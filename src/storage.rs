@@ -79,10 +79,12 @@ pub struct Table {
     pub columns: Vec<ColumnDef>,
     pub rows: Vec<Vec<Value>>,
     /// Each row's SQLite-style rowid, index-aligned with `rows` (i.e.
-    /// `row_ids[i]` is `rows[i]`'s rowid). Monotonically increasing,
-    /// assigned in [`Database::insert_row`], never reused — this crate
-    /// has no `DELETE` yet, so the "reuse the highest deleted rowid"
-    /// question that would otherwise arise doesn't come up.
+    /// `row_ids[i]` is `rows[i]`'s rowid). Assigned in [`Database::
+    /// insert_row`] as `max(existing row_ids) + 1` — matching real
+    /// SQLite's own default (non-`AUTOINCREMENT`) behavior, deleting the
+    /// highest-rowid row (issue #129) does make its rowid eligible for
+    /// reuse by the next insert, since the next `max + 1` is computed
+    /// fresh each time.
     pub row_ids: Vec<i64>,
 }
 
@@ -492,6 +494,39 @@ impl Database {
             updated_rowids.push(table.row_ids[i]);
         }
         Ok(updated_rowids)
+    }
+
+    /// Applies a `DELETE FROM table [WHERE ...]` statement (issue #129).
+    /// Removes every row matching `filter` (`None` matches every row,
+    /// same as a `WHERE`-less `SELECT`/`UPDATE`) — no constraint
+    /// re-validation needed (removing a row can't violate `NOT NULL`/
+    /// `PRIMARY KEY`/`UNIQUE`/`CHECK`, unlike `INSERT`/`UPDATE`). Returns
+    /// every deleted row's rowid, in table row order, for
+    /// `Connection::execute`'s `update_hook` firing. Deleted rowids
+    /// become eligible for reuse by a later `INSERT` — see [`Table::
+    /// row_ids`]'s own doc comment.
+    pub fn delete_rows(&mut self, table_name: &str, filter: Option<&Expr>) -> Result<Vec<i64>> {
+        let table = self
+            .tables
+            .get_mut(table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+
+        let mut deleted_rowids = Vec::new();
+        let mut i = 0;
+        while i < table.rows.len() {
+            let keep = match filter {
+                Some(f) => evaluate_bool3(f, &table.column_names, &table.rows[i])?.unwrap_or(false),
+                None => true,
+            };
+            if keep {
+                deleted_rowids.push(table.row_ids[i]);
+                table.rows.remove(i);
+                table.row_ids.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        Ok(deleted_rowids)
     }
 
     /// Returns a table's schema and rows for scanning.

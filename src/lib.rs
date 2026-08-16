@@ -40,6 +40,7 @@ mod blob;
 mod config;
 mod connection;
 mod ddl;
+mod dml_delete;
 mod dml_insert;
 mod dml_select;
 mod dml_update;
@@ -75,6 +76,7 @@ pub use ddl::{
     parse_drop_index, parse_drop_table, AlterTable, AlterTableAction, ColumnDef, CreateIndex,
     CreateTable, CreateVirtualTable, DropIndex, DropTable, ParseError,
 };
+pub use dml_delete::{parse_delete, Delete};
 pub use dml_insert::{parse_insert, Insert, InsertSource, OrConflict};
 pub use dml_select::{
     parse_compound_select, parse_select, parse_with_select, AggregateArg, AggregateCall, BinaryOp,
@@ -84,9 +86,9 @@ pub use dml_select::{
 pub use dml_update::{parse_update, Update};
 pub use engine::{
     execute_alter_table, execute_compound_select, execute_create_index, execute_create_table,
-    execute_drop_index, execute_drop_table, execute_insert, execute_insert_into_virtual_table,
-    execute_select, execute_select_with_aggregates, execute_select_with_functions,
-    execute_select_with_window, execute_update, execute_with_select,
+    execute_delete, execute_drop_index, execute_drop_table, execute_insert,
+    execute_insert_into_virtual_table, execute_select, execute_select_with_aggregates,
+    execute_select_with_functions, execute_select_with_window, execute_update, execute_with_select,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{

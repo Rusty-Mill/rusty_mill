@@ -4,14 +4,15 @@ use crate::ddl::{
     parse_alter_table, parse_create_index, parse_create_table, parse_create_virtual_table,
     parse_drop_index, parse_drop_table, ColumnDef, CreateVirtualTable,
 };
+use crate::dml_delete::parse_delete;
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_compound_select, parse_with_select, SelectColumns};
 use crate::dml_update::parse_update;
 use crate::engine::{
-    execute_alter_table, execute_create_index, execute_create_table, execute_drop_index,
-    execute_drop_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
-    execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
-    execute_update,
+    execute_alter_table, execute_create_index, execute_create_table, execute_delete,
+    execute_drop_index, execute_drop_table, execute_insert_into_virtual_table,
+    execute_insert_returning_rowids, execute_select_with_aggregates, execute_select_with_functions,
+    execute_select_with_window, execute_update,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -787,16 +788,16 @@ impl Connection {
         self.rollback_hook = hook.map(|f| Box::new(f) as Box<dyn FnMut()>);
     }
 
-    /// Registers a callback invoked once per row inserted or updated by
-    /// [`Connection::execute`]/[`Connection::execute_batch`], as
-    /// `(action, db_name, table_name, rowid)`. `db_name` is always
+    /// Registers a callback invoked once per row inserted, updated, or
+    /// deleted by [`Connection::execute`]/[`Connection::execute_batch`],
+    /// as `(action, db_name, table_name, rowid)`. `db_name` is always
     /// `"main"` (no `ATTACH` support). `rowid` is the row's real,
     /// persistent SQLite-style rowid — see [`Connection::last_insert_rowid`].
     /// Pass `None` to unregister.
     ///
-    /// [`crate::hooks::Action::Insert`] and (issue #128) [`crate::hooks::
-    /// Action::Update`] can fire today; `Delete` has no statement to
-    /// trigger it yet.
+    /// [`crate::hooks::Action::Insert`], [`crate::hooks::Action::Update`]
+    /// (issue #128), and [`crate::hooks::Action::Delete`] (issue #129)
+    /// can all fire today.
     pub fn update_hook<F>(&mut self, hook: Option<F>)
     where
         F: FnMut(Action, &str, &str, i64) + 'static,
@@ -1255,6 +1256,12 @@ impl Connection {
                 self.check_authorized(Action::Update, &update.table_name)?;
                 let rowids = execute_update(&mut self.db, &update)?;
                 (rowids.len(), update.table_name, Action::Update, rowids)
+            }
+            Some(kw) if kw.eq_ignore_ascii_case("DELETE") => {
+                let delete = parse_delete(&tokens)?;
+                self.check_authorized(Action::Delete, &delete.table_name)?;
+                let rowids = execute_delete(&mut self.db, &delete)?;
+                (rowids.len(), delete.table_name, Action::Delete, rowids)
             }
             Some(kw) if kw.eq_ignore_ascii_case("DROP") && is_index_statement(&tokens) => {
                 let drop = parse_drop_index(&tokens)?;
@@ -1859,12 +1866,12 @@ mod tests {
 
     #[test]
     fn execute_on_unrecognized_statement_is_an_error() {
-        // `DROP TABLE`/`UPDATE` are recognized statements now (issues
-        // #120/#128) -- `DELETE` isn't implemented yet, so it's this
-        // test's example instead.
+        // `DROP TABLE`/`UPDATE`/`DELETE` are all recognized statements
+        // now (issues #120/#128/#129) -- `PRAGMA` isn't implemented at
+        // all, so it's this test's example instead.
         let mut conn = Connection::open_in_memory().unwrap();
         assert!(matches!(
-            conn.execute("DELETE FROM t"),
+            conn.execute("PRAGMA table_info(t)"),
             Err(Error::UnrecognizedStatement(_))
         ));
     }
@@ -3233,6 +3240,131 @@ mod tests {
         let mut rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
         rows.sort_unstable();
         assert_eq!(rows, vec![1, 99]);
+    }
+
+    #[test]
+    fn delete_happy_path_removes_matching_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let affected = conn.execute("DELETE FROM t WHERE a >= 2").unwrap();
+        assert_eq!(affected, 2);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn delete_with_no_matching_rows_affects_zero_and_is_not_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        let affected = conn.execute("DELETE FROM t WHERE a = 42").unwrap();
+        assert_eq!(affected, 0);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn where_less_delete_removes_every_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let affected = conn.execute("DELETE FROM t").unwrap();
+        assert_eq!(affected, 3);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn delete_on_an_unknown_table_is_table_not_found() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(matches!(
+            conn.execute("DELETE FROM missing"),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn deleted_rowid_becomes_eligible_for_reuse() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap(); // rowid 1
+        conn.execute("DELETE FROM t WHERE a = 1").unwrap();
+        conn.execute("INSERT INTO t VALUES (2)").unwrap(); // reuses rowid 1
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.update_hook(Some(move |action, _: &str, _: &str, rowid| {
+            events_clone.borrow_mut().push((action, rowid));
+        }));
+        conn.execute("INSERT INTO t VALUES (3)").unwrap();
+        assert_eq!(*events.borrow(), vec![(Action::Insert, 2)]);
+    }
+
+    #[test]
+    fn update_hook_fires_once_per_deleted_row_with_its_real_rowid() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.update_hook(Some(move |action, db: &str, table: &str, rowid| {
+            events_clone
+                .borrow_mut()
+                .push((action, db.to_string(), table.to_string(), rowid));
+        }));
+
+        conn.execute("DELETE FROM t WHERE a >= 2").unwrap();
+
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                (Action::Delete, "main".to_string(), "t".to_string(), 2),
+                (Action::Delete, "main".to_string(), "t".to_string(), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn authorizer_deny_blocks_delete() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        conn.authorizer(Some(|ctx: &AuthContext| {
+            if ctx.action == Action::Delete {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }));
+
+        assert_eq!(
+            conn.execute("DELETE FROM t"),
+            Err(Error::AuthorizationDenied)
+        );
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn delete_works_through_a_prepared_statement_with_bound_params() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let mut stmt = conn.prepare("DELETE FROM t WHERE a = ?").unwrap();
+        stmt.raw_bind_parameter(1, 2i64).unwrap();
+        assert_eq!(stmt.execute().unwrap(), 1);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
     }
 
     #[test]
