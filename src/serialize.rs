@@ -60,6 +60,16 @@ fn write_table(out: &mut Vec<u8>, table: &Table) {
     }
 }
 
+/// Writes a column definition. **Scope note (issue #117):** only the
+/// flag-shaped constraints (`not_null`/`primary_key`/`unique`/
+/// `autoincrement`) round-trip through this format — `check`/`default`/
+/// `references` (which hold an [`crate::dml_select::Expr`]/
+/// [`crate::ddl::ForeignKeyRef`], not a fixed-shape value) aren't encoded
+/// here and come back as `None` from [`Reader::read_column_def`].
+/// Extending this hand-rolled format to serialize arbitrary expression
+/// trees is out of scope for a parsing-only sub-issue; tracked as a
+/// follow-up gap if `serialize`/`deserialize` round-tripping those
+/// constraints is ever needed.
 fn write_column_def(out: &mut Vec<u8>, col: &ColumnDef) {
     write_string(out, &col.name);
     match &col.type_name {
@@ -71,6 +81,8 @@ fn write_column_def(out: &mut Vec<u8>, col: &ColumnDef) {
     }
     out.push(col.not_null as u8);
     out.push(col.primary_key as u8);
+    out.push(col.unique as u8);
+    out.push(col.autoincrement as u8);
 }
 
 fn write_value(out: &mut Vec<u8>, value: &Value) {
@@ -176,11 +188,16 @@ impl<'a> Reader<'a> {
         };
         let not_null = self.read_bool()?;
         let primary_key = self.read_bool()?;
+        let unique = self.read_bool()?;
+        let autoincrement = self.read_bool()?;
         Ok(ColumnDef {
             name,
             type_name,
             not_null,
             primary_key,
+            unique,
+            autoincrement,
+            ..Default::default()
         })
     }
 

@@ -261,6 +261,36 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
     })
 }
 
+/// Parses a single expression (the full boolean/comparison precedence
+/// chain used by `WHERE`) starting at `tokens[pos]`. Returns the parsed
+/// [`Expr`] and the index of the first token past it.
+///
+/// Reused by `ddl.rs` for `CHECK`/`DEFAULT` column constraints (issue
+/// #117), which need the same expression grammar without a full `SELECT`
+/// wrapped around it — rather than duplicating `parse_or_expr` and its
+/// whole precedence chain in a second parser.
+pub(crate) fn parse_expr_at(tokens: &[Token], pos: usize) -> Result<(Expr, usize), ParseError> {
+    let mut p = SelectParser { tokens, pos };
+    let expr = p.parse_or_expr()?;
+    Ok((expr, p.pos))
+}
+
+/// Parses a single primary expression (a literal, column, function call,
+/// `CASE`, or parameter — no comparison operator required) starting at
+/// `tokens[pos]`. Returns the parsed [`Expr`] and the index of the first
+/// token past it.
+///
+/// Reused by `ddl.rs` for `DEFAULT` column-constraint values (issue
+/// #117): [`parse_expr_at`] goes through `parse_comparison`, which
+/// *requires* a binary operator after its left operand (it models
+/// `WHERE`, where a bare value isn't itself a filter) — wrong for
+/// `DEFAULT 1`, a bare value with no operator at all.
+pub(crate) fn parse_operand_at(tokens: &[Token], pos: usize) -> Result<(Expr, usize), ParseError> {
+    let mut p = SelectParser { tokens, pos };
+    let expr = p.parse_operand()?;
+    Ok((expr, p.pos))
+}
+
 struct SelectParser<'a> {
     tokens: &'a [Token],
     pos: usize,
