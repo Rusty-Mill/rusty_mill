@@ -105,14 +105,12 @@ pub fn execute_select_with_functions(
     select: &Select,
     functions: &HashMap<String, Box<ScalarFn>>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let table = db.table(&select.table_name)?;
+    let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
 
     let mut matching_rows = Vec::new();
-    for row in &table.rows {
+    for row in &rows {
         let keep = match &select.filter {
-            Some(filter) => {
-                evaluate_bool_with_functions(filter, &table.column_names, row, functions)?
-            }
+            Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
             None => true,
         };
         if keep {
@@ -123,14 +121,13 @@ pub fn execute_select_with_functions(
     match &select.columns {
         SelectColumns::All => {
             let rows = matching_rows.into_iter().cloned().collect();
-            Ok((table.column_names.clone(), rows))
+            Ok((column_names, rows))
         }
         SelectColumns::Named(names) => {
             let indices = names
                 .iter()
                 .map(|n| {
-                    table
-                        .column_names
+                    column_names
                         .iter()
                         .position(|c| c == n)
                         .ok_or_else(|| Error::UnknownColumn(n.clone()))
@@ -162,7 +159,7 @@ pub fn execute_select_with_aggregates(
     functions: &HashMap<String, Box<ScalarFn>>,
     aggregates: &HashMap<String, Aggregate>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let table = db.table(&select.table_name)?;
+    let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
     let calls = match &select.columns {
         SelectColumns::Aggregates(calls) => calls,
         _ => {
@@ -182,11 +179,9 @@ pub fn execute_select_with_aggregates(
         aggs.push(agg);
     }
 
-    for row in &table.rows {
+    for row in &rows {
         let keep = match &select.filter {
-            Some(filter) => {
-                evaluate_bool_with_functions(filter, &table.column_names, row, functions)?
-            }
+            Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
             None => true,
         };
         if !keep {
@@ -196,7 +191,7 @@ pub fn execute_select_with_aggregates(
             let arg_value = match &call.arg {
                 AggregateArg::Star => Value::Integer(1),
                 AggregateArg::Expr(expr) => {
-                    evaluate_with_functions(expr, &table.column_names, row, functions)?
+                    evaluate_with_functions(expr, &column_names, row, functions)?
                 }
             };
             accumulators[i] = (aggs[i].step)(&accumulators[i], &[arg_value])?;
@@ -243,7 +238,7 @@ pub fn execute_select_with_window(
     functions: &HashMap<String, Box<ScalarFn>>,
     aggregates: &HashMap<String, Aggregate>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let table = db.table(&select.table_name)?;
+    let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
     let calls = match &select.columns {
         SelectColumns::Window(calls) => calls,
         _ => {
@@ -254,11 +249,9 @@ pub fn execute_select_with_window(
     };
 
     let mut matching_rows = Vec::new();
-    for row in &table.rows {
+    for row in &rows {
         let keep = match &select.filter {
-            Some(filter) => {
-                evaluate_bool_with_functions(filter, &table.column_names, row, functions)?
-            }
+            Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
             None => true,
         };
         if keep {
@@ -281,11 +274,11 @@ pub fn execute_select_with_window(
         let mut row_partition: Vec<usize> = Vec::with_capacity(matching_rows.len());
 
         for row in &matching_rows {
-            let key = partition_key(&call.partition_by, &table.column_names, row)?;
+            let key = partition_key(&call.partition_by, &column_names, row)?;
             let arg_value = match &call.arg {
                 AggregateArg::Star => Value::Integer(1),
                 AggregateArg::Expr(expr) => {
-                    evaluate_with_functions(expr, &table.column_names, row, functions)?
+                    evaluate_with_functions(expr, &column_names, row, functions)?
                 }
             };
             let idx = match partitions.iter().position(|(k, _)| *k == key) {
@@ -451,5 +444,56 @@ mod tests {
         let select =
             parse_select(&tokenize("SELECT * FROM t WHERE DOUBLE(a) = 4").unwrap()).unwrap();
         assert!(execute_select(&db, &select).is_err());
+    }
+
+    struct ConstantSource {
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+    }
+
+    impl crate::storage::TableSource for ConstantSource {
+        fn column_names(&self) -> &[String] {
+            &self.columns
+        }
+        fn scan(&self, _filter: Option<&Expr>) -> Result<Vec<Vec<Value>>> {
+            Ok(self.rows.clone())
+        }
+    }
+
+    #[test]
+    fn select_star_scans_a_virtual_table_end_to_end() {
+        let mut db = Database::new();
+        db.register_virtual_table(
+            "v".to_string(),
+            Box::new(ConstantSource {
+                columns: vec!["a".to_string(), "b".to_string()],
+                rows: vec![
+                    vec![Value::Integer(1), Value::Text("x".into())],
+                    vec![Value::Integer(2), Value::Text("y".into())],
+                ],
+            }),
+        );
+
+        let select = parse_select(&tokenize("SELECT * FROM v WHERE a = 2").unwrap()).unwrap();
+        let (cols, rows) = execute_select(&db, &select).unwrap();
+        assert_eq!(cols, vec!["a", "b"]);
+        assert_eq!(rows, vec![vec![Value::Integer(2), Value::Text("y".into())]]);
+    }
+
+    #[test]
+    fn select_named_columns_projects_a_virtual_table() {
+        let mut db = Database::new();
+        db.register_virtual_table(
+            "v".to_string(),
+            Box::new(ConstantSource {
+                columns: vec!["a".to_string(), "b".to_string()],
+                rows: vec![vec![Value::Integer(1), Value::Text("x".into())]],
+            }),
+        );
+
+        let select = parse_select(&tokenize("SELECT b FROM v").unwrap()).unwrap();
+        let (cols, rows) = execute_select(&db, &select).unwrap();
+        assert_eq!(cols, vec!["b"]);
+        assert_eq!(rows, vec![vec![Value::Text("x".into())]]);
     }
 }
