@@ -23,6 +23,34 @@ entry per PR.
 
 ---
 
+## PR #101 — Add Connection::create_module (closes #92)
+**2026-08-16** · [#101](https://github.com/baileyrd/rusty_-rusqlite/pull/101)
+
+- **Added:** `Connection::create_module<T: VTab + 'static>(name, vtab)`
+  — registers a ready-made `VTab` instance as an eponymous, read-only
+  virtual table queryable directly by `name` (e.g.
+  `SELECT * FROM name`). No `CREATE VIRTUAL TABLE` needed (issue #93
+  doesn't exist yet).
+- **Deviates from real `rusqlite::Connection::create_module`
+  deliberately:** that registers a reusable *module* (a factory,
+  `Module<T>`) instantiated afresh per `CREATE VIRTUAL TABLE ... USING
+  module_name(args)` call. This crate has no such grammar yet, so
+  `create_module` takes one ready-made `VTab` instance directly. **No
+  separate `Module<T>` wrapper type** — `VTabTableSource` (issue #91)
+  already plays that role; a second, identically-purposed type would be
+  indirection, not real parity.
+- Re-registering an already-used `name` replaces the previous virtual
+  table (matching `create_scalar_function`'s overwrite behavior).
+  Errors with `Error::TableAlreadyExists` if `name` already names a
+  *native* table, rather than silently registering something
+  `Database::scan` can never reach.
+- Removes the now-unnecessary `#[allow(dead_code)]` on
+  `Database::register_virtual_table`, which has a real caller now.
+- 4 new unit tests (278 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #100 — Add VTab/VTabCursor/Context core traits (closes #91)
 **2026-08-16** · [#100](https://github.com/baileyrd/rusty_-rusqlite/pull/100)
 

@@ -15,6 +15,7 @@ use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};
 use crate::value::Value;
+use crate::vtab::{VTab, VTabTableSource};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -518,6 +519,40 @@ impl Connection {
     /// removing a function that isn't there.
     pub fn remove_function(&mut self, name: &str) -> Result<()> {
         self.functions.remove(name);
+        Ok(())
+    }
+
+    /// Registers `vtab` as an eponymous, read-only virtual table —
+    /// queryable directly by `name` (e.g. `SELECT * FROM name`), no
+    /// `CREATE VIRTUAL TABLE` needed (issue #93 doesn't exist yet). See
+    /// `src/vtab.rs`'s module doc comment and
+    /// `docs/adr/0003-tablesource.md`.
+    ///
+    /// **Deviation from real `rusqlite::Connection::create_module`,
+    /// stated plainly:** that registers a reusable *module* (a factory,
+    /// `Module<T>`) instantiated afresh per `CREATE VIRTUAL TABLE ...
+    /// USING module_name(args)` call. This crate has no such grammar
+    /// yet, so `create_module` here takes one ready-made [`VTab`]
+    /// instance directly and registers it under `name`. There's no
+    /// separate `Module<T>` wrapper type: [`VTabTableSource`] (issue
+    /// #91) already plays that role — a second, identically-purposed
+    /// type would be indirection, not real parity. Revisit if issue
+    /// #93 introduces a genuine multi-instantiation call site
+    /// `Module<T>` would earn its keep for.
+    ///
+    /// Re-registering an already-used `name` replaces the previous
+    /// virtual table, matching [`Connection::create_scalar_function`]'s
+    /// overwrite-on-reregister behavior. Errors with
+    /// [`Error::TableAlreadyExists`] if `name` already names a *native*
+    /// table — silently allowing that would register a virtual table
+    /// [`Database::scan`] can never reach (native tables are always
+    /// checked first).
+    pub fn create_module<T: VTab + 'static>(&mut self, name: &str, vtab: T) -> Result<()> {
+        if self.table_exists(name) {
+            return Err(Error::TableAlreadyExists(name.to_string()));
+        }
+        self.db_mut()
+            .register_virtual_table(name.to_string(), Box::new(VTabTableSource::new(vtab)));
         Ok(())
     }
 
@@ -1494,6 +1529,98 @@ mod tests {
     fn removing_unregistered_function_is_not_an_error() {
         let mut conn = Connection::open_in_memory().unwrap();
         assert!(conn.remove_function("NEVER_REGISTERED").is_ok());
+    }
+
+    /// A minimal read-only vtab for `create_module` tests: exposes one
+    /// column (`value`) holding whatever integers it was built with.
+    struct FixedRowsVTab {
+        rows: Vec<i64>,
+    }
+
+    struct FixedRowsCursor {
+        rows: Vec<i64>,
+        pos: usize,
+    }
+
+    impl crate::vtab::VTab for FixedRowsVTab {
+        type Cursor = FixedRowsCursor;
+
+        fn column_names(&self) -> Vec<String> {
+            vec!["value".to_string()]
+        }
+
+        fn open(&self) -> Result<FixedRowsCursor> {
+            Ok(FixedRowsCursor {
+                rows: self.rows.clone(),
+                pos: 0,
+            })
+        }
+    }
+
+    impl crate::vtab::VTabCursor for FixedRowsCursor {
+        fn filter(&mut self, _filter: Option<&crate::dml_select::Expr>) -> Result<()> {
+            Ok(())
+        }
+
+        fn next(&mut self) -> Result<()> {
+            self.pos += 1;
+            Ok(())
+        }
+
+        fn eof(&self) -> bool {
+            self.pos >= self.rows.len()
+        }
+
+        fn column(&self, ctx: &mut crate::vtab::Context, _i: usize) -> Result<()> {
+            ctx.set_result(&self.rows[self.pos])
+        }
+    }
+
+    #[test]
+    fn create_module_registers_a_queryable_virtual_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module(
+            "v",
+            FixedRowsVTab {
+                rows: vec![1, 2, 3],
+            },
+        )
+        .unwrap();
+
+        let values: Vec<i64> = conn.query_map("SELECT * FROM v", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn create_module_reregistering_same_name_replaces_the_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module("v", FixedRowsVTab { rows: vec![1] })
+            .unwrap();
+        conn.create_module("v", FixedRowsVTab { rows: vec![9, 9] })
+            .unwrap();
+
+        let values: Vec<i64> = conn.query_map("SELECT * FROM v", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![9, 9]);
+    }
+
+    #[test]
+    fn create_module_errors_if_name_already_names_a_native_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        assert_eq!(
+            conn.create_module("t", FixedRowsVTab { rows: vec![1] }),
+            Err(Error::TableAlreadyExists("t".to_string()))
+        );
+    }
+
+    #[test]
+    fn querying_an_unregistered_module_name_is_table_not_found() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(matches!(
+            conn.query_row("SELECT * FROM never_registered"),
+            Err(Error::TableNotFound(_))
+        ));
     }
 
     #[test]
