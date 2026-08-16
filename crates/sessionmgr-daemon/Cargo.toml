@@ -33,3 +33,13 @@ rusty_tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[build-dependencies]
+# Embeds `sessionmgr.exe.manifest` (longPathAware, UTF-8 activeCodePage)
+# into the built binary. Chosen over `winres`/`embed_resource`
+# specifically because it does not shell out to `rc.exe`: it emits the
+# manifest via `/MANIFEST` linker options on MSVC (a COFF resource object
+# on GNU), so the build does not depend on the Windows SDK being on PATH
+# -- true both locally and on `windows-latest` CI. No-op on non-Windows
+# targets (see `build.rs`), so it costs nothing on the Linux/MSRV jobs.
+embed-manifest = "1.5"
