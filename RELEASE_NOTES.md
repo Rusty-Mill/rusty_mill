@@ -23,6 +23,28 @@ entry per PR.
 
 ---
 
+## PR #133 — Add LIKE/GLOB/BETWEEN operators (closes #113)
+**2026-08-16** · [#133](https://github.com/baileyrd/rusty_-rusqlite/pull/133)
+
+- **Added:** `Expr::Like`/`Expr::Glob`/`Expr::Between`, plus `NOT
+  LIKE`/`NOT GLOB`/`NOT BETWEEN` (infix per-operator negation, distinct
+  from prefix `NOT` — no ambiguity since prefix `NOT` is consumed
+  before an operand is parsed, infix `NOT` only checked mid-comparison).
+- **Added:** `LIKE`'s optional `ESCAPE` clause.
+- **Added:** a small hand-rolled dynamic-programming wildcard matcher
+  (`src/like.rs`) shared by `LIKE` (`%`/`_`, ASCII-case-insensitive)
+  and `GLOB` (`*`/`?`/`[...]`, case-sensitive, no escape — matching
+  real SQLite's own `GLOB`). No new dependency — both pattern kinds
+  are small SQL literals, simpler to hand-roll than pull in a
+  glob/regex crate.
+- **Scope note:** `BETWEEN` is sugar for `>=`/`<=` via the existing
+  `compare_values`, inheriting that function's current comparison
+  semantics as-is — not touched by this PR.
+- Second sub-issue of `[epic] SQL dialect coverage` (#111).
+- 391 tests passing.
+
+---
+
 ## PR #132 — Add WHERE boolean combinators: AND/OR/NOT, parens (closes #112)
 **2026-08-16** · [#132](https://github.com/baileyrd/rusty_-rusqlite/pull/132)
 
