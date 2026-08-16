@@ -1,6 +1,6 @@
 # ADR-0002: A real PTY is required for agent-CLI sessions
 
-- **Status**: Accepted
+- **Status**: Accepted — **implemented**
 - **Date**: 2026-08-16
 - **Phase**: 1 (spike outcome)
 - **Supersedes**: PLAN.md's "open, unresolved-by-design tension" between a real
@@ -55,17 +55,60 @@ not a fidelity trade-off, it is a hard functional requirement.
    using `-p`, rather than attaching an idle pipe: an unwritten stdin pipe
    costs a silent 3-second startup delay and a warning on every launch.
 
-## Still open
+## Implementation
 
-Whether a ConPTY-attached child survives an **unclean worker crash** — as
-opposed to a graceful `ClosePseudoConsole` — is unverified and untestable off
-Windows (PLAN.md risk 3). `rustils`' PTY path was built for interactive
-foreground use, not for detach-and-outlive. This must be settled on a real
-Windows machine before PTY-backed sessions ship, because a "no" would mean
-PTY-backed sessions cannot deliver the survives-the-manager-closing guarantee
-that the piped-stdio sessions built in Phase 1 already demonstrably do.
+Done. `sessionmgr-pty` wraps `rustils`' `platform::pty::Pty` capability —
+ConPTY on Windows, `openpty` on Linux — rather than adding `portable-pty` as a
+second PTY implementation to a dependency graph that already had one. Sessions
+run on a terminal by default; `--no-pty` selects the piped backend.
 
-That is a genuinely load-bearing unknown, and it is the reason this ADR changes
-the *decision* about PTYs without yet changing any Phase 1 code: the walking
-skeleton's guarantee is proven, and it should not be traded away for a PTY
-until the PTY is proven to keep it.
+All four consequences above are implemented:
+
+1. `sessionmgr-pty` exists and is the default backend.
+2. `SessionEvent::Output` and `SessionInput` are `Vec<u8>`, carried as base64
+   because the framing is line-delimited JSON.
+3. Terminal-sequence interpretation remains Phase 4's problem; the bytes now
+   reach the client intact for it to interpret.
+4. Not yet applied — the Claude Code adapter is Phase 3, and there is no
+   adapter to put it in.
+
+`a_session_runs_on_a_real_terminal_by_default` is the acceptance test: a
+session runs `test -t 1` and its own output must say `IS_A_TTY`. Its
+counterpart asserts `--no-pty` really does produce `NOT_A_TTY`.
+
+### Why the piped backend was kept rather than deleted
+
+Not hedging. The survives-the-manager-closing guarantee is **proven** for the
+piped path on Windows by a green suite. It is **unproven** for ConPTY. Removing
+the proven path to make room for the unproven one would trade a demonstrated
+guarantee for an assumed one, in the one area where this project's whole value
+rests.
+
+## Resolved: ConPTY survives an unclean daemon kill
+
+**Answered, by measurement.** This was PLAN.md risk 3 and the last unknown in
+this ADR: `rustils`' PTY path was built for interactive foreground use, not for
+detach-and-outlive, so whether a ConPTY-attached child survives its supervisor
+being killed uncleanly was genuinely open.
+
+The question was routed through the tests that already existed rather than a
+bespoke spike. Sessions default to a PTY, so `supervisor_restart_recovery` —
+create a session, `TerminateProcess` the daemon, assert the worker *and its
+child* are still alive, assert the replacement daemon adopts them rather than
+respawning — became the ConPTY-survival test automatically.
+
+`test (windows-latest)` passed the full suite on
+[run 31970983489](https://github.com/baileyrd/rusty_yirp/actions/runs/31970983489),
+on `windows-latest` against real ConPTY.
+
+**So the survives-the-manager-closing guarantee holds for the default PTY
+backend**, and the default stays PTY. The `--no-pty` path is no longer
+insurance against this specific unknown; it is kept for non-interactive
+commands, where a terminal buys nothing.
+
+Two honest caveats. This is one CI run on one Windows image, not a soak test —
+but it now runs on every push, so a regression surfaces immediately rather than
+during a manual pass. And GitHub's `windows-latest` is a server image; a
+desktop Windows install with different console-host behaviour is not the same
+environment, which is why the manual verification on a real dev machine stays
+on the list.

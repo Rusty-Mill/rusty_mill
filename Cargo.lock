@@ -205,6 +205,7 @@ dependencies = [
  "sessionmgr-git",
  "sessionmgr-proc",
  "sessionmgr-protocol",
+ "sessionmgr-pty",
  "thiserror",
 ]
 
@@ -232,6 +233,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sessionmgr-core",
+]
+
+[[package]]
+name = "sessionmgr-pty"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "platform-windows",
 ]
 
 [[package]]

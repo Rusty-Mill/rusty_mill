@@ -34,7 +34,7 @@ USAGE:
     sessionmgr <COMMAND>
 
 COMMANDS:
-    new [--kind KIND] [--repo <path>] [-- <command>...]
+    new [--kind KIND] [--repo <path>] [--no-pty] [-- <command>...]
                                               create a session and start it
     list                                      list every session
     attach <id>                               stream a session's output
@@ -55,6 +55,11 @@ CLOSING:
     close <id> --merge      also merge the session's branch back
                             (fast-forward only; fails loudly if diverged)
     close <id> --discard    also delete the session's worktree and branch
+
+TERMINALS:
+    Sessions run on a real terminal by default. Interactive agent CLIs
+    refuse to start without one. --no-pty runs the process on plain pipes
+    instead, which suits non-interactive commands.
 
 GLOBAL OPTIONS:
     --state-root <path>   where to keep state (default: $SESSIONMGR_HOME, else
@@ -141,7 +146,12 @@ async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
         Some(index) => args[index + 1..].to_vec(),
         None => Vec::new(),
     };
-    let id = client::session_new(root, kind, command, repo).await?;
+    // A terminal unless explicitly refused. Interactive agent CLIs will
+    // not start without one; `--no-pty` selects the piped backend, whose
+    // survives-a-kill behaviour is the one proven on Windows.
+    let pty = !args.iter().any(|a| a == "--no-pty");
+    args.retain(|a| a != "--no-pty");
+    let id = client::session_new(root, kind, command, repo, pty).await?;
     println!("{id}");
     Ok(())
 }

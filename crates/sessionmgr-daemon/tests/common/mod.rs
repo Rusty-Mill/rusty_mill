@@ -71,6 +71,20 @@ impl Drop for TempRoot {
     /// Without this, a failing test leaks a background process that
     /// outlives the whole `cargo test` run.
     fn drop(&mut self) {
+        // Dump the evidence *before* destroying it. These tests drive the
+        // real binary as a subprocess, so when one fails, the only
+        // account of why usually lives in a daemon or worker log inside
+        // this directory -- and this `Drop` is what deletes it.
+        //
+        // That is not hypothetical: a CI failure reported only "the
+        // daemon did not answer within 60s", and the log that would have
+        // explained it had already been removed by this function before
+        // anything could read it. A test harness that erases the
+        // diagnosis of its own failures costs a full round-trip every
+        // time.
+        if std::thread::panicking() {
+            self.dump_diagnostics();
+        }
         for pid in all_recorded_pids(&self.0) {
             force_kill(pid);
         }
@@ -78,6 +92,81 @@ impl Drop for TempRoot {
             force_kill(state);
         }
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl TempRoot {
+    /// Prints everything known about this state root to stderr, for a
+    /// test that is already failing.
+    ///
+    /// Written to stderr rather than a file: `cargo test` captures a
+    /// failing test's output and prints it with the failure, so this
+    /// reaches both a local developer and a CI log with no extra step and
+    /// nothing to collect afterwards.
+    fn dump_diagnostics(&self) {
+        eprintln!("\n===== sessionmgr diagnostics: {} =====", self.0.display());
+
+        for (label, path) in [("daemon.json", "daemon.json"), ("daemon.log", "daemon.log")] {
+            match std::fs::read_to_string(self.0.join(path)) {
+                Ok(text) if text.trim().is_empty() => eprintln!("--- {label}: (empty) ---"),
+                Ok(text) => eprintln!("--- {label} ---\n{text}"),
+                Err(e) => eprintln!("--- {label}: unavailable ({e}) ---"),
+            }
+        }
+
+        if let Ok(entries) = std::fs::read_dir(self.0.join("sessions")) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                for file in ["state.json", "worker.log"] {
+                    match std::fs::read_to_string(dir.join(file)) {
+                        Ok(text) if text.trim().is_empty() => {}
+                        Ok(text) => eprintln!("--- {name}/{file} ---\n{text}"),
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+
+        // Which of this project's processes are still alive, which is the
+        // first question for any hang: a daemon that accepted a
+        // connection and never answered looks identical from the client
+        // to one that died, and only this tells them apart.
+        eprintln!("--- live sessionmgr processes ---");
+        #[cfg(unix)]
+        let listing = Command::new("ps").args(["-eo", "pid,stat,args"]).output();
+        #[cfg(windows)]
+        let listing = Command::new("tasklist")
+            .arg("/FI")
+            .arg("IMAGENAME eq sessionmgr.exe")
+            .output();
+        match listing {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                // Matched on this project's own subcommands rather than on
+                // the string "sessionmgr", which also appears in the
+                // command line of whatever is running the tests (an editor,
+                // an agent, a shell in this checkout) and buries the three
+                // lines that matter under a screenful of noise.
+                let ours = |line: &&str| {
+                    line.contains("__worker-main")
+                        || line.contains("daemon run")
+                        || line.contains("sessionmgr.exe")
+                };
+                let mut found = false;
+                for line in text.lines().filter(ours) {
+                    found = true;
+                    eprintln!("{line}");
+                }
+                if !found {
+                    eprintln!(
+                        "(none alive -- so a hang here is not a daemon still holding the request)"
+                    );
+                }
+            }
+            Err(e) => eprintln!("(could not list processes: {e})"),
+        }
+        eprintln!("===== end diagnostics =====\n");
     }
 }
 
@@ -132,6 +221,20 @@ impl TempRepo {
         // An explicit initial branch name, rather than whatever this
         // machine's `init.defaultBranch` happens to be.
         git(&["init", "--initial-branch=main"]);
+        // Persisted into the repository's config, not just passed as env
+        // vars to the calls above. Sessions commit from inside a worktree
+        // via a shell command of their own, which inherits none of this
+        // process's environment -- and linked worktrees share the main
+        // repository's config, so writing it once here covers all of
+        // them. Without it, every session's `git commit` fails for want
+        // of an identity on a machine that has none configured globally.
+        //
+        // No spaces in the name, deliberately: the value has to survive a
+        // trip through a shell command line on both `cmd.exe` and `sh`,
+        // and `cmd.exe` does not understand the single quotes that would
+        // otherwise be needed to protect it.
+        git(&["config", "user.email", "tests@example.invalid"]);
+        git(&["config", "user.name", "sessionmgr-tests"]);
         git(&["commit", "--allow-empty", "-m", "initial", "--no-gpg-sign"]);
         TempRepo { dir }
     }
@@ -184,13 +287,25 @@ impl Drop for TempRepo {
 
 /// A command that commits a file inside whatever directory it runs in,
 /// so a worktree session produces something a merge can actually move.
+///
+/// **Not a single quote anywhere, and that is the whole trick.** This
+/// string is handed to `cmd /C` on Windows and `sh -c` elsewhere, and
+/// `cmd.exe` has no concept of single quotes -- it passes them through
+/// literally. An earlier version used `-m 'add {name}'`, which `cmd`
+/// split into `-m`, `'add`, and `{name}'`, so git took `'add` as the
+/// whole message and `{name}'` as a pathspec:
+///
+/// ```text
+/// error: pathspec 'from-the-session.txt'' did not match any file(s)
+/// ```
+///
+/// Six of the ten worktree tests failed that way on Windows and passed on
+/// Linux. The identity now lives in the repository's config (see
+/// [`TempRepo::new`]) and the commit message contains no spaces, so
+/// nothing here needs quoting on either shell.
 pub fn commit_a_file(name: &str) -> Vec<String> {
-    let script = format!(
-        "git config user.email tests@example.invalid && \
-         git config user.name 'sessionmgr tests' && \
-         echo hello > {name} && git add {name} && \
-         git commit --no-gpg-sign -m 'add {name}'"
-    );
+    let script =
+        format!("echo hello > {name} && git add {name} && git commit --no-gpg-sign -m add-{name}");
     if cfg!(windows) {
         vec!["cmd".into(), "/C".into(), script]
     } else {
@@ -389,6 +504,45 @@ pub fn force_kill(pid: u32) {
     {
         let _ = sessionmgr_proc::terminate(pid);
     }
+}
+
+/// Does a session's transcript contain `needle` anywhere in its output?
+///
+/// Decodes rather than grepping the file. Output events carry base64
+/// payloads (session output is a terminal byte stream, not text), so a
+/// raw substring search over `transcript.jsonl` silently never matches --
+/// which reads as "the output never arrived" rather than "the test is
+/// looking at it wrong".
+pub fn transcript_contains(root: &Path, id: &str, needle: &str) -> bool {
+    !transcript_output(root, id).is_empty()
+        && String::from_utf8_lossy(&transcript_output(root, id)).contains(needle)
+}
+
+/// Every output byte a session has produced so far, decoded and
+/// concatenated.
+pub fn transcript_output(root: &Path, id: &str) -> Vec<u8> {
+    let path = root.join("sessions").join(id).join("transcript.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // Only output events carry a payload; status and exit events have
+        // no `data` field at all.
+        if !line.contains("\"type\":\"output\"") {
+            continue;
+        }
+        let needle = "\"data\":\"";
+        let Some(start) = line.find(needle) else {
+            continue;
+        };
+        let rest = &line[start + needle.len()..];
+        let Some(end) = rest.find('"') else { continue };
+        if let Ok(decoded) = sessionmgr_protocol::base64::decode(&rest[..end]) {
+            out.extend_from_slice(&decoded);
+        }
+    }
+    out
 }
 
 /// Is `pid` a live process (a zombie does not count)?

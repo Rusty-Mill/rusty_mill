@@ -37,7 +37,8 @@ pub async fn start_daemon_detached(root: &Path) -> Result<()> {
     use rusty_tokio::process::{Command, Stdio};
 
     paths::ensure_dir("creating the state root", root)?;
-    let exe = std::env::current_exe().map_err(|e| Error::io("locating this executable", None, e))?;
+    let exe =
+        std::env::current_exe().map_err(|e| Error::io("locating this executable", None, e))?;
     let log_path = paths::daemon_log(root);
     let log = std::fs::File::create(&log_path)
         .map_err(|e| Error::io("creating the daemon log", log_path, e))?;
@@ -82,10 +83,34 @@ pub async fn start_daemon_detached(root: &Path) -> Result<()> {
     })
 }
 
+/// How long a one-shot client command waits for the daemon to answer.
+///
+/// Generous, because `SessionNew` legitimately takes as long as it takes
+/// a worker to start (up to `WORKER_READY_TIMEOUT`), and on Windows that
+/// covers process creation with an antivirus scanner in the path.
+///
+/// But bounded, which the socket reads underneath are not. A client that
+/// hangs forever against a wedged daemon gives the user nothing to act on
+/// and nothing to report; a client that gives up after a minute names the
+/// daemon and its log. This is a backstop for a bug rather than an
+/// expected path -- if it ever fires, something is wrong that this
+/// message should help find.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// One request, one response, against a possibly-auto-started daemon.
 async fn request(root: &Path, request: Request) -> Result<Response> {
     let mut conn = connect(root).await?;
-    let response: Response = conn.request(&request).await?;
+    let response: Response =
+        match rusty_tokio::time::timeout(REQUEST_TIMEOUT, conn.request(&request)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(Error::conflict(format!(
+                    "the daemon accepted the request but did not answer within {}s; see {}",
+                    REQUEST_TIMEOUT.as_secs(),
+                    paths::daemon_log(root).display()
+                )))
+            }
+        };
     match response {
         Response::Error { kind, message } => Err(match kind {
             sessionmgr_protocol::ErrorKind::NotFound => Error::NotFound { id: message },
@@ -101,6 +126,7 @@ pub async fn session_new(
     kind: SessionKind,
     command: Vec<String>,
     repo: Option<PathBuf>,
+    pty: bool,
 ) -> Result<SessionId> {
     match request(
         root,
@@ -108,6 +134,7 @@ pub async fn session_new(
             kind,
             command,
             repo,
+            pty,
         },
     )
     .await?
@@ -157,9 +184,12 @@ pub async fn session_attach(root: &Path, id: SessionId) -> Result<()> {
         while let Ok(Some(line)) = lines.next_line().await {
             let request = Request::SessionInput {
                 id: id.clone(),
-                data: format!("{line}\n"),
+                data: format!("{line}\n").into_bytes(),
             };
-            if transport::write_framed(&mut writer, &request).await.is_err() {
+            if transport::write_framed(&mut writer, &request)
+                .await
+                .is_err()
+            {
                 return;
             }
         }
@@ -171,7 +201,12 @@ pub async fn session_attach(root: &Path, id: SessionId) -> Result<()> {
         let Some(event) = event else { return Ok(()) };
         match event {
             SessionEvent::Output { data } => {
-                print!("{data}");
+                // Written as raw bytes, not through `print!`: session
+                // output is a terminal byte stream carrying escape
+                // sequences, and forcing it through a `String` would
+                // corrupt any multi-byte character split across a chunk
+                // boundary -- the exact defect that made this type bytes.
+                let _ = std::io::stdout().write_all(&data);
                 // Explicitly flushed: output frequently arrives without a
                 // trailing newline (a prompt waiting for an answer is the
                 // important case), and line-buffered stdout would hold
@@ -216,7 +251,9 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
     if sessions.is_empty() {
         return "no sessions".to_owned();
     }
-    let mut out = String::from("ID            STATUS       KIND            BRANCH                    COMMAND\n");
+    let mut out = String::from(
+        "ID            STATUS       KIND            BRANCH                    COMMAND\n",
+    );
     for session in sessions {
         out.push_str(&format!(
             "{:<13} {:<12} {:<15} {:<25} {}\n",

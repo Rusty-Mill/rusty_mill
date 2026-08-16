@@ -65,10 +65,7 @@ fn a_worktree_sessions_work_does_not_touch_the_main_working_copy() {
         ),
         "the session's commit should succeed, but it is {}: {}",
         session_status(root.path(), &id),
-        std::fs::read_to_string(
-            root.path().join("sessions").join(&id).join("transcript.jsonl")
-        )
-        .unwrap_or_default()
+        String::from_utf8_lossy(&transcript_output(root.path(), &id))
     );
 
     // The file exists in the worktree...
@@ -104,10 +101,13 @@ fn closing_with_merge_fast_forwards_the_work_back() {
         Duration::from_secs(30)
     ));
 
-    assert_success("close --merge", &run(root.path(), &["close", &id, "--merge"]));
+    assert_success(
+        "close --merge",
+        &run(root.path(), &["close", &id, "--merge"]),
+    );
 
     assert!(
-        repo.log_contains("add merged.txt"),
+        repo.log_contains("add-merged.txt"),
         "the session's commit should now be on the repository's own branch:\n{}",
         repo.branches()
     );
@@ -151,7 +151,7 @@ fn closing_with_discard_throws_the_worktree_and_branch_away() {
         repo.branches()
     );
     assert!(
-        !repo.log_contains("add discarded.txt"),
+        !repo.log_contains("add-discarded.txt"),
         "discarded work must not have reached the main branch"
     );
 }
@@ -201,7 +201,13 @@ fn merging_a_diverged_branch_fails_loudly_and_keeps_the_work() {
     // Move the main branch on independently, so a fast-forward is
     // impossible.
     let out = std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "main-side", "--no-gpg-sign"])
+        .args([
+            "commit",
+            "--allow-empty",
+            "-m",
+            "main-side",
+            "--no-gpg-sign",
+        ])
         .current_dir(repo.path())
         .env("GIT_AUTHOR_NAME", "sessionmgr tests")
         .env("GIT_AUTHOR_EMAIL", "tests@example.invalid")
@@ -305,12 +311,7 @@ fn a_session_created_from_a_subdirectory_resolves_to_the_repository_root() {
 
     let id = session_new_in(
         root.path(),
-        &[
-            "--kind",
-            "worktree",
-            "--repo",
-            &subdir.to_string_lossy(),
-        ],
+        &["--kind", "worktree", "--repo", &subdir.to_string_lossy()],
         &long_running(),
     );
 
@@ -367,6 +368,6 @@ fn two_worktree_sessions_on_one_repo_are_independent() {
         "close --merge",
         &run(root.path(), &["close", &first, "--merge"]),
     );
-    assert!(repo.log_contains("add first.txt"));
+    assert!(repo.log_contains("add-first.txt"));
     assert_eq!(session_status(root.path(), &second), "finished");
 }

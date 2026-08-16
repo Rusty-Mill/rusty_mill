@@ -5,13 +5,19 @@ members = [
     "crates/sessionmgr-protocol",
     "crates/sessionmgr-proc",
     "crates/sessionmgr-git",
+    "crates/sessionmgr-pty",
     "crates/sessionmgr-daemon",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# Verified, not guessed. 1.75 was inherited from a sibling project's
+# manifest and was wrong by thirteen releases: `rusty_libc` (transitive,
+# via `rustils`) requires 1.88, and edition-2024 dependencies rule out
+# anything below 1.85 regardless. CI pins a job to exactly this version
+# so the claim cannot silently drift again.
+rust-version = "1.88"
 license = "MIT"
 publish = false
 
@@ -37,3 +43,4 @@ sessionmgr-core = { path = "crates/sessionmgr-core" }
 sessionmgr-protocol = { path = "crates/sessionmgr-protocol" }
 sessionmgr-proc = { path = "crates/sessionmgr-proc" }
 sessionmgr-git = { path = "crates/sessionmgr-git" }
+sessionmgr-pty = { path = "crates/sessionmgr-pty" }

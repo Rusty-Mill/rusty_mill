@@ -44,7 +44,10 @@ fn a_session_survives_the_daemon_being_killed_and_is_adopted_by_its_replacement(
         is_alive(worker),
         "the worker MUST survive the daemon being killed -- this is the product's central promise"
     );
-    assert!(is_alive(child), "the session's own process must survive too");
+    assert!(
+        is_alive(child),
+        "the session's own process must survive too"
+    );
 
     // A client transparently starts a replacement daemon.
     let listing = session_list(root.path());
@@ -55,7 +58,10 @@ fn a_session_survives_the_daemon_being_killed_and_is_adopted_by_its_replacement(
     );
 
     let new_daemon = daemon_pid(root.path()).expect("a replacement daemon should be recorded");
-    assert_ne!(new_daemon, daemon, "a genuinely new daemon should be running");
+    assert_ne!(
+        new_daemon, daemon,
+        "a genuinely new daemon should be running"
+    );
 
     // Adopted, **not respawned**. A new worker pid here would mean the
     // supervisor silently restarted the session -- which would look like
@@ -66,7 +72,10 @@ fn a_session_survives_the_daemon_being_killed_and_is_adopted_by_its_replacement(
         worker,
         "the worker must be adopted, not respawned"
     );
-    assert!(is_alive(worker), "the original worker should still be the live one");
+    assert!(
+        is_alive(worker),
+        "the original worker should still be the live one"
+    );
 }
 
 #[test]
@@ -75,7 +84,11 @@ fn reattaching_after_a_restart_announces_the_recovery_and_replays_the_transcript
     // Prints, then stays alive -- so there is both a transcript to replay
     // and a live worker to adopt.
     let command = if cfg!(windows) {
-        vec!["cmd", "/C", "echo marker-line && ping -n 600 127.0.0.1 > NUL"]
+        vec![
+            "cmd",
+            "/C",
+            "echo marker-line && ping -n 600 127.0.0.1 > NUL",
+        ]
     } else {
         vec!["sh", "-c", "echo marker-line; sleep 600"]
     };
@@ -85,11 +98,7 @@ fn reattaching_after_a_restart_announces_the_recovery_and_replays_the_transcript
     // Let the output land in the transcript before killing anything.
     assert!(
         wait_until(
-            || std::fs::read_to_string(
-                root.path().join("sessions").join(&id).join("transcript.jsonl")
-            )
-            .map(|t| t.contains("marker-line"))
-            .unwrap_or(false),
+            || transcript_contains(root.path(), &id, "marker-line"),
             Duration::from_secs(10),
         ),
         "the session's output should reach the transcript"
@@ -120,7 +129,10 @@ fn shutting_the_daemon_down_gracefully_also_leaves_sessions_running() {
     let id = session_new(root.path(), &long_running());
     let worker = worker_pid(root.path(), &id);
 
-    assert_success("daemon shutdown", &run(root.path(), &["daemon", "shutdown"]));
+    assert_success(
+        "daemon shutdown",
+        &run(root.path(), &["daemon", "shutdown"]),
+    );
 
     assert!(
         is_alive(worker),

@@ -70,7 +70,11 @@ fn attaching_to_a_crashed_session_still_shows_what_it_produced() {
     // explains *why* it crashed -- exactly when the user needs it most.
     let root = TempRoot::new("attach-crashed");
     let command = if cfg!(windows) {
-        vec!["cmd", "/C", "echo before-the-crash && ping -n 600 127.0.0.1 > NUL"]
+        vec![
+            "cmd",
+            "/C",
+            "echo before-the-crash && ping -n 600 127.0.0.1 > NUL",
+        ]
     } else {
         vec!["sh", "-c", "echo before-the-crash; sleep 600"]
     };
@@ -79,11 +83,7 @@ fn attaching_to_a_crashed_session_still_shows_what_it_produced() {
 
     assert!(
         wait_until(
-            || std::fs::read_to_string(
-                root.path().join("sessions").join(&id).join("transcript.jsonl")
-            )
-            .map(|t| t.contains("before-the-crash"))
-            .unwrap_or(false),
+            || transcript_contains(root.path(), &id, "before-the-crash"),
             Duration::from_secs(10),
         ),
         "the output should reach the transcript before the crash"

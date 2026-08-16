@@ -88,10 +88,29 @@ pub async fn run(root: PathBuf) -> Result<()> {
     }
 
     paths::ensure_dir("creating the state root", &root)?;
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::io("locating this executable", None, e))?;
+    let exe =
+        std::env::current_exe().map_err(|e| Error::io("locating this executable", None, e))?;
 
-    let listener = transport::Listener::bind("binding the daemon socket", &paths::daemon_socket(&root))?;
+    let supervisor = Arc::new(Supervisor {
+        root: root.clone(),
+        exe,
+        shutdown: Notify::new(),
+    });
+
+    // Recovery runs **before** the socket exists, and the ordering is
+    // load-bearing. Binding first opened a window where a client could
+    // connect -- successfully, into the listen backlog -- while this
+    // process was still probing pids and nothing was accepting yet. The
+    // client then waited for an answer that could not come until recovery
+    // finished. With no socket yet, a client simply fails to connect and
+    // retries, which its readiness loop already handles correctly.
+    //
+    // It also means no client can ever observe the registry mid-recovery,
+    // reading a session as `Running` a moment before it is marked crashed.
+    supervisor.reconcile_all()?;
+
+    let listener =
+        transport::Listener::bind("binding the daemon socket", &paths::daemon_socket(&root))?;
 
     // Written after the bind succeeds, never before: a pointer file
     // advertising a daemon that then failed to bind would send every
@@ -102,19 +121,8 @@ pub async fn run(root: PathBuf) -> Result<()> {
         start_fingerprint: sessionmgr_proc::start_fingerprint(me).ok().flatten(),
     };
     let state_path = paths::daemon_state(&root);
-    std::fs::write(
-        &state_path,
-        serde_json::to_string_pretty(&state)?,
-    )
-    .map_err(|e| Error::io("writing the daemon pointer file", state_path.clone(), e))?;
-
-    let supervisor = Arc::new(Supervisor {
-        root: root.clone(),
-        exe,
-        shutdown: Notify::new(),
-    });
-
-    supervisor.reconcile_all()?;
+    std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)
+        .map_err(|e| Error::io("writing the daemon pointer file", state_path.clone(), e))?;
 
     let accept_loop = rusty_tokio::spawn({
         let supervisor = Arc::clone(&supervisor);
@@ -179,12 +187,12 @@ impl Supervisor {
                 kind,
                 command,
                 repo,
-            } => self.session_new(kind, command, repo).await,
+                pty,
+            } => self.session_new(kind, command, repo, pty).await,
             Request::SessionList => self.session_list(),
             Request::SessionInput { id, data } => self.session_input(id, data).await,
-            Request::SessionClose { id, disposition } => {
-                self.session_close(id, disposition).await
-            }
+            Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
+            Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
             Request::DaemonShutdown => {
                 self.shutdown.notify_one();
                 Ok(Response::Ok)
@@ -204,6 +212,7 @@ impl Supervisor {
         kind: SessionKind,
         command: Vec<String>,
         repo: Option<PathBuf>,
+        pty: bool,
     ) -> Result<Response> {
         let command = if command.is_empty() {
             default_shell()
@@ -219,6 +228,7 @@ impl Supervisor {
             kind,
             command,
             workspace,
+            pty,
             sessionmgr_proc::now_millis(),
         );
         // Written before the spawn, never after: if this process dies in
@@ -380,12 +390,14 @@ impl Supervisor {
             // Reconciled on every list, not only at startup: a worker can
             // die at any moment, and a status this tool reports as
             // `Running` when the process is gone is worse than useless.
-            sessions.push(catalog::summarize(&catalog::reconcile(&self.root, session)?));
+            sessions.push(catalog::summarize(&catalog::reconcile(
+                &self.root, session,
+            )?));
         }
         Ok(Response::Sessions { sessions })
     }
 
-    async fn session_input(&self, id: SessionId, data: String) -> Result<Response> {
+    async fn session_input(&self, id: SessionId, data: Vec<u8>) -> Result<Response> {
         let session = catalog::read_session(&self.root, &id)?;
         if !session.status.expects_live_worker() {
             return Err(Error::conflict(format!(
@@ -399,6 +411,23 @@ impl Supervisor {
         )
         .await?;
         conn.request(&Request::SessionInput { id, data }).await
+    }
+
+    /// Forwards a terminal resize to the session's worker.
+    async fn session_resize(&self, id: SessionId, rows: u16, cols: u16) -> Result<Response> {
+        let session = catalog::read_session(&self.root, &id)?;
+        if !session.status.expects_live_worker() {
+            // Not an error: a UI resizing every session it displays
+            // should not have to filter out the finished ones first.
+            return Ok(Response::Ok);
+        }
+        let mut conn = transport::Connection::connect(
+            "connecting to a worker",
+            &paths::worker_socket(&self.root, &id),
+        )
+        .await?;
+        conn.request(&Request::SessionResize { id, rows, cols })
+            .await
     }
 
     /// Graceful first, then force, then record.
@@ -421,7 +450,8 @@ impl Supervisor {
         //    exits, which is cleaner than anything done from outside.
         let socket = paths::worker_socket(&self.root, &id);
         let graceful = rusty_tokio::time::timeout(GRACEFUL_CLOSE_TIMEOUT, async {
-            let mut conn = transport::Connection::connect("connecting to a worker", &socket).await?;
+            let mut conn =
+                transport::Connection::connect("connecting to a worker", &socket).await?;
             let response: Response = conn.request(&Request::WorkerShutdown).await?;
             Ok::<_, Error>(response)
         })

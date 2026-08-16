@@ -132,7 +132,9 @@ mod tests {
         assert!(branch_name(&id()).ends_with(id().as_str()));
         assert_eq!(
             worktree_dir(Path::new("/repo"), &id()),
-            PathBuf::from("/repo").join(WORKTREE_DIR).join(id().as_str())
+            PathBuf::from("/repo")
+                .join(WORKTREE_DIR)
+                .join(id().as_str())
         );
     }
 

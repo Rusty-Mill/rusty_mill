@@ -184,14 +184,40 @@ where
     }))
 }
 
+/// How long one readiness probe may take before it is abandoned and
+/// retried.
+///
+/// **Load-bearing, not a tidy-up.** Connecting to a bound socket succeeds
+/// as soon as the listener exists, whether or not anything is accepting
+/// yet -- the connection simply sits in the listen backlog. A probe that
+/// then waits for a reply with no timeout blocks forever, which makes the
+/// caller's own deadline meaningless because it is only checked between
+/// probes. That is not hypothetical: it hung `supervisor_restart_recovery`
+/// indefinitely on Windows, where a client connected to a daemon that had
+/// bound its socket but had not yet started accepting.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 async fn probe<Req, Res>(path: &Path, ping: Req, is_pong: &impl Fn(&Res) -> bool) -> Result<bool>
 where
     Req: Serialize,
     Res: DeserializeOwned,
 {
-    let mut conn = Connection::connect("probing a socket", path).await?;
-    let response: Res = conn.request(&ping).await?;
-    Ok(is_pong(&response))
+    let attempt = async {
+        let mut conn = Connection::connect("probing a socket", path).await?;
+        let response: Res = conn.request(&ping).await?;
+        Ok::<_, Error>(is_pong(&response))
+    };
+    match rusty_tokio::time::timeout(PROBE_TIMEOUT, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::io(
+            "probing a socket",
+            path.to_path_buf(),
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the peer accepted a connection but did not answer",
+            ),
+        )),
+    }
 }
 
 /// A listener plus the path it is bound to, so shutdown can remove the
@@ -214,9 +240,34 @@ impl Listener {
             crate::paths::ensure_dir(context, parent)?;
         }
         crate::paths::warn_if_socket_path_is_long(path);
-        crate::paths::clear_socket(path)?;
-        let inner = rusty_tokio::io::UnixListener::bind(path)
-            .map_err(|e| Error::io(context, path.to_path_buf(), e))?;
+        crate::paths::clear_socket(path);
+        let inner = match rusty_tokio::io::UnixListener::bind(path) {
+            Ok(listener) => listener,
+            // One retry, because the interesting failure here is a race
+            // rather than a permanent condition: a socket file left by a
+            // process that was killed moments ago can briefly refuse to
+            // be deleted or rebound while the OS finishes releasing it.
+            // A tool built around surviving unclean exits meets exactly
+            // that case on every restart after a crash, so failing on the
+            // first attempt would make the common path the fragile one.
+            Err(first) => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                crate::paths::clear_socket(path);
+                rusty_tokio::io::UnixListener::bind(path).map_err(|second| {
+                    Error::io(
+                        context,
+                        path.to_path_buf(),
+                        std::io::Error::new(
+                            second.kind(),
+                            format!(
+                                "{second} (first attempt: {first}). If no sessionmgr daemon is \
+                                 running, delete this file and retry."
+                            ),
+                        ),
+                    )
+                })?
+            }
+        };
         Ok(Listener {
             inner,
             path: path.to_path_buf(),

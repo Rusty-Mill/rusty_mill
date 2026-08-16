@@ -64,12 +64,19 @@ repositories.
   - Claude Code's hooks **do** fire when it runs headless under a detached
     worker, so Phase 3's hook-based design stands.
   - A real PTY turns out to be **mandatory**, not preferable, for interactive
-    agent sessions — [ADR-0002](docs/decisions/0002-pty-required-for-agent-sessions.md).
+    agent sessions — [ADR-0002](docs/decisions/0002-pty-required-for-agent-sessions.md),
+    now implemented, with ConPTY confirmed to survive an unclean daemon kill.
 - **Phase 2**: git worktree isolation, all three session kinds, and
-  merge/discard teardown. 105 tests pass. See the
-  [Phase 2 report](docs/phase-2-report.md) — including the Windows work that is
-  declared but not yet finished (the `longPathAware` manifest is written but
-  not wired into the build, and the Defender smoke test needs a Windows box).
+  merge/discard teardown.
+- **Verified on real Windows**: the full suite passes **105/105** on
+  `x86_64-pc-windows-msvc`, not just cross-compiled. That pass found two
+  genuine product bugs the Linux suite had not — an unbounded socket wait
+  behind a bind-before-recover race, and `terminate()` wrongly failing on an
+  already-exited pid. Both fixed; see the
+  [Phase 2 report](docs/phase-2-report.md).
+
+Still outstanding on Windows: the Defender smoke test, and wiring the
+`longPathAware` manifest into the build via a `build.rs`.
 
 Phase order is deliberate and gated: the highest-uncertainty work (agent-CLI
 "needs input" detection, runtime availability) is proven earliest, and no phase
