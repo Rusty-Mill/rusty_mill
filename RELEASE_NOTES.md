@@ -23,6 +23,34 @@ entry per PR.
 
 ---
 
+## PR #109 — Add Connection::get_interrupt_handle/release_memory (closes #107)
+**2026-08-16** · [#109](https://github.com/baileyrd/rusty_-rusqlite/pull/109)
+
+- **Added:** `Connection::get_interrupt_handle` / `InterruptHandle` —
+  `Send`/`Sync`, so a handle obtained from one thread can interrupt the
+  connection's next `execute`/query call from another. Checked at
+  `Connection`'s own `execute`/`execute_with_params`/`query_row`/
+  `query_one`/`query_map`/`query_map_with_params` entry points.
+- **Added:** `Error::Interrupted`, returned by an interrupted call.
+- **Added:** `Connection::release_memory` — documented no-op, same
+  precedent `Connection::cache_flush` already established (no page
+  cache to release from).
+- **Scope cut:** this crate's interrupt is **one-shot**, not sticky
+  like real SQLite's — it fails exactly the next call, then
+  auto-clears. There's no long-running C virtual machine here for a
+  sticky flag to guard mid-statement the way real SQLite's does, so
+  faithfully modeling "still running the interrupted statement" has
+  no honest equivalent; one-shot is the simpler, stated deviation.
+- **Scope cut:** `handle` (raw FFI `sqlite3*` exposure, bundled with
+  this gap in the original `gap-analysis.md` row) stays out of scope
+  under this crate's standing no-C-dependency decision — not part of
+  this PR.
+- Second half of this session's re-scan of `gap-analysis.md` against
+  the issue tracker (see #106/PR #108's entry above for the first).
+- 339 tests passing.
+
+---
+
 ## PR #108 — Add Connection::prepare_cached (closes #106)
 **2026-08-16** · [#108](https://github.com/baileyrd/rusty_-rusqlite/pull/108)
 
