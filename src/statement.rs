@@ -413,6 +413,7 @@ impl<'conn> Statement<'conn> {
                 .iter()
                 .map(|row| row.iter().map(|e| self.resolve_expr(e)).collect())
                 .collect(),
+            or_conflict: insert.or_conflict,
         }
     }
 
