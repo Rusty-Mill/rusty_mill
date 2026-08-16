@@ -23,6 +23,21 @@ entry per PR.
 
 ---
 
+## PR #136 — Add SELECT DISTINCT (closes #116)
+**2026-08-16** · [#136](https://github.com/baileyrd/rusty_-rusqlite/pull/136)
+
+- **Added:** `SELECT DISTINCT ...` — dedups the final output rows
+  (post-projection, so `SELECT DISTINCT col` dedups on just that
+  column, not the whole underlying row), preserving first-occurrence
+  order.
+- **Scope note:** `DISTINCT` on an aggregate `SELECT` is a syntactic
+  no-op — always exactly one output row already, matching real
+  SQLite's own behavior there.
+- Sixth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 421 tests passing.
+
+---
+
 ## PR #135 — Add CASE WHEN expressions (closes #115)
 **2026-08-16** · [#135](https://github.com/baileyrd/rusty_-rusqlite/pull/135)
 
