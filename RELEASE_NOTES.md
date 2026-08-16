@@ -23,6 +23,30 @@ entry per PR.
 
 ---
 
+## PR #143 — Add INSERT OR REPLACE / OR IGNORE conflict resolution (closes #123)
+**2026-08-16** · [#143](https://github.com/baileyrd/rusty_-rusqlite/pull/143)
+
+- **Added:** `INSERT OR REPLACE INTO ...` — a conflicting existing row
+  (by `PRIMARY KEY`/`UNIQUE`) is deleted before the new row is inserted.
+  `INSERT OR IGNORE INTO ...` — a conflicting row is silently skipped
+  (no error, doesn't count toward the affected-row count or fire
+  `update_hook`).
+- **Scope:** only `PRIMARY KEY`/`UNIQUE` conflicts are subject to either
+  mode, per this issue's own narrower acceptance — a `NOT NULL`/`CHECK`
+  violation still hard-errors regardless of `OR REPLACE`/`OR IGNORE`.
+- **Decided:** `OR ABORT`/`OR FAIL`/`OR ROLLBACK` are accepted
+  syntactically (real SQLite grammar) but parsed as a plain `INSERT` —
+  all three reduce to this crate's existing hard-error-on-conflict
+  behavior once constraint enforcement (#118) is in place, so they add
+  no new observable behavior, matching the epic doc's own Part 3 note.
+- New `Database::insert_row_returning_rowid_with_conflict` (returns
+  `Option<i64>`, `None` for an `OR IGNORE`-skipped row) and
+  `OrConflict` enum (`dml_insert.rs`).
+- Thirteenth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 513 tests passing.
+
+---
+
 ## PR #142 — Add CREATE INDEX / DROP INDEX (recorded, not accelerating) (closes #122)
 **2026-08-16** · [#142](https://github.com/baileyrd/rusty_-rusqlite/pull/142)
 
