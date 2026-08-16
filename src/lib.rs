@@ -59,6 +59,7 @@ mod tosql;
 mod trace;
 mod transaction;
 mod value;
+mod vtab;
 
 pub use aggregate::Aggregate;
 pub use blob::{Blob, ZeroBlob};
@@ -85,7 +86,7 @@ pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};
 pub use statement::{Statement, StatementStatus};
-pub use storage::{Database, Table};
+pub use storage::{Database, Table, TableSource};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
 pub use trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};
@@ -93,6 +94,7 @@ pub use transaction::{
     DropBehavior, Savepoint, Transaction, TransactionBehavior, TransactionState,
 };
 pub use value::{Type, Value, ValueRef};
+pub use vtab::{Context, VTab, VTabCursor, VTabTableSource};
 
 #[cfg(test)]
 mod tests {
