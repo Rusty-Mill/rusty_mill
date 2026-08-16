@@ -29,6 +29,11 @@ sessionmgr-protocol = { workspace = true }
 sessionmgr-proc = { workspace = true }
 sessionmgr-git = { workspace = true }
 sessionmgr-pty = { workspace = true }
+# The `tui` role is a thin dispatch from this composition root into the
+# TUI crate, following PLAN.md's "the TUI is a role of the same binary"
+# call. The dependency direction is one-way -- see
+# `sessionmgr-tui`'s own crate docs for why it cannot depend back.
+sessionmgr-tui = { workspace = true }
 rusty_tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -39,6 +39,7 @@ COMMANDS:
     list                                      list every session
     attach <id>                               stream a session's output
     close <id> [--merge|--discard]            tear a session down
+    tui                                       grid of session panes (starts a daemon if needed)
     daemon run                                run the supervisor in the foreground
     daemon start                              start the supervisor detached
     daemon status                             is a supervisor running?
@@ -89,6 +90,12 @@ pub async fn run(args: &[String]) -> Result<()> {
             client::session_attach(&root, id).await
         }
         "close" => cmd_close(&root, rest).await,
+        "tui" => {
+            client::ensure_daemon(&root).await?;
+            sessionmgr_tui::run(paths::daemon_socket(&root))
+                .await
+                .map_err(|e| Error::conflict(e.to_string()))
+        }
         "daemon" => cmd_daemon(&root, rest).await,
         "__worker-main" => {
             let mut rest = rest.to_vec();
