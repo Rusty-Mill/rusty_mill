@@ -8,6 +8,26 @@ use crate::dml_select::{parse_param_marker, Expr};
 use crate::token::Token;
 use crate::value::Value;
 
+/// `INSERT OR REPLACE`/`INSERT OR IGNORE`'s conflict-resolution mode
+/// (issue #123) — the only two of SQLite's five `OR`-clause modes that
+/// change observable behavior once constraint enforcement is in place
+/// (`OR ABORT`/`OR FAIL`/`OR ROLLBACK` all reduce to this crate's
+/// existing hard-error-on-conflict behavior, so [`parse_insert`] accepts
+/// that syntax but parses it as a plain `INSERT` — see its own doc
+/// comment). Only `PRIMARY KEY`/`UNIQUE` conflicts are subject to either
+/// mode; a `NOT NULL`/`CHECK` violation still errors regardless, per
+/// this issue's own narrower acceptance scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrConflict {
+    /// A conflicting existing row (by `PRIMARY KEY`/`UNIQUE`) is deleted
+    /// before the new row is inserted.
+    Replace,
+    /// A row that would conflict (by `PRIMARY KEY`/`UNIQUE`) is silently
+    /// skipped — not inserted, no error, doesn't count toward the
+    /// statement's affected-row count.
+    Ignore,
+}
+
 /// A parsed `INSERT INTO ... VALUES (...)` statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Insert {
@@ -20,13 +40,41 @@ pub struct Insert {
     /// (never any other `Expr` variant — this parser only ever produces
     /// those two) — see `docs/adr/0002-parameter-markers.md`.
     pub rows: Vec<Vec<Expr>>,
+    /// `OR REPLACE`/`OR IGNORE`, if given (issue #123) — see
+    /// [`OrConflict`]'s own doc comment.
+    pub or_conflict: Option<OrConflict>,
 }
 
-/// Parses an `INSERT INTO ... VALUES (...)` statement from a token stream
-/// (as produced by [`crate::tokenize`]).
+/// Parses an `INSERT [OR REPLACE|OR IGNORE|OR ABORT|OR FAIL|OR ROLLBACK]
+/// INTO ... VALUES (...)` statement from a token stream (as produced by
+/// [`crate::tokenize`]).
 pub fn parse_insert(tokens: &[Token]) -> Result<Insert, ParseError> {
     let mut p = InsertParser { tokens, pos: 0 };
     p.expect_ident("INSERT")?;
+
+    let or_conflict = if p.peek_ident("OR") {
+        p.advance();
+        if p.peek_ident("REPLACE") {
+            p.advance();
+            Some(OrConflict::Replace)
+        } else if p.peek_ident("IGNORE") {
+            p.advance();
+            Some(OrConflict::Ignore)
+        } else if p.peek_ident("ABORT") || p.peek_ident("FAIL") || p.peek_ident("ROLLBACK") {
+            // Deferred (epic #111 Part 3) -- accepted syntactically,
+            // parsed as a plain INSERT (see OrConflict's doc comment).
+            p.advance();
+            None
+        } else {
+            match p.advance() {
+                Some(Token::Eof) | None => return Err(ParseError::UnexpectedEof),
+                Some(other) => return Err(ParseError::UnexpectedToken(format!("{other:?}"))),
+            }
+        }
+    } else {
+        None
+    };
+
     p.expect_ident("INTO")?;
     let table_name = p.expect_any_ident()?;
 
@@ -74,6 +122,7 @@ pub fn parse_insert(tokens: &[Token]) -> Result<Insert, ParseError> {
         table_name,
         columns,
         rows,
+        or_conflict,
     })
 }
 
@@ -89,6 +138,10 @@ impl<'a> InsertParser<'a> {
 
     fn peek_punct(&self, p: &str) -> bool {
         matches!(self.peek(), Some(Token::Punct(s)) if *s == p)
+    }
+
+    fn peek_ident(&self, keyword: &str) -> bool {
+        matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case(keyword))
     }
 
     fn advance(&mut self) -> Option<&Token> {
@@ -177,6 +230,46 @@ mod tests {
         let tokens = tokenize("INSERT INTO t VALUES (1), (2), (3)").unwrap();
         let insert = parse_insert(&tokens).unwrap();
         assert_eq!(insert.rows.len(), 3);
+    }
+
+    #[test]
+    fn plain_insert_has_no_or_conflict() {
+        let tokens = tokenize("INSERT INTO t VALUES (1)").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(insert.or_conflict, None);
+    }
+
+    #[test]
+    fn parses_insert_or_replace() {
+        let tokens = tokenize("INSERT OR REPLACE INTO t VALUES (1)").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(insert.or_conflict, Some(OrConflict::Replace));
+        assert_eq!(insert.table_name, "t");
+    }
+
+    #[test]
+    fn parses_insert_or_ignore() {
+        let tokens = tokenize("INSERT OR IGNORE INTO t VALUES (1)").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(insert.or_conflict, Some(OrConflict::Ignore));
+    }
+
+    #[test]
+    fn parses_deferred_or_clauses_as_a_plain_insert() {
+        for keyword in ["ABORT", "FAIL", "ROLLBACK"] {
+            let tokens = tokenize(&format!("INSERT OR {keyword} INTO t VALUES (1)")).unwrap();
+            let insert = parse_insert(&tokens).unwrap();
+            assert_eq!(insert.or_conflict, None);
+        }
+    }
+
+    #[test]
+    fn unrecognized_or_clause_is_an_error() {
+        let tokens = tokenize("INSERT OR BOGUS INTO t VALUES (1)").unwrap();
+        assert!(matches!(
+            parse_insert(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
     }
 
     #[test]

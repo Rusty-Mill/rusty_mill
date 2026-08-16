@@ -74,7 +74,7 @@ pub use ddl::{
     parse_drop_index, parse_drop_table, AlterTable, AlterTableAction, ColumnDef, CreateIndex,
     CreateTable, CreateVirtualTable, DropIndex, DropTable, ParseError,
 };
-pub use dml_insert::{parse_insert, Insert};
+pub use dml_insert::{parse_insert, Insert, OrConflict};
 pub use dml_select::{
     parse_select, AggregateArg, AggregateCall, BinaryOp, Expr, ParamMarker, Select, SelectColumns,
     WindowCall,

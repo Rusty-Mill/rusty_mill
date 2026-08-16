@@ -2190,6 +2190,57 @@ mod tests {
             .is_ok());
     }
 
+    #[test]
+    fn insert_or_replace_replaces_a_conflicting_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 'old')").unwrap();
+
+        let affected = conn
+            .execute("INSERT OR REPLACE INTO t VALUES (1, 'new')")
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1), Value::Text("new".into())]);
+    }
+
+    #[test]
+    fn insert_or_ignore_skips_a_conflicting_row_without_erroring() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 'old')").unwrap();
+
+        let affected = conn
+            .execute("INSERT OR IGNORE INTO t VALUES (1, 'new')")
+            .unwrap();
+        assert_eq!(affected, 0);
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1), Value::Text("old".into())]);
+    }
+
+    #[test]
+    fn insert_or_ignore_does_not_block_non_conflicting_rows_in_the_same_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        let affected = conn
+            .execute("INSERT OR IGNORE INTO t VALUES (1), (2), (1), (3)")
+            .unwrap();
+        assert_eq!(affected, 2);
+
+        let mut rows: Vec<i64> = conn
+            .query_map("SELECT id FROM t", |row| row.get(0))
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 2, 3]);
+    }
+
     /// A `CreateVTab` test double: `USING arange(start, end)` builds a
     /// one-column (`value`) integer-range table from its own
     /// `CREATE VIRTUAL TABLE` arguments.

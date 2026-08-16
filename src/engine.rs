@@ -72,7 +72,16 @@ pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Re
             .iter()
             .map(resolve_insert_value)
             .collect::<Result<Vec<Value>>>()?;
-        rowids.push(db.insert_row_returning_rowid(&insert.table_name, values)?);
+        // `OrConflict::Ignore` returns `None` for a silently skipped row
+        // (issue #123) -- not pushed, so it doesn't count toward the
+        // statement's affected-row count or fire `update_hook`.
+        if let Some(rowid) = db.insert_row_returning_rowid_with_conflict(
+            &insert.table_name,
+            values,
+            insert.or_conflict,
+        )? {
+            rowids.push(rowid);
+        }
     }
     Ok(rowids)
 }

@@ -3,6 +3,7 @@
 //! the on-disk file format isn't in scope yet.
 
 use crate::ddl::{AlterTableAction, ColumnDef, CreateTable};
+use crate::dml_insert::OrConflict;
 use crate::dml_select::Expr;
 use crate::error::{Error, Result};
 use crate::eval::{evaluate, evaluate_bool3};
@@ -352,6 +353,63 @@ impl Database {
         Ok(rowid)
     }
 
+    /// Like [`Database::insert_row_returning_rowid`], but honors
+    /// `INSERT`'s `OR REPLACE`/`OR IGNORE` conflict-resolution mode
+    /// (issue #123) — see [`crate::dml_insert::OrConflict`]'s own doc
+    /// comment for exactly what each mode does and its `PRIMARY KEY`/
+    /// `UNIQUE`-only scope. `or_conflict: None` behaves identically to
+    /// [`Database::insert_row_returning_rowid`] (always `Some` rowid).
+    ///
+    /// Returns `None` when `OrConflict::Ignore` silently skips the row
+    /// (a `PRIMARY KEY`/`UNIQUE` conflict, so nothing was inserted).
+    pub fn insert_row_returning_rowid_with_conflict(
+        &mut self,
+        table_name: &str,
+        row: Vec<Value>,
+        or_conflict: Option<OrConflict>,
+    ) -> Result<Option<i64>> {
+        match or_conflict {
+            None => self.insert_row_returning_rowid(table_name, row).map(Some),
+            Some(OrConflict::Ignore) => {
+                let table = self
+                    .tables
+                    .get(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                if row.len() != table.column_names.len() {
+                    return Err(Error::ColumnCountMismatch {
+                        expected: table.column_names.len(),
+                        actual: row.len(),
+                    });
+                }
+                if !find_pk_unique_conflicts(table, &row).is_empty() {
+                    return Ok(None);
+                }
+                self.insert_row_returning_rowid(table_name, row).map(Some)
+            }
+            Some(OrConflict::Replace) => {
+                let table = self
+                    .tables
+                    .get_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                if row.len() != table.column_names.len() {
+                    return Err(Error::ColumnCountMismatch {
+                        expected: table.column_names.len(),
+                        actual: row.len(),
+                    });
+                }
+                // Highest index first, so removing one doesn't shift the
+                // still-to-be-removed indices out from under it.
+                let mut conflicts = find_pk_unique_conflicts(table, &row);
+                conflicts.sort_unstable_by(|a, b| b.cmp(a));
+                for idx in conflicts {
+                    table.rows.remove(idx);
+                    table.row_ids.remove(idx);
+                }
+                self.insert_row_returning_rowid(table_name, row).map(Some)
+            }
+        }
+    }
+
     /// Returns a table's schema and rows for scanning.
     pub fn table(&self, table_name: &str) -> Result<&Table> {
         self.tables
@@ -546,6 +604,29 @@ fn check_constraints(table: &Table, table_name: &str, row: &[Value]) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Returns the indices in `table.rows` that conflict with `row` on any
+/// of the table's `PRIMARY KEY`/`UNIQUE` columns — the same conflict
+/// [`check_constraints`] detects and turns into a hard
+/// [`Error::ConstraintViolation`], exposed separately so `OR REPLACE`/
+/// `OR IGNORE` (issue #123) can act on the conflicting rows themselves
+/// rather than only learning a conflict exists via an error. Mirrors
+/// `check_constraints`'s own NULL-is-distinct-from-NULL rule (a `NULL`
+/// value never conflicts).
+fn find_pk_unique_conflicts(table: &Table, row: &[Value]) -> Vec<usize> {
+    let mut conflicts = Vec::new();
+    for (i, col) in table.columns.iter().enumerate() {
+        if !(col.primary_key || col.unique) || row[i] == Value::Null {
+            continue;
+        }
+        for (row_idx, existing) in table.rows.iter().enumerate() {
+            if existing[i] == row[i] && !conflicts.contains(&row_idx) {
+                conflicts.push(row_idx);
+            }
+        }
+    }
+    conflicts
 }
 
 #[cfg(test)]
@@ -1136,6 +1217,109 @@ mod tests {
         assert!(db
             .insert_row("t", vec![Value::Integer(4), Value::Integer(40)])
             .is_ok());
+    }
+
+    #[test]
+    fn or_replace_deletes_the_conflicting_row_and_inserts_the_new_one() {
+        let mut db = Database::new();
+        db.create_table(&create(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+        ))
+        .unwrap();
+        db.insert_row("t", vec![Value::Integer(1), Value::Text("old".into())])
+            .unwrap();
+
+        let rowid = db
+            .insert_row_returning_rowid_with_conflict(
+                "t",
+                vec![Value::Integer(1), Value::Text("new".into())],
+                Some(OrConflict::Replace),
+            )
+            .unwrap();
+        assert!(rowid.is_some());
+
+        let table = db.table("t").unwrap();
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0][1], Value::Text("new".into()));
+    }
+
+    #[test]
+    fn or_replace_with_no_conflict_behaves_like_a_plain_insert() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (id INTEGER PRIMARY KEY)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        db.insert_row_returning_rowid_with_conflict(
+            "t",
+            vec![Value::Integer(2)],
+            Some(OrConflict::Replace),
+        )
+        .unwrap();
+
+        assert_eq!(db.table("t").unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn or_ignore_silently_skips_a_conflicting_row() {
+        let mut db = Database::new();
+        db.create_table(&create(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+        ))
+        .unwrap();
+        db.insert_row("t", vec![Value::Integer(1), Value::Text("old".into())])
+            .unwrap();
+
+        let rowid = db
+            .insert_row_returning_rowid_with_conflict(
+                "t",
+                vec![Value::Integer(1), Value::Text("new".into())],
+                Some(OrConflict::Ignore),
+            )
+            .unwrap();
+        assert_eq!(rowid, None);
+
+        // Untouched -- the conflicting row was neither replaced nor did
+        // insertion error.
+        let table = db.table("t").unwrap();
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0][1], Value::Text("old".into()));
+    }
+
+    #[test]
+    fn or_ignore_with_no_conflict_behaves_like_a_plain_insert() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (id INTEGER PRIMARY KEY)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        let rowid = db
+            .insert_row_returning_rowid_with_conflict(
+                "t",
+                vec![Value::Integer(2)],
+                Some(OrConflict::Ignore),
+            )
+            .unwrap();
+        assert!(rowid.is_some());
+        assert_eq!(db.table("t").unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn or_ignore_still_errors_on_a_not_null_violation() {
+        // Scope decision (issue #123): only PRIMARY KEY/UNIQUE conflicts
+        // are subject to OR REPLACE/OR IGNORE -- a NOT NULL violation
+        // still hard-errors regardless.
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER NOT NULL)"))
+            .unwrap();
+        assert!(matches!(
+            db.insert_row_returning_rowid_with_conflict(
+                "t",
+                vec![Value::Null],
+                Some(OrConflict::Ignore),
+            ),
+            Err(Error::ConstraintViolation(_))
+        ));
     }
 
     #[test]
