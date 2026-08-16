@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
 use crate::hooks::{Action, AuthContext, Authorization};
 use crate::row::Row;
+use crate::statement::{StatementCache, DEFAULT_STATEMENT_CACHE_CAPACITY};
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};
@@ -106,6 +107,8 @@ pub struct Connection {
     last_insert_rowid: i64,
     transaction_depth: u32,
     default_transaction_behavior: crate::transaction::TransactionBehavior,
+    /// Backs [`Connection::prepare_cached`] (issue #106).
+    statement_cache: StatementCache,
 }
 
 impl Connection {
@@ -145,6 +148,7 @@ impl Connection {
             last_insert_rowid: 0,
             transaction_depth: 0,
             default_transaction_behavior: crate::transaction::TransactionBehavior::Deferred,
+            statement_cache: StatementCache::new(DEFAULT_STATEMENT_CACHE_CAPACITY),
         })
     }
 
@@ -348,14 +352,19 @@ impl Connection {
         previous
     }
 
-    /// No-op: there's no prepared-statement cache yet — `prepare_cached`
-    /// isn't implemented (it needs a real `Statement` type, tracked
-    /// separately; see the note on `prepare*` above).
-    pub fn set_prepared_statement_cache_capacity(&mut self, _capacity: usize) {}
+    /// Changes [`Connection::prepare_cached`]'s cache capacity (issue
+    /// #106), evicting least-recently-used entries immediately if
+    /// shrinking below the current entry count. `0` disables caching.
+    pub fn set_prepared_statement_cache_capacity(&mut self, capacity: usize) {
+        self.statement_cache.set_capacity(capacity);
+    }
 
-    /// No-op, for the same reason as
-    /// [`Connection::set_prepared_statement_cache_capacity`].
-    pub fn flush_prepared_statement_cache(&mut self) {}
+    /// Discards every entry in [`Connection::prepare_cached`]'s cache
+    /// (issue #106). Capacity is unchanged — the next
+    /// `prepare_cached` call for any SQL text re-parses and re-caches it.
+    pub fn flush_prepared_statement_cache(&mut self) {
+        self.statement_cache.clear();
+    }
 
     /// No-op: this engine has no page cache to flush (see
     /// `ARCHITECTURE.md` — storage is a plain in-memory `HashMap`, not a
@@ -1006,6 +1015,38 @@ impl Connection {
     /// out of scope in this first cut (parameter binding, hook firing).
     pub fn prepare(&mut self, sql: &str) -> Result<crate::statement::Statement<'_>> {
         crate::statement::Statement::prepare(self, sql)
+    }
+
+    /// Like [`Connection::prepare`], but reuses a cached parse of `sql` if
+    /// this connection has prepared the exact same SQL text before,
+    /// skipping tokenizing/parsing on a cache hit (issue #106). Capacity
+    /// is controlled by [`Connection::set_prepared_statement_cache_capacity`]
+    /// (default: 16, matching real `rusqlite`); [`Error`] on a parse
+    /// failure, same as [`Connection::prepare`].
+    ///
+    /// See [`crate::statement::StatementCache`]'s doc comment for how
+    /// this differs from real `rusqlite::Connection::prepare_cached`'s
+    /// `CachedStatement`/`Drop`-based design — the short version: each
+    /// call returns a fresh [`crate::Statement`] built from a clone of
+    /// the cached parse, with empty bindings, not a shared live handle.
+    pub fn prepare_cached(&mut self, sql: &str) -> Result<crate::statement::Statement<'_>> {
+        if let Some((kind, param_names)) = self.statement_cache.get(sql) {
+            return Ok(crate::statement::Statement::from_parsed(
+                self,
+                sql,
+                kind,
+                param_names,
+            ));
+        }
+        let (kind, param_names) = crate::statement::parse_statement(sql)?;
+        self.statement_cache
+            .insert(sql, kind.clone(), param_names.clone());
+        Ok(crate::statement::Statement::from_parsed(
+            self,
+            sql,
+            kind,
+            param_names,
+        ))
     }
 
     /// Begins a transaction, returning a guard that rolls back on drop
