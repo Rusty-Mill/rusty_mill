@@ -21,6 +21,8 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A custom text-comparison function registered via
@@ -51,6 +53,29 @@ impl From<&ColumnDef> for ColumnMetadata {
             not_null: def.not_null,
             primary_key: def.primary_key,
         }
+    }
+}
+
+/// Interrupts a [`Connection`]'s next `execute`/query call, obtained via
+/// [`Connection::get_interrupt_handle`] (issue #107). `Send`/`Sync` —
+/// deliberately usable from a different thread than the one holding the
+/// [`Connection`], matching real `rusqlite::vtab::InterruptHandle`'s own
+/// point (a [`Connection`] itself isn't `Sync`, so this is the one way to
+/// reach into it from elsewhere while it's busy).
+///
+/// See [`Connection::get_interrupt_handle`]'s doc comment for how this
+/// crate's one-shot interrupt semantics differ from real SQLite's sticky
+/// one.
+#[derive(Clone)]
+pub struct InterruptHandle {
+    interrupted: Arc<AtomicBool>,
+}
+
+impl InterruptHandle {
+    /// Arms the interrupt: the connection's next `execute`/query call
+    /// fails with [`Error::Interrupted`], then the flag clears itself.
+    pub fn interrupt(&self) {
+        self.interrupted.store(true, AtomicOrdering::SeqCst);
     }
 }
 
@@ -109,6 +134,11 @@ pub struct Connection {
     default_transaction_behavior: crate::transaction::TransactionBehavior,
     /// Backs [`Connection::prepare_cached`] (issue #106).
     statement_cache: StatementCache,
+    /// Backs [`Connection::get_interrupt_handle`] (issue #107). An `Arc`
+    /// so a cloned [`InterruptHandle`] can flip it from anywhere —
+    /// including another OS thread — while this connection is off doing
+    /// something else.
+    interrupted: Arc<AtomicBool>,
 }
 
 impl Connection {
@@ -149,6 +179,7 @@ impl Connection {
             transaction_depth: 0,
             default_transaction_behavior: crate::transaction::TransactionBehavior::Deferred,
             statement_cache: StatementCache::new(DEFAULT_STATEMENT_CACHE_CAPACITY),
+            interrupted: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -371,6 +402,58 @@ impl Connection {
     /// paged cache over a file).
     pub fn cache_flush(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// No-op, for the same reason as [`Connection::cache_flush`]: real
+    /// `rusqlite::Connection::release_memory` asks SQLite's page cache to
+    /// give back unused memory, and this engine has no page cache to
+    /// release from (issue #107).
+    pub fn release_memory(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Returns a handle that can interrupt this connection's next
+    /// `execute`/query call from anywhere — including another OS thread
+    /// while this connection is blocked doing something else (issue
+    /// #107). Mirrors real `rusqlite::Connection::get_interrupt_handle`/
+    /// `InterruptHandle`.
+    ///
+    /// **Design deviation, stated plainly:** real SQLite's interrupt
+    /// flag is sticky — once tripped, every subsequent call keeps
+    /// failing until the connection itself resets it (there's no public
+    /// "un-interrupt" API; in practice a real app re-opens or just
+    /// treats the connection as done). This crate's engine has no
+    /// long-running C virtual machine for the flag to guard mid-step, so
+    /// there's no equivalent "still running the statement that got
+    /// interrupted" window to model faithfully — the honest simpler
+    /// choice here is **one-shot**: [`InterruptHandle::interrupt`] fails
+    /// exactly the next `execute`/query call on this connection (see
+    /// [`Error::Interrupted`]), then automatically clears, so the
+    /// connection is immediately usable again afterward. Checked only at
+    /// [`Connection`]'s own `execute`/`execute_with_params`/`query_row`/
+    /// `query_one`/`query_map`/`query_map_with_params` entry points —
+    /// calling `execute`/`query*` directly on a [`crate::Statement`]
+    /// obtained via [`Connection::prepare`]/[`Connection::prepare_cached`]
+    /// doesn't observe it, the same "narrower than `Connection::execute`"
+    /// scope [`crate::Statement::execute`]'s own doc comment already
+    /// states for `trace`/`profile`/hooks.
+    pub fn get_interrupt_handle(&self) -> InterruptHandle {
+        InterruptHandle {
+            interrupted: Arc::clone(&self.interrupted),
+        }
+    }
+
+    /// `Ok(())` unless [`InterruptHandle::interrupt`] was called since
+    /// the last time this was checked, in which case it returns
+    /// [`Error::Interrupted`] and clears the flag (see
+    /// [`Connection::get_interrupt_handle`]'s doc comment for why this
+    /// is one-shot rather than sticky).
+    fn check_interrupted(&self) -> Result<()> {
+        if self.interrupted.swap(false, AtomicOrdering::SeqCst) {
+            Err(Error::Interrupted)
+        } else {
+            Ok(())
+        }
     }
 
     /// Sets a custom error message on the connection. In real SQLite,
@@ -1109,6 +1192,7 @@ impl Connection {
     /// hook setter's doc comment for exactly what it observes here.
     pub fn execute(&mut self, sql: &str) -> Result<usize> {
         self.check_open()?;
+        self.check_interrupted()?;
         if self.read_only {
             return Err(Error::ReadOnlyConnection);
         }
@@ -1195,6 +1279,7 @@ impl Connection {
         params: P,
     ) -> Result<usize> {
         self.check_open()?;
+        self.check_interrupted()?;
         let mut stmt = self.prepare(sql)?;
         stmt.execute_with_params(params)
     }
@@ -1204,6 +1289,7 @@ impl Connection {
     /// with [`Error::QueryReturnedNoRows`] if the query matched no rows.
     pub fn query_row(&self, sql: &str) -> Result<Vec<Value>> {
         self.check_open()?;
+        self.check_interrupted()?;
         if self.should_abort_via_progress_handler() {
             return Err(Error::OperationAborted);
         }
@@ -1227,6 +1313,7 @@ impl Connection {
         F: FnOnce(Row<'_>) -> Result<T>,
     {
         self.check_open()?;
+        self.check_interrupted()?;
         if self.should_abort_via_progress_handler() {
             return Err(Error::OperationAborted);
         }
@@ -1251,6 +1338,7 @@ impl Connection {
         F: FnMut(Row<'_>) -> Result<T>,
     {
         self.check_open()?;
+        self.check_interrupted()?;
         if self.should_abort_via_progress_handler() {
             return Err(Error::OperationAborted);
         }
@@ -1278,6 +1366,7 @@ impl Connection {
         F: FnMut(Row<'_>) -> Result<T>,
     {
         self.check_open()?;
+        self.check_interrupted()?;
         let mut stmt = self.prepare(sql)?;
         stmt.query_map_with_params(params, f)
     }
@@ -2571,5 +2660,86 @@ mod tests {
             Err(Error::CommitHookVetoed)
         );
         assert_eq!(conn.last_insert_rowid(), 0);
+    }
+
+    #[test]
+    fn a_fresh_connection_is_not_interrupted() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(conn.execute("CREATE TABLE t (a INTEGER)").is_ok());
+    }
+
+    #[test]
+    fn interrupt_fails_the_next_execute_call() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let handle = conn.get_interrupt_handle();
+        handle.interrupt();
+
+        assert_eq!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::Interrupted)
+        );
+    }
+
+    #[test]
+    fn interrupt_is_one_shot_and_auto_clears() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let handle = conn.get_interrupt_handle();
+        handle.interrupt();
+
+        assert_eq!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::Interrupted)
+        );
+        // The flag already auto-cleared -- this call succeeds.
+        assert!(conn.execute("INSERT INTO t VALUES (2)").is_ok());
+    }
+
+    #[test]
+    fn interrupt_fails_query_row_query_one_and_query_map_too() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        let handle = conn.get_interrupt_handle();
+
+        handle.interrupt();
+        assert_eq!(conn.query_row("SELECT * FROM t"), Err(Error::Interrupted));
+
+        handle.interrupt();
+        assert_eq!(
+            conn.query_one("SELECT * FROM t", |row| row.get::<i64>(0)),
+            Err(Error::Interrupted)
+        );
+
+        handle.interrupt();
+        assert_eq!(
+            conn.query_map("SELECT * FROM t", |row| row.get::<i64>(0)),
+            Err(Error::Interrupted)
+        );
+    }
+
+    #[test]
+    fn interrupt_handle_works_from_another_thread() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let handle = conn.get_interrupt_handle();
+
+        std::thread::spawn(move || handle.interrupt())
+            .join()
+            .unwrap();
+
+        assert_eq!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::Interrupted)
+        );
+    }
+
+    #[test]
+    fn release_memory_is_a_harmless_no_op() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.release_memory(), Ok(()));
     }
 }

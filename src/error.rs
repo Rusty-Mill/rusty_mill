@@ -79,6 +79,12 @@ pub enum Error {
     /// override [`crate::VTab::insert`] (issue #95) — the default,
     /// matching a plain read-only virtual table.
     ReadOnlyVirtualTable,
+    /// A call was interrupted via [`crate::InterruptHandle::interrupt`]
+    /// (issue #107). Auto-resets: only the call that observes the
+    /// interrupt fails — see [`crate::Connection::get_interrupt_handle`]'s
+    /// doc comment for why this crate's interrupt is one-shot rather than
+    /// sticky like real SQLite's.
+    Interrupted,
 }
 
 impl fmt::Display for Error {
@@ -116,6 +122,7 @@ impl fmt::Display for Error {
             Error::ReadOnlyConnection => write!(f, "attempt to write a readonly connection"),
             Error::ModuleNotFound(name) => write!(f, "no such module: {name:?}"),
             Error::ReadOnlyVirtualTable => write!(f, "virtual table is read-only"),
+            Error::Interrupted => write!(f, "interrupted"),
         }
     }
 }
