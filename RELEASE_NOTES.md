@@ -23,6 +23,38 @@ entry per PR.
 
 ---
 
+## PR #146 — Add UNION / INTERSECT / EXCEPT (compound SELECT) (closes #126)
+**2026-08-16** · [#146](https://github.com/baileyrd/rusty_-rusqlite/pull/146)
+
+- **Added:** `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT` combine two (or
+  a left-associative chain of more) `SELECT`s' results — new
+  `CompoundOp`/`CompoundSelect` AST, `parse_compound_select`, and
+  `execute_compound_select`. `UNION`/`INTERSECT`/`EXCEPT` all dedup
+  their result (real SQL's own implicitly-`DISTINCT` semantics for
+  those three); `UNION ALL` alone doesn't.
+- Each side executes through the exact same path a standalone `SELECT`
+  would — a pure Rust-side `Vec` operation combines the two sides'
+  already-materialized rows, no new execution model, per the issue's
+  own scope note.
+- A column-count mismatch between any two combined sides is a clear
+  `Error::ColumnCountMismatch`. The output's column names come from the
+  first `SELECT` alone — matching real SQLite, which doesn't require
+  (or use) the other sides' column names.
+- **Wired into every actual statement-dispatch site** — `Statement::
+  prepare` (so compound `SELECT`s work with bound `?`/`:name`
+  parameters, including through `Connection::query_map_with_params`)
+  and `Connection::query_row`/`query_map`/`query_one` — not just a new
+  parser function nobody calls: `parse_select`'s own pre-existing lenient
+  trailing-token behavior meant a query like `SELECT a FROM t UNION
+  SELECT a FROM u` would previously have silently executed only the
+  first `SELECT`, silently dropping the `UNION` clause entirely, if
+  compound-select support had been added as parser-only. Real
+  statement dispatch now uses `parse_compound_select`, so that's fixed.
+- Sixteenth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 557 tests passing.
+
+---
+
 ## PR #145 — Add GROUP BY / HAVING (closes #125)
 **2026-08-16** · [#145](https://github.com/baileyrd/rusty_-rusqlite/pull/145)
 
