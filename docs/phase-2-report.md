@@ -14,10 +14,12 @@ Phase 2's stated scope:
 | All three `SessionKind`s | **Done** |
 | Worktree lifecycle tests | **Done** — 10 black-box tests against real repositories |
 | Windows path-length mitigation | **Partly** — budget asserted in tests, manifest written but not wired into the build |
-| Windows Defender smoke test | **Not run** — needs a Windows machine |
+| Windows Defender smoke test | **Not run** — still outstanding |
+| **Full suite on real Windows** | **Done** — 105/105, see below |
 
-105 tests pass in total. `cargo clippy --workspace --all-targets` is clean and
-the workspace type-checks for `x86_64-pc-windows-msvc`.
+105 tests pass in total, **on Linux and on real Windows alike**.
+`cargo clippy --workspace --all-targets` is clean and the workspace
+type-checks for `x86_64-pc-windows-msvc`.
 
 ## What was built
 
@@ -116,3 +118,74 @@ ships. They are about twenty lines with their own parser tests (porcelain
 status codes, renames, quoted paths), and writing them now avoided a second
 editing pass over the same file for the sake of phase purity. No CLI command
 exposes them yet.
+
+## The Windows verification pass
+
+Run on the Windows dev box against `x86_64-pc-windows-msvc`, 2026-08-16.
+Final result: **105 passed, 0 failed**, including all 10 worktree lifecycle
+tests, all 3 supervisor-restart-recovery tests, and all 4 worker-crash tests.
+
+It was worth doing. 56 of the first 62 tests passed immediately — the daemon,
+detached workers, Windows `AF_UNIX` sockets, worktree creation and teardown all
+worked first time — but the run surfaced **two genuine product bugs that
+neither the Linux suite nor review had found**, plus two defects in the test
+harness itself.
+
+### Product bug 1 — bind before recover, an unbounded wait (was: an infinite hang)
+
+`supervisor_restart_recovery` hung indefinitely. Three `sessionmgr` processes
+alive during the hang — worker, replacement daemon, and the client — showed the
+*client* was wedged rather than blocked on an inherited pipe.
+
+Root cause: **no socket read had a timeout.** `Connection::request` blocked
+forever, which made `wait_ready`'s 20-second deadline decorative, since the
+deadline was only checked *between* probes and one probe could block forever.
+
+The window that triggered it: `supervisor::run` bound the listener, *then* ran
+`reconcile_all()`, *then* started accepting. A client connecting in between
+connects successfully — straight into the listen backlog — and waits for an
+answer nobody is accepting yet. Recovery probes one pid per session, so the
+window widens with the number of sessions.
+
+Three fixes: recovery now runs **before** the socket is bound (with no socket, a
+client fails to connect and retries, which its readiness loop already handles,
+and no client can observe the registry mid-recovery); each readiness probe gets
+a 2-second timeout so the caller's deadline is real; and one-shot client
+commands get a 60-second backstop that names `daemon.log` instead of hanging.
+
+**This was never a Windows bug.** The ordering window was always there. Linux
+just lost the race less often.
+
+### Product bug 2 — `terminate()` failed on a pid that had already exited
+
+`terminate()`'s contract says a pid that is already gone is not an error: the
+caller's goal is "not running", which is already true. The Windows arm did not
+honour it. `TerminateProcess` returns `ERROR_ACCESS_DENIED` on a process that
+has **already exited**, and that was propagated as `Err`.
+
+Not an edge case: a process object outlives the process itself whenever anyone
+still holds a handle to it, so the failing call is the ordinary one. Since
+teardown terminates a recorded pid pair, closing a session whose child had
+already exited on its own would have failed on Windows — and a finished session
+is the common case for closing.
+
+Fixed by opening with `PROCESS_QUERY_LIMITED_INFORMATION` as well and, on a
+failed `TerminateProcess`, asking `GetExitCodeProcess` whether the process has
+in fact ended.
+
+### Harness defects (not product code)
+
+- **`cmd.exe` has no single quotes.** `commit_a_file` built a shell one-liner
+  using `-m 'add {name}'`; `cmd` split that into `-m`, `'add`, and `{name}'`, so
+  git took `'add` as the message and the filename as a pathspec. Six of the ten
+  worktree tests failed this way. Fixed by removing every quote: the git
+  identity now lives in the repository config (linked worktrees share it, and a
+  session's shell inherits none of the test process's environment anyway), and
+  the commit message contains no spaces.
+- **A stale socket could stop the daemon restarting.** `clear_socket` returned
+  `Err` on any delete failure other than "not found", and `Listener::bind`
+  propagated it — so on Windows, where deleting an `AF_UNIX` socket left by a
+  killed process does not reliably succeed, one unclean kill could leave the
+  daemon permanently unable to bind. `clear_socket` is now infallible and `bind`
+  retries once. Not confirmed as the cause of any observed failure, but a real
+  latent defect in a tool whose premise is surviving unclean exits.
