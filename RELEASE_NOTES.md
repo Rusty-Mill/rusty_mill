@@ -23,6 +23,30 @@ entry per PR.
 
 ---
 
+## PR #149 — Add DELETE statement (closes #129)
+**2026-08-16** · [#149](https://github.com/baileyrd/rusty_-rusqlite/pull/149)
+
+- **Added:** `DELETE FROM table [WHERE ...]`. New `Delete` AST,
+  `parse_delete`, `Database::delete_rows`, and free-function
+  `execute_delete` — structurally simpler than `UPDATE` (issue #128,
+  right before this one in the epic's own sequencing): no `SET` clause
+  at all.
+- No constraint re-validation needed on delete (removing a row can't
+  violate `NOT NULL`/`PRIMARY KEY`/`UNIQUE`/`CHECK`, unlike `INSERT`/
+  `UPDATE`).
+- **Wired into `hooks::Action::Delete`** (previously an unreachable
+  placeholder variant) — `authorizer`/`update_hook` fire correctly, one
+  `update_hook` call per deleted row with its real rowid.
+- Wired into every actual statement-dispatch site: `Connection::execute`
+  and `Statement::prepare`/`execute` (bound-parameter support included).
+- Returns the affected-row count, matching `Connection::execute`'s
+  existing behavior — `0` (not an error) when no row matches `WHERE`.
+- Deleting the highest-rowid row makes that rowid eligible for reuse by
+  a later `INSERT` (real SQLite's own default, non-`AUTOINCREMENT`
+  behavior) — documented on `Table::row_ids`, not a new decision.
+
+---
+
 ## PR #148 — Add UPDATE statement (closes #128)
 **2026-08-16** · [#148](https://github.com/baileyrd/rusty_-rusqlite/pull/148)
 
