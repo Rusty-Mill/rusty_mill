@@ -2241,6 +2241,39 @@ mod tests {
         assert_eq!(rows, vec![1, 2, 3]);
     }
 
+    #[test]
+    fn insert_select_copies_rows_end_to_end() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 'x'), (2, 'y')")
+            .unwrap();
+        conn.execute("CREATE TABLE u (a INTEGER, b TEXT)").unwrap();
+
+        let affected = conn.execute("INSERT INTO u SELECT * FROM t").unwrap();
+        assert_eq!(affected, 2);
+
+        let mut rows: Vec<i64> = conn.query_map("SELECT a FROM u", |row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 2]);
+    }
+
+    #[test]
+    fn insert_select_with_a_bound_parameter_in_the_where_clause() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        conn.execute("CREATE TABLE u (a INTEGER)").unwrap();
+
+        let affected = conn
+            .execute_with_params("INSERT INTO u SELECT a FROM t WHERE a > ?", (1i64,))
+            .unwrap();
+        assert_eq!(affected, 2);
+
+        let mut rows: Vec<i64> = conn.query_map("SELECT a FROM u", |row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2, 3]);
+    }
+
     /// A `CreateVTab` test double: `USING arange(start, end)` builds a
     /// one-column (`value`) integer-range table from its own
     /// `CREATE VIRTUAL TABLE` arguments.

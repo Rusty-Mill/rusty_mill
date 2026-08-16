@@ -39,7 +39,7 @@
 
 use crate::connection::{leading_keyword, Connection};
 use crate::ddl::{parse_create_table, CreateTable};
-use crate::dml_insert::{parse_insert, Insert};
+use crate::dml_insert::{parse_insert, Insert, InsertSource};
 use crate::dml_select::{
     parse_param_marker, parse_select, AggregateArg, AggregateCall, Expr, ParamMarker, Select,
     SelectColumns,
@@ -90,35 +90,45 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
     let mut resolver = ParamResolver::new();
     match &mut kind {
         StatementKind::CreateTable(_) => {}
-        StatementKind::Insert(insert) => {
-            for row in &mut insert.rows {
-                for expr in row {
-                    resolver.rewrite(expr);
-                }
-            }
-        }
-        StatementKind::Select(select) => {
-            if let SelectColumns::Aggregates(calls) = &mut select.columns {
-                for call in calls {
-                    if let AggregateArg::Expr(e) = &mut call.arg {
-                        resolver.rewrite(e);
+        StatementKind::Insert(insert) => match &mut insert.source {
+            InsertSource::Values(rows) => {
+                for row in rows {
+                    for expr in row {
+                        resolver.rewrite(expr);
                     }
                 }
             }
-            if let SelectColumns::Window(calls) = &mut select.columns {
-                for call in calls {
-                    if let AggregateArg::Expr(e) = &mut call.arg {
-                        resolver.rewrite(e);
-                    }
-                }
-            }
-            if let Some(filter) = &mut select.filter {
-                resolver.rewrite(filter);
-            }
-        }
+            InsertSource::Select(select) => rewrite_select_params(select, &mut resolver),
+        },
+        StatementKind::Select(select) => rewrite_select_params(select, &mut resolver),
     }
 
     Ok((kind, resolver.names))
+}
+
+/// Rewrites every `?`/`?N`/`:name`/`@name`/`$name` marker in `select`
+/// (select-list aggregate/window args, then `WHERE`, left-to-right over
+/// the SQL text) to a resolved 1-based index via `resolver` — shared by
+/// a top-level `SELECT` and an `INSERT ... SELECT` source (issue #124),
+/// since both need the exact same walk.
+fn rewrite_select_params(select: &mut Select, resolver: &mut ParamResolver) {
+    if let SelectColumns::Aggregates(calls) = &mut select.columns {
+        for call in calls {
+            if let AggregateArg::Expr(e) = &mut call.arg {
+                resolver.rewrite(e);
+            }
+        }
+    }
+    if let SelectColumns::Window(calls) = &mut select.columns {
+        for call in calls {
+            if let AggregateArg::Expr(e) = &mut call.arg {
+                resolver.rewrite(e);
+            }
+        }
+    }
+    if let Some(filter) = &mut select.filter {
+        resolver.rewrite(filter);
+    }
 }
 
 /// Default capacity of a fresh [`Connection`]'s prepared-statement cache
@@ -405,14 +415,18 @@ impl<'conn> Statement<'conn> {
     }
 
     fn resolved_insert(&self, insert: &Insert) -> Insert {
+        let source = match &insert.source {
+            InsertSource::Values(rows) => InsertSource::Values(
+                rows.iter()
+                    .map(|row| row.iter().map(|e| self.resolve_expr(e)).collect())
+                    .collect(),
+            ),
+            InsertSource::Select(select) => InsertSource::Select(self.resolve_select(select)),
+        };
         Insert {
             table_name: insert.table_name.clone(),
             columns: insert.columns.clone(),
-            rows: insert
-                .rows
-                .iter()
-                .map(|row| row.iter().map(|e| self.resolve_expr(e)).collect())
-                .collect(),
+            source,
             or_conflict: insert.or_conflict,
         }
     }
@@ -425,7 +439,17 @@ impl<'conn> Statement<'conn> {
     }
 
     fn resolved_select(&self) -> Result<Select> {
-        let select = self.select()?;
+        Ok(self.resolve_select(self.select()?))
+    }
+
+    /// Resolves every `Expr::Parameter` in `select` (select-list
+    /// aggregate/window args, then `WHERE`) to its bound value — the
+    /// shared body [`Statement::resolved_select`] and [`Statement::
+    /// resolved_insert`]'s `INSERT ... SELECT` case (issue #124) both
+    /// need, since an `INSERT ... SELECT`'s nested `SELECT` isn't
+    /// `self.select()`-reachable (that only returns `self.kind`'s own
+    /// top-level `Select`).
+    fn resolve_select(&self, select: &Select) -> Select {
         let columns = match &select.columns {
             SelectColumns::Aggregates(calls) => SelectColumns::Aggregates(
                 calls
@@ -448,12 +472,12 @@ impl<'conn> Statement<'conn> {
             ),
             other => other.clone(),
         };
-        Ok(Select {
+        Select {
             columns,
             table_name: select.table_name.clone(),
             filter: select.filter.as_ref().map(|f| self.resolve_expr(f)),
             distinct: select.distinct,
-        })
+        }
     }
 
     /// Runs this statement (`CREATE TABLE`/`INSERT`), returning the number

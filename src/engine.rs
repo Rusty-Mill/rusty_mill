@@ -5,7 +5,7 @@
 
 use crate::aggregate::Aggregate;
 use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
-use crate::dml_insert::Insert;
+use crate::dml_insert::{Insert, InsertSource};
 use crate::dml_select::{AggregateArg, Expr, Select, SelectColumns};
 use crate::error::{Error, Result};
 use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
@@ -61,17 +61,10 @@ pub fn execute_insert(db: &mut Database, insert: &Insert) -> Result<usize> {
 /// row-position-based) `update_hook` rowids.
 pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Result<Vec<i64>> {
     let table_column_names = db.table(&insert.table_name)?.column_names.clone();
+    let value_rows = resolve_insert_source(db, insert, &table_column_names)?;
 
-    let mut rowids = Vec::with_capacity(insert.rows.len());
-    for row in &insert.rows {
-        let expanded = match &insert.columns {
-            None => row.clone(),
-            Some(names) => expand_row(&table_column_names, names, row)?,
-        };
-        let values = expanded
-            .iter()
-            .map(resolve_insert_value)
-            .collect::<Result<Vec<Value>>>()?;
+    let mut rowids = Vec::with_capacity(value_rows.len());
+    for values in value_rows {
         // `OrConflict::Ignore` returns `None` for a silently skipped row
         // (issue #123) -- not pushed, so it doesn't count toward the
         // statement's affected-row count or fire `update_hook`.
@@ -86,6 +79,60 @@ pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Re
     Ok(rowids)
 }
 
+/// Resolves `insert.source` into concrete `Value` rows, in target
+/// `table_column_names` order (column-list expansion applied, `NULL`
+/// filled for any column not named).
+///
+/// For [`InsertSource::Select`] (issue #124), the `SELECT` is fully
+/// executed first via the plain [`execute_select`] — eager, not
+/// streaming, and function-call/aggregate-free (no access to a
+/// [`crate::Connection`]'s registered scalar functions/aggregates from
+/// here; a `SELECT` using one would need `Connection::execute`'s own
+/// dispatch instead, which isn't wired up for this sub-form — a
+/// documented scope cut, not silently dropped support). Its output rows
+/// are then treated exactly like a `VALUES` row: expanded through the
+/// same [`expand_row`] column-list logic (via a round-trip through
+/// [`Expr::Literal`], since `expand_row` operates on `Expr`) rather than
+/// duplicating that reordering logic for already-resolved `Value`s.
+fn resolve_insert_source(
+    db: &Database,
+    insert: &Insert,
+    table_column_names: &[String],
+) -> Result<Vec<Vec<Value>>> {
+    match &insert.source {
+        InsertSource::Values(rows) => rows
+            .iter()
+            .map(|row| {
+                let expanded = match &insert.columns {
+                    None => row.clone(),
+                    Some(names) => expand_row(table_column_names, names, row)?,
+                };
+                expanded
+                    .iter()
+                    .map(resolve_insert_value)
+                    .collect::<Result<Vec<Value>>>()
+            })
+            .collect(),
+        InsertSource::Select(select) => {
+            let (_, rows) = execute_select(db, select)?;
+            match &insert.columns {
+                None => Ok(rows),
+                Some(names) => rows
+                    .into_iter()
+                    .map(|row| {
+                        let row_exprs: Vec<Expr> = row.into_iter().map(Expr::Literal).collect();
+                        let expanded = expand_row(table_column_names, names, &row_exprs)?;
+                        expanded
+                            .iter()
+                            .map(resolve_insert_value)
+                            .collect::<Result<Vec<Value>>>()
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
 /// Executes an `INSERT` into a *registered virtual table* (issue #95),
 /// returning the number of rows inserted. Resolves each row the same
 /// way [`execute_insert_returning_rowids`] does for native tables
@@ -96,11 +143,24 @@ pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Re
 /// rowid concept (see `src/vtab.rs`'s module doc comment), so unlike
 /// [`execute_insert_returning_rowids`] this returns just the affected
 /// count — there's nothing rowid-shaped to return.
+///
+/// **Scope note (issue #124):** `INSERT ... SELECT` into a virtual
+/// table isn't supported — errors clearly rather than being silently
+/// mishandled. `INSERT ... SELECT` support only covers native-table
+/// targets, matching that issue's own focus.
 pub fn execute_insert_into_virtual_table(db: &mut Database, insert: &Insert) -> Result<usize> {
     let column_names = db.virtual_table_column_names(&insert.table_name)?;
+    let rows = match &insert.source {
+        InsertSource::Values(rows) => rows,
+        InsertSource::Select(_) => {
+            return Err(Error::UnrecognizedStatement(
+                "INSERT ... SELECT into a virtual table is not supported".to_string(),
+            ))
+        }
+    };
 
     let mut affected = 0;
-    for row in &insert.rows {
+    for row in rows {
         let expanded = match &insert.columns {
             None => row.clone(),
             Some(names) => expand_row(&column_names, names, row)?,
@@ -490,6 +550,77 @@ mod tests {
             table.rows[0],
             vec![Value::Integer(1), Value::Text("x".into())]
         );
+    }
+
+    #[test]
+    fn insert_select_copies_rows_from_another_table() {
+        let mut db = setup();
+        let create =
+            parse_create_table(&tokenize("CREATE TABLE u (a INTEGER, b TEXT)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+
+        let insert = parse_insert(&tokenize("INSERT INTO u SELECT * FROM t").unwrap()).unwrap();
+        let affected = execute_insert(&mut db, &insert).unwrap();
+        assert_eq!(affected, 3);
+        assert_eq!(db.table("u").unwrap().rows.len(), 3);
+    }
+
+    #[test]
+    fn insert_select_with_filter_and_projection() {
+        let mut db = setup();
+        let create = parse_create_table(&tokenize("CREATE TABLE u (b TEXT)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+
+        let insert =
+            parse_insert(&tokenize("INSERT INTO u SELECT b FROM t WHERE a > 1").unwrap()).unwrap();
+        let affected = execute_insert(&mut db, &insert).unwrap();
+        assert_eq!(affected, 2);
+        assert_eq!(
+            db.table("u").unwrap().rows,
+            vec![vec![Value::Text("y".into())], vec![Value::Text("z".into())]]
+        );
+    }
+
+    #[test]
+    fn insert_select_with_empty_result_inserts_zero_rows_without_erroring() {
+        let mut db = setup();
+        let create =
+            parse_create_table(&tokenize("CREATE TABLE u (a INTEGER, b TEXT)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+
+        let insert =
+            parse_insert(&tokenize("INSERT INTO u SELECT * FROM t WHERE a > 100").unwrap())
+                .unwrap();
+        let affected = execute_insert(&mut db, &insert).unwrap();
+        assert_eq!(affected, 0);
+        assert!(db.table("u").unwrap().rows.is_empty());
+    }
+
+    #[test]
+    fn insert_select_with_explicit_column_list() {
+        let mut db = setup();
+        let create = parse_create_table(&tokenize("CREATE TABLE u (a INTEGER)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+
+        let insert =
+            parse_insert(&tokenize("INSERT INTO u (a) SELECT a FROM t WHERE a = 2").unwrap())
+                .unwrap();
+        execute_insert(&mut db, &insert).unwrap();
+        assert_eq!(db.table("u").unwrap().rows, vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn insert_select_column_count_mismatch_errors_clearly() {
+        let mut db = setup();
+        let create = parse_create_table(&tokenize("CREATE TABLE u (a INTEGER)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+
+        // t has two columns (a, b); u only has one.
+        let insert = parse_insert(&tokenize("INSERT INTO u SELECT * FROM t").unwrap()).unwrap();
+        assert!(matches!(
+            execute_insert(&mut db, &insert),
+            Err(Error::ColumnCountMismatch { .. })
+        ));
     }
 
     #[test]
