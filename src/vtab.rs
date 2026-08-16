@@ -1,16 +1,24 @@
-//! Eponymous, read-only virtual tables (issue #91 — the smallest
-//! meaningful slice of the `vtab` epic, built on issue #90's
-//! `TableSource` abstraction). See `docs/gap-analysis-vtab.md` and
+//! Virtual tables (issues #91/#93, built on issue #90's `TableSource`
+//! abstraction). See `docs/gap-analysis-vtab.md` and
 //! `docs/adr/0003-tablesource.md`.
 //!
+//! Two ways to register one, via [`crate::Connection`]:
+//! - [`crate::Connection::create_module`] — a ready-made [`VTab`]
+//!   instance, usable directly by name (e.g. `SELECT * FROM name`), no
+//!   `CREATE VIRTUAL TABLE` needed. The eponymous case.
+//! - [`crate::Connection::register_module`] — a [`CreateVTab`] type,
+//!   instantiated fresh by each `CREATE VIRTUAL TABLE table_name USING
+//!   module_name(args...)` that names it.
+//!
 //! **Scope, stated plainly:** mirrors real `rusqlite::vtab::VTab`/
-//! `VTabCursor`/`Context`'s *shape* (a `VTab` that `open()`s a
-//! `VTabCursor`, driven `filter` → loop `next`/`eof`/`column`), not its
-//! mechanics — there's no C `sqlite3_module`/`sqlite3_vtab_cursor` FFI
-//! bridge to build, since this crate has no C engine invoking these
-//! callbacks (see `docs/adr/0003-tablesource.md`'s explanation of why
-//! that's true). Two real deviations from `rusqlite`'s shape, both
-//! because the capability they'd represent doesn't exist here yet:
+//! `VTabCursor`/`Context`/`CreateVTab`'s *shape* (a `VTab` that
+//! `open()`s a `VTabCursor`, driven `filter` → loop
+//! `next`/`eof`/`column`), not its mechanics — there's no C
+//! `sqlite3_module`/`sqlite3_vtab_cursor` FFI bridge to build, since
+//! this crate has no C engine invoking these callbacks (see
+//! `docs/adr/0003-tablesource.md`'s explanation of why that's true).
+//! Real deviations from `rusqlite`'s shape, all because the capability
+//! they'd represent doesn't exist here yet:
 //! - **No `Values`/`ValueIter` in `filter`'s signature.** Real SQLite's
 //!   `xFilter` receives pre-negotiated bound constraint values from
 //!   `best_index`; this crate has no such negotiation (issue #94's
@@ -19,10 +27,16 @@
 //!   as [`TableSource::scan`].
 //! - **No `VTabCursor::rowid`.** [`TableSource::scan`]'s return shape
 //!   (`Vec<Vec<Value>>`, positional only) has no rowid to report.
-//!
-//! **Also out of scope:** `CREATE VIRTUAL TABLE` support (issue #93) —
-//! a `VTab` is only usable eponymously, registered directly by name via
-//! [`crate::Connection::create_module`].
+//! - **No `Module<T>` type.** Real `rusqlite::vtab::create_module`
+//!   takes a `&'static Module<T>` carrying a `'static`-lifetime
+//!   C-callback bundle plus optional `aux` data across the C FFI
+//!   boundary. This crate has neither — `register_module`'s registry
+//!   lives directly in `Connection`'s own fields, so the type
+//!   parameter alone determines a module's behavior. Considered
+//!   introducing `Module<T>` anyway (per #92's own note that #93 might
+//!   be where it "earns its keep") and concluded it still wouldn't:
+//!   there's no static-lifetime/aux-data ceremony a wrapper type would
+//!   actually carry here.
 
 use crate::dml_select::Expr;
 use crate::error::Result;
@@ -134,6 +148,98 @@ impl<T: VTab> TableSource for VTabTableSource<T> {
             cursor.next()?;
         }
         Ok(rows)
+    }
+}
+
+/// A [`VTab`] that can be constructed from `CREATE VIRTUAL TABLE
+/// table_name USING module_name(args...)` (issue #93). Extends
+/// [`VTab`] the same way real `rusqlite::vtab::CreateVTab` extends
+/// `VTab`.
+pub trait CreateVTab: VTab {
+    /// Constructs a new instance from the module's argument list —
+    /// each already reconstructed from its source tokens (see
+    /// [`crate::CreateVirtualTable`]'s doc comment for the honest
+    /// caveat about exact-text fidelity). Use [`dequote`]/[`parameter`]/
+    /// [`parse_boolean`] to interpret them, the same way a real
+    /// `rusqlite` vtab module would.
+    fn connect(args: &[String]) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+/// Type-erased factory for a [`CreateVTab`] implementor, registered by
+/// module name via [`crate::Connection::register_module`] and
+/// instantiated by `CREATE VIRTUAL TABLE ... USING module_name(args)`.
+/// Needed because [`CreateVTab::connect`]'s `-> Result<Self>` (`Self:
+/// Sized`) isn't object-safe on its own — the same type-erasure step
+/// [`VTabTableSource`] already does for a ready-made [`VTab`] instance,
+/// just triggered by parsed `CREATE VIRTUAL TABLE` args instead of a
+/// value the caller already built.
+pub(crate) trait VTabModule {
+    fn connect(&self, args: &[String]) -> Result<Box<dyn TableSource>>;
+}
+
+pub(crate) struct CreateVTabModule<T> {
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> CreateVTabModule<T> {
+    pub(crate) fn new() -> CreateVTabModule<T> {
+        CreateVTabModule {
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: CreateVTab + 'static> VTabModule for CreateVTabModule<T> {
+    fn connect(&self, args: &[String]) -> Result<Box<dyn TableSource>> {
+        let vtab = T::connect(args)?;
+        Ok(Box::new(VTabTableSource::new(vtab)))
+    }
+}
+
+/// Strips matching surrounding quote characters (`'`, `"`, `` ` ``, or
+/// `[`...`]`) from `s` and un-escapes doubled inner quotes. Returns `s`
+/// unchanged if it isn't quoted. Mirrors real
+/// `rusqlite::vtab::dequote`.
+pub fn dequote(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 {
+        return s.to_string();
+    }
+    let inner = &s[1..s.len() - 1];
+    match (bytes[0], bytes[bytes.len() - 1]) {
+        (b'\'', b'\'') => inner.replace("''", "'"),
+        (b'"', b'"') => inner.replace("\"\"", "\""),
+        (b'`', b'`') => inner.replace("``", "`"),
+        (b'[', b']') => inner.to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// Doubles every `"` in `s`, for safely embedding it inside a
+/// double-quoted identifier/string. Mirrors real
+/// `rusqlite::vtab::escape_double_quote`.
+pub fn escape_double_quote(s: &str) -> String {
+    s.replace('"', "\"\"")
+}
+
+/// Splits a `key=value` (or `key = value`) module argument into
+/// `(key, value)`, both trimmed. Returns `None` if `s` has no `=`.
+/// Mirrors real `rusqlite::vtab::parameter`.
+pub fn parameter(s: &str) -> Option<(&str, &str)> {
+    let idx = s.find('=')?;
+    Some((s[..idx].trim(), s[idx + 1..].trim()))
+}
+
+/// Parses a boolean-ish module argument value: `1`/`0`, `true`/`false`,
+/// `yes`/`no`, `on`/`off` (case-insensitive). Mirrors real
+/// `rusqlite::vtab::parse_boolean`.
+pub fn parse_boolean(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -253,5 +359,48 @@ mod tests {
     fn empty_range_scans_zero_rows() {
         let source = VTabTableSource::new(RangeVTab { start: 5, end: 5 });
         assert_eq!(source.scan(None).unwrap(), Vec::<Vec<Value>>::new());
+    }
+
+    #[test]
+    fn dequote_strips_matching_quotes_and_unescapes_doubled_inner_quotes() {
+        assert_eq!(dequote("'it''s'"), "it's");
+        assert_eq!(dequote("\"say \"\"hi\"\"\""), "say \"hi\"");
+        assert_eq!(dequote("`ident`"), "ident");
+        assert_eq!(dequote("[bracketed]"), "bracketed");
+    }
+
+    #[test]
+    fn dequote_leaves_unquoted_or_mismatched_text_alone() {
+        assert_eq!(dequote("bare"), "bare");
+        assert_eq!(dequote("'mismatched\""), "'mismatched\"");
+        assert_eq!(dequote(""), "");
+        assert_eq!(dequote("x"), "x");
+    }
+
+    #[test]
+    fn escape_double_quote_doubles_every_quote() {
+        assert_eq!(escape_double_quote("say \"hi\""), "say \"\"hi\"\"");
+        assert_eq!(escape_double_quote("plain"), "plain");
+    }
+
+    #[test]
+    fn parameter_splits_key_equals_value() {
+        assert_eq!(parameter("tokenize=porter"), Some(("tokenize", "porter")));
+        assert_eq!(
+            parameter("tokenize = 'porter'"),
+            Some(("tokenize", "'porter'"))
+        );
+        assert_eq!(parameter("no_equals_sign"), None);
+    }
+
+    #[test]
+    fn parse_boolean_accepts_common_spellings() {
+        for truthy in ["1", "true", "TRUE", "yes", "on"] {
+            assert_eq!(parse_boolean(truthy), Some(true), "{truthy}");
+        }
+        for falsy in ["0", "false", "FALSE", "no", "off"] {
+            assert_eq!(parse_boolean(falsy), Some(false), "{falsy}");
+        }
+        assert_eq!(parse_boolean("maybe"), None);
     }
 }

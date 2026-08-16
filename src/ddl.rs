@@ -22,6 +22,25 @@ pub struct ColumnDef {
     pub not_null: bool,
 }
 
+/// A parsed `CREATE VIRTUAL TABLE table_name USING module_name(args...)`
+/// statement (issue #93 — see `docs/gap-analysis-vtab.md`).
+///
+/// **Argument-text fidelity, stated plainly:** each argument is a
+/// reconstruction of its source tokens (joined with single spaces), not
+/// an exact byte-for-byte slice of the original text. Real SQLite
+/// preserves exact module-argument text (original whitespace/quoting
+/// included); this crate's parser works purely on the tokenized stream
+/// — like every other parser here — and has no raw-text span to slice
+/// from. Semantically equivalent for the `dequote`/`parameter`/
+/// `parse_boolean` helpers (`crate::vtab`) a module uses to interpret
+/// its arguments, just not byte-identical.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateVirtualTable {
+    pub table_name: String,
+    pub module_name: String,
+    pub args: Vec<String>,
+}
+
 /// An error produced while parsing.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
@@ -58,6 +77,41 @@ pub fn parse_create_table(tokens: &[Token]) -> Result<CreateTable, ParseError> {
     Ok(CreateTable {
         table_name,
         columns,
+    })
+}
+
+/// Parses a `CREATE VIRTUAL TABLE table_name USING module_name(args...)`
+/// statement from a token stream. The `(args...)` list is optional
+/// (omitted entirely when the module takes none).
+pub fn parse_create_virtual_table(tokens: &[Token]) -> Result<CreateVirtualTable, ParseError> {
+    let mut p = Parser { tokens, pos: 0 };
+    p.expect_ident("CREATE")?;
+    p.expect_ident("VIRTUAL")?;
+    p.expect_ident("TABLE")?;
+    let table_name = p.expect_any_ident()?;
+    p.expect_ident("USING")?;
+    let module_name = p.expect_any_ident()?;
+
+    let mut args = Vec::new();
+    if matches!(p.peek(), Some(Token::Punct("("))) {
+        p.advance();
+        if !matches!(p.peek(), Some(Token::Punct(")"))) {
+            loop {
+                args.push(p.parse_module_arg()?);
+                if matches!(p.peek(), Some(Token::Punct(","))) {
+                    p.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+        p.expect_punct(")")?;
+    }
+
+    Ok(CreateVirtualTable {
+        table_name,
+        module_name,
+        args,
     })
 }
 
@@ -138,6 +192,61 @@ impl<'a> Parser<'a> {
             not_null,
         })
     }
+
+    /// Consumes tokens up to (not including) the next top-level `,` or
+    /// `)`, reconstructing them into a single source-like string — see
+    /// [`CreateVirtualTable`]'s doc comment for the fidelity caveat.
+    /// Tracks paren depth so a nested call-shaped argument (e.g.
+    /// `foo(1, 2)`) isn't split on its own internal comma.
+    fn parse_module_arg(&mut self) -> Result<String, ParseError> {
+        let mut depth: i32 = 0;
+        let mut parts = Vec::new();
+        loop {
+            match self.peek() {
+                Some(Token::Punct(",")) if depth == 0 => break,
+                Some(Token::Punct(")")) if depth == 0 => break,
+                Some(Token::Eof) | None => return Err(ParseError::UnexpectedEof),
+                Some(Token::Punct("(")) => {
+                    depth += 1;
+                    parts.push("(".to_string());
+                    self.advance();
+                }
+                Some(Token::Punct(")")) => {
+                    depth -= 1;
+                    parts.push(")".to_string());
+                    self.advance();
+                }
+                Some(tok) => {
+                    parts.push(token_text(tok));
+                    self.advance();
+                }
+            }
+        }
+        if parts.is_empty() {
+            return Err(ParseError::UnexpectedToken(
+                "empty module argument".to_string(),
+            ));
+        }
+        Ok(parts.join(" "))
+    }
+}
+
+/// Reconstructs `tok`'s source-like text — see
+/// [`Parser::parse_module_arg`].
+fn token_text(tok: &Token) -> String {
+    match tok {
+        Token::Ident(s) => s.clone(),
+        Token::Integer(n) => n.to_string(),
+        Token::Real(f) => f.to_string(),
+        Token::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Token::Blob(b) => {
+            let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("X'{hex}'")
+        }
+        Token::Punct(p) => p.to_string(),
+        Token::Param(spec) => format!("?{spec}"),
+        Token::Eof => String::new(),
+    }
 }
 
 fn is_column_constraint_keyword(s: &str) -> bool {
@@ -202,5 +311,72 @@ mod tests {
     fn unterminated_column_list_is_an_error() {
         let tokens = tokenize("CREATE TABLE t (a INTEGER").unwrap();
         assert_eq!(parse_create_table(&tokens), Err(ParseError::UnexpectedEof));
+    }
+
+    #[test]
+    fn parses_create_virtual_table_with_args() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t USING myrange(1, 10, 'x')").unwrap();
+        let create = parse_create_virtual_table(&tokens).unwrap();
+        assert_eq!(create.table_name, "t");
+        assert_eq!(create.module_name, "myrange");
+        assert_eq!(create.args, vec!["1", "10", "'x'"]);
+    }
+
+    #[test]
+    fn parses_create_virtual_table_with_no_args() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t USING myrange").unwrap();
+        let create = parse_create_virtual_table(&tokens).unwrap();
+        assert_eq!(create.table_name, "t");
+        assert_eq!(create.module_name, "myrange");
+        assert!(create.args.is_empty());
+    }
+
+    #[test]
+    fn parses_create_virtual_table_with_empty_parens() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t USING myrange()").unwrap();
+        let create = parse_create_virtual_table(&tokens).unwrap();
+        assert!(create.args.is_empty());
+    }
+
+    #[test]
+    fn parses_key_value_style_module_args() {
+        let tokens =
+            tokenize("CREATE VIRTUAL TABLE t USING fts5(content, tokenize = 'porter')").unwrap();
+        let create = parse_create_virtual_table(&tokens).unwrap();
+        assert_eq!(create.args, vec!["content", "tokenize = 'porter'"]);
+    }
+
+    #[test]
+    fn nested_parens_in_an_arg_are_not_split_on_their_inner_comma() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t USING mod(foo(1, 2), 3)").unwrap();
+        let create = parse_create_virtual_table(&tokens).unwrap();
+        assert_eq!(create.args, vec!["foo ( 1 , 2 )", "3"]);
+    }
+
+    #[test]
+    fn unterminated_module_arg_list_is_an_error() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t USING mod(1, 2").unwrap();
+        assert_eq!(
+            parse_create_virtual_table(&tokens),
+            Err(ParseError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn empty_module_arg_is_an_error() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t USING mod(1, , 2)").unwrap();
+        assert!(matches!(
+            parse_create_virtual_table(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn missing_using_keyword_is_an_error() {
+        let tokens = tokenize("CREATE VIRTUAL TABLE t mod(1)").unwrap();
+        assert!(matches!(
+            parse_create_virtual_table(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
     }
 }

@@ -65,7 +65,10 @@ pub use aggregate::Aggregate;
 pub use blob::{Blob, ZeroBlob};
 pub use config::{DbConfig, Limit, OpenFlags};
 pub use connection::{ColumnMetadata, Connection};
-pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
+pub use ddl::{
+    parse_create_table, parse_create_virtual_table, ColumnDef, CreateTable, CreateVirtualTable,
+    ParseError,
+};
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{
     parse_select, AggregateArg, AggregateCall, BinaryOp, Expr, ParamMarker, Select, SelectColumns,
@@ -94,7 +97,10 @@ pub use transaction::{
     DropBehavior, Savepoint, Transaction, TransactionBehavior, TransactionState,
 };
 pub use value::{Type, Value, ValueRef};
-pub use vtab::{Context, VTab, VTabCursor, VTabTableSource};
+pub use vtab::{
+    dequote, escape_double_quote, parameter, parse_boolean, Context, CreateVTab, VTab, VTabCursor,
+    VTabTableSource,
+};
 
 #[cfg(test)]
 mod tests {

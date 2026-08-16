@@ -71,6 +71,10 @@ pub enum Error {
     /// [`crate::Transaction`]/[`crate::Savepoint`]) was made on a
     /// connection opened with [`crate::OpenFlags::READ_ONLY`].
     ReadOnlyConnection,
+    /// `CREATE VIRTUAL TABLE ... USING module_name(...)` named a module
+    /// that isn't registered on the connection (see
+    /// [`crate::Connection::register_module`]).
+    ModuleNotFound(String),
 }
 
 impl fmt::Display for Error {
@@ -106,6 +110,7 @@ impl fmt::Display for Error {
                 "unable to open database {path:?}: does not exist and OpenFlags::CREATE wasn't set"
             ),
             Error::ReadOnlyConnection => write!(f, "attempt to write a readonly connection"),
+            Error::ModuleNotFound(name) => write!(f, "no such module: {name:?}"),
         }
     }
 }

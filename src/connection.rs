@@ -1,6 +1,6 @@
 use crate::aggregate::{self, Aggregate};
 use crate::config::{DbConfig, Limit, OpenFlags};
-use crate::ddl::{parse_create_table, ColumnDef};
+use crate::ddl::{parse_create_table, parse_create_virtual_table, ColumnDef, CreateVirtualTable};
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
@@ -15,7 +15,7 @@ use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};
 use crate::value::Value;
-use crate::vtab::{VTab, VTabTableSource};
+use crate::vtab::{CreateVTab, CreateVTabModule, VTab, VTabModule, VTabTableSource};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -77,6 +77,9 @@ pub struct Connection {
     functions: HashMap<String, Box<ScalarFn>>,
     aggregates: HashMap<String, Aggregate>,
     collations: HashMap<String, Box<CollationFn>>,
+    /// Registered via [`Connection::register_module`], consumed by
+    /// `CREATE VIRTUAL TABLE ... USING module_name(args)`.
+    vtab_modules: HashMap<String, Box<dyn VTabModule>>,
     commit_hook: Option<Box<dyn FnMut() -> bool>>,
     rollback_hook: Option<Box<dyn FnMut()>>,
     update_hook: Option<Box<UpdateHookFn>>,
@@ -128,6 +131,7 @@ impl Connection {
             functions: HashMap::new(),
             aggregates: aggregate::builtins(),
             collations: HashMap::new(),
+            vtab_modules: HashMap::new(),
             commit_hook: None,
             rollback_hook: None,
             update_hook: None,
@@ -556,6 +560,30 @@ impl Connection {
         Ok(())
     }
 
+    /// Registers `T` as a virtual-table module under `module_name`,
+    /// usable via `CREATE VIRTUAL TABLE table_name USING
+    /// module_name(args...)` (issue #93). The factory counterpart to
+    /// [`Connection::create_module`] (issue #92), which instead
+    /// registers a single ready-made instance directly for the
+    /// no-`CREATE VIRTUAL TABLE` (eponymous) case.
+    ///
+    /// Takes no `T` value, only a type parameter — [`CreateVTab::connect`]
+    /// is effectively a free function of the type, invoked fresh for
+    /// each `CREATE VIRTUAL TABLE ... USING module_name(...)` statement
+    /// that names it. Re-registering an already-used `module_name`
+    /// replaces the previous module.
+    ///
+    /// See `src/vtab.rs`'s module doc comment for why there's no
+    /// `Module<T>` wrapper type here, unlike real
+    /// `rusqlite::vtab::create_module`.
+    pub fn register_module<T: CreateVTab + 'static>(&mut self, module_name: &str) -> Result<()> {
+        self.vtab_modules.insert(
+            module_name.to_string(),
+            Box::new(CreateVTabModule::<T>::new()),
+        );
+        Ok(())
+    }
+
     /// Registers an aggregate SQL function, usable in a whole-table
     /// aggregate select list (e.g. `SELECT MEDIAN(a) FROM t`) — see
     /// [`crate::Aggregate`] and [`crate::dml_select::SelectColumns::Aggregates`].
@@ -817,6 +845,29 @@ impl Connection {
         }
     }
 
+    /// Instantiates `create.module_name` (via [`Connection::register_module`])
+    /// with `create.args` and registers the result as `create.table_name`.
+    /// Errors with [`Error::TableAlreadyExists`] if that name already
+    /// names a native table (same reasoning as
+    /// [`Connection::create_module`]: silently registering a virtual
+    /// table [`crate::storage::Database::scan`] can never reach would
+    /// just be confusing), or [`Error::ModuleNotFound`] if
+    /// `create.module_name` isn't registered.
+    fn execute_create_virtual_table(&mut self, create: CreateVirtualTable) -> Result<()> {
+        if self.table_exists(&create.table_name) {
+            return Err(Error::TableAlreadyExists(create.table_name));
+        }
+        let source = {
+            let module = self
+                .vtab_modules
+                .get(&create.module_name)
+                .ok_or_else(|| Error::ModuleNotFound(create.module_name.clone()))?;
+            module.connect(&create.args)?
+        };
+        self.db.register_virtual_table(create.table_name, source);
+        Ok(())
+    }
+
     /// Fires the rollback hook, if one is registered. `pub(crate)` so
     /// [`crate::Transaction`]/[`crate::Savepoint`] (a different module)
     /// can call it when a real rollback happens.
@@ -1030,6 +1081,13 @@ impl Connection {
         let snapshot = self.commit_hook.is_some().then(|| self.db.snapshot());
 
         let (affected, table_name, action, rowids) = match leading_keyword(&tokens) {
+            Some(kw) if kw.eq_ignore_ascii_case("CREATE") && is_create_virtual_table(&tokens) => {
+                let create = parse_create_virtual_table(&tokens)?;
+                let table_name = create.table_name.clone();
+                self.check_authorized(Action::CreateTable, &table_name)?;
+                self.execute_create_virtual_table(create)?;
+                (0, table_name, Action::CreateTable, Vec::new())
+            }
             Some(kw) if kw.eq_ignore_ascii_case("CREATE") => {
                 let create = parse_create_table(&tokens)?;
                 self.check_authorized(Action::CreateTable, &create.table_name)?;
@@ -1227,6 +1285,13 @@ pub(crate) fn leading_keyword(tokens: &[Token]) -> Option<&str> {
         Some(Token::Ident(s)) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// Whether `tokens` starts `CREATE VIRTUAL TABLE ...` rather than plain
+/// `CREATE TABLE ...` — both share the `CREATE` leading keyword, so
+/// this peeks the second token to tell them apart.
+fn is_create_virtual_table(tokens: &[Token]) -> bool {
+    matches!(tokens.get(1), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("VIRTUAL"))
 }
 
 #[cfg(test)]
@@ -1621,6 +1686,113 @@ mod tests {
             conn.query_row("SELECT * FROM never_registered"),
             Err(Error::TableNotFound(_))
         ));
+    }
+
+    /// A `CreateVTab` test double: `USING arange(start, end)` builds a
+    /// one-column (`value`) integer-range table from its own
+    /// `CREATE VIRTUAL TABLE` arguments.
+    struct ArgRangeVTab {
+        start: i64,
+        end: i64,
+    }
+
+    struct ArgRangeCursor {
+        current: i64,
+        end: i64,
+    }
+
+    impl crate::vtab::VTab for ArgRangeVTab {
+        type Cursor = ArgRangeCursor;
+
+        fn column_names(&self) -> Vec<String> {
+            vec!["value".to_string()]
+        }
+
+        fn open(&self) -> Result<ArgRangeCursor> {
+            Ok(ArgRangeCursor {
+                current: self.start,
+                end: self.end,
+            })
+        }
+    }
+
+    impl crate::vtab::CreateVTab for ArgRangeVTab {
+        fn connect(args: &[String]) -> Result<Self> {
+            let [start, end] = args else {
+                return Err(Error::UnrecognizedStatement(
+                    "arange needs exactly 2 args".to_string(),
+                ));
+            };
+            let parse = |s: &str| {
+                s.trim()
+                    .parse::<i64>()
+                    .map_err(|_| Error::UnrecognizedStatement(format!("not an integer: {s:?}")))
+            };
+            Ok(ArgRangeVTab {
+                start: parse(start)?,
+                end: parse(end)?,
+            })
+        }
+    }
+
+    impl crate::vtab::VTabCursor for ArgRangeCursor {
+        fn filter(&mut self, _filter: Option<&crate::dml_select::Expr>) -> Result<()> {
+            Ok(())
+        }
+
+        fn next(&mut self) -> Result<()> {
+            self.current += 1;
+            Ok(())
+        }
+
+        fn eof(&self) -> bool {
+            self.current >= self.end
+        }
+
+        fn column(&self, ctx: &mut crate::vtab::Context, _i: usize) -> Result<()> {
+            ctx.set_result(&self.current)
+        }
+    }
+
+    #[test]
+    fn create_virtual_table_registers_and_queries_a_module_instance() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.register_module::<ArgRangeVTab>("arange").unwrap();
+        conn.execute("CREATE VIRTUAL TABLE t USING arange(1, 4)")
+            .unwrap();
+
+        let values: Vec<i64> = conn.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn create_virtual_table_with_unknown_module_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(matches!(
+            conn.execute("CREATE VIRTUAL TABLE t USING nomodule(1, 2)"),
+            Err(Error::ModuleNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn create_virtual_table_with_malformed_args_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.register_module::<ArgRangeVTab>("arange").unwrap();
+        assert!(conn
+            .execute("CREATE VIRTUAL TABLE t USING arange(not_a_number, 4)")
+            .is_err());
+    }
+
+    #[test]
+    fn create_virtual_table_errors_if_name_already_names_a_native_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.register_module::<ArgRangeVTab>("arange").unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        assert_eq!(
+            conn.execute("CREATE VIRTUAL TABLE t USING arange(1, 4)"),
+            Err(Error::TableAlreadyExists("t".to_string()))
+        );
     }
 
     #[test]

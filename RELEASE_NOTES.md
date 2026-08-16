@@ -23,6 +23,39 @@ entry per PR.
 
 ---
 
+## PR #102 — Add CREATE VIRTUAL TABLE parsing + CreateVTab trait (closes #93)
+**2026-08-16** · [#102](https://github.com/baileyrd/rusty_-rusqlite/pull/102)
+
+- **Added:** `ddl::CreateVirtualTable` AST node + `parse_create_virtual_table`
+  for `CREATE VIRTUAL TABLE table_name USING module_name(args...)`.
+  Each argument is a reconstruction of its source tokens (joined with
+  single spaces), not an exact byte slice of the original text — this
+  crate's parser works purely on the tokenized stream, like every
+  other parser here. Semantically equivalent for the `dequote`/
+  `parameter`/`parse_boolean` helpers a module uses to interpret its
+  arguments, just not byte-identical.
+- **Added:** `CreateVTab` trait, extending `VTab` with
+  `connect(args) -> Result<Self>`, plus a type-erased `VTabModule`/
+  `CreateVTabModule<T>` factory (needed since `connect`'s `Self: Sized`
+  return isn't object-safe on its own).
+- **Added:** `Connection::register_module<T: CreateVTab>(module_name)`
+  registers the factory; `Connection::execute` recognizes `CREATE
+  VIRTUAL TABLE` (peeking the second token to distinguish it from
+  plain `CREATE TABLE`, since both share the `CREATE` leading keyword)
+  and instantiates the named module with the parsed args.
+- **No `Module<T>` wrapper type**, unlike real
+  `rusqlite::vtab::create_module`'s `&'static Module<T>` parameter —
+  revisited the question #92's own note raised and concluded it still
+  isn't needed: no static-lifetime/aux-data ceremony a wrapper type
+  would carry here.
+- **Added:** `Error::ModuleNotFound`; `dequote`/`escape_double_quote`/
+  `parameter`/`parse_boolean` implemented and exported from `lib.rs`
+  alongside `CreateVTab`.
+- 17 new unit tests (295 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #101 — Add Connection::create_module (closes #92)
 **2026-08-16** · [#101](https://github.com/baileyrd/rusty_-rusqlite/pull/101)
 
