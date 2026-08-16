@@ -39,6 +39,10 @@ COMMANDS:
     list                                      list every session
     attach <id>                               stream a session's output
     close <id> [--merge|--discard]            tear a session down
+    daemon run                                run the supervisor in the foreground
+    daemon start                              start the supervisor detached
+    daemon status                             is a supervisor running?
+    daemon shutdown                           stop the supervisor (sessions keep running)
 
 SESSION KINDS:
     worktree     isolated in its own git worktree and branch (needs a repo)
@@ -51,10 +55,6 @@ CLOSING:
     close <id> --merge      also merge the session's branch back
                             (fast-forward only; fails loudly if diverged)
     close <id> --discard    also delete the session's worktree and branch
-    daemon run                                run the supervisor in the foreground
-    daemon start                              start the supervisor detached
-    daemon status                             is a supervisor running?
-    daemon shutdown                           stop the supervisor (sessions keep running)
 
 GLOBAL OPTIONS:
     --state-root <path>   where to keep state (default: $SESSIONMGR_HOME, else
