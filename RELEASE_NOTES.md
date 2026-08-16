@@ -23,6 +23,31 @@ entry per PR.
 
 ---
 
+## PR #137 — Add CREATE TABLE constraint parsing: UNIQUE/CHECK/DEFAULT/AUTOINCREMENT/REFERENCES (closes #117)
+**2026-08-16** · [#137](https://github.com/baileyrd/rusty_-rusqlite/pull/137)
+
+- **Added:** `ColumnDef` now parses and stores `UNIQUE`, `CHECK(expr)`,
+  `DEFAULT value`, `AUTOINCREMENT`, and `REFERENCES table [(column)]` —
+  parsing only, per this sub-issue's scope; enforcement at insert/update
+  time is a separate sub-issue (#118).
+- **Scope note:** `AUTOINCREMENT` is enforced at *parse* time to match
+  real SQLite's own restriction — it's a `ParseError` unless it directly
+  follows `PRIMARY KEY` on an `INTEGER`-typed column.
+- **Scope note:** `CHECK`/`DEFAULT` reuse the same expression grammar as
+  `WHERE` (via a new `parse_expr_at`/`parse_operand_at` shared with
+  `dml_select.rs`, rather than a second hand-rolled expression parser).
+  `DEFAULT` needed its own bare-operand entry point (`parse_operand_at`)
+  since `WHERE`'s grammar requires a comparison operator, which a bare
+  `DEFAULT 1` doesn't have.
+- **Scope note:** `Connection::serialize`/`deserialize`'s hand-rolled
+  binary format now round-trips `UNIQUE`/`AUTOINCREMENT` (flag-shaped),
+  but not `CHECK`/`DEFAULT`/`REFERENCES` (expression-shaped) — those come
+  back as `None` after a round trip, documented on `write_column_def`.
+- Seventh sub-issue of `[epic] SQL dialect coverage` (#111).
+- 432 tests passing.
+
+---
+
 ## PR #136 — Add SELECT DISTINCT (closes #116)
 **2026-08-16** · [#136](https://github.com/baileyrd/rusty_-rusqlite/pull/136)
 

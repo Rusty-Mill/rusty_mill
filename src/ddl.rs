@@ -2,7 +2,9 @@
 //! statement types live here yet — see `A4a`/`A4b` for `INSERT`/`SELECT`.
 //! Grammar reference: <https://www.sqlite.org/lang_createtable.html>.
 
+use crate::dml_select::{parse_expr_at, parse_operand_at, Expr};
 use crate::token::Token;
+use crate::value::Value;
 
 /// A parsed `CREATE TABLE` statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,7 +14,7 @@ pub struct CreateTable {
 }
 
 /// A single column definition within a `CREATE TABLE`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ColumnDef {
     pub name: String,
     /// The declared type name, if any (SQLite's type affinity is inferred
@@ -20,6 +22,38 @@ pub struct ColumnDef {
     pub type_name: Option<String>,
     pub primary_key: bool,
     pub not_null: bool,
+    /// `UNIQUE` (issue #117). Enforcement is a separate sub-issue (#118)
+    /// — this crate only parses and stores the flag here.
+    pub unique: bool,
+    /// `AUTOINCREMENT`, only accepted directly after `PRIMARY KEY` on an
+    /// `INTEGER`-typed column (issue #117) — matching real SQLite's own
+    /// restriction, enforced here at parse time rather than accepted
+    /// leniently. See [`Parser::parse_column_def`].
+    pub autoincrement: bool,
+    /// `CHECK(expr)` (issue #117). Parsed with the same expression
+    /// grammar as `WHERE` (via [`parse_expr_at`]); enforcement at
+    /// insert/update time is out of scope (#118).
+    pub check: Option<Expr>,
+    /// `DEFAULT value` (issue #117) — a literal, a signed numeric
+    /// literal, or a parenthesized expression. Applying this at insert
+    /// time is out of scope (#118); this crate only parses and stores it.
+    pub default: Option<Expr>,
+    /// `REFERENCES table [(column)]` (issue #117), the column-constraint
+    /// form of a foreign key. Enforcement (and the table-level `FOREIGN
+    /// KEY (...) REFERENCES ...` form) is out of scope here.
+    pub references: Option<ForeignKeyRef>,
+}
+
+/// A parsed `REFERENCES table [(column)]` column constraint — see
+/// [`ColumnDef::references`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignKeyRef {
+    pub table: String,
+    /// The referenced column, if given explicitly. `None` when the
+    /// reference omits it (SQLite then uses the referenced table's own
+    /// primary key) — this crate doesn't resolve that omission to a
+    /// concrete column name, it just records that none was written.
+    pub column: Option<String>,
 }
 
 /// A parsed `CREATE VIRTUAL TABLE table_name USING module_name(args...)`
@@ -155,6 +189,10 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn peek_ident(&self, keyword: &str) -> bool {
+        matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case(keyword))
+    }
+
     fn parse_column_def(&mut self) -> Result<ColumnDef, ParseError> {
         let name = self.expect_any_ident()?;
 
@@ -169,20 +207,76 @@ impl<'a> Parser<'a> {
 
         let mut primary_key = false;
         let mut not_null = false;
+        let mut unique = false;
+        let mut autoincrement = false;
+        let mut check = None;
+        let mut default = None;
+        let mut references = None;
         loop {
             match self.peek() {
                 Some(Token::Ident(s)) if s.eq_ignore_ascii_case("PRIMARY") => {
                     self.advance();
                     self.expect_ident("KEY")?;
                     primary_key = true;
+                    if self.peek_ident("AUTOINCREMENT") {
+                        self.advance();
+                        autoincrement = true;
+                    }
                 }
                 Some(Token::Ident(s)) if s.eq_ignore_ascii_case("NOT") => {
                     self.advance();
                     self.expect_ident("NULL")?;
                     not_null = true;
                 }
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("UNIQUE") => {
+                    self.advance();
+                    unique = true;
+                }
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("CHECK") => {
+                    self.advance();
+                    self.expect_punct("(")?;
+                    let (expr, new_pos) = parse_expr_at(self.tokens, self.pos)?;
+                    self.pos = new_pos;
+                    self.expect_punct(")")?;
+                    check = Some(expr);
+                }
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("DEFAULT") => {
+                    self.advance();
+                    default = Some(self.parse_default_value()?);
+                }
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("REFERENCES") => {
+                    self.advance();
+                    let table = self.expect_any_ident()?;
+                    let column = if matches!(self.peek(), Some(Token::Punct("("))) {
+                        self.advance();
+                        let col = self.expect_any_ident()?;
+                        self.expect_punct(")")?;
+                        Some(col)
+                    } else {
+                        None
+                    };
+                    references = Some(ForeignKeyRef { table, column });
+                }
+                // `AUTOINCREMENT` only appears immediately after `PRIMARY
+                // KEY` above; seeing it here means it showed up on its
+                // own, which real SQLite also rejects.
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("AUTOINCREMENT") => {
+                    return Err(ParseError::UnexpectedToken(
+                        "AUTOINCREMENT must follow PRIMARY KEY".to_string(),
+                    ));
+                }
                 _ => break,
             }
+        }
+
+        if autoincrement
+            && !type_name
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"))
+        {
+            return Err(ParseError::UnexpectedToken(
+                "AUTOINCREMENT requires an INTEGER PRIMARY KEY column".to_string(),
+            ));
         }
 
         Ok(ColumnDef {
@@ -190,7 +284,41 @@ impl<'a> Parser<'a> {
             type_name,
             primary_key,
             not_null,
+            unique,
+            autoincrement,
+            check,
+            default,
+            references,
         })
+    }
+
+    /// Parses a `DEFAULT` value — SQLite's `signed-number | literal-value
+    /// | (expr)` grammar. A bare value (`DEFAULT 1`) has no comparison
+    /// operator, so this uses [`parse_operand_at`] (a single primary
+    /// expression) rather than [`parse_expr_at`] (which requires one, by
+    /// design — see its own doc comment). Unary minus (`DEFAULT -1`) is
+    /// handled directly, since the shared expression grammar has no
+    /// unary-minus operator; a parenthesized value (`DEFAULT ('x')`) is
+    /// unwrapped by recursing, so nesting (`DEFAULT ((-1))`) also works.
+    fn parse_default_value(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Some(Token::Punct("-"))) {
+            self.advance();
+            return match self.advance() {
+                Some(Token::Integer(n)) => Ok(Expr::Literal(Value::Integer(-n))),
+                Some(Token::Real(f)) => Ok(Expr::Literal(Value::Real(-f))),
+                Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
+                Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
+            };
+        }
+        if matches!(self.peek(), Some(Token::Punct("("))) {
+            self.advance();
+            let inner = self.parse_default_value()?;
+            self.expect_punct(")")?;
+            return Ok(inner);
+        }
+        let (expr, new_pos) = parse_operand_at(self.tokens, self.pos)?;
+        self.pos = new_pos;
+        Ok(expr)
     }
 
     /// Consumes tokens up to (not including) the next top-level `,` or
@@ -250,12 +378,19 @@ fn token_text(tok: &Token) -> String {
 }
 
 fn is_column_constraint_keyword(s: &str) -> bool {
-    s.eq_ignore_ascii_case("PRIMARY") || s.eq_ignore_ascii_case("NOT")
+    s.eq_ignore_ascii_case("PRIMARY")
+        || s.eq_ignore_ascii_case("NOT")
+        || s.eq_ignore_ascii_case("UNIQUE")
+        || s.eq_ignore_ascii_case("CHECK")
+        || s.eq_ignore_ascii_case("DEFAULT")
+        || s.eq_ignore_ascii_case("REFERENCES")
+        || s.eq_ignore_ascii_case("AUTOINCREMENT")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dml_select::BinaryOp;
     use crate::tokenize;
 
     #[test]
@@ -269,14 +404,12 @@ mod tests {
                 ColumnDef {
                     name: "a".into(),
                     type_name: Some("INTEGER".into()),
-                    primary_key: false,
-                    not_null: false,
+                    ..Default::default()
                 },
                 ColumnDef {
                     name: "b".into(),
                     type_name: Some("TEXT".into()),
-                    primary_key: false,
-                    not_null: false,
+                    ..Default::default()
                 },
             ]
         );
@@ -296,6 +429,122 @@ mod tests {
         let tokens = tokenize("CREATE TABLE t (a)").unwrap();
         let create = parse_create_table(&tokens).unwrap();
         assert_eq!(create.columns[0].type_name, None);
+    }
+
+    #[test]
+    fn parses_unique() {
+        let tokens = tokenize("CREATE TABLE t (email TEXT UNIQUE)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert!(create.columns[0].unique);
+    }
+
+    #[test]
+    fn parses_check_constraint() {
+        let tokens = tokenize("CREATE TABLE t (age INTEGER CHECK (age >= 0))").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(
+            create.columns[0].check,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::GtEq,
+                left: Box::new(Expr::Column("age".into())),
+                right: Box::new(Expr::Literal(Value::Integer(0))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_default_literal() {
+        let tokens = tokenize("CREATE TABLE t (active INTEGER DEFAULT 1)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(
+            create.columns[0].default,
+            Some(Expr::Literal(Value::Integer(1)))
+        );
+    }
+
+    #[test]
+    fn parses_default_negative_number() {
+        let tokens = tokenize("CREATE TABLE t (balance INTEGER DEFAULT -1)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(
+            create.columns[0].default,
+            Some(Expr::Literal(Value::Integer(-1)))
+        );
+    }
+
+    #[test]
+    fn parses_default_parenthesized_expression() {
+        let tokens = tokenize("CREATE TABLE t (label TEXT DEFAULT ('x'))").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(
+            create.columns[0].default,
+            Some(Expr::Literal(Value::Text("x".into())))
+        );
+    }
+
+    #[test]
+    fn parses_references_with_explicit_column() {
+        let tokens = tokenize("CREATE TABLE t (owner_id INTEGER REFERENCES users(id))").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(
+            create.columns[0].references,
+            Some(ForeignKeyRef {
+                table: "users".into(),
+                column: Some("id".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_references_without_explicit_column() {
+        let tokens = tokenize("CREATE TABLE t (owner_id INTEGER REFERENCES users)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(
+            create.columns[0].references,
+            Some(ForeignKeyRef {
+                table: "users".into(),
+                column: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_autoincrement_on_integer_primary_key() {
+        let tokens = tokenize("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert!(create.columns[0].primary_key);
+        assert!(create.columns[0].autoincrement);
+    }
+
+    #[test]
+    fn autoincrement_on_a_non_integer_column_is_an_error() {
+        let tokens = tokenize("CREATE TABLE t (id TEXT PRIMARY KEY AUTOINCREMENT)").unwrap();
+        assert!(matches!(
+            parse_create_table(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn autoincrement_without_primary_key_is_an_error() {
+        let tokens = tokenize("CREATE TABLE t (id INTEGER AUTOINCREMENT)").unwrap();
+        assert!(matches!(
+            parse_create_table(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn parses_multiple_constraints_on_one_column() {
+        let tokens =
+            tokenize("CREATE TABLE t (age INTEGER NOT NULL UNIQUE DEFAULT 0 CHECK (age >= 0))")
+                .unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        let col = &create.columns[0];
+        assert!(col.not_null);
+        assert!(col.unique);
+        assert_eq!(col.default, Some(Expr::Literal(Value::Integer(0))));
+        assert!(col.check.is_some());
     }
 
     #[test]
