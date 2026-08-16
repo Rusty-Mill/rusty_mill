@@ -70,8 +70,9 @@ pub use blob::{Blob, ZeroBlob};
 pub use config::{DbConfig, Limit, OpenFlags};
 pub use connection::{ColumnMetadata, Connection, InterruptHandle};
 pub use ddl::{
-    parse_create_table, parse_create_virtual_table, parse_drop_table, ColumnDef, CreateTable,
-    CreateVirtualTable, DropTable, ParseError,
+    parse_alter_table, parse_create_table, parse_create_virtual_table, parse_drop_table,
+    AlterTable, AlterTableAction, ColumnDef, CreateTable, CreateVirtualTable, DropTable,
+    ParseError,
 };
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{
@@ -79,9 +80,9 @@ pub use dml_select::{
     WindowCall,
 };
 pub use engine::{
-    execute_create_table, execute_drop_table, execute_insert, execute_insert_into_virtual_table,
-    execute_select, execute_select_with_aggregates, execute_select_with_functions,
-    execute_select_with_window,
+    execute_alter_table, execute_create_table, execute_drop_table, execute_insert,
+    execute_insert_into_virtual_table, execute_select, execute_select_with_aggregates,
+    execute_select_with_functions, execute_select_with_window,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{

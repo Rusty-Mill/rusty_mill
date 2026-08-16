@@ -23,6 +23,29 @@ entry per PR.
 
 ---
 
+## PR #141 — Add ALTER TABLE (ADD COLUMN, RENAME TO, RENAME COLUMN) (closes #121)
+**2026-08-16** · [#141](https://github.com/baileyrd/rusty_-rusqlite/pull/141)
+
+- **Added:** `ALTER TABLE t ADD COLUMN c ...` (existing rows backfilled
+  with the column's `DEFAULT`, or `NULL` if none), `ALTER TABLE t RENAME
+  TO new_name`, `ALTER TABLE t RENAME COLUMN a TO b` — new `AlterTable`/
+  `AlterTableAction` AST, parser, `Database::alter_table`, and a
+  `Connection::execute` dispatch arm.
+- **Scope:** matches real SQLite's own narrow `ALTER TABLE` subset — no
+  `DROP COLUMN` (SQLite 3.35+, not modeled here), no changing a column's
+  type or constraints.
+- **Decided:** `ADD COLUMN` rejects a `PRIMARY KEY`/`UNIQUE` column
+  outright (no sensible way to backfill a uniqueness constraint across
+  existing rows) and rejects `NOT NULL` with no `DEFAULT` (every existing
+  row would otherwise immediately violate the new constraint) — both new
+  `Error::ConstraintViolation`s, matching real SQLite's own restrictions.
+- New `Error::DuplicateColumn` for an `ADD COLUMN`/`RENAME COLUMN` name
+  collision; new `Action::AlterTable` authorizer/hook variant.
+- Eleventh sub-issue of `[epic] SQL dialect coverage` (#111).
+- 484 tests passing.
+
+---
+
 ## PR #140 — Add DROP TABLE [IF EXISTS] (closes #120)
 **2026-08-16** · [#140](https://github.com/baileyrd/rusty_-rusqlite/pull/140)
 

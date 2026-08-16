@@ -100,6 +100,9 @@ pub enum Error {
     /// [`crate::TableSource`] has no destroy-lifecycle hook to model
     /// that (only `begin`/`commit`/`rollback`/`insert`/`scan`).
     CannotDropVirtualTable(String),
+    /// `ALTER TABLE ... ADD COLUMN`/`RENAME COLUMN` named a column that
+    /// collides with one the table already has (issue #121).
+    DuplicateColumn(String),
 }
 
 impl fmt::Display for Error {
@@ -142,6 +145,7 @@ impl fmt::Display for Error {
             Error::CannotDropVirtualTable(name) => {
                 write!(f, "cannot DROP TABLE {name:?}: it is a virtual table")
             }
+            Error::DuplicateColumn(name) => write!(f, "duplicate column name: {name:?}"),
         }
     }
 }

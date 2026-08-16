@@ -20,6 +20,8 @@ pub enum Action {
     CreateTable,
     /// `DROP TABLE` (issue #120).
     DropTable,
+    /// `ALTER TABLE` (issue #121).
+    AlterTable,
     Insert,
     Select,
     /// Not yet reachable — no `UPDATE` statement exists yet. Kept so

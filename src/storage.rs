@@ -2,10 +2,10 @@
 //! Deliberately in-memory-only — see `ARCHITECTURE.md`'s non-goals for why
 //! the on-disk file format isn't in scope yet.
 
-use crate::ddl::{ColumnDef, CreateTable};
+use crate::ddl::{AlterTableAction, ColumnDef, CreateTable};
 use crate::dml_select::Expr;
 use crate::error::{Error, Result};
-use crate::eval::evaluate_bool3;
+use crate::eval::{evaluate, evaluate_bool3};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::fmt;
@@ -154,6 +154,95 @@ impl Database {
             return Ok(());
         }
         Err(Error::TableNotFound(table_name.to_string()))
+    }
+
+    /// Applies an `ALTER TABLE table_name ...` action (issue #121) — see
+    /// [`crate::ddl::AlterTable`]'s own doc comment for the supported
+    /// forms and their scope.
+    ///
+    /// `ADD COLUMN` additionally rejects a `PRIMARY KEY`/`UNIQUE` column
+    /// and a `NOT NULL` column with no `DEFAULT` — see the inline
+    /// comments below for why, matching real SQLite's own `ADD COLUMN`
+    /// restrictions rather than silently leaving the table in a state
+    /// that violates its own declared constraints.
+    pub fn alter_table(&mut self, table_name: &str, action: &AlterTableAction) -> Result<()> {
+        match action {
+            AlterTableAction::AddColumn(column) => {
+                let table = self
+                    .tables
+                    .get_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                if table.column_names.contains(&column.name) {
+                    return Err(Error::DuplicateColumn(column.name.clone()));
+                }
+                // Real SQLite rejects adding a PRIMARY KEY/UNIQUE column
+                // outright (there's no sensible way to backfill a
+                // uniqueness constraint across existing rows without a
+                // user-supplied value per row) -- mirrored here rather
+                // than silently accepting a constraint this crate would
+                // then never actually enforce for the backfilled rows.
+                if column.primary_key || column.unique {
+                    return Err(Error::ConstraintViolation(format!(
+                        "Cannot add a PRIMARY KEY or UNIQUE column via ALTER TABLE: {}",
+                        column.name
+                    )));
+                }
+                // Real SQLite also rejects `NOT NULL` here unless a
+                // `DEFAULT` is given -- otherwise every existing row
+                // would immediately violate the new constraint via a
+                // backfilled `NULL`.
+                if column.not_null && column.default.is_none() {
+                    return Err(Error::ConstraintViolation(format!(
+                        "Cannot add a NOT NULL column with no default value: {}",
+                        column.name
+                    )));
+                }
+                // Evaluated with no columns/row in scope: a `DEFAULT`
+                // used to backfill existing rows must be a self-contained
+                // constant (real SQLite's own restriction) -- an
+                // `Expr::Column` reference here errors `UnknownColumn`
+                // rather than silently reading `NULL` or the new row's
+                // own not-yet-existing value.
+                let default_value = match &column.default {
+                    Some(expr) => evaluate(expr, &[], &[])?,
+                    None => Value::Null,
+                };
+                for row in &mut table.rows {
+                    row.push(default_value.clone());
+                }
+                table.column_names.push(column.name.clone());
+                table.columns.push(column.clone());
+                Ok(())
+            }
+            AlterTableAction::RenameTo(new_name) => {
+                if self.tables.contains_key(new_name) {
+                    return Err(Error::TableAlreadyExists(new_name.clone()));
+                }
+                let table = self
+                    .tables
+                    .remove(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                self.tables.insert(new_name.clone(), table);
+                Ok(())
+            }
+            AlterTableAction::RenameColumn { old_name, new_name } => {
+                let table = self
+                    .tables
+                    .get_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                let idx = table
+                    .column_names
+                    .iter()
+                    .position(|c| c == old_name)
+                    .ok_or_else(|| Error::UnknownColumn(old_name.clone()))?;
+                if table.column_names.iter().any(|c| c == new_name) {
+                    return Err(Error::DuplicateColumn(new_name.clone()));
+                }
+                table.column_names[idx] = new_name.clone();
+                table.columns[idx].name = new_name.clone();
+                Ok(())
+            }
+        }
     }
 
     /// Inserts one row into `table_name`, given values in the table's
@@ -479,6 +568,238 @@ mod tests {
         db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
             .unwrap();
         assert!(db.table("t").unwrap().rows.is_empty());
+    }
+
+    #[test]
+    fn alter_table_add_column_backfills_null_by_default() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        db.alter_table(
+            "t",
+            &AlterTableAction::AddColumn(ColumnDef {
+                name: "b".into(),
+                type_name: Some("TEXT".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let table = db.table("t").unwrap();
+        assert_eq!(table.column_names, vec!["a", "b"]);
+        assert_eq!(table.rows, vec![vec![Value::Integer(1), Value::Null]]);
+    }
+
+    #[test]
+    fn alter_table_add_column_backfills_declared_default() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        db.alter_table(
+            "t",
+            &AlterTableAction::AddColumn(ColumnDef {
+                name: "b".into(),
+                type_name: Some("INTEGER".into()),
+                default: Some(Expr::Literal(Value::Integer(0))),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let table = db.table("t").unwrap();
+        assert_eq!(table.rows, vec![vec![Value::Integer(1), Value::Integer(0)]]);
+
+        // New rows use the table's ordinary column-count check, not the
+        // default -- ADD COLUMN's default only backfills existing rows.
+        db.insert_row("t", vec![Value::Integer(2), Value::Integer(9)])
+            .unwrap();
+        assert_eq!(db.table("t").unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn alter_table_add_column_duplicate_name_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        assert!(matches!(
+            db.alter_table(
+                "t",
+                &AlterTableAction::AddColumn(ColumnDef {
+                    name: "a".into(),
+                    ..Default::default()
+                }),
+            ),
+            Err(Error::DuplicateColumn(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_add_column_not_null_without_default_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        assert!(matches!(
+            db.alter_table(
+                "t",
+                &AlterTableAction::AddColumn(ColumnDef {
+                    name: "b".into(),
+                    not_null: true,
+                    ..Default::default()
+                }),
+            ),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_add_column_not_null_with_default_is_allowed() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        assert!(db
+            .alter_table(
+                "t",
+                &AlterTableAction::AddColumn(ColumnDef {
+                    name: "b".into(),
+                    not_null: true,
+                    default: Some(Expr::Literal(Value::Integer(0))),
+                    ..Default::default()
+                }),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn alter_table_add_column_primary_key_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        assert!(matches!(
+            db.alter_table(
+                "t",
+                &AlterTableAction::AddColumn(ColumnDef {
+                    name: "b".into(),
+                    primary_key: true,
+                    ..Default::default()
+                }),
+            ),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_add_column_missing_table_is_an_error() {
+        let mut db = Database::new();
+        assert!(matches!(
+            db.alter_table(
+                "missing",
+                &AlterTableAction::AddColumn(ColumnDef {
+                    name: "b".into(),
+                    ..Default::default()
+                }),
+            ),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_rename_to_renames_the_table() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        db.alter_table("t", &AlterTableAction::RenameTo("t2".into()))
+            .unwrap();
+
+        assert!(matches!(db.table("t"), Err(Error::TableNotFound(_))));
+        assert_eq!(db.table("t2").unwrap().rows, vec![vec![Value::Integer(1)]]);
+    }
+
+    #[test]
+    fn alter_table_rename_to_an_existing_name_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.create_table(&create("CREATE TABLE t2 (a INTEGER)"))
+            .unwrap();
+        assert!(matches!(
+            db.alter_table("t", &AlterTableAction::RenameTo("t2".into())),
+            Err(Error::TableAlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_rename_to_missing_table_is_an_error() {
+        let mut db = Database::new();
+        assert!(matches!(
+            db.alter_table("missing", &AlterTableAction::RenameTo("t2".into())),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_rename_column_renames_it() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1), Value::Text("x".into())])
+            .unwrap();
+
+        db.alter_table(
+            "t",
+            &AlterTableAction::RenameColumn {
+                old_name: "a".into(),
+                new_name: "c".into(),
+            },
+        )
+        .unwrap();
+
+        let table = db.table("t").unwrap();
+        assert_eq!(table.column_names, vec!["c", "b"]);
+        assert_eq!(table.columns[0].name, "c");
+        assert_eq!(
+            table.rows,
+            vec![vec![Value::Integer(1), Value::Text("x".into())]]
+        );
+    }
+
+    #[test]
+    fn alter_table_rename_column_missing_column_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        assert!(matches!(
+            db.alter_table(
+                "t",
+                &AlterTableAction::RenameColumn {
+                    old_name: "missing".into(),
+                    new_name: "c".into(),
+                },
+            ),
+            Err(Error::UnknownColumn(_))
+        ));
+    }
+
+    #[test]
+    fn alter_table_rename_column_to_an_existing_name_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
+            .unwrap();
+        assert!(matches!(
+            db.alter_table(
+                "t",
+                &AlterTableAction::RenameColumn {
+                    old_name: "a".into(),
+                    new_name: "b".into(),
+                },
+            ),
+            Err(Error::DuplicateColumn(_))
+        ));
     }
 
     #[test]
