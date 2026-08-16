@@ -373,29 +373,59 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_TERMINATE,
         };
-        const ERROR_INVALID_PARAMETER: i32 = 87;
+        const STILL_ACTIVE: u32 = 259;
         // SAFETY: plain Win32 calls on a caller-supplied pid; the handle
         // is checked before use and closed on every path that opened one.
         unsafe {
-            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            // `PROCESS_QUERY_LIMITED_INFORMATION` alongside
+            // `PROCESS_TERMINATE`, because a failed termination has to be
+            // followed by "did it already exit?" -- see below.
+            let handle = OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            );
             if handle.is_null() {
                 let err = io::Error::last_os_error();
-                // Already gone -- the desired end state.
-                if err.raw_os_error() == Some(ERROR_INVALID_PARAMETER) {
+                // Cannot open it. If it is not running, the caller's goal
+                // is already met. Asking `is_alive` rather than matching
+                // one specific error code: `OpenProcess` reports a
+                // vanished pid inconsistently (`ERROR_INVALID_PARAMETER`
+                // usually, but not only), and the question that actually
+                // matters is whether anything is still running.
+                if !is_alive(pid).unwrap_or(false) {
                     return Ok(());
                 }
                 return Err(err);
             }
             let ok = TerminateProcess(handle, 1);
             let err = io::Error::last_os_error();
-            CloseHandle(handle);
             if ok != 0 {
-                Ok(())
-            } else {
-                Err(err)
+                CloseHandle(handle);
+                return Ok(());
             }
+            // **`TerminateProcess` fails with `ERROR_ACCESS_DENIED` on a
+            // process that has already exited**, and a handle kept open
+            // by someone else (a parent that has not dropped its `Child`)
+            // keeps the process object alive long enough for that to be
+            // the common case rather than a rare one. Reporting it as a
+            // failure breaks teardown: closing a session terminates a
+            // recorded pid pair, and a child that exited on its own would
+            // make the whole close fail.
+            //
+            // So distinguish "already gone" from a genuine refusal by
+            // asking for the exit code, which is available precisely
+            // because the process has ended.
+            let mut exit_code: u32 = 0;
+            let queried = GetExitCodeProcess(handle, &mut exit_code);
+            CloseHandle(handle);
+            if queried != 0 && exit_code != STILL_ACTIVE {
+                return Ok(());
+            }
+            Err(err)
         }
     }
 }
@@ -574,10 +604,22 @@ mod tests {
             .expect("spawn");
         let pid = child.id();
         child.wait().expect("reap");
+        // `child` is deliberately still in scope, so on Windows this
+        // process still holds a handle and the process object outlives
+        // the process itself -- which is exactly the state that made
+        // `TerminateProcess` return `ERROR_ACCESS_DENIED` and this
+        // function wrongly report failure. Dropping `child` first would
+        // hide the case rather than test it.
+        //
         // The goal is "not running", which is already true. Teardown runs
         // over a recorded pid list and must not fail because one entry
         // died on its own first.
-        assert!(terminate(pid).is_ok());
+        assert!(
+            terminate(pid).is_ok(),
+            "terminating an already-exited pid must succeed: {:?}",
+            terminate(pid)
+        );
+        drop(child);
     }
 
     #[test]
