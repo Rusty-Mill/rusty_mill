@@ -132,6 +132,20 @@ impl TempRepo {
         // An explicit initial branch name, rather than whatever this
         // machine's `init.defaultBranch` happens to be.
         git(&["init", "--initial-branch=main"]);
+        // Persisted into the repository's config, not just passed as env
+        // vars to the calls above. Sessions commit from inside a worktree
+        // via a shell command of their own, which inherits none of this
+        // process's environment -- and linked worktrees share the main
+        // repository's config, so writing it once here covers all of
+        // them. Without it, every session's `git commit` fails for want
+        // of an identity on a machine that has none configured globally.
+        //
+        // No spaces in the name, deliberately: the value has to survive a
+        // trip through a shell command line on both `cmd.exe` and `sh`,
+        // and `cmd.exe` does not understand the single quotes that would
+        // otherwise be needed to protect it.
+        git(&["config", "user.email", "tests@example.invalid"]);
+        git(&["config", "user.name", "sessionmgr-tests"]);
         git(&["commit", "--allow-empty", "-m", "initial", "--no-gpg-sign"]);
         TempRepo { dir }
     }
@@ -184,13 +198,25 @@ impl Drop for TempRepo {
 
 /// A command that commits a file inside whatever directory it runs in,
 /// so a worktree session produces something a merge can actually move.
+///
+/// **Not a single quote anywhere, and that is the whole trick.** This
+/// string is handed to `cmd /C` on Windows and `sh -c` elsewhere, and
+/// `cmd.exe` has no concept of single quotes -- it passes them through
+/// literally. An earlier version used `-m 'add {name}'`, which `cmd`
+/// split into `-m`, `'add`, and `{name}'`, so git took `'add` as the
+/// whole message and `{name}'` as a pathspec:
+///
+/// ```text
+/// error: pathspec 'from-the-session.txt'' did not match any file(s)
+/// ```
+///
+/// Six of the ten worktree tests failed that way on Windows and passed on
+/// Linux. The identity now lives in the repository's config (see
+/// [`TempRepo::new`]) and the commit message contains no spaces, so
+/// nothing here needs quoting on either shell.
 pub fn commit_a_file(name: &str) -> Vec<String> {
-    let script = format!(
-        "git config user.email tests@example.invalid && \
-         git config user.name 'sessionmgr tests' && \
-         echo hello > {name} && git add {name} && \
-         git commit --no-gpg-sign -m 'add {name}'"
-    );
+    let script =
+        format!("echo hello > {name} && git add {name} && git commit --no-gpg-sign -m add-{name}");
     if cfg!(windows) {
         vec!["cmd".into(), "/C".into(), script]
     } else {

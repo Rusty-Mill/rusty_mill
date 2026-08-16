@@ -107,7 +107,7 @@ fn closing_with_merge_fast_forwards_the_work_back() {
     assert_success("close --merge", &run(root.path(), &["close", &id, "--merge"]));
 
     assert!(
-        repo.log_contains("add merged.txt"),
+        repo.log_contains("add-merged.txt"),
         "the session's commit should now be on the repository's own branch:\n{}",
         repo.branches()
     );
@@ -151,7 +151,7 @@ fn closing_with_discard_throws_the_worktree_and_branch_away() {
         repo.branches()
     );
     assert!(
-        !repo.log_contains("add discarded.txt"),
+        !repo.log_contains("add-discarded.txt"),
         "discarded work must not have reached the main branch"
     );
 }
@@ -367,6 +367,6 @@ fn two_worktree_sessions_on_one_repo_are_independent() {
         "close --merge",
         &run(root.path(), &["close", &first, "--merge"]),
     );
-    assert!(repo.log_contains("add first.txt"));
+    assert!(repo.log_contains("add-first.txt"));
     assert_eq!(session_status(root.path(), &second), "finished");
 }
