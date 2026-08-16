@@ -60,6 +60,8 @@ mod trace;
 mod transaction;
 mod value;
 mod vtab;
+mod vtab_csvtab;
+mod vtab_series;
 
 pub use aggregate::Aggregate;
 pub use blob::{Blob, ZeroBlob};
@@ -101,6 +103,8 @@ pub use vtab::{
     dequote, escape_double_quote, parameter, parse_boolean, Context, CreateVTab, TransactionVTab,
     UpdateVTab, VTab, VTabCursor, VTabTableSource,
 };
+pub use vtab_csvtab::{CsvCursor, CsvTab};
+pub use vtab_series::{SeriesCursor, SeriesTab};
 
 #[cfg(test)]
 mod tests {
