@@ -8,12 +8,14 @@ use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
 use crate::dml_delete::Delete;
 use crate::dml_insert::{Insert, InsertSource};
 use crate::dml_select::{
-    describe_aggregate_call, AggregateArg, CompoundOp, CompoundSelect, Expr, Select, SelectColumns,
-    WithSelect,
+    describe_aggregate_call, AggregateArg, CompoundOp, CompoundSelect, Expr, JoinCondition,
+    JoinKind, Select, SelectColumns, WithSelect,
 };
 use crate::dml_update::Update;
 use crate::error::{Error, Result};
-use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
+use crate::eval::{
+    evaluate_bool_with_functions, evaluate_with_functions, resolve_column_index, ScalarFn,
+};
 use crate::storage::Database;
 use crate::value::Value;
 use std::collections::HashMap;
@@ -261,7 +263,15 @@ pub fn execute_select_with_functions(
             "GROUP BY/HAVING require an aggregate SELECT list".to_string(),
         ));
     }
-    let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
+    // A joined row source's WHERE may reference more than one table's
+    // columns, so (issue #130) it can't be pushed into `db.scan` the way
+    // a single-table filter can -- `scan_joined` deliberately doesn't
+    // take one; it's applied once, below, over the fully joined rows.
+    let (column_names, rows) = if select.joins.is_empty() {
+        db.scan(&select.table_name, select.filter.as_ref())?
+    } else {
+        scan_joined(db, select, functions)?
+    };
 
     let mut matching_rows = Vec::new();
     for row in &rows {
@@ -276,24 +286,24 @@ pub fn execute_select_with_functions(
 
     match &select.columns {
         SelectColumns::All => {
+            // Bare (unqualified) output names, matching real SQLite's own
+            // `SELECT *` convention -- a no-op for the non-joined path,
+            // where `column_names` is already bare.
+            let output_names = column_names.iter().map(|c| bare_name(c)).collect();
             let rows = matching_rows.into_iter().cloned().collect();
-            Ok((column_names, dedup_rows(select.distinct, rows)))
+            Ok((output_names, dedup_rows(select.distinct, rows)))
         }
         SelectColumns::Named(names) => {
             let indices = names
                 .iter()
-                .map(|n| {
-                    column_names
-                        .iter()
-                        .position(|c| c == n)
-                        .ok_or_else(|| Error::UnknownColumn(n.clone()))
-                })
+                .map(|n| resolve_column_index(&column_names, n))
                 .collect::<Result<Vec<usize>>>()?;
+            let output_names = names.iter().map(|n| bare_name(n)).collect();
             let rows = matching_rows
                 .into_iter()
                 .map(|row| indices.iter().map(|&i| row[i].clone()).collect())
                 .collect();
-            Ok((names.clone(), dedup_rows(select.distinct, rows)))
+            Ok((output_names, dedup_rows(select.distinct, rows)))
         }
         SelectColumns::Aggregates(_) => Err(Error::UnrecognizedStatement(
             "aggregate select lists need execute_select_with_aggregates".to_string(),
@@ -302,6 +312,120 @@ pub fn execute_select_with_functions(
             "window select lists need execute_select_with_window".to_string(),
         )),
     }
+}
+
+/// The last `.`-separated segment of a (possibly `"qualifier.column"`-
+/// qualified — issue #130) column name, e.g. `"t1.a"` → `"a"`, `"a"` →
+/// `"a"`. Used for result-column naming: real SQLite's own convention is
+/// that a joined query's output columns are named by their bare column
+/// name (not table-qualified), even though resolution internally needs
+/// the qualified form to disambiguate. `pub(crate)` so [`crate::Statement::
+/// column_names`] (a different module) can report the exact same names
+/// its `query*` methods' rows actually come back under.
+pub(crate) fn bare_name(qualified: &str) -> String {
+    qualified
+        .rsplit('.')
+        .next()
+        .unwrap_or(qualified)
+        .to_string()
+}
+
+/// Builds one combined row source from `select.table_name`/`table_alias`
+/// and `select.joins` (issue #130) via a nested-loop join — the natural
+/// fit for this crate's in-memory, index-free model (see the issue's own
+/// note on why). Each join folds into the accumulated rows left to
+/// right, so a 3+-table join chain works the same way a 2-table one
+/// does. Returned column names are always `"qualifier.column"` (a
+/// table's alias, or its own name if unaliased) — see
+/// [`crate::eval::resolve_column_index`] for how an unqualified
+/// reference can still resolve against these when unambiguous.
+///
+/// **Scope, stated plainly:** only [`execute_select_with_functions`]
+/// calls this. `GROUP BY`/aggregate and window `SELECT` lists don't
+/// support `select.joins` being non-empty — a documented scope cut (see
+/// each function's own guard), not a silently wrong combination.
+fn scan_joined(
+    db: &Database,
+    select: &Select,
+    functions: &HashMap<String, Box<ScalarFn>>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let left_qualifier = select
+        .table_alias
+        .clone()
+        .unwrap_or_else(|| select.table_name.clone());
+    let (left_cols, mut rows) = db.scan(&select.table_name, None)?;
+    let mut columns: Vec<String> = left_cols
+        .iter()
+        .map(|c| format!("{left_qualifier}.{c}"))
+        .collect();
+
+    for join in &select.joins {
+        let right_qualifier = join
+            .table
+            .alias
+            .clone()
+            .unwrap_or_else(|| join.table.name.clone());
+        let (right_cols, right_rows) = db.scan(&join.table.name, None)?;
+        let right_columns: Vec<String> = right_cols
+            .iter()
+            .map(|c| format!("{right_qualifier}.{c}"))
+            .collect();
+
+        let mut combined_columns = columns.clone();
+        combined_columns.extend(right_columns.clone());
+
+        // Resolved once per join, outside the row-pair loop below --
+        // `USING (col, ...)` names are the same for every row pair.
+        let using_pairs: Vec<(usize, usize)> = match &join.condition {
+            JoinCondition::Using(names) => names
+                .iter()
+                .map(|name| {
+                    let left_idx = resolve_column_index(&columns, name)?;
+                    let right_idx = resolve_column_index(&right_columns, name)?;
+                    Ok((left_idx, columns.len() + right_idx))
+                })
+                .collect::<Result<Vec<(usize, usize)>>>()?,
+            _ => Vec::new(),
+        };
+
+        let right_len = right_cols.len();
+        let mut new_rows = Vec::new();
+        for left_row in &rows {
+            let mut matched = false;
+            for right_row in &right_rows {
+                let mut combined = left_row.clone();
+                combined.extend(right_row.iter().cloned());
+                let keep = match &join.condition {
+                    JoinCondition::None => true,
+                    JoinCondition::Using(_) => using_pairs
+                        .iter()
+                        .all(|&(li, ri)| combined[li] == combined[ri]),
+                    JoinCondition::On(cond) => {
+                        evaluate_bool_with_functions(cond, &combined_columns, &combined, functions)?
+                    }
+                };
+                if keep {
+                    matched = true;
+                    new_rows.push(combined);
+                }
+            }
+            // LEFT JOIN: a left row with no matching right row still
+            // appears once, right-side columns NULL-padded. INNER/CROSS
+            // simply drop it (CROSS never reaches here unmatched unless
+            // the right side has zero rows, in which case dropping is
+            // exactly the correct empty-Cartesian-product result).
+            if !matched && join.kind == JoinKind::Left {
+                let mut combined = left_row.clone();
+                combined.extend(std::iter::repeat_n(Value::Null, right_len));
+                new_rows.push(combined);
+            }
+        }
+
+        columns = combined_columns;
+        rows = new_rows;
+    }
+
+    Ok((columns, rows))
 }
 
 /// Runs one `SELECT` core, dispatching to
@@ -465,6 +589,14 @@ pub fn execute_select_with_aggregates(
     functions: &HashMap<String, Box<ScalarFn>>,
     aggregates: &HashMap<String, Aggregate>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    // Scope cut (issue #130): an aggregate SELECT list combined with a
+    // JOIN isn't supported yet -- errors clearly rather than silently
+    // aggregating over just `select.table_name` and ignoring the joins.
+    if !select.joins.is_empty() {
+        return Err(Error::UnrecognizedStatement(
+            "JOIN is not yet supported with an aggregate SELECT list".to_string(),
+        ));
+    }
     let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
     let calls = match &select.columns {
         SelectColumns::Aggregates(calls) => calls,
@@ -574,6 +706,14 @@ pub fn execute_select_with_window(
     if !select.group_by.is_empty() || select.having.is_some() {
         return Err(Error::UnrecognizedStatement(
             "GROUP BY/HAVING are not supported with a window SELECT list".to_string(),
+        ));
+    }
+    // Scope cut (issue #130): a window SELECT list combined with a JOIN
+    // isn't supported yet -- see execute_select_with_aggregates's own
+    // identical guard.
+    if !select.joins.is_empty() {
+        return Err(Error::UnrecognizedStatement(
+            "JOIN is not yet supported with a window SELECT list".to_string(),
         ));
     }
     let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;

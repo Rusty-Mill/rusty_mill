@@ -2916,6 +2916,243 @@ mod tests {
         assert_eq!(stmt.query_row().unwrap(), vec![Value::Integer(7)]);
     }
 
+    fn setup_join_tables(conn: &mut Connection) {
+        conn.execute("CREATE TABLE customers (id INTEGER, name TEXT)")
+            .unwrap();
+        conn.execute("INSERT INTO customers VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')")
+            .unwrap();
+        conn.execute("CREATE TABLE orders (id INTEGER, customer_id INTEGER, amount INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO orders VALUES (100, 1, 10), (101, 1, 20), (102, 2, 30)")
+            .unwrap();
+    }
+
+    #[test]
+    fn inner_join_combines_matching_rows_via_on() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let mut rows: Vec<(String, i64)> = conn
+            .query_map(
+                "SELECT customers.name, orders.amount FROM customers \
+                 JOIN orders ON customers.id = orders.customer_id",
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec![
+                ("alice".to_string(), 10),
+                ("alice".to_string(), 20),
+                ("bob".to_string(), 30),
+            ]
+        );
+    }
+
+    #[test]
+    fn inner_join_drops_unmatched_left_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        // carol (id 3) has no orders -- INNER JOIN drops her entirely.
+        let rows: Vec<String> = conn
+            .query_map(
+                "SELECT customers.name FROM customers \
+                 JOIN orders ON customers.id = orders.customer_id",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!rows.contains(&"carol".to_string()));
+    }
+
+    #[test]
+    fn left_join_null_pads_unmatched_left_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let rows = conn
+            .query_map(
+                "SELECT customers.name, orders.amount FROM customers \
+                 LEFT JOIN orders ON customers.id = orders.customer_id \
+                 WHERE customers.name = 'carol'",
+                |row| Ok((row.get::<String>(0)?, row.get_ref(1)?.to_owned())),
+            )
+            .unwrap();
+        assert_eq!(rows, vec![("carol".to_string(), Value::Null)]);
+    }
+
+    #[test]
+    fn cross_join_produces_the_full_cartesian_product() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE a (x INTEGER)").unwrap();
+        conn.execute("INSERT INTO a VALUES (1), (2)").unwrap();
+        conn.execute("CREATE TABLE b (y INTEGER)").unwrap();
+        conn.execute("INSERT INTO b VALUES (10), (20), (30)")
+            .unwrap();
+
+        let rows: Vec<(i64, i64)> = conn
+            .query_map("SELECT a.x, b.y FROM a CROSS JOIN b", |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 6);
+    }
+
+    #[test]
+    fn join_using_matches_on_the_shared_column_name() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t1 (id INTEGER, a TEXT)")
+            .unwrap();
+        conn.execute("INSERT INTO t1 VALUES (1, 'x'), (2, 'y')")
+            .unwrap();
+        conn.execute("CREATE TABLE t2 (id INTEGER, b TEXT)")
+            .unwrap();
+        conn.execute("INSERT INTO t2 VALUES (1, 'p'), (3, 'q')")
+            .unwrap();
+
+        let rows: Vec<(String, String)> = conn
+            .query_map("SELECT t1.a, t2.b FROM t1 JOIN t2 USING (id)", |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(rows, vec![("x".to_string(), "p".to_string())]);
+    }
+
+    #[test]
+    fn table_alias_usable_in_on_and_select_list() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let mut rows: Vec<String> = conn
+            .query_map(
+                "SELECT c.name FROM customers c \
+                 JOIN orders o ON c.id = o.customer_id",
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec!["alice".to_string(), "alice".to_string(), "bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_star_on_a_join_uses_bare_output_column_names() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let stmt = conn
+            .prepare("SELECT * FROM customers JOIN orders ON customers.id = orders.customer_id")
+            .unwrap();
+        assert_eq!(
+            stmt.column_names().unwrap(),
+            vec!["id", "name", "id", "customer_id", "amount"]
+        );
+    }
+
+    #[test]
+    fn named_qualified_select_list_reports_bare_column_names() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let stmt = conn
+            .prepare(
+                "SELECT customers.name, orders.amount FROM customers \
+                 JOIN orders ON customers.id = orders.customer_id",
+            )
+            .unwrap();
+        // column_names() must agree with what query_map's Row actually
+        // hands back -- both derive from the same bare_name transform.
+        assert_eq!(stmt.column_names().unwrap(), vec!["name", "amount"]);
+    }
+
+    #[test]
+    fn unqualified_column_resolves_when_unambiguous() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        // `name` only exists on `customers`, `amount` only on `orders` --
+        // both resolve fine unqualified even though the row source is a
+        // join with an ambiguous `id` on both sides.
+        let mut rows: Vec<(String, i64)> = conn
+            .query_map(
+                "SELECT name, amount FROM customers JOIN orders ON customers.id = orders.customer_id",
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec![
+                ("alice".to_string(), 10),
+                ("alice".to_string(), 20),
+                ("bob".to_string(), 30),
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_unqualified_column_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        // `id` exists on both `customers` and `orders` -- unqualified is
+        // ambiguous.
+        assert!(matches!(
+            conn.query_row(
+                "SELECT id FROM customers JOIN orders ON customers.id = orders.customer_id"
+            ),
+            Err(Error::AmbiguousColumn(_))
+        ));
+    }
+
+    #[test]
+    fn join_where_filters_the_joined_row_source() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let rows: Vec<i64> = conn
+            .query_map(
+                "SELECT orders.amount FROM customers JOIN orders \
+                 ON customers.id = orders.customer_id WHERE orders.amount > 15",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, vec![20, 30]);
+    }
+
+    #[test]
+    fn join_works_through_a_prepared_statement_with_bound_params() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT orders.amount FROM customers JOIN orders \
+                 ON customers.id = orders.customer_id WHERE customers.name = ?",
+            )
+            .unwrap();
+        stmt.raw_bind_parameter(1, "alice").unwrap();
+        let mut rows: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![10, 20]);
+    }
+
+    #[test]
+    fn aggregate_select_list_with_a_join_is_a_clear_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        assert!(matches!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM customers JOIN orders ON customers.id = orders.customer_id"
+            ),
+            Err(Error::UnrecognizedStatement(_))
+        ));
+    }
+
     #[test]
     fn min_max_over_empty_table_are_null() {
         let mut conn = Connection::open_in_memory().unwrap();

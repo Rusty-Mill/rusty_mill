@@ -1,7 +1,10 @@
-//! SQL parser: single-table `SELECT` (DML subset, foundation-tier `A4b`).
-//! No joins, aggregates, or subqueries. Parses `WHERE` into an [`Expr`]
-//! tree but does not evaluate it — evaluation is `A6`.
-//! Grammar reference: <https://www.sqlite.org/lang_select.html>.
+//! SQL parser: `SELECT` (DML subset, foundation-tier `A4b`, extended by
+//! many later issues — aggregates, `GROUP BY`/`HAVING`, window
+//! functions, compound `SELECT`, `WITH`, and (issue #130) `INNER`/
+//! `LEFT`/`CROSS JOIN`; subqueries remain unsupported, tracked as issue
+//! #131). Parses `WHERE` into an [`Expr`] tree but does not evaluate it
+//! — evaluation is `A6`. Grammar reference:
+//! <https://www.sqlite.org/lang_select.html>.
 
 use crate::ddl::ParseError;
 use crate::token::Token;
@@ -96,11 +99,65 @@ pub(crate) fn describe_aggregate_call(call: &AggregateCall) -> String {
     format!("{}({arg})", call.name)
 }
 
-/// A parsed single-table `SELECT` statement.
+/// `INNER`/`LEFT [OUTER]`/`CROSS JOIN` (issue #130). A bare `JOIN` with
+/// no leading keyword parses as `Inner`, matching real SQLite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+    Cross,
+}
+
+/// A join's `ON`/`USING` condition (issue #130). `CROSS JOIN` takes
+/// neither, hence `None` — the parser enforces that `Inner`/`Left`
+/// always carry `On`/`Using` and `Cross` always carries `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinCondition {
+    On(Expr),
+    Using(Vec<String>),
+    None,
+}
+
+/// A `FROM`/`JOIN` table reference: a table name plus an optional alias
+/// (issue #130) — e.g. `orders o` / `orders AS o` parses as `TableRef {
+/// name: "orders", alias: Some("o") }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRef {
+    pub name: String,
+    pub alias: Option<String>,
+}
+
+/// One join in a `FROM` clause's join chain (issue #130). See
+/// [`Select::joins`]'s own doc comment for how a chain of these becomes
+/// one combined row source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Join {
+    pub kind: JoinKind,
+    pub table: TableRef,
+    pub condition: JoinCondition,
+}
+
+/// A parsed `SELECT` statement — single-table, or (issue #130)
+/// multi-table via `joins`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Select {
     pub columns: SelectColumns,
     pub table_name: String,
+    /// The primary (`FROM`) table's alias, if given (issue #130) — e.g.
+    /// `o` in `FROM orders o` / `FROM orders AS o`. Qualified-column
+    /// resolution (`engine::scan_joined`) uses this (falling back to
+    /// `table_name` itself when `None`) as `table_name`'s qualifier.
+    pub table_alias: Option<String>,
+    /// Additional tables joined onto `table_name`, in `FROM`-clause
+    /// order (issue #130) — empty for a plain single-table `SELECT`,
+    /// this crate's only supported shape before this issue and still
+    /// the overwhelmingly common case. A non-empty chain is folded,
+    /// left to right, into one combined row source with `"qualifier.
+    /// column"`-named columns (see `engine::scan_joined`) before
+    /// `filter`/projection run — `eval::resolve_column_index` then lets
+    /// both the qualified form and (when unambiguous) the bare column
+    /// name resolve.
+    pub joins: Vec<Join>,
     pub filter: Option<Expr>,
     /// Whether `DISTINCT` followed `SELECT` (issue #116) — the engine
     /// dedups the final output rows, preserving first-occurrence order.
@@ -345,16 +402,18 @@ pub(crate) fn parse_select_at(tokens: &[Token], pos: usize) -> Result<(Select, u
             SelectColumns::Aggregates(calls)
         }
     } else {
-        let mut cols = vec![p.expect_any_ident()?];
+        let mut cols = vec![p.parse_qualified_ident()?];
         while p.peek_punct(",") {
             p.advance();
-            cols.push(p.expect_any_ident()?);
+            cols.push(p.parse_qualified_ident()?);
         }
         SelectColumns::Named(cols)
     };
 
     p.expect_ident("FROM")?;
     let table_name = p.expect_any_ident()?;
+    let table_alias = p.parse_table_alias()?;
+    let joins = p.parse_joins()?;
 
     let filter = if p.peek_ident("WHERE") {
         p.advance();
@@ -387,6 +446,8 @@ pub(crate) fn parse_select_at(tokens: &[Token], pos: usize) -> Result<(Select, u
         Select {
             columns,
             table_name,
+            table_alias,
+            joins,
             filter,
             distinct,
             group_by,
@@ -620,12 +681,128 @@ impl<'a> SelectParser<'a> {
         }
     }
 
+    /// Like [`SelectParser::expect_any_ident`], but also accepts a
+    /// `table.column`-qualified form (issue #130), returned as one
+    /// dotted string (`"table.column"`) — [`eval::resolve_column_index`]
+    /// (a different module) is what actually understands that shape at
+    /// resolution time; the parser here only recognizes and joins the
+    /// two tokens.
+    fn parse_qualified_ident(&mut self) -> Result<String, ParseError> {
+        let first = self.expect_any_ident()?;
+        if self.peek_punct(".") {
+            self.advance();
+            let second = self.expect_any_ident()?;
+            Ok(format!("{first}.{second}"))
+        } else {
+            Ok(first)
+        }
+    }
+
     fn expect_punct(&mut self, p: &str) -> Result<(), ParseError> {
         match self.advance() {
             Some(Token::Punct(s)) if *s == p => Ok(()),
             Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
             Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
         }
+    }
+
+    /// Parses an optional table alias following a `FROM`/`JOIN` table
+    /// reference (issue #130): `[AS] ident`, or nothing. A bare (no
+    /// `AS`) alias is only accepted when the next identifier isn't one
+    /// of the keywords that can legitimately follow a table reference
+    /// here (`WHERE`, a join keyword, `ON`/`USING`, `GROUP`, `HAVING`,
+    /// or a compound-`SELECT` operator) — otherwise e.g. `FROM t WHERE
+    /// ...` would misparse `WHERE` itself as `t`'s alias.
+    fn parse_table_alias(&mut self) -> Result<Option<String>, ParseError> {
+        if self.peek_ident("AS") {
+            self.advance();
+            return Ok(Some(self.expect_any_ident()?));
+        }
+        const RESERVED: &[&str] = &[
+            "WHERE",
+            "INNER",
+            "LEFT",
+            "CROSS",
+            "JOIN",
+            "ON",
+            "USING",
+            "GROUP",
+            "HAVING",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+        ];
+        if let Some(Token::Ident(s)) = self.peek() {
+            if !RESERVED.iter().any(|kw| s.eq_ignore_ascii_case(kw)) {
+                let alias = s.clone();
+                self.advance();
+                return Ok(Some(alias));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Parses a `FROM` clause's join chain (issue #130): zero or more
+    /// `[INNER | LEFT [OUTER] | CROSS] JOIN table [[AS] alias] (ON expr
+    /// | USING (col, ...))`, in order. A bare `JOIN` (no leading
+    /// keyword) is `INNER`. `CROSS JOIN` takes no `ON`/`USING` — any
+    /// other kind requires exactly one of them.
+    fn parse_joins(&mut self) -> Result<Vec<Join>, ParseError> {
+        let mut joins = Vec::new();
+        loop {
+            let kind = if self.peek_ident("INNER") {
+                self.advance();
+                self.expect_ident("JOIN")?;
+                JoinKind::Inner
+            } else if self.peek_ident("LEFT") {
+                self.advance();
+                if self.peek_ident("OUTER") {
+                    self.advance();
+                }
+                self.expect_ident("JOIN")?;
+                JoinKind::Left
+            } else if self.peek_ident("CROSS") {
+                self.advance();
+                self.expect_ident("JOIN")?;
+                JoinKind::Cross
+            } else if self.peek_ident("JOIN") {
+                self.advance();
+                JoinKind::Inner
+            } else {
+                break;
+            };
+
+            let name = self.expect_any_ident()?;
+            let alias = self.parse_table_alias()?;
+
+            let condition = if kind == JoinKind::Cross {
+                JoinCondition::None
+            } else if self.peek_ident("ON") {
+                self.advance();
+                JoinCondition::On(self.parse_or_expr()?)
+            } else if self.peek_ident("USING") {
+                self.advance();
+                self.expect_punct("(")?;
+                let mut cols = vec![self.expect_any_ident()?];
+                while self.peek_punct(",") {
+                    self.advance();
+                    cols.push(self.expect_any_ident()?);
+                }
+                self.expect_punct(")")?;
+                JoinCondition::Using(cols)
+            } else {
+                return Err(ParseError::UnexpectedToken(
+                    "expected ON or USING after JOIN".to_string(),
+                ));
+            };
+
+            joins.push(Join {
+                kind,
+                table: TableRef { name, alias },
+                condition,
+            });
+        }
+        Ok(joins)
     }
 
     /// `expr (OR expr)*`, left-associative — the lowest-precedence level
@@ -833,6 +1010,15 @@ impl<'a> SelectParser<'a> {
                     }
                     self.expect_punct(")")?;
                     Ok(Expr::FunctionCall { name, args })
+                } else if self.peek_punct(".") {
+                    // `table.column` (issue #130) -- joined the qualifier
+                    // and column into one dotted `Expr::Column` string;
+                    // see `eval::resolve_column_index` for how that's
+                    // resolved against a joined row source's qualified
+                    // column names.
+                    self.advance();
+                    let column = self.expect_any_ident()?;
+                    Ok(Expr::Column(format!("{name}.{column}")))
                 } else {
                     Ok(Expr::Column(name))
                 }
@@ -1709,5 +1895,125 @@ mod tests {
                 .unwrap();
         let with_select = parse_with_select(&tokens).unwrap();
         assert_eq!(with_select.ctes[1].select.first.table_name, "a");
+    }
+
+    #[test]
+    fn plain_select_has_no_alias_or_joins() {
+        let tokens = tokenize("SELECT * FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.table_alias, None);
+        assert!(select.joins.is_empty());
+    }
+
+    #[test]
+    fn parses_from_table_alias_with_and_without_as() {
+        let tokens = tokenize("SELECT * FROM t AS x").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.table_alias, Some("x".to_string()));
+
+        let tokens = tokenize("SELECT * FROM t x").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.table_alias, Some("x".to_string()));
+    }
+
+    #[test]
+    fn bare_join_is_inner_join() {
+        let tokens = tokenize("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.joins.len(), 1);
+        assert_eq!(select.joins[0].kind, JoinKind::Inner);
+        assert_eq!(select.joins[0].table.name, "t2");
+        assert_eq!(select.joins[0].table.alias, None);
+        assert_eq!(
+            select.joins[0].condition,
+            JoinCondition::On(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Column("t1.a".to_string())),
+                right: Box::new(Expr::Column("t2.a".to_string())),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_inner_join_with_alias() {
+        let tokens = tokenize("SELECT * FROM t1 INNER JOIN t2 AS b ON t1.a = b.a").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.joins[0].kind, JoinKind::Inner);
+        assert_eq!(select.joins[0].table.alias, Some("b".to_string()));
+    }
+
+    #[test]
+    fn parses_left_join_with_optional_outer_keyword() {
+        let tokens = tokenize("SELECT * FROM t1 LEFT JOIN t2 ON t1.a = t2.a").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.joins[0].kind, JoinKind::Left);
+
+        let tokens = tokenize("SELECT * FROM t1 LEFT OUTER JOIN t2 ON t1.a = t2.a").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.joins[0].kind, JoinKind::Left);
+    }
+
+    #[test]
+    fn parses_cross_join_with_no_condition() {
+        let tokens = tokenize("SELECT * FROM t1 CROSS JOIN t2").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.joins[0].kind, JoinKind::Cross);
+        assert_eq!(select.joins[0].condition, JoinCondition::None);
+    }
+
+    #[test]
+    fn parses_join_using_clause() {
+        let tokens = tokenize("SELECT * FROM t1 JOIN t2 USING (a, b)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.joins[0].condition,
+            JoinCondition::Using(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn parses_a_chain_of_two_joins() {
+        let tokens =
+            tokenize("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a LEFT JOIN t3 ON t2.b = t3.b")
+                .unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.joins.len(), 2);
+        assert_eq!(select.joins[0].kind, JoinKind::Inner);
+        assert_eq!(select.joins[0].table.name, "t2");
+        assert_eq!(select.joins[1].kind, JoinKind::Left);
+        assert_eq!(select.joins[1].table.name, "t3");
+    }
+
+    #[test]
+    fn inner_or_left_join_without_on_or_using_is_an_error() {
+        let tokens = tokenize("SELECT * FROM t1 JOIN t2").unwrap();
+        assert!(matches!(
+            parse_select(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn qualified_column_parses_as_a_single_dotted_expr_column() {
+        let tokens = tokenize("SELECT t1.a FROM t1 JOIN t2 ON t1.id = t2.id").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Named(vec!["t1.a".to_string()])
+        );
+    }
+
+    #[test]
+    fn qualified_column_usable_in_where() {
+        let tokens = tokenize("SELECT * FROM t1 JOIN t2 ON t1.id = t2.id WHERE t2.b = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Column("t2.b".to_string())),
+                right: Box::new(Expr::Literal(Value::Integer(1))),
+            })
+        );
     }
 }

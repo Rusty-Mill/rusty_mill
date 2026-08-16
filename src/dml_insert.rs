@@ -43,8 +43,13 @@ pub enum InsertSource {
     /// mismatches between the `SELECT`'s output and `t`'s schema (or the
     /// explicit column list, if given) surface as the same
     /// [`crate::error::Error::ColumnCountMismatch`] a mismatched
-    /// `VALUES` row would.
-    Select(Select),
+    /// `VALUES` row would. Boxed: `Select` grew past clippy's
+    /// `large_enum_variant` threshold once `table_alias`/`joins` (issue
+    /// #130) joined it, and `Values` (this enum's other variant) stays
+    /// small — boxing only the large variant avoids bloating every
+    /// `InsertSource::Values` with unused space for a `Select` it'll
+    /// never hold.
+    Select(Box<Select>),
 }
 
 /// A parsed `INSERT INTO ...` statement.
@@ -118,7 +123,7 @@ pub fn parse_insert(tokens: &[Token]) -> Result<Insert, ParseError> {
         // remaining slice (which still ends in the same trailing `Eof`
         // token `tokenize` always appends) rather than duplicating
         // SELECT's own grammar here.
-        InsertSource::Select(parse_select(&p.tokens[p.pos..])?)
+        InsertSource::Select(Box::new(parse_select(&p.tokens[p.pos..])?))
     } else {
         p.expect_ident("VALUES")?;
 

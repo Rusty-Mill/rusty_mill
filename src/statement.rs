@@ -48,8 +48,8 @@ use crate::dml_select::{
 };
 use crate::dml_update::{parse_update, Update};
 use crate::engine::{
-    describe_window_call, execute_create_table, execute_delete, execute_insert_returning_rowids,
-    execute_update,
+    bare_name, describe_window_call, execute_create_table, execute_delete,
+    execute_insert_returning_rowids, execute_update,
 };
 use crate::error::{Error, Result};
 use crate::row::Row;
@@ -152,10 +152,11 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
 }
 
 /// Rewrites every `?`/`?N`/`:name`/`@name`/`$name` marker in `select`
-/// (select-list aggregate/window args, then `WHERE`, left-to-right over
-/// the SQL text) to a resolved 1-based index via `resolver` — shared by
-/// a top-level `SELECT` and an `INSERT ... SELECT` source (issue #124),
-/// since both need the exact same walk.
+/// (select-list aggregate/window args, then join `ON` conditions — issue
+/// #130 — then `WHERE`, then `HAVING`, left-to-right over the SQL text)
+/// to a resolved 1-based index via `resolver` — shared by a top-level
+/// `SELECT` and an `INSERT ... SELECT` source (issue #124), since both
+/// need the exact same walk.
 fn rewrite_select_params(select: &mut Select, resolver: &mut ParamResolver) {
     if let SelectColumns::Aggregates(calls) = &mut select.columns {
         for call in calls {
@@ -169,6 +170,11 @@ fn rewrite_select_params(select: &mut Select, resolver: &mut ParamResolver) {
             if let AggregateArg::Expr(e) = &mut call.arg {
                 resolver.rewrite(e);
             }
+        }
+    }
+    for join in &mut select.joins {
+        if let crate::dml_select::JoinCondition::On(cond) = &mut join.condition {
+            resolver.rewrite(cond);
         }
     }
     if let Some(filter) = &mut select.filter {
@@ -469,7 +475,9 @@ impl<'conn> Statement<'conn> {
                     .map(|row| row.iter().map(|e| self.resolve_expr(e)).collect())
                     .collect(),
             ),
-            InsertSource::Select(select) => InsertSource::Select(self.resolve_select(select)),
+            InsertSource::Select(select) => {
+                InsertSource::Select(Box::new(self.resolve_select(select)))
+            }
         };
         Insert {
             table_name: insert.table_name.clone(),
@@ -603,9 +611,30 @@ impl<'conn> Statement<'conn> {
             ),
             other => other.clone(),
         };
+        let joins = select
+            .joins
+            .iter()
+            .map(|j| crate::dml_select::Join {
+                kind: j.kind,
+                table: j.table.clone(),
+                condition: match &j.condition {
+                    crate::dml_select::JoinCondition::On(e) => {
+                        crate::dml_select::JoinCondition::On(self.resolve_expr(e))
+                    }
+                    crate::dml_select::JoinCondition::Using(cols) => {
+                        crate::dml_select::JoinCondition::Using(cols.clone())
+                    }
+                    crate::dml_select::JoinCondition::None => {
+                        crate::dml_select::JoinCondition::None
+                    }
+                },
+            })
+            .collect();
         Select {
             columns,
             table_name: select.table_name.clone(),
+            table_alias: select.table_alias.clone(),
+            joins,
             filter: select.filter.as_ref().map(|f| self.resolve_expr(f)),
             distinct: select.distinct,
             group_by: select.group_by.clone(),
@@ -755,13 +784,23 @@ impl<'conn> Statement<'conn> {
     pub fn column_names(&self) -> Result<Vec<String>> {
         let first = self.result_select()?;
         match &first.columns {
-            SelectColumns::All => Ok(self
-                .conn
-                .db()
-                .table(&first.table_name)?
-                .column_names
-                .clone()),
-            SelectColumns::Named(names) => Ok(names.clone()),
+            SelectColumns::All => {
+                // Bare column names, in `FROM`-then-`JOIN` order (issue
+                // #130) -- matches `engine::scan_joined`'s own column
+                // order, whose "qualifier.column" names `bare_name`
+                // strips down to this same bare form at execution time.
+                let mut names = self
+                    .conn
+                    .db()
+                    .table(&first.table_name)?
+                    .column_names
+                    .clone();
+                for join in &first.joins {
+                    names.extend(self.conn.db().table(&join.table.name)?.column_names.clone());
+                }
+                Ok(names)
+            }
+            SelectColumns::Named(names) => Ok(names.iter().map(|n| bare_name(n)).collect()),
             SelectColumns::Aggregates(calls) => {
                 Ok(calls.iter().map(describe_aggregate_call).collect())
             }

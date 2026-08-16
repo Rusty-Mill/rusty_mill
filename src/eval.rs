@@ -25,6 +25,40 @@ pub fn evaluate(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<V
     evaluate_with_functions(expr, column_names, row, &HashMap::new())
 }
 
+/// Resolves `name` to its index in `column_names`. Tries an exact match
+/// first — the only lookup a single-table (non-joined) query ever needs,
+/// so this is a no-op behavior change for every pre-#130 call site.
+///
+/// If no exact match is found and `name` has no `.` in it, falls back to
+/// matching it against the *last* `.`-separated segment of each
+/// `column_names` entry — e.g. `name` = `"a"` matches a joined row
+/// source's `"t1.a"` column (issue #130's qualified-column-naming
+/// convention, see `engine::scan_joined`). Exactly one match resolves;
+/// zero is [`Error::UnknownColumn`]; more than one — the column name
+/// exists on more than one joined table and wasn't qualified to say
+/// which — is [`Error::AmbiguousColumn`], matching real SQLite's own
+/// "ambiguous column name" rejection rather than silently picking
+/// whichever table happened to scan first.
+pub(crate) fn resolve_column_index(column_names: &[String], name: &str) -> Result<usize> {
+    if let Some(idx) = column_names.iter().position(|c| c == name) {
+        return Ok(idx);
+    }
+    if !name.contains('.') {
+        let matches: Vec<usize> = column_names
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.rsplit('.').next() == Some(name))
+            .map(|(i, _)| i)
+            .collect();
+        match matches.len() {
+            1 => return Ok(matches[0]),
+            n if n > 1 => return Err(Error::AmbiguousColumn(name.to_string())),
+            _ => {}
+        }
+    }
+    Err(Error::UnknownColumn(name.to_string()))
+}
+
 /// Like [`evaluate`], but resolves [`Expr::FunctionCall`] against
 /// `functions` (name → implementation).
 pub fn evaluate_with_functions(
@@ -36,10 +70,7 @@ pub fn evaluate_with_functions(
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Column(name) => {
-            let idx = column_names
-                .iter()
-                .position(|c| c == name)
-                .ok_or_else(|| Error::UnknownColumn(name.clone()))?;
+            let idx = resolve_column_index(column_names, name)?;
             Ok(row[idx].clone())
         }
         Expr::BinaryOp { op, left, right } => {

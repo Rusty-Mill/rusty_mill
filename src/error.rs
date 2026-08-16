@@ -109,6 +109,13 @@ pub enum Error {
     /// `DROP INDEX` named an index that doesn't exist (issue #122),
     /// without `IF EXISTS`.
     IndexNotFound(String),
+    /// A bare (unqualified) column name in a joined query (issue #130)
+    /// matched more than one of the joined tables' columns — e.g. `id`
+    /// when both sides of the join have an `id` column. Real SQLite's
+    /// own rule: an unqualified reference to a column present in more
+    /// than one table in scope is an error, not a silent "pick the
+    /// first one" — qualify it (`t1.id`) to disambiguate.
+    AmbiguousColumn(String),
 }
 
 impl fmt::Display for Error {
@@ -154,6 +161,7 @@ impl fmt::Display for Error {
             Error::DuplicateColumn(name) => write!(f, "duplicate column name: {name:?}"),
             Error::IndexAlreadyExists(name) => write!(f, "index {name:?} already exists"),
             Error::IndexNotFound(name) => write!(f, "no such index: {name:?}"),
+            Error::AmbiguousColumn(name) => write!(f, "ambiguous column name: {name:?}"),
         }
     }
 }
