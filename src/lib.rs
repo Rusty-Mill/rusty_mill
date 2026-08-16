@@ -47,6 +47,7 @@ mod error;
 mod eval;
 mod fromsql;
 mod hooks;
+mod like;
 mod macros;
 mod params;
 mod row;

@@ -1530,6 +1530,32 @@ mod tests {
     }
 
     #[test]
+    fn where_clause_like_filters_by_pattern() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (name TEXT)").unwrap();
+        conn.execute("INSERT INTO t VALUES ('alice'), ('bob'), ('alina')")
+            .unwrap();
+
+        let rows: Vec<String> = conn
+            .query_map("SELECT name FROM t WHERE name LIKE 'al%'", |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, vec!["alice", "alina"]);
+    }
+
+    #[test]
+    fn where_clause_between_filters_inclusive_range() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (5), (10), (15)")
+            .unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a BETWEEN 5 AND 10", |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, vec![5, 10]);
+    }
+
+    #[test]
     fn execute_with_params_binds_and_runs() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
