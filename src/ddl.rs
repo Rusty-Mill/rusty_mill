@@ -89,6 +89,30 @@ pub struct DropTable {
     pub if_exists: bool,
 }
 
+/// A parsed `ALTER TABLE table_name ...` statement (issue #121).
+///
+/// **Scope, stated plainly:** matches real SQLite's own narrow `ALTER
+/// TABLE` subset — no `DROP COLUMN` (SQLite added that in 3.35, this
+/// crate doesn't model it), no changing a column's type or constraints.
+/// Not inventing a broader one than SQLite itself has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterTable {
+    pub table_name: String,
+    pub action: AlterTableAction,
+}
+
+/// The three forms `AlterTable` supports — see [`AlterTable`]'s own doc
+/// comment for the scope this mirrors.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterTableAction {
+    /// `ADD [COLUMN] column-def`.
+    AddColumn(ColumnDef),
+    /// `RENAME TO new-table-name`.
+    RenameTo(String),
+    /// `RENAME [COLUMN] old-name TO new-name`.
+    RenameColumn { old_name: String, new_name: String },
+}
+
 /// An error produced while parsing.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
@@ -190,6 +214,45 @@ pub fn parse_drop_table(tokens: &[Token]) -> Result<DropTable, ParseError> {
         table_name,
         if_exists,
     })
+}
+
+/// Parses an `ALTER TABLE table_name ...` statement from a token stream
+/// (as produced by [`crate::tokenize`]) — see [`AlterTable`]'s doc
+/// comment for the supported forms.
+pub fn parse_alter_table(tokens: &[Token]) -> Result<AlterTable, ParseError> {
+    let mut p = Parser { tokens, pos: 0 };
+    p.expect_ident("ALTER")?;
+    p.expect_ident("TABLE")?;
+    let table_name = p.expect_any_ident()?;
+
+    let action = if p.peek_ident("ADD") {
+        p.advance();
+        if p.peek_ident("COLUMN") {
+            p.advance();
+        }
+        AlterTableAction::AddColumn(p.parse_column_def()?)
+    } else if p.peek_ident("RENAME") {
+        p.advance();
+        if p.peek_ident("TO") {
+            p.advance();
+            AlterTableAction::RenameTo(p.expect_any_ident()?)
+        } else {
+            if p.peek_ident("COLUMN") {
+                p.advance();
+            }
+            let old_name = p.expect_any_ident()?;
+            p.expect_ident("TO")?;
+            let new_name = p.expect_any_ident()?;
+            AlterTableAction::RenameColumn { old_name, new_name }
+        }
+    } else {
+        match p.advance() {
+            Some(Token::Eof) | None => return Err(ParseError::UnexpectedEof),
+            Some(other) => return Err(ParseError::UnexpectedToken(format!("{other:?}"))),
+        }
+    };
+
+    Ok(AlterTable { table_name, action })
 }
 
 struct Parser<'a> {
@@ -707,5 +770,77 @@ mod tests {
     fn missing_table_name_in_drop_table_is_an_error() {
         let tokens = tokenize("DROP TABLE").unwrap();
         assert_eq!(parse_drop_table(&tokens), Err(ParseError::UnexpectedEof));
+    }
+
+    #[test]
+    fn parses_alter_table_add_column() {
+        let tokens = tokenize("ALTER TABLE t ADD COLUMN b TEXT").unwrap();
+        let alter = parse_alter_table(&tokens).unwrap();
+        assert_eq!(alter.table_name, "t");
+        assert_eq!(
+            alter.action,
+            AlterTableAction::AddColumn(ColumnDef {
+                name: "b".into(),
+                type_name: Some("TEXT".into()),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn parses_alter_table_add_column_without_the_column_keyword() {
+        let tokens = tokenize("ALTER TABLE t ADD b TEXT").unwrap();
+        let alter = parse_alter_table(&tokens).unwrap();
+        assert_eq!(
+            alter.action,
+            AlterTableAction::AddColumn(ColumnDef {
+                name: "b".into(),
+                type_name: Some("TEXT".into()),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn parses_alter_table_rename_to() {
+        let tokens = tokenize("ALTER TABLE t RENAME TO t2").unwrap();
+        let alter = parse_alter_table(&tokens).unwrap();
+        assert_eq!(alter.table_name, "t");
+        assert_eq!(alter.action, AlterTableAction::RenameTo("t2".into()));
+    }
+
+    #[test]
+    fn parses_alter_table_rename_column() {
+        let tokens = tokenize("ALTER TABLE t RENAME COLUMN a TO b").unwrap();
+        let alter = parse_alter_table(&tokens).unwrap();
+        assert_eq!(
+            alter.action,
+            AlterTableAction::RenameColumn {
+                old_name: "a".into(),
+                new_name: "b".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_alter_table_rename_column_without_the_column_keyword() {
+        let tokens = tokenize("ALTER TABLE t RENAME a TO b").unwrap();
+        let alter = parse_alter_table(&tokens).unwrap();
+        assert_eq!(
+            alter.action,
+            AlterTableAction::RenameColumn {
+                old_name: "a".into(),
+                new_name: "b".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn alter_table_with_an_unrecognized_action_is_an_error() {
+        let tokens = tokenize("ALTER TABLE t DROP COLUMN a").unwrap();
+        assert!(matches!(
+            parse_alter_table(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
     }
 }

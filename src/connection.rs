@@ -1,14 +1,15 @@
 use crate::aggregate::{self, Aggregate};
 use crate::config::{DbConfig, Limit, OpenFlags};
 use crate::ddl::{
-    parse_create_table, parse_create_virtual_table, parse_drop_table, ColumnDef, CreateVirtualTable,
+    parse_alter_table, parse_create_table, parse_create_virtual_table, parse_drop_table, ColumnDef,
+    CreateVirtualTable,
 };
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
-    execute_create_table, execute_drop_table, execute_insert_into_virtual_table,
-    execute_insert_returning_rowids, execute_select_with_aggregates, execute_select_with_functions,
-    execute_select_with_window,
+    execute_alter_table, execute_create_table, execute_drop_table,
+    execute_insert_into_virtual_table, execute_insert_returning_rowids,
+    execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -1246,6 +1247,12 @@ impl Connection {
                 execute_drop_table(&mut self.db, &drop)?;
                 (0, drop.table_name, Action::DropTable, Vec::new())
             }
+            Some(kw) if kw.eq_ignore_ascii_case("ALTER") => {
+                let alter = parse_alter_table(&tokens)?;
+                self.check_authorized(Action::AlterTable, &alter.table_name)?;
+                execute_alter_table(&mut self.db, &alter)?;
+                (0, alter.table_name, Action::AlterTable, Vec::new())
+            }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
 
@@ -2087,6 +2094,47 @@ mod tests {
             conn.execute("DROP TABLE v"),
             Err(Error::CannotDropVirtualTable(_))
         ));
+    }
+
+    #[test]
+    fn alter_table_add_column_backfills_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        let affected = conn.execute("ALTER TABLE t ADD COLUMN b TEXT").unwrap();
+        assert_eq!(affected, 0);
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1), Value::Null]);
+    }
+
+    #[test]
+    fn alter_table_rename_to_renames_the_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        conn.execute("ALTER TABLE t RENAME TO t2").unwrap();
+
+        assert!(matches!(
+            conn.query_row("SELECT * FROM t"),
+            Err(Error::TableNotFound(_))
+        ));
+        let row = conn.query_row("SELECT * FROM t2").unwrap();
+        assert_eq!(row, vec![Value::Integer(1)]);
+    }
+
+    #[test]
+    fn alter_table_rename_column_renames_it() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        conn.execute("ALTER TABLE t RENAME COLUMN a TO b").unwrap();
+
+        let rows: Vec<i64> = conn.query_map("SELECT b FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
     }
 
     /// A `CreateVTab` test double: `USING arange(start, end)` builds a
