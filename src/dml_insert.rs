@@ -4,7 +4,7 @@
 //! Grammar reference: <https://www.sqlite.org/lang_insert.html>.
 
 use crate::ddl::ParseError;
-use crate::dml_select::{parse_param_marker, Expr};
+use crate::dml_select::{parse_param_marker, parse_select, Expr, Select};
 use crate::token::Token;
 use crate::value::Value;
 
@@ -28,7 +28,26 @@ pub enum OrConflict {
     Ignore,
 }
 
-/// A parsed `INSERT INTO ... VALUES (...)` statement.
+/// An `INSERT` statement's row source — either an explicit `VALUES` list
+/// or a `SELECT` (issue #124), whose output rows are inserted after the
+/// `SELECT` is fully executed (eager, not streaming — same
+/// fully-materialize-first pattern [`crate::storage::TableSource::scan`]
+/// already uses; no new execution capability).
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertSource {
+    /// Each row, as [`Expr::Literal`] or [`Expr::Parameter`] (never any
+    /// other `Expr` variant — this parser only ever produces those two)
+    /// — see `docs/adr/0002-parameter-markers.md`.
+    Values(Vec<Vec<Expr>>),
+    /// `INSERT INTO t [(cols...)] SELECT ...` (issue #124). Column-count
+    /// mismatches between the `SELECT`'s output and `t`'s schema (or the
+    /// explicit column list, if given) surface as the same
+    /// [`crate::error::Error::ColumnCountMismatch`] a mismatched
+    /// `VALUES` row would.
+    Select(Select),
+}
+
+/// A parsed `INSERT INTO ...` statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Insert {
     pub table_name: String,
@@ -36,18 +55,16 @@ pub struct Insert {
     /// `None` means "all columns, in table-definition order" (unresolvable
     /// without a catalog — left to the caller until `A5` exists).
     pub columns: Option<Vec<String>>,
-    /// Each `VALUES` slot, as [`Expr::Literal`] or [`Expr::Parameter`]
-    /// (never any other `Expr` variant — this parser only ever produces
-    /// those two) — see `docs/adr/0002-parameter-markers.md`.
-    pub rows: Vec<Vec<Expr>>,
+    /// The row source — see [`InsertSource`]'s own doc comment.
+    pub source: InsertSource,
     /// `OR REPLACE`/`OR IGNORE`, if given (issue #123) — see
     /// [`OrConflict`]'s own doc comment.
     pub or_conflict: Option<OrConflict>,
 }
 
 /// Parses an `INSERT [OR REPLACE|OR IGNORE|OR ABORT|OR FAIL|OR ROLLBACK]
-/// INTO ... VALUES (...)` statement from a token stream (as produced by
-/// [`crate::tokenize`]).
+/// INTO ... (VALUES (...) | SELECT ...)` statement from a token stream
+/// (as produced by [`crate::tokenize`]).
 pub fn parse_insert(tokens: &[Token]) -> Result<Insert, ParseError> {
     let mut p = InsertParser { tokens, pos: 0 };
     p.expect_ident("INSERT")?;
@@ -95,33 +112,43 @@ pub fn parse_insert(tokens: &[Token]) -> Result<Insert, ParseError> {
         None
     };
 
-    p.expect_ident("VALUES")?;
+    let source = if p.peek_ident("SELECT") {
+        // Parses a nested SELECT starting mid-token-stream: `parse_select`
+        // expects `tokens[0]` to be `SELECT`, so this hands it the
+        // remaining slice (which still ends in the same trailing `Eof`
+        // token `tokenize` always appends) rather than duplicating
+        // SELECT's own grammar here.
+        InsertSource::Select(parse_select(&p.tokens[p.pos..])?)
+    } else {
+        p.expect_ident("VALUES")?;
 
-    let mut rows = Vec::new();
-    loop {
-        p.expect_punct("(")?;
-        let mut row = Vec::new();
+        let mut rows = Vec::new();
         loop {
-            row.push(p.parse_value_or_param()?);
+            p.expect_punct("(")?;
+            let mut row = Vec::new();
+            loop {
+                row.push(p.parse_value_or_param()?);
+                if p.peek_punct(",") {
+                    p.advance();
+                    continue;
+                }
+                p.expect_punct(")")?;
+                break;
+            }
+            rows.push(row);
             if p.peek_punct(",") {
                 p.advance();
                 continue;
             }
-            p.expect_punct(")")?;
             break;
         }
-        rows.push(row);
-        if p.peek_punct(",") {
-            p.advance();
-            continue;
-        }
-        break;
-    }
+        InsertSource::Values(rows)
+    };
 
     Ok(Insert {
         table_name,
         columns,
-        rows,
+        source,
         or_conflict,
     })
 }
@@ -202,12 +229,12 @@ mod tests {
         assert_eq!(insert.table_name, "t");
         assert_eq!(insert.columns, None);
         assert_eq!(
-            insert.rows,
-            vec![vec![
+            insert.source,
+            InsertSource::Values(vec![vec![
                 Expr::Literal(Value::Integer(1)),
                 Expr::Literal(Value::Text("x".into())),
                 Expr::Literal(Value::Null)
-            ]]
+            ]])
         );
     }
 
@@ -217,11 +244,11 @@ mod tests {
         let insert = parse_insert(&tokens).unwrap();
         assert_eq!(insert.columns, Some(vec!["a".into(), "b".into()]));
         assert_eq!(
-            insert.rows,
-            vec![vec![
+            insert.source,
+            InsertSource::Values(vec![vec![
                 Expr::Literal(Value::Integer(1)),
                 Expr::Literal(Value::Integer(2))
-            ]]
+            ]])
         );
     }
 
@@ -229,7 +256,10 @@ mod tests {
     fn parses_multiple_value_rows() {
         let tokens = tokenize("INSERT INTO t VALUES (1), (2), (3)").unwrap();
         let insert = parse_insert(&tokens).unwrap();
-        assert_eq!(insert.rows.len(), 3);
+        match insert.source {
+            InsertSource::Values(rows) => assert_eq!(rows.len(), 3),
+            InsertSource::Select(_) => panic!("expected a VALUES source"),
+        }
     }
 
     #[test]
@@ -292,11 +322,48 @@ mod tests {
         let tokens = tokenize("INSERT INTO t VALUES (?, :name)").unwrap();
         let insert = parse_insert(&tokens).unwrap();
         assert_eq!(
-            insert.rows,
-            vec![vec![
+            insert.source,
+            InsertSource::Values(vec![vec![
                 Expr::Parameter(crate::dml_select::ParamMarker::Anonymous),
                 Expr::Parameter(crate::dml_select::ParamMarker::Named(":name".into())),
-            ]]
+            ]])
         );
+    }
+
+    #[test]
+    fn parses_insert_select_without_column_list() {
+        let tokens = tokenize("INSERT INTO t SELECT * FROM u").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(insert.table_name, "t");
+        assert_eq!(insert.columns, None);
+        match insert.source {
+            InsertSource::Select(select) => assert_eq!(select.table_name, "u"),
+            InsertSource::Values(_) => panic!("expected a SELECT source"),
+        }
+    }
+
+    #[test]
+    fn parses_insert_select_with_column_list_and_where() {
+        let tokens = tokenize("INSERT INTO t (a, b) SELECT x, y FROM u WHERE x > 0").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(insert.columns, Some(vec!["a".into(), "b".into()]));
+        match insert.source {
+            InsertSource::Select(select) => {
+                assert_eq!(
+                    select.columns,
+                    crate::dml_select::SelectColumns::Named(vec!["x".into(), "y".into()])
+                );
+                assert!(select.filter.is_some());
+            }
+            InsertSource::Values(_) => panic!("expected a SELECT source"),
+        }
+    }
+
+    #[test]
+    fn insert_select_with_or_replace_parses_both() {
+        let tokens = tokenize("INSERT OR REPLACE INTO t SELECT * FROM u").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(insert.or_conflict, Some(OrConflict::Replace));
+        assert!(matches!(insert.source, InsertSource::Select(_)));
     }
 }
