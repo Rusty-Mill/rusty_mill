@@ -23,6 +23,35 @@ entry per PR.
 
 ---
 
+## PR #104 — Add SeriesTab/CsvTab example vtab modules (closes #97)
+**2026-08-16** · [#104](https://github.com/baileyrd/rusty_-rusqlite/pull/104)
+
+- **Added:** `vtab_series::SeriesTab` — a `generate_series`-style row
+  generator (`CREATE VIRTUAL TABLE s USING series(start, stop[, step])`),
+  the same spirit as real `rusqlite::vtab::series::Series`.
+- **Added:** `vtab_csvtab::CsvTab` — exposes a CSV file as a read-only
+  table (`CREATE VIRTUAL TABLE t USING csv('path')`), header row as
+  column names, every column `TEXT`.
+- **Scope cut:** `SeriesTab`'s `start`/`stop`/`step` are fixed at
+  `CREATE VIRTUAL TABLE` time via module args, not bound per-query —
+  this engine has no `best_index`/hidden-column negotiation (issue
+  #94's resolution stands: there's no query planner to negotiate a
+  plan with).
+- **Scope cut:** `CsvTab` is a minimal literal comma-split reader — no
+  RFC4180 quoted-field support, no custom delimiter, no `schema=`
+  typed columns. Not worth an external CSV-parsing dependency for a
+  low-priority example module (optional even in real `rusqlite`).
+- 317 tests passing.
+
+Note: #94 (`IndexInfo`/`best_index` constraint pushdown) stays open,
+unrelated to this PR — its own comment thread already recorded that
+constraint pushdown was folded into `TableSource::scan`'s `filter`
+hint back in #90/#95, and it's left open only as a placeholder for a
+genuinely future, more structured pushdown need. Nothing concrete to
+build against today, so no code change for it here.
+
+---
+
 ## PR #103 — Add UpdateVTab/TransactionVTab (closes #95)
 **2026-08-16** · [#103](https://github.com/baileyrd/rusty_-rusqlite/pull/103)
 
