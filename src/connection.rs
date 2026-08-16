@@ -1597,6 +1597,19 @@ mod tests {
     }
 
     #[test]
+    fn select_distinct_dedups_query_map_results() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (1), (3), (2)")
+            .unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT DISTINCT a FROM t", |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, vec![1, 2, 3]);
+    }
+
+    #[test]
     fn execute_with_params_binds_and_runs() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();

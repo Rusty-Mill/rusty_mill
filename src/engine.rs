@@ -150,7 +150,7 @@ pub fn execute_select_with_functions(
     match &select.columns {
         SelectColumns::All => {
             let rows = matching_rows.into_iter().cloned().collect();
-            Ok((column_names, rows))
+            Ok((column_names, dedup_rows(select.distinct, rows)))
         }
         SelectColumns::Named(names) => {
             let indices = names
@@ -166,7 +166,7 @@ pub fn execute_select_with_functions(
                 .into_iter()
                 .map(|row| indices.iter().map(|&i| row[i].clone()).collect())
                 .collect();
-            Ok((names.clone(), rows))
+            Ok((names.clone(), dedup_rows(select.distinct, rows)))
         }
         SelectColumns::Aggregates(_) => Err(Error::UnrecognizedStatement(
             "aggregate select lists need execute_select_with_aggregates".to_string(),
@@ -177,11 +177,32 @@ pub fn execute_select_with_functions(
     }
 }
 
+/// Dedups `rows` (preserving first-occurrence order) if `distinct`, a
+/// no-op otherwise — backs `SELECT DISTINCT` (issue #116). Linear
+/// membership check, not hash-based: `Value` doesn't implement `Hash`/
+/// `Eq` (a `Real(f64)` payload can't), same constraint already noted on
+/// `execute_select_with_window`'s partition lookup. Row counts in this
+/// crate's tables are small enough that this isn't a practical concern.
+fn dedup_rows(distinct: bool, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    if !distinct {
+        return rows;
+    }
+    let mut result: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !result.contains(&row) {
+            result.push(row);
+        }
+    }
+    result
+}
+
 /// Executes a whole-table aggregate `SELECT` (e.g. `SELECT COUNT(*), SUM(a)
 /// FROM t`), folding every row matching `select.filter` through each
 /// aggregate call's `step` and producing exactly one output row — this
 /// crate has no `GROUP BY`, so there's no per-group fan-out. Errors if
-/// `select.columns` isn't [`SelectColumns::Aggregates`].
+/// `select.columns` isn't [`SelectColumns::Aggregates`]. `select.distinct`
+/// is a syntactic no-op here (issue #116) — there's always exactly one
+/// output row, nothing to dedup.
 pub fn execute_select_with_aggregates(
     db: &Database,
     select: &Select,
@@ -333,7 +354,7 @@ pub fn execute_select_with_window(
         .collect();
     let column_names = calls.iter().map(describe_window_call).collect();
 
-    Ok((column_names, rows))
+    Ok((column_names, dedup_rows(select.distinct, rows)))
 }
 
 /// Looks up `partition_by`'s column values in `row`, for grouping rows
@@ -524,5 +545,52 @@ mod tests {
         let (cols, rows) = execute_select(&db, &select).unwrap();
         assert_eq!(cols, vec!["b"]);
         assert_eq!(rows, vec![vec![Value::Text("x".into())]]);
+    }
+
+    fn setup_with_duplicates() -> Database {
+        let mut db = Database::new();
+        let create =
+            parse_create_table(&tokenize("CREATE TABLE t (a INTEGER, b TEXT)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+        let insert = parse_insert(
+            &tokenize("INSERT INTO t VALUES (1, 'x'), (2, 'x'), (1, 'x'), (3, 'y')").unwrap(),
+        )
+        .unwrap();
+        execute_insert(&mut db, &insert).unwrap();
+        db
+    }
+
+    #[test]
+    fn select_distinct_dedups_full_rows() {
+        let db = setup_with_duplicates();
+        let select = parse_select(&tokenize("SELECT DISTINCT a, b FROM t").unwrap()).unwrap();
+        let (_, rows) = execute_select(&db, &select).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Integer(1), Value::Text("x".into())],
+                vec![Value::Integer(2), Value::Text("x".into())],
+                vec![Value::Integer(3), Value::Text("y".into())],
+            ]
+        );
+    }
+
+    #[test]
+    fn select_distinct_on_a_single_projected_column_dedups_after_projection() {
+        let db = setup_with_duplicates();
+        let select = parse_select(&tokenize("SELECT DISTINCT b FROM t").unwrap()).unwrap();
+        let (_, rows) = execute_select(&db, &select).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text("x".into())], vec![Value::Text("y".into())]]
+        );
+    }
+
+    #[test]
+    fn select_without_distinct_keeps_duplicates() {
+        let db = setup_with_duplicates();
+        let select = parse_select(&tokenize("SELECT a, b FROM t").unwrap()).unwrap();
+        let (_, rows) = execute_select(&db, &select).unwrap();
+        assert_eq!(rows.len(), 4);
     }
 }

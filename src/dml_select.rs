@@ -74,6 +74,9 @@ pub struct Select {
     pub columns: SelectColumns,
     pub table_name: String,
     pub filter: Option<Expr>,
+    /// Whether `DISTINCT` followed `SELECT` (issue #116) — the engine
+    /// dedups the final output rows, preserving first-occurrence order.
+    pub distinct: bool,
 }
 
 /// A minimal expression tree — enough to represent `WHERE` filters.
@@ -203,6 +206,13 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
     let mut p = SelectParser { tokens, pos: 0 };
     p.expect_ident("SELECT")?;
 
+    let distinct = if p.peek_ident("DISTINCT") {
+        p.advance();
+        true
+    } else {
+        false
+    };
+
     let columns = if p.peek_punct("*") {
         p.advance();
         SelectColumns::All
@@ -247,6 +257,7 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
         columns,
         table_name,
         filter,
+        distinct,
     })
 }
 
@@ -609,6 +620,26 @@ mod tests {
         assert_eq!(select.columns, SelectColumns::All);
         assert_eq!(select.table_name, "t");
         assert_eq!(select.filter, None);
+        assert!(!select.distinct);
+    }
+
+    #[test]
+    fn parses_select_distinct_star() {
+        let tokens = tokenize("SELECT DISTINCT * FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert!(select.distinct);
+        assert_eq!(select.columns, SelectColumns::All);
+    }
+
+    #[test]
+    fn parses_select_distinct_named_columns() {
+        let tokens = tokenize("SELECT DISTINCT a, b FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert!(select.distinct);
+        assert_eq!(
+            select.columns,
+            SelectColumns::Named(vec!["a".into(), "b".into()])
+        );
     }
 
     #[test]
