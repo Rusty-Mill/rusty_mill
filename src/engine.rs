@@ -6,7 +6,9 @@
 use crate::aggregate::Aggregate;
 use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
 use crate::dml_insert::{Insert, InsertSource};
-use crate::dml_select::{describe_aggregate_call, AggregateArg, Expr, Select, SelectColumns};
+use crate::dml_select::{
+    describe_aggregate_call, AggregateArg, CompoundOp, CompoundSelect, Expr, Select, SelectColumns,
+};
 use crate::error::{Error, Result};
 use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
 use crate::storage::Database;
@@ -276,6 +278,92 @@ pub fn execute_select_with_functions(
         SelectColumns::Window(_) => Err(Error::UnrecognizedStatement(
             "window select lists need execute_select_with_window".to_string(),
         )),
+    }
+}
+
+/// Runs one `SELECT` core, dispatching to
+/// [`execute_select_with_aggregates`]/[`execute_select_with_window`]/
+/// [`execute_select_with_functions`] by `select.columns`'s kind — the
+/// same dispatch [`crate::Connection::run_select`] does, reused here for
+/// [`execute_compound_select`]'s free-function (no-`Connection`) form.
+fn dispatch_select(
+    db: &Database,
+    select: &Select,
+    functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    match &select.columns {
+        SelectColumns::Aggregates(_) => {
+            execute_select_with_aggregates(db, select, functions, aggregates)
+        }
+        SelectColumns::Window(_) => execute_select_with_window(db, select, functions, aggregates),
+        _ => execute_select_with_functions(db, select, functions),
+    }
+}
+
+/// Executes a compound `SELECT` (`UNION`/`UNION ALL`/`INTERSECT`/
+/// `EXCEPT` — issue #126): runs `compound.first`, then folds each
+/// `compound.rest` entry into the running result left-associatively via
+/// [`combine_rows`]. Each side runs through the exact same path a
+/// standalone [`Select`] would ([`dispatch_select`]) — no new execution
+/// model, per the issue's own scope note. A column-count mismatch
+/// between any two combined sides is [`Error::ColumnCountMismatch`].
+/// The output's column names come from `compound.first` alone (real
+/// SQLite doesn't require — or use — the other sides' column names).
+pub fn execute_compound_select(
+    db: &Database,
+    compound: &CompoundSelect,
+    functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let (column_names, mut rows) = dispatch_select(db, &compound.first, functions, aggregates)?;
+
+    for (op, select) in &compound.rest {
+        let (next_column_names, next_rows) = dispatch_select(db, select, functions, aggregates)?;
+        if next_column_names.len() != column_names.len() {
+            return Err(Error::ColumnCountMismatch {
+                expected: column_names.len(),
+                actual: next_column_names.len(),
+            });
+        }
+        rows = combine_rows(*op, rows, next_rows);
+    }
+
+    Ok((column_names, rows))
+}
+
+/// Combines two already-executed sides' rows per `op` (issue #126) — a
+/// pure `Vec` operation, no re-scanning or re-evaluation. `UNION`/
+/// `INTERSECT`/`EXCEPT` (no `ALL`) all dedup their result, matching real
+/// SQL's own implicitly-`DISTINCT` semantics for those three; `UNION
+/// ALL` alone doesn't. `left`'s rows lead in the combined output, same
+/// left-to-right order [`dedup_rows`] already preserves elsewhere in
+/// this crate.
+pub(crate) fn combine_rows(
+    op: CompoundOp,
+    mut left: Vec<Vec<Value>>,
+    right: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    match op {
+        CompoundOp::UnionAll => {
+            left.extend(right);
+            left
+        }
+        CompoundOp::Union => {
+            left.extend(right);
+            dedup_rows(true, left)
+        }
+        CompoundOp::Intersect => {
+            let kept = left.into_iter().filter(|row| right.contains(row)).collect();
+            dedup_rows(true, kept)
+        }
+        CompoundOp::Except => {
+            let kept = left
+                .into_iter()
+                .filter(|row| !right.contains(row))
+                .collect();
+            dedup_rows(true, kept)
+        }
     }
 }
 
@@ -553,7 +641,7 @@ pub(crate) fn describe_window_call(call: &crate::dml_select::WindowCall) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse_create_table, parse_insert, parse_select, tokenize};
+    use crate::{parse_compound_select, parse_create_table, parse_insert, parse_select, tokenize};
 
     fn setup() -> Database {
         let mut db = Database::new();
@@ -815,5 +903,109 @@ mod tests {
         let select = parse_select(&tokenize("SELECT a, b FROM t").unwrap()).unwrap();
         let (_, rows) = execute_select(&db, &select).unwrap();
         assert_eq!(rows.len(), 4);
+    }
+
+    /// `t` (from [`setup`]: `a`/`b` = (1,'x'), (2,'y'), (3,'z')) plus a
+    /// second table `u` for compound-`SELECT` (issue #126) tests.
+    fn setup_compound() -> Database {
+        let mut db = setup();
+        let create =
+            parse_create_table(&tokenize("CREATE TABLE u (a INTEGER, b TEXT)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+        let insert =
+            parse_insert(&tokenize("INSERT INTO u VALUES (2, 'y'), (4, 'w')").unwrap()).unwrap();
+        execute_insert(&mut db, &insert).unwrap();
+        db
+    }
+
+    fn run_compound(db: &Database, sql: &str) -> Vec<Vec<Value>> {
+        let compound = parse_compound_select(&tokenize(sql).unwrap()).unwrap();
+        execute_compound_select(db, &compound, &HashMap::new(), &HashMap::new())
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn union_combines_and_dedups_overlapping_rows() {
+        let db = setup_compound();
+        let mut rows = run_compound(&db, "SELECT a FROM t UNION SELECT a FROM u");
+        rows.sort_by_key(|r| match r[0] {
+            Value::Integer(n) => n,
+            _ => unreachable!(),
+        });
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+                vec![Value::Integer(4)],
+            ]
+        );
+    }
+
+    #[test]
+    fn union_all_keeps_duplicates() {
+        let db = setup_compound();
+        let rows = run_compound(&db, "SELECT a FROM t UNION ALL SELECT a FROM u");
+        // t has 3 rows, u has 2 -- UNION ALL never dedups, so 5 total,
+        // including the (2) that both sides share.
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn intersect_keeps_only_rows_present_on_both_sides() {
+        let db = setup_compound();
+        let rows = run_compound(&db, "SELECT a FROM t INTERSECT SELECT a FROM u");
+        assert_eq!(rows, vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn except_keeps_only_left_side_rows_absent_on_the_right() {
+        let db = setup_compound();
+        let mut rows = run_compound(&db, "SELECT a FROM t EXCEPT SELECT a FROM u");
+        rows.sort_by_key(|r| match r[0] {
+            Value::Integer(n) => n,
+            _ => unreachable!(),
+        });
+        assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]);
+    }
+
+    #[test]
+    fn non_overlapping_union_keeps_every_row() {
+        let mut db = Database::new();
+        let create = parse_create_table(&tokenize("CREATE TABLE t (a INTEGER)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+        execute_insert(
+            &mut db,
+            &parse_insert(&tokenize("INSERT INTO t VALUES (1)").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let create = parse_create_table(&tokenize("CREATE TABLE u (a INTEGER)").unwrap()).unwrap();
+        execute_create_table(&mut db, &create).unwrap();
+        execute_insert(
+            &mut db,
+            &parse_insert(&tokenize("INSERT INTO u VALUES (2)").unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        let mut rows = run_compound(&db, "SELECT a FROM t UNION SELECT a FROM u");
+        rows.sort_by_key(|r| match r[0] {
+            Value::Integer(n) => n,
+            _ => unreachable!(),
+        });
+        assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn compound_select_column_count_mismatch_errors_clearly() {
+        let db = setup_compound();
+        let compound =
+            parse_compound_select(&tokenize("SELECT a, b FROM t UNION SELECT a FROM u").unwrap())
+                .unwrap();
+        assert!(matches!(
+            execute_compound_select(&db, &compound, &HashMap::new(), &HashMap::new()),
+            Err(Error::ColumnCountMismatch { .. })
+        ));
     }
 }

@@ -41,8 +41,8 @@ use crate::connection::{leading_keyword, Connection};
 use crate::ddl::{parse_create_table, CreateTable};
 use crate::dml_insert::{parse_insert, Insert, InsertSource};
 use crate::dml_select::{
-    describe_aggregate_call, parse_param_marker, parse_select, AggregateArg, AggregateCall, Expr,
-    ParamMarker, Select, SelectColumns,
+    describe_aggregate_call, parse_compound_select, parse_param_marker, AggregateArg,
+    AggregateCall, CompoundSelect, Expr, ParamMarker, Select, SelectColumns,
 };
 use crate::engine::{describe_window_call, execute_create_table, execute_insert_returning_rowids};
 use crate::error::{Error, Result};
@@ -57,7 +57,7 @@ use std::collections::HashMap;
 pub(crate) enum StatementKind {
     CreateTable(CreateTable),
     Insert(Insert),
-    Select(Select),
+    Select(CompoundSelect),
 }
 
 /// Tokenizes and parses `sql`, resolving parameter markers to 1-based
@@ -75,7 +75,7 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
             StatementKind::Insert(parse_insert(&tokens)?)
         }
         Some(kw) if kw.eq_ignore_ascii_case("SELECT") => {
-            StatementKind::Select(parse_select(&tokens)?)
+            StatementKind::Select(parse_compound_select(&tokens)?)
         }
         _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
     };
@@ -97,7 +97,12 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
             }
             InsertSource::Select(select) => rewrite_select_params(select, &mut resolver),
         },
-        StatementKind::Select(select) => rewrite_select_params(select, &mut resolver),
+        StatementKind::Select(compound) => {
+            rewrite_select_params(&mut compound.first, &mut resolver);
+            for (_, select) in &mut compound.rest {
+                rewrite_select_params(select, &mut resolver);
+            }
+        }
     }
 
     Ok((kind, resolver.names))
@@ -438,8 +443,19 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    fn resolved_select(&self) -> Result<Select> {
-        Ok(self.resolve_select(self.select()?))
+    /// Resolves every `Expr::Parameter` across this statement's
+    /// (possibly compound — issue #126) `SELECT`: `compound.first`, then
+    /// each `compound.rest` entry, via [`Statement::resolve_select`].
+    fn resolved_compound_select(&self) -> Result<CompoundSelect> {
+        let compound = self.select()?;
+        Ok(CompoundSelect {
+            first: self.resolve_select(&compound.first),
+            rest: compound
+                .rest
+                .iter()
+                .map(|(op, select)| (*op, self.resolve_select(select)))
+                .collect(),
+        })
     }
 
     /// Resolves every `Expr::Parameter` in `select` (select-list
@@ -509,7 +525,7 @@ impl<'conn> Statement<'conn> {
         Ok(affected)
     }
 
-    fn select(&self) -> Result<&Select> {
+    fn select(&self) -> Result<&CompoundSelect> {
         match &self.kind {
             StatementKind::Select(select) => Ok(select),
             _ => Err(Error::UnrecognizedStatement(
@@ -523,8 +539,8 @@ impl<'conn> Statement<'conn> {
     where
         F: FnMut(Row<'_>) -> Result<T>,
     {
-        let select = self.resolved_select()?;
-        let (columns, rows) = self.conn.run_select(&select)?;
+        let compound = self.resolved_compound_select()?;
+        let (columns, rows) = self.conn.run_compound_select(&compound)?;
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
@@ -534,8 +550,8 @@ impl<'conn> Statement<'conn> {
     /// values in result-column order. Errors with
     /// [`Error::QueryReturnedNoRows`] if no row matched.
     pub fn query_row(&self) -> Result<Vec<Value>> {
-        let select = self.resolved_select()?;
-        let (_, mut rows) = self.conn.run_select(&select)?;
+        let compound = self.resolved_compound_select()?;
+        let (_, mut rows) = self.conn.run_compound_select(&compound)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -548,8 +564,8 @@ impl<'conn> Statement<'conn> {
     where
         F: FnOnce(Row<'_>) -> Result<T>,
     {
-        let select = self.resolved_select()?;
-        let (columns, mut rows) = self.conn.run_select(&select)?;
+        let compound = self.resolved_compound_select()?;
+        let (columns, mut rows) = self.conn.run_compound_select(&compound)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -562,8 +578,8 @@ impl<'conn> Statement<'conn> {
     /// collects into a `Vec`), this is the same shape as real
     /// `rusqlite::Statement::query`.
     pub fn query(&mut self) -> Result<Rows<'_>> {
-        let select = self.resolved_select()?;
-        let result = self.conn.run_select(&select)?;
+        let compound = self.resolved_compound_select()?;
+        let result = self.conn.run_compound_select(&compound)?;
         self.last_result = Some(result);
         let (columns, rows) = self.last_result.as_ref().expect("just assigned Some above");
         Ok(Rows::new(columns, rows))
@@ -581,8 +597,8 @@ impl<'conn> Statement<'conn> {
 
     /// Runs this `SELECT`, returning whether it matched at least one row.
     pub fn exists(&self) -> Result<bool> {
-        let select = self.resolved_select()?;
-        let (_, rows) = self.conn.run_select(&select)?;
+        let compound = self.resolved_compound_select()?;
+        let (_, rows) = self.conn.run_compound_select(&compound)?;
         Ok(!rows.is_empty())
     }
 
@@ -598,13 +614,17 @@ impl<'conn> Statement<'conn> {
     }
 
     /// This statement's result-column names, in order. Errors if this
-    /// isn't a `SELECT`.
+    /// isn't a `SELECT`. For a compound `SELECT` (`UNION`/`INTERSECT`/
+    /// `EXCEPT` — issue #126), these come from the first branch alone,
+    /// same as real SQLite (the other branches' column names aren't
+    /// required to match, and aren't used for anything if they don't).
     pub fn column_names(&self) -> Result<Vec<String>> {
-        match &self.select()?.columns {
+        let first = &self.select()?.first;
+        match &first.columns {
             SelectColumns::All => Ok(self
                 .conn
                 .db()
-                .table(&self.select()?.table_name)?
+                .table(&first.table_name)?
                 .column_names
                 .clone()),
             SelectColumns::Named(names) => Ok(names.clone()),
