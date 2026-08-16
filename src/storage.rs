@@ -23,6 +23,30 @@ pub trait TableSource {
     /// unoptimized. See the ADR for why this isn't real SQLite's
     /// `IndexInfo`/`best_index` negotiation.
     fn scan(&self, filter: Option<&Expr>) -> Result<Vec<Vec<Value>>>;
+
+    /// Inserts a new row (issue #95). Default: read-only, errors with
+    /// [`Error::ReadOnlyVirtualTable`]. [`Table`] (native tables) never
+    /// goes through this path — `INSERT` into a native table uses
+    /// [`Database::insert_row`] directly, unrelated to `TableSource`.
+    fn insert(&self, _row: Vec<Value>) -> Result<()> {
+        Err(Error::ReadOnlyVirtualTable)
+    }
+
+    /// Notifies this source that the enclosing
+    /// [`crate::Transaction`]/[`crate::Savepoint`] has begun/committed/
+    /// rolled back (issue #95). Defaults: no-op — most virtual tables
+    /// don't need to know about transaction boundaries, and
+    /// `Transaction`/`Savepoint`'s own snapshot/restore already covers
+    /// native tables, unrelated to this.
+    fn begin(&self) -> Result<()> {
+        Ok(())
+    }
+    fn commit(&self) -> Result<()> {
+        Ok(())
+    }
+    fn rollback(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl TableSource for Table {
@@ -165,6 +189,47 @@ impl Database {
     /// calls this.
     pub(crate) fn register_virtual_table(&mut self, name: String, source: Box<dyn TableSource>) {
         self.virtual_tables.insert(name, source);
+    }
+
+    /// Returns a registered virtual table's column names (issue #95 —
+    /// used by `engine::execute_insert_into_virtual_table` for
+    /// column-list expansion, the same role [`Database::table`]'s
+    /// `column_names` field plays for native `INSERT`).
+    pub fn virtual_table_column_names(&self, table_name: &str) -> Result<Vec<String>> {
+        self.virtual_tables
+            .get(table_name)
+            .map(|source| source.column_names().to_vec())
+            .ok_or_else(|| Error::TableNotFound(table_name.to_string()))
+    }
+
+    /// Inserts a row into a registered virtual table (issue #95),
+    /// via [`TableSource::insert`] — errors with
+    /// [`Error::ReadOnlyVirtualTable`] unless the table's [`crate::VTab`]
+    /// overrode [`crate::VTab::insert`].
+    pub fn insert_into_virtual_table(&mut self, table_name: &str, row: Vec<Value>) -> Result<()> {
+        self.virtual_tables
+            .get(table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?
+            .insert(row)
+    }
+
+    /// Notifies every registered virtual table that a
+    /// [`crate::Transaction`]/[`crate::Savepoint`] has begun/committed/
+    /// rolled back (issue #95), via [`TableSource::begin`]/`commit`/
+    /// `rollback`. Stops at the first error rather than a two-phase
+    /// protocol — not a real concern with this crate's single-writer,
+    /// in-memory model, but stated plainly: an earlier-notified virtual
+    /// table in the same call isn't rolled back if a later one errors.
+    pub(crate) fn notify_virtual_tables_begin(&self) -> Result<()> {
+        self.virtual_tables.values().try_for_each(|s| s.begin())
+    }
+
+    pub(crate) fn notify_virtual_tables_commit(&self) -> Result<()> {
+        self.virtual_tables.values().try_for_each(|s| s.commit())
+    }
+
+    pub(crate) fn notify_virtual_tables_rollback(&self) -> Result<()> {
+        self.virtual_tables.values().try_for_each(|s| s.rollback())
     }
 
     /// Returns a mutable reference to a single cell, addressed by its row's

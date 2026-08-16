@@ -51,6 +51,35 @@ pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Re
     Ok(rowids)
 }
 
+/// Executes an `INSERT` into a *registered virtual table* (issue #95),
+/// returning the number of rows inserted. Resolves each row the same
+/// way [`execute_insert_returning_rowids`] does for native tables
+/// (column-list expansion, parameter/literal resolution), but writes
+/// through [`crate::storage::Database::insert_into_virtual_table`]
+/// (→ [`crate::storage::TableSource::insert`]) instead of
+/// [`crate::storage::Database::insert_row`]. Virtual tables have no
+/// rowid concept (see `src/vtab.rs`'s module doc comment), so unlike
+/// [`execute_insert_returning_rowids`] this returns just the affected
+/// count — there's nothing rowid-shaped to return.
+pub fn execute_insert_into_virtual_table(db: &mut Database, insert: &Insert) -> Result<usize> {
+    let column_names = db.virtual_table_column_names(&insert.table_name)?;
+
+    let mut affected = 0;
+    for row in &insert.rows {
+        let expanded = match &insert.columns {
+            None => row.clone(),
+            Some(names) => expand_row(&column_names, names, row)?,
+        };
+        let values = expanded
+            .iter()
+            .map(resolve_insert_value)
+            .collect::<Result<Vec<Value>>>()?;
+        db.insert_into_virtual_table(&insert.table_name, values)?;
+        affected += 1;
+    }
+    Ok(affected)
+}
+
 /// Resolves an `INSERT` value slot into a concrete [`Value`] —
 /// [`Expr::Literal`] as-is, [`Expr::Parameter`] as [`Value::Null`]
 /// (matching real SQLite's unbound-parameter default; `crate::Statement`
