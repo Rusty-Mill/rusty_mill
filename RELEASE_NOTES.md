@@ -23,6 +23,38 @@ entry per PR.
 
 ---
 
+## PR #100 — Add VTab/VTabCursor/Context core traits (closes #91)
+**2026-08-16** · [#100](https://github.com/baileyrd/rusty_-rusqlite/pull/100)
+
+Eponymous, read-only virtual tables — the smallest meaningful slice of
+the `vtab` epic, built on #90's `TableSource` abstraction.
+
+- **Added:** `VTab`/`VTabCursor`/`Context` traits (new `src/vtab.rs`),
+  mirroring real `rusqlite::vtab::VTab`/`VTabCursor`/`Context`'s
+  *shape* (a `VTab` that `open()`s a `VTabCursor`, driven `filter` →
+  loop `next`/`eof`/`column`) — not its C-FFI mechanics, since this
+  crate has no C engine invoking these callbacks.
+- **Two deliberate shape deviations**, both because the capability
+  they'd represent doesn't exist here yet: no `Values`/`ValueIter` in
+  `filter`'s signature (no `best_index` negotiation to bind values
+  from — `filter` gets the whole `WHERE`-clause `Expr` instead, per
+  #94's resolution), and no `VTabCursor::rowid` (`TableSource::scan`'s
+  `Vec<Vec<Value>>` return shape has no rowid to report).
+- **Added:** `VTabTableSource<T: VTab>`, the adapter from `VTab` to the
+  `TableSource` the engine actually consults — each `scan()` call opens
+  a fresh cursor and drives it to completion, eagerly materializing
+  rows.
+- **Also exports `storage::TableSource` from `lib.rs`** — an omission
+  from #99.
+- Proven end-to-end with a `RangeVTab` example (generates an integer
+  sequence — same spirit as real SQLite's `generate_series` vtab
+  example) registered and queried through the real `SELECT` engine
+  path with `WHERE` filtering and column projection.
+- 6 new unit tests (274 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #99 — Add TableSource abstraction (closes #90)
 **2026-08-14** · [#99](https://github.com/baileyrd/rusty_-rusqlite/pull/99)
 
