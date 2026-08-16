@@ -23,6 +23,29 @@ entry per PR.
 
 ---
 
+## PR #142 — Add CREATE INDEX / DROP INDEX (recorded, not accelerating) (closes #122)
+**2026-08-16** · [#142](https://github.com/baileyrd/rusty_-rusqlite/pull/142)
+
+- **Added:** `CREATE INDEX [IF NOT EXISTS] name ON table (col, ...)` /
+  `DROP INDEX [IF EXISTS] name` — new `CreateIndex`/`DropIndex` AST,
+  parser, `Database::create_index`/`drop_index`/`index`, and
+  `Connection::execute` dispatch arms.
+- **Non-accelerating, stated plainly (per the issue's own scope cut):**
+  this engine's storage is a plain `HashMap`/`Vec`, so an index can't
+  actually speed up anything here. `CREATE INDEX`/`DROP INDEX` parse and
+  record schema metadata only — the same honest-inert-plumbing precedent
+  `PRAGMA foreign_keys` already established. Every scan stays a full
+  scan regardless of what's indexed.
+- `CREATE INDEX` validates eagerly: the target table must exist and
+  every named column must be one of its columns, checked at creation
+  time rather than silently accepted and never verified.
+- New `Error::IndexAlreadyExists`/`Error::IndexNotFound`; new
+  `Action::CreateIndex`/`Action::DropIndex` authorizer/hook variants.
+- Twelfth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 500 tests passing.
+
+---
+
 ## PR #141 — Add ALTER TABLE (ADD COLUMN, RENAME TO, RENAME COLUMN) (closes #121)
 **2026-08-16** · [#141](https://github.com/baileyrd/rusty_-rusqlite/pull/141)
 
