@@ -50,9 +50,20 @@ PID is never mistaken for a live worker.
 
 ## Status
 
-**Phase 0 complete.** `rusty_tokio` is confirmed as the async runtime — see
-[ADR-0001](docs/decisions/0001-async-runtime-rusty-tokio.md), including its
-stated verification limits. Phase 1 (walking skeleton + two spikes) is next.
+**Phase 1 complete** — the walking skeleton works and its exit criterion is met.
+
+- **Phase 0**: `rusty_tokio` confirmed as the async runtime —
+  [ADR-0001](docs/decisions/0001-async-runtime-rusty-tokio.md), including its
+  stated verification limits.
+- **Phase 1**: daemon / detached worker / client roles, `PlainTerminal`
+  sessions, and 79 passing tests. `supervisor_restart_recovery.rs` proves the
+  central promise against real processes: a session survives its daemon being
+  `SIGKILL`ed and is **adopted** — not respawned — by the replacement. Both
+  spikes ran; see the [Phase 1 report](docs/phase-1-report.md).
+  - Claude Code's hooks **do** fire when it runs headless under a detached
+    worker, so Phase 3's hook-based design stands.
+  - A real PTY turns out to be **mandatory**, not preferable, for interactive
+    agent sessions — [ADR-0002](docs/decisions/0002-pty-required-for-agent-sessions.md).
 
 Phase order is deliberate and gated: the highest-uncertainty work (agent-CLI
 "needs input" detection, runtime availability) is proven earliest, and no phase

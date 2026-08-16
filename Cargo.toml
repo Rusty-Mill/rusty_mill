@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sessionmgr-core",
+    "crates/sessionmgr-protocol",
+    "crates/sessionmgr-proc",
+    "crates/sessionmgr-daemon",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# The async runtime AND this project's sole process-spawn and local-IPC
+# layer -- see `docs/decisions/0001-async-runtime-rusty-tokio.md` for the
+# Phase 0 verification that pinned this rev.
+#
+# Pinned by rev, never tracking a branch: the same convention
+# `rusty_prime_agent` and `rusty_tokio` itself both document for their own
+# git dependencies. Bumping it is a single deliberate edit here, shared by
+# every member crate, rather than four independently drifting pins.
+#
+# Deliberately NOT `rusty_prime_agent`'s older `01e455ae` -- Phase 0 exists
+# precisely so this is a freshly verified rev rather than an inherited one.
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "6e6f18471749ee8327ce52e9d9b825e2e9e5e1a7" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+sessionmgr-core = { path = "crates/sessionmgr-core" }
+sessionmgr-protocol = { path = "crates/sessionmgr-protocol" }
+sessionmgr-proc = { path = "crates/sessionmgr-proc" }

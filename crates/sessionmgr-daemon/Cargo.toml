@@ -1,0 +1,33 @@
+[package]
+name = "sessionmgr-daemon"
+description = "The sessionmgr composition root: supervisor daemon, detached per-session workers, and the CLI client roles. Ships the `sessionmgr` binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# A real `[lib]` alongside the `[[bin]]`, following `rusty_prime_agent`'s
+# split for the same reason: internal wire handling and path layout must
+# be importable by `tests/` and (Phase 4) by the TUI crate without either
+# depending on a bin target, which Cargo cannot express.
+name = "sessionmgr_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+# One binary, three roles (daemon / detached worker / client). One
+# release artifact, no version skew between "the running daemon" and
+# "the worker binary it just spawned", and `current_exe()` is correct by
+# construction when the daemon re-execs itself as a worker.
+name = "sessionmgr"
+path = "src/main.rs"
+
+[dependencies]
+sessionmgr-core = { workspace = true }
+sessionmgr-protocol = { workspace = true }
+sessionmgr-proc = { workspace = true }
+rusty_tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
