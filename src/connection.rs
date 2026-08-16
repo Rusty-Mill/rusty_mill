@@ -1610,6 +1610,29 @@ mod tests {
     }
 
     #[test]
+    fn create_table_if_not_exists_is_a_no_op_on_an_existing_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        conn.execute("CREATE TABLE IF NOT EXISTS t (a INTEGER)")
+            .unwrap();
+
+        let row = conn.query_row("SELECT a FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1)]);
+    }
+
+    #[test]
+    fn create_table_without_if_not_exists_still_errors_on_collision() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        assert!(matches!(
+            conn.execute("CREATE TABLE t (a INTEGER)"),
+            Err(Error::TableAlreadyExists(_))
+        ));
+    }
+
+    #[test]
     fn insert_violating_primary_key_is_a_constraint_error() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")

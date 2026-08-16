@@ -11,6 +11,10 @@ use crate::value::Value;
 pub struct CreateTable {
     pub table_name: String,
     pub columns: Vec<ColumnDef>,
+    /// Whether `IF NOT EXISTS` followed `CREATE TABLE` (issue #119) — a
+    /// name collision is a silent no-op (existing table kept as-is, no
+    /// schema comparison) rather than [`crate::error::Error::TableAlreadyExists`].
+    pub if_not_exists: bool,
 }
 
 /// A single column definition within a `CREATE TABLE`.
@@ -88,6 +92,14 @@ pub fn parse_create_table(tokens: &[Token]) -> Result<CreateTable, ParseError> {
     let mut p = Parser { tokens, pos: 0 };
     p.expect_ident("CREATE")?;
     p.expect_ident("TABLE")?;
+    let if_not_exists = if p.peek_ident("IF") {
+        p.advance();
+        p.expect_ident("NOT")?;
+        p.expect_ident("EXISTS")?;
+        true
+    } else {
+        false
+    };
     let table_name = p.expect_any_ident()?;
     p.expect_punct("(")?;
 
@@ -111,6 +123,7 @@ pub fn parse_create_table(tokens: &[Token]) -> Result<CreateTable, ParseError> {
     Ok(CreateTable {
         table_name,
         columns,
+        if_not_exists,
     })
 }
 
@@ -413,6 +426,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_if_not_exists() {
+        let tokens = tokenize("CREATE TABLE IF NOT EXISTS t (a INTEGER)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert_eq!(create.table_name, "t");
+        assert!(create.if_not_exists);
+    }
+
+    #[test]
+    fn plain_create_table_has_if_not_exists_false() {
+        let tokens = tokenize("CREATE TABLE t (a INTEGER)").unwrap();
+        let create = parse_create_table(&tokens).unwrap();
+        assert!(!create.if_not_exists);
     }
 
     #[test]

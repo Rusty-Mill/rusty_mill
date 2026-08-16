@@ -23,6 +23,20 @@ entry per PR.
 
 ---
 
+## PR #139 — Add CREATE TABLE IF NOT EXISTS (closes #119)
+**2026-08-16** · [#139](https://github.com/baileyrd/rusty_-rusqlite/pull/139)
+
+- **Added:** `CREATE TABLE IF NOT EXISTS name (...)` — a name collision
+  is now a silent no-op (existing table kept as-is, no schema comparison
+  against the new statement's columns) instead of
+  `Error::TableAlreadyExists`.
+- **Unchanged:** plain `CREATE TABLE` (no `IF NOT EXISTS`) still errors
+  on collision.
+- Ninth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 450 tests passing.
+
+---
+
 ## PR #138 — Enforce PRIMARY KEY/UNIQUE/NOT NULL/CHECK at insert time (closes #118)
 **2026-08-16** · [#138](https://github.com/baileyrd/rusty_-rusqlite/pull/138)
 
