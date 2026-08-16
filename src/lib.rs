@@ -42,6 +42,7 @@ mod connection;
 mod ddl;
 mod dml_insert;
 mod dml_select;
+mod dml_update;
 mod engine;
 mod error;
 mod eval;
@@ -80,11 +81,12 @@ pub use dml_select::{
     CompoundOp, CompoundSelect, Cte, Expr, ParamMarker, Select, SelectColumns, WindowCall,
     WithSelect,
 };
+pub use dml_update::{parse_update, Update};
 pub use engine::{
     execute_alter_table, execute_compound_select, execute_create_index, execute_create_table,
     execute_drop_index, execute_drop_table, execute_insert, execute_insert_into_virtual_table,
     execute_select, execute_select_with_aggregates, execute_select_with_functions,
-    execute_select_with_window, execute_with_select,
+    execute_select_with_window, execute_update, execute_with_select,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{

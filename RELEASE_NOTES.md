@@ -23,6 +23,36 @@ entry per PR.
 
 ---
 
+## PR #148 — Add UPDATE statement (closes #128)
+**2026-08-16** · [#148](https://github.com/baileyrd/rusty_-rusqlite/pull/148)
+
+- **Added:** `UPDATE table SET col = expr, ... [WHERE ...]` — single
+  table, no `FROM` clause (SQLite's `UPDATE...FROM` extension explicitly
+  out of scope for this issue). New `Update` AST, `parse_update`,
+  `Database::update_rows`, and free-function `execute_update`.
+- Each `SET` expression is evaluated against the row's *pre-update*
+  values — `UPDATE t SET b = a, a = 5` sees `a`'s old value on the `b =
+  a` side, matching real SQLite's own "evaluate against the pre-`UPDATE`
+  row" rule rather than applying assignments as a left-to-right mutation
+  sequence.
+- Every updated row is fully re-validated against `NOT NULL`/`PRIMARY
+  KEY`/`UNIQUE`/`CHECK` (issue #118's constraint enforcement), excluding
+  the row's own pre-update values from the `PRIMARY KEY`/`UNIQUE`
+  conflict scan — otherwise a no-op update of an existing PK/UNIQUE
+  value would spuriously conflict with itself. A violation on any single
+  row aborts the whole statement (no partial update), matching this
+  crate's existing all-or-nothing `INSERT` behavior.
+- **Wired into `hooks::Action::Update`** (previously an unreachable
+  placeholder variant) — `authorizer`/`update_hook` fire correctly, one
+  `update_hook` call per updated row with its real rowid.
+- Wired into every actual statement-dispatch site: `Connection::execute`
+  and `Statement::prepare`/`execute` (bound-parameter support included).
+- Returns the affected-row count, matching `Connection::execute`'s
+  existing `INSERT` behavior — `0` (not an error) when no row matches
+  `WHERE`.
+
+---
+
 ## PR #147 — Add WITH (non-recursive common table expressions) (closes #127)
 **2026-08-16** · [#147](https://github.com/baileyrd/rusty_-rusqlite/pull/147)
 

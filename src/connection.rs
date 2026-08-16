@@ -6,10 +6,12 @@ use crate::ddl::{
 };
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_compound_select, parse_with_select, SelectColumns};
+use crate::dml_update::parse_update;
 use crate::engine::{
     execute_alter_table, execute_create_index, execute_create_table, execute_drop_index,
     execute_drop_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
     execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
+    execute_update,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -785,15 +787,16 @@ impl Connection {
         self.rollback_hook = hook.map(|f| Box::new(f) as Box<dyn FnMut()>);
     }
 
-    /// Registers a callback invoked once per row inserted by
+    /// Registers a callback invoked once per row inserted or updated by
     /// [`Connection::execute`]/[`Connection::execute_batch`], as
     /// `(action, db_name, table_name, rowid)`. `db_name` is always
     /// `"main"` (no `ATTACH` support). `rowid` is the row's real,
     /// persistent SQLite-style rowid — see [`Connection::last_insert_rowid`].
     /// Pass `None` to unregister.
     ///
-    /// Only [`crate::hooks::Action::Insert`] can fire today; `Update`/
-    /// `Delete` have no statements to trigger them yet.
+    /// [`crate::hooks::Action::Insert`] and (issue #128) [`crate::hooks::
+    /// Action::Update`] can fire today; `Delete` has no statement to
+    /// trigger it yet.
     pub fn update_hook<F>(&mut self, hook: Option<F>)
     where
         F: FnMut(Action, &str, &str, i64) + 'static,
@@ -1246,6 +1249,12 @@ impl Connection {
                     // rather than inventing a placeholder value.
                     (affected, insert.table_name, Action::Insert, Vec::new())
                 }
+            }
+            Some(kw) if kw.eq_ignore_ascii_case("UPDATE") => {
+                let update = parse_update(&tokens)?;
+                self.check_authorized(Action::Update, &update.table_name)?;
+                let rowids = execute_update(&mut self.db, &update)?;
+                (rowids.len(), update.table_name, Action::Update, rowids)
             }
             Some(kw) if kw.eq_ignore_ascii_case("DROP") && is_index_statement(&tokens) => {
                 let drop = parse_drop_index(&tokens)?;
@@ -1850,12 +1859,12 @@ mod tests {
 
     #[test]
     fn execute_on_unrecognized_statement_is_an_error() {
-        // `DROP TABLE` is a recognized statement now (issue #120) --
-        // `UPDATE` isn't implemented yet, so it's this test's example
-        // instead.
+        // `DROP TABLE`/`UPDATE` are recognized statements now (issues
+        // #120/#128) -- `DELETE` isn't implemented yet, so it's this
+        // test's example instead.
         let mut conn = Connection::open_in_memory().unwrap();
         assert!(matches!(
-            conn.execute("UPDATE t SET a = 1"),
+            conn.execute("DELETE FROM t"),
             Err(Error::UnrecognizedStatement(_))
         ));
     }
@@ -3088,6 +3097,142 @@ mod tests {
 
         conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
         assert!(!*fired.borrow());
+    }
+
+    #[test]
+    fn update_happy_path_changes_matching_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z')")
+            .unwrap();
+
+        let affected = conn.execute("UPDATE t SET b = 'hit' WHERE a >= 2").unwrap();
+        assert_eq!(affected, 2);
+
+        let mut rows: Vec<(i64, String)> = conn
+            .query_map("SELECT a, b FROM t", |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "x".to_string()),
+                (2, "hit".to_string()),
+                (3, "hit".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn update_with_no_matching_rows_affects_zero_and_is_not_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        let affected = conn.execute("UPDATE t SET a = 99 WHERE a = 42").unwrap();
+        assert_eq!(affected, 0);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn where_less_update_changes_every_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let affected = conn.execute("UPDATE t SET a = 0").unwrap();
+        assert_eq!(affected, 3);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn update_can_set_multiple_columns_and_reference_other_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 10)").unwrap();
+
+        conn.execute("UPDATE t SET b = a, a = 5").unwrap();
+        // `b = a` reads `a`'s *pre-update* value (1), not the `a = 5`
+        // assignment landing in the same statement.
+        let row = conn.query_row("SELECT a, b FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(5), Value::Integer(1)]);
+    }
+
+    #[test]
+    fn update_violating_a_constraint_errors_and_does_not_apply() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER PRIMARY KEY, b INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 1), (2, 2)").unwrap();
+
+        assert!(matches!(
+            conn.execute("UPDATE t SET a = 2 WHERE a = 1"),
+            Err(Error::ConstraintViolation(_))
+        ));
+        // Unchanged: the conflicting update didn't apply.
+        let mut rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 2]);
+    }
+
+    #[test]
+    fn update_on_a_primary_key_column_does_not_conflict_with_itself() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER PRIMARY KEY)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        // Without excluding the row's own pre-update value from the
+        // PRIMARY KEY conflict scan, this would spuriously error.
+        conn.execute("UPDATE t SET a = 1 WHERE a = 1").unwrap();
+        let row = conn.query_row("SELECT a FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1)]);
+    }
+
+    #[test]
+    fn update_hook_fires_once_per_updated_row_with_its_real_rowid() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.update_hook(Some(move |action, db: &str, table: &str, rowid| {
+            events_clone
+                .borrow_mut()
+                .push((action, db.to_string(), table.to_string(), rowid));
+        }));
+
+        conn.execute("UPDATE t SET a = 0 WHERE a >= 2").unwrap();
+
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                (Action::Update, "main".to_string(), "t".to_string(), 2),
+                (Action::Update, "main".to_string(), "t".to_string(), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn update_works_through_a_prepared_statement_with_bound_params() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let mut stmt = conn.prepare("UPDATE t SET a = ? WHERE a = ?").unwrap();
+        stmt.raw_bind_parameter(1, 99i64).unwrap();
+        stmt.raw_bind_parameter(2, 2i64).unwrap();
+        assert_eq!(stmt.execute().unwrap(), 1);
+
+        let mut rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 99]);
     }
 
     #[test]
