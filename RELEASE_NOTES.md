@@ -23,6 +23,42 @@ entry per PR.
 
 ---
 
+## PR #103 — Add UpdateVTab/TransactionVTab (closes #95)
+**2026-08-16** · [#103](https://github.com/baileyrd/rusty_-rusqlite/pull/103)
+
+- **Added:** `VTab::insert`/`begin`/`commit`/`rollback` as defaulted
+  trait methods (default: read-only / no-op), so a single already-shipped
+  `VTabTableSource<T>` adapter keeps working unconditionally for every
+  capability combination instead of needing separate wrapper types per
+  combination.
+- **Added:** `UpdateVTab: VTab {}` and `TransactionVTab: UpdateVTab {}` —
+  zero-method marker traits documenting "this module opted into
+  insert/transaction support," matching real rusqlite's `UpdateVTab`/
+  `TransactionVTab` naming. Rust can't enforce "did this type actually
+  override the default," so these are advisory only, same status as any
+  other marker trait.
+- **Added:** `TableSource::insert`/`begin`/`commit`/`rollback` (mirroring
+  `VTab`, defaulted the same way) plus `Database::insert_into_virtual_table`
+  and `notify_virtual_tables_begin/commit/rollback`, wired into
+  `Transaction`'s begin/commit/rollback/drop paths so a writable vtab
+  genuinely participates in transaction rollback, not just commit.
+- **Added:** `engine::execute_insert_into_virtual_table` and INSERT
+  dispatch in `Connection::execute` routing to it when the target name
+  isn't a native table (native tables keep first-match precedence, same
+  rule `Database::scan` already used for SELECT).
+- **Scope cut:** `update`/`delete` are deliberately **not** part of this
+  vtab surface — this crate has no `UPDATE`/`DELETE` grammar or execution
+  path yet for *any* table, native or virtual, so there was nothing to
+  wire a vtab hook into. That's a separate, pre-existing gap, not
+  something to invent from scratch here.
+- **Scope cut:** virtual-table inserts report only an affected-row count,
+  no rowid — a virtual table has no native rowid concept to synthesize,
+  so `update_hook`/`last_insert_rowid` simply don't fire/update for
+  virtual-table rows. Documented as an honest omission, not a bug.
+- 306 tests passing.
+
+---
+
 ## PR #102 — Add CREATE VIRTUAL TABLE parsing + CreateVTab trait (closes #93)
 **2026-08-16** · [#102](https://github.com/baileyrd/rusty_-rusqlite/pull/102)
 

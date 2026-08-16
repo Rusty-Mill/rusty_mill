@@ -75,6 +75,10 @@ pub enum Error {
     /// that isn't registered on the connection (see
     /// [`crate::Connection::register_module`]).
     ModuleNotFound(String),
+    /// `INSERT` into a virtual table whose [`crate::VTab`] didn't
+    /// override [`crate::VTab::insert`] (issue #95) — the default,
+    /// matching a plain read-only virtual table.
+    ReadOnlyVirtualTable,
 }
 
 impl fmt::Display for Error {
@@ -111,6 +115,7 @@ impl fmt::Display for Error {
             ),
             Error::ReadOnlyConnection => write!(f, "attempt to write a readonly connection"),
             Error::ModuleNotFound(name) => write!(f, "no such module: {name:?}"),
+            Error::ReadOnlyVirtualTable => write!(f, "virtual table is read-only"),
         }
     }
 }

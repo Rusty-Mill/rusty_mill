@@ -4,8 +4,8 @@ use crate::ddl::{parse_create_table, parse_create_virtual_table, ColumnDef, Crea
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
-    execute_create_table, execute_insert_returning_rowids, execute_select_with_aggregates,
-    execute_select_with_functions, execute_select_with_window,
+    execute_create_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
+    execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -1097,8 +1097,20 @@ impl Connection {
             Some(kw) if kw.eq_ignore_ascii_case("INSERT") => {
                 let insert = parse_insert(&tokens)?;
                 self.check_authorized(Action::Insert, &insert.table_name)?;
-                let rowids = execute_insert_returning_rowids(&mut self.db, &insert)?;
-                (rowids.len(), insert.table_name, Action::Insert, rowids)
+                if self.table_exists(&insert.table_name) {
+                    let rowids = execute_insert_returning_rowids(&mut self.db, &insert)?;
+                    (rowids.len(), insert.table_name, Action::Insert, rowids)
+                } else {
+                    let affected = execute_insert_into_virtual_table(&mut self.db, &insert)?;
+                    // Virtual tables have no rowid concept (see
+                    // `src/vtab.rs`'s module doc comment):
+                    // `update_hook` doesn't fire and
+                    // `last_insert_rowid` doesn't change for these
+                    // rows, since there's no real rowid to report --
+                    // an empty `rowids` here reflects that honestly
+                    // rather than inventing a placeholder value.
+                    (affected, insert.table_name, Action::Insert, Vec::new())
+                }
             }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
@@ -1793,6 +1805,91 @@ mod tests {
             conn.execute("CREATE VIRTUAL TABLE t USING arange(1, 4)"),
             Err(Error::TableAlreadyExists("t".to_string()))
         );
+    }
+
+    #[test]
+    fn insert_into_read_only_virtual_table_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module("v", FixedRowsVTab { rows: vec![1, 2] })
+            .unwrap();
+        assert_eq!(
+            conn.execute("INSERT INTO v VALUES (3)"),
+            Err(Error::ReadOnlyVirtualTable)
+        );
+    }
+
+    /// A writable vtab (issue #95): one integer column, backed by a
+    /// `RefCell` so `insert` can mutate it through `&self`.
+    struct AppendableVTab {
+        rows: std::cell::RefCell<Vec<i64>>,
+    }
+
+    impl crate::vtab::VTab for AppendableVTab {
+        type Cursor = FixedRowsCursor;
+
+        fn column_names(&self) -> Vec<String> {
+            vec!["value".to_string()]
+        }
+
+        fn open(&self) -> Result<FixedRowsCursor> {
+            Ok(FixedRowsCursor {
+                rows: self.rows.borrow().clone(),
+                pos: 0,
+            })
+        }
+
+        fn insert(&self, row: Vec<Value>) -> Result<()> {
+            match row.as_slice() {
+                [Value::Integer(n)] => {
+                    self.rows.borrow_mut().push(*n);
+                    Ok(())
+                }
+                other => Err(Error::ColumnCountMismatch {
+                    expected: 1,
+                    actual: other.len(),
+                }),
+            }
+        }
+    }
+
+    impl crate::vtab::UpdateVTab for AppendableVTab {}
+
+    #[test]
+    fn insert_into_writable_virtual_table_via_execute() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module(
+            "v",
+            AppendableVTab {
+                rows: std::cell::RefCell::new(vec![1]),
+            },
+        )
+        .unwrap();
+
+        let affected = conn.execute("INSERT INTO v VALUES (2)").unwrap();
+        assert_eq!(affected, 1);
+
+        let values: Vec<i64> = conn.query_map("SELECT * FROM v", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn insert_into_writable_virtual_table_does_not_affect_last_insert_rowid() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module(
+            "v",
+            AppendableVTab {
+                rows: std::cell::RefCell::new(vec![]),
+            },
+        )
+        .unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (42)").unwrap();
+        assert_eq!(conn.last_insert_rowid(), 1);
+
+        conn.execute("INSERT INTO v VALUES (1)").unwrap();
+        // Virtual tables have no rowid concept -- last_insert_rowid is
+        // untouched by the virtual-table insert above.
+        assert_eq!(conn.last_insert_rowid(), 1);
     }
 
     #[test]

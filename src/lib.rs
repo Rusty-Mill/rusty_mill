@@ -75,8 +75,8 @@ pub use dml_select::{
     WindowCall,
 };
 pub use engine::{
-    execute_create_table, execute_insert, execute_select, execute_select_with_aggregates,
-    execute_select_with_functions, execute_select_with_window,
+    execute_create_table, execute_insert, execute_insert_into_virtual_table, execute_select,
+    execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{
@@ -98,8 +98,8 @@ pub use transaction::{
 };
 pub use value::{Type, Value, ValueRef};
 pub use vtab::{
-    dequote, escape_double_quote, parameter, parse_boolean, Context, CreateVTab, VTab, VTabCursor,
-    VTabTableSource,
+    dequote, escape_double_quote, parameter, parse_boolean, Context, CreateVTab, TransactionVTab,
+    UpdateVTab, VTab, VTabCursor, VTabTableSource,
 };
 
 #[cfg(test)]

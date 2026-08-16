@@ -39,7 +39,7 @@
 //!   actually carry here.
 
 use crate::dml_select::Expr;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::storage::TableSource;
 use crate::tosql::ToSql;
 use crate::value::Value;
@@ -57,7 +57,76 @@ pub trait VTab {
 
     /// Opens a new cursor for scanning this table from the start.
     fn open(&self) -> Result<Self::Cursor>;
+
+    /// Inserts a new row's values, in column-definition order (issue
+    /// #95). Default: read-only, errors with
+    /// [`crate::Error::ReadOnlyVirtualTable`]. Takes `&self`, like
+    /// every other `VTab`-family method — a real mutation needs its own
+    /// interior mutability (`RefCell`, `Mutex`, ...).
+    ///
+    /// Override this to support `INSERT`, and implement the
+    /// [`UpdateVTab`] marker trait alongside it — nothing *enforces*
+    /// that pairing (Rust can't check "did this type override a
+    /// default method"), but it's the documented convention this
+    /// crate's own examples and [`crate::Connection::create_module`]-
+    /// adjacent docs follow, matching real `rusqlite`'s
+    /// `VTab`/`UpdateVTab` split.
+    ///
+    /// **Also out of scope:** `UPDATE`/`DELETE`. This crate's SQL
+    /// engine has no `UPDATE`/`DELETE` grammar or execution path at
+    /// all yet, for *any* table (native or virtual) — adding them here
+    /// first would mean inventing `UPDATE`/`DELETE` support
+    /// specifically for virtual tables before it exists for ordinary
+    /// ones, which is backwards. Revisit once native `UPDATE`/`DELETE`
+    /// exists.
+    fn insert(&self, _row: Vec<Value>) -> Result<()> {
+        Err(Error::ReadOnlyVirtualTable)
+    }
+
+    /// Notifies this table that the enclosing
+    /// [`crate::Transaction`]/[`crate::Savepoint`] has begun (issue
+    /// #95). Default: no-op — most virtual tables don't need to know
+    /// about transaction boundaries. Override alongside implementing
+    /// the [`TransactionVTab`] marker trait (same advisory-only
+    /// convention as [`UpdateVTab`]) if this table's data needs to
+    /// participate in rollback — this crate's `Transaction`/
+    /// `Savepoint` snapshot/restore mechanism only covers native
+    /// tables, so a virtual table with mutable state of its own has to
+    /// manage its own undo here.
+    fn begin(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Notifies this table that the enclosing transaction committed.
+    /// Default: no-op. See [`VTab::begin`].
+    fn commit(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Notifies this table that the enclosing transaction rolled back
+    /// — the point at which a transaction-aware implementation should
+    /// undo whatever it did since [`VTab::begin`]. Default: no-op. See
+    /// [`VTab::begin`].
+    fn rollback(&self) -> Result<()> {
+        Ok(())
+    }
 }
+
+/// Marker: a [`VTab`] that overrides [`VTab::insert`] to actually
+/// support `INSERT` (issue #95). Purely a compile-time attestation —
+/// Rust has no way to check "did this type override a default
+/// method," so this is how a vtab author documents the opt-in
+/// explicitly, the same role real `rusqlite::vtab::UpdateVTab` plays
+/// (there, it's required because `rusqlite`'s `insert`/`update`/
+/// `delete` aren't defaulted; here, where they *are* defaulted for
+/// `insert`, this trait has no methods of its own).
+pub trait UpdateVTab: VTab {}
+
+/// Marker: an [`UpdateVTab`] that also overrides
+/// [`VTab::begin`]/[`VTab::commit`]/[`VTab::rollback`] to participate
+/// in `Transaction`/`Savepoint` lifecycle notifications (issue #95).
+/// Same compile-time-attestation role as [`UpdateVTab`].
+pub trait TransactionVTab: UpdateVTab {}
 
 /// A virtual table's row-at-a-time cursor. Mirrors real
 /// `rusqlite::vtab::VTabCursor`'s shape.
@@ -148,6 +217,27 @@ impl<T: VTab> TableSource for VTabTableSource<T> {
             cursor.next()?;
         }
         Ok(rows)
+    }
+
+    /// Forwards to `T`'s own `insert`/`begin`/`commit`/`rollback` —
+    /// [`VTab`]'s defaults if `T` didn't override them (see
+    /// [`UpdateVTab`]/[`TransactionVTab`]), or the real implementation
+    /// if it did. No separate wrapper type needed for a writable or
+    /// transaction-aware vtab; this one adapter handles all of it.
+    fn insert(&self, row: Vec<Value>) -> Result<()> {
+        self.vtab.insert(row)
+    }
+
+    fn begin(&self) -> Result<()> {
+        self.vtab.begin()
+    }
+
+    fn commit(&self) -> Result<()> {
+        self.vtab.commit()
+    }
+
+    fn rollback(&self) -> Result<()> {
+        self.vtab.rollback()
     }
 }
 
@@ -402,5 +492,152 @@ mod tests {
             assert_eq!(parse_boolean(falsy), Some(false), "{falsy}");
         }
         assert_eq!(parse_boolean("maybe"), None);
+    }
+
+    /// A writable, transaction-aware vtab: an in-memory integer list
+    /// supporting `INSERT`, with `begin`/`rollback` snapshotting its own
+    /// state — proving [`UpdateVTab`]/[`TransactionVTab`] work without
+    /// needing a real [`crate::Connection`]/[`crate::Transaction`].
+    struct ListVTab {
+        rows: std::cell::RefCell<Vec<i64>>,
+        snapshot: std::cell::RefCell<Option<Vec<i64>>>,
+    }
+
+    impl ListVTab {
+        fn new(initial: Vec<i64>) -> ListVTab {
+            ListVTab {
+                rows: std::cell::RefCell::new(initial),
+                snapshot: std::cell::RefCell::new(None),
+            }
+        }
+    }
+
+    struct ListCursor {
+        rows: Vec<i64>,
+        pos: usize,
+    }
+
+    impl VTab for ListVTab {
+        type Cursor = ListCursor;
+
+        fn column_names(&self) -> Vec<String> {
+            vec!["value".to_string()]
+        }
+
+        fn open(&self) -> Result<ListCursor> {
+            Ok(ListCursor {
+                rows: self.rows.borrow().clone(),
+                pos: 0,
+            })
+        }
+
+        fn insert(&self, row: Vec<Value>) -> Result<()> {
+            match row.as_slice() {
+                [Value::Integer(n)] => {
+                    self.rows.borrow_mut().push(*n);
+                    Ok(())
+                }
+                other => Err(Error::ColumnCountMismatch {
+                    expected: 1,
+                    actual: other.len(),
+                }),
+            }
+        }
+
+        fn begin(&self) -> Result<()> {
+            *self.snapshot.borrow_mut() = Some(self.rows.borrow().clone());
+            Ok(())
+        }
+
+        fn commit(&self) -> Result<()> {
+            *self.snapshot.borrow_mut() = None;
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<()> {
+            if let Some(snap) = self.snapshot.borrow_mut().take() {
+                *self.rows.borrow_mut() = snap;
+            }
+            Ok(())
+        }
+    }
+
+    impl UpdateVTab for ListVTab {}
+    impl TransactionVTab for ListVTab {}
+
+    impl VTabCursor for ListCursor {
+        fn filter(&mut self, _filter: Option<&Expr>) -> Result<()> {
+            Ok(())
+        }
+
+        fn next(&mut self) -> Result<()> {
+            self.pos += 1;
+            Ok(())
+        }
+
+        fn eof(&self) -> bool {
+            self.pos >= self.rows.len()
+        }
+
+        fn column(&self, ctx: &mut Context, _i: usize) -> Result<()> {
+            ctx.set_result(&self.rows[self.pos])
+        }
+    }
+
+    #[test]
+    fn writable_vtab_insert_appends_a_row() {
+        let source = VTabTableSource::new(ListVTab::new(vec![1, 2]));
+        source.insert(vec![Value::Integer(3)]).unwrap();
+        assert_eq!(
+            source.scan(None).unwrap(),
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+            ]
+        );
+    }
+
+    #[test]
+    fn read_only_vtab_errors_on_insert_by_default() {
+        let source = VTabTableSource::new(RangeVTab { start: 1, end: 3 });
+        assert_eq!(
+            source.insert(vec![Value::Integer(5)]),
+            Err(Error::ReadOnlyVirtualTable)
+        );
+    }
+
+    #[test]
+    fn transaction_vtab_rollback_restores_pre_begin_state() {
+        let source = VTabTableSource::new(ListVTab::new(vec![1, 2]));
+        source.begin().unwrap();
+        source.insert(vec![Value::Integer(3)]).unwrap();
+        assert_eq!(source.scan(None).unwrap().len(), 3);
+
+        source.rollback().unwrap();
+        assert_eq!(
+            source.scan(None).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+    }
+
+    #[test]
+    fn transaction_vtab_commit_keeps_changes() {
+        let source = VTabTableSource::new(ListVTab::new(vec![1]));
+        source.begin().unwrap();
+        source.insert(vec![Value::Integer(2)]).unwrap();
+        source.commit().unwrap();
+        assert_eq!(
+            source.scan(None).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+    }
+
+    #[test]
+    fn read_only_vtab_begin_commit_rollback_are_harmless_no_ops() {
+        let source = VTabTableSource::new(RangeVTab { start: 1, end: 3 });
+        source.begin().unwrap();
+        source.commit().unwrap();
+        source.rollback().unwrap();
     }
 }

@@ -64,6 +64,7 @@ pub struct Transaction<'conn> {
 impl<'conn> Transaction<'conn> {
     pub(crate) fn new(conn: &'conn mut Connection) -> Result<Transaction<'conn>> {
         let snapshot = conn.snapshot_db();
+        conn.db().notify_virtual_tables_begin()?;
         conn.increment_transaction_depth();
         Ok(Transaction {
             conn,
@@ -74,16 +75,23 @@ impl<'conn> Transaction<'conn> {
     }
 
     /// Commits: keeps the changes made since the transaction began.
+    /// Notifies any [`crate::TransactionVTab`]-participating virtual
+    /// tables (issue #95) — this guard's own snapshot/restore mechanism
+    /// only ever covered native tables.
     pub fn commit(mut self) -> Result<()> {
+        self.conn.db().notify_virtual_tables_commit()?;
         self.snapshot = None;
         self.mark_finished();
         Ok(())
     }
 
-    /// Rolls back to the pre-transaction snapshot.
+    /// Rolls back to the pre-transaction snapshot, and notifies any
+    /// [`crate::TransactionVTab`]-participating virtual tables (issue
+    /// #95) so they can undo their own state the same way.
     pub fn rollback(mut self) -> Result<()> {
         if let Some(snapshot) = self.snapshot.take() {
             self.conn.restore_db(snapshot);
+            self.conn.db().notify_virtual_tables_rollback()?;
             self.conn.fire_rollback_hook();
         }
         self.mark_finished();
@@ -102,10 +110,14 @@ impl<'conn> Transaction<'conn> {
             return Ok(());
         }
         match self.drop_behavior {
-            DropBehavior::Commit => self.snapshot = None,
+            DropBehavior::Commit => {
+                self.conn.db().notify_virtual_tables_commit()?;
+                self.snapshot = None;
+            }
             DropBehavior::Rollback => {
                 if let Some(snapshot) = self.snapshot.take() {
                     self.conn.restore_db(snapshot);
+                    self.conn.db().notify_virtual_tables_rollback()?;
                     self.conn.fire_rollback_hook();
                 }
             }
@@ -394,5 +406,138 @@ mod tests {
         assert_eq!(conn.transaction_behavior(), TransactionBehavior::Deferred);
         conn.set_transaction_behavior(TransactionBehavior::Exclusive);
         assert_eq!(conn.transaction_behavior(), TransactionBehavior::Exclusive);
+    }
+
+    /// A writable, transaction-aware vtab (issue #95) — an in-memory
+    /// integer list that snapshots itself on `begin` and restores on
+    /// `rollback`, proving real [`Connection::transaction`]/
+    /// [`crate::Transaction`] usage actually notifies it (not just the
+    /// vtab-internal unit tests in `vtab.rs`, which call
+    /// `begin`/`commit`/`rollback` directly without a real
+    /// `Transaction` guard in the loop at all).
+    struct ListVTab {
+        rows: std::cell::RefCell<Vec<i64>>,
+        snapshot: std::cell::RefCell<Option<Vec<i64>>>,
+    }
+
+    struct ListCursor {
+        rows: Vec<i64>,
+        pos: usize,
+    }
+
+    impl crate::vtab::VTab for ListVTab {
+        type Cursor = ListCursor;
+
+        fn column_names(&self) -> Vec<String> {
+            vec!["value".to_string()]
+        }
+
+        fn open(&self) -> Result<ListCursor> {
+            Ok(ListCursor {
+                rows: self.rows.borrow().clone(),
+                pos: 0,
+            })
+        }
+
+        fn insert(&self, row: Vec<crate::value::Value>) -> Result<()> {
+            match row.as_slice() {
+                [crate::value::Value::Integer(n)] => {
+                    self.rows.borrow_mut().push(*n);
+                    Ok(())
+                }
+                other => Err(crate::error::Error::ColumnCountMismatch {
+                    expected: 1,
+                    actual: other.len(),
+                }),
+            }
+        }
+
+        fn begin(&self) -> Result<()> {
+            *self.snapshot.borrow_mut() = Some(self.rows.borrow().clone());
+            Ok(())
+        }
+
+        fn commit(&self) -> Result<()> {
+            *self.snapshot.borrow_mut() = None;
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<()> {
+            if let Some(snap) = self.snapshot.borrow_mut().take() {
+                *self.rows.borrow_mut() = snap;
+            }
+            Ok(())
+        }
+    }
+
+    impl crate::vtab::UpdateVTab for ListVTab {}
+    impl crate::vtab::TransactionVTab for ListVTab {}
+
+    impl crate::vtab::VTabCursor for ListCursor {
+        fn filter(&mut self, _filter: Option<&crate::dml_select::Expr>) -> Result<()> {
+            Ok(())
+        }
+
+        fn next(&mut self) -> Result<()> {
+            self.pos += 1;
+            Ok(())
+        }
+
+        fn eof(&self) -> bool {
+            self.pos >= self.rows.len()
+        }
+
+        fn column(&self, ctx: &mut crate::vtab::Context, _i: usize) -> Result<()> {
+            ctx.set_result(&self.rows[self.pos])
+        }
+    }
+
+    fn conn_with_list_vtab(initial: Vec<i64>) -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module(
+            "v",
+            ListVTab {
+                rows: std::cell::RefCell::new(initial),
+                snapshot: std::cell::RefCell::new(None),
+            },
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn transaction_rollback_undoes_a_writable_vtab_insert() {
+        let mut conn = conn_with_list_vtab(vec![1, 2]);
+        {
+            let mut tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO v VALUES (3)").unwrap();
+            tx.rollback().unwrap();
+        }
+        let values: Vec<i64> = conn.query_map("SELECT * FROM v", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn transaction_commit_keeps_a_writable_vtab_insert() {
+        let mut conn = conn_with_list_vtab(vec![1]);
+        {
+            let mut tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO v VALUES (2)").unwrap();
+            tx.commit().unwrap();
+        }
+        let values: Vec<i64> = conn.query_map("SELECT * FROM v", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn drop_without_commit_rolls_back_a_writable_vtab_insert() {
+        let mut conn = conn_with_list_vtab(vec![1]);
+        {
+            let mut tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO v VALUES (2)").unwrap();
+            // no commit/rollback -- dropped here, defaults to Rollback
+        }
+        let values: Vec<i64> = conn.query_map("SELECT * FROM v", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1]);
     }
 }
