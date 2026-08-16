@@ -135,6 +135,27 @@ impl Database {
         Ok(())
     }
 
+    /// Drops `table_name`, removing its schema and all rows. A missing
+    /// table is [`Error::TableNotFound`], unless `if_exists` is set
+    /// (issue #120) — then it's a silent no-op, mirroring [`Database::
+    /// create_table`]'s own `IF NOT EXISTS` no-op convention (#119).
+    ///
+    /// A registered virtual table by this name is
+    /// [`Error::CannotDropVirtualTable`] regardless of `if_exists` — see
+    /// that variant's doc comment for why dropping one isn't supported.
+    pub fn drop_table(&mut self, table_name: &str, if_exists: bool) -> Result<()> {
+        if self.tables.remove(table_name).is_some() {
+            return Ok(());
+        }
+        if self.virtual_tables.contains_key(table_name) {
+            return Err(Error::CannotDropVirtualTable(table_name.to_string()));
+        }
+        if if_exists {
+            return Ok(());
+        }
+        Err(Error::TableNotFound(table_name.to_string()))
+    }
+
     /// Inserts one row into `table_name`, given values in the table's
     /// column-definition order. Column-list-driven inserts (reordering or
     /// omitting columns) are the caller's responsibility to expand into
@@ -364,6 +385,7 @@ fn check_constraints(table: &Table, table_name: &str, row: &[Value]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ddl::parse_drop_table;
     use crate::parse_create_table;
     use crate::tokenize;
 
@@ -416,6 +438,47 @@ mod tests {
         db.create_table(&create("CREATE TABLE IF NOT EXISTS t (a INTEGER)"))
             .unwrap();
         assert!(db.table("t").is_ok());
+    }
+
+    #[test]
+    fn drop_table_removes_schema_and_rows() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        let drop = parse_drop_table(&tokenize("DROP TABLE t").unwrap()).unwrap();
+        db.drop_table(&drop.table_name, drop.if_exists).unwrap();
+
+        assert!(matches!(db.table("t"), Err(Error::TableNotFound(_))));
+    }
+
+    #[test]
+    fn drop_missing_table_without_if_exists_is_an_error() {
+        let mut db = Database::new();
+        assert!(matches!(
+            db.drop_table("missing", false),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn drop_missing_table_with_if_exists_is_a_no_op() {
+        let mut db = Database::new();
+        assert!(db.drop_table("missing", true).is_ok());
+    }
+
+    #[test]
+    fn dropped_table_can_be_recreated() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+        db.drop_table("t", false).unwrap();
+
+        db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
+            .unwrap();
+        assert!(db.table("t").unwrap().rows.is_empty());
     }
 
     #[test]
@@ -713,6 +776,29 @@ mod tests {
         assert!(matches!(
             db.scan("missing", None),
             Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn drop_table_on_a_virtual_table_is_rejected() {
+        let mut db = Database::new();
+        db.register_virtual_table(
+            "v".to_string(),
+            Box::new(ConstantSource {
+                columns: vec!["a".to_string()],
+                rows: vec![vec![Value::Integer(1)]],
+            }),
+        );
+
+        assert!(matches!(
+            db.drop_table("v", false),
+            Err(Error::CannotDropVirtualTable(_))
+        ));
+        // Rejected regardless of IF EXISTS -- it isn't a "missing table"
+        // case IF EXISTS is meant to no-op.
+        assert!(matches!(
+            db.drop_table("v", true),
+            Err(Error::CannotDropVirtualTable(_))
         ));
     }
 }

@@ -1,11 +1,14 @@
 use crate::aggregate::{self, Aggregate};
 use crate::config::{DbConfig, Limit, OpenFlags};
-use crate::ddl::{parse_create_table, parse_create_virtual_table, ColumnDef, CreateVirtualTable};
+use crate::ddl::{
+    parse_create_table, parse_create_virtual_table, parse_drop_table, ColumnDef, CreateVirtualTable,
+};
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
-    execute_create_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
-    execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
+    execute_create_table, execute_drop_table, execute_insert_into_virtual_table,
+    execute_insert_returning_rowids, execute_select_with_aggregates, execute_select_with_functions,
+    execute_select_with_window,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -1237,6 +1240,12 @@ impl Connection {
                     (affected, insert.table_name, Action::Insert, Vec::new())
                 }
             }
+            Some(kw) if kw.eq_ignore_ascii_case("DROP") => {
+                let drop = parse_drop_table(&tokens)?;
+                self.check_authorized(Action::DropTable, &drop.table_name)?;
+                execute_drop_table(&mut self.db, &drop)?;
+                (0, drop.table_name, Action::DropTable, Vec::new())
+            }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
 
@@ -1633,6 +1642,36 @@ mod tests {
     }
 
     #[test]
+    fn drop_table_removes_the_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        let affected = conn.execute("DROP TABLE t").unwrap();
+        assert_eq!(affected, 0);
+
+        assert!(matches!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn drop_missing_table_without_if_exists_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(matches!(
+            conn.execute("DROP TABLE t"),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn drop_missing_table_with_if_exists_is_a_no_op() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(conn.execute("DROP TABLE IF EXISTS t").is_ok());
+    }
+
+    #[test]
     fn insert_violating_primary_key_is_a_constraint_error() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -1707,9 +1746,12 @@ mod tests {
 
     #[test]
     fn execute_on_unrecognized_statement_is_an_error() {
+        // `DROP TABLE` is a recognized statement now (issue #120) --
+        // `UPDATE` isn't implemented yet, so it's this test's example
+        // instead.
         let mut conn = Connection::open_in_memory().unwrap();
         assert!(matches!(
-            conn.execute("DROP TABLE t"),
+            conn.execute("UPDATE t SET a = 1"),
             Err(Error::UnrecognizedStatement(_))
         ));
     }
@@ -2032,6 +2074,18 @@ mod tests {
         assert!(matches!(
             conn.query_row("SELECT * FROM never_registered"),
             Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn drop_table_on_a_virtual_table_is_rejected() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_module("v", FixedRowsVTab { rows: vec![1] })
+            .unwrap();
+
+        assert!(matches!(
+            conn.execute("DROP TABLE v"),
+            Err(Error::CannotDropVirtualTable(_))
         ));
     }
 

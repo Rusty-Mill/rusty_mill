@@ -79,6 +79,16 @@ pub struct CreateVirtualTable {
     pub args: Vec<String>,
 }
 
+/// A parsed `DROP TABLE [IF EXISTS] table_name` statement (issue #120).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropTable {
+    pub table_name: String,
+    /// Whether `IF EXISTS` followed `DROP TABLE` — a missing table is a
+    /// silent no-op instead of `Error::TableNotFound`, mirroring `CREATE
+    /// TABLE IF NOT EXISTS`'s own no-op convention (issue #119).
+    pub if_exists: bool,
+}
+
 /// An error produced while parsing.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
@@ -159,6 +169,26 @@ pub fn parse_create_virtual_table(tokens: &[Token]) -> Result<CreateVirtualTable
         table_name,
         module_name,
         args,
+    })
+}
+
+/// Parses a `DROP TABLE [IF EXISTS] table_name` statement from a token
+/// stream (as produced by [`crate::tokenize`]).
+pub fn parse_drop_table(tokens: &[Token]) -> Result<DropTable, ParseError> {
+    let mut p = Parser { tokens, pos: 0 };
+    p.expect_ident("DROP")?;
+    p.expect_ident("TABLE")?;
+    let if_exists = if p.peek_ident("IF") {
+        p.advance();
+        p.expect_ident("EXISTS")?;
+        true
+    } else {
+        false
+    };
+    let table_name = p.expect_any_ident()?;
+    Ok(DropTable {
+        table_name,
+        if_exists,
     })
 }
 
@@ -655,5 +685,27 @@ mod tests {
             parse_create_virtual_table(&tokens),
             Err(ParseError::UnexpectedToken(_))
         ));
+    }
+
+    #[test]
+    fn parses_drop_table() {
+        let tokens = tokenize("DROP TABLE t").unwrap();
+        let drop = parse_drop_table(&tokens).unwrap();
+        assert_eq!(drop.table_name, "t");
+        assert!(!drop.if_exists);
+    }
+
+    #[test]
+    fn parses_drop_table_if_exists() {
+        let tokens = tokenize("DROP TABLE IF EXISTS t").unwrap();
+        let drop = parse_drop_table(&tokens).unwrap();
+        assert_eq!(drop.table_name, "t");
+        assert!(drop.if_exists);
+    }
+
+    #[test]
+    fn missing_table_name_in_drop_table_is_an_error() {
+        let tokens = tokenize("DROP TABLE").unwrap();
+        assert_eq!(parse_drop_table(&tokens), Err(ParseError::UnexpectedEof));
     }
 }

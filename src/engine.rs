@@ -4,7 +4,7 @@
 //! joins, aggregates, subqueries, or indexes yet.
 
 use crate::aggregate::Aggregate;
-use crate::ddl::CreateTable;
+use crate::ddl::{CreateTable, DropTable};
 use crate::dml_insert::Insert;
 use crate::dml_select::{AggregateArg, Expr, Select, SelectColumns};
 use crate::error::{Error, Result};
@@ -16,6 +16,11 @@ use std::collections::HashMap;
 /// Executes a `CREATE TABLE` statement.
 pub fn execute_create_table(db: &mut Database, create: &CreateTable) -> Result<()> {
     db.create_table(create)
+}
+
+/// Executes a `DROP TABLE` statement (issue #120).
+pub fn execute_drop_table(db: &mut Database, drop: &DropTable) -> Result<()> {
+    db.drop_table(&drop.table_name, drop.if_exists)
 }
 
 /// Executes an `INSERT` statement, returning the number of rows inserted.

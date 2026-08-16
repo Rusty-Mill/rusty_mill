@@ -92,6 +92,14 @@ pub enum Error {
     /// `SQLITE_CONSTRAINT` error message, which callers already parse as
     /// text rather than a typed payload.
     ConstraintViolation(String),
+    /// `DROP TABLE` named a registered virtual table (issue #120's own
+    /// "decide and document" acceptance point). Rejected explicitly
+    /// rather than silently no-op'd or misreported as
+    /// [`Error::TableNotFound`]: real SQLite's `DROP TABLE` on a virtual
+    /// table invokes the module's `xDestroy` callback, and
+    /// [`crate::TableSource`] has no destroy-lifecycle hook to model
+    /// that (only `begin`/`commit`/`rollback`/`insert`/`scan`).
+    CannotDropVirtualTable(String),
 }
 
 impl fmt::Display for Error {
@@ -131,6 +139,9 @@ impl fmt::Display for Error {
             Error::ReadOnlyVirtualTable => write!(f, "virtual table is read-only"),
             Error::Interrupted => write!(f, "interrupted"),
             Error::ConstraintViolation(msg) => write!(f, "{msg}"),
+            Error::CannotDropVirtualTable(name) => {
+                write!(f, "cannot DROP TABLE {name:?}: it is a virtual table")
+            }
         }
     }
 }
