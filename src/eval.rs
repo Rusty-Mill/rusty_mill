@@ -250,6 +250,15 @@ pub fn evaluate_bool_with_functions(
     to_bool(evaluate_with_functions(expr, column_names, row, functions)?)
 }
 
+/// Like [`evaluate_bool`], but distinguishes `NULL` (`None`) from a
+/// `FALSE`-ish value (`Some(false)`) instead of collapsing both to
+/// `false` — used by `storage.rs`'s `CHECK` constraint enforcement
+/// (issue #118), where real SQLite's rule is that a `CHECK` only fails on
+/// an exactly-`FALSE` result; `NULL` (unknown) passes, same as `TRUE`.
+pub fn evaluate_bool3(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<Option<bool>> {
+    to_bool3(evaluate(expr, column_names, row)?)
+}
+
 fn to_bool(value: Value) -> Result<bool> {
     Ok(to_bool3(value)?.unwrap_or(false))
 }

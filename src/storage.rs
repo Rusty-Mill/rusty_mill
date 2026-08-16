@@ -5,6 +5,7 @@
 use crate::ddl::{ColumnDef, CreateTable};
 use crate::dml_select::Expr;
 use crate::error::{Error, Result};
+use crate::eval::evaluate_bool3;
 use crate::value::Value;
 use std::collections::HashMap;
 use std::fmt;
@@ -150,6 +151,7 @@ impl Database {
                 actual: row.len(),
             });
         }
+        check_constraints(table, table_name, &row)?;
         let rowid = table.row_ids.iter().max().copied().unwrap_or(0) + 1;
         table.rows.push(row);
         table.row_ids.push(rowid);
@@ -293,6 +295,65 @@ impl Database {
     }
 }
 
+/// Checks `row` (about to be inserted into `table`) against its declared
+/// `PRIMARY KEY`/`UNIQUE`/`NOT NULL`/`CHECK` constraints (issue #118),
+/// called from [`Database::insert_row_returning_rowid`] before the row is
+/// added to `table.rows`.
+///
+/// **Scope, stated plainly:** this crate only parses column-level
+/// constraints (`ddl.rs` has no table-level `PRIMARY KEY (a, b)` /
+/// `UNIQUE (a, b)` clause), so a composite (multi-column) key isn't
+/// representable here — each `primary_key`/`unique`-flagged column is
+/// checked independently. `PRIMARY KEY` and `UNIQUE` both use SQL's own
+/// NULL-is-distinct-from-NULL rule: a `NULL` value never conflicts with
+/// anything, including another `NULL` already in the table.
+///
+/// `CHECK` uses [`evaluate_bool3`] so a `NULL` result passes (matching
+/// real SQLite: only exactly-`FALSE` is a violation) — but note that
+/// this crate's `BinaryOp` comparisons (`=`/`<`/`>=`/...) don't
+/// themselves propagate `NULL` yet (a separate, pre-existing gap in
+/// `eval.rs`, out of scope here), so e.g. `CHECK (age >= 0)` with `age`
+/// `NULL` currently evaluates to plain `FALSE`, not `NULL` — a real
+/// SQLite would let that row through.
+fn check_constraints(table: &Table, table_name: &str, row: &[Value]) -> Result<()> {
+    for (i, col) in table.columns.iter().enumerate() {
+        let value = &row[i];
+
+        if col.not_null && *value == Value::Null {
+            return Err(Error::ConstraintViolation(format!(
+                "NOT NULL constraint failed: {table_name}.{}",
+                col.name
+            )));
+        }
+
+        if (col.primary_key || col.unique)
+            && *value != Value::Null
+            && table.rows.iter().any(|existing| existing[i] == *value)
+        {
+            let kind = if col.primary_key {
+                "PRIMARY KEY"
+            } else {
+                "UNIQUE"
+            };
+            return Err(Error::ConstraintViolation(format!(
+                "{kind} constraint failed: {table_name}.{}",
+                col.name
+            )));
+        }
+
+        if let Some(check) = &col.check {
+            let satisfied = evaluate_bool3(check, &table.column_names, row)?.unwrap_or(true);
+            if !satisfied {
+                return Err(Error::ConstraintViolation(format!(
+                    "CHECK constraint failed: {table_name}.{}",
+                    col.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +406,135 @@ mod tests {
             db.insert_row("missing", vec![Value::Integer(1)]),
             Err(Error::TableNotFound(_))
         ));
+    }
+
+    #[test]
+    fn not_null_violation_is_a_constraint_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER NOT NULL)"))
+            .unwrap();
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Null]),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn not_null_is_satisfied_by_a_non_null_value() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER NOT NULL)"))
+            .unwrap();
+        assert!(db.insert_row("t", vec![Value::Integer(1)]).is_ok());
+    }
+
+    #[test]
+    fn primary_key_violation_is_a_constraint_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (id INTEGER PRIMARY KEY)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Integer(1)]),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn unique_violation_is_a_constraint_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (email TEXT UNIQUE)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Text("a@example.com".into())])
+            .unwrap();
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Text("a@example.com".into())]),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn unique_allows_multiple_nulls() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (email TEXT UNIQUE)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Null]).unwrap();
+        assert!(db.insert_row("t", vec![Value::Null]).is_ok());
+    }
+
+    #[test]
+    fn check_violation_is_a_constraint_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (age INTEGER CHECK (age >= 0))"))
+            .unwrap();
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Integer(-1)]),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn check_is_satisfied_by_a_passing_value() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (age INTEGER CHECK (age >= 0))"))
+            .unwrap();
+        assert!(db.insert_row("t", vec![Value::Integer(0)]).is_ok());
+    }
+
+    #[test]
+    fn check_treats_null_as_passing() {
+        // Real SQLite's own rule: a `CHECK` only fails on an
+        // exactly-`FALSE` result -- `NULL` (unknown) passes, same as
+        // `TRUE`. Built directly (bypassing SQL parsing): a bare-column
+        // condition like `CHECK (flag)` isn't expressible through this
+        // crate's WHERE-style grammar (`parse_comparison` always
+        // requires an operator after its left operand — see its own doc
+        // comment), and a comparison like `age >= 0` wouldn't exercise
+        // this path either, since this crate's `BinaryOp` comparisons
+        // don't yet propagate `NULL` themselves (a separate,
+        // pre-existing gap in `eval.rs`, out of scope here) and would
+        // evaluate a `NULL` operand to plain `FALSE` instead.
+        let mut db = Database::new();
+        db.create_table(&CreateTable {
+            table_name: "t".into(),
+            columns: vec![ColumnDef {
+                name: "flag".into(),
+                check: Some(Expr::Column("flag".into())),
+                ..Default::default()
+            }],
+        })
+        .unwrap();
+        assert!(db.insert_row("t", vec![Value::Null]).is_ok());
+    }
+
+    #[test]
+    fn multiple_constraints_on_one_insert_are_all_enforced() {
+        let mut db = Database::new();
+        db.create_table(&create(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, age INTEGER NOT NULL CHECK (age >= 0))",
+        ))
+        .unwrap();
+        db.insert_row("t", vec![Value::Integer(1), Value::Integer(30)])
+            .unwrap();
+
+        // Duplicate primary key.
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Integer(1), Value::Integer(20)]),
+            Err(Error::ConstraintViolation(_))
+        ));
+        // NOT NULL violation.
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Integer(2), Value::Null]),
+            Err(Error::ConstraintViolation(_))
+        ));
+        // CHECK violation.
+        assert!(matches!(
+            db.insert_row("t", vec![Value::Integer(3), Value::Integer(-1)]),
+            Err(Error::ConstraintViolation(_))
+        ));
+        // Satisfies everything.
+        assert!(db
+            .insert_row("t", vec![Value::Integer(4), Value::Integer(40)])
+            .is_ok());
     }
 
     #[test]
