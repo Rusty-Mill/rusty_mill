@@ -383,6 +383,11 @@ impl<'conn> Statement<'conn> {
                 high: Box::new(self.resolve_expr(high)),
                 negate: *negate,
             },
+            Expr::InList { expr, list, negate } => Expr::InList {
+                expr: Box::new(self.resolve_expr(expr)),
+                list: list.iter().map(|e| self.resolve_expr(e)).collect(),
+                negate: *negate,
+            },
             Expr::Column(_) | Expr::Literal(_) => expr.clone(),
         }
     }
@@ -791,6 +796,12 @@ impl ParamResolver {
                 self.rewrite(expr);
                 self.rewrite(low);
                 self.rewrite(high);
+            }
+            Expr::InList { expr, list, .. } => {
+                self.rewrite(expr);
+                for item in list {
+                    self.rewrite(item);
+                }
             }
             Expr::Column(_) | Expr::Literal(_) => {}
         }
