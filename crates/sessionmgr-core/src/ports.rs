@@ -43,7 +43,7 @@ pub trait ProcessPort {
 }
 
 /// A file changed in a session's workspace.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangedFile {
     /// Two-character porcelain status (`" M"`, `"??"`, `"A "`, …), kept
     /// raw rather than parsed into an enum: git's porcelain v1 codes

@@ -6,6 +6,7 @@ members = [
     "crates/sessionmgr-proc",
     "crates/sessionmgr-git",
     "crates/sessionmgr-pty",
+    "crates/sessionmgr-tui",
     "crates/sessionmgr-daemon",
 ]
 
@@ -39,8 +40,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 
+# TUI (Phase 4). `tui-term` wraps `vt100` -- a real VT100/ANSI parser and
+# screen-state machine -- as a ratatui widget, per ADR-0002: panes must
+# *interpret* terminal escape sequences, not print them. Reusing it
+# instead of hand-rolling cursor addressing, SGR colors, and wide/
+# combining-character handling is the same "boring over bespoke" call
+# this project already made for the PTY layer itself (`sessionmgr-pty`
+# wraps rustils rather than adding a second PTY implementation).
+ratatui = "0.30"
+crossterm = "0.29"
+tui-term = "0.3"
+# `tui-term`'s own re-export of the parser it wraps -- pinned directly
+# too, since `terminal_pane.rs` constructs a `vt100::Parser` itself, not
+# just the widget.
+vt100 = "0.16"
+
 sessionmgr-core = { path = "crates/sessionmgr-core" }
 sessionmgr-protocol = { path = "crates/sessionmgr-protocol" }
 sessionmgr-proc = { path = "crates/sessionmgr-proc" }
 sessionmgr-git = { path = "crates/sessionmgr-git" }
 sessionmgr-pty = { path = "crates/sessionmgr-pty" }
+sessionmgr-tui = { path = "crates/sessionmgr-tui" }

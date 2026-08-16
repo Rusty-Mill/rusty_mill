@@ -193,6 +193,8 @@ impl Supervisor {
             Request::SessionInput { id, data } => self.session_input(id, data).await,
             Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
             Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
+            Request::GitStatus { id } => self.session_git_status(id).await,
+            Request::GitDiff { id, path } => self.session_git_diff(id, path).await,
             Request::DaemonShutdown => {
                 self.shutdown.notify_one();
                 Ok(Response::Ok)
@@ -520,6 +522,49 @@ impl Supervisor {
         session.transition_to(session.teardown_status(disposition))?;
         catalog::write_session(&self.root, &session)?;
         Ok(Response::Ok)
+    }
+    /// The files changed in a session's workspace, for the TUI's diff
+    /// pane.
+    ///
+    /// `git status` is a synchronous subprocess call, so it goes to
+    /// `spawn_blocking` -- the same reasoning as `prepare_workspace`/
+    /// `dispose_workspace` (see their own comments): real OS work does
+    /// not belong inline on the async executor.
+    async fn session_git_status(&self, id: SessionId) -> Result<Response> {
+        let session = catalog::read_session(&self.root, &id)?;
+        let Some(workspace) = session.workspace else {
+            return Err(Error::conflict(format!(
+                "session {id} has no workspace to read git status from"
+            )));
+        };
+        let files = rusty_tokio::spawn_blocking(move || {
+            SystemGit
+                .changed_files(&workspace.cwd)
+                .map_err(|e| Error::conflict(e.to_string()))
+        })
+        .await
+        .map_err(|e| Error::conflict(format!("the git-status task did not complete: {e}")))??;
+        Ok(Response::GitStatus { files })
+    }
+
+    /// A unified diff of a session's workspace, optionally narrowed to
+    /// one file. Same `spawn_blocking` reasoning as
+    /// [`Self::session_git_status`].
+    async fn session_git_diff(&self, id: SessionId, path: Option<String>) -> Result<Response> {
+        let session = catalog::read_session(&self.root, &id)?;
+        let Some(workspace) = session.workspace else {
+            return Err(Error::conflict(format!(
+                "session {id} has no workspace to diff"
+            )));
+        };
+        let diff = rusty_tokio::spawn_blocking(move || {
+            SystemGit
+                .diff(&workspace.cwd, path.as_deref())
+                .map_err(|e| Error::conflict(e.to_string()))
+        })
+        .await
+        .map_err(|e| Error::conflict(format!("the git-diff task did not complete: {e}")))??;
+        Ok(Response::GitDiff { diff })
     }
 }
 

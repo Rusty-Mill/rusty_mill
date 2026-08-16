@@ -26,7 +26,13 @@ pub mod base64;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use sessionmgr_core::{Disposition, SessionId, SessionKind, SessionStatus};
+/// Re-exported, not just `use`d privately: a crate that depends on
+/// `sessionmgr-protocol` only (the TUI, deliberately -- see the
+/// crate-level docs) needs to name these types too, to hold a
+/// `SessionId` or match on a `SessionStatus`, without adding
+/// `sessionmgr-core` as a second dependency.
+pub use sessionmgr_core::ports::ChangedFile;
+pub use sessionmgr_core::{Disposition, SessionId, SessionKind, SessionStatus};
 
 /// A request from a client to the daemon, or from the daemon to a worker.
 ///
@@ -111,6 +117,15 @@ pub enum Request {
         disposition: Option<Disposition>,
     },
 
+    /// The files changed in a session's workspace, for the diff pane.
+    /// `NotFound` if the session has no workspace (a `PlainTerminal`
+    /// session, or one that failed before a workspace was set up).
+    GitStatus { id: SessionId },
+
+    /// A unified diff of a session's workspace. `path` narrows it to one
+    /// file, matching [`sessionmgr_core::ports::GitPort::diff`].
+    GitDiff { id: SessionId, path: Option<String> },
+
     /// Shut the daemon down. Deliberately does **not** stop running
     /// sessions: workers are detached precisely so they outlive this.
     DaemonShutdown,
@@ -136,6 +151,14 @@ pub enum Response {
     },
     /// The request succeeded and has no payload.
     Ok,
+    /// Answer to [`Request::GitStatus`].
+    GitStatus {
+        files: Vec<sessionmgr_core::ports::ChangedFile>,
+    },
+    /// Answer to [`Request::GitDiff`].
+    GitDiff {
+        diff: String,
+    },
     /// The request failed. `message` is human-facing; `kind` is for
     /// clients that need to branch (notably "not found", which
     /// `__hook-fire` must treat as a silent no-op rather than an error).
