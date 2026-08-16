@@ -65,10 +65,7 @@ fn a_worktree_sessions_work_does_not_touch_the_main_working_copy() {
         ),
         "the session's commit should succeed, but it is {}: {}",
         session_status(root.path(), &id),
-        std::fs::read_to_string(
-            root.path().join("sessions").join(&id).join("transcript.jsonl")
-        )
-        .unwrap_or_default()
+        String::from_utf8_lossy(&transcript_output(root.path(), &id))
     );
 
     // The file exists in the worktree...

@@ -347,6 +347,17 @@ pub struct Session {
     /// this project promises not to lose.
     #[serde(default)]
     pub workspace: Option<Workspace>,
+    /// Does this session's process run on a real terminal?
+    ///
+    /// Normally yes, and for an agent session it is not optional:
+    /// interactive agent CLIs refuse to start without one (ADR-0002).
+    ///
+    /// `#[serde(default)]` gives `false`, which is deliberately the
+    /// *truthful* answer for a record written before terminals existed
+    /// here -- those sessions really were piped. Defaulting to `true`
+    /// would relabel history.
+    #[serde(default)]
+    pub pty: bool,
     /// Millisecond timestamp, supplied by the caller (this crate does not
     /// read the clock).
     pub created_at_millis: u64,
@@ -360,6 +371,7 @@ impl Session {
         kind: SessionKind,
         command: Vec<String>,
         workspace: Option<Workspace>,
+        pty: bool,
         created_at_millis: u64,
     ) -> Self {
         Session {
@@ -370,6 +382,7 @@ impl Session {
             worker: None,
             child: None,
             workspace,
+            pty,
             created_at_millis,
             exit_code: None,
         }
@@ -492,6 +505,7 @@ mod tests {
             SessionKind::PlainTerminal,
             vec!["sh".to_owned()],
             None,
+            true,
             1_700_000_000_000,
         )
     }
@@ -690,6 +704,7 @@ mod tests {
             SessionKind::Worktree,
             vec!["sh".to_owned()],
             Some(Workspace::worktree(std::path::PathBuf::from("/repo"), &id)),
+            true,
             1_700_000_000_000,
         )
     }

@@ -417,6 +417,43 @@ pub fn force_kill(pid: u32) {
     }
 }
 
+/// Does a session's transcript contain `needle` anywhere in its output?
+///
+/// Decodes rather than grepping the file. Output events carry base64
+/// payloads (session output is a terminal byte stream, not text), so a
+/// raw substring search over `transcript.jsonl` silently never matches --
+/// which reads as "the output never arrived" rather than "the test is
+/// looking at it wrong".
+pub fn transcript_contains(root: &Path, id: &str, needle: &str) -> bool {
+    !transcript_output(root, id).is_empty()
+        && String::from_utf8_lossy(&transcript_output(root, id)).contains(needle)
+}
+
+/// Every output byte a session has produced so far, decoded and
+/// concatenated.
+pub fn transcript_output(root: &Path, id: &str) -> Vec<u8> {
+    let path = root.join("sessions").join(id).join("transcript.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // Only output events carry a payload; status and exit events have
+        // no `data` field at all.
+        if !line.contains("\"type\":\"output\"") {
+            continue;
+        }
+        let needle = "\"data\":\"";
+        let Some(start) = line.find(needle) else { continue };
+        let rest = &line[start + needle.len()..];
+        let Some(end) = rest.find('"') else { continue };
+        if let Ok(decoded) = sessionmgr_protocol::base64::decode(&rest[..end]) {
+            out.extend_from_slice(&decoded);
+        }
+    }
+    out
+}
+
 /// Is `pid` a live process (a zombie does not count)?
 pub fn is_alive(pid: u32) -> bool {
     sessionmgr_proc::is_alive(pid).unwrap_or(false)

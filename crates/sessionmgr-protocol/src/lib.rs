@@ -21,6 +21,8 @@
 //! readable with `cat`. `SessionEvent`s are the only high-volume message
 //! and are still one line each.
 
+pub mod base64;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -63,6 +65,12 @@ pub enum Request {
         /// subdirectory lands in the same repository as one created from
         /// the top.
         repo: Option<PathBuf>,
+        /// Run the session's process on a real terminal.
+        ///
+        /// Defaults to true at the CLI. `false` selects the piped
+        /// backend, which cannot host an interactive agent CLI but whose
+        /// survives-the-manager-closing behaviour is proven on Windows.
+        pty: bool,
     },
 
     /// List every known session.
@@ -72,8 +80,29 @@ pub enum Request {
     /// [`SessionEvent`]s until the client disconnects.
     SessionAttach { id: SessionId },
 
-    /// Send a line of input to a session's process.
-    SessionInput { id: SessionId, data: String },
+    /// Send input to a session's process.
+    ///
+    /// Bytes, not text, for the same reason [`SessionEvent::Output`] is:
+    /// a terminal's input stream carries control bytes and escape
+    /// sequences (arrow keys, Ctrl-C, bracketed paste), and a `String`
+    /// cannot represent a lone `0x03`.
+    SessionInput {
+        id: SessionId,
+        #[serde(with = "crate::base64::bytes")]
+        data: Vec<u8>,
+    },
+
+    /// Tell a session's terminal it has been resized.
+    ///
+    /// A PTY-hosted program lays its output out to the size it was told,
+    /// so a session whose terminal is never resized renders to whatever
+    /// size it was given at creation -- which for a session created by a
+    /// background client is a default, not the user's actual window.
+    SessionResize {
+        id: SessionId,
+        rows: u16,
+        cols: u16,
+    },
 
     /// Tear a session down: graceful shutdown first, then terminate the
     /// recorded worker **and** child pids if it does not ack in time.
@@ -169,13 +198,26 @@ pub struct SessionSummary {
 pub enum SessionEvent {
     /// A chunk of the session process's output.
     ///
-    /// `String`, not `Vec<u8>`: output is decoded lossily at the worker,
-    /// once, rather than pushing the decision onto every consumer and
-    /// bloating the JSON with a byte array. This is a real (and recorded)
-    /// limitation for a future PTY-backed session carrying control
-    /// sequences -- see the Phase 1 PTY spike, which is exactly what
-    /// decides whether this type needs to become bytes.
-    Output { data: String },
+    /// **Bytes, deliberately.** This was a `String` with a per-chunk
+    /// lossy decode until the Phase 1 PTY spike settled the question (see
+    /// `docs/decisions/0002-pty-required-for-agent-sessions.md`): a real
+    /// terminal is mandatory for interactive agent CLIs, and terminal
+    /// output is a byte stream of text interleaved with ANSI and
+    /// cursor-positioning sequences. Two things broke under `String`:
+    ///
+    /// 1. A multi-byte character split across a read boundary decoded to
+    ///    replacement characters -- permanent corruption, since the
+    ///    transcript is append-only.
+    /// 2. Escape sequences are not text and have no business being
+    ///    validated as UTF-8.
+    ///
+    /// Carried over the wire as base64 (see [`crate::base64`]), because
+    /// the framing is line-delimited JSON and serde's default encoding
+    /// for `Vec<u8>` is a number-per-byte array.
+    Output {
+        #[serde(with = "crate::base64::bytes")]
+        data: Vec<u8>,
+    },
 
     /// The session's status changed.
     Status { status: SessionStatus },
@@ -216,12 +258,18 @@ mod tests {
                 kind: SessionKind::PlainTerminal,
                 command: vec!["sh".to_owned()],
                 repo: None,
+                pty: true,
             },
             Request::SessionList,
             Request::SessionAttach { id: id.clone() },
             Request::SessionInput {
                 id: id.clone(),
-                data: "echo hi".to_owned(),
+                data: b"echo hi\n".to_vec(),
+            },
+            Request::SessionResize {
+                id: id.clone(),
+                rows: 40,
+                cols: 120,
             },
             Request::SessionClose {
                 id,
@@ -248,7 +296,7 @@ mod tests {
         }
         for event in [
             SessionEvent::Output {
-                data: "hello".to_owned(),
+                data: b"hello".to_vec(),
             },
             SessionEvent::Status {
                 status: SessionStatus::Running,
@@ -267,7 +315,7 @@ mod tests {
         // escaping is what prevents that, and this asserts it rather than
         // assuming it.
         let event = SessionEvent::Output {
-            data: "line one\nline two\r\n".to_owned(),
+            data: b"line one\nline two\r\n\x1b[31m\x00\xff".to_vec(),
         };
         assert_eq!(round_trip(&event), event);
     }

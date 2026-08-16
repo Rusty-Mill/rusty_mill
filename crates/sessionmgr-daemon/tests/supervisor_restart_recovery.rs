@@ -85,11 +85,7 @@ fn reattaching_after_a_restart_announces_the_recovery_and_replays_the_transcript
     // Let the output land in the transcript before killing anything.
     assert!(
         wait_until(
-            || std::fs::read_to_string(
-                root.path().join("sessions").join(&id).join("transcript.jsonl")
-            )
-            .map(|t| t.contains("marker-line"))
-            .unwrap_or(false),
+            || transcript_contains(root.path(), &id, "marker-line"),
             Duration::from_secs(10),
         ),
         "the session's output should reach the transcript"

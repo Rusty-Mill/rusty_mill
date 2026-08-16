@@ -129,6 +129,7 @@ pub async fn session_new(
     kind: SessionKind,
     command: Vec<String>,
     repo: Option<PathBuf>,
+    pty: bool,
 ) -> Result<SessionId> {
     match request(
         root,
@@ -136,6 +137,7 @@ pub async fn session_new(
             kind,
             command,
             repo,
+            pty,
         },
     )
     .await?
@@ -185,7 +187,7 @@ pub async fn session_attach(root: &Path, id: SessionId) -> Result<()> {
         while let Ok(Some(line)) = lines.next_line().await {
             let request = Request::SessionInput {
                 id: id.clone(),
-                data: format!("{line}\n"),
+                data: format!("{line}\n").into_bytes(),
             };
             if transport::write_framed(&mut writer, &request).await.is_err() {
                 return;
@@ -199,7 +201,12 @@ pub async fn session_attach(root: &Path, id: SessionId) -> Result<()> {
         let Some(event) = event else { return Ok(()) };
         match event {
             SessionEvent::Output { data } => {
-                print!("{data}");
+                // Written as raw bytes, not through `print!`: session
+                // output is a terminal byte stream carrying escape
+                // sequences, and forcing it through a `String` would
+                // corrupt any multi-byte character split across a chunk
+                // boundary -- the exact defect that made this type bytes.
+                let _ = std::io::stdout().write_all(&data);
                 // Explicitly flushed: output frequently arrives without a
                 // trailing newline (a prompt waiting for an answer is the
                 // important case), and line-buffered stdout would hold

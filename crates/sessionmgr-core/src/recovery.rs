@@ -120,6 +120,7 @@ mod tests {
             SessionKind::PlainTerminal,
             vec!["sh".to_owned()],
             None,
+            true,
             1_700_000_000_000,
         );
         s.status = status;

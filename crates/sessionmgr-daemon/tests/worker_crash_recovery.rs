@@ -79,11 +79,7 @@ fn attaching_to_a_crashed_session_still_shows_what_it_produced() {
 
     assert!(
         wait_until(
-            || std::fs::read_to_string(
-                root.path().join("sessions").join(&id).join("transcript.jsonl")
-            )
-            .map(|t| t.contains("before-the-crash"))
-            .unwrap_or(false),
+            || transcript_contains(root.path(), &id, "before-the-crash"),
             Duration::from_secs(10),
         ),
         "the output should reach the transcript before the crash"

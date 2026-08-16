@@ -231,6 +231,7 @@ mod tests {
             SessionKind::PlainTerminal,
             vec!["sh".to_owned()],
             None,
+            true,
             1_700_000_000_000,
         )
     }
@@ -357,7 +358,7 @@ mod tests {
                 &root.0,
                 &s.id,
                 &SessionEvent::Output {
-                    data: text.to_owned(),
+                    data: text.as_bytes().to_vec(),
                 },
             )
             .expect("append");
@@ -367,7 +368,7 @@ mod tests {
         assert_eq!(
             replayed[0],
             SessionEvent::Output {
-                data: "first".to_owned()
+                data: b"first".to_vec()
             }
         );
     }
@@ -384,7 +385,7 @@ mod tests {
             &root.0,
             &s.id,
             &SessionEvent::Output {
-                data: "complete".to_owned(),
+                data: b"complete".to_vec(),
             },
         )
         .expect("append");
@@ -394,7 +395,7 @@ mod tests {
                 .append(true)
                 .open(paths::session_transcript(&root.0, &s.id))
                 .expect("open");
-            f.write_all(b"{\"type\":\"output\",\"data\":\"trunc")
+            f.write_all(b"{\"type\":\"output\",\"data\":\"dHJ1bmM")
                 .expect("write partial");
         }
         let replayed = read_transcript(&root.0, &s.id).expect("read");

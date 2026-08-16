@@ -189,6 +189,112 @@ fn a_repo_backed_kind_outside_a_repository_fails_clearly() {
     );
 }
 
+/// A command that reports whether its stdout is a terminal.
+///
+/// Unix-only: `test -t 1` has no portable `cmd.exe` equivalent, and a
+/// contrived Windows probe would test the probe rather than the product.
+/// Windows coverage comes from the whole suite instead -- every session
+/// there now runs on ConPTY by default, so a broken ConPTY path fails
+/// these tests wholesale rather than in one dedicated case.
+#[cfg(unix)]
+fn tty_probe() -> Vec<&'static str> {
+    vec!["sh", "-c", "test -t 1 && echo IS_A_TTY || echo NOT_A_TTY"]
+}
+
+#[test]
+#[cfg(unix)]
+fn a_session_runs_on_a_real_terminal_by_default() {
+    // The acceptance test for ADR-0002. Interactive agent CLIs refuse to
+    // start without a terminal, so a session that does not get one cannot
+    // host the product's actual workload -- and the failure mode is a CLI
+    // silently falling back to non-interactive mode, not an error.
+    let root = TempRoot::new("lifecycle-tty");
+    let id = session_new(root.path(), &tty_probe());
+
+    assert!(
+        wait_until(
+            || transcript_contains(root.path(), &id, "IS_A_TTY"),
+            Duration::from_secs(15),
+        ),
+        "a session must run on a real terminal by default, but its own probe said: {}",
+        String::from_utf8_lossy(&transcript_output(root.path(), &id))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn no_pty_runs_the_process_on_plain_pipes() {
+    // The escape hatch, asserted to actually escape: this is the backend
+    // whose survives-the-manager-closing behaviour is proven on Windows,
+    // so it needs to stay reachable and stay piped.
+    let root = TempRoot::new("lifecycle-nopty");
+    let id = session_new_in(root.path(), &["--no-pty"], &tty_probe());
+
+    assert!(
+        wait_until(
+            || transcript_contains(root.path(), &id, "NOT_A_TTY"),
+            Duration::from_secs(15),
+        ),
+        "--no-pty must run the process on pipes, but its own probe said: {}",
+        String::from_utf8_lossy(&transcript_output(root.path(), &id))
+    );
+}
+
+#[test]
+fn a_no_pty_session_still_runs_and_finishes() {
+    // Cross-platform counterpart to the two above: whatever the backend,
+    // the session lifecycle has to work the same way.
+    let root = TempRoot::new("lifecycle-nopty-runs");
+    let command = echo("piped-output");
+    let id = session_new_in(
+        root.path(),
+        &["--no-pty"],
+        &command.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    assert!(
+        wait_until(
+            || session_status(root.path(), &id) == "finished",
+            Duration::from_secs(15),
+        ),
+        "a piped session should finish, but is {}",
+        session_status(root.path(), &id)
+    );
+    assert!(transcript_contains(root.path(), &id, "piped-output"));
+}
+
+#[test]
+fn terminal_output_survives_the_round_trip_to_an_attached_client() {
+    // Terminal output is a byte stream with escape sequences in it, and
+    // it now crosses the wire base64-encoded. This proves the encoding is
+    // transparent end to end rather than only in the protocol crate's own
+    // unit tests.
+    let root = TempRoot::new("lifecycle-bytes");
+    let command: Vec<&str> = if cfg!(windows) {
+        vec!["cmd", "/C", "echo colour-test && ping -n 600 127.0.0.1 > NUL"]
+    } else {
+        vec![
+            "sh",
+            "-c",
+            "printf '\\033[31mcolour-test\\033[0m\\n'; sleep 600",
+        ]
+    };
+    let id = session_new(root.path(), &command);
+
+    assert!(
+        wait_until(
+            || transcript_contains(root.path(), &id, "colour-test"),
+            Duration::from_secs(15),
+        ),
+        "output should reach the transcript: {}",
+        String::from_utf8_lossy(&transcript_output(root.path(), &id))
+    );
+    let joined = attach_lines(root.path(), &id, 6, Duration::from_secs(15)).join("\n");
+    assert!(
+        joined.contains("colour-test"),
+        "an attached client should receive the session's output:\n{joined}"
+    );
+}
+
 #[test]
 fn two_sessions_run_independently() {
     let root = TempRoot::new("lifecycle-two");

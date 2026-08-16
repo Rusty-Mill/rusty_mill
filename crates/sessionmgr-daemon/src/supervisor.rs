@@ -189,9 +189,11 @@ impl Supervisor {
                 kind,
                 command,
                 repo,
-            } => self.session_new(kind, command, repo).await,
+                pty,
+            } => self.session_new(kind, command, repo, pty).await,
             Request::SessionList => self.session_list(),
             Request::SessionInput { id, data } => self.session_input(id, data).await,
+            Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
             Request::SessionClose { id, disposition } => {
                 self.session_close(id, disposition).await
             }
@@ -214,6 +216,7 @@ impl Supervisor {
         kind: SessionKind,
         command: Vec<String>,
         repo: Option<PathBuf>,
+        pty: bool,
     ) -> Result<Response> {
         let command = if command.is_empty() {
             default_shell()
@@ -229,6 +232,7 @@ impl Supervisor {
             kind,
             command,
             workspace,
+            pty,
             sessionmgr_proc::now_millis(),
         );
         // Written before the spawn, never after: if this process dies in
@@ -395,7 +399,7 @@ impl Supervisor {
         Ok(Response::Sessions { sessions })
     }
 
-    async fn session_input(&self, id: SessionId, data: String) -> Result<Response> {
+    async fn session_input(&self, id: SessionId, data: Vec<u8>) -> Result<Response> {
         let session = catalog::read_session(&self.root, &id)?;
         if !session.status.expects_live_worker() {
             return Err(Error::conflict(format!(
@@ -409,6 +413,22 @@ impl Supervisor {
         )
         .await?;
         conn.request(&Request::SessionInput { id, data }).await
+    }
+
+    /// Forwards a terminal resize to the session's worker.
+    async fn session_resize(&self, id: SessionId, rows: u16, cols: u16) -> Result<Response> {
+        let session = catalog::read_session(&self.root, &id)?;
+        if !session.status.expects_live_worker() {
+            // Not an error: a UI resizing every session it displays
+            // should not have to filter out the finished ones first.
+            return Ok(Response::Ok);
+        }
+        let mut conn = transport::Connection::connect(
+            "connecting to a worker",
+            &paths::worker_socket(&self.root, &id),
+        )
+        .await?;
+        conn.request(&Request::SessionResize { id, rows, cols }).await
     }
 
     /// Graceful first, then force, then record.

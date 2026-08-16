@@ -1,6 +1,6 @@
 # ADR-0002: A real PTY is required for agent-CLI sessions
 
-- **Status**: Accepted
+- **Status**: Accepted — **implemented**
 - **Date**: 2026-08-16
 - **Phase**: 1 (spike outcome)
 - **Supersedes**: PLAN.md's "open, unresolved-by-design tension" between a real
@@ -55,17 +55,53 @@ not a fidelity trade-off, it is a hard functional requirement.
    using `-p`, rather than attaching an idle pipe: an unwritten stdin pipe
    costs a silent 3-second startup delay and a warning on every launch.
 
-## Still open
+## Implementation
+
+Done. `sessionmgr-pty` wraps `rustils`' `platform::pty::Pty` capability —
+ConPTY on Windows, `openpty` on Linux — rather than adding `portable-pty` as a
+second PTY implementation to a dependency graph that already had one. Sessions
+run on a terminal by default; `--no-pty` selects the piped backend.
+
+All four consequences above are implemented:
+
+1. `sessionmgr-pty` exists and is the default backend.
+2. `SessionEvent::Output` and `SessionInput` are `Vec<u8>`, carried as base64
+   because the framing is line-delimited JSON.
+3. Terminal-sequence interpretation remains Phase 4's problem; the bytes now
+   reach the client intact for it to interpret.
+4. Not yet applied — the Claude Code adapter is Phase 3, and there is no
+   adapter to put it in.
+
+`a_session_runs_on_a_real_terminal_by_default` is the acceptance test: a
+session runs `test -t 1` and its own output must say `IS_A_TTY`. Its
+counterpart asserts `--no-pty` really does produce `NOT_A_TTY`.
+
+### Why the piped backend was kept rather than deleted
+
+Not hedging. The survives-the-manager-closing guarantee is **proven** for the
+piped path on Windows by a green suite. It is **unproven** for ConPTY. Removing
+the proven path to make room for the unproven one would trade a demonstrated
+guarantee for an assumed one, in the one area where this project's whole value
+rests.
+
+## Still open — but now testable rather than theoretical
 
 Whether a ConPTY-attached child survives an **unclean worker crash** — as
-opposed to a graceful `ClosePseudoConsole` — is unverified and untestable off
-Windows (PLAN.md risk 3). `rustils`' PTY path was built for interactive
-foreground use, not for detach-and-outlive. This must be settled on a real
-Windows machine before PTY-backed sessions ship, because a "no" would mean
-PTY-backed sessions cannot deliver the survives-the-manager-closing guarantee
-that the piped-stdio sessions built in Phase 1 already demonstrably do.
+opposed to a graceful `ClosePseudoConsole` — is still unverified (PLAN.md risk
+3). `rustils`' PTY path was built for interactive foreground use, not for
+detach-and-outlive.
 
-That is a genuinely load-bearing unknown, and it is the reason this ADR changes
-the *decision* about PTYs without yet changing any Phase 1 code: the walking
-skeleton's guarantee is proven, and it should not be traded away for a PTY
-until the PTY is proven to keep it.
+What changed is that answering it no longer needs a bespoke experiment.
+**Sessions now default to a PTY, so the existing suite exercises ConPTY on
+every test.** In particular `supervisor_restart_recovery` — kill the daemon,
+assert the worker and its child survive, assert the replacement adopts them —
+is now precisely the ConPTY-survival question, asked automatically.
+
+- Suite green on Windows → ConPTY survives an unclean daemon kill, and the
+  guarantee holds for the default backend.
+- `supervisor_restart_recovery` red while `--no-pty` sessions stay green →
+  ConPTY does not survive detachment, and the default must flip back to piped
+  with PTY sessions documented as non-persistent.
+
+Either outcome is decisive, which is the point of routing the question through
+the tests that already exist rather than through a new one-off spike.

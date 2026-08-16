@@ -1,5 +1,5 @@
 //! The per-session worker: one detached OS process that owns one
-//! session's child process, its transcript, and its private socket.
+//! session's process, its transcript, and its private socket.
 //!
 //! **This is the process that makes the product's central promise true.**
 //! Closing the manager must not stop the work, so the thing actually
@@ -7,8 +7,26 @@
 //! daemon re-execs its own binary here with detach flags and then forgets
 //! about it except as a pid on disk.
 //!
-//! Modelled directly on `rusty_prime_agent::worker`, which solved the
-//! same problem for the same reasons.
+//! # Two backends, and why both exist
+//!
+//! A session runs its process either on a real terminal
+//! ([`Backend::Pty`], the default) or on plain pipes
+//! ([`Backend::Piped`]).
+//!
+//! The PTY is the default because it is **required**: interactive agent
+//! CLIs refuse to run without a terminal, which the Phase 1 spike
+//! established by measurement (ADR-0002). Piped stdio cannot host the
+//! product's actual workload.
+//!
+//! The piped path is nonetheless kept, reachable with `--no-pty`, for one
+//! specific reason rather than as general hedging. The persistence
+//! guarantee -- a session surviving the manager being killed -- is
+//! **proven** on Windows for the piped path, by a test suite that runs
+//! green. It is *unproven* for ConPTY: whether a ConPTY-attached child
+//! survives an unclean worker crash is an open question that needs a
+//! Windows machine to answer (ADR-0002, "Still open"). Deleting the
+//! proven path to make room for the unproven one would be trading a
+//! demonstrated guarantee for an assumed one.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +37,7 @@ use rusty_tokio::sync::{broadcast, Mutex, Notify};
 use sessionmgr_core::ports::worker_ref;
 use sessionmgr_core::{SessionId, SessionStatus};
 use sessionmgr_proc::SystemProcessPort;
+use sessionmgr_pty::{PtyOptions, PtySession, TerminalSize};
 use sessionmgr_protocol::{ErrorKind, Request, Response, SessionEvent};
 
 use crate::error::{Error, Result};
@@ -28,6 +47,9 @@ use crate::{catalog, paths, transport};
 /// them. Output is also on disk in the transcript, so a lagging client
 /// loses nothing permanently -- it just sees a gap in the live stream.
 const BROADCAST_CAPACITY: usize = 1024;
+
+/// Read buffer size for session output.
+const READ_BUFFER: usize = 8192;
 
 /// Supervisor-side: launch a detached worker process for `id`.
 ///
@@ -92,30 +114,42 @@ pub struct WorkerArgs {
     pub state_root: PathBuf,
 }
 
-/// Shared worker state. `Arc`ed across the accept loop, the output pumps,
-/// and the child-exit watcher.
+/// A just-started session process, before it has been wired to a
+/// [`Worker`]. Exists only to carry the handles across that gap.
+enum Started {
+    Pty(Arc<PtySession>),
+    Piped(rusty_tokio::process::Child),
+}
+
+/// How a session's process is attached to the world.
+enum Backend {
+    /// A real terminal. See the module docs.
+    Pty(Arc<PtySession>),
+    /// Plain pipes, holding the child's stdin so input can still be sent.
+    Piped(Mutex<Option<rusty_tokio::process::ChildStdin>>),
+}
+
+/// Shared worker state, `Arc`ed across the accept loop, the output
+/// reader, and the exit watcher.
 struct Worker {
     root: PathBuf,
     id: SessionId,
     events: broadcast::Sender<SessionEvent>,
-    /// The child's stdin, held so attached clients can send input.
-    stdin: Mutex<Option<rusty_tokio::process::ChildStdin>>,
-    /// Set when the worker should exit: either the child finished or a
-    /// shutdown was requested.
+    backend: Backend,
+    /// Set when the worker should exit: either the session's process
+    /// finished or a shutdown was requested.
     shutdown: Notify,
     child_pid: u32,
 }
 
 /// The `__worker-main` entrypoint.
 pub async fn run(args: WorkerArgs) -> Result<()> {
-    use rusty_tokio::process::{Command, Stdio};
-
     let root = args.state_root;
     let id = args.session_id;
     let mut session = catalog::read_session(&root, &id)?;
 
-    // Cloned rather than borrowed from `session`: the failure path below
-    // needs to mutate the record while still holding the program name for
+    // Cloned rather than borrowed from `session`: the failure paths below
+    // need to mutate the record while still holding the program name for
     // the error message.
     let command = session.command.clone();
     let Some((program, program_args)) = command.split_first() else {
@@ -123,53 +157,48 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
             "session {id} has an empty command and cannot be started"
         )));
     };
-
-    let mut cmd = Command::new(program);
-    cmd.args(program_args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // The whole point of a worktree session: the command runs *in the
-    // worktree*, not wherever this worker happens to have been spawned
-    // from. Without this, an isolated session would quietly operate on
-    // the user's main working copy -- the exact collision the isolation
-    // exists to prevent, and one that would look like it was working.
-    if let Some(workspace) = session.workspace.as_ref() {
-        cmd.current_dir(&workspace.cwd);
-    }
-    // Deliberately *not* `prepare_detached`: this worker owns its child.
-    // Detachment is about surviving the *daemon*, and this worker is
-    // already detached from it. Detaching the child too would mean
-    // nothing tracked its exit.
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            // A bad command is the user's ordinary mistake, not a crash.
-            // Record it as a real exit so the session shows `Errored`
-            // rather than sitting in `Created` until something else
-            // reconciles it as a phantom crash.
-            let _ = session.record_exit(None);
-            catalog::write_session(&root, &session)?;
-            return Err(Error::io(
-                "spawning the session's command",
-                PathBuf::from(program),
-                e,
-            ));
-        }
-    };
+    // A session's own working directory, which for a worktree session is
+    // the entire point: without it an isolated session would quietly
+    // operate on the user's main working copy.
+    let cwd = session
+        .workspace
+        .as_ref()
+        .map(|w| w.cwd.clone())
+        .unwrap_or_else(std::env::temp_dir);
 
     let port = SystemProcessPort;
-    let child_pid = child.id();
     let me = std::process::id();
+
+    // Started, but not yet wired: the output reader and exit watcher both
+    // need the `Worker`, which cannot exist until the pid is known. So the
+    // process is started here and handed on below.
+    let (backend, child_pid, started) = if session.pty {
+        match start_pty(program, program_args, &cwd) {
+            Ok(pty) => {
+                let pty = Arc::new(pty);
+                let pid = pty.pid();
+                (Backend::Pty(Arc::clone(&pty)), pid, Started::Pty(pty))
+            }
+            Err(e) => return record_start_failure(&root, &mut session, program, e),
+        }
+    } else {
+        match start_piped(program, program_args, &cwd) {
+            Ok(mut child) => {
+                let pid = child.id();
+                // Taken now, because the `Backend` owns it from here on.
+                let stdin = child.stdin.take();
+                (Backend::Piped(Mutex::new(stdin)), pid, Started::Piped(child))
+            }
+            Err(e) => return record_start_failure(&root, &mut session, program, e),
+        }
+    };
 
     // Bound **before** the record below leaves `Created`, and that
     // ordering is load-bearing. The daemon treats a record past `Created`
     // as "this session is ready to attach to", so publishing `Running`
     // first would open a window where a client that attached immediately
     // found no socket and silently fell back to replaying a transcript
-    // instead of streaming. Connections that arrive before the accept
-    // loop starts queue in the listen backlog, which is exactly what a
-    // backlog is for.
+    // instead of streaming.
     let listener = transport::Listener::bind(
         "binding the worker socket",
         &paths::worker_socket(&root, &id),
@@ -190,7 +219,7 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
         root: root.clone(),
         id: id.clone(),
         events,
-        stdin: Mutex::new(child.stdin.take()),
+        backend,
         shutdown: Notify::new(),
         child_pid,
     });
@@ -199,11 +228,36 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
         status: SessionStatus::Running,
     });
 
-    if let Some(stdout) = child.stdout.take() {
-        rusty_tokio::spawn(pump(Arc::clone(&worker), stdout));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        rusty_tokio::spawn(pump(Arc::clone(&worker), stderr));
+    // Wire output and exit detection, which differ by backend: a PTY is
+    // one merged stream read on its own thread, while pipes are two
+    // async streams plus a separate `wait`.
+    match started {
+        Started::Pty(pty) => spawn_pty_reader(Arc::clone(&worker), pty),
+        Started::Piped(mut child) => {
+            if let Some(stdout) = child.stdout.take() {
+                rusty_tokio::spawn(pump(Arc::clone(&worker), stdout));
+            }
+            if let Some(stderr) = child.stderr.take() {
+                rusty_tokio::spawn(pump(Arc::clone(&worker), stderr));
+            }
+            rusty_tokio::spawn({
+                let worker = Arc::clone(&worker);
+                async move {
+                    // The exit status is the tier-2 signal: free, always
+                    // available, and the one status source that cannot be
+                    // wrong.
+                    let code = match child.wait().await {
+                        Ok(status) => status.code(),
+                        Err(e) => {
+                            eprintln!("sessionmgr worker: waiting on the session failed: {e}");
+                            None
+                        }
+                    };
+                    worker.record_child_exit(code);
+                    worker.shutdown.notify_one();
+                }
+            });
+        }
     }
 
     rusty_tokio::spawn({
@@ -223,26 +277,94 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
         }
     });
 
-    // Watch the child. Its exit status is PLAN.md's tier-2 signal: free,
-    // always available, and the one status source that cannot be wrong.
-    rusty_tokio::spawn({
-        let worker = Arc::clone(&worker);
-        async move {
-            let status = child.wait().await;
-            let code = match status {
-                Ok(status) => status.code(),
-                Err(e) => {
-                    eprintln!("sessionmgr worker: waiting on the child failed: {e}");
-                    None
-                }
-            };
-            worker.record_child_exit(code);
-            worker.shutdown.notify_one();
-        }
-    });
-
     worker.shutdown.notified().await;
     Ok(())
+}
+
+/// Starts the session's process on a real terminal.
+fn start_pty(program: &str, args: &[String], cwd: &Path) -> std::io::Result<PtySession> {
+    PtySession::spawn(PtyOptions {
+        program: program.into(),
+        args: args.iter().map(Into::into).collect(),
+        cwd: cwd.as_os_str().to_owned(),
+        // The creating client usually has no terminal of its own, so this
+        // is a placeholder an attaching UI corrects with a resize.
+        size: TerminalSize::default(),
+    })
+}
+
+/// Starts the session's process on plain pipes.
+fn start_piped(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+) -> std::io::Result<rusty_tokio::process::Child> {
+    use rusty_tokio::process::{Command, Stdio};
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Deliberately *not* `prepare_detached`: this worker owns its child.
+    // Detachment is about surviving the *daemon*, and this worker is
+    // already detached from it. Detaching the child too would mean
+    // nothing tracked its exit.
+    cmd.spawn()
+}
+
+/// Records a failure to start the session's process as a real exit.
+///
+/// A bad command is the user's ordinary mistake, not a crash. Recording
+/// it as an exit makes the session show `Errored` rather than sitting in
+/// `Created` until something else reconciles it as a phantom crash.
+fn record_start_failure(
+    root: &Path,
+    session: &mut sessionmgr_core::Session,
+    program: &str,
+    error: std::io::Error,
+) -> Result<()> {
+    let _ = session.record_exit(None);
+    catalog::write_session(root, session)?;
+    Err(Error::io(
+        "starting the session's command",
+        PathBuf::from(program),
+        error,
+    ))
+}
+
+/// Reads a PTY-hosted session's output on a dedicated OS thread.
+///
+/// A plain `std::thread`, not `spawn_blocking`: the read blocks for the
+/// entire life of the session, which would occupy a runtime blocking-pool
+/// slot from creation to teardown. Nothing in the loop is async --
+/// `broadcast::Sender::send` and the transcript append are both
+/// synchronous -- so the thread needs no runtime at all.
+fn spawn_pty_reader(worker: Arc<Worker>, pty: Arc<PtySession>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; READ_BUFFER];
+        loop {
+            match pty.read(&mut buf) {
+                // The documented end-of-stream signal: the process exited.
+                Ok(0) => break,
+                Ok(n) => worker.emit(SessionEvent::Output {
+                    data: buf[..n].to_vec(),
+                }),
+                Err(e) => {
+                    // A master whose child has gone reports an I/O error
+                    // rather than a clean zero-length read on some
+                    // platforms. Either way the session is over, and
+                    // treating it as a read failure would report a normal
+                    // exit as a fault.
+                    let _ = e;
+                    break;
+                }
+            }
+        }
+        let code = pty.wait().unwrap_or(None);
+        worker.record_child_exit(code);
+        worker.shutdown.notify_one();
+    });
 }
 
 impl Worker {
@@ -274,38 +396,54 @@ impl Worker {
         }
         self.emit(SessionEvent::Exited { code });
     }
-}
 
-/// Streams one of the child's output handles into the transcript and the
-/// broadcast channel.
-///
-/// Chunked reads, not line reads: an agent CLI's prompt ("Continue?
-/// [y/N] ") has no trailing newline, and a line-buffered pump would hold
-/// it until the user answered a question they had not been shown.
-///
-/// **Known limitation, and a real input to the Phase 1 PTY spike**:
-/// `from_utf8_lossy` is applied per chunk, so a multi-byte character
-/// split across a read boundary is mangled into replacement characters.
-/// Fixing that properly means carrying a decoder across chunks, or
-/// switching the wire type to bytes. Which of those is right depends on
-/// whether sessions end up PTY-backed and therefore carrying control
-/// sequences -- which is precisely what the spike decides, so this stays
-/// as-is until it has an answer.
-async fn pump<R>(worker: Arc<Worker>, mut source: R)
-where
-    R: AsyncReadExt + Unpin + Send + 'static,
-{
-    let mut buf = [0u8; 8192];
-    loop {
-        match source.read(&mut buf).await {
-            Ok(0) => return,
-            Ok(n) => worker.emit(SessionEvent::Output {
-                data: String::from_utf8_lossy(&buf[..n]).into_owned(),
-            }),
-            Err(e) => {
-                eprintln!("sessionmgr worker: reading child output failed: {e}");
-                return;
+    /// Sends input to the session's process.
+    async fn send_input(&self, data: Vec<u8>) -> Result<()> {
+        match &self.backend {
+            Backend::Pty(pty) => {
+                let pty = Arc::clone(pty);
+                // The write blocks, so it goes to the blocking pool
+                // rather than stalling a runtime worker. Unlike the read,
+                // this is short-lived, so a pool slot is the right home
+                // for it.
+                rusty_tokio::spawn_blocking(move || pty.write_all(&data))
+                    .await
+                    // The blocking task itself failed to run to
+                    // completion -- it panicked, or the runtime is
+                    // shutting down. Neither is an I/O failure of the
+                    // terminal, so it is reported as its own thing.
+                    .map_err(|e| {
+                        Error::conflict(format!("the terminal write task did not complete: {e}"))
+                    })?
+                    .map_err(|e| Error::io("writing to the session's terminal", None, e))
             }
+            Backend::Piped(stdin) => {
+                let mut guard = stdin.lock().await;
+                let Some(stdin) = guard.as_mut() else {
+                    return Err(Error::conflict("this session's input stream is closed"));
+                };
+                stdin
+                    .write_all(&data)
+                    .await
+                    .map_err(|e| Error::io("writing to the session's stdin", None, e))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| Error::io("flushing the session's stdin", None, e))
+            }
+        }
+    }
+
+    /// Tells the session's terminal it has been resized.
+    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        match &self.backend {
+            Backend::Pty(pty) => pty
+                .resize(TerminalSize { rows, cols })
+                .map_err(|e| Error::io("resizing the session's terminal", None, e)),
+            // Not an error worth failing on: a piped session has no
+            // terminal to resize, and a UI that resizes every session it
+            // shows should not have to special-case which ones have one.
+            Backend::Piped(_) => Ok(()),
         }
     }
 }
@@ -336,7 +474,17 @@ async fn serve(worker: Arc<Worker>, mut conn: transport::Connection) {
         }
         Request::SessionAttach { .. } => attach(worker, conn).await,
         Request::SessionInput { data, .. } => {
-            let response = match worker.send_input(&data).await {
+            let response = match worker.send_input(data).await {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                },
+            };
+            let _ = conn.write(&response).await;
+        }
+        Request::SessionResize { rows, cols, .. } => {
+            let response = match worker.resize(rows, cols) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     kind: e.kind(),
@@ -347,13 +495,13 @@ async fn serve(worker: Arc<Worker>, mut conn: transport::Connection) {
         }
         Request::WorkerShutdown => {
             let _ = conn.write(&Response::Ok).await;
-            // Terminate the child before exiting. Leaving it running
-            // would orphan it with nothing recording it as live and
-            // nothing able to reach it -- the exact failure the recorded
-            // pid pair exists to prevent, and it would be perverse to
-            // create it here on the *graceful* path.
+            // Terminate the session's process before exiting. Leaving it
+            // running would orphan it with nothing recording it as live
+            // and nothing able to reach it -- the exact failure the
+            // recorded pid pair exists to prevent, and it would be
+            // perverse to create it here on the *graceful* path.
             if let Err(e) = sessionmgr_proc::terminate(worker.child_pid) {
-                eprintln!("sessionmgr worker: could not terminate the child: {e}");
+                eprintln!("sessionmgr worker: could not terminate the session's process: {e}");
             }
             worker.shutdown.notify_one();
         }
@@ -365,25 +513,6 @@ async fn serve(worker: Arc<Worker>, mut conn: transport::Connection) {
                 })
                 .await;
         }
-    }
-}
-
-impl Worker {
-    async fn send_input(&self, data: &str) -> Result<()> {
-        let mut guard = self.stdin.lock().await;
-        let Some(stdin) = guard.as_mut() else {
-            return Err(Error::conflict(
-                "this session's input stream is closed".to_owned(),
-            ));
-        };
-        stdin
-            .write_all(data.as_bytes())
-            .await
-            .map_err(|e| Error::io("writing to the session's stdin", None, e))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| Error::io("flushing the session's stdin", None, e))
     }
 }
 
@@ -411,22 +540,25 @@ async fn attach(worker: Arc<Worker>, conn: transport::Connection) {
         Err(e) => eprintln!("sessionmgr worker: could not replay the transcript: {e}"),
     }
 
-    // Client -> child: input lines, read concurrently with the outbound
-    // stream below.
+    // Client -> session: input and resizes, read concurrently with the
+    // outbound stream below.
     rusty_tokio::spawn({
         let worker = Arc::clone(&worker);
         async move {
             while let Ok(Some(request)) = transport::read_framed::<Request>(&mut reader).await {
-                if let Request::SessionInput { data, .. } = request {
-                    if let Err(e) = worker.send_input(&data).await {
-                        eprintln!("sessionmgr worker: {e}");
-                    }
+                let outcome = match request {
+                    Request::SessionInput { data, .. } => worker.send_input(data).await,
+                    Request::SessionResize { rows, cols, .. } => worker.resize(rows, cols),
+                    _ => Ok(()),
+                };
+                if let Err(e) = outcome {
+                    eprintln!("sessionmgr worker: {e}");
                 }
             }
         }
     });
 
-    // Child -> client.
+    // Session -> client.
     loop {
         match live.recv().await {
             Ok(event) => {
@@ -440,6 +572,31 @@ async fn attach(worker: Arc<Worker>, conn: transport::Connection) {
             // dropping the client.
             Err(broadcast::RecvError::Lagged(_)) => continue,
             Err(broadcast::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// Streams one of a piped child's output handles into the transcript and
+/// the broadcast channel.
+///
+/// Chunked reads, not line reads: a prompt waiting for an answer has no
+/// trailing newline, and a line-buffered pump would hold it until the
+/// user answered a question they had not been shown.
+async fn pump<R>(worker: Arc<Worker>, mut source: R)
+where
+    R: AsyncReadExt + Unpin + Send + 'static,
+{
+    let mut buf = [0u8; READ_BUFFER];
+    loop {
+        match source.read(&mut buf).await {
+            Ok(0) => return,
+            Ok(n) => worker.emit(SessionEvent::Output {
+                data: buf[..n].to_vec(),
+            }),
+            Err(e) => {
+                eprintln!("sessionmgr worker: reading session output failed: {e}");
+                return;
+            }
         }
     }
 }
