@@ -121,6 +121,16 @@ pub enum Expr {
         high: Box<Expr>,
         negate: bool,
     },
+    /// `expr IN (v1, v2, ...)` (`NOT IN` if `negate`) — issue #114,
+    /// literal-list form only. `IN (SELECT ...)` (subquery form) needs
+    /// nested query execution, which this crate's `Expr`/`eval.rs`
+    /// layering doesn't support yet — tracked separately as a
+    /// new-subsystem gap alongside subqueries in general (issue #131).
+    InList {
+        expr: Box<Expr>,
+        list: Vec<Expr>,
+        negate: bool,
+    },
     /// A scalar function call, e.g. `UPPER(name)`. Evaluated only by
     /// `eval::evaluate_with_functions` — plain `evaluate`/`evaluate_bool`
     /// (which predate function-call support) error on this variant rather
@@ -389,14 +399,15 @@ impl<'a> SelectParser<'a> {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_operand()?;
 
-        // `NOT LIKE`/`NOT GLOB`/`NOT BETWEEN` -- infix negation, distinct
-        // from the prefix `NOT` `parse_not_expr` already handles (that one
-        // wraps a whole boolean primary; this one only fires mid-comparison,
-        // so there's no ambiguity between the two).
+        // `NOT LIKE`/`NOT GLOB`/`NOT BETWEEN`/`NOT IN` -- infix negation,
+        // distinct from the prefix `NOT` `parse_not_expr` already handles
+        // (that one wraps a whole boolean primary; this one only fires
+        // mid-comparison, so there's no ambiguity between the two).
         let negate = self.peek_ident("NOT")
             && (self.peek_ident_at(1, "LIKE")
                 || self.peek_ident_at(1, "GLOB")
-                || self.peek_ident_at(1, "BETWEEN"));
+                || self.peek_ident_at(1, "BETWEEN")
+                || self.peek_ident_at(1, "IN"));
         if negate {
             self.advance();
         }
@@ -435,6 +446,27 @@ impl<'a> SelectParser<'a> {
                 expr: Box::new(left),
                 low: Box::new(low),
                 high: Box::new(high),
+                negate,
+            });
+        }
+        if self.peek_ident("IN") {
+            self.advance();
+            self.expect_punct("(")?;
+            let mut list = Vec::new();
+            if !self.peek_punct(")") {
+                loop {
+                    list.push(self.parse_operand()?);
+                    if self.peek_punct(",") {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect_punct(")")?;
+            return Ok(Expr::InList {
+                expr: Box::new(left),
+                list,
                 negate,
             });
         }
@@ -943,6 +975,75 @@ mod tests {
                 escape: None,
                 negate: false,
             })))
+        );
+    }
+
+    #[test]
+    fn parses_in_list() {
+        let tokens = tokenize("SELECT * FROM t WHERE a IN (1, 2, 3)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::InList {
+                expr: Box::new(Expr::Column("a".into())),
+                list: vec![
+                    Expr::Literal(Value::Integer(1)),
+                    Expr::Literal(Value::Integer(2)),
+                    Expr::Literal(Value::Integer(3)),
+                ],
+                negate: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_not_in_list() {
+        let tokens = tokenize("SELECT * FROM t WHERE a NOT IN (1, 2)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::InList {
+                expr: Box::new(Expr::Column("a".into())),
+                list: vec![
+                    Expr::Literal(Value::Integer(1)),
+                    Expr::Literal(Value::Integer(2)),
+                ],
+                negate: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_empty_in_list() {
+        let tokens = tokenize("SELECT * FROM t WHERE a IN ()").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::InList {
+                expr: Box::new(Expr::Column("a".into())),
+                list: vec![],
+                negate: false,
+            })
+        );
+    }
+
+    #[test]
+    fn in_list_combines_with_and() {
+        let tokens = tokenize("SELECT * FROM t WHERE a IN (1, 2) AND b = 3").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::And(
+                Box::new(Expr::InList {
+                    expr: Box::new(Expr::Column("a".into())),
+                    list: vec![
+                        Expr::Literal(Value::Integer(1)),
+                        Expr::Literal(Value::Integer(2)),
+                    ],
+                    negate: false,
+                }),
+                Box::new(eq("b", 3)),
+            ))
         );
     }
 }

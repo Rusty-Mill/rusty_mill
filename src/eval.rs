@@ -161,6 +161,33 @@ pub fn evaluate_with_functions(
                 && compare_values(&v, &hi) != Ordering::Greater;
             Ok(bool3_to_value(Some(matched != *negate)))
         }
+        Expr::InList { expr, list, negate } => {
+            let x = evaluate_with_functions(expr, column_names, row, functions)?;
+            if x == Value::Null {
+                return Ok(Value::Null);
+            }
+            let mut found = false;
+            let mut saw_null = false;
+            for item in list {
+                let v = evaluate_with_functions(item, column_names, row, functions)?;
+                if v == Value::Null {
+                    saw_null = true;
+                    continue;
+                }
+                if compare_values(&x, &v) == Ordering::Equal {
+                    found = true;
+                    break;
+                }
+            }
+            let result = if found {
+                Some(true)
+            } else if saw_null {
+                None
+            } else {
+                Some(false)
+            };
+            Ok(bool3_to_value(result.map(|b| b != *negate)))
+        }
         // No bindings are available here — `crate::Statement` resolves
         // `Parameter` nodes to a concrete `Literal` (bound value, or
         // `Value::Null` if unbound) before this ever runs; a caller that
@@ -520,6 +547,79 @@ mod tests {
             negate: false,
         };
         assert_eq!(evaluate(&expr, &cols(), &[]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn in_list_matches_a_member() {
+        let expr = Expr::InList {
+            expr: Box::new(lit(2)),
+            list: vec![lit(1), lit(2), lit(3)],
+            negate: false,
+        };
+        assert!(evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn in_list_does_not_match_a_non_member() {
+        let expr = Expr::InList {
+            expr: Box::new(lit(5)),
+            list: vec![lit(1), lit(2), lit(3)],
+            negate: false,
+        };
+        assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn not_in_list_negates_the_match() {
+        let expr = Expr::InList {
+            expr: Box::new(lit(2)),
+            list: vec![lit(1), lit(2), lit(3)],
+            negate: true,
+        };
+        assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn null_in_list_is_null() {
+        let expr = Expr::InList {
+            expr: Box::new(null()),
+            list: vec![lit(1), lit(2)],
+            negate: false,
+        };
+        assert_eq!(evaluate(&expr, &cols(), &[]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn not_in_list_with_a_null_member_and_no_match_is_null() {
+        // x NOT IN (1, NULL) is NULL, not TRUE, for any non-matching x --
+        // real SQL's NULL-aware IN semantics: x could equal the unknown
+        // NULL value, so "definitely not in the list" can't be asserted.
+        let expr = Expr::InList {
+            expr: Box::new(lit(5)),
+            list: vec![lit(1), null()],
+            negate: true,
+        };
+        assert_eq!(evaluate(&expr, &cols(), &[]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn in_list_with_a_null_member_and_a_real_match_is_true() {
+        let expr = Expr::InList {
+            expr: Box::new(lit(1)),
+            list: vec![lit(1), null()],
+            negate: false,
+        };
+        assert!(evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn empty_in_list_never_matches() {
+        let expr = Expr::InList {
+            expr: Box::new(lit(1)),
+            list: vec![],
+            negate: false,
+        };
+        assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
     }
 
     #[test]
