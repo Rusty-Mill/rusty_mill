@@ -80,8 +80,8 @@ pub use dml_delete::{parse_delete, Delete};
 pub use dml_insert::{parse_insert, Insert, InsertSource, OrConflict};
 pub use dml_select::{
     parse_compound_select, parse_select, parse_with_select, AggregateArg, AggregateCall, BinaryOp,
-    CompoundOp, CompoundSelect, Cte, Expr, ParamMarker, Select, SelectColumns, WindowCall,
-    WithSelect,
+    CompoundOp, CompoundSelect, Cte, Expr, Join, JoinCondition, JoinKind, ParamMarker, Select,
+    SelectColumns, TableRef, WindowCall, WithSelect,
 };
 pub use dml_update::{parse_update, Update};
 pub use engine::{
