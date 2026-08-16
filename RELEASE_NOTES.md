@@ -23,6 +23,32 @@ entry per PR.
 
 ---
 
+## PR #105 — Add ArrayTab vtab module (closes #96)
+**2026-08-16** · [#105](https://github.com/baileyrd/rusty_-rusqlite/pull/105)
+
+- **Added:** `vtab_array::ArrayTab` — binds a `Vec<Value>` as a
+  query-able one-column table, the same use case as real `rusqlite`'s
+  `rarray!`/`vtab::array`.
+- **Scope cut:** real `rarray!` binds its `Vec` as a *query parameter*
+  via SQLite's `sqlite3_bind_pointer` FFI trick; this engine has
+  neither an FFI boundary nor per-query pointer-bound parameters to
+  mirror that with. The honest equivalent: register a fresh table per
+  `Vec` via the existing eponymous `Connection::create_module` path
+  (#92) — queryable immediately, no separate bind step.
+- **Scope cut:** the real headline use case, `WHERE x IN rarray(?1)`,
+  isn't reproducible yet — this engine's `WHERE` grammar has no `IN`/
+  `JOIN` support, a separate pre-existing gap. `ArrayTab` works
+  standalone today (`SELECT * FROM name`, ordinary `WHERE value = ...`
+  filtering) and will compose with `IN`/`JOIN` once those land.
+- 323 tests passing.
+- This closes out the `vtab` epic (#90–#97) started this session, with
+  one deliberate exception: #94 (`IndexInfo`/`best_index` constraint
+  pushdown) stays open as a placeholder — already resolved to the
+  extent this engine's single-plan-only scan model calls for (see #90/
+  #95), nothing concrete to build against beyond that today.
+
+---
+
 ## PR #104 — Add SeriesTab/CsvTab example vtab modules (closes #97)
 **2026-08-16** · [#104](https://github.com/baileyrd/rusty_-rusqlite/pull/104)
 
