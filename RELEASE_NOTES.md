@@ -23,6 +23,40 @@ entry per PR.
 
 ---
 
+## PR #147 — Add WITH (non-recursive common table expressions) (closes #127)
+**2026-08-16** · [#147](https://github.com/baileyrd/rusty_-rusqlite/pull/147)
+
+- **Added:** `WITH name AS (SELECT ...) [, ...] <select-stmt>` — new
+  `Cte`/`WithSelect` AST, `parse_with_select`, `Connection::
+  run_with_select`, and a free-function `execute_with_select` (matching
+  this crate's established `Connection`-method / free-function dual-API
+  pattern). Each CTE's body may itself be a compound `SELECT` (`UNION`/
+  `INTERSECT`/`EXCEPT`, issue #126), reusing `parse_compound_select_at`.
+- **`WITH RECURSIVE` is explicitly out of scope for this issue** and not
+  implemented — a genuinely different execution shape (iterate to a
+  fixed point) rather than a small addition, matching the epic's own
+  Part 3 scope note. `WITH RECURSIVE ...` is not recognized and errors
+  as an unrecognized statement.
+- CTEs execute in declaration order, each materialized result
+  registered by name before the next CTE (or the final body) runs — so
+  a later CTE can reference an earlier one by name, resolved through
+  the ordinary `FROM`-resolution path (`Database::scan`) like any other
+  table.
+- **Decided and documented:** a CTE name shadows a real table of the
+  same name for the duration of the statement, matching real SQLite's
+  own precedence. CTE state is always cleared after the statement runs
+  — success or error — so it never leaks into a later, unrelated query.
+- Implemented without changing any existing public method's signature:
+  `Connection::query_row`/`query_map`/`query_one` are `&self`, so CTE
+  registration goes through a new `RefCell`-backed field on `Database`
+  (interior mutability) rather than requiring `&mut Database`.
+- **Wired into every actual statement-dispatch site** — `Statement::
+  prepare`/`query*` (bound-parameter support included) and `Connection::
+  query_row`/`query_map`/`query_one` — branching on a leading `WITH`
+  keyword alongside the existing plain/compound `SELECT` path.
+
+---
+
 ## PR #146 — Add UNION / INTERSECT / EXCEPT (compound SELECT) (closes #126)
 **2026-08-16** · [#146](https://github.com/baileyrd/rusty_-rusqlite/pull/146)
 

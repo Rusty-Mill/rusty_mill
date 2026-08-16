@@ -76,14 +76,15 @@ pub use ddl::{
 };
 pub use dml_insert::{parse_insert, Insert, InsertSource, OrConflict};
 pub use dml_select::{
-    parse_compound_select, parse_select, AggregateArg, AggregateCall, BinaryOp, CompoundOp,
-    CompoundSelect, Expr, ParamMarker, Select, SelectColumns, WindowCall,
+    parse_compound_select, parse_select, parse_with_select, AggregateArg, AggregateCall, BinaryOp,
+    CompoundOp, CompoundSelect, Cte, Expr, ParamMarker, Select, SelectColumns, WindowCall,
+    WithSelect,
 };
 pub use engine::{
     execute_alter_table, execute_compound_select, execute_create_index, execute_create_table,
     execute_drop_index, execute_drop_table, execute_insert, execute_insert_into_virtual_table,
     execute_select, execute_select_with_aggregates, execute_select_with_functions,
-    execute_select_with_window,
+    execute_select_with_window, execute_with_select,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{

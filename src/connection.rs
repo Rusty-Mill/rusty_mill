@@ -5,7 +5,7 @@ use crate::ddl::{
     parse_drop_index, parse_drop_table, ColumnDef, CreateVirtualTable,
 };
 use crate::dml_insert::parse_insert;
-use crate::dml_select::{parse_compound_select, SelectColumns};
+use crate::dml_select::{parse_compound_select, parse_with_select, SelectColumns};
 use crate::engine::{
     execute_alter_table, execute_create_index, execute_create_table, execute_drop_index,
     execute_drop_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
@@ -1324,9 +1324,15 @@ impl Connection {
         self.fire_trace(sql);
         let start = Instant::now();
         let tokens = tokenize(sql)?;
-        let compound = parse_compound_select(&tokens)?;
-        self.check_authorized(Action::Select, &compound.first.table_name)?;
-        let (_, mut rows) = self.run_compound_select(&compound)?;
+        let (_, mut rows) = if is_with_select(&tokens) {
+            let with_select = parse_with_select(&tokens)?;
+            self.check_authorized(Action::Select, &with_select.body.first.table_name)?;
+            self.run_with_select(&with_select)?
+        } else {
+            let compound = parse_compound_select(&tokens)?;
+            self.check_authorized(Action::Select, &compound.first.table_name)?;
+            self.run_compound_select(&compound)?
+        };
         self.fire_profile(sql, start.elapsed());
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
@@ -1348,9 +1354,15 @@ impl Connection {
         self.fire_trace(sql);
         let start = Instant::now();
         let tokens = tokenize(sql)?;
-        let compound = parse_compound_select(&tokens)?;
-        self.check_authorized(Action::Select, &compound.first.table_name)?;
-        let (columns, mut rows) = self.run_compound_select(&compound)?;
+        let (columns, mut rows) = if is_with_select(&tokens) {
+            let with_select = parse_with_select(&tokens)?;
+            self.check_authorized(Action::Select, &with_select.body.first.table_name)?;
+            self.run_with_select(&with_select)?
+        } else {
+            let compound = parse_compound_select(&tokens)?;
+            self.check_authorized(Action::Select, &compound.first.table_name)?;
+            self.run_compound_select(&compound)?
+        };
         self.fire_profile(sql, start.elapsed());
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
@@ -1373,9 +1385,15 @@ impl Connection {
         self.fire_trace(sql);
         let start = Instant::now();
         let tokens = tokenize(sql)?;
-        let compound = parse_compound_select(&tokens)?;
-        self.check_authorized(Action::Select, &compound.first.table_name)?;
-        let (columns, rows) = self.run_compound_select(&compound)?;
+        let (columns, rows) = if is_with_select(&tokens) {
+            let with_select = parse_with_select(&tokens)?;
+            self.check_authorized(Action::Select, &with_select.body.first.table_name)?;
+            self.run_with_select(&with_select)?
+        } else {
+            let compound = parse_compound_select(&tokens)?;
+            self.check_authorized(Action::Select, &compound.first.table_name)?;
+            self.run_compound_select(&compound)?
+        };
         self.fire_profile(sql, start.elapsed());
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
@@ -1470,6 +1488,34 @@ impl Connection {
         }
         Ok((column_names, rows))
     }
+
+    /// Runs a parsed `WITH` statement (issue #127): executes each CTE's
+    /// `SELECT` once, in order, via [`Connection::run_compound_select`],
+    /// registering its materialized result into `self.db` (via
+    /// [`crate::storage::Database::insert_cte`]) before moving to the
+    /// next one — so a later CTE can reference an earlier one by name,
+    /// resolved the same way `FROM` resolves any other table (native,
+    /// virtual, or now CTE — see [`crate::storage::Database::scan`]'s
+    /// own doc comment for the lookup order and the CTE-shadows-a-real-
+    /// table precedence decision). Then runs `with_select.body` the same
+    /// way. CTEs are always cleared afterward — success or error — so
+    /// they never leak into a later, unrelated query. `pub(crate)` so
+    /// [`crate::Statement`] can reuse it for already-parsed `WITH`
+    /// statements.
+    pub(crate) fn run_with_select(
+        &self,
+        with_select: &crate::dml_select::WithSelect,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        let result = (|| {
+            for cte in &with_select.ctes {
+                let (columns, rows) = self.run_compound_select(&cte.select)?;
+                self.db.insert_cte(cte.name.clone(), columns, rows);
+            }
+            self.run_compound_select(&with_select.body)
+        })();
+        self.db.clear_ctes();
+        result
+    }
 }
 
 /// `pub(crate)` so [`crate::Statement`] (a different module) can reuse it
@@ -1479,6 +1525,13 @@ pub(crate) fn leading_keyword(tokens: &[Token]) -> Option<&str> {
         Some(Token::Ident(s)) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// Whether `tokens` starts a `WITH ...` statement (issue #127) rather than
+/// a bare `SELECT`/compound `SELECT`. `pub(crate)` so [`crate::Statement`]
+/// can reuse it for the same dispatch decision when preparing.
+pub(crate) fn is_with_select(tokens: &[Token]) -> bool {
+    matches!(leading_keyword(tokens), Some(kw) if kw.eq_ignore_ascii_case("WITH"))
 }
 
 /// Whether `tokens` starts `CREATE VIRTUAL TABLE ...` rather than plain
@@ -2742,6 +2795,109 @@ mod tests {
             conn.query_row("SELECT a, b FROM t UNION SELECT a FROM u"),
             Err(Error::ColumnCountMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn with_select_runs_a_single_cte() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut rows: Vec<i64> = conn
+            .query_map(
+                "WITH cte AS (SELECT a FROM t WHERE a > 1) SELECT a FROM cte",
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2, 3]);
+    }
+
+    #[test]
+    fn with_select_supports_multiple_ctes_in_one_clause() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+        conn.execute("CREATE TABLE u (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO u VALUES (10), (20)").unwrap();
+
+        let mut rows: Vec<i64> = conn
+            .query_map(
+                "WITH ct AS (SELECT a FROM t), cu AS (SELECT a FROM u) \
+                 SELECT a FROM ct UNION SELECT a FROM cu",
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 2, 10, 20]);
+    }
+
+    #[test]
+    fn a_later_cte_can_reference_an_earlier_cte() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut rows: Vec<i64> = conn
+            .query_map(
+                "WITH big AS (SELECT a FROM t WHERE a > 1), \
+                      bigger AS (SELECT a FROM big WHERE a > 2) \
+                 SELECT a FROM bigger",
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![3]);
+    }
+
+    #[test]
+    fn a_cte_shadows_a_real_table_of_the_same_name() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let mut rows: Vec<i64> = conn
+            .query_map(
+                "WITH t AS (SELECT a FROM t WHERE a > 1) SELECT a FROM t",
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2]);
+
+        // After the WITH statement finishes, the real table `t` is
+        // resolved normally again -- the CTE doesn't leak.
+        let mut rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 2]);
+    }
+
+    #[test]
+    fn with_select_works_through_a_prepared_statement_with_bound_params() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn
+            .prepare("WITH cte AS (SELECT a FROM t WHERE a > ?) SELECT a FROM cte")
+            .unwrap();
+        stmt.raw_bind_parameter(1, 1i64).unwrap();
+        let mut rows: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2, 3]);
+    }
+
+    #[test]
+    fn with_select_query_row_and_column_names() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (7)").unwrap();
+
+        let stmt = conn
+            .prepare("WITH cte AS (SELECT a FROM t) SELECT a FROM cte")
+            .unwrap();
+        assert_eq!(stmt.column_names().unwrap(), vec!["a"]);
+        assert_eq!(stmt.query_row().unwrap(), vec![Value::Integer(7)]);
     }
 
     #[test]
