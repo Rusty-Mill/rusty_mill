@@ -2527,6 +2527,116 @@ mod tests {
     }
 
     #[test]
+    fn group_by_single_column_buckets_before_aggregating() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (category TEXT, amount INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES ('a', 10), ('a', 20), ('b', 5), ('b', 1), ('b', 1)")
+            .unwrap();
+
+        let mut counts: Vec<i64> = conn
+            .query_map("SELECT COUNT(*) FROM t GROUP BY category", |row| row.get(0))
+            .unwrap();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![2, 3]);
+    }
+
+    #[test]
+    fn group_by_multiple_columns_buckets_on_the_full_key() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 1), (1, 1), (1, 2), (2, 1)")
+            .unwrap();
+
+        let mut counts: Vec<i64> = conn
+            .query_map("SELECT COUNT(*) FROM t GROUP BY a, b", |row| row.get(0))
+            .unwrap();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 1, 2]);
+    }
+
+    #[test]
+    fn null_grouping_key_forms_its_own_group() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (category TEXT)").unwrap();
+        conn.execute("INSERT INTO t VALUES (NULL), (NULL), ('a')")
+            .unwrap();
+
+        let mut counts: Vec<i64> = conn
+            .query_map("SELECT COUNT(*) FROM t GROUP BY category", |row| row.get(0))
+            .unwrap();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 2]);
+    }
+
+    #[test]
+    fn group_by_excludes_groups_with_no_matching_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (category TEXT, amount INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES ('a', 1), ('b', 100)")
+            .unwrap();
+
+        // WHERE filters out every 'b' row before grouping -- only one
+        // group ('a') should ever form.
+        let counts: Vec<i64> = conn
+            .query_map(
+                "SELECT COUNT(*) FROM t WHERE amount < 10 GROUP BY category",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(counts, vec![1]);
+    }
+
+    #[test]
+    fn having_filters_groups_referencing_an_aggregate() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (category TEXT)").unwrap();
+        conn.execute("INSERT INTO t VALUES ('a'), ('a'), ('b')")
+            .unwrap();
+
+        let counts: Vec<i64> = conn
+            .query_map(
+                "SELECT COUNT(*) FROM t GROUP BY category HAVING COUNT(*) > 1",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(counts, vec![2]);
+    }
+
+    #[test]
+    fn having_without_group_by_filters_the_single_whole_table_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT COUNT(*) FROM t HAVING COUNT(*) > 5", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(rows.is_empty());
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT COUNT(*) FROM t HAVING COUNT(*) > 1", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, vec![2]);
+    }
+
+    #[test]
+    fn group_by_with_non_aggregate_select_list_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        assert!(matches!(
+            conn.query_row("SELECT a FROM t GROUP BY a"),
+            Err(Error::UnrecognizedStatement(_))
+        ));
+    }
+
+    #[test]
     fn min_max_over_empty_table_are_null() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER)").unwrap();

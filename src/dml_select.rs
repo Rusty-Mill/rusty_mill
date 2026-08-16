@@ -16,9 +16,19 @@ pub enum SelectColumns {
     Named(Vec<String>),
     /// A select list that's entirely aggregate-function calls, e.g.
     /// `SELECT COUNT(*), SUM(a) FROM t`. Evaluated over every row matching
-    /// `filter` into a single output row — this crate has no `GROUP BY`
-    /// yet, so grouped aggregation (multiple output rows, one per group)
-    /// isn't supported; only whole-table aggregation is.
+    /// `filter`, bucketed by [`Select::group_by`] into one output row per
+    /// distinct group (issue #125) — an empty `group_by` is one implicit
+    /// whole-table group, same as this crate's pre-#125 behavior.
+    ///
+    /// **Scope, stated plainly:** the `GROUP BY` column(s) themselves
+    /// aren't added to the output row — this select-list variant is
+    /// still calls-only (no mixing a bare grouped column into the list
+    /// alongside aggregate calls, e.g. `SELECT category, COUNT(*) ...`
+    /// isn't parseable). `GROUP BY`/`HAVING` still work correctly for
+    /// bucketing and filtering; the grouped value just isn't projected.
+    /// Extending the select-list grammar to mix plain columns with
+    /// aggregate calls is a larger, separate change than this issue's
+    /// own "extends the existing whole-table aggregation path" scope.
     Aggregates(Vec<AggregateCall>),
     /// A select list that's entirely window-function calls, e.g.
     /// `SELECT SUM(a) OVER (PARTITION BY b) FROM t`. See [`WindowCall`]'s
@@ -68,6 +78,24 @@ pub enum AggregateArg {
     Expr(Box<Expr>),
 }
 
+/// A result-column name for an aggregate call, e.g. `COUNT(*)` or
+/// `SUM(a)`. Simplified relative to real SQLite's full result-column-name
+/// inference: any non-column expression argument is just shown as `expr`.
+/// `pub(crate)` so `engine.rs`/`Statement` (different modules) can reuse
+/// it for `Statement::column_names` on an aggregate `SELECT`, and so the
+/// parser itself can reuse it for `HAVING`'s aggregate-reference syntax
+/// (issue #125 — see [`SelectParser::parse_operand`]'s own doc comment).
+pub(crate) fn describe_aggregate_call(call: &AggregateCall) -> String {
+    let arg = match &call.arg {
+        AggregateArg::Star => "*".to_string(),
+        AggregateArg::Expr(expr) => match expr.as_ref() {
+            Expr::Column(name) => name.clone(),
+            _ => "expr".to_string(),
+        },
+    };
+    format!("{}({arg})", call.name)
+}
+
 /// A parsed single-table `SELECT` statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Select {
@@ -77,6 +105,18 @@ pub struct Select {
     /// Whether `DISTINCT` followed `SELECT` (issue #116) — the engine
     /// dedups the final output rows, preserving first-occurrence order.
     pub distinct: bool,
+    /// `GROUP BY col, ...` (issue #125) — only meaningful (and only
+    /// checked) for [`SelectColumns::Aggregates`]; empty means "one
+    /// implicit whole-table group", matching this crate's pre-#125
+    /// aggregate behavior exactly (see `engine::execute_select_with_aggregates`).
+    pub group_by: Vec<String>,
+    /// `HAVING expr` (issue #125) — a post-aggregation filter, evaluated
+    /// once per group rather than once per row like `WHERE`. Parsed with
+    /// [`SelectParser::parse_operand`]'s aggregate-reference extension,
+    /// so it can reference an aggregate result (e.g. `HAVING COUNT(*) >
+    /// 1`), which plain `WHERE` cannot (grouping/aggregation hasn't
+    /// happened yet when `WHERE` runs).
+    pub having: Option<Expr>,
 }
 
 /// A minimal expression tree — enough to represent `WHERE` filters.
@@ -203,7 +243,11 @@ pub enum BinaryOp {
 /// Parses a single-table `SELECT` statement from a token stream (as
 /// produced by [`crate::tokenize`]).
 pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
-    let mut p = SelectParser { tokens, pos: 0 };
+    let mut p = SelectParser {
+        tokens,
+        pos: 0,
+        in_having: false,
+    };
     p.expect_ident("SELECT")?;
 
     let distinct = if p.peek_ident("DISTINCT") {
@@ -253,11 +297,33 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
         None
     };
 
+    let group_by = if p.peek_ident("GROUP") {
+        p.advance();
+        p.expect_ident("BY")?;
+        let mut cols = vec![p.expect_any_ident()?];
+        while p.peek_punct(",") {
+            p.advance();
+            cols.push(p.expect_any_ident()?);
+        }
+        cols
+    } else {
+        Vec::new()
+    };
+
+    let having = if p.peek_ident("HAVING") {
+        p.advance();
+        Some(p.parse_having_expr()?)
+    } else {
+        None
+    };
+
     Ok(Select {
         columns,
         table_name,
         filter,
         distinct,
+        group_by,
+        having,
     })
 }
 
@@ -270,7 +336,11 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
 /// wrapped around it — rather than duplicating `parse_or_expr` and its
 /// whole precedence chain in a second parser.
 pub(crate) fn parse_expr_at(tokens: &[Token], pos: usize) -> Result<(Expr, usize), ParseError> {
-    let mut p = SelectParser { tokens, pos };
+    let mut p = SelectParser {
+        tokens,
+        pos,
+        in_having: false,
+    };
     let expr = p.parse_or_expr()?;
     Ok((expr, p.pos))
 }
@@ -286,7 +356,11 @@ pub(crate) fn parse_expr_at(tokens: &[Token], pos: usize) -> Result<(Expr, usize
 /// `WHERE`, where a bare value isn't itself a filter) — wrong for
 /// `DEFAULT 1`, a bare value with no operator at all.
 pub(crate) fn parse_operand_at(tokens: &[Token], pos: usize) -> Result<(Expr, usize), ParseError> {
-    let mut p = SelectParser { tokens, pos };
+    let mut p = SelectParser {
+        tokens,
+        pos,
+        in_having: false,
+    };
     let expr = p.parse_operand()?;
     Ok((expr, p.pos))
 }
@@ -294,6 +368,9 @@ pub(crate) fn parse_operand_at(tokens: &[Token], pos: usize) -> Result<(Expr, us
 struct SelectParser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// Set only while parsing a `HAVING` clause (issue #125) — see
+    /// [`SelectParser::parse_operand`]'s aggregate-reference branch.
+    in_having: bool,
 }
 
 impl<'a> SelectParser<'a> {
@@ -403,6 +480,20 @@ impl<'a> SelectParser<'a> {
             left = Expr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
+    }
+
+    /// Parses a `HAVING` clause's expression — the same boolean grammar
+    /// as `WHERE` ([`SelectParser::parse_or_expr`]), but with
+    /// [`SelectParser::in_having`] set for its duration so
+    /// [`SelectParser::parse_operand`] treats `IDENT(...)` as an
+    /// aggregate-call reference (issue #125). Scoped to exactly this
+    /// call — reset afterward, so `WHERE`/`CHECK`/`DEFAULT` parsing
+    /// elsewhere is unaffected.
+    fn parse_having_expr(&mut self) -> Result<Expr, ParseError> {
+        self.in_having = true;
+        let result = self.parse_or_expr();
+        self.in_having = false;
+        result
     }
 
     /// `expr (AND expr)*`, left-associative — binds tighter than `OR`,
@@ -541,7 +632,27 @@ impl<'a> SelectParser<'a> {
         })
     }
 
+    /// Parses a primary expression. Beyond the usual literal/column/
+    /// function-call/`CASE`/parameter cases, when [`SelectParser::
+    /// in_having`] is set (i.e. only while parsing a `HAVING` clause —
+    /// issue #125), an `IDENT(...)` shape is parsed as an aggregate-call
+    /// reference (via [`SelectParser::parse_aggregate_call`], so
+    /// `COUNT(*)` works) rather than a scalar [`Expr::FunctionCall`], and
+    /// represented as `Expr::Column` under that call's display name
+    /// (matching [`describe_aggregate_call`], the same name the select
+    /// list's own aggregate calls surface as output columns under) —
+    /// this lets `HAVING COUNT(*) > 1` evaluate against the group's
+    /// already-finalized aggregate value with the ordinary boolean
+    /// evaluator, no special-cased "is this an aggregate?" logic needed
+    /// in `eval.rs`. Consistent with the select list's own established
+    /// rule that `IDENT(...)` always means an aggregate call there too
+    /// (never a plain scalar function call — scalar calls are a
+    /// `WHERE`/`CHECK`/`DEFAULT`-context-only concept in this grammar).
     fn parse_operand(&mut self) -> Result<Expr, ParseError> {
+        if self.in_having && self.starts_aggregate_call() {
+            let call = self.parse_aggregate_call()?;
+            return Ok(Expr::Column(describe_aggregate_call(&call)));
+        }
         match self.peek().cloned() {
             Some(Token::Ident(name)) if name.eq_ignore_ascii_case("CASE") => {
                 self.advance();
@@ -1241,5 +1352,101 @@ mod tests {
     fn case_with_no_when_branches_is_an_error() {
         let tokens = tokenize("SELECT * FROM t WHERE CASE ELSE 1 END = 1").unwrap();
         assert!(parse_select(&tokens).is_err());
+    }
+
+    #[test]
+    fn select_without_group_by_or_having_has_neither() {
+        let tokens = tokenize("SELECT COUNT(*) FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert!(select.group_by.is_empty());
+        assert_eq!(select.having, None);
+    }
+
+    #[test]
+    fn parses_group_by_single_column() {
+        let tokens = tokenize("SELECT COUNT(*) FROM t GROUP BY category").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.group_by, vec!["category".to_string()]);
+    }
+
+    #[test]
+    fn parses_group_by_multiple_columns() {
+        let tokens = tokenize("SELECT COUNT(*) FROM t GROUP BY a, b").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.group_by, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn parses_having_as_a_plain_comparison() {
+        let tokens = tokenize("SELECT COUNT(*) FROM t GROUP BY a HAVING a = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.having,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Column("a".into())),
+                right: Box::new(Expr::Literal(Value::Integer(1))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_having_referencing_an_aggregate() {
+        let tokens = tokenize("SELECT COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.having,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Gt,
+                left: Box::new(Expr::Column("COUNT(*)".into())),
+                right: Box::new(Expr::Literal(Value::Integer(1))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_having_referencing_a_non_star_aggregate() {
+        let tokens =
+            tokenize("SELECT SUM(amount) FROM t GROUP BY a HAVING SUM(amount) > 100").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.having,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Gt,
+                left: Box::new(Expr::Column("SUM(amount)".into())),
+                right: Box::new(Expr::Literal(Value::Integer(100))),
+            })
+        );
+    }
+
+    #[test]
+    fn having_without_group_by_is_allowed() {
+        // Real SQLite allows this too -- it just filters the single
+        // whole-table aggregate row.
+        let tokens = tokenize("SELECT COUNT(*) FROM t HAVING COUNT(*) > 0").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert!(select.group_by.is_empty());
+        assert!(select.having.is_some());
+    }
+
+    #[test]
+    fn aggregate_reference_syntax_is_scoped_to_having_only() {
+        // The same "IDENT(...)" shape in WHERE is a plain scalar
+        // function call (Expr::FunctionCall), not an aggregate
+        // reference -- the HAVING-only parsing extension doesn't leak
+        // into WHERE.
+        let tokens = tokenize("SELECT * FROM t WHERE UPPER(a) = 'X'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::FunctionCall {
+                    name: "UPPER".into(),
+                    args: vec![Expr::Column("a".into())],
+                }),
+                right: Box::new(Expr::Literal(Value::Text("X".into()))),
+            })
+        );
     }
 }
