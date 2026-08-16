@@ -21,9 +21,8 @@
 //!   (`Vec<Vec<Value>>`, positional only) has no rowid to report.
 //!
 //! **Also out of scope:** `CREATE VIRTUAL TABLE` support (issue #93) —
-//! a `VTab` is only usable eponymously (registered directly by name via
-//! [`crate::storage::Database::register_virtual_table`], still
-//! `pub(crate)`-only until issue #92 adds a public `Connection` API).
+//! a `VTab` is only usable eponymously, registered directly by name via
+//! [`crate::Connection::create_module`].
 
 use crate::dml_select::Expr;
 use crate::error::Result;

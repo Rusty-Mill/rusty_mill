@@ -11,8 +11,8 @@ use std::fmt;
 
 /// A source of rows a `SELECT` can scan, standing in for a concrete
 /// [`Table`] — see `docs/adr/0003-tablesource.md`. Implemented by
-/// `Table` itself (native tables) and, once `Connection::create_module`
-/// (issue #92) exists, by any registered virtual table.
+/// `Table` itself (native tables) and by any virtual table registered
+/// via [`crate::Connection::create_module`].
 pub trait TableSource {
     fn column_names(&self) -> &[String];
     /// `filter`, if given, is the query's `WHERE` clause — an
@@ -58,9 +58,9 @@ pub struct Table {
 #[derive(Default)]
 pub struct Database {
     tables: HashMap<String, Table>,
-    /// Registered via [`Database::register_virtual_table`] (issue #92
-    /// wires a public `Connection` API to it; nothing does yet). Checked
-    /// by [`Database::scan`] after native tables — see
+    /// Registered via [`Database::register_virtual_table`]
+    /// ([`crate::Connection::create_module`]'s the public API for it).
+    /// Checked by [`Database::scan`] after native tables — see
     /// `docs/adr/0003-tablesource.md`.
     virtual_tables: HashMap<String, Box<dyn TableSource>>,
 }
@@ -140,9 +140,9 @@ impl Database {
     }
 
     /// Returns `table_name`'s column names and rows for a `SELECT` scan,
-    /// checking native tables first, then registered virtual tables
-    /// (issue #92) — the dispatch point [`TableSource`] exists for. Used
-    /// by `engine.rs`'s `execute_select*` functions instead of
+    /// checking native tables first, then registered virtual tables —
+    /// the dispatch point [`TableSource`] exists for. Used by
+    /// `engine.rs`'s `execute_select*` functions instead of
     /// [`Database::table`] directly, so a virtual table can stand in for
     /// a native one. See `docs/adr/0003-tablesource.md`.
     pub fn scan(
@@ -160,12 +160,9 @@ impl Database {
     }
 
     /// Registers a virtual table under `name`, checked by
-    /// [`Database::scan`] after native tables. `pub(crate)` only — issue
-    /// #92 (`Connection::create_module`) adds the public API that calls
-    /// this; nothing does yet, so it's only exercised by this module's
-    /// and `engine.rs`'s own tests today (`#[allow(dead_code)]` since
-    /// clippy's `--all-targets` lib-only pass can't see those).
-    #[allow(dead_code)]
+    /// [`Database::scan`] after native tables. `pub(crate)` only —
+    /// [`crate::Connection::create_module`] is the public API that
+    /// calls this.
     pub(crate) fn register_virtual_table(&mut self, name: String, source: Box<dyn TableSource>) {
         self.virtual_tables.insert(name, source);
     }
