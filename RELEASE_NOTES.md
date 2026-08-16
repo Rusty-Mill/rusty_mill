@@ -23,6 +23,42 @@ entry per PR.
 
 ---
 
+## PR #99 — Add TableSource abstraction (closes #90)
+**2026-08-14** · [#99](https://github.com/baileyrd/rusty_-rusqlite/pull/99)
+
+The `vtab` epic's architectural prerequisite — see
+`docs/adr/0003-tablesource.md`.
+
+- **Added:** `TableSource` trait (`storage.rs`) — a source of rows a
+  `SELECT` can scan, standing in for a concrete `Table`. `Table`
+  implements it trivially. `Database` gains a `scan(table_name, filter)`
+  dispatch point, checked after native tables against a new
+  `virtual_tables` registry.
+- **`engine.rs`'s `execute_select*` functions** now go through
+  `Database::scan` instead of reading `table.rows`/`table.column_names`
+  directly — no behavior change for native tables.
+- **Deliberately eager, not cursor-based:** `scan()` returns a fully
+  materialized `Vec<Vec<Value>>`, no `next`/`eof`/`column` pull protocol
+  like real SQLite's `xNext`/`xEof`.
+- **Folds issue #94 (`best_index` constraint pushdown) into `scan`'s own
+  `filter: Option<&Expr>` parameter** — an opportunistic hint, not a
+  contract (the engine still re-evaluates `filter` against every
+  returned row). No `IndexInfo`/cost-based plan negotiation, since
+  there's no query planner on this crate's side to negotiate with.
+- **Read-only on purpose** — no `insert`/`update`/`delete`; issue #95's
+  job as a separate trait.
+- **`Database::table`/`Table` untouched** — `blob.rs`/`pragma_table_info`/
+  `serialize.rs` don't need to change, since none of those make sense
+  for a virtual table.
+- `register_virtual_table` is `pub(crate)` only — issue #92
+  (`Connection::create_module`) adds the public API that calls it.
+- 5 new unit tests (268 total), including two full end-to-end `SELECT`
+  queries (filter + projection) against a registered virtual table;
+  all passing. `cargo clippy -- -D warnings` and `cargo fmt --check`
+  clean.
+
+---
+
 ## PR #98 — Add vtab module scoping pass (part of issue 38)
 **2026-08-14** · [#98](https://github.com/baileyrd/rusty_-rusqlite/pull/98)
 
