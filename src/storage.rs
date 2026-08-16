@@ -8,8 +8,15 @@ use crate::dml_select::Expr;
 use crate::error::{Error, Result};
 use crate::eval::{evaluate, evaluate_bool3};
 use crate::value::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+
+/// A resolved query result: column names alongside every matching row's
+/// values. Named for [`Database::scan`]'s own return shape, which
+/// [`Database`]'s `ctes` field (issue #127) stores one of per registered
+/// CTE name.
+type QueryResult = (Vec<String>, Vec<Vec<Value>>);
 
 /// A source of rows a `SELECT` can scan, standing in for a concrete
 /// [`Table`] — see `docs/adr/0003-tablesource.md`. Implemented by
@@ -102,6 +109,19 @@ pub struct Database {
     /// only, never consulted by [`Database::scan`]. See
     /// [`IndexMetadata`]'s doc comment.
     indexes: HashMap<String, IndexMetadata>,
+    /// A `WITH` query's materialized CTE results, keyed by name (issue
+    /// #127) — checked by [`Database::scan`] *before* native tables (a
+    /// CTE shadows a same-named real table — decided and documented on
+    /// [`crate::dml_select::WithSelect`]). `RefCell`, not a plain field:
+    /// [`crate::Connection::query_row`]/`query_map`/`query_one` (which
+    /// drive `WITH` execution via `Connection::run_with_select`) are
+    /// `&self` methods, so registering/clearing CTEs can't take
+    /// `&mut self` without a breaking public-API signature change this
+    /// issue doesn't call for. Always empty outside of a `WITH` query's
+    /// own execution — [`Database::clear_ctes`] runs once it finishes
+    /// (success or error), so CTE state never leaks into a later,
+    /// unrelated query.
+    ctes: RefCell<HashMap<String, QueryResult>>,
 }
 
 impl fmt::Debug for Database {
@@ -112,6 +132,7 @@ impl fmt::Debug for Database {
             .field("tables", &self.tables)
             .field("virtual_table_count", &self.virtual_tables.len())
             .field("indexes", &self.indexes)
+            .field("cte_count", &self.ctes.borrow().len())
             .finish()
     }
 }
@@ -123,6 +144,7 @@ impl Database {
             tables: HashMap::new(),
             virtual_tables: HashMap::new(),
             indexes: HashMap::new(),
+            ctes: RefCell::new(HashMap::new()),
         }
     }
 
@@ -418,16 +440,21 @@ impl Database {
     }
 
     /// Returns `table_name`'s column names and rows for a `SELECT` scan,
-    /// checking native tables first, then registered virtual tables —
-    /// the dispatch point [`TableSource`] exists for. Used by
-    /// `engine.rs`'s `execute_select*` functions instead of
-    /// [`Database::table`] directly, so a virtual table can stand in for
-    /// a native one. See `docs/adr/0003-tablesource.md`.
+    /// checking a `WITH` query's registered CTEs first (issue #127 — a
+    /// CTE shadows a same-named real table), then native tables, then
+    /// registered virtual tables — the dispatch point [`TableSource`]
+    /// exists for. Used by `engine.rs`'s `execute_select*` functions
+    /// instead of [`Database::table`] directly, so a virtual table (or a
+    /// CTE) can stand in for a native one. See
+    /// `docs/adr/0003-tablesource.md`.
     pub fn scan(
         &self,
         table_name: &str,
         filter: Option<&Expr>,
     ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        if let Some((columns, rows)) = self.ctes.borrow().get(table_name) {
+            return Ok((columns.clone(), rows.clone()));
+        }
         if let Some(table) = self.tables.get(table_name) {
             return Ok((table.column_names.clone(), table.scan(filter)?));
         }
@@ -435,6 +462,24 @@ impl Database {
             return Ok((source.column_names().to_vec(), source.scan(filter)?));
         }
         Err(Error::TableNotFound(table_name.to_string()))
+    }
+
+    /// Registers a `WITH` query's CTE result under `name` (issue #127),
+    /// for the duration of that query's own execution — see [`Database`]
+    /// ('s `ctes` field) doc comment for why this is `&self`. Called
+    /// once per CTE, in the order they're defined, so a later CTE in the
+    /// same `WITH` clause can reference an earlier one (its `SELECT`
+    /// runs — and resolves that name via [`Database::scan`] — before the
+    /// next CTE is registered).
+    pub(crate) fn insert_cte(&self, name: String, columns: Vec<String>, rows: Vec<Vec<Value>>) {
+        self.ctes.borrow_mut().insert(name, (columns, rows));
+    }
+
+    /// Clears every registered CTE — called once the enclosing `WITH`
+    /// query finishes, success or error, so CTE state never leaks into
+    /// an unrelated later query.
+    pub(crate) fn clear_ctes(&self) {
+        self.ctes.borrow_mut().clear();
     }
 
     /// Registers a virtual table under `name`, checked by

@@ -145,6 +145,31 @@ pub struct CompoundSelect {
     pub rest: Vec<(CompoundOp, Select)>,
 }
 
+/// One `name AS (SELECT ...)` common table expression in a `WITH`
+/// clause (issue #127). `WITH RECURSIVE` is explicitly deferred (epic
+/// #111's own Part 3 note) — a genuinely different execution shape
+/// (iterate to a fixed point) rather than a small addition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cte {
+    pub name: String,
+    pub select: CompoundSelect,
+}
+
+/// A parsed `WITH name AS (SELECT ...) [, ...] <select-stmt>` statement
+/// (issue #127). Each `cte` is executed once, in order, and its result
+/// materialized as an ephemeral table visible by name to every `cte`
+/// after it and to `body` — see `Connection::run_with_select`'s doc
+/// comment for exactly how (no new subsystem: an ephemeral use of the
+/// existing `TableSource`/virtual-table machinery). **Decided and
+/// documented (this issue's own "decide and document" acceptance
+/// point):** a CTE name shadows a real table of the same name for the
+/// duration of this statement, matching real SQLite's own precedence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithSelect {
+    pub ctes: Vec<Cte>,
+    pub body: CompoundSelect,
+}
+
 /// A minimal expression tree — enough to represent `WHERE` filters.
 /// Evaluated by `A6`, not here.
 #[derive(Debug, Clone, PartialEq)]
@@ -380,7 +405,21 @@ pub(crate) fn parse_select_at(tokens: &[Token], pos: usize) -> Result<(Select, u
 /// of [`parse_select`] directly, so a `UNION`/`INTERSECT`/`EXCEPT`
 /// clause is never silently dropped as unconsumed trailing tokens.
 pub fn parse_compound_select(tokens: &[Token]) -> Result<CompoundSelect, ParseError> {
-    let (first, mut pos) = parse_select_at(tokens, 0)?;
+    let (compound, _) = parse_compound_select_at(tokens, 0)?;
+    Ok(compound)
+}
+
+/// Parses a compound `SELECT` starting at `tokens[pos]`. Returns the
+/// parsed [`CompoundSelect`] and the index of the first token past it —
+/// the same "parse at an offset, report where it stopped" shape as
+/// [`parse_select_at`], letting [`parse_with_select`] (issue #127) parse
+/// a `WITH` clause's parenthesized CTE bodies (which may themselves be
+/// compound `SELECT`s) from the middle of a larger token stream.
+pub(crate) fn parse_compound_select_at(
+    tokens: &[Token],
+    pos: usize,
+) -> Result<(CompoundSelect, usize), ParseError> {
+    let (first, mut pos) = parse_select_at(tokens, pos)?;
 
     let mut rest = Vec::new();
     loop {
@@ -407,7 +446,39 @@ pub fn parse_compound_select(tokens: &[Token]) -> Result<CompoundSelect, ParseEr
         rest.push((op, next_select));
     }
 
-    Ok(CompoundSelect { first, rest })
+    Ok((CompoundSelect { first, rest }, pos))
+}
+
+/// Parses a `WITH name AS (SELECT ...) [, ...] <select-stmt>` statement
+/// (issue #127) from a token stream (as produced by [`crate::tokenize`]).
+pub fn parse_with_select(tokens: &[Token]) -> Result<WithSelect, ParseError> {
+    let mut p = SelectParser {
+        tokens,
+        pos: 0,
+        in_having: false,
+    };
+    p.expect_ident("WITH")?;
+
+    let mut ctes = Vec::new();
+    loop {
+        let name = p.expect_any_ident()?;
+        p.expect_ident("AS")?;
+        p.expect_punct("(")?;
+        let (select, new_pos) = parse_compound_select_at(p.tokens, p.pos)?;
+        p.pos = new_pos;
+        p.expect_punct(")")?;
+        ctes.push(Cte { name, select });
+
+        if p.peek_punct(",") {
+            p.advance();
+            continue;
+        }
+        break;
+    }
+
+    let (body, _) = parse_compound_select_at(p.tokens, p.pos)?;
+
+    Ok(WithSelect { ctes, body })
 }
 
 fn token_is_ident(tokens: &[Token], pos: usize, keyword: &str) -> bool {
@@ -1596,5 +1667,47 @@ mod tests {
         let tokens = tokenize("SELECT a FROM t UNION SELECT a FROM u").unwrap();
         let select = parse_select(&tokens).unwrap();
         assert_eq!(select.table_name, "t");
+    }
+
+    #[test]
+    fn parses_a_single_cte() {
+        let tokens = tokenize("WITH cte AS (SELECT a FROM t) SELECT a FROM cte").unwrap();
+        let with_select = parse_with_select(&tokens).unwrap();
+        assert_eq!(with_select.ctes.len(), 1);
+        assert_eq!(with_select.ctes[0].name, "cte");
+        assert_eq!(with_select.ctes[0].select.first.table_name, "t");
+        assert_eq!(with_select.body.first.table_name, "cte");
+    }
+
+    #[test]
+    fn parses_multiple_ctes_in_one_with_clause() {
+        let tokens =
+            tokenize("WITH a AS (SELECT x FROM t1), b AS (SELECT x FROM t2) SELECT x FROM a")
+                .unwrap();
+        let with_select = parse_with_select(&tokens).unwrap();
+        assert_eq!(with_select.ctes.len(), 2);
+        assert_eq!(with_select.ctes[0].name, "a");
+        assert_eq!(with_select.ctes[0].select.first.table_name, "t1");
+        assert_eq!(with_select.ctes[1].name, "b");
+        assert_eq!(with_select.ctes[1].select.first.table_name, "t2");
+    }
+
+    #[test]
+    fn a_cte_body_may_itself_be_a_compound_select() {
+        let tokens =
+            tokenize("WITH cte AS (SELECT a FROM t UNION SELECT a FROM u) SELECT a FROM cte")
+                .unwrap();
+        let with_select = parse_with_select(&tokens).unwrap();
+        assert_eq!(with_select.ctes[0].select.rest.len(), 1);
+        assert_eq!(with_select.ctes[0].select.rest[0].0, CompoundOp::Union);
+    }
+
+    #[test]
+    fn a_later_cte_can_reference_an_earlier_one_by_name() {
+        let tokens =
+            tokenize("WITH a AS (SELECT x FROM t), b AS (SELECT x FROM a) SELECT x FROM b")
+                .unwrap();
+        let with_select = parse_with_select(&tokens).unwrap();
+        assert_eq!(with_select.ctes[1].select.first.table_name, "a");
     }
 }

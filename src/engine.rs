@@ -8,6 +8,7 @@ use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
 use crate::dml_insert::{Insert, InsertSource};
 use crate::dml_select::{
     describe_aggregate_call, AggregateArg, CompoundOp, CompoundSelect, Expr, Select, SelectColumns,
+    WithSelect,
 };
 use crate::error::{Error, Result};
 use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
@@ -330,6 +331,31 @@ pub fn execute_compound_select(
     }
 
     Ok((column_names, rows))
+}
+
+/// Executes a `WITH` statement (issue #127), free-function counterpart
+/// to [`crate::Connection::run_with_select`] — for API symmetry with
+/// [`execute_compound_select`], for callers that already have a
+/// [`Database`] rather than a [`crate::Connection`]. Materializes each
+/// CTE's `SELECT` in declaration order, registering it via
+/// [`Database::insert_cte`] before moving to the next (so a later CTE
+/// can reference an earlier one), then runs `with_select.body` the same
+/// way. CTEs are always cleared afterward — success or error.
+pub fn execute_with_select(
+    db: &Database,
+    with_select: &WithSelect,
+    functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let result = (|| {
+        for cte in &with_select.ctes {
+            let (columns, rows) = execute_compound_select(db, &cte.select, functions, aggregates)?;
+            db.insert_cte(cte.name.clone(), columns, rows);
+        }
+        execute_compound_select(db, &with_select.body, functions, aggregates)
+    })();
+    db.clear_ctes();
+    result
 }
 
 /// Combines two already-executed sides' rows per `op` (issue #126) — a

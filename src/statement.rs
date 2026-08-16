@@ -37,12 +37,13 @@
 //! connection (see [`crate::Connection::open`]), since those are
 //! correctness guarantees, not observability.
 
-use crate::connection::{leading_keyword, Connection};
+use crate::connection::{is_with_select, leading_keyword, Connection};
 use crate::ddl::{parse_create_table, CreateTable};
 use crate::dml_insert::{parse_insert, Insert, InsertSource};
 use crate::dml_select::{
-    describe_aggregate_call, parse_compound_select, parse_param_marker, AggregateArg,
-    AggregateCall, CompoundSelect, Expr, ParamMarker, Select, SelectColumns,
+    describe_aggregate_call, parse_compound_select, parse_param_marker, parse_with_select,
+    AggregateArg, AggregateCall, CompoundSelect, Cte, Expr, ParamMarker, Select, SelectColumns,
+    WithSelect,
 };
 use crate::engine::{describe_window_call, execute_create_table, execute_insert_returning_rowids};
 use crate::error::{Error, Result};
@@ -58,6 +59,7 @@ pub(crate) enum StatementKind {
     CreateTable(CreateTable),
     Insert(Insert),
     Select(CompoundSelect),
+    With(WithSelect),
 }
 
 /// Tokenizes and parses `sql`, resolving parameter markers to 1-based
@@ -77,6 +79,7 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
         Some(kw) if kw.eq_ignore_ascii_case("SELECT") => {
             StatementKind::Select(parse_compound_select(&tokens)?)
         }
+        _ if is_with_select(&tokens) => StatementKind::With(parse_with_select(&tokens)?),
         _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
     };
 
@@ -100,6 +103,18 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
         StatementKind::Select(compound) => {
             rewrite_select_params(&mut compound.first, &mut resolver);
             for (_, select) in &mut compound.rest {
+                rewrite_select_params(select, &mut resolver);
+            }
+        }
+        StatementKind::With(with_select) => {
+            for cte in &mut with_select.ctes {
+                rewrite_select_params(&mut cte.select.first, &mut resolver);
+                for (_, select) in &mut cte.select.rest {
+                    rewrite_select_params(select, &mut resolver);
+                }
+            }
+            rewrite_select_params(&mut with_select.body.first, &mut resolver);
+            for (_, select) in &mut with_select.body.rest {
                 rewrite_select_params(select, &mut resolver);
             }
         }
@@ -448,14 +463,60 @@ impl<'conn> Statement<'conn> {
     /// each `compound.rest` entry, via [`Statement::resolve_select`].
     fn resolved_compound_select(&self) -> Result<CompoundSelect> {
         let compound = self.select()?;
-        Ok(CompoundSelect {
+        Ok(self.resolve_compound(compound))
+    }
+
+    /// Resolves every `Expr::Parameter` across a `WITH` statement (issue
+    /// #127): each CTE's (possibly compound) `SELECT`, in order, then the
+    /// body — mirroring [`Statement::resolved_compound_select`].
+    fn resolved_with_select(&self) -> Result<WithSelect> {
+        match &self.kind {
+            StatementKind::With(with_select) => Ok(WithSelect {
+                ctes: with_select
+                    .ctes
+                    .iter()
+                    .map(|cte| Cte {
+                        name: cte.name.clone(),
+                        select: self.resolve_compound(&cte.select),
+                    })
+                    .collect(),
+                body: self.resolve_compound(&with_select.body),
+            }),
+            _ => Err(Error::UnrecognizedStatement(
+                "query*() called on a non-SELECT statement -- use execute() instead".to_string(),
+            )),
+        }
+    }
+
+    fn resolve_compound(&self, compound: &CompoundSelect) -> CompoundSelect {
+        CompoundSelect {
             first: self.resolve_select(&compound.first),
             rest: compound
                 .rest
                 .iter()
                 .map(|(op, select)| (*op, self.resolve_select(select)))
                 .collect(),
-        })
+        }
+    }
+
+    /// Runs this statement's `SELECT` (plain, compound, or `WITH` — issue
+    /// #127), dispatching to the right resolve+run pair based on
+    /// [`StatementKind`]. Shared by every `query*`/`exists` method so
+    /// none of them need their own `Select`-vs-`With` branch.
+    fn run_query(&self) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        match &self.kind {
+            StatementKind::Select(_) => {
+                let compound = self.resolved_compound_select()?;
+                self.conn.run_compound_select(&compound)
+            }
+            StatementKind::With(_) => {
+                let with_select = self.resolved_with_select()?;
+                self.conn.run_with_select(&with_select)
+            }
+            _ => Err(Error::UnrecognizedStatement(
+                "query*() called on a non-SELECT statement -- use execute() instead".to_string(),
+            )),
+        }
     }
 
     /// Resolves every `Expr::Parameter` in `select` (select-list
@@ -515,7 +576,7 @@ impl<'conn> Statement<'conn> {
                 let resolved = self.resolved_insert(insert);
                 execute_insert_returning_rowids(self.conn.db_mut(), &resolved)?.len()
             }
-            StatementKind::Select(_) => {
+            StatementKind::Select(_) | StatementKind::With(_) => {
                 return Err(Error::UnrecognizedStatement(
                     "execute() called on a SELECT statement -- use query*() instead".to_string(),
                 ))
@@ -534,13 +595,27 @@ impl<'conn> Statement<'conn> {
         }
     }
 
+    /// The `Select` whose columns describe this statement's result set:
+    /// a plain/compound `SELECT`'s own first branch, or (issue #127) a
+    /// `WITH` statement's body's first branch — same rule real SQLite
+    /// uses (a compound `SELECT`'s result columns always come from its
+    /// first branch, `WITH`'s CTEs don't contribute any).
+    fn result_select(&self) -> Result<&Select> {
+        match &self.kind {
+            StatementKind::Select(compound) => Ok(&compound.first),
+            StatementKind::With(with_select) => Ok(&with_select.body.first),
+            _ => Err(Error::UnrecognizedStatement(
+                "query*() called on a non-SELECT statement -- use execute() instead".to_string(),
+            )),
+        }
+    }
+
     /// Runs this `SELECT`, mapping every matching row through `f`.
     pub fn query_map<T, F>(&self, mut f: F) -> Result<Vec<T>>
     where
         F: FnMut(Row<'_>) -> Result<T>,
     {
-        let compound = self.resolved_compound_select()?;
-        let (columns, rows) = self.conn.run_compound_select(&compound)?;
+        let (columns, rows) = self.run_query()?;
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
@@ -550,8 +625,7 @@ impl<'conn> Statement<'conn> {
     /// values in result-column order. Errors with
     /// [`Error::QueryReturnedNoRows`] if no row matched.
     pub fn query_row(&self) -> Result<Vec<Value>> {
-        let compound = self.resolved_compound_select()?;
-        let (_, mut rows) = self.conn.run_compound_select(&compound)?;
+        let (_, mut rows) = self.run_query()?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -564,8 +638,7 @@ impl<'conn> Statement<'conn> {
     where
         F: FnOnce(Row<'_>) -> Result<T>,
     {
-        let compound = self.resolved_compound_select()?;
-        let (columns, mut rows) = self.conn.run_compound_select(&compound)?;
+        let (columns, mut rows) = self.run_query()?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -578,8 +651,7 @@ impl<'conn> Statement<'conn> {
     /// collects into a `Vec`), this is the same shape as real
     /// `rusqlite::Statement::query`.
     pub fn query(&mut self) -> Result<Rows<'_>> {
-        let compound = self.resolved_compound_select()?;
-        let result = self.conn.run_compound_select(&compound)?;
+        let result = self.run_query()?;
         self.last_result = Some(result);
         let (columns, rows) = self.last_result.as_ref().expect("just assigned Some above");
         Ok(Rows::new(columns, rows))
@@ -597,8 +669,7 @@ impl<'conn> Statement<'conn> {
 
     /// Runs this `SELECT`, returning whether it matched at least one row.
     pub fn exists(&self) -> Result<bool> {
-        let compound = self.resolved_compound_select()?;
-        let (_, rows) = self.conn.run_compound_select(&compound)?;
+        let (_, rows) = self.run_query()?;
         Ok(!rows.is_empty())
     }
 
@@ -619,7 +690,7 @@ impl<'conn> Statement<'conn> {
     /// same as real SQLite (the other branches' column names aren't
     /// required to match, and aren't used for anything if they don't).
     pub fn column_names(&self) -> Result<Vec<String>> {
-        let first = &self.select()?.first;
+        let first = self.result_select()?;
         match &first.columns {
             SelectColumns::All => Ok(self
                 .conn
@@ -666,7 +737,7 @@ impl<'conn> Statement<'conn> {
     /// [`Statement::query_map`]/[`Statement::query_row`]/
     /// [`Statement::query_one`] rather than [`Statement::execute`]).
     pub fn is_query(&self) -> bool {
-        matches!(self.kind, StatementKind::Select(_))
+        matches!(self.kind, StatementKind::Select(_) | StatementKind::With(_))
     }
 
     /// The number of `?`/`:name`-style parameters in this statement,
