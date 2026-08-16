@@ -103,6 +103,12 @@ pub enum Error {
     /// `ALTER TABLE ... ADD COLUMN`/`RENAME COLUMN` named a column that
     /// collides with one the table already has (issue #121).
     DuplicateColumn(String),
+    /// `CREATE INDEX` named an index that already exists (issue #122),
+    /// without `IF NOT EXISTS`.
+    IndexAlreadyExists(String),
+    /// `DROP INDEX` named an index that doesn't exist (issue #122),
+    /// without `IF EXISTS`.
+    IndexNotFound(String),
 }
 
 impl fmt::Display for Error {
@@ -146,6 +152,8 @@ impl fmt::Display for Error {
                 write!(f, "cannot DROP TABLE {name:?}: it is a virtual table")
             }
             Error::DuplicateColumn(name) => write!(f, "duplicate column name: {name:?}"),
+            Error::IndexAlreadyExists(name) => write!(f, "index {name:?} already exists"),
+            Error::IndexNotFound(name) => write!(f, "no such index: {name:?}"),
         }
     }
 }
