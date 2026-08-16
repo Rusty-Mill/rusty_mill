@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock.orig
+
+# sessionmgr's own local state root, if a dev points one at the repo
+.sessionmgr/
+.sessionmgr-worktrees/
