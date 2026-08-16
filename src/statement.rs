@@ -352,6 +352,37 @@ impl<'conn> Statement<'conn> {
                 Box::new(self.resolve_expr(right)),
             ),
             Expr::Not(inner) => Expr::Not(Box::new(self.resolve_expr(inner))),
+            Expr::Like {
+                left,
+                pattern,
+                escape,
+                negate,
+            } => Expr::Like {
+                left: Box::new(self.resolve_expr(left)),
+                pattern: Box::new(self.resolve_expr(pattern)),
+                escape: escape.as_ref().map(|e| Box::new(self.resolve_expr(e))),
+                negate: *negate,
+            },
+            Expr::Glob {
+                left,
+                pattern,
+                negate,
+            } => Expr::Glob {
+                left: Box::new(self.resolve_expr(left)),
+                pattern: Box::new(self.resolve_expr(pattern)),
+                negate: *negate,
+            },
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negate,
+            } => Expr::Between {
+                expr: Box::new(self.resolve_expr(expr)),
+                low: Box::new(self.resolve_expr(low)),
+                high: Box::new(self.resolve_expr(high)),
+                negate: *negate,
+            },
             Expr::Column(_) | Expr::Literal(_) => expr.clone(),
         }
     }
@@ -738,6 +769,29 @@ impl ParamResolver {
                 self.rewrite(right);
             }
             Expr::Not(inner) => self.rewrite(inner),
+            Expr::Like {
+                left,
+                pattern,
+                escape,
+                ..
+            } => {
+                self.rewrite(left);
+                self.rewrite(pattern);
+                if let Some(e) = escape {
+                    self.rewrite(e);
+                }
+            }
+            Expr::Glob { left, pattern, .. } => {
+                self.rewrite(left);
+                self.rewrite(pattern);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                self.rewrite(expr);
+                self.rewrite(low);
+                self.rewrite(high);
+            }
             Expr::Column(_) | Expr::Literal(_) => {}
         }
     }

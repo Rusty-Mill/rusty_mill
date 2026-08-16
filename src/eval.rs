@@ -105,6 +105,62 @@ pub fn evaluate_with_functions(
             )?)?;
             Ok(bool3_to_value(v.map(|b| !b)))
         }
+        Expr::Like {
+            left,
+            pattern,
+            escape,
+            negate,
+        } => {
+            let l = evaluate_with_functions(left, column_names, row, functions)?;
+            let p = evaluate_with_functions(pattern, column_names, row, functions)?;
+            let esc = match escape {
+                Some(e) => match evaluate_with_functions(e, column_names, row, functions)? {
+                    Value::Null => return Ok(Value::Null),
+                    other => Some(value_as_text(&other)?.chars().next().ok_or_else(|| {
+                        Error::UnrecognizedStatement("ESCAPE must be one character".to_string())
+                    })?),
+                },
+                None => None,
+            };
+            Ok(match (value_as_text_opt(&l), value_as_text_opt(&p)) {
+                (Some(text), Some(pat)) => {
+                    let matched = crate::like::like_match(&text, &pat, esc);
+                    bool3_to_value(Some(matched != *negate))
+                }
+                _ => Value::Null,
+            })
+        }
+        Expr::Glob {
+            left,
+            pattern,
+            negate,
+        } => {
+            let l = evaluate_with_functions(left, column_names, row, functions)?;
+            let p = evaluate_with_functions(pattern, column_names, row, functions)?;
+            Ok(match (value_as_text_opt(&l), value_as_text_opt(&p)) {
+                (Some(text), Some(pat)) => {
+                    let matched = crate::like::glob_match(&text, &pat);
+                    bool3_to_value(Some(matched != *negate))
+                }
+                _ => Value::Null,
+            })
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negate,
+        } => {
+            let v = evaluate_with_functions(expr, column_names, row, functions)?;
+            let lo = evaluate_with_functions(low, column_names, row, functions)?;
+            let hi = evaluate_with_functions(high, column_names, row, functions)?;
+            if v == Value::Null || lo == Value::Null || hi == Value::Null {
+                return Ok(Value::Null);
+            }
+            let matched = compare_values(&v, &lo) != Ordering::Less
+                && compare_values(&v, &hi) != Ordering::Greater;
+            Ok(bool3_to_value(Some(matched != *negate)))
+        }
         // No bindings are available here — `crate::Statement` resolves
         // `Parameter` nodes to a concrete `Literal` (bound value, or
         // `Value::Null` if unbound) before this ever runs; a caller that
@@ -155,6 +211,24 @@ fn to_bool3(value: Value) -> Result<Option<bool>> {
 /// `INTEGER` `0`/`1`, with `NULL` staying `NULL`.
 fn bool3_to_value(value: Option<bool>) -> Value {
     value.map_or(Value::Null, |b| Value::Integer(b as i64))
+}
+
+/// Coerces `value` to text for [`Expr::Like`]/[`Expr::Glob`] matching,
+/// the same numeric-to-text coercion SQLite applies to these operators'
+/// operands. `None` for `NULL` (propagates as a `NULL` match result) and
+/// `Blob` (has no textual reading — never matches, same as real SQLite).
+fn value_as_text_opt(value: &Value) -> Option<String> {
+    match value {
+        Value::Null | Value::Blob(_) => None,
+        Value::Integer(n) => Some(n.to_string()),
+        Value::Real(f) => Some(f.to_string()),
+        Value::Text(s) => Some(s.clone()),
+    }
+}
+
+fn value_as_text(value: &Value) -> Result<String> {
+    value_as_text_opt(value)
+        .ok_or_else(|| Error::UnrecognizedStatement(format!("expected text, got {value:?}")))
 }
 
 /// Orders two values per SQLite's storage-class ordering (`NULL` <
@@ -338,6 +412,114 @@ mod tests {
         assert!(
             !evaluate_bool(&Expr::Or(Box::new(lit(0)), Box::new(null())), &cols(), &[]).unwrap()
         );
+    }
+
+    fn text(s: &str) -> Expr {
+        Expr::Literal(Value::Text(s.to_string()))
+    }
+
+    #[test]
+    fn like_matches_with_percent_wildcard() {
+        let expr = Expr::Like {
+            left: Box::new(text("hello world")),
+            pattern: Box::new(text("hello%")),
+            escape: None,
+            negate: false,
+        };
+        assert!(evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn not_like_negates_the_match() {
+        let expr = Expr::Like {
+            left: Box::new(text("hello world")),
+            pattern: Box::new(text("hello%")),
+            escape: None,
+            negate: true,
+        };
+        assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn like_with_null_operand_is_null() {
+        let expr = Expr::Like {
+            left: Box::new(null()),
+            pattern: Box::new(text("a%")),
+            escape: None,
+            negate: false,
+        };
+        assert_eq!(evaluate(&expr, &cols(), &[]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn glob_matches_with_star_wildcard() {
+        let expr = Expr::Glob {
+            left: Box::new(text("hello.txt")),
+            pattern: Box::new(text("*.txt")),
+            negate: false,
+        };
+        assert!(evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn glob_is_case_sensitive_unlike_like() {
+        let expr = Expr::Glob {
+            left: Box::new(text("HELLO")),
+            pattern: Box::new(text("hello")),
+            negate: false,
+        };
+        assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn between_matches_inclusive_range() {
+        let expr = Expr::Between {
+            expr: Box::new(lit(5)),
+            low: Box::new(lit(1)),
+            high: Box::new(lit(10)),
+            negate: false,
+        };
+        assert!(evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn between_boundaries_are_inclusive() {
+        let at_low = Expr::Between {
+            expr: Box::new(lit(1)),
+            low: Box::new(lit(1)),
+            high: Box::new(lit(10)),
+            negate: false,
+        };
+        let at_high = Expr::Between {
+            expr: Box::new(lit(10)),
+            low: Box::new(lit(1)),
+            high: Box::new(lit(10)),
+            negate: false,
+        };
+        assert!(evaluate_bool(&at_low, &cols(), &[]).unwrap());
+        assert!(evaluate_bool(&at_high, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn not_between_negates_the_match() {
+        let expr = Expr::Between {
+            expr: Box::new(lit(5)),
+            low: Box::new(lit(1)),
+            high: Box::new(lit(10)),
+            negate: true,
+        };
+        assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn between_with_null_operand_is_null() {
+        let expr = Expr::Between {
+            expr: Box::new(null()),
+            low: Box::new(lit(1)),
+            high: Box::new(lit(10)),
+            negate: false,
+        };
+        assert_eq!(evaluate(&expr, &cols(), &[]).unwrap(), Value::Null);
     }
 
     #[test]

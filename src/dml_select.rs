@@ -97,6 +97,30 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     /// `NOT expr` (issue #112). `NOT NULL` is `NULL`.
     Not(Box<Expr>),
+    /// `left LIKE pattern [ESCAPE escape]` (`NOT LIKE` if `negate`) —
+    /// issue #113. `%` matches any run of characters, `_` matches one,
+    /// ASCII-case-insensitive.
+    Like {
+        left: Box<Expr>,
+        pattern: Box<Expr>,
+        escape: Option<Box<Expr>>,
+        negate: bool,
+    },
+    /// `left GLOB pattern` (`NOT GLOB` if `negate`) — issue #113. Unix
+    /// glob syntax (`*`/`?`/`[...]`), case-sensitive, no escape.
+    Glob {
+        left: Box<Expr>,
+        pattern: Box<Expr>,
+        negate: bool,
+    },
+    /// `expr BETWEEN low AND high` (`NOT BETWEEN` if `negate`) — issue
+    /// #113. Sugar for `expr >= low AND expr <= high`.
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negate: bool,
+    },
     /// A scalar function call, e.g. `UPPER(name)`. Evaluated only by
     /// `eval::evaluate_with_functions` — plain `evaluate`/`evaluate_bool`
     /// (which predate function-call support) error on this variant rather
@@ -358,8 +382,63 @@ impl<'a> SelectParser<'a> {
         }
     }
 
+    fn peek_ident_at(&self, offset: usize, keyword: &str) -> bool {
+        matches!(self.peek_at(offset), Some(Token::Ident(s)) if s.eq_ignore_ascii_case(keyword))
+    }
+
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_operand()?;
+
+        // `NOT LIKE`/`NOT GLOB`/`NOT BETWEEN` -- infix negation, distinct
+        // from the prefix `NOT` `parse_not_expr` already handles (that one
+        // wraps a whole boolean primary; this one only fires mid-comparison,
+        // so there's no ambiguity between the two).
+        let negate = self.peek_ident("NOT")
+            && (self.peek_ident_at(1, "LIKE")
+                || self.peek_ident_at(1, "GLOB")
+                || self.peek_ident_at(1, "BETWEEN"));
+        if negate {
+            self.advance();
+        }
+
+        if self.peek_ident("LIKE") {
+            self.advance();
+            let pattern = self.parse_operand()?;
+            let escape = if self.peek_ident("ESCAPE") {
+                self.advance();
+                Some(Box::new(self.parse_operand()?))
+            } else {
+                None
+            };
+            return Ok(Expr::Like {
+                left: Box::new(left),
+                pattern: Box::new(pattern),
+                escape,
+                negate,
+            });
+        }
+        if self.peek_ident("GLOB") {
+            self.advance();
+            let pattern = self.parse_operand()?;
+            return Ok(Expr::Glob {
+                left: Box::new(left),
+                pattern: Box::new(pattern),
+                negate,
+            });
+        }
+        if self.peek_ident("BETWEEN") {
+            self.advance();
+            let low = self.parse_operand()?;
+            self.expect_ident("AND")?;
+            let high = self.parse_operand()?;
+            return Ok(Expr::Between {
+                expr: Box::new(left),
+                low: Box::new(low),
+                high: Box::new(high),
+                negate,
+            });
+        }
+
         let op = match self.advance() {
             Some(Token::Punct("=")) => BinaryOp::Eq,
             Some(Token::Punct("<>")) | Some(Token::Punct("!=")) => BinaryOp::NotEq,
@@ -727,5 +806,143 @@ mod tests {
             parse_select(&tokens),
             Err(ParseError::UnexpectedEof)
         ));
+    }
+
+    #[test]
+    fn parses_like() {
+        let tokens = tokenize("SELECT * FROM t WHERE name LIKE 'a%'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Like {
+                left: Box::new(Expr::Column("name".into())),
+                pattern: Box::new(Expr::Literal(Value::Text("a%".into()))),
+                escape: None,
+                negate: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_like_with_escape() {
+        let tokens = tokenize("SELECT * FROM t WHERE name LIKE 'a\\%' ESCAPE '\\'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Like {
+                left: Box::new(Expr::Column("name".into())),
+                pattern: Box::new(Expr::Literal(Value::Text("a\\%".into()))),
+                escape: Some(Box::new(Expr::Literal(Value::Text("\\".into())))),
+                negate: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_not_like() {
+        let tokens = tokenize("SELECT * FROM t WHERE name NOT LIKE 'a%'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Like {
+                left: Box::new(Expr::Column("name".into())),
+                pattern: Box::new(Expr::Literal(Value::Text("a%".into()))),
+                escape: None,
+                negate: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_glob() {
+        let tokens = tokenize("SELECT * FROM t WHERE name GLOB 'a*'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Glob {
+                left: Box::new(Expr::Column("name".into())),
+                pattern: Box::new(Expr::Literal(Value::Text("a*".into()))),
+                negate: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_not_glob() {
+        let tokens = tokenize("SELECT * FROM t WHERE name NOT GLOB 'a*'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Glob {
+                left: Box::new(Expr::Column("name".into())),
+                pattern: Box::new(Expr::Literal(Value::Text("a*".into()))),
+                negate: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_between() {
+        let tokens = tokenize("SELECT * FROM t WHERE a BETWEEN 1 AND 10").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Between {
+                expr: Box::new(Expr::Column("a".into())),
+                low: Box::new(Expr::Literal(Value::Integer(1))),
+                high: Box::new(Expr::Literal(Value::Integer(10))),
+                negate: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_not_between() {
+        let tokens = tokenize("SELECT * FROM t WHERE a NOT BETWEEN 1 AND 10").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Between {
+                expr: Box::new(Expr::Column("a".into())),
+                low: Box::new(Expr::Literal(Value::Integer(1))),
+                high: Box::new(Expr::Literal(Value::Integer(10))),
+                negate: true,
+            })
+        );
+    }
+
+    #[test]
+    fn like_combines_with_and() {
+        let tokens = tokenize("SELECT * FROM t WHERE name LIKE 'a%' AND b = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::And(
+                Box::new(Expr::Like {
+                    left: Box::new(Expr::Column("name".into())),
+                    pattern: Box::new(Expr::Literal(Value::Text("a%".into()))),
+                    escape: None,
+                    negate: false,
+                }),
+                Box::new(eq("b", 1)),
+            ))
+        );
+    }
+
+    #[test]
+    fn prefix_not_still_wraps_a_like_comparison() {
+        // `WHERE NOT name LIKE 'a%'` -- prefix NOT (boolean-level),
+        // distinct from `NOT LIKE` (infix, per-operator negation).
+        let tokens = tokenize("SELECT * FROM t WHERE NOT name LIKE 'a%'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Not(Box::new(Expr::Like {
+                left: Box::new(Expr::Column("name".into())),
+                pattern: Box::new(Expr::Literal(Value::Text("a%".into()))),
+                escape: None,
+                negate: false,
+            })))
+        );
     }
 }
