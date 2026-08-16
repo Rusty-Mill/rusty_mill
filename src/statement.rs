@@ -41,13 +41,10 @@ use crate::connection::{leading_keyword, Connection};
 use crate::ddl::{parse_create_table, CreateTable};
 use crate::dml_insert::{parse_insert, Insert, InsertSource};
 use crate::dml_select::{
-    parse_param_marker, parse_select, AggregateArg, AggregateCall, Expr, ParamMarker, Select,
-    SelectColumns,
+    describe_aggregate_call, parse_param_marker, parse_select, AggregateArg, AggregateCall, Expr,
+    ParamMarker, Select, SelectColumns,
 };
-use crate::engine::{
-    describe_aggregate_call, describe_window_call, execute_create_table,
-    execute_insert_returning_rowids,
-};
+use crate::engine::{describe_window_call, execute_create_table, execute_insert_returning_rowids};
 use crate::error::{Error, Result};
 use crate::row::Row;
 use crate::rows::{AndThenRows, Rows};
@@ -128,6 +125,9 @@ fn rewrite_select_params(select: &mut Select, resolver: &mut ParamResolver) {
     }
     if let Some(filter) = &mut select.filter {
         resolver.rewrite(filter);
+    }
+    if let Some(having) = &mut select.having {
+        resolver.rewrite(having);
     }
 }
 
@@ -477,6 +477,8 @@ impl<'conn> Statement<'conn> {
             table_name: select.table_name.clone(),
             filter: select.filter.as_ref().map(|f| self.resolve_expr(f)),
             distinct: select.distinct,
+            group_by: select.group_by.clone(),
+            having: select.having.as_ref().map(|h| self.resolve_expr(h)),
         }
     }
 

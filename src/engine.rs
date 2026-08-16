@@ -6,7 +6,7 @@
 use crate::aggregate::Aggregate;
 use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
 use crate::dml_insert::{Insert, InsertSource};
-use crate::dml_select::{AggregateArg, Expr, Select, SelectColumns};
+use crate::dml_select::{describe_aggregate_call, AggregateArg, Expr, Select, SelectColumns};
 use crate::error::{Error, Result};
 use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
 use crate::storage::Database;
@@ -229,6 +229,13 @@ pub fn execute_select_with_functions(
     select: &Select,
     functions: &HashMap<String, Box<ScalarFn>>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    // GROUP BY/HAVING (issue #125) only make sense alongside an
+    // aggregate select list -- see execute_select_with_aggregates.
+    if !select.group_by.is_empty() || select.having.is_some() {
+        return Err(Error::UnrecognizedStatement(
+            "GROUP BY/HAVING require an aggregate SELECT list".to_string(),
+        ));
+    }
     let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
 
     let mut matching_rows = Vec::new();
@@ -291,13 +298,31 @@ fn dedup_rows(distinct: bool, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     result
 }
 
-/// Executes a whole-table aggregate `SELECT` (e.g. `SELECT COUNT(*), SUM(a)
-/// FROM t`), folding every row matching `select.filter` through each
-/// aggregate call's `step` and producing exactly one output row — this
-/// crate has no `GROUP BY`, so there's no per-group fan-out. Errors if
-/// `select.columns` isn't [`SelectColumns::Aggregates`]. `select.distinct`
-/// is a syntactic no-op here (issue #116) — there's always exactly one
-/// output row, nothing to dedup.
+/// Executes an aggregate `SELECT` (e.g. `SELECT COUNT(*), SUM(a) FROM
+/// t`), folding every row matching `select.filter` through each
+/// aggregate call's `step`. Bucketed by `select.group_by` (issue #125)
+/// into one output row per distinct group — an empty `group_by` is one
+/// implicit whole-table group (this crate's pre-#125 behavior:
+/// ungrouped aggregation always produces exactly one row, even over zero
+/// matching rows, e.g. `COUNT(*)` = 0; genuine grouping with zero
+/// matching rows instead produces zero groups/rows, since there's
+/// nothing to bucket). A `select.having` filter, if given, runs after
+/// aggregation, once per group, evaluated against a synthetic row of
+/// `select.group_by`'s key values followed by each aggregate call's
+/// finalized value (named per [`describe_aggregate_call`], so e.g.
+/// `HAVING COUNT(*) > 1` can reference the group's own `COUNT(*)`
+/// result — `dml_select.rs`'s parser recognizes `IDENT(...)` inside
+/// `HAVING` as an aggregate-call reference specifically to make this
+/// possible). Errors if `select.columns` isn't
+/// [`SelectColumns::Aggregates`].
+///
+/// **Scope, stated plainly (issue #125):** the `GROUP BY` column(s)
+/// themselves aren't projected into the output row — see
+/// [`SelectColumns::Aggregates`]'s own doc comment for why.
+///
+/// `select.distinct` (issue #116) dedups the final grouped rows — no
+/// longer always a no-op now that `GROUP BY` can produce more than one
+/// output row.
 pub fn execute_select_with_aggregates(
     db: &Database,
     select: &Select,
@@ -315,15 +340,19 @@ pub fn execute_select_with_aggregates(
     };
 
     let mut aggs = Vec::with_capacity(calls.len());
-    let mut accumulators = Vec::with_capacity(calls.len());
     for call in calls {
-        let agg = aggregates
-            .get(&call.name)
-            .ok_or_else(|| Error::FunctionNotFound(call.name.clone()))?;
-        accumulators.push(agg.init.clone());
-        aggs.push(agg);
+        aggs.push(
+            aggregates
+                .get(&call.name)
+                .ok_or_else(|| Error::FunctionNotFound(call.name.clone()))?,
+        );
     }
 
+    // (group key, one accumulator per aggregate call), in
+    // first-occurrence order -- linear (not hashed) group lookup, same
+    // `Value`-has-no-`Hash`/`Eq` constraint as `execute_select_with_
+    // window`'s own partition lookup.
+    let mut groups: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
     for row in &rows {
         let keep = match &select.filter {
             Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
@@ -332,6 +361,14 @@ pub fn execute_select_with_aggregates(
         if !keep {
             continue;
         }
+        let key = partition_key(&select.group_by, &column_names, row)?;
+        let idx = match groups.iter().position(|(k, _)| *k == key) {
+            Some(idx) => idx,
+            None => {
+                groups.push((key, aggs.iter().map(|a| a.init.clone()).collect()));
+                groups.len() - 1
+            }
+        };
         for (i, call) in calls.iter().enumerate() {
             let arg_value = match &call.arg {
                 AggregateArg::Star => Value::Integer(1),
@@ -339,34 +376,46 @@ pub fn execute_select_with_aggregates(
                     evaluate_with_functions(expr, &column_names, row, functions)?
                 }
             };
-            accumulators[i] = (aggs[i].step)(&accumulators[i], &[arg_value])?;
+            groups[idx].1[i] = (aggs[i].step)(&groups[idx].1[i], &[arg_value])?;
         }
     }
 
-    let result_row = aggs
+    // Ungrouped aggregation over zero matching rows still produces one
+    // row (e.g. `SELECT COUNT(*) FROM t WHERE 1 = 0` is `[0]`, not zero
+    // rows) -- genuine `GROUP BY` with zero matching rows produces zero
+    // groups instead, since there's nothing to bucket.
+    if groups.is_empty() && select.group_by.is_empty() {
+        groups.push((Vec::new(), aggs.iter().map(|a| a.init.clone()).collect()));
+    }
+
+    let having_column_names: Vec<String> = select
+        .group_by
         .iter()
-        .zip(accumulators)
-        .map(|(agg, acc)| (agg.finalize)(acc))
-        .collect::<Result<Vec<Value>>>()?;
+        .cloned()
+        .chain(calls.iter().map(describe_aggregate_call))
+        .collect();
+
+    let mut result_rows = Vec::with_capacity(groups.len());
+    for (key, accumulators) in groups {
+        let result_row = aggs
+            .iter()
+            .zip(accumulators)
+            .map(|(agg, acc)| (agg.finalize)(acc))
+            .collect::<Result<Vec<Value>>>()?;
+
+        if let Some(having) = &select.having {
+            let having_row: Vec<Value> = key.into_iter().chain(result_row.clone()).collect();
+            let keep =
+                evaluate_bool_with_functions(having, &having_column_names, &having_row, functions)?;
+            if !keep {
+                continue;
+            }
+        }
+        result_rows.push(result_row);
+    }
+
     let column_names = calls.iter().map(describe_aggregate_call).collect();
-
-    Ok((column_names, vec![result_row]))
-}
-
-/// A result-column name for an aggregate call, e.g. `COUNT(*)` or
-/// `SUM(a)`. Simplified relative to real SQLite's full result-column-name
-/// inference: any non-column expression argument is just shown as `expr`.
-/// `pub(crate)` so [`crate::Statement`] (a different module) can reuse it
-/// for `Statement::column_names` on an aggregate `SELECT`.
-pub(crate) fn describe_aggregate_call(call: &crate::dml_select::AggregateCall) -> String {
-    let arg = match &call.arg {
-        AggregateArg::Star => "*".to_string(),
-        AggregateArg::Expr(expr) => match expr.as_ref() {
-            crate::dml_select::Expr::Column(name) => name.clone(),
-            _ => "expr".to_string(),
-        },
-    };
-    format!("{}({arg})", call.name)
+    Ok((column_names, dedup_rows(select.distinct, result_rows)))
 }
 
 /// Executes a window-function `SELECT` (e.g.
@@ -383,6 +432,14 @@ pub fn execute_select_with_window(
     functions: &HashMap<String, Box<ScalarFn>>,
     aggregates: &HashMap<String, Aggregate>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    // GROUP BY/HAVING (issue #125) is an aggregate-select-list-only
+    // concept here -- window functions already have their own
+    // per-partition grouping via PARTITION BY.
+    if !select.group_by.is_empty() || select.having.is_some() {
+        return Err(Error::UnrecognizedStatement(
+            "GROUP BY/HAVING are not supported with a window SELECT list".to_string(),
+        ));
+    }
     let (column_names, rows) = db.scan(&select.table_name, select.filter.as_ref())?;
     let calls = match &select.columns {
         SelectColumns::Window(calls) => calls,
