@@ -23,6 +23,24 @@ entry per PR.
 
 ---
 
+## PR #132 — Add WHERE boolean combinators: AND/OR/NOT, parens (closes #112)
+**2026-08-16** · [#132](https://github.com/baileyrd/rusty_-rusqlite/pull/132)
+
+- **Added:** `Expr::And`/`Expr::Or`/`Expr::Not`, with standard SQL
+  precedence (`OR` < `AND` < `NOT` < comparison) and parenthesized
+  grouping — `WHERE` could previously express only a single bare
+  comparison.
+- **Added:** real SQLite three-valued boolean logic in `eval.rs`
+  (`FALSE AND NULL` is `FALSE`, `TRUE AND NULL` is `NULL`, `TRUE OR
+  NULL` is `TRUE`, `FALSE OR NULL` is `NULL`, `NOT NULL` is `NULL`) —
+  not plain two-valued `&&`/`||`/`!`.
+- First implemented sub-issue of the new `[epic] SQL dialect coverage`
+  (#111) — this session's third parity-loop pass, against real
+  SQLite's own SQL grammar. See `docs/gap-analysis-sql-dialect.md`.
+- 360 tests passing.
+
+---
+
 ## PR #109 — Add Connection::get_interrupt_handle/release_memory (closes #107)
 **2026-08-16** · [#109](https://github.com/baileyrd/rusty_-rusqlite/pull/109)
 

@@ -1465,6 +1465,71 @@ mod tests {
     }
 
     #[test]
+    fn where_clause_and_combines_conditions() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1, 1), (1, 2), (2, 1)")
+            .unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT b FROM t WHERE a = 1 AND b = 1", |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn where_clause_or_combines_conditions() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a = 1 OR a = 3", |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, vec![1, 3]);
+    }
+
+    #[test]
+    fn where_clause_not_negates_a_condition() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE NOT a = 1", |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, vec![2]);
+    }
+
+    #[test]
+    fn where_clause_parens_override_default_precedence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER)")
+            .unwrap();
+        // Row A: a=1 alone would satisfy an unparenthesized `a=1 OR b=1
+        // AND c=0` (AND binds tighter, so that's `a=1 OR (b=1 AND
+        // c=0)`), but fails `(a=1 OR b=1) AND c=0` since c=1 there.
+        // Row B: satisfies both readings.
+        conn.execute("INSERT INTO t VALUES (1, 0, 1), (0, 1, 0)")
+            .unwrap();
+
+        let without_parens: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a = 1 OR b = 1 AND c = 0", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(without_parens, vec![1, 0]);
+
+        let with_parens: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE (a = 1 OR b = 1) AND c = 0", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(with_parens, vec![0]);
+    }
+
+    #[test]
     fn execute_with_params_binds_and_runs() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();

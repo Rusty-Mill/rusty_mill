@@ -87,6 +87,16 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// `left AND right` (issue #112). Three-valued: `eval.rs` combines
+    /// per SQLite's own `NULL`-propagation rule (`FALSE AND NULL` is
+    /// `FALSE`, `TRUE AND NULL` is `NULL`), not plain two-valued boolean
+    /// `&&`.
+    And(Box<Expr>, Box<Expr>),
+    /// `left OR right` (issue #112). Three-valued, mirroring [`Expr::And`]
+    /// (`TRUE OR NULL` is `TRUE`, `FALSE OR NULL` is `NULL`).
+    Or(Box<Expr>, Box<Expr>),
+    /// `NOT expr` (issue #112). `NOT NULL` is `NULL`.
+    Not(Box<Expr>),
     /// A scalar function call, e.g. `UPPER(name)`. Evaluated only by
     /// `eval::evaluate_with_functions` — plain `evaluate`/`evaluate_bool`
     /// (which predate function-call support) error on this variant rather
@@ -183,7 +193,7 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
 
     let filter = if p.peek_ident("WHERE") {
         p.advance();
-        Some(p.parse_comparison()?)
+        Some(p.parse_or_expr()?)
     } else {
         None
     };
@@ -294,6 +304,57 @@ impl<'a> SelectParser<'a> {
             Some(Token::Punct(s)) if *s == p => Ok(()),
             Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
             Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
+        }
+    }
+
+    /// `expr (OR expr)*`, left-associative — the lowest-precedence level
+    /// of the `WHERE` boolean grammar (issue #112).
+    fn parse_or_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_and_expr()?;
+        while self.peek_ident("OR") {
+            self.advance();
+            let right = self.parse_and_expr()?;
+            left = Expr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// `expr (AND expr)*`, left-associative — binds tighter than `OR`,
+    /// looser than `NOT`, matching SQLite's own precedence.
+    fn parse_and_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_not_expr()?;
+        while self.peek_ident("AND") {
+            self.advance();
+            let right = self.parse_not_expr()?;
+            left = Expr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// `NOT expr` (right-recursive, so `NOT NOT x` parses) or a plain
+    /// boolean primary.
+    fn parse_not_expr(&mut self) -> Result<Expr, ParseError> {
+        if self.peek_ident("NOT") {
+            self.advance();
+            let inner = self.parse_not_expr()?;
+            Ok(Expr::Not(Box::new(inner)))
+        } else {
+            self.parse_bool_primary()
+        }
+    }
+
+    /// A parenthesized boolean sub-expression (`(a = 1 OR b = 2)`) or a
+    /// single comparison. Grouping parens are scoped to the boolean
+    /// grammar only here — this crate has no general arithmetic/operand
+    /// grouping to extend (`parse_operand` never accepted `(` either).
+    fn parse_bool_primary(&mut self) -> Result<Expr, ParseError> {
+        if self.peek_punct("(") {
+            self.advance();
+            let inner = self.parse_or_expr()?;
+            self.expect_punct(")")?;
+            Ok(inner)
+        } else {
+            self.parse_comparison()
         }
     }
 
@@ -577,5 +638,94 @@ mod tests {
                 },
             ])
         );
+    }
+
+    fn eq(col: &str, n: i64) -> Expr {
+        Expr::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column(col.into())),
+            right: Box::new(Expr::Literal(Value::Integer(n))),
+        }
+    }
+
+    #[test]
+    fn parses_and() {
+        let tokens = tokenize("SELECT * FROM t WHERE a = 1 AND b = 2").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::And(Box::new(eq("a", 1)), Box::new(eq("b", 2))))
+        );
+    }
+
+    #[test]
+    fn parses_or() {
+        let tokens = tokenize("SELECT * FROM t WHERE a = 1 OR b = 2").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Or(Box::new(eq("a", 1)), Box::new(eq("b", 2))))
+        );
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        // a=1 OR (b=2 AND c=3), not (a=1 OR b=2) AND c=3.
+        let tokens = tokenize("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Or(
+                Box::new(eq("a", 1)),
+                Box::new(Expr::And(Box::new(eq("b", 2)), Box::new(eq("c", 3)))),
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_not() {
+        let tokens = tokenize("SELECT * FROM t WHERE NOT a = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.filter, Some(Expr::Not(Box::new(eq("a", 1)))));
+    }
+
+    #[test]
+    fn parses_double_not() {
+        let tokens = tokenize("SELECT * FROM t WHERE NOT NOT a = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Not(Box::new(Expr::Not(Box::new(eq("a", 1))))))
+        );
+    }
+
+    #[test]
+    fn parses_parenthesized_grouping() {
+        // (a=1 OR b=2) AND c=3 -- parens override AND-before-OR precedence.
+        let tokens = tokenize("SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = 3").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::And(
+                Box::new(Expr::Or(Box::new(eq("a", 1)), Box::new(eq("b", 2)))),
+                Box::new(eq("c", 3)),
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_nested_parens() {
+        let tokens = tokenize("SELECT * FROM t WHERE ((a = 1))").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.filter, Some(eq("a", 1)));
+    }
+
+    #[test]
+    fn missing_closing_paren_is_an_error() {
+        let tokens = tokenize("SELECT * FROM t WHERE (a = 1").unwrap();
+        assert!(matches!(
+            parse_select(&tokens),
+            Err(ParseError::UnexpectedEof)
+        ));
     }
 }

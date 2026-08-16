@@ -66,6 +66,45 @@ pub fn evaluate_with_functions(
                 .collect::<Result<Vec<Value>>>()?;
             f(&arg_values)
         }
+        Expr::And(left, right) => {
+            let l = to_bool3(evaluate_with_functions(left, column_names, row, functions)?)?;
+            let r = to_bool3(evaluate_with_functions(
+                right,
+                column_names,
+                row,
+                functions,
+            )?)?;
+            let result = match (l, r) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            };
+            Ok(bool3_to_value(result))
+        }
+        Expr::Or(left, right) => {
+            let l = to_bool3(evaluate_with_functions(left, column_names, row, functions)?)?;
+            let r = to_bool3(evaluate_with_functions(
+                right,
+                column_names,
+                row,
+                functions,
+            )?)?;
+            let result = match (l, r) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            };
+            Ok(bool3_to_value(result))
+        }
+        Expr::Not(inner) => {
+            let v = to_bool3(evaluate_with_functions(
+                inner,
+                column_names,
+                row,
+                functions,
+            )?)?;
+            Ok(bool3_to_value(v.map(|b| !b)))
+        }
         // No bindings are available here — `crate::Statement` resolves
         // `Parameter` nodes to a concrete `Literal` (bound value, or
         // `Value::Null` if unbound) before this ever runs; a caller that
@@ -94,13 +133,28 @@ pub fn evaluate_bool_with_functions(
 }
 
 fn to_bool(value: Value) -> Result<bool> {
+    Ok(to_bool3(value)?.unwrap_or(false))
+}
+
+/// Like [`to_bool`], but distinguishes `NULL` (`None`) from a `FALSE`-ish
+/// value (`Some(false)`) instead of collapsing both to `false` — needed
+/// so [`Expr::And`]/[`Expr::Or`]/[`Expr::Not`] (issue #112) can implement
+/// SQLite's actual three-valued boolean logic rather than plain two-valued
+/// `&&`/`||`/`!`.
+fn to_bool3(value: Value) -> Result<Option<bool>> {
     Ok(match value {
-        Value::Null => false,
-        Value::Integer(n) => n != 0,
-        Value::Real(f) => f != 0.0,
-        Value::Text(s) => !s.is_empty(),
-        Value::Blob(b) => !b.is_empty(),
+        Value::Null => None,
+        Value::Integer(n) => Some(n != 0),
+        Value::Real(f) => Some(f != 0.0),
+        Value::Text(s) => Some(!s.is_empty()),
+        Value::Blob(b) => Some(!b.is_empty()),
     })
+}
+
+/// The inverse of [`to_bool3`]: SQLite represents boolean results as
+/// `INTEGER` `0`/`1`, with `NULL` staying `NULL`.
+fn bool3_to_value(value: Option<bool>) -> Value {
+    value.map_or(Value::Null, |b| Value::Integer(b as i64))
 }
 
 /// Orders two values per SQLite's storage-class ordering (`NULL` <
@@ -186,6 +240,104 @@ mod tests {
     #[test]
     fn null_is_falsy() {
         assert!(!evaluate_bool(&Expr::Literal(Value::Null), &cols(), &[]).unwrap());
+    }
+
+    fn lit(n: i64) -> Expr {
+        Expr::Literal(Value::Integer(n))
+    }
+
+    fn null() -> Expr {
+        Expr::Literal(Value::Null)
+    }
+
+    #[test]
+    fn and_is_true_only_if_both_sides_are_true() {
+        assert_eq!(
+            evaluate(&Expr::And(Box::new(lit(1)), Box::new(lit(1))), &cols(), &[]).unwrap(),
+            Value::Integer(1)
+        );
+        assert_eq!(
+            evaluate(&Expr::And(Box::new(lit(1)), Box::new(lit(0))), &cols(), &[]).unwrap(),
+            Value::Integer(0)
+        );
+    }
+
+    #[test]
+    fn or_is_true_if_either_side_is_true() {
+        assert_eq!(
+            evaluate(&Expr::Or(Box::new(lit(0)), Box::new(lit(1))), &cols(), &[]).unwrap(),
+            Value::Integer(1)
+        );
+        assert_eq!(
+            evaluate(&Expr::Or(Box::new(lit(0)), Box::new(lit(0))), &cols(), &[]).unwrap(),
+            Value::Integer(0)
+        );
+    }
+
+    #[test]
+    fn not_inverts_a_truthy_value() {
+        assert_eq!(
+            evaluate(&Expr::Not(Box::new(lit(0))), &cols(), &[]).unwrap(),
+            Value::Integer(1)
+        );
+        assert_eq!(
+            evaluate(&Expr::Not(Box::new(lit(1))), &cols(), &[]).unwrap(),
+            Value::Integer(0)
+        );
+    }
+
+    #[test]
+    fn not_null_is_null() {
+        assert_eq!(
+            evaluate(&Expr::Not(Box::new(null())), &cols(), &[]).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn false_and_null_is_false_not_null() {
+        // SQLite's three-valued logic: FALSE wins over NULL in AND.
+        assert_eq!(
+            evaluate(&Expr::And(Box::new(lit(0)), Box::new(null())), &cols(), &[]).unwrap(),
+            Value::Integer(0)
+        );
+    }
+
+    #[test]
+    fn true_and_null_is_null() {
+        assert_eq!(
+            evaluate(&Expr::And(Box::new(lit(1)), Box::new(null())), &cols(), &[]).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn true_or_null_is_true_not_null() {
+        // SQLite's three-valued logic: TRUE wins over NULL in OR.
+        assert_eq!(
+            evaluate(&Expr::Or(Box::new(lit(1)), Box::new(null())), &cols(), &[]).unwrap(),
+            Value::Integer(1)
+        );
+    }
+
+    #[test]
+    fn false_or_null_is_null() {
+        assert_eq!(
+            evaluate(&Expr::Or(Box::new(lit(0)), Box::new(null())), &cols(), &[]).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn and_or_not_as_a_where_filter_treat_null_as_non_matching() {
+        // Consistent with evaluate_bool's existing "NULL is falsy" rule
+        // for a top-level WHERE result.
+        assert!(
+            !evaluate_bool(&Expr::And(Box::new(lit(1)), Box::new(null())), &cols(), &[]).unwrap()
+        );
+        assert!(
+            !evaluate_bool(&Expr::Or(Box::new(lit(0)), Box::new(null())), &cols(), &[]).unwrap()
+        );
     }
 
     #[test]

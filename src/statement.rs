@@ -343,6 +343,15 @@ impl<'conn> Statement<'conn> {
                 name: name.clone(),
                 args: args.iter().map(|a| self.resolve_expr(a)).collect(),
             },
+            Expr::And(left, right) => Expr::And(
+                Box::new(self.resolve_expr(left)),
+                Box::new(self.resolve_expr(right)),
+            ),
+            Expr::Or(left, right) => Expr::Or(
+                Box::new(self.resolve_expr(left)),
+                Box::new(self.resolve_expr(right)),
+            ),
+            Expr::Not(inner) => Expr::Not(Box::new(self.resolve_expr(inner))),
             Expr::Column(_) | Expr::Literal(_) => expr.clone(),
         }
     }
@@ -724,6 +733,11 @@ impl ParamResolver {
                     self.rewrite(a);
                 }
             }
+            Expr::And(left, right) | Expr::Or(left, right) => {
+                self.rewrite(left);
+                self.rewrite(right);
+            }
+            Expr::Not(inner) => self.rewrite(inner),
             Expr::Column(_) | Expr::Literal(_) => {}
         }
     }
