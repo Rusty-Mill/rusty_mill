@@ -121,6 +121,17 @@ pub enum Expr {
         high: Box<Expr>,
         negate: bool,
     },
+    /// `CASE [operand] WHEN cond1 THEN result1 ... [ELSE else_result] END`
+    /// — issue #115. `operand` is `Some` for the simple form (`CASE
+    /// operand WHEN val THEN ...`, matched by equality) and `None` for
+    /// the searched form (`CASE WHEN cond THEN ...`, each `cond`
+    /// evaluated as a boolean). The first matching branch's result wins;
+    /// `else_result` (or `NULL` if absent) if none match.
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<(Expr, Expr)>,
+        else_result: Option<Box<Expr>>,
+    },
     /// `expr IN (v1, v2, ...)` (`NOT IN` if `negate`) — issue #114,
     /// literal-list form only. `IN (SELECT ...)` (subquery form) needs
     /// nested query execution, which this crate's `Expr`/`eval.rs`
@@ -491,6 +502,10 @@ impl<'a> SelectParser<'a> {
 
     fn parse_operand(&mut self) -> Result<Expr, ParseError> {
         match self.peek().cloned() {
+            Some(Token::Ident(name)) if name.eq_ignore_ascii_case("CASE") => {
+                self.advance();
+                self.parse_case_expr()
+            }
             Some(Token::Ident(name)) => {
                 self.advance();
                 if self.peek_punct("(") {
@@ -535,6 +550,50 @@ impl<'a> SelectParser<'a> {
             Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
             Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
         }
+    }
+
+    /// Parses a `CASE` expression's body — the leading `CASE` keyword is
+    /// already consumed. Simple form (`CASE operand WHEN val THEN
+    /// ...`) if the next token isn't `WHEN`; searched form (`CASE WHEN
+    /// cond THEN ...`, `cond` a full boolean expression) otherwise.
+    fn parse_case_expr(&mut self) -> Result<Expr, ParseError> {
+        let operand = if self.peek_ident("WHEN") {
+            None
+        } else {
+            Some(Box::new(self.parse_operand()?))
+        };
+
+        let mut branches = Vec::new();
+        while self.peek_ident("WHEN") {
+            self.advance();
+            let cond = if operand.is_some() {
+                self.parse_operand()?
+            } else {
+                self.parse_or_expr()?
+            };
+            self.expect_ident("THEN")?;
+            let result = self.parse_operand()?;
+            branches.push((cond, result));
+        }
+        if branches.is_empty() {
+            return Err(ParseError::UnexpectedToken(
+                "CASE needs at least one WHEN branch".to_string(),
+            ));
+        }
+
+        let else_result = if self.peek_ident("ELSE") {
+            self.advance();
+            Some(Box::new(self.parse_operand()?))
+        } else {
+            None
+        };
+        self.expect_ident("END")?;
+
+        Ok(Expr::Case {
+            operand,
+            branches,
+            else_result,
+        })
     }
 }
 
@@ -1045,5 +1104,81 @@ mod tests {
                 Box::new(eq("b", 3)),
             ))
         );
+    }
+
+    #[test]
+    fn parses_searched_case_in_where() {
+        let tokens =
+            tokenize("SELECT * FROM t WHERE CASE WHEN a = 1 THEN 1 ELSE 0 END = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Case {
+                    operand: None,
+                    branches: vec![(eq("a", 1), Expr::Literal(Value::Integer(1)))],
+                    else_result: Some(Box::new(Expr::Literal(Value::Integer(0)))),
+                }),
+                right: Box::new(Expr::Literal(Value::Integer(1))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_searched_case_with_multiple_when_branches() {
+        let tokens = tokenize(
+            "SELECT * FROM t WHERE CASE WHEN a = 1 THEN 10 WHEN a = 2 THEN 20 ELSE 0 END = 10",
+        )
+        .unwrap();
+        let select = parse_select(&tokens).unwrap();
+        let Some(Expr::BinaryOp { left, .. }) = select.filter else {
+            panic!("expected BinaryOp");
+        };
+        let Expr::Case { branches, .. } = *left else {
+            panic!("expected Case");
+        };
+        assert_eq!(branches.len(), 2);
+    }
+
+    #[test]
+    fn parses_simple_case() {
+        let tokens =
+            tokenize("SELECT * FROM t WHERE CASE a WHEN 1 THEN 10 ELSE 0 END = 10").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::Case {
+                    operand: Some(Box::new(Expr::Column("a".into()))),
+                    branches: vec![(
+                        Expr::Literal(Value::Integer(1)),
+                        Expr::Literal(Value::Integer(10))
+                    )],
+                    else_result: Some(Box::new(Expr::Literal(Value::Integer(0)))),
+                }),
+                right: Box::new(Expr::Literal(Value::Integer(10))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_case_with_no_else() {
+        let tokens = tokenize("SELECT * FROM t WHERE CASE WHEN a = 1 THEN 1 END = 1").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        let Some(Expr::BinaryOp { left, .. }) = select.filter else {
+            panic!("expected BinaryOp");
+        };
+        let Expr::Case { else_result, .. } = *left else {
+            panic!("expected Case");
+        };
+        assert_eq!(else_result, None);
+    }
+
+    #[test]
+    fn case_with_no_when_branches_is_an_error() {
+        let tokens = tokenize("SELECT * FROM t WHERE CASE ELSE 1 END = 1").unwrap();
+        assert!(parse_select(&tokens).is_err());
     }
 }

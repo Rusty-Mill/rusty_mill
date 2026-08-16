@@ -388,6 +388,18 @@ impl<'conn> Statement<'conn> {
                 list: list.iter().map(|e| self.resolve_expr(e)).collect(),
                 negate: *negate,
             },
+            Expr::Case {
+                operand,
+                branches,
+                else_result,
+            } => Expr::Case {
+                operand: operand.as_ref().map(|o| Box::new(self.resolve_expr(o))),
+                branches: branches
+                    .iter()
+                    .map(|(c, r)| (self.resolve_expr(c), self.resolve_expr(r)))
+                    .collect(),
+                else_result: else_result.as_ref().map(|e| Box::new(self.resolve_expr(e))),
+            },
             Expr::Column(_) | Expr::Literal(_) => expr.clone(),
         }
     }
@@ -801,6 +813,22 @@ impl ParamResolver {
                 self.rewrite(expr);
                 for item in list {
                     self.rewrite(item);
+                }
+            }
+            Expr::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if let Some(o) = operand {
+                    self.rewrite(o);
+                }
+                for (c, r) in branches {
+                    self.rewrite(c);
+                    self.rewrite(r);
+                }
+                if let Some(e) = else_result {
+                    self.rewrite(e);
                 }
             }
             Expr::Column(_) | Expr::Literal(_) => {}
