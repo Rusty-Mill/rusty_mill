@@ -451,6 +451,7 @@ impl<'conn> Statement<'conn> {
             columns,
             table_name: select.table_name.clone(),
             filter: select.filter.as_ref().map(|f| self.resolve_expr(f)),
+            distinct: select.distinct,
         })
     }
 
