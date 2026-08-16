@@ -1610,6 +1610,43 @@ mod tests {
     }
 
     #[test]
+    fn insert_violating_primary_key_is_a_constraint_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert!(matches!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn insert_violating_not_null_is_a_constraint_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER NOT NULL)").unwrap();
+        assert!(matches!(
+            conn.execute("INSERT INTO t VALUES (NULL)"),
+            Err(Error::ConstraintViolation(_))
+        ));
+    }
+
+    #[test]
+    fn insert_violating_check_is_a_constraint_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (age INTEGER CHECK (age <= 10))")
+            .unwrap();
+        assert!(matches!(
+            conn.execute("INSERT INTO t VALUES (20)"),
+            Err(Error::ConstraintViolation(_))
+        ));
+
+        conn.execute("INSERT INTO t VALUES (5)").unwrap();
+        let row = conn.query_row("SELECT age FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(5)]);
+    }
+
+    #[test]
     fn execute_with_params_binds_and_runs() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();

@@ -23,6 +23,34 @@ entry per PR.
 
 ---
 
+## PR #138 — Enforce PRIMARY KEY/UNIQUE/NOT NULL/CHECK at insert time (closes #118)
+**2026-08-16** · [#138](https://github.com/baileyrd/rusty_-rusqlite/pull/138)
+
+- **Added:** `INSERT` now enforces declared `PRIMARY KEY`/`UNIQUE`/
+  `NOT NULL`/`CHECK(expr)` constraints, erroring with a new
+  `Error::ConstraintViolation(String)` variant instead of silently
+  accepting a violating row.
+- **Behavior change:** code that was previously inserting
+  constraint-violating rows successfully (duplicate `PRIMARY KEY`/
+  `UNIQUE` values, `NULL` into a `NOT NULL` column, a failing `CHECK`)
+  now gets an error it didn't before. No public Rust signatures changed.
+- **Scope note:** only column-level constraints are enforced — this
+  crate has no table-level `PRIMARY KEY (a, b)`/`UNIQUE (a, b)` clause
+  (composite keys), so each `primary_key`/`unique`-flagged column is
+  checked independently. `PRIMARY KEY`/`UNIQUE` use SQL's own
+  NULL-is-distinct-from-NULL rule: a `NULL` value never conflicts with
+  anything.
+- **Scope note:** `CHECK` treats a `NULL` result as passing (matching
+  real SQLite: only exactly-`FALSE` is a violation), but this crate's
+  `BinaryOp` comparisons (`=`/`<`/`>=`/...) don't yet propagate `NULL`
+  themselves — a separate, pre-existing gap in `eval.rs`'s comparison
+  evaluation, out of scope here and left documented on
+  `storage::check_constraints`.
+- Eighth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 444 tests passing.
+
+---
+
 ## PR #137 — Add CREATE TABLE constraint parsing: UNIQUE/CHECK/DEFAULT/AUTOINCREMENT/REFERENCES (closes #117)
 **2026-08-16** · [#137](https://github.com/baileyrd/rusty_-rusqlite/pull/137)
 

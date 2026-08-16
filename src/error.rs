@@ -85,6 +85,13 @@ pub enum Error {
     /// doc comment for why this crate's interrupt is one-shot rather than
     /// sticky like real SQLite's.
     Interrupted,
+    /// An `INSERT` row violated a declared `PRIMARY KEY`/`UNIQUE`/
+    /// `NOT NULL`/`CHECK` constraint (issue #118). Carries a
+    /// human-readable description (constraint kind, table, column) rather
+    /// than structured fields — matching real SQLite's own single-string
+    /// `SQLITE_CONSTRAINT` error message, which callers already parse as
+    /// text rather than a typed payload.
+    ConstraintViolation(String),
 }
 
 impl fmt::Display for Error {
@@ -123,6 +130,7 @@ impl fmt::Display for Error {
             Error::ModuleNotFound(name) => write!(f, "no such module: {name:?}"),
             Error::ReadOnlyVirtualTable => write!(f, "virtual table is read-only"),
             Error::Interrupted => write!(f, "interrupted"),
+            Error::ConstraintViolation(msg) => write!(f, "{msg}"),
         }
     }
 }
