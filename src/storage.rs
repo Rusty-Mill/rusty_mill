@@ -3,9 +3,37 @@
 //! the on-disk file format isn't in scope yet.
 
 use crate::ddl::{ColumnDef, CreateTable};
+use crate::dml_select::Expr;
 use crate::error::{Error, Result};
 use crate::value::Value;
 use std::collections::HashMap;
+use std::fmt;
+
+/// A source of rows a `SELECT` can scan, standing in for a concrete
+/// [`Table`] — see `docs/adr/0003-tablesource.md`. Implemented by
+/// `Table` itself (native tables) and, once `Connection::create_module`
+/// (issue #92) exists, by any registered virtual table.
+pub trait TableSource {
+    fn column_names(&self) -> &[String];
+    /// `filter`, if given, is the query's `WHERE` clause — an
+    /// opportunistic hint, not a contract: an implementation MAY use it
+    /// to skip computing rows that can't match, but the caller
+    /// re-evaluates `filter` against every returned row regardless, so
+    /// ignoring it (returning everything) is always correct, just
+    /// unoptimized. See the ADR for why this isn't real SQLite's
+    /// `IndexInfo`/`best_index` negotiation.
+    fn scan(&self, filter: Option<&Expr>) -> Result<Vec<Vec<Value>>>;
+}
+
+impl TableSource for Table {
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    fn scan(&self, _filter: Option<&Expr>) -> Result<Vec<Vec<Value>>> {
+        Ok(self.rows.clone())
+    }
+}
 
 /// A single table's schema and row data.
 #[derive(Debug, Clone)]
@@ -27,9 +55,25 @@ pub struct Table {
 
 /// The full set of tables in a database. This is the storage layer that
 /// [`crate::Connection`] will be wired to in `A8`.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Database {
     tables: HashMap<String, Table>,
+    /// Registered via [`Database::register_virtual_table`] (issue #92
+    /// wires a public `Connection` API to it; nothing does yet). Checked
+    /// by [`Database::scan`] after native tables — see
+    /// `docs/adr/0003-tablesource.md`.
+    virtual_tables: HashMap<String, Box<dyn TableSource>>,
+}
+
+impl fmt::Debug for Database {
+    // Hand-written: `Box<dyn TableSource>` isn't `Debug`, so `Database`
+    // can't derive it while holding `virtual_tables`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Database")
+            .field("tables", &self.tables)
+            .field("virtual_table_count", &self.virtual_tables.len())
+            .finish()
+    }
 }
 
 impl Database {
@@ -37,6 +81,7 @@ impl Database {
     pub fn new() -> Database {
         Database {
             tables: HashMap::new(),
+            virtual_tables: HashMap::new(),
         }
     }
 
@@ -92,6 +137,37 @@ impl Database {
         self.tables
             .get(table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))
+    }
+
+    /// Returns `table_name`'s column names and rows for a `SELECT` scan,
+    /// checking native tables first, then registered virtual tables
+    /// (issue #92) — the dispatch point [`TableSource`] exists for. Used
+    /// by `engine.rs`'s `execute_select*` functions instead of
+    /// [`Database::table`] directly, so a virtual table can stand in for
+    /// a native one. See `docs/adr/0003-tablesource.md`.
+    pub fn scan(
+        &self,
+        table_name: &str,
+        filter: Option<&Expr>,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        if let Some(table) = self.tables.get(table_name) {
+            return Ok((table.column_names.clone(), table.scan(filter)?));
+        }
+        if let Some(source) = self.virtual_tables.get(table_name) {
+            return Ok((source.column_names().to_vec(), source.scan(filter)?));
+        }
+        Err(Error::TableNotFound(table_name.to_string()))
+    }
+
+    /// Registers a virtual table under `name`, checked by
+    /// [`Database::scan`] after native tables. `pub(crate)` only — issue
+    /// #92 (`Connection::create_module`) adds the public API that calls
+    /// this; nothing does yet, so it's only exercised by this module's
+    /// and `engine.rs`'s own tests today (`#[allow(dead_code)]` since
+    /// clippy's `--all-targets` lib-only pass can't see those).
+    #[allow(dead_code)]
+    pub(crate) fn register_virtual_table(&mut self, name: String, source: Box<dyn TableSource>) {
+        self.virtual_tables.insert(name, source);
     }
 
     /// Returns a mutable reference to a single cell, addressed by its row's
@@ -294,6 +370,63 @@ mod tests {
                 expected: 2,
                 actual: 1
             })
+        ));
+    }
+
+    struct ConstantSource {
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+    }
+
+    impl TableSource for ConstantSource {
+        fn column_names(&self) -> &[String] {
+            &self.columns
+        }
+        fn scan(&self, _filter: Option<&Expr>) -> Result<Vec<Vec<Value>>> {
+            Ok(self.rows.clone())
+        }
+    }
+
+    #[test]
+    fn scan_dispatches_to_a_registered_virtual_table() {
+        let mut db = Database::new();
+        db.register_virtual_table(
+            "v".to_string(),
+            Box::new(ConstantSource {
+                columns: vec!["a".to_string()],
+                rows: vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+            }),
+        );
+
+        let (columns, rows) = db.scan("v", None).unwrap();
+        assert_eq!(columns, vec!["a".to_string()]);
+        assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn scan_prefers_a_native_table_over_a_virtual_table_with_the_same_name() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(99)]).unwrap();
+        db.register_virtual_table(
+            "t".to_string(),
+            Box::new(ConstantSource {
+                columns: vec!["a".to_string()],
+                rows: vec![vec![Value::Integer(1)]],
+            }),
+        );
+
+        let (_, rows) = db.scan("t", None).unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(99)]]);
+    }
+
+    #[test]
+    fn scan_on_unregistered_name_is_table_not_found() {
+        let db = Database::new();
+        assert!(matches!(
+            db.scan("missing", None),
+            Err(Error::TableNotFound(_))
         ));
     }
 }
