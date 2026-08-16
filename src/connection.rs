@@ -1582,6 +1582,21 @@ mod tests {
     }
 
     #[test]
+    fn where_clause_case_when_computes_a_value_used_in_the_filter() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map(
+                "SELECT a FROM t WHERE CASE WHEN a = 2 THEN 1 ELSE 0 END = 1",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, vec![2]);
+    }
+
+    #[test]
     fn execute_with_params_binds_and_runs() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();

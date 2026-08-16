@@ -188,6 +188,41 @@ pub fn evaluate_with_functions(
             };
             Ok(bool3_to_value(result.map(|b| b != *negate)))
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            let operand_value = match operand {
+                Some(o) => Some(evaluate_with_functions(o, column_names, row, functions)?),
+                None => None,
+            };
+            for (cond, result) in branches {
+                let matched = match &operand_value {
+                    Some(ov) => {
+                        let cv = evaluate_with_functions(cond, column_names, row, functions)?;
+                        // Simple-form matching is `=` comparison; a NULL
+                        // operand or NULL WHEN value never matches (same
+                        // "unknown isn't true" rule as every other
+                        // comparison here), falling through to ELSE.
+                        *ov != Value::Null
+                            && cv != Value::Null
+                            && compare_values(ov, &cv) == Ordering::Equal
+                    }
+                    None => {
+                        let cv = evaluate_with_functions(cond, column_names, row, functions)?;
+                        to_bool3(cv)?.unwrap_or(false)
+                    }
+                };
+                if matched {
+                    return evaluate_with_functions(result, column_names, row, functions);
+                }
+            }
+            match else_result {
+                Some(e) => evaluate_with_functions(e, column_names, row, functions),
+                None => Ok(Value::Null),
+            }
+        }
         // No bindings are available here — `crate::Statement` resolves
         // `Parameter` nodes to a concrete `Literal` (bound value, or
         // `Value::Null` if unbound) before this ever runs; a caller that
@@ -620,6 +655,99 @@ mod tests {
             negate: false,
         };
         assert!(!evaluate_bool(&expr, &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn searched_case_returns_the_first_matching_branch() {
+        let expr = Expr::Case {
+            operand: None,
+            branches: vec![
+                (
+                    Expr::BinaryOp {
+                        op: BinaryOp::Eq,
+                        left: Box::new(lit(1)),
+                        right: Box::new(lit(2)),
+                    },
+                    text("no"),
+                ),
+                (
+                    Expr::BinaryOp {
+                        op: BinaryOp::Eq,
+                        left: Box::new(lit(1)),
+                        right: Box::new(lit(1)),
+                    },
+                    text("yes"),
+                ),
+            ],
+            else_result: Some(Box::new(text("else"))),
+        };
+        assert_eq!(
+            evaluate(&expr, &cols(), &[]).unwrap(),
+            Value::Text("yes".to_string())
+        );
+    }
+
+    #[test]
+    fn searched_case_falls_through_to_else_when_nothing_matches() {
+        let expr = Expr::Case {
+            operand: None,
+            branches: vec![(
+                Expr::BinaryOp {
+                    op: BinaryOp::Eq,
+                    left: Box::new(lit(1)),
+                    right: Box::new(lit(2)),
+                },
+                text("no"),
+            )],
+            else_result: Some(Box::new(text("else"))),
+        };
+        assert_eq!(
+            evaluate(&expr, &cols(), &[]).unwrap(),
+            Value::Text("else".to_string())
+        );
+    }
+
+    #[test]
+    fn case_with_no_else_and_no_match_is_null() {
+        let expr = Expr::Case {
+            operand: None,
+            branches: vec![(
+                Expr::BinaryOp {
+                    op: BinaryOp::Eq,
+                    left: Box::new(lit(1)),
+                    right: Box::new(lit(2)),
+                },
+                text("no"),
+            )],
+            else_result: None,
+        };
+        assert_eq!(evaluate(&expr, &cols(), &[]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn simple_case_matches_operand_by_equality() {
+        let expr = Expr::Case {
+            operand: Some(Box::new(lit(2))),
+            branches: vec![(lit(1), text("one")), (lit(2), text("two"))],
+            else_result: Some(Box::new(text("other"))),
+        };
+        assert_eq!(
+            evaluate(&expr, &cols(), &[]).unwrap(),
+            Value::Text("two".to_string())
+        );
+    }
+
+    #[test]
+    fn simple_case_with_null_operand_never_matches() {
+        let expr = Expr::Case {
+            operand: Some(Box::new(null())),
+            branches: vec![(null(), text("matched-null"))],
+            else_result: Some(Box::new(text("else"))),
+        };
+        assert_eq!(
+            evaluate(&expr, &cols(), &[]).unwrap(),
+            Value::Text("else".to_string())
+        );
     }
 
     #[test]
