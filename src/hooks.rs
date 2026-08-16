@@ -30,8 +30,7 @@ pub enum Action {
     Select,
     /// `UPDATE` (issue #128).
     Update,
-    /// Not yet reachable — no `DELETE` statement exists yet. Same
-    /// reasoning as `Update`.
+    /// `DELETE` (issue #129).
     Delete,
 }
 

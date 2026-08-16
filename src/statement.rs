@@ -39,6 +39,7 @@
 
 use crate::connection::{is_with_select, leading_keyword, Connection};
 use crate::ddl::{parse_create_table, CreateTable};
+use crate::dml_delete::{parse_delete, Delete};
 use crate::dml_insert::{parse_insert, Insert, InsertSource};
 use crate::dml_select::{
     describe_aggregate_call, parse_compound_select, parse_param_marker, parse_with_select,
@@ -47,7 +48,8 @@ use crate::dml_select::{
 };
 use crate::dml_update::{parse_update, Update};
 use crate::engine::{
-    describe_window_call, execute_create_table, execute_insert_returning_rowids, execute_update,
+    describe_window_call, execute_create_table, execute_delete, execute_insert_returning_rowids,
+    execute_update,
 };
 use crate::error::{Error, Result};
 use crate::row::Row;
@@ -64,6 +66,7 @@ pub(crate) enum StatementKind {
     Select(CompoundSelect),
     With(WithSelect),
     Update(Update),
+    Delete(Delete),
 }
 
 /// Tokenizes and parses `sql`, resolving parameter markers to 1-based
@@ -85,6 +88,9 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
         }
         Some(kw) if kw.eq_ignore_ascii_case("UPDATE") => {
             StatementKind::Update(parse_update(&tokens)?)
+        }
+        Some(kw) if kw.eq_ignore_ascii_case("DELETE") => {
+            StatementKind::Delete(parse_delete(&tokens)?)
         }
         _ if is_with_select(&tokens) => StatementKind::With(parse_with_select(&tokens)?),
         _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
@@ -132,6 +138,11 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
                 resolver.rewrite(expr);
             }
             if let Some(filter) = &mut update.filter {
+                resolver.rewrite(filter);
+            }
+        }
+        StatementKind::Delete(delete) => {
+            if let Some(filter) = &mut delete.filter {
                 resolver.rewrite(filter);
             }
         }
@@ -484,6 +495,16 @@ impl<'conn> Statement<'conn> {
         }
     }
 
+    /// Resolves every `Expr::Parameter` in a `DELETE` statement's `WHERE`
+    /// filter (issue #129) — the same bound-value-substitution
+    /// [`Statement::resolved_update`] does for `UPDATE`.
+    fn resolved_delete(&self, delete: &Delete) -> Delete {
+        Delete {
+            table_name: delete.table_name.clone(),
+            filter: delete.filter.as_ref().map(|f| self.resolve_expr(f)),
+        }
+    }
+
     fn resolve_aggregate_arg(&self, arg: &AggregateArg) -> AggregateArg {
         match arg {
             AggregateArg::Star => AggregateArg::Star,
@@ -592,9 +613,9 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    /// Runs this statement (`CREATE TABLE`/`INSERT`/`UPDATE` — issue
-    /// #128), returning the number of rows affected (`0` for `CREATE
-    /// TABLE`). Errors if this is a `SELECT` — use [`Statement::
+    /// Runs this statement (`CREATE TABLE`/`INSERT`/`UPDATE`/`DELETE` —
+    /// issues #128/#129), returning the number of rows affected (`0` for
+    /// `CREATE TABLE`). Errors if this is a `SELECT` — use [`Statement::
     /// query_map`]/[`Statement::query_row`]/[`Statement::query_one`]
     /// instead.
     pub fn execute(&mut self) -> Result<usize> {
@@ -613,6 +634,10 @@ impl<'conn> Statement<'conn> {
             StatementKind::Update(update) => {
                 let resolved = self.resolved_update(update);
                 execute_update(self.conn.db_mut(), &resolved)?.len()
+            }
+            StatementKind::Delete(delete) => {
+                let resolved = self.resolved_delete(delete);
+                execute_delete(self.conn.db_mut(), &resolved)?.len()
             }
             StatementKind::Select(_) | StatementKind::With(_) => {
                 return Err(Error::UnrecognizedStatement(
@@ -816,7 +841,8 @@ impl<'conn> Statement<'conn> {
     }
 
     /// Returns whether this statement can't modify the database — `true`
-    /// for a `SELECT`, `false` for `CREATE TABLE`/`INSERT`/`UPDATE`.
+    /// for a `SELECT`, `false` for `CREATE TABLE`/`INSERT`/`UPDATE`/
+    /// `DELETE`.
     pub fn readonly(&self) -> bool {
         self.is_query()
     }

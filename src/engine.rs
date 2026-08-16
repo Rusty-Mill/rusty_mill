@@ -5,6 +5,7 @@
 
 use crate::aggregate::Aggregate;
 use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
+use crate::dml_delete::Delete;
 use crate::dml_insert::{Insert, InsertSource};
 use crate::dml_select::{
     describe_aggregate_call, AggregateArg, CompoundOp, CompoundSelect, Expr, Select, SelectColumns,
@@ -37,6 +38,14 @@ pub fn execute_update(db: &mut Database, update: &Update) -> Result<Vec<i64>> {
         &update.assignments,
         update.filter.as_ref(),
     )
+}
+
+/// Executes a `DELETE` statement (issue #129), returning each deleted
+/// row's rowid (in table row order) — same "affected count via
+/// `.len()`, plus real rowids for `update_hook`" shape [`execute_update`]
+/// already established.
+pub fn execute_delete(db: &mut Database, delete: &Delete) -> Result<Vec<i64>> {
+    db.delete_rows(&delete.table_name, delete.filter.as_ref())
 }
 
 /// Executes an `ALTER TABLE` statement (issue #121).
