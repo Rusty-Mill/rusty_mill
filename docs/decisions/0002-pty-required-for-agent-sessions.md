@@ -84,24 +84,31 @@ the proven path to make room for the unproven one would trade a demonstrated
 guarantee for an assumed one, in the one area where this project's whole value
 rests.
 
-## Still open — but now testable rather than theoretical
+## Resolved: ConPTY survives an unclean daemon kill
 
-Whether a ConPTY-attached child survives an **unclean worker crash** — as
-opposed to a graceful `ClosePseudoConsole` — is still unverified (PLAN.md risk
-3). `rustils`' PTY path was built for interactive foreground use, not for
-detach-and-outlive.
+**Answered, by measurement.** This was PLAN.md risk 3 and the last unknown in
+this ADR: `rustils`' PTY path was built for interactive foreground use, not for
+detach-and-outlive, so whether a ConPTY-attached child survives its supervisor
+being killed uncleanly was genuinely open.
 
-What changed is that answering it no longer needs a bespoke experiment.
-**Sessions now default to a PTY, so the existing suite exercises ConPTY on
-every test.** In particular `supervisor_restart_recovery` — kill the daemon,
-assert the worker and its child survive, assert the replacement adopts them —
-is now precisely the ConPTY-survival question, asked automatically.
+The question was routed through the tests that already existed rather than a
+bespoke spike. Sessions default to a PTY, so `supervisor_restart_recovery` —
+create a session, `TerminateProcess` the daemon, assert the worker *and its
+child* are still alive, assert the replacement daemon adopts them rather than
+respawning — became the ConPTY-survival test automatically.
 
-- Suite green on Windows → ConPTY survives an unclean daemon kill, and the
-  guarantee holds for the default backend.
-- `supervisor_restart_recovery` red while `--no-pty` sessions stay green →
-  ConPTY does not survive detachment, and the default must flip back to piped
-  with PTY sessions documented as non-persistent.
+`test (windows-latest)` passed the full suite on
+[run 31970983489](https://github.com/baileyrd/rusty_yirp/actions/runs/31970983489),
+on `windows-latest` against real ConPTY.
 
-Either outcome is decisive, which is the point of routing the question through
-the tests that already exist rather than through a new one-off spike.
+**So the survives-the-manager-closing guarantee holds for the default PTY
+backend**, and the default stays PTY. The `--no-pty` path is no longer
+insurance against this specific unknown; it is kept for non-interactive
+commands, where a terminal buys nothing.
+
+Two honest caveats. This is one CI run on one Windows image, not a soak test —
+but it now runs on every push, so a regression surfaces immediately rather than
+during a manual pass. And GitHub's `windows-latest` is a server image; a
+desktop Windows install with different console-host behaviour is not the same
+environment, which is why the manual verification on a real dev machine stays
+on the list.

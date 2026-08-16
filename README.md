@@ -64,7 +64,8 @@ repositories.
   - Claude Code's hooks **do** fire when it runs headless under a detached
     worker, so Phase 3's hook-based design stands.
   - A real PTY turns out to be **mandatory**, not preferable, for interactive
-    agent sessions — [ADR-0002](docs/decisions/0002-pty-required-for-agent-sessions.md).
+    agent sessions — [ADR-0002](docs/decisions/0002-pty-required-for-agent-sessions.md),
+    now implemented, with ConPTY confirmed to survive an unclean daemon kill.
 - **Phase 2**: git worktree isolation, all three session kinds, and
   merge/discard teardown.
 - **Verified on real Windows**: the full suite passes **105/105** on
