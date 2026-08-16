@@ -11,8 +11,8 @@ use crate::dml_update::parse_update;
 use crate::engine::{
     execute_alter_table, execute_create_index, execute_create_table, execute_delete,
     execute_drop_index, execute_drop_table, execute_insert_into_virtual_table,
-    execute_insert_returning_rowids, execute_select_with_aggregates, execute_select_with_functions,
-    execute_select_with_window, execute_update,
+    execute_insert_returning_rowids, execute_select_with_aggregates,
+    execute_select_with_functions_and_aggregates, execute_select_with_window, execute_update,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -1463,9 +1463,13 @@ impl Connection {
     /// [`execute_select_with_aggregates`] for an aggregate select list
     /// ([`SelectColumns::Aggregates`]), [`execute_select_with_window`] for
     /// a window select list ([`SelectColumns::Window`]), and
-    /// [`execute_select_with_functions`] for everything else.
-    /// `pub(crate)` so [`crate::Statement`] (a different module) can
-    /// reuse it for already-parsed `SELECT`s.
+    /// [`execute_select_with_functions_and_aggregates`] for everything
+    /// else — the `_and_aggregates` (not plain [`execute_select_with_
+    /// functions`]) form, so a subquery (issue #131) in `select.filter`
+    /// can itself have an aggregate/window select list too (e.g. `WHERE
+    /// a = (SELECT MAX(b) FROM t)`), using this connection's own
+    /// registered aggregates. `pub(crate)` so [`crate::Statement`] (a
+    /// different module) can reuse it for already-parsed `SELECT`s.
     pub(crate) fn run_select(
         &self,
         select: &crate::dml_select::Select,
@@ -1477,7 +1481,12 @@ impl Connection {
             SelectColumns::Window(_) => {
                 execute_select_with_window(&self.db, select, &self.functions, &self.aggregates)
             }
-            _ => execute_select_with_functions(&self.db, select, &self.functions),
+            _ => execute_select_with_functions_and_aggregates(
+                &self.db,
+                select,
+                &self.functions,
+                &self.aggregates,
+            ),
         }
     }
 
@@ -3149,6 +3158,155 @@ mod tests {
             conn.query_row(
                 "SELECT COUNT(*) FROM customers JOIN orders ON customers.id = orders.customer_id"
             ),
+            Err(Error::UnrecognizedStatement(_))
+        ));
+    }
+
+    #[test]
+    fn scalar_subquery_in_where_via_equality() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a = (SELECT MAX(a) FROM t)", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, vec![3]);
+    }
+
+    #[test]
+    fn scalar_subquery_over_zero_rows_is_null() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        conn.execute("CREATE TABLE empty (b INTEGER)").unwrap();
+
+        // `(SELECT b FROM empty)` matches zero rows -> NULL (issue
+        // #131's own documented rule) -- `=` against NULL is never
+        // true, so this matches nothing (this crate's grammar has no
+        // expression-valued select list to observe the NULL more
+        // directly, e.g. no `IS NULL`).
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a = (SELECT b FROM empty)", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn scalar_subquery_with_multiple_columns_is_a_column_count_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        conn.execute("CREATE TABLE u (x INTEGER, y INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO u VALUES (1, 2)").unwrap();
+
+        assert!(matches!(
+            conn.query_row("SELECT a FROM t WHERE a = (SELECT x, y FROM u)"),
+            Err(Error::ColumnCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn in_subquery_matches_membership() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        conn.execute("CREATE TABLE u (b INTEGER)").unwrap();
+        conn.execute("INSERT INTO u VALUES (2), (3)").unwrap();
+
+        let mut rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a IN (SELECT b FROM u)", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2, 3]);
+    }
+
+    #[test]
+    fn not_in_subquery_excludes_membership() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        conn.execute("CREATE TABLE u (b INTEGER)").unwrap();
+        conn.execute("INSERT INTO u VALUES (2), (3)").unwrap();
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t WHERE a NOT IN (SELECT b FROM u)", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn scalar_subquery_usable_in_a_joins_on_condition() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_join_tables(&mut conn);
+
+        // Only join orders whose amount is the maximum across all orders.
+        let rows: Vec<String> = conn
+            .query_map(
+                "SELECT customers.name FROM customers JOIN orders \
+                 ON customers.id = orders.customer_id \
+                 AND orders.amount = (SELECT MAX(amount) FROM orders)",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn scalar_subquery_usable_through_a_prepared_statement_with_bound_params() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT a FROM t WHERE a = (SELECT MAX(a) FROM t WHERE a < ?)")
+            .unwrap();
+        stmt.raw_bind_parameter(1, 3i64).unwrap();
+        let rows: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![2]);
+    }
+
+    #[test]
+    fn correlated_subquery_is_a_clear_unknown_column_error() {
+        // Uncorrelated only (issue #131's own scope note): the inner
+        // query can't see the outer row's `t.a`, so this is `t2`'s own
+        // scan not finding a column literally named "a" -- a clear
+        // error, not silently wrong results.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        conn.execute("CREATE TABLE t2 (x INTEGER, y INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t2 VALUES (1, 100)").unwrap();
+
+        assert!(matches!(
+            conn.query_row("SELECT a FROM t WHERE a = (SELECT y FROM t2 WHERE x = a)"),
+            Err(Error::UnknownColumn(_))
+        ));
+    }
+
+    #[test]
+    fn subquery_in_update_where_is_a_clear_scope_cut_error() {
+        // Scope cut, stated plainly (issue #131): `Database::update_rows`/
+        // `delete_rows` can't hand out a subquery executor without a
+        // `&mut self`-vs-`&self` borrow conflict, so a subquery parses
+        // fine here but errors clearly at execution time rather than
+        // being silently ignored or panicking.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        assert!(matches!(
+            conn.execute("UPDATE t SET a = 0 WHERE a = (SELECT MAX(a) FROM t)"),
             Err(Error::UnrecognizedStatement(_))
         ));
     }

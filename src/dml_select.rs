@@ -284,15 +284,30 @@ pub enum Expr {
         else_result: Option<Box<Expr>>,
     },
     /// `expr IN (v1, v2, ...)` (`NOT IN` if `negate`) — issue #114,
-    /// literal-list form only. `IN (SELECT ...)` (subquery form) needs
-    /// nested query execution, which this crate's `Expr`/`eval.rs`
-    /// layering doesn't support yet — tracked separately as a
-    /// new-subsystem gap alongside subqueries in general (issue #131).
+    /// literal-list form only. See [`Expr::InSubquery`] for `IN (SELECT
+    /// ...)`, the subquery form (issue #131).
     InList {
         expr: Box<Expr>,
         list: Vec<Expr>,
         negate: bool,
     },
+    /// `expr IN (SELECT ...)` (`NOT IN` if `negate`) — issue #131, the
+    /// subquery form of `IN`, alongside [`Expr::InList`]'s pre-existing
+    /// literal-list form. Uncorrelated only — see `eval::SubqueryFn`'s
+    /// doc comment for exactly what that means and why.
+    InSubquery {
+        expr: Box<Expr>,
+        query: Box<Select>,
+        negate: bool,
+    },
+    /// A scalar subquery in expression position, e.g. `(SELECT MAX(a)
+    /// FROM t)` in `WHERE x = (SELECT MAX(a) FROM t)` — issue #131.
+    /// Uncorrelated only, same as [`Expr::InSubquery`]. Zero result rows
+    /// evaluates to `NULL`; more than one row uses the first row's
+    /// value (matching real SQLite's own behavior for an over-returning
+    /// scalar subquery); a result row with other than exactly one
+    /// column is a clear [`crate::error::Error::ColumnCountMismatch`].
+    ScalarSubquery(Box<Select>),
     /// A scalar function call, e.g. `UPPER(name)`. Evaluated only by
     /// `eval::evaluate_with_functions` — plain `evaluate`/`evaluate_bool`
     /// (which predate function-call support) error on this variant rather
@@ -858,9 +873,19 @@ impl<'a> SelectParser<'a> {
     /// A parenthesized boolean sub-expression (`(a = 1 OR b = 2)`) or a
     /// single comparison. Grouping parens are scoped to the boolean
     /// grammar only here — this crate has no general arithmetic/operand
-    /// grouping to extend (`parse_operand` never accepted `(` either).
+    /// grouping to extend (`parse_operand` never accepted `(` either,
+    /// except for one narrow case — see the next paragraph).
+    ///
+    /// **Disambiguating a leading `(` from a scalar subquery (issue
+    /// #131):** `(SELECT ...) = x` puts a subquery, not a boolean
+    /// sub-expression, first — `(SELECT ...` is never the start of a
+    /// valid boolean grouping (a `SELECT` isn't a comparison), so a
+    /// `(` immediately followed by `SELECT` always means "defer to
+    /// `parse_comparison`, whose `parse_operand` call handles the `(
+    /// SELECT ...)` subquery itself" rather than "consume this paren as
+    /// a boolean group".
     fn parse_bool_primary(&mut self) -> Result<Expr, ParseError> {
-        if self.peek_punct("(") {
+        if self.peek_punct("(") && !self.peek_ident_at(1, "SELECT") {
             self.advance();
             let inner = self.parse_or_expr()?;
             self.expect_punct(")")?;
@@ -930,6 +955,18 @@ impl<'a> SelectParser<'a> {
         if self.peek_ident("IN") {
             self.advance();
             self.expect_punct("(")?;
+            if self.peek_ident("SELECT") {
+                // `expr IN (SELECT ...)` (issue #131) -- the subquery
+                // form, alongside the literal-list form just below.
+                let (select, new_pos) = parse_select_at(self.tokens, self.pos)?;
+                self.pos = new_pos;
+                self.expect_punct(")")?;
+                return Ok(Expr::InSubquery {
+                    expr: Box::new(left),
+                    query: Box::new(select),
+                    negate,
+                });
+            }
             let mut list = Vec::new();
             if !self.peek_punct(")") {
                 loop {
@@ -987,6 +1024,19 @@ impl<'a> SelectParser<'a> {
         if self.in_having && self.starts_aggregate_call() {
             let call = self.parse_aggregate_call()?;
             return Ok(Expr::Column(describe_aggregate_call(&call)));
+        }
+        if self.peek_punct("(") && self.peek_ident_at(1, "SELECT") {
+            // A scalar subquery in expression position (issue #131),
+            // e.g. the `(SELECT MAX(a) FROM t)` in `WHERE x = (SELECT
+            // MAX(a) FROM t)`. `parse_bool_primary`'s own leading-`(`
+            // handling defers to `parse_comparison` (and so eventually
+            // here) for exactly this `(SELECT ...`-lookahead case, so a
+            // subquery on either side of a comparison parses correctly.
+            self.advance();
+            let (select, new_pos) = parse_select_at(self.tokens, self.pos)?;
+            self.pos = new_pos;
+            self.expect_punct(")")?;
+            return Ok(Expr::ScalarSubquery(Box::new(select)));
         }
         match self.peek().cloned() {
             Some(Token::Ident(name)) if name.eq_ignore_ascii_case("CASE") => {
@@ -2015,5 +2065,116 @@ mod tests {
                 right: Box::new(Expr::Literal(Value::Integer(1))),
             })
         );
+    }
+
+    #[test]
+    fn parses_scalar_subquery_on_the_right_of_a_comparison() {
+        let tokens = tokenize("SELECT a FROM t WHERE a = (SELECT MAX(b) FROM u)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        match select.filter {
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            }) => {
+                assert_eq!(*left, Expr::Column("a".to_string()));
+                match *right {
+                    Expr::ScalarSubquery(sub) => assert_eq!(sub.table_name, "u"),
+                    other => panic!("expected a ScalarSubquery, got {other:?}"),
+                }
+            }
+            other => panic!("expected a top-level BinaryOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scalar_subquery_on_the_left_of_a_comparison() {
+        let tokens = tokenize("SELECT a FROM t WHERE (SELECT MAX(b) FROM u) = a").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        match select.filter {
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left,
+                ..
+            }) => match *left {
+                Expr::ScalarSubquery(sub) => assert_eq!(sub.table_name, "u"),
+                other => panic!("expected a ScalarSubquery, got {other:?}"),
+            },
+            other => panic!("expected a top-level BinaryOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_grouping_parens_still_parse_as_a_boolean_group() {
+        // A leading `(` not immediately followed by `SELECT` is still
+        // the pre-#131 boolean-grouping form.
+        let tokens = tokenize("SELECT a FROM t WHERE (a = 1 OR a = 2)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::Or(
+                Box::new(Expr::BinaryOp {
+                    op: BinaryOp::Eq,
+                    left: Box::new(Expr::Column("a".to_string())),
+                    right: Box::new(Expr::Literal(Value::Integer(1))),
+                }),
+                Box::new(Expr::BinaryOp {
+                    op: BinaryOp::Eq,
+                    left: Box::new(Expr::Column("a".to_string())),
+                    right: Box::new(Expr::Literal(Value::Integer(2))),
+                }),
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_in_subquery() {
+        let tokens = tokenize("SELECT a FROM t WHERE a IN (SELECT b FROM u)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        match select.filter {
+            Some(Expr::InSubquery {
+                expr,
+                query,
+                negate,
+            }) => {
+                assert_eq!(*expr, Expr::Column("a".to_string()));
+                assert_eq!(query.table_name, "u");
+                assert!(!negate);
+            }
+            other => panic!("expected an InSubquery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_not_in_subquery() {
+        let tokens = tokenize("SELECT a FROM t WHERE a NOT IN (SELECT b FROM u)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        match select.filter {
+            Some(Expr::InSubquery { negate, .. }) => assert!(negate),
+            other => panic!("expected an InSubquery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_list_form_still_parses_when_no_select_follows() {
+        let tokens = tokenize("SELECT a FROM t WHERE a IN (1, 2, 3)").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert!(matches!(select.filter, Some(Expr::InList { .. })));
+    }
+
+    #[test]
+    fn scalar_subquery_usable_as_a_function_argument() {
+        let tokens = tokenize("SELECT a FROM t WHERE UPPER((SELECT b FROM u)) = 'X'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        match select.filter {
+            Some(Expr::BinaryOp { left, .. }) => match *left {
+                Expr::FunctionCall { name, args } => {
+                    assert_eq!(name, "UPPER");
+                    assert!(matches!(args[0], Expr::ScalarSubquery(_)));
+                }
+                other => panic!("expected a FunctionCall, got {other:?}"),
+            },
+            other => panic!("expected a top-level BinaryOp, got {other:?}"),
+        }
     }
 }

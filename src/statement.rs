@@ -452,6 +452,18 @@ impl<'conn> Statement<'conn> {
                 list: list.iter().map(|e| self.resolve_expr(e)).collect(),
                 negate: *negate,
             },
+            Expr::InSubquery {
+                expr,
+                query,
+                negate,
+            } => Expr::InSubquery {
+                expr: Box::new(self.resolve_expr(expr)),
+                query: Box::new(self.resolve_select(query)),
+                negate: *negate,
+            },
+            Expr::ScalarSubquery(query) => {
+                Expr::ScalarSubquery(Box::new(self.resolve_select(query)))
+            }
             Expr::Case {
                 operand,
                 branches,
@@ -1036,6 +1048,13 @@ impl ParamResolver {
                 for item in list {
                     self.rewrite(item);
                 }
+            }
+            Expr::InSubquery { expr, query, .. } => {
+                self.rewrite(expr);
+                rewrite_select_params(query, self);
+            }
+            Expr::ScalarSubquery(query) => {
+                rewrite_select_params(query, self);
             }
             Expr::Case {
                 operand,
