@@ -18,6 +18,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     CreateTable,
+    /// `DROP TABLE` (issue #120).
+    DropTable,
     Insert,
     Select,
     /// Not yet reachable — no `UPDATE` statement exists yet. Kept so
