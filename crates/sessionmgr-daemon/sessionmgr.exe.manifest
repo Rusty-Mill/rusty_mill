@@ -16,11 +16,9 @@
   failure mode without this manifest is git refusing to create or remove a
   worktree with an error that says nothing about path length.
 
-  This manifest is declared but **not yet wired into the build**: embedding
-  it requires a `build.rs` invoking a resource compiler, which only runs on
-  a Windows toolchain. It is checked in now so the requirement is recorded
-  next to the code rather than living in someone's memory, and so the
-  Windows verification pass has the file it needs.
+  Embedded by `build.rs` via the `embed-manifest` crate, gated on
+  `CARGO_CFG_WINDOWS` so cross-compile checks from Linux CI still work.
+  See `build.rs` for why that crate over `winres`/`embed_resource`.
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity

@@ -32,7 +32,21 @@ pub struct SystemGit;
 
 /// Runs one git command in `cwd` and returns its stdout.
 fn git(operation: &'static str, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
-    let output = Command::new("git")
+    let mut cmd = Command::new("git");
+    // `core.longpaths` is Git for Windows' own opt-in for paths beyond
+    // the legacy ~260-character limit -- a *git.exe* setting, separate
+    // from both this binary's `longPathAware` manifest (which only
+    // covers `sessionmgr.exe`'s own filesystem calls, never a child
+    // process's) and the Windows `LongPathsEnabled` registry policy.
+    // Measured directly: with the registry policy already on and the
+    // manifest embedded, `git init` still failed with "Filename too
+    // long" inside a ~250-character worktree path until this was set.
+    // Passed per-invocation via `-c` rather than left to the user's
+    // global config, so a worktree session under a deeply nested repo
+    // does not depend on a setting this tool never asked them to make.
+    #[cfg(windows)]
+    cmd.args(["-c", "core.longpaths=true"]);
+    let output = cmd
         .args(args)
         .current_dir(cwd)
         // Git reads the *invoking* terminal for credential and editor

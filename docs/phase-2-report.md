@@ -13,8 +13,8 @@ Phase 2's stated scope:
 | Worktree isolation | **Done** |
 | All three `SessionKind`s | **Done** |
 | Worktree lifecycle tests | **Done** — 10 black-box tests against real repositories |
-| Windows path-length mitigation | **Partly** — budget asserted in tests, manifest written but not wired into the build |
-| Windows Defender smoke test | **Not run** — still outstanding |
+| Windows path-length mitigation | **Done, with a caveat** — manifest wired into the build and verified embedded; a lower, git-for-windows-internal ceiling found. See [`phase-2-windows-verification.md`](phase-2-windows-verification.md). |
+| Windows Defender smoke test | **Done** — see [`phase-2-windows-verification.md`](phase-2-windows-verification.md) |
 | **Full suite on real Windows** | **Done** — 105/105, see below |
 
 105 tests pass in total, **on Linux and on real Windows alike**.
@@ -93,22 +93,24 @@ choosing it is the one who needs to know.
    throwaway repository, and the reasoning is recorded on the type so it does
    not recur.
 
-## Windows work that is declared but not finished
+## Windows work that was outstanding here — now closed out
 
-- **`longPathAware` manifest**: written to
-  `crates/sessionmgr-daemon/sessionmgr.exe.manifest`, including `activeCodePage`
-  UTF-8, but **not wired into the build**. Embedding it needs a `build.rs`
-  driving a resource compiler, which only runs on a Windows toolchain. It is
-  checked in so the requirement lives next to the code rather than in someone's
-  memory. Wiring it up is a task for the Windows verification pass.
-- **Path-length exposure** is asserted at the unit level from both directions:
-  `workspace::worktree_dir` proves this tool adds at most ~40 characters to a
-  path it does not control, and `paths` proves socket paths fit the 107-byte
-  `AF_UNIX` budget for a realistic Windows state root. Neither is a substitute
-  for trying it against a genuinely deep repository on Windows.
-- **Windows Defender smoke test** (PLAN.md risk 7 — heavy concurrent worktree
-  file I/O at Defender's default settings) has not been run. It cannot be
-  simulated here. This remains an open, genuinely Windows-native risk.
+All three items below were run against a real Windows desktop and are
+recorded in full, including the one that did not come back clean, in
+[`phase-2-windows-verification.md`](phase-2-windows-verification.md) rather
+than repeated here:
+
+- The `longPathAware` manifest is now embedded by `build.rs` and verified
+  present in the built binary.
+- The Windows Defender smoke test (PLAN.md risk 7) has been run: 24
+  concurrent worktree sessions under real-time protection, no failures.
+- Trying it against a genuinely deep repository surfaced a real limitation
+  neither the manifest nor `LongPathsEnabled` nor `core.longpaths` fully
+  covers, internal to Git for Windows' `worktree add` — measured, not
+  assumed, with the threshold recorded.
+
+That same pass also root-caused and fixed issue #2 (the daemon hang) while
+investigating this ground, since the two shared a root cause.
 
 ## Slightly ahead of scope, deliberately
 

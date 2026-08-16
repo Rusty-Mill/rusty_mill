@@ -27,7 +27,7 @@ use sessionmgr_core::{
     Disposition, RecoveryAction, SessionId, SessionKind, SessionStatus, Workspace,
 };
 use sessionmgr_git::SystemGit;
-use sessionmgr_protocol::{Request, Response, SessionEvent};
+use sessionmgr_protocol::{Request, Response, SessionEvent, SessionSummary};
 
 use crate::error::{Error, Result};
 use crate::{catalog, paths, transport, worker};
@@ -189,7 +189,7 @@ impl Supervisor {
                 repo,
                 pty,
             } => self.session_new(kind, command, repo, pty).await,
-            Request::SessionList => self.session_list(),
+            Request::SessionList => self.session_list().await,
             Request::SessionInput { id, data } => self.session_input(id, data).await,
             Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
             Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
@@ -222,7 +222,7 @@ impl Supervisor {
         let id = sessionmgr_proc::session_id()
             .map_err(|e| Error::io("generating a session id", None, e))?;
 
-        let workspace = self.prepare_workspace(kind, repo, &id)?;
+        let workspace = self.prepare_workspace(kind, repo, &id).await?;
         let session = sessionmgr_core::Session::new(
             id.clone(),
             kind,
@@ -284,7 +284,16 @@ impl Supervisor {
     /// leaves nothing behind at all. Writing the record first would leave
     /// a session pointing at a worktree that does not exist -- visible in
     /// `list`, impossible to attach to, and needing its own cleanup path.
-    fn prepare_workspace(
+    ///
+    /// `git worktree add` is a synchronous subprocess call -- real disk
+    /// I/O checking out a full working copy, with an antivirus scanner
+    /// free to sit in the path (PLAN.md risk 7). Run inline on an async
+    /// task, it is the same "real OS work on the executor" bug as
+    /// `session_list` (see its own comment), except slower and more
+    /// variable, which makes it the more likely trigger for issue #2's
+    /// hang under any concurrent `new`/`close` load. `spawn_blocking`
+    /// moves it to the blocking pool.
+    async fn prepare_workspace(
         &self,
         kind: SessionKind,
         repo: Option<PathBuf>,
@@ -299,25 +308,30 @@ impl Supervisor {
                  or pass --repo <path>"
             ))
         })?;
-        let git = SystemGit;
-        // Resolved from the client's directory to a repository root, so a
-        // session created deep inside a repo lands in the same place as
-        // one created at the top.
-        let root = git
-            .repo_root(&from)
-            .map_err(|e| Error::usage(e.to_string()))?;
+        let id = id.clone();
+        rusty_tokio::spawn_blocking(move || -> Result<Option<Workspace>> {
+            let git = SystemGit;
+            // Resolved from the client's directory to a repository root,
+            // so a session created deep inside a repo lands in the same
+            // place as one created at the top.
+            let root = git
+                .repo_root(&from)
+                .map_err(|e| Error::usage(e.to_string()))?;
 
-        match kind {
-            SessionKind::SameDirectory => Ok(Some(Workspace::same_directory(root))),
-            SessionKind::Worktree => {
-                let workspace = Workspace::worktree(root.clone(), id);
-                let branch = workspace.branch.clone().unwrap_or_default();
-                git.worktree_add(&root, &workspace.cwd, &branch)
-                    .map_err(|e| Error::conflict(e.to_string()))?;
-                Ok(Some(workspace))
+            match kind {
+                SessionKind::SameDirectory => Ok(Some(Workspace::same_directory(root))),
+                SessionKind::Worktree => {
+                    let workspace = Workspace::worktree(root.clone(), &id);
+                    let branch = workspace.branch.clone().unwrap_or_default();
+                    git.worktree_add(&root, &workspace.cwd, &branch)
+                        .map_err(|e| Error::conflict(e.to_string()))?;
+                    Ok(Some(workspace))
+                }
+                SessionKind::PlainTerminal => Ok(None),
             }
-            SessionKind::PlainTerminal => Ok(None),
-        }
+        })
+        .await
+        .map_err(|e| Error::conflict(format!("the workspace-setup task did not complete: {e}")))?
     }
 
     /// Removes a worktree session's worktree and branch according to
@@ -329,12 +343,17 @@ impl Supervisor {
     /// directory genuinely undeletable. Ordering teardown as
     /// processes-then-files is what makes the removal likely to succeed
     /// at all.
-    fn dispose_workspace(
+    ///
+    /// Same `spawn_blocking` reasoning as [`Self::prepare_workspace`]:
+    /// `git worktree remove`/`branch -d`/a fast-forward merge are
+    /// synchronous subprocess calls doing real file I/O, not fit for the
+    /// async executor.
+    async fn dispose_workspace(
         &self,
         session: &sessionmgr_core::Session,
         disposition: Option<Disposition>,
     ) -> Result<()> {
-        let Some(workspace) = session.workspace.as_ref() else {
+        let Some(workspace) = session.workspace.clone() else {
             return Ok(());
         };
         if !workspace.owns_worktree() {
@@ -349,51 +368,70 @@ impl Supervisor {
             // ambiguous instruction.
             return Ok(());
         };
-        let git = SystemGit;
-        let branch = workspace.branch.clone().unwrap_or_default();
+        rusty_tokio::spawn_blocking(move || -> Result<()> {
+            let git = SystemGit;
+            let branch = workspace.branch.clone().unwrap_or_default();
 
-        if disposition == Disposition::Merge {
-            // Merge first, and propagate a failure. A fast-forward-only
-            // merge that fails means the branch has diverged -- and
-            // removing the worktree anyway would destroy exactly the work
-            // that could not be merged.
-            git.merge_fast_forward_only(&workspace.repo, &branch)
-                .map_err(|e| {
-                    Error::conflict(format!(
-                        "{e}\nThe session's worktree and branch have been left in place. \
-                         Merge `{branch}` by hand, or close with --discard to throw it away."
-                    ))
-                })?;
-        }
+            if disposition == Disposition::Merge {
+                // Merge first, and propagate a failure. A fast-forward-only
+                // merge that fails means the branch has diverged -- and
+                // removing the worktree anyway would destroy exactly the work
+                // that could not be merged.
+                git.merge_fast_forward_only(&workspace.repo, &branch)
+                    .map_err(|e| {
+                        Error::conflict(format!(
+                            "{e}\nThe session's worktree and branch have been left in place. \
+                             Merge `{branch}` by hand, or close with --discard to throw it away."
+                        ))
+                    })?;
+            }
 
-        let force = disposition == Disposition::Discard;
-        if let Err(e) = git.worktree_remove(&workspace.repo, &workspace.cwd, force) {
-            return Err(Error::conflict(format!(
-                "{e}\nSomething may still be holding a file open in {}.",
-                workspace.cwd.display()
-            )));
-        }
-        // The branch outlives the worktree unless it was merged (nothing
-        // left to lose) or explicitly discarded (the user said so).
-        if let Err(e) = git.branch_delete(&workspace.repo, &branch, force) {
-            // Not fatal: the worktree is gone, which is the part that
-            // matters, and a branch left behind is recoverable by hand
-            // whereas failing the whole close here is not.
-            eprintln!("sessionmgr daemon: could not delete branch {branch}: {e}");
-        }
-        Ok(())
+            let force = disposition == Disposition::Discard;
+            if let Err(e) = git.worktree_remove(&workspace.repo, &workspace.cwd, force) {
+                return Err(Error::conflict(format!(
+                    "{e}\nSomething may still be holding a file open in {}.",
+                    workspace.cwd.display()
+                )));
+            }
+            // The branch outlives the worktree unless it was merged (nothing
+            // left to lose) or explicitly discarded (the user said so).
+            if let Err(e) = git.branch_delete(&workspace.repo, &branch, force) {
+                // Not fatal: the worktree is gone, which is the part that
+                // matters, and a branch left behind is recoverable by hand
+                // whereas failing the whole close here is not.
+                eprintln!("sessionmgr daemon: could not delete branch {branch}: {e}");
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            Error::conflict(format!("the workspace-teardown task did not complete: {e}"))
+        })?
     }
 
-    fn session_list(&self) -> Result<Response> {
-        let mut sessions = Vec::new();
-        for session in catalog::list_sessions(&self.root)? {
-            // Reconciled on every list, not only at startup: a worker can
-            // die at any moment, and a status this tool reports as
-            // `Running` when the process is gone is worse than useless.
-            sessions.push(catalog::summarize(&catalog::reconcile(
-                &self.root, session,
-            )?));
-        }
+    /// Filesystem reads and pid-liveness probes here are synchronous --
+    /// on Linux, `reconcile` reads `/proc/<pid>/stat`; on macOS/BSD it
+    /// shells out to `ps` and waits for it to exit. Doing that inline on
+    /// an async task ties up one of `rusty_tokio`'s fixed worker threads
+    /// for as long as the syscall (or subprocess) takes, and on a
+    /// small CI runner (2-4 workers, per `#[rusty_tokio::main]`'s
+    /// default multi-threaded flavor) enough concurrent `list` calls can
+    /// starve every worker at once -- indistinguishable from the daemon
+    /// hanging to anything else trying to connect. Issue #2's daemon
+    /// hang on Linux CI is this class of bug, same as the bind-before-
+    /// recover race already fixed: real OS work belongs on the blocking
+    /// pool, not on the executor. `spawn_blocking` moves it there.
+    async fn session_list(&self) -> Result<Response> {
+        let root = self.root.clone();
+        let sessions = rusty_tokio::spawn_blocking(move || -> Result<Vec<SessionSummary>> {
+            let mut sessions = Vec::new();
+            for session in catalog::list_sessions(&root)? {
+                sessions.push(catalog::summarize(&catalog::reconcile(&root, session)?));
+            }
+            Ok(sessions)
+        })
+        .await
+        .map_err(|e| Error::conflict(format!("the session-list task did not complete: {e}")))??;
         Ok(Response::Sessions { sessions })
     }
 
@@ -476,7 +514,7 @@ impl Supervisor {
         // 3. Only once nothing is running: dispose of the worktree. A
         //    live process holding a file open inside it would make the
         //    removal fail, and on Windows that is not advisory.
-        self.dispose_workspace(&session, disposition)?;
+        self.dispose_workspace(&session, disposition).await?;
 
         // 4. Now, with no other possible writer, record the outcome.
         session.transition_to(session.teardown_status(disposition))?;
