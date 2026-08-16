@@ -67,7 +67,7 @@ mod vtab_series;
 pub use aggregate::Aggregate;
 pub use blob::{Blob, ZeroBlob};
 pub use config::{DbConfig, Limit, OpenFlags};
-pub use connection::{ColumnMetadata, Connection};
+pub use connection::{ColumnMetadata, Connection, InterruptHandle};
 pub use ddl::{
     parse_create_table, parse_create_virtual_table, ColumnDef, CreateTable, CreateVirtualTable,
     ParseError,
