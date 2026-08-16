@@ -23,6 +23,28 @@ entry per PR.
 
 ---
 
+## PR #140 — Add DROP TABLE [IF EXISTS] (closes #120)
+**2026-08-16** · [#140](https://github.com/baileyrd/rusty_-rusqlite/pull/140)
+
+- **Added:** `DROP TABLE [IF EXISTS] table_name` — new `DropTable` AST,
+  parser, `Database::drop_table`, and `Connection::execute` dispatch arm.
+  A missing table is `Error::TableNotFound`, unless `IF EXISTS` is given
+  — then it's a silent no-op, mirroring `CREATE TABLE IF NOT EXISTS`'s
+  own convention (#119).
+- **Decided:** `DROP TABLE` on a registered virtual table is rejected
+  with a new `Error::CannotDropVirtualTable`, not silently no-op'd or
+  misreported as `TableNotFound` — real SQLite's `DROP TABLE` on a
+  virtual table invokes the module's `xDestroy` callback, and
+  `TableSource` has no destroy-lifecycle hook to model that.
+- New `Action::DropTable` authorizer/hook variant.
+- **Note:** `connection.rs`'s own `execute_on_unrecognized_statement_is_an_error`
+  test (previously asserting `DROP TABLE t` was unrecognized) now uses
+  `UPDATE` instead, since `DROP TABLE` is a recognized statement now.
+- Tenth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 462 tests passing.
+
+---
+
 ## PR #139 — Add CREATE TABLE IF NOT EXISTS (closes #119)
 **2026-08-16** · [#139](https://github.com/baileyrd/rusty_-rusqlite/pull/139)
 
