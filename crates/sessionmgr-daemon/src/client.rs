@@ -82,10 +82,38 @@ pub async fn start_daemon_detached(root: &Path) -> Result<()> {
     })
 }
 
+/// How long a one-shot client command waits for the daemon to answer.
+///
+/// Generous, because `SessionNew` legitimately takes as long as it takes
+/// a worker to start (up to `WORKER_READY_TIMEOUT`), and on Windows that
+/// covers process creation with an antivirus scanner in the path.
+///
+/// But bounded, which the socket reads underneath are not. A client that
+/// hangs forever against a wedged daemon gives the user nothing to act on
+/// and nothing to report; a client that gives up after a minute names the
+/// daemon and its log. This is a backstop for a bug rather than an
+/// expected path -- if it ever fires, something is wrong that this
+/// message should help find.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// One request, one response, against a possibly-auto-started daemon.
 async fn request(root: &Path, request: Request) -> Result<Response> {
     let mut conn = connect(root).await?;
-    let response: Response = conn.request(&request).await?;
+    let response: Response = match rusty_tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        conn.request(&request),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(Error::conflict(format!(
+                "the daemon accepted the request but did not answer within {}s; see {}",
+                REQUEST_TIMEOUT.as_secs(),
+                paths::daemon_log(root).display()
+            )))
+        }
+    };
     match response {
         Response::Error { kind, message } => Err(match kind {
             sessionmgr_protocol::ErrorKind::NotFound => Error::NotFound { id: message },

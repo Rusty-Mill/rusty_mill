@@ -91,6 +91,24 @@ pub async fn run(root: PathBuf) -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| Error::io("locating this executable", None, e))?;
 
+    let supervisor = Arc::new(Supervisor {
+        root: root.clone(),
+        exe,
+        shutdown: Notify::new(),
+    });
+
+    // Recovery runs **before** the socket exists, and the ordering is
+    // load-bearing. Binding first opened a window where a client could
+    // connect -- successfully, into the listen backlog -- while this
+    // process was still probing pids and nothing was accepting yet. The
+    // client then waited for an answer that could not come until recovery
+    // finished. With no socket yet, a client simply fails to connect and
+    // retries, which its readiness loop already handles correctly.
+    //
+    // It also means no client can ever observe the registry mid-recovery,
+    // reading a session as `Running` a moment before it is marked crashed.
+    supervisor.reconcile_all()?;
+
     let listener = transport::Listener::bind("binding the daemon socket", &paths::daemon_socket(&root))?;
 
     // Written after the bind succeeds, never before: a pointer file
@@ -107,14 +125,6 @@ pub async fn run(root: PathBuf) -> Result<()> {
         serde_json::to_string_pretty(&state)?,
     )
     .map_err(|e| Error::io("writing the daemon pointer file", state_path.clone(), e))?;
-
-    let supervisor = Arc::new(Supervisor {
-        root: root.clone(),
-        exe,
-        shutdown: Notify::new(),
-    });
-
-    supervisor.reconcile_all()?;
 
     let accept_loop = rusty_tokio::spawn({
         let supervisor = Arc::clone(&supervisor);
