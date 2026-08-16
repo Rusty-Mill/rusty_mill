@@ -131,12 +131,31 @@ pub fn worker_log(root: &Path, id: &SessionId) -> PathBuf {
 /// Binding fails if the path already exists, and a socket file always
 /// outlives an uncleanly-killed process -- which, for a tool whose whole
 /// premise is surviving unclean exits, is the normal case rather than the
-/// exception. A missing file is success, not an error.
-pub fn clear_socket(path: &Path) -> Result<()> {
+/// exception.
+///
+/// **Never fails.** An earlier version returned `Err` on any delete
+/// failure other than "not found", which made this a single point of
+/// failure for the entire daemon: on Windows, deleting an `AF_UNIX`
+/// socket file left behind by a killed process does not always succeed,
+/// and a refusal here took the replacement daemon down at startup -- so
+/// killing the manager once would leave it permanently unable to
+/// restart. That is the exact failure this project exists to not have.
+///
+/// A failure to delete is therefore reported and ignored. The bind that
+/// follows is the real test: if something genuinely still owns the
+/// address it will fail there, with an error about the address rather
+/// than about a file.
+pub fn clear_socket(path: &Path) {
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(Error::io("removing a stale socket", path.to_path_buf(), e)),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "sessionmgr: could not remove the stale socket at {} ({e}); \
+                 continuing to bind anyway",
+                path.display()
+            );
+        }
     }
 }
 
@@ -197,9 +216,19 @@ mod tests {
     }
 
     #[test]
-    fn clearing_a_missing_socket_is_not_an_error() {
-        let missing = std::env::temp_dir().join("sessionmgr-definitely-not-here.sock");
-        assert!(clear_socket(&missing).is_ok());
+    fn clearing_a_socket_never_fails_even_when_it_cannot_delete() {
+        // Load-bearing: a refusal here used to take the whole daemon down
+        // at startup, which meant one unclean kill could leave the tool
+        // permanently unable to restart.
+        clear_socket(&std::env::temp_dir().join("sessionmgr-definitely-not-here.sock"));
+        // A directory cannot be removed by `remove_file`, so this
+        // exercises the failure path without depending on platform
+        // permissions.
+        let dir = std::env::temp_dir().join(format!("smclear{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        clear_socket(&dir);
+        assert!(dir.exists(), "the failure path must not have deleted it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

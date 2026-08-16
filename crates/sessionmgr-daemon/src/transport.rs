@@ -214,9 +214,34 @@ impl Listener {
             crate::paths::ensure_dir(context, parent)?;
         }
         crate::paths::warn_if_socket_path_is_long(path);
-        crate::paths::clear_socket(path)?;
-        let inner = rusty_tokio::io::UnixListener::bind(path)
-            .map_err(|e| Error::io(context, path.to_path_buf(), e))?;
+        crate::paths::clear_socket(path);
+        let inner = match rusty_tokio::io::UnixListener::bind(path) {
+            Ok(listener) => listener,
+            // One retry, because the interesting failure here is a race
+            // rather than a permanent condition: a socket file left by a
+            // process that was killed moments ago can briefly refuse to
+            // be deleted or rebound while the OS finishes releasing it.
+            // A tool built around surviving unclean exits meets exactly
+            // that case on every restart after a crash, so failing on the
+            // first attempt would make the common path the fragile one.
+            Err(first) => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                crate::paths::clear_socket(path);
+                rusty_tokio::io::UnixListener::bind(path).map_err(|second| {
+                    Error::io(
+                        context,
+                        path.to_path_buf(),
+                        std::io::Error::new(
+                            second.kind(),
+                            format!(
+                                "{second} (first attempt: {first}). If no sessionmgr daemon is \
+                                 running, delete this file and retry."
+                            ),
+                        ),
+                    )
+                })?
+            }
+        };
         Ok(Listener {
             inner,
             path: path.to_path_buf(),
