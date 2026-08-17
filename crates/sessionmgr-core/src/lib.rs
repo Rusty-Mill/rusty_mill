@@ -13,11 +13,13 @@
 //! processes, and no filesystem. See `docs/plan/PLAN.md` § Testing
 //! strategy.
 //!
+pub mod dependency;
 pub mod ports;
 pub mod recovery;
 pub mod session;
 pub mod workspace;
 
+pub use dependency::{parent_readiness, ParentReadiness};
 pub use recovery::{decide_recovery, Liveness, RecoveryAction};
 pub use session::{
     AgentKind, Disposition, Session, SessionId, SessionIdError, SessionKind, SessionStatus,

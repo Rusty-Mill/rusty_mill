@@ -20,11 +20,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusty_tokio::sync::Notify;
+use rusty_tokio::sync::{Mutex, Notify};
 use serde::{Deserialize, Serialize};
 use sessionmgr_core::ports::GitPort;
 use sessionmgr_core::{
-    Disposition, RecoveryAction, SessionId, SessionKind, SessionStatus, Workspace,
+    Disposition, ParentReadiness, RecoveryAction, Session, SessionId, SessionKind, SessionStatus,
+    Workspace,
 };
 use sessionmgr_git::SystemGit;
 use sessionmgr_protocol::{Request, Response, SessionEvent, SessionSummary};
@@ -42,6 +43,16 @@ const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a worker gets to acknowledge a graceful shutdown before it is
 /// terminated.
 const GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the daemon re-checks a `Waiting` dependent session's
+/// parent.
+///
+/// Matches the TUI's own session-list refresh cadence (`sessionmgr-tui`'s
+/// `app.rs`), which is the shortest interval anything in this project
+/// already treats as "prompt enough" -- there is no reason a parent's own
+/// status becoming visible in `sessionmgr list` and a dependent session
+/// noticing it should be tuned any tighter than that.
+const DEPENDENT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The daemon's own pointer file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +86,27 @@ struct Supervisor {
     root: PathBuf,
     exe: PathBuf,
     shutdown: Notify,
+    /// Serializes a `Waiting` dependent session's two competing writers:
+    /// the background poller ([`poll_parent_then_start`]) promoting it to
+    /// `Running`, and a user closing it before that happens.
+    ///
+    /// Coarse-grained -- one lock for every waiting session in the
+    /// daemon, not one per session -- deliberately: promoting a session
+    /// out of `Waiting` is rare (it happens once, ever, per dependent
+    /// session) and already involves spawning a worker and waiting for it
+    /// to report in, which is a slower operation than acquiring this lock
+    /// could ever meaningfully contend with. A per-session lock registry
+    /// would be real complexity bought for a case that does not need it.
+    ///
+    /// Without this, [`Supervisor::session_close`] could read a `Waiting`
+    /// session (no worker recorded), the poller could win a race and
+    /// spawn a real worker for it, and `session_close`'s own stale
+    /// in-memory copy would then overwrite `state.json` with `Closed` and
+    /// no worker/child pids -- leaking the freshly spawned process with
+    /// nothing left tracking it. Both sides take this lock before acting
+    /// on a `Waiting` session, so "is it still Waiting?" and "act on it"
+    /// happen atomically with respect to each other.
+    dependent_lock: Mutex<()>,
 }
 
 /// Runs the daemon in the foreground. Returns when a `DaemonShutdown`
@@ -95,6 +127,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
         root: root.clone(),
         exe,
         shutdown: Notify::new(),
+        dependent_lock: Mutex::new(()),
     });
 
     // Recovery runs **before** the socket exists, and the ordering is
@@ -107,7 +140,17 @@ pub async fn run(root: PathBuf) -> Result<()> {
     //
     // It also means no client can ever observe the registry mid-recovery,
     // reading a session as `Running` a moment before it is marked crashed.
-    supervisor.reconcile_all()?;
+    let still_waiting = supervisor.reconcile_all()?;
+
+    // A `Waiting` dependent session has no worker, so `reconcile_all`'s
+    // ordinary adopt/crash pass above never touches it -- its only
+    // "liveness" is an in-memory poller task, which does not survive a
+    // daemon restart. Restart one here for anything still found
+    // `Waiting`, or a session created just before the daemon died would
+    // wait forever with nothing ever checking its parent again.
+    for id in still_waiting {
+        rusty_tokio::spawn(poll_parent_then_start(Arc::clone(&supervisor), id));
+    }
 
     let listener =
         transport::Listener::bind("binding the daemon socket", &paths::daemon_socket(&root))?;
@@ -152,20 +195,30 @@ pub async fn run(root: PathBuf) -> Result<()> {
 }
 
 impl Supervisor {
-    /// Applies the recovery rule to every session on disk.
+    /// Applies the recovery rule to every session on disk, and returns
+    /// the ids of every session found still [`SessionStatus::Waiting`] --
+    /// which `recovery_for` deliberately leaves untouched (see
+    /// `SessionStatus::expects_live_worker`'s own docs) but which still
+    /// needs its poller task restarted, since that task lived only in the
+    /// previous daemon process's memory.
     ///
     /// This runs once at startup and is the moment the whole persistence
     /// design either works or does not: sessions whose workers survived
     /// this daemon's predecessor are adopted, and the rest are honestly
     /// marked crashed.
-    fn reconcile_all(&self) -> Result<()> {
+    fn reconcile_all(&self) -> Result<Vec<SessionId>> {
         let mut adopted = 0usize;
         let mut crashed = 0usize;
+        let mut waiting = Vec::new();
         for session in catalog::list_sessions(&self.root)? {
             match catalog::recovery_for(&session) {
                 RecoveryAction::Adopt => adopted += 1,
                 RecoveryAction::MarkCrashed => crashed += 1,
-                RecoveryAction::LeaveAsIs => {}
+                RecoveryAction::LeaveAsIs => {
+                    if session.status == SessionStatus::Waiting {
+                        waiting.push(session.id.clone());
+                    }
+                }
             }
             catalog::reconcile(&self.root, session)?;
         }
@@ -175,10 +228,10 @@ impl Supervisor {
                  marked {crashed} crashed"
             );
         }
-        Ok(())
+        Ok(waiting)
     }
 
-    async fn handle(&self, request: Request) -> Result<Response> {
+    async fn handle(self: &Arc<Self>, request: Request) -> Result<Response> {
         match request {
             Request::Ping => Ok(Response::Pong {
                 pid: std::process::id(),
@@ -190,15 +243,27 @@ impl Supervisor {
                 pty,
                 agent,
                 hooks,
+                parent,
+                wait_for_parent,
             } => {
-                self.session_new(kind, command, repo, pty, agent, hooks)
-                    .await
+                self.session_new(
+                    kind,
+                    command,
+                    repo,
+                    pty,
+                    agent,
+                    hooks,
+                    parent,
+                    wait_for_parent,
+                )
+                .await
             }
             Request::SessionList => self.session_list().await,
             Request::SessionInput { id, data } => self.session_input(id, data).await,
             Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
             Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
             Request::SessionRename { id, name } => self.session_rename(id, name).await,
+            Request::SessionStartNow { id } => self.session_start_now(id).await,
             Request::GitStatus { id } => self.session_git_status(id).await,
             Request::GitDiff { id, path } => self.session_git_diff(id, path).await,
             Request::HookFire { session_id, event } => self.hook_fire(session_id, event).await,
@@ -216,15 +281,35 @@ impl Supervisor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn session_new(
-        &self,
+        self: &Arc<Self>,
         kind: SessionKind,
         command: Vec<String>,
         repo: Option<PathBuf>,
         pty: bool,
         agent: Option<sessionmgr_core::AgentKind>,
         hooks: bool,
+        parent: Option<SessionId>,
+        wait_for_parent: bool,
     ) -> Result<Response> {
+        // `parent` and `kind` must agree with each other -- checked here,
+        // on the daemon side, rather than trusted from the client: the
+        // public socket is the actual trust boundary, and the CLI layer's
+        // own `--parent`/`--kind` mutual-exclusion check is a courtesy to
+        // the user, not a security control.
+        if parent.is_some() != (kind == SessionKind::Dependent) {
+            return Err(Error::usage(
+                "a dependent session needs --parent together with a dependent kind, \
+                 and nothing else may set a dependent kind",
+            ));
+        }
+        if kind == SessionKind::Dependent && repo.is_some() {
+            return Err(Error::usage(
+                "--repo is meaningless for a dependent session; its workspace comes \
+                 from --parent's own worktree",
+            ));
+        }
         // An agent's own `launch_args` decides the real command line --
         // `command` becomes its `extra` (an initial prompt, typically),
         // not the literal program to run. Without an agent, behaviour is
@@ -238,14 +323,28 @@ impl Supervisor {
         let id = sessionmgr_proc::session_id()
             .map_err(|e| Error::io("generating a session id", None, e))?;
 
-        let workspace = self.prepare_workspace(kind, repo, &id).await?;
+        let workspace = match &parent {
+            Some(parent_id) => Some(self.resolve_dependent_workspace(parent_id).await?),
+            None => self.prepare_workspace(kind, repo, &id).await?,
+        };
         // Installed *before* the session record is written and the
         // worker spawned, so the hook config exists on disk by the time
-        // the agent CLI actually starts and reads it.
+        // the agent CLI actually starts and reads it. Not offered for a
+        // dependent session: it shares its parent's own worktree, so any
+        // hook config the parent installed with its own `--hooks`
+        // already applies -- installing a second copy on top would be at
+        // best redundant and at worst a second, conflicting settings
+        // file in the same directory.
         if hooks {
             let Some(agent) = agent else {
                 return Err(Error::usage("--hooks needs --agent <claude|codex>"));
             };
+            if kind == SessionKind::Dependent {
+                return Err(Error::usage(
+                    "--hooks is inherited from the parent's own worktree for a dependent \
+                     session; pass --hooks on the parent session instead",
+                ));
+            }
             let Some(workspace) = workspace.as_ref() else {
                 return Err(Error::usage(
                     "--hooks needs an isolated worktree session (--kind worktree)",
@@ -261,7 +360,7 @@ impl Supervisor {
                 Error::conflict(format!("the hook-install task did not complete: {e}"))
             })??;
         }
-        let session = sessionmgr_core::Session::new(
+        let mut session = Session::new(
             id.clone(),
             kind,
             command,
@@ -269,15 +368,100 @@ impl Supervisor {
             pty,
             sessionmgr_proc::now_millis(),
             agent,
+            parent.clone(),
+            wait_for_parent,
         );
+
+        // A dependent session asked to wait, whose parent is not ready
+        // yet, is published `Waiting` and gets **no worker at all** until
+        // the parent is -- see `try_advance_waiting_session`. Every other
+        // case (no parent, `--start-now`, or a parent that already
+        // finished by the time this request arrived) starts immediately,
+        // exactly as every session did before Phase 5.
+        let parent_readiness = match &parent {
+            Some(parent_id) if wait_for_parent => {
+                let parent_session = catalog::read_session(&self.root, parent_id)?;
+                Some(sessionmgr_core::parent_readiness(parent_session.status))
+            }
+            _ => None,
+        };
+
+        match parent_readiness {
+            Some(ParentReadiness::NotYet) => {
+                session.transition_to(SessionStatus::Waiting)?;
+                catalog::write_session(&self.root, &session)?;
+                rusty_tokio::spawn(poll_parent_then_start(Arc::clone(self), id.clone()));
+                return Ok(Response::SessionCreated { id });
+            }
+            Some(ParentReadiness::Unavailable) => {
+                return Err(Error::usage(
+                    "the parent session's worktree no longer exists (it was merged or discarded)",
+                ));
+            }
+            // `Ready`, or no parent at all (or `--start-now`): fall
+            // through to the ordinary immediate-start path below.
+            Some(ParentReadiness::Ready) | None => {}
+        }
 
         // Written before the spawn, never after: if this process dies in
         // the window between the two, a record with no worker is
         // recoverable (it reconciles to `Crashed`), whereas a running
         // worker with no record on disk is unreachable garbage.
         catalog::write_session(&self.root, &session)?;
+        self.spawn_and_await_running(&id).await?;
+        Ok(Response::SessionCreated { id })
+    }
 
-        let worker_pid = worker::spawn_detached(&self.exe, &self.root, &id)?;
+    /// Resolves a dependent session's workspace from its parent, and
+    /// rejects everything that would leave it with nowhere to run.
+    ///
+    /// Runs **before** the child session's own record is ever written, so
+    /// a rejected parent leaves nothing behind at all -- the same
+    /// principle [`Self::prepare_workspace`] already follows for a
+    /// worktree that fails to create.
+    async fn resolve_dependent_workspace(&self, parent_id: &SessionId) -> Result<Workspace> {
+        let parent = catalog::read_session(&self.root, parent_id)
+            .map_err(|_| Error::usage(format!("parent session {parent_id} does not exist")))?;
+        if !matches!(parent.kind, SessionKind::Worktree | SessionKind::Dependent) {
+            return Err(Error::usage(format!(
+                "session {parent_id} is a {:?} session and has no worktree to depend on; \
+                 a dependent session's parent must be --kind worktree (or itself dependent \
+                 on one)",
+                parent.kind
+            )));
+        }
+        let parent_workspace = parent.workspace.ok_or_else(|| {
+            Error::usage(format!("session {parent_id} has no workspace to depend on"))
+        })?;
+        // Caught early here as a clear creation-time rejection; the same
+        // condition is also what `parent_readiness` calls `Unavailable`
+        // for a session that is already `Waiting` when its parent's
+        // worktree disappears later.
+        if matches!(
+            parent.status,
+            SessionStatus::Merged | SessionStatus::Discarded
+        ) {
+            return Err(Error::usage(format!(
+                "session {parent_id}'s worktree no longer exists (it was {:?})",
+                parent.status
+            )));
+        }
+        Ok(Workspace::dependent(&parent_workspace))
+    }
+
+    /// Spawns a worker for `id` -- whose record is currently `Created` or
+    /// `Waiting` -- and waits until it reports something (`Running`, or
+    /// an immediate exit).
+    ///
+    /// Factored out of `session_new`'s own original tail so
+    /// [`try_advance_waiting_session`] and [`Self::session_start_now`]
+    /// can promote a `Waiting` session through the exact same start path
+    /// an ordinary session already goes through -- from the worker's own
+    /// point of view there is no difference between the two; it just
+    /// transitions whatever status the record currently holds to
+    /// `Running`.
+    async fn spawn_and_await_running(&self, id: &SessionId) -> Result<()> {
+        let worker_pid = worker::spawn_detached(&self.exe, &self.root, id)?;
 
         // Readiness is the **session record**, not the worker's socket.
         //
@@ -290,31 +474,123 @@ impl Supervisor {
         // tests, which failed exactly this way.
         //
         // The record covers both outcomes, because the worker leaves
-        // `Created` whether it starts serving or exits first. And the
-        // worker binds its socket *before* publishing `Running`, so a
-        // record past `Created` also guarantees the socket exists for an
-        // attach that follows immediately.
+        // `Created`/`Waiting` whether it starts serving or exits first.
+        // And the worker binds its socket *before* publishing `Running`,
+        // so a record past either also guarantees the socket exists for
+        // an attach that follows immediately.
         let deadline = std::time::Instant::now() + WORKER_READY_TIMEOUT;
         loop {
-            if catalog::read_session(&self.root, &id)?.status != SessionStatus::Created {
-                return Ok(Response::SessionCreated { id });
+            let status = catalog::read_session(&self.root, id)?.status;
+            if status != SessionStatus::Created && status != SessionStatus::Waiting {
+                return Ok(());
             }
             // The worker died without recording anything -- fail with a
             // pointer to the only place its reason was written.
             if !sessionmgr_proc::is_alive(worker_pid).unwrap_or(false) {
                 return Err(Error::conflict(format!(
                     "the worker for session {id} exited before starting it; see {}",
-                    paths::worker_log(&self.root, &id).display()
+                    paths::worker_log(&self.root, id).display()
                 )));
             }
             if std::time::Instant::now() >= deadline {
                 return Err(Error::conflict(format!(
                     "the worker for session {id} did not start it in time; see {}",
-                    paths::worker_log(&self.root, &id).display()
+                    paths::worker_log(&self.root, id).display()
                 )));
             }
             rusty_tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    /// The CAPABILITIES.md "start now" override, applied to a session
+    /// that is already `Waiting` rather than at creation time.
+    async fn session_start_now(&self, id: SessionId) -> Result<Response> {
+        if !self.try_advance_waiting_session(&id, true).await? {
+            return Err(Error::conflict(format!(
+                "session {id} is not currently waiting on a parent"
+            )));
+        }
+        Ok(Response::Ok)
+    }
+
+    /// The core of the wait-for-parent mechanism: if `id` is currently
+    /// `Waiting`, decides whether it can start yet and, if so, starts (or
+    /// fails) it. Returns whether `id` was `Waiting` at all -- the
+    /// poller uses `false` to mean "keep polling" and `true` to mean
+    /// "done, stop"; [`Self::session_start_now`] uses it to report
+    /// "there was nothing to start now".
+    ///
+    /// `force`, when true, skips the parent-readiness check for the
+    /// `NotYet` case and starts immediately regardless -- the "start now"
+    /// override. It never skips the `Unavailable` check: forcing a start
+    /// into a worktree that no longer exists would just move today's
+    /// clear error to whatever `git`/the shell reports for a missing
+    /// directory instead.
+    ///
+    /// Takes [`Supervisor::dependent_lock`] for its entire body: see that
+    /// field's own docs for the race this closes.
+    async fn try_advance_waiting_session(&self, id: &SessionId, force: bool) -> Result<bool> {
+        let _guard = self.dependent_lock.lock().await;
+        let session = catalog::read_session(&self.root, id)?;
+        if session.status != SessionStatus::Waiting {
+            return Ok(false);
+        }
+        let Some(parent_id) = session.parent_id.clone() else {
+            // Should be unreachable -- nothing else ever writes
+            // `Waiting` -- but a `Waiting` session with no parent to wait
+            // for cannot resolve itself, so fail it rather than spin
+            // forever.
+            self.fail_waiting_session(id, "has no recorded parent to wait for")
+                .await?;
+            return Ok(true);
+        };
+        let readiness = match catalog::read_session(&self.root, &parent_id) {
+            Ok(parent) => sessionmgr_core::parent_readiness(parent.status),
+            // The parent record itself is unreadable (should not
+            // normally happen -- sessions are never deleted, only torn
+            // down in place). Handled rather than assumed: propagating a
+            // read error here would leave the session stuck `Waiting`
+            // forever with nothing retrying, since the poller's own
+            // caller treats any `Err` as "try again later" (see
+            // `poll_parent_then_start`).
+            Err(_) => {
+                self.fail_waiting_session(id, "its parent session record could not be read")
+                    .await?;
+                return Ok(true);
+            }
+        };
+        match readiness {
+            ParentReadiness::NotYet if !force => Ok(false),
+            ParentReadiness::NotYet | ParentReadiness::Ready => {
+                self.spawn_and_await_running(id).await?;
+                Ok(true)
+            }
+            ParentReadiness::Unavailable => {
+                self.fail_waiting_session(
+                    id,
+                    "its parent session's worktree was merged or discarded before \
+                     this session could start",
+                )
+                .await?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Fails a `Waiting` session directly to `Errored`, with no worker
+    /// ever having been spawned for it.
+    async fn fail_waiting_session(&self, id: &SessionId, reason: &str) -> Result<()> {
+        let mut session = catalog::read_session(&self.root, id)?;
+        if session.transition_to(SessionStatus::Errored).is_ok() {
+            eprintln!("sessionmgr daemon: session {id} could not start: {reason}");
+            catalog::write_session(&self.root, &session)?;
+            // Matches `Worker::record_child_exit`'s own notification for
+            // an ordinary `Errored` exit -- from a webhook consumer's
+            // point of view, a dependent session that never got to start
+            // is the same kind of bad news.
+            crate::hooks::dispatch::notify(&session, "errored");
+        }
+        Ok(())
     }
 
     /// Resolves the repository and creates the worktree, if the session's
@@ -367,7 +643,13 @@ impl Supervisor {
                         .map_err(|e| Error::conflict(e.to_string()))?;
                     Ok(Some(workspace))
                 }
-                SessionKind::PlainTerminal => Ok(None),
+                // Both unreachable in practice: `needs_repo()` is `false`
+                // for both, so the early return above already sends
+                // every `PlainTerminal`/`Dependent` call here home before
+                // this match ever runs. Kept exhaustive (rather than a
+                // wildcard) so a future kind cannot silently fall through
+                // this match with the wrong behaviour.
+                SessionKind::PlainTerminal | SessionKind::Dependent => Ok(None),
             }
         })
         .await
@@ -562,6 +844,33 @@ impl Supervisor {
             return Err(Error::conflict(format!("session {id} is already closed")));
         }
 
+        // A `Waiting` dependent session has no worker at all yet -- see
+        // `SessionStatus::Waiting`'s own docs -- so closing it is a pure
+        // record update, not the graceful-then-forced teardown below.
+        // Guarded by `dependent_lock` and re-read under it, because the
+        // background poller (`poll_parent_then_start`) is racing to
+        // promote this exact session concurrently: see
+        // `Supervisor::dependent_lock`'s own docs for what goes wrong
+        // without this.
+        if session.status == SessionStatus::Waiting {
+            let _guard = self.dependent_lock.lock().await;
+            session = catalog::read_session(&self.root, &id)?;
+            if session.status == SessionStatus::Waiting {
+                // Nothing was ever spawned: nothing to terminate, and
+                // (per `Workspace::dependent`'s `branch: None`) nothing
+                // for `dispose_workspace` to remove either -- it is a
+                // no-op below regardless, but skipping the graceful
+                // WorkerShutdown attempt against a socket that was never
+                // bound avoids paying its timeout for no reason.
+                session.transition_to(session.teardown_status(disposition))?;
+                catalog::write_session(&self.root, &session)?;
+                return Ok(Response::Ok);
+            }
+            // The poller won the race: `session` is now a fresh, real
+            // record with a worker to close. Fall through to the
+            // ordinary path below using it.
+        }
+
         // 1. Ask nicely. A worker that acks shuts its own child down and
         //    exits, which is cleaner than anything done from outside.
         let socket = paths::worker_socket(&self.root, &id);
@@ -653,6 +962,35 @@ impl Supervisor {
         .await
         .map_err(|e| Error::conflict(format!("the git-diff task did not complete: {e}")))??;
         Ok(Response::GitDiff { diff })
+    }
+}
+
+/// Background task, one per `Waiting` dependent session: re-checks its
+/// parent every [`DEPENDENT_POLL_INTERVAL`] until
+/// [`Supervisor::try_advance_waiting_session`] reports it is done (either
+/// started or failed).
+///
+/// Deliberately **daemon-owned, not worker-owned**: a session with
+/// nothing spawned yet has no worker to survive the daemon's own
+/// restart, so this is exactly the kind of readiness-gating work the
+/// daemon already does elsewhere (`prepare_workspace`, hook install)
+/// before a worker ever exists. If the daemon itself is killed while a
+/// session is `Waiting`, this task simply stops -- and `run`'s own
+/// `reconcile_all` restarts an equivalent one for it the next time any
+/// `sessionmgr` command brings a daemon back up (see `run`'s own
+/// comments). Nothing is lost either way: there is no process running
+/// yet for a `Waiting` session, so there is nothing an unclean daemon
+/// exit could have orphaned.
+async fn poll_parent_then_start(supervisor: Arc<Supervisor>, id: SessionId) {
+    loop {
+        match supervisor.try_advance_waiting_session(&id, false).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("sessionmgr daemon: checking session {id}'s parent failed: {e}");
+            }
+        }
+        rusty_tokio::time::sleep(DEPENDENT_POLL_INTERVAL).await;
     }
 }
 

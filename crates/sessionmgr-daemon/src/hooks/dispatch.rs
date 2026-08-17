@@ -88,12 +88,14 @@ fn kind_name(kind: SessionKind) -> &'static str {
         SessionKind::PlainTerminal => "terminal",
         SessionKind::SameDirectory => "same-dir",
         SessionKind::Worktree => "worktree",
+        SessionKind::Dependent => "dependent",
     }
 }
 
 fn status_name(status: SessionStatus) -> &'static str {
     match status {
         SessionStatus::Created => "created",
+        SessionStatus::Waiting => "waiting",
         SessionStatus::Running => "running",
         SessionStatus::NeedsInput => "needs-input",
         SessionStatus::Finished => "finished",

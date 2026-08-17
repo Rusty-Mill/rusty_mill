@@ -91,6 +91,20 @@ pub enum Request {
         /// hook-trust gate) and writes a file into the session's own
         /// directory.
         hooks: bool,
+        /// Phase 5: the session this one depends on. `Some` requires
+        /// `kind` to be [`SessionKind::Dependent`] and `repo` to be
+        /// `None` -- a dependent session's workspace is derived entirely
+        /// from the parent's own workspace, not from a repository path
+        /// the caller supplies (see
+        /// `sessionmgr_core::workspace::Workspace::dependent`).
+        parent: Option<SessionId>,
+        /// Should this session hold off starting until `parent` finishes,
+        /// rather than starting immediately? Meaningless unless `parent`
+        /// is `Some`. `sessionmgr new --parent <id>` defaults this
+        /// `true`, matching CAPABILITIES.md's observed default ("the
+        /// child can be configured to wait... with a start now
+        /// override"); `--start-now` sets it `false`.
+        wait_for_parent: bool,
     },
 
     /// List every known session.
@@ -136,6 +150,14 @@ pub enum Request {
     /// changes. CAPABILITIES.md's Xirp-observed "renaming a session",
     /// wired to the TUI command palette.
     SessionRename { id: SessionId, name: Option<String> },
+
+    /// The CAPABILITIES.md-observed "start now" override, applied to a
+    /// session that is **already** [`SessionStatus::Waiting`] rather than
+    /// at creation time (`SessionNew`'s own `wait_for_parent: false`
+    /// covers the creation-time case). A no-op error, not a silent
+    /// success, on a session that is not currently `Waiting` -- there is
+    /// nothing to skip ahead of.
+    SessionStartNow { id: SessionId },
 
     /// The files changed in a session's workspace, for the diff pane.
     /// `NotFound` if the session has no workspace (a `PlainTerminal`
@@ -254,6 +276,13 @@ pub struct SessionSummary {
     /// `rename` action, if any.
     #[serde(default)]
     pub name: Option<String>,
+    /// The session this one depends on, for a [`SessionKind::Dependent`]
+    /// session -- surfaced so a client can group a dependent session
+    /// with its parent (CAPABILITIES.md: "grouped together in the
+    /// sidebar") and, together with `status ==` [`SessionStatus::Waiting`],
+    /// render "waiting on parent".
+    #[serde(default)]
+    pub parent: Option<SessionId>,
 }
 
 /// A live event streamed to an attached client.
@@ -325,6 +354,18 @@ mod tests {
                 pty: true,
                 agent: Some(AgentKind::Codex),
                 hooks: true,
+                parent: None,
+                wait_for_parent: false,
+            },
+            Request::SessionNew {
+                kind: SessionKind::Dependent,
+                command: vec![],
+                repo: None,
+                pty: true,
+                agent: None,
+                hooks: false,
+                parent: Some(id.clone()),
+                wait_for_parent: true,
             },
             Request::SessionList,
             Request::SessionAttach { id: id.clone() },
@@ -347,9 +388,10 @@ mod tests {
                 disposition: Some(Disposition::Merge),
             },
             Request::SessionRename {
-                id,
+                id: id.clone(),
                 name: Some("my session".to_owned()),
             },
+            Request::SessionStartNow { id },
             Request::DaemonShutdown,
             Request::WorkerShutdown,
             Request::HookFire {
