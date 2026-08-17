@@ -34,6 +34,11 @@ sessionmgr-pty = { workspace = true }
 # call. The dependency direction is one-way -- see
 # `sessionmgr-tui`'s own crate docs for why it cannot depend back.
 sessionmgr-tui = { workspace = true }
+# Per-agent-CLI adapters (launch_args, tier-3 needs_input). The worker
+# and the `new` client both need these -- resolving launch args at
+# session-creation time, and matching against live output while the
+# session runs.
+sessionmgr-agents = { workspace = true }
 rusty_tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

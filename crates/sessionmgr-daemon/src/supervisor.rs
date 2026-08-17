@@ -188,7 +188,8 @@ impl Supervisor {
                 command,
                 repo,
                 pty,
-            } => self.session_new(kind, command, repo, pty).await,
+                agent,
+            } => self.session_new(kind, command, repo, pty, agent).await,
             Request::SessionList => self.session_list().await,
             Request::SessionInput { id, data } => self.session_input(id, data).await,
             Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
@@ -215,11 +216,17 @@ impl Supervisor {
         command: Vec<String>,
         repo: Option<PathBuf>,
         pty: bool,
+        agent: Option<sessionmgr_core::AgentKind>,
     ) -> Result<Response> {
-        let command = if command.is_empty() {
-            default_shell()
-        } else {
-            command
+        // An agent's own `launch_args` decides the real command line --
+        // `command` becomes its `extra` (an initial prompt, typically),
+        // not the literal program to run. Without an agent, behaviour is
+        // exactly what it always was: the command as given, or the
+        // platform's default shell if none.
+        let command = match agent {
+            Some(kind) => sessionmgr_agents::adapter_for(kind).launch_args(&command),
+            None if command.is_empty() => default_shell(),
+            None => command,
         };
         let id = sessionmgr_proc::session_id()
             .map_err(|e| Error::io("generating a session id", None, e))?;
@@ -232,6 +239,7 @@ impl Supervisor {
             workspace,
             pty,
             sessionmgr_proc::now_millis(),
+            agent,
         );
         // Written before the spawn, never after: if this process dies in
         // the window between the two, a record with no worker is

@@ -1,0 +1,16 @@
+[package]
+name = "sessionmgr-agents"
+description = "Per-agent-CLI adapters: launch_args and tier-3 needs_input pattern matching for Claude Code and Codex, against a vt100-rendered screen per ADR-0002. Gemini CLI has a confirmed hook mechanism (gemini hooks) but no adapter here yet -- unverified firing on this machine for lack of credentials, not assumed working."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sessionmgr_agents"
+path = "src/lib.rs"
+
+[dependencies]
+sessionmgr-core = { workspace = true }
+vt100 = { workspace = true }

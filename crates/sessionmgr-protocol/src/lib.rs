@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// `SessionId` or match on a `SessionStatus`, without adding
 /// `sessionmgr-core` as a second dependency.
 pub use sessionmgr_core::ports::ChangedFile;
-pub use sessionmgr_core::{Disposition, SessionId, SessionKind, SessionStatus};
+pub use sessionmgr_core::{AgentKind, Disposition, SessionId, SessionKind, SessionStatus};
 
 /// A request from a client to the daemon, or from the daemon to a worker.
 ///
@@ -77,6 +77,11 @@ pub enum Request {
         /// backend, which cannot host an interactive agent CLI but whose
         /// survives-the-manager-closing behaviour is proven on Windows.
         pty: bool,
+        /// Which agent CLI to run, if any. `Some` resolves `command`
+        /// through that agent's `launch_args` (an initial prompt, say)
+        /// rather than treating it as the literal program to run, and
+        /// turns on tier-3 `needs_input` detection for the session.
+        agent: Option<AgentKind>,
     },
 
     /// List every known session.
@@ -209,6 +214,11 @@ pub struct SessionSummary {
     pub branch: Option<String>,
     pub created_at_millis: u64,
     pub exit_code: Option<i32>,
+    /// Which agent CLI this session runs, if any -- surfaced so a
+    /// client (the TUI's status badge, eventually) can tell an
+    /// adapter-backed session from a plain command.
+    #[serde(default)]
+    pub agent: Option<AgentKind>,
 }
 
 /// A live event streamed to an attached client.
@@ -278,6 +288,7 @@ mod tests {
                 command: vec!["sh".to_owned()],
                 repo: None,
                 pty: true,
+                agent: Some(AgentKind::Codex),
             },
             Request::SessionList,
             Request::SessionAttach { id: id.clone() },
@@ -289,6 +300,11 @@ mod tests {
                 id: id.clone(),
                 rows: 40,
                 cols: 120,
+            },
+            Request::GitStatus { id: id.clone() },
+            Request::GitDiff {
+                id: id.clone(),
+                path: Some("src/lib.rs".to_owned()),
             },
             Request::SessionClose {
                 id,
@@ -309,6 +325,15 @@ mod tests {
             Response::Error {
                 kind: ErrorKind::NotFound,
                 message: "no such session".to_owned(),
+            },
+            Response::GitStatus {
+                files: vec![ChangedFile {
+                    status: " M".to_owned(),
+                    path: "src/lib.rs".to_owned(),
+                }],
+            },
+            Response::GitDiff {
+                diff: "diff --git a/x b/x".to_owned(),
             },
         ] {
             assert_eq!(round_trip(&response), response);

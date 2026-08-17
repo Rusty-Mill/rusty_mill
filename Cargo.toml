@@ -7,6 +7,7 @@ members = [
     "crates/sessionmgr-git",
     "crates/sessionmgr-pty",
     "crates/sessionmgr-tui",
+    "crates/sessionmgr-agents",
     "crates/sessionmgr-daemon",
 ]
 
@@ -61,3 +62,4 @@ sessionmgr-proc = { path = "crates/sessionmgr-proc" }
 sessionmgr-git = { path = "crates/sessionmgr-git" }
 sessionmgr-pty = { path = "crates/sessionmgr-pty" }
 sessionmgr-tui = { path = "crates/sessionmgr-tui" }
+sessionmgr-agents = { path = "crates/sessionmgr-agents" }
