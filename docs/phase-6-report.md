@@ -19,7 +19,7 @@ done."
 | `GitPort::worktree_add`'s `start_point` (fork-from-branch-tip) | **Done** |
 | `Request::SessionFork`, `sessionmgr fork <id>` | **Done** |
 | Claude Code adapter (`--session-id` pin, `--resume --fork-session`) | **Done, live-verified** |
-| Codex adapter | **Deferred** — filed as [#14](https://github.com/baileyrd/rusty_yirp/issues/14) |
+| Codex adapter | **Done**, 2026-08-17 — see this report's own second dated update below |
 | Gemini CLI adapter | **Done**, 2026-08-17 — see this report's own dated update below |
 | Live verification | **Done** — real mechanism proven, plus an honest limit on what could be proven in this environment |
 
@@ -166,7 +166,7 @@ this phase's confidence; the end-to-end test is additional coverage for
 whichever environment (a real Windows box, in particular) does not hit
 that limitation.
 
-## Why Codex was deferred, not guessed at (Gemini CLI closed this gap 2026-08-17 -- see below)
+## Why Codex and Gemini CLI were deferred, not guessed at (both closed 2026-08-17 -- see below)
 
 Both had real fork mechanisms — ADR-0003 already established that. Both
 were missing one specific, identified piece, not "everything":
@@ -233,9 +233,9 @@ build was checked and found fine.
 
 ## What is not done
 
-**Codex Fork support** — filed as issue #14, not silently dropped; see
-above and this report's own 2026-08-17 update. (Gemini CLI Fork support
-shipped as of that update.)
+**Codex and Gemini CLI Fork support** shipped 2026-08-17, closing issues
+#14 and #15 — see this report's own two dated updates below for the full
+account, including what could and could not be live-verified for each.
 
 **Switch-agent-mid-session** — entirely untouched by this phase.
 ADR-0003 scoped the format each CLI expects, which is the real
@@ -347,12 +347,115 @@ interactive-PTY flake every phase report since 5 has documented, `cargo
 
 ### What is still not done
 
-**Codex Fork (issue #14)** remains open. Unlike Gemini's file-location
-problem, Codex's own blocker is a genuinely separate piece of
-machinery -- a post-spawn filesystem watch to discover its
-self-assigned thread id, wired into `Supervisor`/`worker.rs` rather than
-a pure adapter method -- plus this session's own billing-quota block
-(see `docs/phase-7-report.md`) still prevents live-verifying
-content-preservation even if that machinery existed. Left for its own
-dedicated PR rather than a rushed addition here; issue #14's own
-2026-08-17 comment has the current state of what is and is not known.
+**Codex Fork (issue #14)** remains open as of this update -- believed at
+the time to need a genuinely separate piece of machinery (a post-spawn
+filesystem watch), wired into `Supervisor`/`worker.rs` rather than a
+pure adapter method. **That assessment turned out to be wrong**; see
+this report's own second dated update immediately below, from later the
+same day, for why and what shipped instead.
+
+## Update (2026-08-17, later the same day): Codex CLI Fork implemented
+
+The "post-spawn filesystem watch" framing above assumed Codex's native
+thread id had to be captured and recorded at *session-creation* time,
+mirroring Claude Code's pin-at-launch design. Revisiting this after
+Gemini CLI's own fork support shipped (this report's first 2026-08-17
+update, directly above) showed that assumption was never actually
+necessary: like Gemini's own chat-file lookup, Codex's rollout file
+(with a usable `SessionMeta.cwd`/`id`) is live-confirmed to already
+exist by the time anyone would ask to fork a real conversation -- it's
+written before the model call even completes or fails (issue #14's own
+prior comment). So this can be, and is, a **lazy, synchronous lookup at
+fork time**, exactly like Gemini's -- no watch, no new async machinery,
+no `Supervisor`/`worker.rs` changes beyond what `ForkSource` already
+provides.
+
+### The mechanism
+
+`Codex::locate_native_thread_id` (`crates/sessionmgr-agents/src/codex.rs`)
+scans `<codex_home>/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`, newest
+day-directory first (plain lexicographic sort on the zero-padded path
+components sorts chronologically for free), for the rollout file whose
+first line's `SessionMeta.cwd` matches the source session's own
+workspace. `codex_home_dir` resolves `CODEX_HOME` (real: `codex --help`
+documents `$CODEX_HOME/<name>.config.toml`) or falls back to `~/.codex`,
+confirmed live to be where rollout files land with `CODEX_HOME` unset --
+the same default-fallback shape `gemini_home_dir` uses for
+`GEMINI_CLI_HOME`. `Codex::fork_args` uses the discovered id to build
+`codex fork <id>` (confirmed real via a real installed `codex fork
+--help`), ignoring `new_native_id` entirely -- Codex has no way to pin
+the *forked* session's own new thread id either, the same reason
+`launch_args` already ignores `native_id`.
+
+### Live verification
+
+Mixed, the same honest way every other live-gated claim in this report
+is: the discovery algorithm is fully unit-tested against real captured
+`SessionMeta` shapes (`codex.rs`'s own `ScratchCodexHome`-based
+fixtures -- newest-day-first ordering, non-matching-cwd and
+non-rollout-file exclusion, no-sessions-dir-at-all). The always-run
+black-box test
+(`forking_a_codex_session_with_no_conversation_yet_names_the_gap_clearly`)
+passed for real -- confirmed live while building it that a bare
+interactive `codex` launch does not write a rollout file until an
+actual conversation happens, so this test needs no credentials and costs
+no quota either way. The new **content-preservation** mechanism test,
+`codex_resume_actually_preserves_conversation_context_via_discovered_thread_id`
+(`fork_sessions.rs`), uses `codex exec resume <id> <prompt>` rather than
+`codex fork <id>` -- `codex exec` (the non-interactive mode this test
+needs for deterministic, PTY-free driving) has no `fork` subcommand,
+only `resume`, so this tests the same underlying context-preservation
+claim Fork depends on without literally exercising `fork`'s own
+lineage-tracking fields. It hit the same real, external billing-quota
+block this report's Gemini update and `docs/phase-7-report.md` already
+document (confirmed reproducible, not transient, throughout this
+session) and skipped cleanly rather than asserting past it.
+
+### A real bug found and fixed along the way
+
+While gating this test on real Codex credentials, `codex login status`
+turned out to write its "Logged in..."/"Not logged in" message to
+**stderr**, not stdout, when run without a TTY attached (confirmed
+live: `codex login status < /dev/null` produces empty stdout). The
+`codex_credentialed()` helper this report's Gemini update introduced in
+both `fork_sessions.rs` and `switch_agent.rs` only checked stdout --
+meaning every Codex-gated test in both files was silently skipping with
+"codex is not logged in" regardless of real credential state, and would
+have kept doing so forever even once real credentials or quota became
+available. Fixed in both files (check stderr too) as part of this
+update; re-run afterward confirmed the previously-merged
+`switch_agent.rs` tests now correctly reach their real live calls before
+skipping on the genuine quota block, rather than skipping on the bug.
+
+### Tests
+
+9 new unit tests in `crates/sessionmgr-agents/src/codex.rs`
+(`locate_native_thread_id`'s discovery logic against fixtures). 2 new
+black-box tests in `fork_sessions.rs` (1 always-run, 1 live-gated,
+skipped cleanly here on the quota block). One obsolete black-box test,
+`forking_an_unsupported_agent_names_the_gap_clearly`, removed: it
+verified that forking a Codex session failed with "Codex does not
+support Fork yet", which stopped being true the moment this update
+shipped -- `Supervisor::session_fork`'s own "{agent:?} does not support
+Fork yet" branch has no real adapter left among this project's three to
+exercise it against, so it stays in the source as defensive code for a
+future, genuinely unsupported adapter, without a black-box test that
+would need to fake one to run. The credential-check bug fix above, in
+two files. `cargo fmt --all` (twice) clean, `cargo clippy --workspace
+--all-targets -- -D warnings` clean, `cargo test --workspace` green
+aside from the same pre-existing, undiffed `agent_needs_input_claude`
+interactive-PTY flake every phase report since 5 has documented, `cargo
++1.88 check --workspace --all-targets` (MSRV) clean.
+
+### What is still not done
+
+Full content-preservation through a real, completed `codex fork` remains
+unverified live in this specific environment -- not because the
+mechanism is in doubt (the discovery algorithm is fully unit-tested, and
+`codex exec resume`'s own equivalent context-preservation claim was
+attempted live and is correctly gated to re-run automatically once
+quota allows), but because this session's own OpenAI account has no
+usable billing quota, confirmed reproducible throughout. Nothing further
+is blocked architecturally; this is purely an external account-state gap
+the next environment with working Codex credentials will close by simply
+running the existing, already-correct test suite.
