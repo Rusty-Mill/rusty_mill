@@ -469,6 +469,39 @@ pub struct Session {
     /// field.
     #[serde(default)]
     pub wait_for_parent: bool,
+    /// This session's own identifier *inside the agent CLI it runs*, when
+    /// the adapter supports pinning one at launch (see
+    /// `sessionmgr_core::ports::AgentAdapterPort::fork_args`'s own docs
+    /// for which adapters do, as of ADR-0003/Phase 6).
+    ///
+    /// `None` for a session with no agent, one whose adapter does not
+    /// support this, or a record written before Fork existed.
+    /// Deliberately an opaque `String`, not further typed or validated:
+    /// its shape is entirely the underlying CLI's own (a UUID for Claude
+    /// Code), and this crate has no business parsing it, only carrying
+    /// it forward to whichever adapter asks for it later.
+    ///
+    /// `#[serde(default)]` for the same reason every other field added
+    /// after Phase 1 has it.
+    #[serde(default)]
+    pub native_session_id: Option<String>,
+    /// The session this one was forked from, if it was.
+    ///
+    /// A genuinely different relationship from [`Self::parent_id`], not a
+    /// reuse of it: a dependent session (`parent_id`) shares its parent's
+    /// *workspace*; a forked session gets its own independent worktree
+    /// (branched from the source session's own branch tip, so its code
+    /// state matches the conversation it starts with) and shares only the
+    /// source's *conversation history*. Conflating the two fields would
+    /// make `SessionKind::Dependent` ambiguous for a session that has its
+    /// own worktree, so this is its own field rather than a second use of
+    /// `parent_id` -- the question ADR-0003 itself flagged as needing an
+    /// answer before Fork was designed.
+    ///
+    /// `#[serde(default)]` for the same reason every other field added
+    /// after Phase 1 has it.
+    #[serde(default)]
+    pub forked_from: Option<SessionId>,
 }
 
 impl Session {
@@ -483,6 +516,8 @@ impl Session {
         agent: Option<AgentKind>,
         parent_id: Option<SessionId>,
         wait_for_parent: bool,
+        native_session_id: Option<String>,
+        forked_from: Option<SessionId>,
     ) -> Self {
         Session {
             id,
@@ -499,6 +534,8 @@ impl Session {
             name: None,
             parent_id,
             wait_for_parent,
+            native_session_id,
+            forked_from,
         }
     }
 
@@ -643,6 +680,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
         )
     }
 
@@ -845,6 +884,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
         )
     }
 
@@ -861,6 +902,8 @@ mod tests {
             None,
             Some(parent.clone()),
             true,
+            None,
+            None,
         )
     }
 

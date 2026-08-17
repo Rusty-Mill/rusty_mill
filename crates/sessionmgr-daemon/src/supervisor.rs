@@ -264,6 +264,7 @@ impl Supervisor {
             Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
             Request::SessionRename { id, name } => self.session_rename(id, name).await,
             Request::SessionStartNow { id } => self.session_start_now(id).await,
+            Request::SessionFork { id, pty } => self.session_fork(id, pty).await,
             Request::GitStatus { id } => self.session_git_status(id).await,
             Request::GitDiff { id, path } => self.session_git_diff(id, path).await,
             Request::HookFire { session_id, event } => self.hook_fire(session_id, event).await,
@@ -310,13 +311,30 @@ impl Supervisor {
                  from --parent's own worktree",
             ));
         }
+        // A session whose adapter supports Fork gets its own native id
+        // pinned up front, unconditionally -- not only when the caller
+        // asks for it -- so that *any* Claude Code session this daemon
+        // creates is already forkable later with no extra machinery. See
+        // `AgentAdapterPort::supports_fork`'s own docs for why this is a
+        // creation-time decision `fork_args` alone cannot make.
+        let native_session_id = match agent {
+            Some(kind) if sessionmgr_agents::adapter_for(kind).supports_fork() => Some(
+                sessionmgr_proc::native_session_uuid()
+                    .map_err(|e| Error::io("generating a native session id", None, e))?,
+            ),
+            _ => None,
+        };
         // An agent's own `launch_args` decides the real command line --
         // `command` becomes its `extra` (an initial prompt, typically),
         // not the literal program to run. Without an agent, behaviour is
         // exactly what it always was: the command as given, or the
         // platform's default shell if none.
         let command = match agent {
-            Some(kind) => sessionmgr_agents::adapter_for(kind).launch_args(&command, hooks),
+            Some(kind) => sessionmgr_agents::adapter_for(kind).launch_args(
+                &command,
+                hooks,
+                native_session_id.as_deref(),
+            ),
             None if command.is_empty() => default_shell(),
             None => command,
         };
@@ -370,6 +388,8 @@ impl Supervisor {
             agent,
             parent.clone(),
             wait_for_parent,
+            native_session_id,
+            None,
         );
 
         // A dependent session asked to wait, whose parent is not ready
@@ -513,6 +533,138 @@ impl Supervisor {
         Ok(Response::Ok)
     }
 
+    /// CAPABILITIES.md's "Fork session": clones `source_id`'s own
+    /// conversation into a brand-new, independent session.
+    ///
+    /// See `docs/decisions/0003-resume-fork-spike.md` for how any of this
+    /// is possible at all, and `docs/phase-6-report.md` for the full
+    /// design -- in short, every check below exists because Fork
+    /// genuinely needs all of these things to be true, not because this
+    /// method is being defensive for its own sake:
+    ///
+    /// - `source` must be `Worktree`-kind: only a session that owns a
+    ///   branch has code state for the fork to start from.
+    /// - `source.agent` must be set, and that agent's own adapter must
+    ///   answer `true` to `supports_fork()` -- as of this phase, only
+    ///   Claude Code.
+    /// - `source.native_session_id` must be recorded -- absent for a
+    ///   session created before Fork existed, or whose adapter did not
+    ///   support pinning one at the time.
+    /// - `source`'s own branch must still exist -- reuses
+    ///   `sessionmgr_core::parent_readiness` (Phase 5), the exact same
+    ///   "does this session's git state still exist" question a
+    ///   dependent session's wait-for-parent already asks, just applied
+    ///   to a different relationship.
+    async fn session_fork(self: &Arc<Self>, source_id: SessionId, pty: bool) -> Result<Response> {
+        let source = catalog::read_session(&self.root, &source_id)?;
+        if source.kind != SessionKind::Worktree {
+            return Err(Error::usage(format!(
+                "session {source_id} is a {:?} session; only a worktree session's branch \
+                 can be forked",
+                source.kind
+            )));
+        }
+        let Some(agent) = source.agent else {
+            return Err(Error::usage(format!(
+                "session {source_id} has no agent CLI conversation to fork"
+            )));
+        };
+        let adapter = sessionmgr_agents::adapter_for(agent);
+        if !adapter.supports_fork() {
+            return Err(Error::usage(format!(
+                "{agent:?} does not support Fork yet -- see docs/phase-6-report.md for \
+                 which agents do and why"
+            )));
+        }
+        let Some(source_native_id) = source.native_session_id.clone() else {
+            return Err(Error::conflict(format!(
+                "session {source_id} has no recorded native session id to fork from \
+                 (sessions created before Fork support existed cannot be forked)"
+            )));
+        };
+        let Some(source_workspace) = source.workspace.clone() else {
+            return Err(Error::conflict(format!(
+                "session {source_id} has no workspace to fork from"
+            )));
+        };
+        let Some(source_branch) = source_workspace.branch.clone() else {
+            return Err(Error::conflict(format!(
+                "session {source_id} owns no branch to fork from"
+            )));
+        };
+        if matches!(
+            sessionmgr_core::parent_readiness(source.status),
+            ParentReadiness::Unavailable
+        ) {
+            return Err(Error::usage(format!(
+                "session {source_id}'s branch no longer exists (it was merged or discarded)"
+            )));
+        }
+
+        let id = sessionmgr_proc::session_id()
+            .map_err(|e| Error::io("generating a session id", None, e))?;
+        let new_native_id = sessionmgr_proc::native_session_uuid()
+            .map_err(|e| Error::io("generating a native session id", None, e))?;
+        // Checked again here, not just trusted from the `supports_fork`
+        // check above: that check is a static fact about the adapter,
+        // this call is the actual, adapter-specific translation of
+        // `(source_native_id, new_native_id)` into a real command line,
+        // and `AgentAdapterPort`'s own drift-guard test
+        // (`sessionmgr-agents`) is what keeps the two from disagreeing in
+        // practice rather than this call site having to.
+        let Some(command) = adapter.fork_args(&source_native_id, &new_native_id, &[]) else {
+            return Err(Error::conflict(format!("{agent:?} does not support Fork")));
+        };
+
+        // A new, independent worktree, branched from the **source**
+        // session's own branch tip rather than the repository's default
+        // branch -- see `GitPort::worktree_add`'s own docs for why this
+        // is load-bearing, not cosmetic.
+        let workspace = self
+            .fork_workspace(source_workspace.repo.clone(), id.clone(), source_branch)
+            .await?;
+
+        let session = Session::new(
+            id.clone(),
+            SessionKind::Worktree,
+            command,
+            Some(workspace),
+            pty,
+            sessionmgr_proc::now_millis(),
+            Some(agent),
+            None,
+            false,
+            Some(new_native_id),
+            Some(source_id),
+        );
+        catalog::write_session(&self.root, &session)?;
+        self.spawn_and_await_running(&id).await?;
+        Ok(Response::SessionCreated { id })
+    }
+
+    /// Creates a forked session's new worktree, branched from
+    /// `start_point` (the source session's own branch) rather than
+    /// git's own default. Same `spawn_blocking` reasoning as
+    /// [`Self::prepare_workspace`]: `git worktree add` is a real,
+    /// synchronous subprocess call.
+    async fn fork_workspace(
+        &self,
+        repo: PathBuf,
+        id: SessionId,
+        start_point: String,
+    ) -> Result<Workspace> {
+        rusty_tokio::spawn_blocking(move || -> Result<Workspace> {
+            let git = SystemGit;
+            let workspace = Workspace::worktree(repo.clone(), &id);
+            let branch = workspace.branch.clone().unwrap_or_default();
+            git.worktree_add(&repo, &workspace.cwd, &branch, Some(&start_point))
+                .map_err(|e| Error::conflict(e.to_string()))?;
+            Ok(workspace)
+        })
+        .await
+        .map_err(|e| Error::conflict(format!("the fork-workspace task did not complete: {e}")))?
+    }
+
     /// The core of the wait-for-parent mechanism: if `id` is currently
     /// `Waiting`, decides whether it can start yet and, if so, starts (or
     /// fails) it. Returns whether `id` was `Waiting` at all -- the
@@ -639,7 +791,7 @@ impl Supervisor {
                 SessionKind::Worktree => {
                     let workspace = Workspace::worktree(root.clone(), &id);
                     let branch = workspace.branch.clone().unwrap_or_default();
-                    git.worktree_add(&root, &workspace.cwd, &branch)
+                    git.worktree_add(&root, &workspace.cwd, &branch, None)
                         .map_err(|e| Error::conflict(e.to_string()))?;
                     Ok(Some(workspace))
                 }

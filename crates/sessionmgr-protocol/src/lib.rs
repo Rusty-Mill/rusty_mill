@@ -159,6 +159,19 @@ pub enum Request {
     /// nothing to skip ahead of.
     SessionStartNow { id: SessionId },
 
+    /// CAPABILITIES.md's "Fork session": clones `id`'s own conversation
+    /// history into a brand-new, independent session with its own
+    /// worktree (branched from `id`'s own branch tip, so the new
+    /// session's code state matches the conversation it starts with) --
+    /// see `docs/decisions/0003-resume-fork-spike.md` for how this is
+    /// possible at all and `docs/phase-6-report.md` for the full design
+    /// and which agents support it today.
+    SessionFork {
+        id: SessionId,
+        /// Same meaning as `SessionNew`'s own `pty` field.
+        pty: bool,
+    },
+
     /// The files changed in a session's workspace, for the diff pane.
     /// `NotFound` if the session has no workspace (a `PlainTerminal`
     /// session, or one that failed before a workspace was set up).
@@ -283,6 +296,11 @@ pub struct SessionSummary {
     /// render "waiting on parent".
     #[serde(default)]
     pub parent: Option<SessionId>,
+    /// The session this one was forked from, if it was -- a distinct
+    /// relationship from `parent` (workspace-sharing); see
+    /// `sessionmgr_core::Session::forked_from`'s own docs for why.
+    #[serde(default)]
+    pub forked_from: Option<SessionId>,
 }
 
 /// A live event streamed to an attached client.
@@ -391,7 +409,8 @@ mod tests {
                 id: id.clone(),
                 name: Some("my session".to_owned()),
             },
-            Request::SessionStartNow { id },
+            Request::SessionStartNow { id: id.clone() },
+            Request::SessionFork { id, pty: true },
             Request::DaemonShutdown,
             Request::WorkerShutdown,
             Request::HookFire {

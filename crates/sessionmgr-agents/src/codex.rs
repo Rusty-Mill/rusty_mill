@@ -39,7 +39,16 @@ const NEEDS_INPUT_MARKERS: &[&str] = &[
 const HOOK_EVENTS: &[&str] = &["SessionStart", "PermissionRequest", "Stop", "SubagentStop"];
 
 impl AgentAdapterPort for Codex {
-    fn launch_args(&self, extra: &[String], hooks_enabled: bool) -> Vec<String> {
+    fn launch_args(
+        &self,
+        extra: &[String],
+        hooks_enabled: bool,
+        _native_id: Option<&str>,
+    ) -> Vec<String> {
+        // `native_id` is ignored, deliberately: Codex has no flag to let
+        // a caller pin a new session's own id at launch (its own
+        // `ThreadId` is always self-assigned) -- see `fork_args`'s own
+        // docs for what that means for Fork support here.
         let mut args = vec!["codex".to_owned()];
         if hooks_enabled {
             // Both measured in Phase 3's own spike: without
@@ -105,6 +114,36 @@ impl AgentAdapterPort for Codex {
             _ => HookOutcome::Ignore,
         }
     }
+
+    /// Not supported here, deliberately -- not a gap silently left open.
+    ///
+    /// `codex fork <id>` is real (confirmed via Codex's own test suite,
+    /// `docs/decisions/0003-resume-fork-spike.md`), but reaching it needs
+    /// this session's *native* Codex thread id, and Codex has no launch
+    /// flag to let a caller pin one the way Claude Code's `--session-id`
+    /// does -- confirmed absent from a real `codex --help`. The id is
+    /// always self-assigned and would have to be *discovered* after the
+    /// fact (Codex's own rollout files embed it in their filename,
+    /// `rollout-<timestamp>-<thread-id>.jsonl`, which is a workable
+    /// mechanism but a genuinely separate piece of machinery -- a
+    /// post-spawn filesystem watch, not a pure format-producing method
+    /// like this trait's other ones). Building that blind, with no
+    /// credentials in any environment available to verify it against a
+    /// real `codex` process, is exactly the kind of unverified guess this
+    /// project's own conventions ask not to ship. See
+    /// `docs/phase-6-report.md` for the filed follow-up.
+    fn fork_args(
+        &self,
+        _source_native_id: &str,
+        _new_native_id: &str,
+        _extra: &[String],
+    ) -> Option<Vec<String>> {
+        None
+    }
+
+    fn supports_fork(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -113,13 +152,16 @@ mod tests {
 
     #[test]
     fn launch_args_bare_is_just_the_program() {
-        assert_eq!(Codex.launch_args(&[], false), vec!["codex".to_owned()]);
+        assert_eq!(
+            Codex.launch_args(&[], false, None),
+            vec!["codex".to_owned()]
+        );
     }
 
     #[test]
     fn launch_args_passes_through_an_initial_prompt() {
         assert_eq!(
-            Codex.launch_args(&["fix the failing test".to_owned()], false),
+            Codex.launch_args(&["fix the failing test".to_owned()], false, None),
             vec!["codex".to_owned(), "fix the failing test".to_owned()]
         );
     }
@@ -127,7 +169,7 @@ mod tests {
     #[test]
     fn launch_args_adds_bypass_and_sandbox_flags_when_hooks_enabled() {
         assert_eq!(
-            Codex.launch_args(&[], true),
+            Codex.launch_args(&[], true, None),
             vec![
                 "codex".to_owned(),
                 "--dangerously-bypass-hook-trust".to_owned(),
@@ -135,6 +177,20 @@ mod tests {
                 "danger-full-access".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn launch_args_ignores_a_native_id_it_cannot_pin() {
+        assert_eq!(
+            Codex.launch_args(&[], false, Some("some-id")),
+            Codex.launch_args(&[], false, None)
+        );
+    }
+
+    #[test]
+    fn fork_is_not_supported() {
+        assert!(!Codex.supports_fork());
+        assert_eq!(Codex.fork_args("source", "new", &[]), None);
     }
 
     #[test]

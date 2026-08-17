@@ -47,6 +47,9 @@ COMMANDS:
     rename <id> <name> | rename <id> --clear  set or clear a display label
     start-now <id>                            stop a waiting dependent session from
                                               waiting any longer and start it now
+    fork <id> [--no-pty]                      clone a session's own agent-CLI
+                                              conversation into a new, independent
+                                              session (see FORK)
     tui                                       grid of session panes (starts a daemon if needed)
     daemon run                                run the supervisor in the foreground
     daemon start                              start the supervisor detached
@@ -78,6 +81,20 @@ DEPENDENT SESSIONS:
     instead of starting it into a workspace that no longer exists).
     --start-now skips the wait and starts immediately. `start-now <id>`
     does the same thing later, to a session already Waiting.
+
+FORK:
+    fork <id> clones <id>'s own agent-CLI conversation into a brand-new,
+    independent session -- CAPABILITIES.md's Fork session capability. The
+    new session gets its own worktree, branched from <id>'s own branch tip
+    (not the repository's default branch), so its code state matches the
+    conversation it starts with; forking never touches <id> itself.
+
+    Requires <id> to be a --kind worktree session with an --agent whose
+    adapter supports it -- as of this release, only claude. Codex and
+    Gemini CLI have real fork mechanisms of their own but need machinery
+    this release does not yet build (see docs/phase-6-report.md for
+    exactly what and why); forking a Codex or Gemini session fails with a
+    clear error naming the gap, not a silent no-op or a guess.
 
 AGENTS:
     claude       Claude Code -- tier-3 pattern matching, plus a verified
@@ -140,6 +157,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         "close" => cmd_close(&root, rest).await,
         "rename" => cmd_rename(&root, rest).await,
         "start-now" => cmd_start_now(&root, rest).await,
+        "fork" => cmd_fork(&root, rest).await,
         "tui" => {
             client::ensure_daemon(&root).await?;
             sessionmgr_tui::run(paths::daemon_socket(&root))
@@ -344,6 +362,16 @@ async fn cmd_start_now(root: &Path, args: &[String]) -> Result<()> {
     let id = parse_id(args.first())?;
     client::session_start_now(root, id).await?;
     println!("started");
+    Ok(())
+}
+
+async fn cmd_fork(root: &Path, args: &[String]) -> Result<()> {
+    let mut args = args.to_vec();
+    let pty = !args.iter().any(|a| a == "--no-pty");
+    args.retain(|a| a != "--no-pty");
+    let id = parse_id(args.first())?;
+    let forked = client::session_fork(root, id, pty).await?;
+    println!("{forked}");
     Ok(())
 }
 

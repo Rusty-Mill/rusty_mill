@@ -90,7 +90,19 @@ const NEEDS_INPUT_MARKERS: &[&str] = &[
 const HOOK_EVENTS: &[&str] = &["SessionStart", "Notification", "AfterAgent"];
 
 impl AgentAdapterPort for GeminiCli {
-    fn launch_args(&self, extra: &[String], hooks_enabled: bool) -> Vec<String> {
+    fn launch_args(
+        &self,
+        extra: &[String],
+        hooks_enabled: bool,
+        _native_id: Option<&str>,
+    ) -> Vec<String> {
+        // `native_id` is ignored here even though `gemini --help` does
+        // have a `--session-id <uuid>` flag that could pin one: nothing
+        // in the daemon calls this with `Some` today, since `fork_args`
+        // below returns `None` -- see its own docs for why -- and wiring
+        // the pin now, for a capability nothing yet uses, would be
+        // exactly the speculative generality this project's own
+        // conventions ask not to build ahead of.
         let mut args = vec!["gemini".to_owned()];
         if hooks_enabled {
             // `--skip-trust` bypasses the interactive workspace-trust
@@ -176,6 +188,36 @@ impl AgentAdapterPort for GeminiCli {
             _ => HookOutcome::Ignore,
         }
     }
+
+    /// Not supported here, deliberately -- not a gap silently left open.
+    ///
+    /// `--session-file <path>` is real, and is in fact the most explicit
+    /// of the three CLIs' mechanisms (`docs/decisions/0003-resume-fork-spike.md`):
+    /// unlike Claude Code's and Codex's id-based resume/fork, it takes an
+    /// arbitrary *file path* to a prior conversation, no native id
+    /// required at all. But that file has to be the source session's own
+    /// current chat-history file, which lives under gemini-cli's own
+    /// per-project temp directory, keyed by a hash of the working
+    /// directory this adapter has not reverse-engineered from the
+    /// installed bundle (only confirmed it exists and roughly where, not
+    /// its exact algorithm). Guessing at that hash and shipping it
+    /// unverified -- there being no credentials in any environment
+    /// available while this was built to check it against a real
+    /// `gemini` process -- is exactly the kind of claim this project's
+    /// own conventions ask to be measured, not assumed. See
+    /// `docs/phase-6-report.md` for the filed follow-up.
+    fn fork_args(
+        &self,
+        _source_native_id: &str,
+        _new_native_id: &str,
+        _extra: &[String],
+    ) -> Option<Vec<String>> {
+        None
+    }
+
+    fn supports_fork(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -184,13 +226,16 @@ mod tests {
 
     #[test]
     fn launch_args_bare_is_just_the_program() {
-        assert_eq!(GeminiCli.launch_args(&[], false), vec!["gemini".to_owned()]);
+        assert_eq!(
+            GeminiCli.launch_args(&[], false, None),
+            vec!["gemini".to_owned()]
+        );
     }
 
     #[test]
     fn launch_args_passes_through_an_initial_prompt() {
         assert_eq!(
-            GeminiCli.launch_args(&["fix the failing test".to_owned()], false),
+            GeminiCli.launch_args(&["fix the failing test".to_owned()], false, None),
             vec!["gemini".to_owned(), "fix the failing test".to_owned()]
         );
     }
@@ -198,9 +243,23 @@ mod tests {
     #[test]
     fn launch_args_adds_skip_trust_flag_when_hooks_enabled() {
         assert_eq!(
-            GeminiCli.launch_args(&[], true),
+            GeminiCli.launch_args(&[], true, None),
             vec!["gemini".to_owned(), "--skip-trust".to_owned()]
         );
+    }
+
+    #[test]
+    fn launch_args_ignores_a_native_id_it_cannot_yet_use() {
+        assert_eq!(
+            GeminiCli.launch_args(&[], false, Some("some-id")),
+            GeminiCli.launch_args(&[], false, None)
+        );
+    }
+
+    #[test]
+    fn fork_is_not_supported() {
+        assert!(!GeminiCli.supports_fork());
+        assert_eq!(GeminiCli.fork_args("source", "new", &[]), None);
     }
 
     #[test]

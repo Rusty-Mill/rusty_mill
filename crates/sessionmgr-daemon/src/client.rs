@@ -166,6 +166,16 @@ pub async fn session_start_now(root: &Path, id: SessionId) -> Result<()> {
     }
 }
 
+/// CAPABILITIES.md's "Fork session".
+pub async fn session_fork(root: &Path, id: SessionId, pty: bool) -> Result<SessionId> {
+    match request(root, Request::SessionFork { id, pty }).await? {
+        Response::SessionCreated { id } => Ok(id),
+        other => Err(Error::protocol(format!(
+            "unexpected answer to session-fork: {other:?}"
+        ))),
+    }
+}
+
 pub async fn session_list(root: &Path) -> Result<Vec<SessionSummary>> {
     match request(root, Request::SessionList).await? {
         Response::Sessions { sessions } => Ok(sessions),
@@ -281,11 +291,11 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
         return "no sessions".to_owned();
     }
     let mut out = String::from(
-        "ID            STATUS       KIND            BRANCH                    NAME                 PARENT        COMMAND\n",
+        "ID            STATUS       KIND            BRANCH                    NAME                 PARENT        FORKED-FROM   COMMAND\n",
     );
     for session in sessions {
         out.push_str(&format!(
-            "{:<13} {:<12} {:<15} {:<25} {:<20} {:<13} {}\n",
+            "{:<13} {:<12} {:<15} {:<25} {:<20} {:<13} {:<13} {}\n",
             session.id,
             format!("{:?}", session.status),
             format!("{:?}", session.kind),
@@ -299,6 +309,15 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
             // for the kinds that own none.
             session
                 .parent
+                .as_ref()
+                .map(SessionId::as_str)
+                .unwrap_or("-"),
+            // Only a forked session has one of these -- see
+            // `Session::forked_from`'s own docs for why this is a
+            // separate relationship from `parent` above, not the same
+            // field reused.
+            session
+                .forked_from
                 .as_ref()
                 .map(SessionId::as_str)
                 .unwrap_or("-"),
@@ -340,6 +359,7 @@ mod tests {
             agent: None,
             name: None,
             parent: None,
+            forked_from: None,
         };
         let rendered = render_sessions(std::slice::from_ref(&summary));
         assert!(rendered.contains(summary.id.as_str()));

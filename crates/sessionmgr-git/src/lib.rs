@@ -128,18 +128,27 @@ impl GitPort for SystemGit {
         Ok(PathBuf::from(root))
     }
 
-    fn worktree_add(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<(), GitError> {
+    fn worktree_add(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        branch: &str,
+        start_point: Option<&str>,
+    ) -> Result<(), GitError> {
         let worktree = worktree.to_string_lossy().into_owned();
         #[cfg(windows)]
         check_worktree_path_length(&worktree)?;
         // `-b <branch>` creates the branch as part of adding the
         // worktree, so there is never a window where one exists without
-        // the other.
-        git(
-            "worktree add",
-            repo,
-            &["worktree", "add", "-b", branch, &worktree],
-        )?;
+        // the other. `start_point`, appended as the trailing positional
+        // `<commit-ish>` only when given, is what lets Fork branch from a
+        // source session's own branch tip instead of git's own default
+        // (repo's checked-out HEAD) -- see this method's own trait docs.
+        let mut args = vec!["worktree", "add", "-b", branch, &worktree];
+        if let Some(start_point) = start_point {
+            args.push(start_point);
+        }
+        git("worktree add", repo, &args)?;
         Ok(())
     }
 
