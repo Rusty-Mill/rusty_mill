@@ -496,6 +496,49 @@ pub fn session_id() -> io::Result<sessionmgr_core::SessionId> {
     ))
 }
 
+/// Mints a fresh, real UUID v4 string, formatted `xxxxxxxx-xxxx-4xxx-
+/// yxxx-xxxxxxxxxxxx` per RFC 4122.
+///
+/// A hand-rolled formatter over [`os_random`] rather than a `uuid`
+/// dependency, the same minimal-deps call this workspace already makes
+/// for [`session_id`]'s own Crockford-base32 id -- sixteen random bytes
+/// with the version/variant nibbles fixed is the entire algorithm, not
+/// enough to justify a crate.
+///
+/// This is deliberately **not** [`sessionmgr_core::SessionId`]: Phase 6's
+/// Fork feature needs a *real* UUID to hand an agent CLI's own
+/// `--session-id`-style flag ("must be a valid UUID", measured against
+/// Claude Code directly), which `SessionId`'s own 12-character format is
+/// not and was never meant to be -- see `SessionId`'s own docs for why
+/// its shape is a deliberately different, shorter thing entirely.
+pub fn native_session_uuid() -> io::Result<String> {
+    let mut b = [0u8; 16];
+    os_random(&mut b)?;
+    // RFC 4122 §4.4: set the version (4) and variant (10) bits.
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-\
+         {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
+    ))
+}
+
 /// The real implementation of [`ProcessPort`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemProcessPort;
@@ -638,6 +681,34 @@ mod tests {
         let b = session_id().expect("mint");
         assert_ne!(a, b);
         assert!(a.as_str().parse::<sessionmgr_core::SessionId>().is_ok());
+    }
+
+    #[test]
+    fn minted_native_uuids_are_shaped_like_a_real_uuid_v4_and_unique() {
+        let a = native_session_uuid().expect("mint");
+        let b = native_session_uuid().expect("mint");
+        assert_ne!(a, b);
+        for uuid in [&a, &b] {
+            let groups: Vec<&str> = uuid.split('-').collect();
+            assert_eq!(
+                groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+                vec![8, 4, 4, 4, 12],
+                "not RFC-4122-shaped: {uuid}"
+            );
+            assert!(
+                uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+                "not all hex/hyphen: {uuid}"
+            );
+            assert_eq!(
+                groups[2].chars().next(),
+                Some('4'),
+                "version nibble must be 4: {uuid}"
+            );
+            assert!(
+                matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+                "variant nibble must be 8/9/a/b: {uuid}"
+            );
+        }
     }
 
     #[test]

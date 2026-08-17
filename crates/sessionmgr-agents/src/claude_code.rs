@@ -50,13 +50,29 @@ const NEEDS_INPUT_MARKERS: &[&str] = &[
 const HOOK_EVENTS: &[&str] = &["SessionStart", "Notification", "Stop", "SubagentStop"];
 
 impl AgentAdapterPort for ClaudeCode {
-    fn launch_args(&self, extra: &[String], _hooks_enabled: bool) -> Vec<String> {
+    fn launch_args(
+        &self,
+        extra: &[String],
+        _hooks_enabled: bool,
+        native_id: Option<&str>,
+    ) -> Vec<String> {
         // Measured: Claude Code's own hooks fired cleanly right after the
         // ordinary folder-trust gate, with no extra review screen and no
         // bypass flag needed -- unlike Codex. `hooks_enabled` genuinely
         // changes nothing here; it is still a parameter (not a
         // Claude-Code-only method signature) because the port is shared.
         let mut args = vec!["claude".to_owned()];
+        // `--session-id <uuid>`, live-verified in ADR-0003's spike: a
+        // real `claude --session-id <uuid> -p "..."` run produced a real
+        // transcript at exactly that id. Pinning it at launch, always
+        // (not only when a `--hooks`-style flag asks for it) is what
+        // makes an *ordinary* session forkable later with zero extra
+        // machinery -- no directory-scanning discovery step is needed
+        // anywhere in this adapter or the worker that spawns it.
+        if let Some(id) = native_id {
+            args.push("--session-id".to_owned());
+            args.push(id.to_owned());
+        }
         args.extend(extra.iter().cloned());
         args
     }
@@ -110,6 +126,35 @@ impl AgentAdapterPort for ClaudeCode {
             _ => HookOutcome::Ignore,
         }
     }
+
+    fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn fork_args(
+        &self,
+        source_native_id: &str,
+        new_native_id: &str,
+        extra: &[String],
+    ) -> Option<Vec<String>> {
+        // `--resume <id> --fork-session`, per `--help`'s own description:
+        // "When resuming, create a new session ID instead of reusing the
+        // original." Combined with `--session-id`, live-verified in
+        // `docs/phase-6-report.md` to pin the *forked* session's own new
+        // id too, rather than leaving it to whatever Claude Code would
+        // have auto-assigned -- keeping every session this adapter
+        // creates, forked or not, equally forkable again afterward.
+        let mut args = vec![
+            "claude".to_owned(),
+            "--resume".to_owned(),
+            source_native_id.to_owned(),
+            "--fork-session".to_owned(),
+            "--session-id".to_owned(),
+            new_native_id.to_owned(),
+        ];
+        args.extend(extra.iter().cloned());
+        Some(args)
+    }
 }
 
 #[cfg(test)]
@@ -119,7 +164,7 @@ mod tests {
     #[test]
     fn launch_args_bare_is_just_the_program() {
         assert_eq!(
-            ClaudeCode.launch_args(&[], false),
+            ClaudeCode.launch_args(&[], false, None),
             vec!["claude".to_owned()]
         );
     }
@@ -127,7 +172,7 @@ mod tests {
     #[test]
     fn launch_args_passes_through_an_initial_prompt() {
         assert_eq!(
-            ClaudeCode.launch_args(&["fix the failing test".to_owned()], false),
+            ClaudeCode.launch_args(&["fix the failing test".to_owned()], false, None),
             vec!["claude".to_owned(), "fix the failing test".to_owned()]
         );
     }
@@ -137,8 +182,40 @@ mod tests {
         // Documented, measured difference from Codex: Claude Code needed
         // no extra flag for its own hooks to fire.
         assert_eq!(
-            ClaudeCode.launch_args(&[], true),
-            ClaudeCode.launch_args(&[], false)
+            ClaudeCode.launch_args(&[], true, None),
+            ClaudeCode.launch_args(&[], false, None)
+        );
+    }
+
+    #[test]
+    fn launch_args_pins_the_native_session_id_when_given() {
+        assert_eq!(
+            ClaudeCode.launch_args(&[], false, Some("11111111-1111-1111-1111-111111111111")),
+            vec![
+                "claude".to_owned(),
+                "--session-id".to_owned(),
+                "11111111-1111-1111-1111-111111111111".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn fork_args_resumes_the_source_and_pins_the_forks_own_new_id() {
+        assert!(ClaudeCode.supports_fork());
+        let args = ClaudeCode
+            .fork_args("source-id", "new-id", &["continue differently".to_owned()])
+            .expect("Claude Code supports fork");
+        assert_eq!(
+            args,
+            vec![
+                "claude".to_owned(),
+                "--resume".to_owned(),
+                "source-id".to_owned(),
+                "--fork-session".to_owned(),
+                "--session-id".to_owned(),
+                "new-id".to_owned(),
+                "continue differently".to_owned(),
+            ]
         );
     }
 

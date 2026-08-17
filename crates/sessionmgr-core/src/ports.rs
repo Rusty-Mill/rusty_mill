@@ -72,7 +72,23 @@ pub trait GitPort {
     fn repo_root(&self, path: &Path) -> Result<std::path::PathBuf, GitError>;
 
     /// Creates a worktree at `worktree` on a new branch `branch`.
-    fn worktree_add(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<(), GitError>;
+    ///
+    /// `start_point`, when `Some`, is the commit-ish the new branch is
+    /// created from -- `None` means git's own default (the currently
+    /// checked-out `HEAD` of `repo`'s own working copy), which is what
+    /// every ordinary worktree session wants. Fork needs the other case:
+    /// a forked session's new worktree must start from **the source
+    /// session's own branch tip**, not the repository's main branch, so
+    /// the code state it starts working in matches the conversation
+    /// history it starts with. Without this, a forked agent would find
+    /// itself talking about edits that are not actually on disk.
+    fn worktree_add(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        branch: &str,
+        start_point: Option<&str>,
+    ) -> Result<(), GitError>;
 
     /// Removes a worktree.
     ///
@@ -148,7 +164,24 @@ pub trait AgentAdapterPort {
     /// some CLIs need their own extra flag to run an installed hook
     /// without an interactive trust-review gate first (measured: Codex
     /// does, `--dangerously-bypass-hook-trust`; Claude Code does not).
-    fn launch_args(&self, extra: &[String], hooks_enabled: bool) -> Vec<String>;
+    ///
+    /// `native_id`, when `Some`, asks this adapter to pin the CLI's own
+    /// session identifier to that value at launch, if it supports doing
+    /// so (see [`Self::fork_args`]'s own docs for which adapters do, and
+    /// why this is what makes Fork possible without the daemon having to
+    /// discover a session's native id after the fact by scanning the
+    /// CLI's own state directory). An adapter that does not support
+    /// pinning simply ignores it rather than erroring -- the daemon only
+    /// ever passes `Some` when it already knows this adapter supports
+    /// it, but an adapter must still behave sensibly if it is passed
+    /// anyway, the same defensive posture every other method on this
+    /// trait already takes toward its inputs.
+    fn launch_args(
+        &self,
+        extra: &[String],
+        hooks_enabled: bool,
+        native_id: Option<&str>,
+    ) -> Vec<String>;
 
     /// Does the CLI's current on-screen state look like it is waiting on
     /// the user? `screen_text` is already-rendered plain text (one
@@ -192,6 +225,59 @@ pub trait AgentAdapterPort {
 
     /// What installing a hook and having it fire for `event` means.
     fn hook_signal(&self, event: &str) -> HookOutcome;
+
+    /// Does this adapter support Fork at all?
+    ///
+    /// Answers a **creation-time** question [`Self::fork_args`] cannot:
+    /// whether it is worth generating and pinning a native session id
+    /// *before* anyone has asked to fork anything, so an ordinary session
+    /// is already forkable later with no further machinery. Kept as its
+    /// own explicit fact, deliberately, rather than inferred by probing
+    /// `fork_args` with placeholder ids -- the same "answer the question,
+    /// do not infer it" reasoning [`Self::has_verified_hooks`] already
+    /// follows. The two methods are two questions asked at two different
+    /// times, not one capability duplicated: `sessionmgr-agents`' own
+    /// tests assert `supports_fork() == fork_args(..).is_some()` for
+    /// every adapter, which is what keeps them from drifting apart in
+    /// practice.
+    ///
+    /// As of ADR-0003/Phase 6, only Claude Code answers `true`: it is the
+    /// one CLI of the three this project supports that could actually be
+    /// live-verified in the environment available while this was built
+    /// (real, authenticated `claude` access), not just reasoned about
+    /// from source. See [`Self::fork_args`]'s own docs for why Codex and
+    /// Gemini CLI are not `true` here yet, and what would change that.
+    fn supports_fork(&self) -> bool;
+
+    /// The command line to launch a **forked** session -- a new,
+    /// independent session that starts with a copy of `source_native_id`'s
+    /// own conversation history, per CAPABILITIES.md's observed "Fork
+    /// session" capability and ADR-0003's spike into whether any CLI
+    /// supports being handed externally-tracked prior state at all.
+    ///
+    /// `None` when [`Self::supports_fork`] is `false` for this adapter.
+    /// Codex's own fork mechanism is real (`codex fork <id>`, confirmed
+    /// via its own test suite in ADR-0003) but needs a *separate*
+    /// native-id-**discovery** mechanism this phase does not build, since
+    /// unlike Claude Code Codex has no flag to let the caller pin a new
+    /// session's id at creation -- see `docs/phase-6-report.md` for
+    /// exactly what is missing and why this was not guessed at instead.
+    /// Gemini CLI's own fork-equivalent (`--session-file`) needs the
+    /// *file path* to the source session's own chat history, which
+    /// requires replicating gemini-cli's internal project-directory
+    /// hashing scheme to locate reliably -- also deferred, also explained
+    /// in the phase report rather than shipped unverified.
+    ///
+    /// `new_native_id` is the id the *forked* session should itself be
+    /// pinned to (see [`Self::launch_args`]'s own `native_id` parameter),
+    /// so a forked session is just as forkable again afterward as an
+    /// ordinary one.
+    fn fork_args(
+        &self,
+        source_native_id: &str,
+        new_native_id: &str,
+        extra: &[String],
+    ) -> Option<Vec<String>>;
 }
 
 /// [`AgentAdapterPort::needs_input`]'s answer.

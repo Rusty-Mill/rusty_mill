@@ -36,3 +36,26 @@ pub fn adapter_for(kind: AgentKind) -> Box<dyn AgentAdapterPort + Send + Sync> {
         AgentKind::Gemini => Box::new(gemini::GeminiCli),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `AgentAdapterPort::supports_fork` and `fork_args` answer two
+    /// different questions asked at two different times (see
+    /// `supports_fork`'s own docs for why they are separate methods, not
+    /// one capability duplicated) -- this is what keeps them from
+    /// drifting apart in practice, run once across every adapter this
+    /// crate ships rather than duplicated per adapter's own test module.
+    #[test]
+    fn supports_fork_agrees_with_fork_args_for_every_adapter() {
+        for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Gemini] {
+            let adapter = adapter_for(kind);
+            assert_eq!(
+                adapter.supports_fork(),
+                adapter.fork_args("source", "new", &[]).is_some(),
+                "{kind:?}: supports_fork() disagrees with fork_args(..).is_some()"
+            );
+        }
+    }
+}
