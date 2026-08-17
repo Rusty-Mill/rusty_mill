@@ -388,6 +388,16 @@ pub struct Session {
     /// are: a record written before this field existed must still load.
     #[serde(default)]
     pub agent: Option<AgentKind>,
+    /// A user-chosen display label, purely cosmetic -- distinct from the
+    /// worktree branch name, which stays `sessionmgr/<id>` no matter what
+    /// this is set to. `None` until renamed (the TUI command palette's
+    /// `rename` action; CAPABILITIES.md's Xirp-observed "renaming a
+    /// session").
+    ///
+    /// `#[serde(default)]` for the same reason as the fields above: a
+    /// record written before this field existed must still load.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Session {
@@ -413,7 +423,15 @@ impl Session {
             created_at_millis,
             exit_code: None,
             agent,
+            name: None,
         }
+    }
+
+    /// Sets (or, given `None`, clears) this session's display label.
+    /// Purely cosmetic bookkeeping, not a state-machine transition --
+    /// unlike `transition_to`/`record_exit` this cannot fail.
+    pub fn rename(&mut self, name: Option<String>) {
+        self.name = name;
     }
 
     /// The teardown status appropriate to how this session was closed.

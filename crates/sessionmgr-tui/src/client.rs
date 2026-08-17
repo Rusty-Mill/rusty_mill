@@ -147,6 +147,35 @@ pub async fn session_close(
     expect(response, |r| matches!(r, Response::Ok).then_some(()))
 }
 
+/// Creates a plain worktree session against `repo`, with no agent and
+/// this platform's default shell -- the command palette's `new session`
+/// action is a fast, keyboard-only shortcut for the single most common
+/// case, not a replacement for `sessionmgr new`'s full flag surface.
+pub async fn session_new(socket: &Path, repo: std::path::PathBuf) -> Result<SessionId> {
+    let mut conn = Connection::connect(socket).await?;
+    let response = conn
+        .request(&Request::SessionNew {
+            kind: sessionmgr_protocol::SessionKind::Worktree,
+            command: Vec::new(),
+            repo: Some(repo),
+            pty: true,
+            agent: None,
+            hooks: false,
+        })
+        .await?;
+    expect(response, |r| match r {
+        Response::SessionCreated { id } => Some(id),
+        _ => None,
+    })
+}
+
+/// Sets (or, given `None`, clears) a session's display label.
+pub async fn session_rename(socket: &Path, id: SessionId, name: Option<String>) -> Result<()> {
+    let mut conn = Connection::connect(socket).await?;
+    let response = conn.request(&Request::SessionRename { id, name }).await?;
+    expect(response, |r| matches!(r, Response::Ok).then_some(()))
+}
+
 /// A live attach: the write half stays open for `SessionInput`/
 /// `SessionResize`, and a background task pumps `SessionEvent`s from the
 /// read half into `events` until the connection closes.

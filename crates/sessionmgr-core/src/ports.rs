@@ -7,9 +7,9 @@
 //! and `Codex`), both driven by real, measured CLI output rather than
 //! assumed shapes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::session::WorkerRef;
+use crate::session::{SessionId, WorkerRef};
 
 /// Everything the domain needs from OS process management.
 ///
@@ -134,18 +134,21 @@ pub fn worker_ref(port: &dyn ProcessPort, pid: u32) -> WorkerRef {
 /// Everything the domain needs from a per-CLI agent adapter.
 ///
 /// Implemented by `sessionmgr-agents`. `launch_args` is the easy half;
-/// `needs_input` is PLAN.md's "hard part" -- tier-3 (pattern-matching)
-/// only, per this trait. Tier 1 (hooks) is a higher-confidence,
+/// `needs_input` is PLAN.md's "hard part" -- tier-3 (pattern-matching).
+/// Tier 1 (hooks, `hook_config`/`hook_signal`) is a higher-confidence,
 /// out-of-band signal that arrives through a hook callback, not through
-/// output text, so it is not this trait's concern -- it updates a
-/// session's status directly once Phase 4's hook-install work exists.
-/// Tier 2 (process exit) is `Session::record_exit`, already wired for
-/// every session regardless of whether it has an adapter at all.
+/// output text. Tier 2 (process exit) is `Session::record_exit`,
+/// already wired for every session regardless of whether it has an
+/// adapter at all.
 pub trait AgentAdapterPort {
     /// The command line to launch this agent. `extra` is whatever the
     /// caller supplied beyond `--agent <kind>` -- typically empty
-    /// (bare interactive) or an initial prompt.
-    fn launch_args(&self, extra: &[String]) -> Vec<String>;
+    /// (bare interactive) or an initial prompt. `hooks_enabled` is
+    /// whether `--hooks` requested a hook install for this session --
+    /// some CLIs need their own extra flag to run an installed hook
+    /// without an interactive trust-review gate first (measured: Codex
+    /// does, `--dangerously-bypass-hook-trust`; Claude Code does not).
+    fn launch_args(&self, extra: &[String], hooks_enabled: bool) -> Vec<String>;
 
     /// Does the CLI's current on-screen state look like it is waiting on
     /// the user? `screen_text` is already-rendered plain text (one
@@ -165,9 +168,30 @@ pub trait AgentAdapterPort {
 
     /// Does this CLI have a hook mechanism sessionmgr has verified
     /// firing for real (not just documented)? Recorded for a future
-    /// confidence badge and for Phase 4's hook-install work; this crate
-    /// never installs a hook itself.
+    /// confidence badge.
     fn has_verified_hooks(&self) -> bool;
+
+    /// The relative path (under the session's own workspace directory)
+    /// and file content for this CLI's own hook configuration format,
+    /// pointing every event this adapter cares about at
+    /// `hook_fire_exe __hook-fire --session-id <id> --event <name>`,
+    /// invoked directly (no shell, no script file).
+    ///
+    /// Measured, not assumed (`docs/phase-4-hooks-report.md`): a real
+    /// Claude Code hook `command` string is tokenized with POSIX-style
+    /// backslash-escaping even on Windows, so a raw Windows path with
+    /// single backslashes silently loses them (`C:\a\b.exe` becomes
+    /// `C:ab.exe`). `hook_fire_exe` must already be forward-slashed by
+    /// the caller; this method does not do it, since that is a Windows-
+    /// path concern, not a per-CLI one.
+    ///
+    /// Pure -- builds a path and a string, touches no filesystem. The
+    /// actual write is `sessionmgr-daemon::hooks::install`'s job: this
+    /// crate is zero-I/O by design.
+    fn hook_config(&self, hook_fire_exe: &Path, session_id: &SessionId) -> (PathBuf, String);
+
+    /// What installing a hook and having it fire for `event` means.
+    fn hook_signal(&self, event: &str) -> HookOutcome;
 }
 
 /// [`AgentAdapterPort::needs_input`]'s answer.
@@ -175,4 +199,19 @@ pub trait AgentAdapterPort {
 pub enum AgentSignal {
     Running,
     NeedsInput,
+}
+
+/// [`AgentAdapterPort::hook_signal`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookOutcome {
+    /// Transition the session to this signal, the same way a tier-3
+    /// pattern match would -- both ultimately call the same transition
+    /// path, so a hook and a pattern match agreeing is not a conflict,
+    /// just redundant confirmation.
+    Status(AgentSignal),
+    /// No status change, but worth telling the webhook dispatcher about
+    /// (a sub-agent finishing, say -- PLAN.md's `SubagentFinished`).
+    Notify,
+    /// Not an event this adapter maps to anything.
+    Ignore,
 }

@@ -16,12 +16,14 @@
 pub mod catalog;
 pub mod client;
 pub mod error;
+pub mod hooks;
 pub mod paths;
 pub mod supervisor;
 pub mod transport;
 pub mod worker;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sessionmgr_core::{Disposition, SessionId, SessionKind};
 
@@ -34,11 +36,12 @@ USAGE:
     sessionmgr <COMMAND>
 
 COMMANDS:
-    new [--kind KIND] [--agent AGENT] [--repo <path>] [--no-pty] [-- <command>...]
+    new [--kind KIND] [--agent AGENT] [--hooks] [--repo <path>] [--no-pty] [-- <command>...]
                                               create a session and start it
     list                                      list every session
     attach <id>                               stream a session's output
     close <id> [--merge|--discard]            tear a session down
+    rename <id> <name> | rename <id> --clear  set or clear a display label
     tui                                       grid of session panes (starts a daemon if needed)
     daemon run                                run the supervisor in the foreground
     daemon start                              start the supervisor detached
@@ -52,12 +55,20 @@ SESSION KINDS:
     terminal     a plain shell, no repository (the default)
 
 AGENTS:
-    claude       Claude Code -- tier-3 pattern matching plus a verified
-                 hook mechanism (not yet wired to this tool's status)
-    codex        Codex -- tier-3 pattern matching plus a verified hook
-                 mechanism (not yet wired to this tool's status)
+    claude       Claude Code -- tier-3 pattern matching, plus a verified
+                 hook mechanism (--hooks wires it to this tool's status)
+    codex        Codex -- tier-3 pattern matching, plus a verified hook
+                 mechanism (--hooks wires it to this tool's status)
     Without --agent, a session gets none of the above: `command` runs
     literally and only process-exit status is ever reported.
+
+HOOKS:
+    --hooks installs the chosen --agent's own hook config into the
+    session's worktree, calling back into this tool for a higher-
+    confidence status signal than pattern matching alone. Needs both
+    --agent and --kind worktree. Set SESSIONMGR_WEBHOOK_URL to also get
+    an outbound POST on needs-input/finished/errored/subagent-finished
+    -- minimal payload, no transcript, no absolute paths.
 
 CLOSING:
     close <id>              stop the processes; leave any worktree in place
@@ -98,6 +109,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             client::session_attach(&root, id).await
         }
         "close" => cmd_close(&root, rest).await,
+        "rename" => cmd_rename(&root, rest).await,
         "tui" => {
             client::ensure_daemon(&root).await?;
             sessionmgr_tui::run(paths::daemon_socket(&root))
@@ -122,6 +134,14 @@ pub async fn run(args: &[String]) -> Result<()> {
             })
             .await
         }
+        "__hook-fire" => {
+            let mut rest = rest.to_vec();
+            let session_id = take_option(&mut rest, "--session-id")?
+                .ok_or_else(|| Error::usage("__hook-fire requires --session-id"))?;
+            let event = take_option(&mut rest, "--event")?
+                .ok_or_else(|| Error::usage("__hook-fire requires --event"))?;
+            cmd_hook_fire(&root, session_id, event).await
+        }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(())
@@ -130,6 +150,44 @@ pub async fn run(args: &[String]) -> Result<()> {
             "unknown command `{other}`\n\n{USAGE}"
         ))),
     }
+}
+
+/// `__hook-fire`'s own handler.
+///
+/// **Fast, silent no-op on anything that does not look like one of this
+/// tool's own sessions** (PLAN.md's own explicit requirement): a hook
+/// this tool installs only ever fires for a session it created, but a
+/// copied hook config, a stray file, or a future id-format change must
+/// never block or auto-start a daemon with nothing to report to. That
+/// check happens *before* touching the daemon at all -- reading the
+/// catalog directly off disk, exactly the same way a recognized id
+/// then still requires no daemon interaction to establish.
+///
+/// A real, recognized session **does** get the daemon's auto-start
+/// sugar: the whole point is reporting to something. Bounded to a few
+/// seconds regardless, because the CLI that invoked this hook is
+/// blocked on this process exiting -- most hook events are synchronous
+/// by default -- and a hang here would hang the user's own agent CLI.
+async fn cmd_hook_fire(root: &Path, session_id: String, event: String) -> Result<()> {
+    let Ok(id) = session_id.parse::<SessionId>() else {
+        return Ok(());
+    };
+    if catalog::read_session(root, &id).is_err() {
+        return Ok(());
+    }
+    let outcome = rusty_tokio::time::timeout(Duration::from_secs(5), async {
+        let mut conn = client::connect(root).await?;
+        conn.request::<_, sessionmgr_protocol::Response>(&sessionmgr_protocol::Request::HookFire {
+            session_id: id.to_string(),
+            event,
+        })
+        .await
+    })
+    .await;
+    if let Ok(Err(e)) = outcome {
+        eprintln!("sessionmgr __hook-fire: {e}");
+    }
+    Ok(())
 }
 
 async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
@@ -179,7 +237,15 @@ async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
             )))
         }
     };
-    let id = client::session_new(root, kind, command, repo, pty, agent).await?;
+    // `--hooks` installs `agent`'s own hook config into the session's
+    // worktree -- opt-in (see Request::SessionNew's own docs for why),
+    // and meaningless without an agent to install hooks for.
+    let hooks = args.iter().any(|a| a == "--hooks");
+    args.retain(|a| a != "--hooks");
+    if hooks && agent.is_none() {
+        return Err(Error::usage("--hooks needs --agent <claude|codex>"));
+    }
+    let id = client::session_new(root, kind, command, repo, pty, agent, hooks).await?;
     println!("{id}");
     Ok(())
 }
@@ -232,6 +298,25 @@ async fn cmd_close(root: &Path, args: &[String]) -> Result<()> {
             None => "closed",
         }
     );
+    Ok(())
+}
+
+async fn cmd_rename(root: &Path, args: &[String]) -> Result<()> {
+    let id = parse_id(args.first())?;
+    let name = match args.get(1).map(String::as_str) {
+        None => {
+            return Err(Error::usage(
+                "usage: rename <id> <name> | rename <id> --clear",
+            ))
+        }
+        Some("--clear") => None,
+        Some(name) => Some(name.to_owned()),
+    };
+    client::session_rename(root, id, name.clone()).await?;
+    match name {
+        Some(name) => println!("renamed to \"{name}\""),
+        None => println!("name cleared"),
+    }
     Ok(())
 }
 

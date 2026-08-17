@@ -128,6 +128,7 @@ pub async fn session_new(
     repo: Option<PathBuf>,
     pty: bool,
     agent: Option<sessionmgr_core::AgentKind>,
+    hooks: bool,
 ) -> Result<SessionId> {
     match request(
         root,
@@ -137,6 +138,7 @@ pub async fn session_new(
             repo,
             pty,
             agent,
+            hooks,
         },
     )
     .await?
@@ -166,6 +168,15 @@ pub async fn session_close(
         Response::Ok => Ok(()),
         other => Err(Error::protocol(format!(
             "unexpected answer to session-close: {other:?}"
+        ))),
+    }
+}
+
+pub async fn session_rename(root: &Path, id: SessionId, name: Option<String>) -> Result<()> {
+    match request(root, Request::SessionRename { id, name }).await? {
+        Response::Ok => Ok(()),
+        other => Err(Error::protocol(format!(
+            "unexpected answer to session-rename: {other:?}"
         ))),
     }
 }
@@ -254,11 +265,11 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
         return "no sessions".to_owned();
     }
     let mut out = String::from(
-        "ID            STATUS       KIND            BRANCH                    COMMAND\n",
+        "ID            STATUS       KIND            BRANCH                    NAME                 COMMAND\n",
     );
     for session in sessions {
         out.push_str(&format!(
-            "{:<13} {:<12} {:<15} {:<25} {}\n",
+            "{:<13} {:<12} {:<15} {:<25} {:<20} {}\n",
             session.id,
             format!("{:?}", session.status),
             format!("{:?}", session.kind),
@@ -266,6 +277,7 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
             // works on whatever the repository is already on, which is
             // exactly the property that makes it the unisolated choice.
             session.branch.as_deref().unwrap_or("-"),
+            session.name.as_deref().unwrap_or("-"),
             session.command.join(" "),
         ));
     }
@@ -302,6 +314,7 @@ mod tests {
             created_at_millis: 1_700_000_000_000,
             exit_code: None,
             agent: None,
+            name: None,
         };
         let rendered = render_sessions(std::slice::from_ref(&summary));
         assert!(rendered.contains(summary.id.as_str()));

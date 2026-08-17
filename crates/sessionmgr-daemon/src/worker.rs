@@ -128,13 +128,19 @@ enum Backend {
     /// Plain pipes, holding the child's stdin so input can still be sent.
     Piped(Mutex<Option<rusty_tokio::process::ChildStdin>>),
 }
-/// Tier-3 `needs_input` state for an agent-backed session: the adapter
-/// plus the `vt100` screen it renders output into, and the last signal
-/// computed, so an unchanged signal never triggers a redundant
-/// transition/write/emit on every single output chunk.
+/// State shared by both tiers for an agent-backed session: the adapter,
+/// and the last signal computed, so an unchanged signal never triggers a
+/// redundant transition/write/emit.
+///
+/// `watcher` is tier-3's alone and is `None` for a piped session (ADR-
+/// 0002: an agent CLI is not meaningfully interactive without a real
+/// terminal, so there is nothing sensible to feed a `vt100` screen with)
+/// -- but a piped session still gets an `AgentState` at all, because
+/// tier 1 (hooks) needs neither a PTY nor a screen; it needs only to
+/// know which adapter to ask and somewhere to cache the last signal.
 struct AgentState {
     adapter: Box<dyn AgentAdapterPort + Send + Sync>,
-    watcher: sessionmgr_agents::ScreenWatcher,
+    watcher: Option<sessionmgr_agents::ScreenWatcher>,
     last_signal: AgentSignal,
 }
 
@@ -233,14 +239,18 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
     session.transition_to(SessionStatus::Running)?;
     catalog::write_session(&root, &session)?;
 
-    // Tier-3 detection only makes sense for a real terminal (ADR-0002:
-    // an agent CLI is not meaningfully interactive without one), so a
-    // piped agent session gets no adapter even though it has one.
-    let agent = session.agent.filter(|_| session.pty).map(|kind| {
-        let size = TerminalSize::default();
+    // Every agent-backed session gets an `AgentState`, PTY or not --
+    // tier 1 (hooks) needs no terminal. Tier 3's `vt100` screen is
+    // built only for a PTY session (ADR-0002: an agent CLI is not
+    // meaningfully interactive without one).
+    let agent = session.agent.map(|kind| {
+        let watcher = session.pty.then(|| {
+            let size = TerminalSize::default();
+            sessionmgr_agents::ScreenWatcher::new(size.rows, size.cols)
+        });
         std::sync::Mutex::new(AgentState {
             adapter: sessionmgr_agents::adapter_for(kind),
-            watcher: sessionmgr_agents::ScreenWatcher::new(size.rows, size.cols),
+            watcher,
             last_signal: AgentSignal::Running,
         })
     });
@@ -421,11 +431,12 @@ impl Worker {
     /// screen and, if the rendered screen's signal changed since the
     /// last chunk, transitions and announces it.
     ///
-    /// A no-op for a session with no adapter (`self.agent` is `None`),
-    /// and for every chunk that does not change the signal -- which is
-    /// most of them, since a CLI's screen typically settles into one
-    /// state (busy, or waiting) across many output chunks in a row, not
-    /// a fresh one on every single read.
+    /// A no-op for a session with no adapter (`self.agent` is `None`)
+    /// or no PTY (`watcher` is `None` -- a piped session, where tier 3
+    /// does not apply at all), and for every chunk that does not change
+    /// the signal -- which is most of them, since a CLI's screen
+    /// typically settles into one state (busy, or waiting) across many
+    /// output chunks in a row, not a fresh one on every single read.
     fn check_agent_signal(&self, data: &[u8]) {
         let Some(agent) = &self.agent else { return };
         let signal = {
@@ -433,14 +444,58 @@ impl Worker {
             // compared to the cached signal, all synchronously, so the
             // lock never needs to survive past this block.
             let mut state = agent.lock().unwrap_or_else(|e| e.into_inner());
-            state.watcher.feed(data);
-            let signal = state.adapter.needs_input(&state.watcher.text());
+            let Some(watcher) = state.watcher.as_mut() else {
+                return;
+            };
+            watcher.feed(data);
+            let text = watcher.text();
+            let signal = state.adapter.needs_input(&text);
             if signal == state.last_signal {
                 return;
             }
             state.last_signal = signal;
             signal
         };
+        self.apply_agent_signal(signal);
+    }
+
+    /// Tier 1: an installed hook fired. Interprets `event` through the
+    /// same adapter tier-3 uses and, for a status outcome, drives the
+    /// exact same transition path through the same `last_signal` cache
+    /// -- a hook and a pattern match agreeing is not a conflict, just
+    /// redundant confirmation, and whichever tier notices a change
+    /// first wins; the other becomes a no-op.
+    ///
+    /// A no-op for a session with no adapter, same as tier-3.
+    fn handle_hook_event(&self, event: &str) {
+        let Some(agent) = &self.agent else { return };
+        let outcome = {
+            let mut state = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let outcome = state.adapter.hook_signal(event);
+            if let sessionmgr_core::ports::HookOutcome::Status(signal) = outcome {
+                if state.last_signal == signal {
+                    return;
+                }
+                state.last_signal = signal;
+            }
+            outcome
+        };
+        match outcome {
+            sessionmgr_core::ports::HookOutcome::Status(signal) => self.apply_agent_signal(signal),
+            sessionmgr_core::ports::HookOutcome::Notify => {
+                if let Ok(session) = catalog::read_session(&self.root, &self.id) {
+                    crate::hooks::dispatch::notify(&session, "subagent-finished");
+                }
+            }
+            sessionmgr_core::ports::HookOutcome::Ignore => {}
+        }
+    }
+
+    /// Shared by both tiers once a new `AgentSignal` has been decided:
+    /// transitions the session record, announces it to attached
+    /// clients, and -- only for `NeedsInput`, the one outcome anybody
+    /// would plausibly want paged about -- fires the webhook.
+    fn apply_agent_signal(&self, signal: AgentSignal) {
         let new_status = match signal {
             AgentSignal::Running => SessionStatus::Running,
             AgentSignal::NeedsInput => SessionStatus::NeedsInput,
@@ -451,13 +506,17 @@ impl Worker {
                 // the live states this signal only makes sense within
                 // (it exited between the last chunk and this one, most
                 // likely) -- tier-2's exit status already won that race
-                // and is authoritative, so a stale tier-3 guess is
-                // silently dropped rather than fighting it.
+                // and is authoritative, so a stale guess from either
+                // tier 1 or tier 3 is silently dropped rather than
+                // fighting it.
                 if session.transition_to(new_status).is_ok() {
                     if let Err(e) = catalog::write_session(&self.root, &session) {
                         eprintln!("sessionmgr worker: could not record {new_status:?}: {e}");
                     }
                     self.emit(SessionEvent::Status { status: new_status });
+                    if new_status == SessionStatus::NeedsInput {
+                        crate::hooks::dispatch::notify(&session, "needs-input");
+                    }
                 }
             }
             Err(e) => eprintln!("sessionmgr worker: could not read the session record: {e}"),
@@ -473,6 +532,11 @@ impl Worker {
                 if let Err(e) = catalog::write_session(&self.root, &session) {
                     eprintln!("sessionmgr worker: could not record the exit: {e}");
                 }
+                let event = match session.status {
+                    SessionStatus::Errored => "errored",
+                    _ => "finished",
+                };
+                crate::hooks::dispatch::notify(&session, event);
             }
             Err(e) => eprintln!("sessionmgr worker: could not read the session record: {e}"),
         }
@@ -519,11 +583,14 @@ impl Worker {
     /// Tells the session's terminal it has been resized.
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         if let Some(agent) = &self.agent {
-            agent
+            if let Some(watcher) = agent
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .watcher
-                .resize(rows, cols);
+                .as_mut()
+            {
+                watcher.resize(rows, cols);
+            }
         }
         match &self.backend {
             Backend::Pty(pty) => pty
@@ -581,6 +648,10 @@ async fn serve(worker: Arc<Worker>, mut conn: transport::Connection) {
                 },
             };
             let _ = conn.write(&response).await;
+        }
+        Request::HookFire { event, .. } => {
+            worker.handle_hook_event(&event);
+            let _ = conn.write(&Response::Ok).await;
         }
         Request::WorkerShutdown => {
             let _ = conn.write(&Response::Ok).await;

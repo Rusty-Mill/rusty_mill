@@ -11,6 +11,9 @@ pub struct SessionPane {
     pub id: SessionId,
     pub kind: SessionKind,
     pub status: SessionStatus,
+    /// The user-chosen display label, set by the command palette's
+    /// `rename` action; `None` until renamed.
+    pub name: Option<String>,
     terminal: TerminalPane,
 }
 
@@ -26,6 +29,7 @@ impl SessionPane {
             id,
             kind,
             status,
+            name: None,
             terminal: TerminalPane::new(rows, cols),
         }
     }
@@ -46,12 +50,29 @@ impl SessionPane {
         self.status = status;
     }
 
-    /// The title bar: short id, a bracketed status word, and the kind --
-    /// low-confidence-vs-high-confidence status badging (PLAN.md's
-    /// per-CLI confidence tiers) is Phase 3 adapter work, out of scope
-    /// here; this just shows the state the daemon actually reports.
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name;
+    }
+
+    /// What the command palette's "Focus: ..." entries and the pane
+    /// title both call this session -- the display name if it was
+    /// renamed, else its id.
+    pub fn display_label(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.id.to_string())
+    }
+
+    /// The title bar: the display label, a bracketed status word, and
+    /// the kind -- low-confidence-vs-high-confidence status badging
+    /// (PLAN.md's per-CLI confidence tiers) is Phase 3 adapter work, out
+    /// of scope here; this just shows the state the daemon actually
+    /// reports.
     fn title(&self) -> String {
-        format!(" {} [{:?}] {:?} ", self.id, self.status, self.kind)
+        format!(
+            " {} [{:?}] {:?} ",
+            self.display_label(),
+            self.status,
+            self.kind
+        )
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, focused: bool) {
