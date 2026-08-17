@@ -18,8 +18,10 @@
 pub mod claude_code;
 pub mod codex;
 pub mod gemini;
+pub mod handoff;
 pub mod pattern_watch;
 
+pub use handoff::render_handoff;
 pub use pattern_watch::ScreenWatcher;
 use sessionmgr_core::ports::AgentAdapterPort;
 use sessionmgr_core::AgentKind;

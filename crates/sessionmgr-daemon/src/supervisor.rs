@@ -24,8 +24,8 @@ use rusty_tokio::sync::{Mutex, Notify};
 use serde::{Deserialize, Serialize};
 use sessionmgr_core::ports::GitPort;
 use sessionmgr_core::{
-    Disposition, ParentReadiness, RecoveryAction, Session, SessionId, SessionKind, SessionStatus,
-    Workspace,
+    AgentKind, Disposition, ParentReadiness, RecoveryAction, Session, SessionId, SessionKind,
+    SessionStatus, Workspace,
 };
 use sessionmgr_git::SystemGit;
 use sessionmgr_protocol::{Request, Response, SessionEvent, SessionSummary};
@@ -265,6 +265,9 @@ impl Supervisor {
             Request::SessionRename { id, name } => self.session_rename(id, name).await,
             Request::SessionStartNow { id } => self.session_start_now(id).await,
             Request::SessionFork { id, pty } => self.session_fork(id, pty).await,
+            Request::SessionSwitchAgent { id, agent, pty } => {
+                self.session_switch_agent(id, agent, pty).await
+            }
             Request::GitStatus { id } => self.session_git_status(id).await,
             Request::GitDiff { id, path } => self.session_git_diff(id, path).await,
             Request::HookFire { session_id, event } => self.hook_fire(session_id, event).await,
@@ -389,6 +392,7 @@ impl Supervisor {
             parent.clone(),
             wait_for_parent,
             native_session_id,
+            None,
             None,
         );
 
@@ -636,6 +640,7 @@ impl Supervisor {
             false,
             Some(new_native_id),
             Some(source_id),
+            None,
         );
         catalog::write_session(&self.root, &session)?;
         self.spawn_and_await_running(&id).await?;
@@ -663,6 +668,105 @@ impl Supervisor {
         })
         .await
         .map_err(|e| Error::conflict(format!("the fork-workspace task did not complete: {e}")))?
+    }
+
+    /// CAPABILITIES.md's "Switch agent mid-session": stops `source_id`'s
+    /// live agent conversation and starts a brand-new session running
+    /// `new_agent` in its place -- **the same workspace** as the source
+    /// (there is one line of work here, not two, unlike
+    /// [`Self::session_fork`]'s own new worktree), seeded with a
+    /// rendered handoff of the source's own transcript as the new
+    /// agent's initial prompt. See `sessionmgr_agents::handoff`'s own
+    /// docs for why this is a text handoff, not a per-CLI native state
+    /// translation, and `docs/phase-7-report.md` for the full design.
+    async fn session_switch_agent(
+        self: &Arc<Self>,
+        source_id: SessionId,
+        new_agent: AgentKind,
+        pty: bool,
+    ) -> Result<Response> {
+        let mut source = catalog::read_session(&self.root, &source_id)?;
+        let Some(source_agent) = source.agent else {
+            return Err(Error::usage(format!(
+                "session {source_id} has no agent CLI conversation to switch away from"
+            )));
+        };
+        if source_agent == new_agent {
+            return Err(Error::usage(format!(
+                "session {source_id} is already running {new_agent:?}"
+            )));
+        }
+        // Mirrors `Session::can_transition_to`'s own
+        // `(Running | NeedsInput, SwitchedAway)` edge: only a session
+        // with a genuinely live, mid-conversation agent can be switched
+        // away from. `Created` has nothing to hand off yet, and every
+        // other status is either already terminal or an exited process
+        // with no live worker to stop.
+        if !matches!(
+            source.status,
+            SessionStatus::Running | SessionStatus::NeedsInput
+        ) {
+            return Err(Error::usage(format!(
+                "session {source_id} is {:?}; only a live (running or needs-input) session \
+                 can be switched to a different agent",
+                source.status
+            )));
+        }
+
+        let transcript = catalog::read_transcript(&self.root, &source_id)?;
+        let mut raw = Vec::new();
+        for event in transcript {
+            if let SessionEvent::Output { data } = event {
+                raw.extend_from_slice(&data);
+            }
+        }
+        let handoff = sessionmgr_agents::render_handoff(&format!("{source_agent:?}"), &raw);
+
+        // Stopped *before* the new session's own record is written or
+        // its worker spawned: the new session is about to run in this
+        // exact same workspace, and only one live process should hold
+        // it at a time.
+        self.stop_worker(&source_id, &source).await;
+
+        let id = sessionmgr_proc::session_id()
+            .map_err(|e| Error::io("generating a session id", None, e))?;
+        let adapter = sessionmgr_agents::adapter_for(new_agent);
+        // Same creation-time pinning `session_new` already does for any
+        // fork-capable adapter, so a switched-to session is exactly as
+        // forkable afterward as one created directly.
+        let native_session_id = match adapter.supports_fork() {
+            true => Some(
+                sessionmgr_proc::native_session_uuid()
+                    .map_err(|e| Error::io("generating a native session id", None, e))?,
+            ),
+            false => None,
+        };
+        let command = adapter.launch_args(&[handoff], false, native_session_id.as_deref());
+
+        let new_session = Session::new(
+            id.clone(),
+            source.kind,
+            command,
+            source.workspace.clone(),
+            pty,
+            sessionmgr_proc::now_millis(),
+            Some(new_agent),
+            None,
+            false,
+            native_session_id,
+            None,
+            Some(source_id),
+        );
+
+        // The source's own record, not the new session's: written first
+        // so a crash between the two never leaves two live-looking
+        // records pointed at the same workspace.
+        source.transition_to(SessionStatus::SwitchedAway)?;
+        catalog::write_session(&self.root, &source)?;
+
+        catalog::write_session(&self.root, &new_session)?;
+        self.spawn_and_await_running(&id).await?;
+        Ok(Response::SessionCreated { id })
     }
 
     /// The core of the wait-for-parent mechanism: if `id` is currently
@@ -980,6 +1084,43 @@ impl Supervisor {
         Ok(Response::Ok)
     }
 
+    /// Stops `session`'s live processes -- graceful `WorkerShutdown`
+    /// first, then a forced terminate of whatever pids are left -- and
+    /// nothing else. Factored out of [`Self::session_close`] so
+    /// [`Self::session_switch_agent`] can stop a session's worker the
+    /// same way without also disposing of its workspace, which (unlike
+    /// an ordinary close) the switched-away session does not own
+    /// afterward but must still leave intact for the new session that
+    /// does.
+    async fn stop_worker(&self, id: &SessionId, session: &Session) {
+        // 1. Ask nicely. A worker that acks shuts its own child down and
+        //    exits, which is cleaner than anything done from outside.
+        let socket = paths::worker_socket(&self.root, id);
+        let graceful = rusty_tokio::time::timeout(GRACEFUL_CLOSE_TIMEOUT, async {
+            let mut conn =
+                transport::Connection::connect("connecting to a worker", &socket).await?;
+            let response: Response = conn.request(&Request::WorkerShutdown).await?;
+            Ok::<_, Error>(response)
+        })
+        .await;
+        if !matches!(graceful, Ok(Ok(Response::Ok))) {
+            // Not an error worth failing over -- a worker that already
+            // exited, or is wedged, is exactly why the forced path below
+            // exists.
+            eprintln!("sessionmgr daemon: session {id} did not acknowledge a graceful shutdown");
+        }
+
+        // 2. Terminate whatever is left, worker **and** child. Killing
+        //    only the worker would leave its child running as an orphan
+        //    with nothing tracking it and no way for the user to reach
+        //    it. This is why both pids are recorded.
+        for pid in sessionmgr_core::recovery::teardown_pids(session) {
+            if let Err(e) = sessionmgr_proc::terminate(pid) {
+                eprintln!("sessionmgr daemon: could not terminate pid {pid}: {e}");
+            }
+        }
+    }
+
     /// Graceful first, then force, then record.
     ///
     /// The ordering is deliberate: processes are terminated **before**
@@ -1023,32 +1164,8 @@ impl Supervisor {
             // ordinary path below using it.
         }
 
-        // 1. Ask nicely. A worker that acks shuts its own child down and
-        //    exits, which is cleaner than anything done from outside.
-        let socket = paths::worker_socket(&self.root, &id);
-        let graceful = rusty_tokio::time::timeout(GRACEFUL_CLOSE_TIMEOUT, async {
-            let mut conn =
-                transport::Connection::connect("connecting to a worker", &socket).await?;
-            let response: Response = conn.request(&Request::WorkerShutdown).await?;
-            Ok::<_, Error>(response)
-        })
-        .await;
-        if !matches!(graceful, Ok(Ok(Response::Ok))) {
-            // Not an error worth failing the close over -- a worker that
-            // already exited, or is wedged, is exactly why the forced
-            // path below exists.
-            eprintln!("sessionmgr daemon: session {id} did not acknowledge a graceful shutdown");
-        }
-
-        // 2. Terminate whatever is left, worker **and** child. Killing
-        //    only the worker would leave its child running as an orphan
-        //    with nothing tracking it and no way for the user to reach
-        //    it. This is why both pids are recorded.
-        for pid in sessionmgr_core::recovery::teardown_pids(&session) {
-            if let Err(e) = sessionmgr_proc::terminate(pid) {
-                eprintln!("sessionmgr daemon: could not terminate pid {pid}: {e}");
-            }
-        }
+        // 1-2. Ask nicely, then terminate whatever is left.
+        self.stop_worker(&id, &session).await;
 
         // 3. Only once nothing is running: dispose of the worktree. A
         //    live process holding a file open inside it would make the

@@ -127,6 +127,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         );
         s.status = status;
         s.worker = worker;

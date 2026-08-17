@@ -43,11 +43,15 @@ pub enum ParentReadiness {
 ///   parent's own close actually removed the worktree (see
 ///   `Supervisor::dispose_workspace`, which runs `git worktree remove`
 ///   for *both* dispositions, not just `--discard`): [`ParentReadiness::Unavailable`].
+/// - [`SessionStatus::SwitchedAway`] (Phase 7) means the parent's own
+///   agent conversation moved to a new session, but -- unlike
+///   `Merged`/`Discarded` -- its workspace was **not** removed, only
+///   handed off: [`ParentReadiness::Ready`], the same as `Closed`.
 pub fn parent_readiness(parent_status: SessionStatus) -> ParentReadiness {
     use SessionStatus::*;
     match parent_status {
         Created | Running | NeedsInput | Waiting => ParentReadiness::NotYet,
-        Finished | Errored | Crashed | Closed => ParentReadiness::Ready,
+        Finished | Errored | Crashed | Closed | SwitchedAway => ParentReadiness::Ready,
         Merged | Discarded => ParentReadiness::Unavailable,
     }
 }
@@ -79,6 +83,7 @@ mod tests {
             SessionStatus::Errored,
             SessionStatus::Crashed,
             SessionStatus::Closed,
+            SessionStatus::SwitchedAway,
         ] {
             assert_eq!(
                 parent_readiness(status),

@@ -172,6 +172,23 @@ pub enum Request {
         pty: bool,
     },
 
+    /// CAPABILITIES.md's "Switch agent mid-session": stops `id`'s live
+    /// agent conversation and creates a brand-new session running
+    /// `agent` instead, in the **same** workspace (there is one line of
+    /// work here, not two, unlike `SessionFork`) -- seeded with a
+    /// rendered handoff of `id`'s own transcript as the new agent's
+    /// initial prompt rather than a native per-CLI state translation
+    /// (see `sessionmgr_agents::handoff`'s own docs for why). `id`
+    /// transitions to [`SessionStatus::SwitchedAway`] and keeps its
+    /// workspace on disk, now owned by the new session. See
+    /// `docs/phase-7-report.md`.
+    SessionSwitchAgent {
+        id: SessionId,
+        agent: AgentKind,
+        /// Same meaning as `SessionNew`'s own `pty` field.
+        pty: bool,
+    },
+
     /// The files changed in a session's workspace, for the diff pane.
     /// `NotFound` if the session has no workspace (a `PlainTerminal`
     /// session, or one that failed before a workspace was set up).
@@ -301,6 +318,12 @@ pub struct SessionSummary {
     /// `sessionmgr_core::Session::forked_from`'s own docs for why.
     #[serde(default)]
     pub forked_from: Option<SessionId>,
+    /// The session this one took over from via switch-agent-mid-session,
+    /// if it was -- a third relationship, distinct from both `parent`
+    /// and `forked_from`; see `sessionmgr_core::Session::switched_from`'s
+    /// own docs for why.
+    #[serde(default)]
+    pub switched_from: Option<SessionId>,
 }
 
 /// A live event streamed to an attached client.
@@ -410,7 +433,15 @@ mod tests {
                 name: Some("my session".to_owned()),
             },
             Request::SessionStartNow { id: id.clone() },
-            Request::SessionFork { id, pty: true },
+            Request::SessionFork {
+                id: id.clone(),
+                pty: true,
+            },
+            Request::SessionSwitchAgent {
+                id,
+                agent: AgentKind::Codex,
+                pty: true,
+            },
             Request::DaemonShutdown,
             Request::WorkerShutdown,
             Request::HookFire {

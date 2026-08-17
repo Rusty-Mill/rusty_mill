@@ -50,6 +50,9 @@ COMMANDS:
     fork <id> [--no-pty]                      clone a session's own agent-CLI
                                               conversation into a new, independent
                                               session (see FORK)
+    switch-agent <id> <agent> [--no-pty]      hand <id>'s live agent conversation
+                                              off to a new session running a
+                                              different agent (see SWITCH AGENT)
     tui                                       grid of session panes (starts a daemon if needed)
     daemon run                                run the supervisor in the foreground
     daemon start                              start the supervisor detached
@@ -95,6 +98,22 @@ FORK:
     this release does not yet build (see docs/phase-6-report.md for
     exactly what and why); forking a Codex or Gemini session fails with a
     clear error naming the gap, not a silent no-op or a guess.
+
+SWITCH AGENT:
+    switch-agent <id> <agent> stops <id>'s live agent conversation and
+    starts a brand-new session running <agent> in its place, in <id>'s own
+    workspace -- CAPABILITIES.md's Switch agent mid-session capability.
+    Unlike fork, this is one line of work continuing, not two: no new
+    worktree is created, and <id> itself stops running once switched.
+
+    The new session's initial prompt is a rendered copy of <id>'s own
+    transcript, so <agent> can read what already happened -- not a native,
+    per-CLI resume. Every agent this tool supports can receive a handoff
+    this way; see docs/phase-7-report.md for why a native translation
+    between three different on-disk transcript formats was not built.
+
+    Requires <id> to have a live agent conversation (status running or
+    needs-input) and a different --agent than it already runs.
 
 AGENTS:
     claude       Claude Code -- tier-3 pattern matching, plus a verified
@@ -158,6 +177,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         "rename" => cmd_rename(&root, rest).await,
         "start-now" => cmd_start_now(&root, rest).await,
         "fork" => cmd_fork(&root, rest).await,
+        "switch-agent" => cmd_switch_agent(&root, rest).await,
         "tui" => {
             client::ensure_daemon(&root).await?;
             sessionmgr_tui::run(paths::daemon_socket(&root))
@@ -313,17 +333,10 @@ async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
     // `--agent` resolves `command` through that agent's own
     // `launch_args` instead of treating it as the literal program to
     // run, and turns on tier-3 `needs_input` detection for the session.
-    let agent = match take_option(&mut args, "--agent")?.as_deref() {
-        None => None,
-        Some("claude" | "claude-code") => Some(sessionmgr_core::AgentKind::ClaudeCode),
-        Some("codex") => Some(sessionmgr_core::AgentKind::Codex),
-        Some("gemini") => Some(sessionmgr_core::AgentKind::Gemini),
-        Some(other) => {
-            return Err(Error::usage(format!(
-                "unknown agent `{other}` (expected `claude`, `codex`, or `gemini`)"
-            )))
-        }
-    };
+    let agent = take_option(&mut args, "--agent")?
+        .as_deref()
+        .map(parse_agent_name)
+        .transpose()?;
     // `--hooks` installs `agent`'s own hook config into the session's
     // worktree -- opt-in (see Request::SessionNew's own docs for why),
     // and meaningless without an agent to install hooks for. A dependent
@@ -373,6 +386,31 @@ async fn cmd_fork(root: &Path, args: &[String]) -> Result<()> {
     let forked = client::session_fork(root, id, pty).await?;
     println!("{forked}");
     Ok(())
+}
+
+async fn cmd_switch_agent(root: &Path, args: &[String]) -> Result<()> {
+    let mut args = args.to_vec();
+    let pty = !args.iter().any(|a| a == "--no-pty");
+    args.retain(|a| a != "--no-pty");
+    let id = parse_id(args.first())?;
+    let agent = match args.get(1) {
+        Some(name) => parse_agent_name(name)?,
+        None => return Err(Error::usage("switch-agent requires <id> <agent>")),
+    };
+    let switched = client::session_switch_agent(root, id, agent, pty).await?;
+    println!("{switched}");
+    Ok(())
+}
+
+fn parse_agent_name(name: &str) -> Result<sessionmgr_core::AgentKind> {
+    match name {
+        "claude" | "claude-code" => Ok(sessionmgr_core::AgentKind::ClaudeCode),
+        "codex" => Ok(sessionmgr_core::AgentKind::Codex),
+        "gemini" => Ok(sessionmgr_core::AgentKind::Gemini),
+        other => Err(Error::usage(format!(
+            "unknown agent `{other}` (expected `claude`, `codex`, or `gemini`)"
+        ))),
+    }
 }
 
 async fn cmd_daemon(root: &Path, args: &[String]) -> Result<()> {
