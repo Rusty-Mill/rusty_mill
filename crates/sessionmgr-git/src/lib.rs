@@ -71,6 +71,46 @@ fn git(operation: &'static str, cwd: &Path, args: &[&str]) -> Result<String, Git
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// A conservative cutoff, not a precise git-internal constant.
+///
+/// Git for Windows' own MSYS2 compatibility layer has a fixed-size
+/// internal buffer computing a new worktree's `$GIT_DIR`, entirely
+/// separate from -- and not fixed by -- `core.longpaths` (set on every
+/// invocation above), the OS `LongPathsEnabled` registry policy, or this
+/// binary's own `longPathAware` manifest. None of those touch this
+/// failure at all. Measured directly
+/// (`docs/phase-2-windows-verification.md`): a 186-character worktree
+/// path succeeded, a 216-character one failed with `fatal: '$GIT_DIR'
+/// too big`. The real ceiling sits somewhere in that unmeasured gap and
+/// is git-version-dependent, so this is deliberately a round number with
+/// margin on both sides of the measured range, not the exact boundary --
+/// see <https://github.com/baileyrd/rusty_yirp/issues/7>.
+#[cfg(windows)]
+const WORKTREE_PATH_WARN_LEN: usize = 200;
+
+/// Fails fast with an explanation, before `git worktree add` ever runs,
+/// once a worktree's path is long enough that Git for Windows is known
+/// to fail on it with a cryptic internal error instead. Windows-only:
+/// the underlying bug is specific to Git for Windows' own MSYS2 layer,
+/// not a general git limitation.
+#[cfg(windows)]
+fn check_worktree_path_length(worktree: &str) -> Result<(), GitError> {
+    let len = worktree.chars().count();
+    if len >= WORKTREE_PATH_WARN_LEN {
+        return Err(GitError {
+            operation: "worktree add",
+            message: format!(
+                "this worktree's path is {len} characters long ({worktree}), past the point \
+                 where Git for Windows' own worktree machinery is known to fail with a cryptic \
+                 `$GIT_DIR too big` error rather than this one -- move the repository somewhere \
+                 shallower before creating a worktree session against it (see \
+                 https://github.com/baileyrd/rusty_yirp/issues/7)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl GitPort for SystemGit {
     fn repo_root(&self, path: &Path) -> Result<PathBuf, GitError> {
         // `--show-toplevel` rather than looking for a `.git` directory:
@@ -90,6 +130,8 @@ impl GitPort for SystemGit {
 
     fn worktree_add(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<(), GitError> {
         let worktree = worktree.to_string_lossy().into_owned();
+        #[cfg(windows)]
+        check_worktree_path_length(&worktree)?;
         // `-b <branch>` creates the branch as part of adding the
         // worktree, so there is never a window where one exists without
         // the other.
@@ -250,5 +292,27 @@ mod tests {
             parse_status_line("MM a.rs").map(|c| c.status),
             Some("MM".to_owned())
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_worktree_path_under_the_measured_working_length_is_allowed() {
+        // 186 characters measured to actually succeed
+        // (docs/phase-2-windows-verification.md); the guard must not
+        // reject something known to work.
+        let path = "C:\\".to_owned() + &"a".repeat(183);
+        assert_eq!(path.len(), 186);
+        assert!(check_worktree_path_length(&path).is_ok());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_worktree_path_at_the_cutoff_is_rejected_with_a_clear_message() {
+        let path = "C:\\".to_owned() + &"a".repeat(197);
+        assert_eq!(path.len(), WORKTREE_PATH_WARN_LEN);
+        let err = check_worktree_path_length(&path).expect_err("must reject at the cutoff");
+        assert_eq!(err.operation, "worktree add");
+        assert!(err.message.contains("$GIT_DIR too big"));
+        assert!(err.message.contains("issues/7"));
     }
 }
