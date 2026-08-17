@@ -244,7 +244,19 @@ fn codex_credentialed() -> bool {
         .args(["login", "status"])
         .output()
         .is_ok_and(|o| {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).contains("Logged in")
+            // `codex login status` writes its message to *stderr*, not
+            // stdout, when run without a TTY attached (confirmed live:
+            // `codex login status < /dev/null` produces empty stdout and
+            // the real "Logged in..."/"Not logged in" text on stderr) --
+            // checking stdout alone always reads as "not logged in"
+            // regardless of real state, which would have silently
+            // stopped this test from ever running for real again even
+            // once real credentials/quota were available. Discovered and
+            // fixed here, and in `fork_sessions.rs`'s own copy, after
+            // this exact bug shipped in this function originally.
+            o.status.success()
+                && (String::from_utf8_lossy(&o.stdout).contains("Logged in")
+                    || String::from_utf8_lossy(&o.stderr).contains("Logged in"))
         })
 }
 

@@ -18,6 +18,11 @@
 //!   (`docs/phase-6-report.md`, issue #15) -- verified against a real,
 //!   running `gemini` process. Skipped cleanly when no key is
 //!   configured.
+//! - **Gated on a real, logged-in `codex`**: Codex's own thread-resume
+//!   mechanism, pointed at a native thread id located the same way
+//!   `Codex::fork_args` does in production (`docs/phase-6-report.md`,
+//!   issue #14) -- verified against a real, running `codex` process.
+//!   Skipped cleanly when not logged in.
 
 mod common;
 
@@ -34,6 +39,25 @@ fn claude_installed() -> bool {
 
 fn gemini_credentialed() -> bool {
     std::env::var_os("GEMINI_API_KEY").is_some()
+}
+
+fn codex_credentialed() -> bool {
+    std::process::Command::new("codex")
+        .args(["login", "status"])
+        .output()
+        .is_ok_and(|o| {
+            // `codex login status` writes its message to *stderr*, not
+            // stdout, when run without a TTY attached (confirmed live:
+            // `codex login status < /dev/null` produces empty stdout and
+            // the real "Logged in..."/"Not logged in" text on stderr) --
+            // checking stdout alone always reads as "not logged in"
+            // regardless of real state, which would have silently
+            // stopped this test from ever running for real again even
+            // once real credentials/quota were available.
+            o.status.success()
+                && (String::from_utf8_lossy(&o.stdout).contains("Logged in")
+                    || String::from_utf8_lossy(&o.stderr).contains("Logged in"))
+        })
 }
 
 #[test]
@@ -74,55 +98,29 @@ fn forking_requires_an_agent() {
     );
 }
 
-#[test]
-fn forking_an_unsupported_agent_names_the_gap_clearly() {
-    // Codex is real and installed as an agent kind, but its own adapter
-    // does not support Fork yet -- see docs/phase-6-report.md. The error
-    // must say so plainly, not fail some other, more confusing way.
-    let root = TempRoot::new("fork-unsupported-agent");
-    let repo = TempRepo::new("fork-unsupported-agent");
-    let id = session_new_in(
-        root.path(),
-        &[
-            "--kind",
-            "worktree",
-            "--repo",
-            &repo.path_str(),
-            "--agent",
-            "codex",
-        ],
-        &[],
-    );
-    // The session may already have exited (no codex credentials in most
-    // test environments) -- that is fine, forking only needs the record
-    // and its agent field, not a live process.
-    let _ = wait_until(
-        || session_status(root.path(), &id) != "created",
-        Duration::from_secs(15),
-    );
-
-    let output = run(root.path(), &["fork", &id]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Codex does not support Fork yet"),
-        "the error should name the agent and say Fork isn't supported for it: {stderr}"
-    );
-
-    let _ = run(root.path(), &["close", &id, "--discard"]);
-}
+// `forking_an_unsupported_agent_names_the_gap_clearly` used to live here,
+// verifying that forking a Codex session failed with "Codex does not
+// support Fork yet". Removed once Codex gained Fork support (this
+// report's own 2026-08-17 update): all three agents this project
+// supports now answer `true` to `supports_fork()`, so
+// `Supervisor::session_fork`'s own "{agent:?} does not support Fork yet"
+// branch has no real adapter left to exercise it against today -- it
+// stays in the source as defensive code for a future, genuinely
+// unsupported adapter, just without a black-box test that would need to
+// fake one to run. `forking_a_codex_session_with_no_conversation_yet_names_the_gap_clearly`
+// below covers what this test's own Codex case was actually verifying
+// day to day (nothing to fork from *yet*), just correctly attributed now
+// that Codex's own gap is "no rollout file located", not "unsupported".
 
 #[test]
 fn forking_a_gemini_session_with_no_conversation_yet_names_the_gap_clearly() {
     // Gemini CLI's Fork *mechanism* works (`supports_fork() == true`),
     // but a session that never actually talked to the model has no chat
     // file yet for `fork_args`'s own discovery step to find -- a real,
-    // session-specific "cannot fork this one right now" outcome, not the
-    // same thing as "Gemini does not support Fork" (`forking_an_unsupported_agent_names_the_gap_clearly`'s
-    // own case above), and the error message must say so rather than
-    // conflating the two. No live model call happens here at all: the
-    // interactive trust gate blocks before any message would ever be
-    // sent, so this needs no `GEMINI_API_KEY` and costs no quota.
+    // session-specific "cannot fork this one right now" outcome. No live
+    // model call happens here at all: the interactive trust gate blocks
+    // before any message would ever be sent, so this needs no
+    // `GEMINI_API_KEY` and costs no quota.
     let root = TempRoot::new("fork-gemini-no-chat");
     let repo = TempRepo::new("fork-gemini-no-chat");
     let id = session_new_in(
@@ -488,4 +486,272 @@ fn fresh_uuid() -> String {
         bytes[14],
         bytes[15]
     )
+}
+
+#[test]
+fn forking_a_codex_session_with_no_conversation_yet_names_the_gap_clearly() {
+    // Codex's Fork *mechanism* works (`supports_fork() == true`), but a
+    // session that never actually talked to the model has no rollout
+    // file yet for `fork_args`'s own discovery step to find -- a real,
+    // session-specific "cannot fork this one right now" outcome, not the
+    // same thing as "Codex does not support Fork" (this file's own
+    // `forking_an_unsupported_agent_names_the_gap_clearly`, which
+    // predates this adapter supporting Fork at all). Confirmed live
+    // while building this: a bare interactive `codex` launch does not
+    // write a rollout file until an actual conversation happens, so this
+    // needs no live model call, no `OPENAI_API_KEY`, and costs no quota
+    // -- it works identically whether or not codex is credentialed here.
+    let root = TempRoot::new("fork-codex-no-rollout");
+    let repo = TempRepo::new("fork-codex-no-rollout");
+    let id = session_new_in(
+        root.path(),
+        &[
+            "--kind",
+            "worktree",
+            "--repo",
+            &repo.path_str(),
+            "--agent",
+            "codex",
+        ],
+        &[],
+    );
+    let _ = wait_until(
+        || session_status(root.path(), &id) != "created",
+        Duration::from_secs(15),
+    );
+
+    let output = run(root.path(), &["fork", &id]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be forked right now"),
+        "the error should explain there is nothing to fork from yet: {stderr}"
+    );
+    assert!(
+        stderr.contains("Codex"),
+        "the error should name the agent: {stderr}"
+    );
+
+    let _ = run(root.path(), &["close", &id, "--discard"]);
+}
+
+/// Wraps `argv` so the child sees its stdin reach an immediate EOF --
+/// `codex exec` reads stdin and appends it as a `<stdin>` block even
+/// when a prompt is also given, and this project's own `--no-pty` worker
+/// backend never closes a session's stdin pipe on its own (correct for
+/// an interactive session `attach` might still write to, not what a
+/// one-shot invocation needs). Same fix, same reasoning as
+/// `switch_agent.rs`'s own `close_stdin` -- duplicated here rather than
+/// shared through `common/`, since this project's own convention (see
+/// `fresh_uuid` above) is that each gated-CLI test file re-implements
+/// the small, test-specific pieces it needs independently.
+fn close_stdin(mut argv: Vec<String>) -> Vec<String> {
+    if cfg!(windows) {
+        return argv;
+    }
+    let prompt = argv.pop().expect("argv always has a trailing prompt");
+    let program_and_flags = argv.join(" ");
+    vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("exec {program_and_flags} \"$1\" < /dev/null"),
+        "sh".to_owned(),
+        prompt,
+    ]
+}
+
+/// Reads `path`'s first line and, if it is a `SessionMeta` record whose
+/// own `cwd` matches `target_cwd`, returns its `id` -- deliberately
+/// re-implemented here rather than calling into
+/// `sessionmgr_agents::codex` (whose own discovery function is private,
+/// and thoroughly unit-tested there against fixtures): this test's whole
+/// point is independently proving Codex's own conversation-continuation
+/// mechanism actually preserves context, the same reason
+/// `gemini_chat_file_for` in this same file re-implements Gemini's own
+/// discovery rather than calling into its adapter.
+fn codex_thread_id_for(
+    codex_home: &std::path::Path,
+    workspace_cwd: &std::path::Path,
+) -> Option<String> {
+    let sessions_dir = codex_home.join("sessions");
+    let mut day_dirs = Vec::new();
+    for year in std::fs::read_dir(&sessions_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for month in std::fs::read_dir(year.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for day in std::fs::read_dir(month.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if day.file_type().is_ok_and(|t| t.is_dir()) {
+                    day_dirs.push(day.path());
+                }
+            }
+        }
+    }
+    day_dirs.sort_by(|a, b| b.cmp(a));
+    let target_cwd = workspace_cwd.to_string_lossy().into_owned();
+
+    for day_dir in day_dirs {
+        for entry in std::fs::read_dir(&day_dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let is_candidate = entry.file_type().is_ok_and(|t| t.is_file())
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"));
+            if !is_candidate {
+                continue;
+            }
+            let Ok(file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            let mut first_line = String::new();
+            if std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first_line)
+                .is_err()
+            {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&first_line) else {
+                continue;
+            };
+            if record.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+                continue;
+            }
+            let Some(payload) = record.get("payload") else {
+                continue;
+            };
+            if payload.get("cwd").and_then(|c| c.as_str()) != Some(target_cwd.as_str()) {
+                continue;
+            }
+            if let Some(id) = payload.get("id").and_then(|i| i.as_str()) {
+                return Some(id.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Live-verifies the actual mechanism -- Codex's own thread-continuation
+/// primitive, pointed at a native thread id located the same way
+/// `Codex::fork_args` does in production -- against a real, running
+/// `codex` process, mirroring `resume_fork_session_id_actually_preserves_conversation_context`'s
+/// own codeword-recall pattern for Claude Code.
+///
+/// Uses `codex exec resume <id> <prompt>`, not `codex fork <id>`:
+/// `codex exec` (the non-interactive mode this test needs for
+/// deterministic, PTY-free driving) has no `fork` subcommand, only
+/// `resume`. This tests the same underlying claim Fork depends on --
+/// does Codex's own conversation-continuation mechanism, given a
+/// discovered native thread id, actually preserve context -- without
+/// literally exercising the `fork` subcommand's own lineage-tracking
+/// (`forked_from_id`/`parent_thread_id`, per ADR-0003); that specific
+/// distinction is not observable through conversation content alone
+/// either way. Recorded honestly here rather than implied to be
+/// identical.
+///
+/// Skips cleanly (does not fail) if not logged in, or if either live
+/// call does not finish in time -- covers a real, external account-level
+/// failure (this session's own exhausted billing quota, at the time of
+/// writing) this project does not control, the same tier this suite's
+/// other live-gated tests already use.
+#[test]
+fn codex_resume_actually_preserves_conversation_context_via_discovered_thread_id() {
+    if !codex_credentialed() {
+        eprintln!("skipping: codex is not logged in");
+        return;
+    }
+    let root = TempRoot::new("fork-codex-mechanism");
+    let repo = TempRepo::new("fork-codex-mechanism");
+    let live_call_timeout = Duration::from_secs(90);
+
+    let seed_command = close_stdin(vec![
+        "codex".to_owned(),
+        "exec".to_owned(),
+        "Output only the following text, with nothing else before or after it: ORACLE901"
+            .to_owned(),
+    ]);
+    let seed_refs: Vec<&str> = seed_command.iter().map(String::as_str).collect();
+    let source_id = session_new_in(
+        root.path(),
+        &["--kind", "same-dir", "--repo", &repo.path_str(), "--no-pty"],
+        &seed_refs,
+    );
+    let seeded = wait_until(
+        || session_status(root.path(), &source_id) == "finished",
+        live_call_timeout,
+    ) && transcript_contains(root.path(), &source_id, "ORACLE901");
+    if !seeded {
+        eprintln!(
+            "skipping: the seed session did not finish with the expected codeword in this \
+             environment (a real account-level failure such as an exhausted quota, most \
+             likely -- not something this test can tell apart from the outside, or should \
+             fail on)"
+        );
+        let _ = run(root.path(), &["close", &source_id, "--discard"]);
+        return;
+    }
+
+    let codex_home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+    } else {
+        std::env::var_os("HOME")
+    }
+    .map(std::path::PathBuf::from)
+    .map(|h| h.join(".codex"));
+    let workspace_cwd = repo
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.path().to_owned());
+    let thread_id = codex_home
+        .as_deref()
+        .and_then(|home| codex_thread_id_for(home, &workspace_cwd));
+    let Some(thread_id) = thread_id else {
+        eprintln!("skipping: could not locate the source session's own native thread id");
+        let _ = run(root.path(), &["close", &source_id, "--discard"]);
+        return;
+    };
+    let _ = run(root.path(), &["close", &source_id, "--discard"]);
+
+    let recall_command = close_stdin(vec![
+        "codex".to_owned(),
+        "exec".to_owned(),
+        "resume".to_owned(),
+        thread_id,
+        "What was the exact codeword in the loaded session above? Reply with only the \
+         codeword, nothing else."
+            .to_owned(),
+    ]);
+    let recall_refs: Vec<&str> = recall_command.iter().map(String::as_str).collect();
+    let forked_id = session_new_in(
+        root.path(),
+        &["--kind", "same-dir", "--repo", &repo.path_str(), "--no-pty"],
+        &recall_refs,
+    );
+    let finished = wait_until(
+        || session_status(root.path(), &forked_id) == "finished",
+        live_call_timeout,
+    );
+    if !finished {
+        eprintln!(
+            "skipping: the recall session did not finish in this environment (same \
+             account-level caveat as the seed leg above)"
+        );
+        let _ = run(root.path(), &["close", &forked_id, "--discard"]);
+        return;
+    }
+
+    assert!(
+        transcript_contains(root.path(), &forked_id, "ORACLE901"),
+        "a codex session resumed via a discovered thread id should have recalled the \
+         codeword from the source session's own conversation history"
+    );
+    let _ = run(root.path(), &["close", &forked_id, "--discard"]);
 }
