@@ -56,6 +56,15 @@ tui-term = "0.3"
 # just the widget.
 vt100 = "0.16"
 
+# Outbound webhook dispatch (Phase 4, session hooks/extensibility).
+# `ureq` over `reqwest`: this is one best-effort POST fired from a
+# throwaway thread (see `sessionmgr-daemon::hooks::dispatch`), not
+# something that needs an async client or connection pooling -- a
+# blocking call on its own thread is simpler and pulls in less than an
+# async HTTP stack would. Default features (rustls) avoid a system
+# OpenSSL dependency, which matters on Windows.
+ureq = "3"
+
 sessionmgr-core = { path = "crates/sessionmgr-core" }
 sessionmgr-protocol = { path = "crates/sessionmgr-protocol" }
 sessionmgr-proc = { path = "crates/sessionmgr-proc" }

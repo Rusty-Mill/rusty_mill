@@ -9,7 +9,7 @@
 //! is a hook-*installation*-time concern (Phase 4), not something this
 //! adapter's tier-3 fallback needs to account for.
 
-use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal};
+use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, HookOutcome};
 
 pub struct Codex;
 
@@ -26,9 +26,34 @@ const NEEDS_INPUT_MARKERS: &[&str] = &[
     "review hooks",
 ];
 
+/// Events this adapter installs a hook for.
+///
+/// `SessionStart` and `Stop` are live-verified (Phase 3's sandbox spike,
+/// and again in Phase 4's own hook-install spike). `PermissionRequest`
+/// is Codex's own real, named event for exactly the tool-approval
+/// dialog `needs_input`'s tier-3 patterns already recognize by text --
+/// captured directly in Codex's own hooks-review screen (see
+/// `docs/phase-3-report.md`), not independently fired-and-observed
+/// here. `SubagentStop` matches PLAN.md's `SubagentFinished` webhook
+/// category.
+const HOOK_EVENTS: &[&str] = &["SessionStart", "PermissionRequest", "Stop", "SubagentStop"];
+
 impl AgentAdapterPort for Codex {
-    fn launch_args(&self, extra: &[String]) -> Vec<String> {
+    fn launch_args(&self, extra: &[String], hooks_enabled: bool) -> Vec<String> {
         let mut args = vec!["codex".to_owned()];
+        if hooks_enabled {
+            // Both measured in Phase 3's own spike: without
+            // `--dangerously-bypass-hook-trust`, Codex blocks the
+            // session behind an interactive "review hooks" gate before
+            // an installed hook is allowed to run at all -- exactly the
+            // opposite of what an unattended notification feature
+            // needs. Without `--sandbox danger-full-access`, hook
+            // commands (which run under the same sandbox as the
+            // agent's own tool calls) silently failed.
+            args.push("--dangerously-bypass-hook-trust".to_owned());
+            args.push("--sandbox".to_owned());
+            args.push("danger-full-access".to_owned());
+        }
         args.extend(extra.iter().cloned());
         args
     }
@@ -50,6 +75,36 @@ impl AgentAdapterPort for Codex {
         // call hook support itself unverified.
         true
     }
+
+    fn hook_config(
+        &self,
+        hook_fire_exe: &std::path::Path,
+        session_id: &sessionmgr_core::SessionId,
+    ) -> (std::path::PathBuf, String) {
+        // TOML *literal* strings (single-quoted): no escaping at all,
+        // deliberately, which is what makes a Windows path safe to embed
+        // here without hand-rolled quoting logic. The official inline
+        // examples use exactly this form for the same reason.
+        let mut content = String::from("[features]\nhooks = true\n");
+        for event in HOOK_EVENTS {
+            content.push_str(&format!(
+                "\n[[hooks.{event}]]\n\n[[hooks.{event}.hooks]]\ntype = \"command\"\ncommand = '{} __hook-fire --session-id {session_id} --event {event}'\n",
+                hook_fire_exe.display()
+            ));
+        }
+        (
+            std::path::PathBuf::from(".codex").join("config.toml"),
+            content,
+        )
+    }
+
+    fn hook_signal(&self, event: &str) -> HookOutcome {
+        match event {
+            "PermissionRequest" | "Stop" => HookOutcome::Status(AgentSignal::NeedsInput),
+            "SubagentStop" => HookOutcome::Notify,
+            _ => HookOutcome::Ignore,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -58,15 +113,59 @@ mod tests {
 
     #[test]
     fn launch_args_bare_is_just_the_program() {
-        assert_eq!(Codex.launch_args(&[]), vec!["codex".to_owned()]);
+        assert_eq!(Codex.launch_args(&[], false), vec!["codex".to_owned()]);
     }
 
     #[test]
     fn launch_args_passes_through_an_initial_prompt() {
         assert_eq!(
-            Codex.launch_args(&["fix the failing test".to_owned()]),
+            Codex.launch_args(&["fix the failing test".to_owned()], false),
             vec!["codex".to_owned(), "fix the failing test".to_owned()]
         );
+    }
+
+    #[test]
+    fn launch_args_adds_bypass_and_sandbox_flags_when_hooks_enabled() {
+        assert_eq!(
+            Codex.launch_args(&[], true),
+            vec![
+                "codex".to_owned(),
+                "--dangerously-bypass-hook-trust".to_owned(),
+                "--sandbox".to_owned(),
+                "danger-full-access".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hook_config_writes_codex_config_toml_with_every_event() {
+        let id = sessionmgr_core::SessionId::new(1_700_000_000_000, 1);
+        let (path, content) = Codex.hook_config(std::path::Path::new("C:/x/sessionmgr.exe"), &id);
+        assert_eq!(path, std::path::PathBuf::from(".codex").join("config.toml"));
+        assert!(content.contains("hooks = true"));
+        for event in HOOK_EVENTS {
+            assert!(
+                content.contains(&format!("[[hooks.{event}]]")),
+                "missing table for {event}:\n{content}"
+            );
+            assert!(content.contains(&format!(
+                "'C:/x/sessionmgr.exe __hook-fire --session-id {id} --event {event}'"
+            )));
+        }
+    }
+
+    #[test]
+    fn hook_signal_maps_needs_input_events() {
+        assert_eq!(
+            Codex.hook_signal("PermissionRequest"),
+            HookOutcome::Status(AgentSignal::NeedsInput)
+        );
+        assert_eq!(
+            Codex.hook_signal("Stop"),
+            HookOutcome::Status(AgentSignal::NeedsInput)
+        );
+        assert_eq!(Codex.hook_signal("SubagentStop"), HookOutcome::Notify);
+        assert_eq!(Codex.hook_signal("PreToolUse"), HookOutcome::Ignore);
     }
 
     /// Real, captured (vt100-rendered) folder-trust gate.

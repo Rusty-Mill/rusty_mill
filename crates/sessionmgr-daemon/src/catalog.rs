@@ -155,6 +155,7 @@ pub fn summarize(session: &Session) -> SessionSummary {
         created_at_millis: session.created_at_millis,
         exit_code: session.exit_code,
         agent: session.agent,
+        name: session.name.clone(),
     }
 }
 

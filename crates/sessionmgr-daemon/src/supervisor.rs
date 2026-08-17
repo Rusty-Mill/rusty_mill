@@ -189,13 +189,19 @@ impl Supervisor {
                 repo,
                 pty,
                 agent,
-            } => self.session_new(kind, command, repo, pty, agent).await,
+                hooks,
+            } => {
+                self.session_new(kind, command, repo, pty, agent, hooks)
+                    .await
+            }
             Request::SessionList => self.session_list().await,
             Request::SessionInput { id, data } => self.session_input(id, data).await,
             Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
             Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
+            Request::SessionRename { id, name } => self.session_rename(id, name).await,
             Request::GitStatus { id } => self.session_git_status(id).await,
             Request::GitDiff { id, path } => self.session_git_diff(id, path).await,
+            Request::HookFire { session_id, event } => self.hook_fire(session_id, event).await,
             Request::DaemonShutdown => {
                 self.shutdown.notify_one();
                 Ok(Response::Ok)
@@ -217,6 +223,7 @@ impl Supervisor {
         repo: Option<PathBuf>,
         pty: bool,
         agent: Option<sessionmgr_core::AgentKind>,
+        hooks: bool,
     ) -> Result<Response> {
         // An agent's own `launch_args` decides the real command line --
         // `command` becomes its `extra` (an initial prompt, typically),
@@ -224,7 +231,7 @@ impl Supervisor {
         // exactly what it always was: the command as given, or the
         // platform's default shell if none.
         let command = match agent {
-            Some(kind) => sessionmgr_agents::adapter_for(kind).launch_args(&command),
+            Some(kind) => sessionmgr_agents::adapter_for(kind).launch_args(&command, hooks),
             None if command.is_empty() => default_shell(),
             None => command,
         };
@@ -232,6 +239,28 @@ impl Supervisor {
             .map_err(|e| Error::io("generating a session id", None, e))?;
 
         let workspace = self.prepare_workspace(kind, repo, &id).await?;
+        // Installed *before* the session record is written and the
+        // worker spawned, so the hook config exists on disk by the time
+        // the agent CLI actually starts and reads it.
+        if hooks {
+            let Some(agent) = agent else {
+                return Err(Error::usage("--hooks needs --agent <claude|codex>"));
+            };
+            let Some(workspace) = workspace.as_ref() else {
+                return Err(Error::usage(
+                    "--hooks needs an isolated worktree session (--kind worktree)",
+                ));
+            };
+            let workspace_cwd = workspace.cwd.clone();
+            let install_id = id.clone();
+            rusty_tokio::spawn_blocking(move || {
+                crate::hooks::install::install(kind, &workspace_cwd, agent, &install_id)
+            })
+            .await
+            .map_err(|e| {
+                Error::conflict(format!("the hook-install task did not complete: {e}"))
+            })??;
+        }
         let session = sessionmgr_core::Session::new(
             id.clone(),
             kind,
@@ -241,6 +270,7 @@ impl Supervisor {
             sessionmgr_proc::now_millis(),
             agent,
         );
+
         // Written before the spawn, never after: if this process dies in
         // the window between the two, a record with no worker is
         // recoverable (it reconciles to `Crashed`), whereas a running
@@ -478,6 +508,44 @@ impl Supervisor {
             .await
     }
 
+    /// Forwards a hook event to the named session's worker.
+    ///
+    /// **Always answers `Response::Ok`, never an error** -- this is
+    /// PLAN.md's own requirement made concrete: a hook this tool
+    /// installs only ever fires for a session it created, but nothing
+    /// upstream of this method has fully proven that (the public socket
+    /// accepts `HookFire` from anything that can connect to it, not
+    /// only `__hook-fire`), so every failure mode here -- unparseable
+    /// id, unknown session, no live worker, the worker itself refusing
+    /// to answer -- collapses to the same silent no-op rather than
+    /// surfacing an error into the invoking CLI's own transcript.
+    async fn hook_fire(&self, session_id: String, event: String) -> Result<Response> {
+        let Ok(id) = session_id.parse::<SessionId>() else {
+            return Ok(Response::Ok);
+        };
+        let Ok(session) = catalog::read_session(&self.root, &id) else {
+            return Ok(Response::Ok);
+        };
+        if !session.status.expects_live_worker() {
+            return Ok(Response::Ok);
+        }
+        let Ok(mut conn) = transport::Connection::connect(
+            "connecting to a worker",
+            &paths::worker_socket(&self.root, &id),
+        )
+        .await
+        else {
+            return Ok(Response::Ok);
+        };
+        let _ = conn
+            .request::<_, Response>(&Request::HookFire {
+                session_id: id.to_string(),
+                event,
+            })
+            .await;
+        Ok(Response::Ok)
+    }
+
     /// Graceful first, then force, then record.
     ///
     /// The ordering is deliberate: processes are terminated **before**
@@ -531,6 +599,18 @@ impl Supervisor {
         catalog::write_session(&self.root, &session)?;
         Ok(Response::Ok)
     }
+
+    /// Sets or clears a session's purely cosmetic display label. No
+    /// state-machine transition and no live worker involved -- unlike
+    /// every method above this touches only the on-disk record, so a
+    /// finished/crashed/closed session can still be renamed.
+    async fn session_rename(&self, id: SessionId, name: Option<String>) -> Result<Response> {
+        let mut session = catalog::read_session(&self.root, &id)?;
+        session.rename(name);
+        catalog::write_session(&self.root, &session)?;
+        Ok(Response::Ok)
+    }
+
     /// The files changed in a session's workspace, for the TUI's diff
     /// pane.
     ///

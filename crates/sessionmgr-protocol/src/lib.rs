@@ -82,6 +82,15 @@ pub enum Request {
         /// rather than treating it as the literal program to run, and
         /// turns on tier-3 `needs_input` detection for the session.
         agent: Option<AgentKind>,
+        /// Install `agent`'s own hook config into the session's
+        /// worktree, calling back into `sessionmgr __hook-fire` for
+        /// tier-1 status detection and webhook dispatch. Requires
+        /// `agent` to be `Some` and `kind` to be `Worktree` -- opt-in,
+        /// not automatic, since it also changes the launched command
+        /// (some CLIs need an extra flag to skip an interactive
+        /// hook-trust gate) and writes a file into the session's own
+        /// directory.
+        hooks: bool,
     },
 
     /// List every known session.
@@ -122,6 +131,12 @@ pub enum Request {
         disposition: Option<Disposition>,
     },
 
+    /// Sets (`Some`) or clears (`None`) a session's purely cosmetic
+    /// display label -- distinct from its worktree branch, which never
+    /// changes. CAPABILITIES.md's Xirp-observed "renaming a session",
+    /// wired to the TUI command palette.
+    SessionRename { id: SessionId, name: Option<String> },
+
     /// The files changed in a session's workspace, for the diff pane.
     /// `NotFound` if the session has no workspace (a `PlainTerminal`
     /// session, or one that failed before a workspace was set up).
@@ -137,6 +152,22 @@ pub enum Request {
 
     /// Daemon -> worker only: shut this worker down gracefully.
     WorkerShutdown,
+
+    /// A CLI's own hook fired. Sent by `sessionmgr __hook-fire` (an
+    /// installed hook command invokes the `sessionmgr` binary directly,
+    /// which then talks over this same socket protocol) to the public
+    /// socket, which forwards it to the named session's worker -- the
+    /// same proxy path `SessionInput`/`SessionResize` already use.
+    ///
+    /// `session_id` is a raw `String`, not `SessionId`: an unrecognized
+    /// or malformed id must be a fast, silent no-op (PLAN.md's own
+    /// requirement -- a hook installed by this tool only ever fires for
+    /// a session this tool created, but a stray or copied hook config
+    /// firing for something else must never error, block, or trigger
+    /// the daemon's auto-start sugar), and a typed `SessionId` would
+    /// reject a malformed one at deserialization instead of letting the
+    /// handler apply that rule.
+    HookFire { session_id: String, event: String },
 }
 
 /// The daemon's (or worker's) answer to a [`Request`].
@@ -219,6 +250,10 @@ pub struct SessionSummary {
     /// adapter-backed session from a plain command.
     #[serde(default)]
     pub agent: Option<AgentKind>,
+    /// The user-chosen display label set by the TUI command palette's
+    /// `rename` action, if any.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A live event streamed to an attached client.
@@ -289,6 +324,7 @@ mod tests {
                 repo: None,
                 pty: true,
                 agent: Some(AgentKind::Codex),
+                hooks: true,
             },
             Request::SessionList,
             Request::SessionAttach { id: id.clone() },
@@ -307,11 +343,19 @@ mod tests {
                 path: Some("src/lib.rs".to_owned()),
             },
             Request::SessionClose {
-                id,
+                id: id.clone(),
                 disposition: Some(Disposition::Merge),
+            },
+            Request::SessionRename {
+                id,
+                name: Some("my session".to_owned()),
             },
             Request::DaemonShutdown,
             Request::WorkerShutdown,
+            Request::HookFire {
+                session_id: "not-a-real-sessionid-shape".to_owned(),
+                event: "Stop".to_owned(),
+            },
         ] {
             assert_eq!(round_trip(&request), request);
         }

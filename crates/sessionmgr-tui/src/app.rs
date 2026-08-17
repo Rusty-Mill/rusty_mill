@@ -22,10 +22,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use rusty_tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use sessionmgr_protocol::{SessionEvent, SessionId, SessionKind, SessionStatus};
@@ -43,6 +43,54 @@ use crate::terminal::Backend;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 const PREFIX: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+/// One action the command palette can run, resolved to a concrete
+/// effect once the user picks it -- some (`Focus`) apply immediately,
+/// others (`NewSession`, `Rename`) open a follow-up [`Overlay::Prompt`]
+/// for the one piece of text they need first.
+#[derive(Clone)]
+enum PaletteAction {
+    NewSession,
+    CloseFocused,
+    Rename,
+    Focus(usize),
+}
+
+struct PaletteItem {
+    label: String,
+    action: PaletteAction,
+}
+
+/// What a [`Overlay::Prompt`]'s text is for, and what to do with it on
+/// Enter.
+enum PromptKind {
+    /// The repository path for a new plain worktree session.
+    NewSessionRepo,
+    /// The new display label for this session (or, submitted empty, to
+    /// clear it).
+    Rename(SessionId),
+}
+
+/// A modal surface drawn on top of the grid, capturing every keystroke
+/// until it closes -- neither of these forwards input to a session's
+/// terminal while open, unlike everything else in this app.
+enum Overlay {
+    None,
+    /// `Ctrl-B k`: a fuzzy-filtered list of actions and (folded in, per
+    /// CAPABILITIES.md's Xirp-observed command palette) every other open
+    /// session to jump straight to.
+    Palette {
+        query: String,
+        items: Vec<PaletteItem>,
+        selected: usize,
+    },
+    /// A single line of free text for whichever [`PromptKind`] opened
+    /// it.
+    Prompt {
+        kind: PromptKind,
+        input: String,
+    },
+}
 
 struct OpenPane {
     pane: SessionPane,
@@ -66,6 +114,7 @@ pub struct App {
     focused: usize,
     prefix_pending: bool,
     diff: Option<(SessionId, GitDiffPane)>,
+    overlay: Overlay,
     status_line: String,
     should_quit: bool,
     session_tx: UnboundedSender<(SessionId, SessionEvent)>,
@@ -89,6 +138,7 @@ impl App {
                 focused: 0,
                 prefix_pending: false,
                 diff: None,
+                overlay: Overlay::None,
                 status_line: String::new(),
                 should_quit: false,
                 session_tx,
@@ -165,6 +215,7 @@ impl App {
         for summary in &summaries {
             if let Some(open) = self.panes.iter_mut().find(|p| p.pane.id == summary.id) {
                 open.pane.set_status(summary.status);
+                open.pane.set_name(summary.name.clone());
                 continue;
             }
             if !summary.status.expects_live_worker() {
@@ -227,6 +278,14 @@ impl App {
             return;
         }
 
+        // An open overlay captures every keystroke -- neither the
+        // prefix nor a session's terminal ever sees one while a palette
+        // or a prompt is up.
+        if !matches!(self.overlay, Overlay::None) {
+            self.handle_overlay_key(key.code).await;
+            return;
+        }
+
         if self.prefix_pending {
             self.prefix_pending = false;
             self.handle_command_key(key.code).await;
@@ -255,6 +314,7 @@ impl App {
                 self.focused = (self.focused + count - 1) % count;
             }
             KeyCode::Char('g') => self.toggle_diff().await,
+            KeyCode::Char('k') => self.open_palette(),
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down if count > 0 => {
                 let cols = self.grid.cols().max(1);
                 let row = self.focused / cols;
@@ -296,6 +356,171 @@ impl App {
                 self.diff = Some((id, pane));
             }
             Err(e) => self.status_line = format!("git status failed: {e}"),
+        }
+    }
+
+    // -- command palette -------------------------------------------------
+
+    /// Builds the palette's item list: the two actions that always make
+    /// sense, the two that need a focused session, and one `Focus: ...`
+    /// entry per *other* open session -- CAPABILITIES.md's Xirp-observed
+    /// session switcher, folded into the same palette rather than a
+    /// second keybinding, matching its own description.
+    fn open_palette(&mut self) {
+        let mut items = vec![PaletteItem {
+            label: "New session...".to_owned(),
+            action: PaletteAction::NewSession,
+        }];
+        if !self.panes.is_empty() {
+            items.push(PaletteItem {
+                label: "Close focused session".to_owned(),
+                action: PaletteAction::CloseFocused,
+            });
+            items.push(PaletteItem {
+                label: "Rename focused session...".to_owned(),
+                action: PaletteAction::Rename,
+            });
+        }
+        for (i, open) in self.panes.iter().enumerate() {
+            if i == self.focused {
+                continue;
+            }
+            items.push(PaletteItem {
+                label: format!("Focus: {}", open.pane.display_label()),
+                action: PaletteAction::Focus(i),
+            });
+        }
+        self.overlay = Overlay::Palette {
+            query: String::new(),
+            items,
+            selected: 0,
+        };
+    }
+
+    async fn handle_overlay_key(&mut self, code: KeyCode) {
+        match &mut self.overlay {
+            Overlay::None => {}
+            Overlay::Palette {
+                query,
+                items,
+                selected,
+            } => {
+                let filtered_len = items
+                    .iter()
+                    .filter(|i| fuzzy_match(query, &i.label))
+                    .count();
+                match code {
+                    KeyCode::Esc => self.overlay = Overlay::None,
+                    KeyCode::Up => *selected = selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        if *selected + 1 < filtered_len {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        *selected = 0;
+                    }
+                    KeyCode::Char(c) => {
+                        query.push(c);
+                        *selected = 0;
+                    }
+                    KeyCode::Enter => {
+                        let action = items
+                            .iter()
+                            .filter(|i| fuzzy_match(query, &i.label))
+                            .nth(*selected)
+                            .map(|i| i.action.clone());
+                        self.overlay = Overlay::None;
+                        if let Some(action) = action {
+                            self.run_palette_action(action).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Overlay::Prompt { input, .. } => match code {
+                KeyCode::Esc => self.overlay = Overlay::None,
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Enter => {
+                    let Overlay::Prompt { kind, input } =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        unreachable!()
+                    };
+                    self.submit_prompt(kind, input).await;
+                }
+                _ => {}
+            },
+        }
+    }
+
+    async fn run_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::NewSession => {
+                self.overlay = Overlay::Prompt {
+                    kind: PromptKind::NewSessionRepo,
+                    input: String::new(),
+                };
+            }
+            PaletteAction::CloseFocused => {
+                let Some(open) = self.panes.get(self.focused) else {
+                    return;
+                };
+                let id = open.pane.id.clone();
+                match client::session_close(&self.socket, id.clone(), None).await {
+                    Ok(()) => {
+                        self.status_line = format!("closed {id}");
+                        self.refresh_sessions().await;
+                    }
+                    Err(e) => self.status_line = format!("close failed: {e}"),
+                }
+            }
+            PaletteAction::Rename => {
+                let Some(open) = self.panes.get(self.focused) else {
+                    return;
+                };
+                self.overlay = Overlay::Prompt {
+                    kind: PromptKind::Rename(open.pane.id.clone()),
+                    input: open.pane.name.clone().unwrap_or_default(),
+                };
+            }
+            PaletteAction::Focus(i) => {
+                if i < self.panes.len() {
+                    self.focused = i;
+                }
+            }
+        }
+    }
+
+    async fn submit_prompt(&mut self, kind: PromptKind, input: String) {
+        match kind {
+            PromptKind::NewSessionRepo => {
+                if input.trim().is_empty() {
+                    self.status_line = "new session: repo path cannot be empty".to_owned();
+                    return;
+                }
+                match client::session_new(&self.socket, PathBuf::from(input.trim())).await {
+                    Ok(id) => {
+                        self.status_line = format!("created {id}");
+                        self.refresh_sessions().await;
+                    }
+                    Err(e) => self.status_line = format!("new session failed: {e}"),
+                }
+            }
+            PromptKind::Rename(id) => {
+                let name = (!input.trim().is_empty()).then(|| input.trim().to_owned());
+                match client::session_rename(&self.socket, id.clone(), name).await {
+                    Ok(()) => {
+                        self.status_line = format!("renamed {id}");
+                        self.refresh_sessions().await;
+                    }
+                    Err(e) => self.status_line = format!("rename failed: {e}"),
+                }
+            }
         }
     }
 
@@ -345,11 +570,55 @@ impl App {
         }
 
         frame.render_widget(self.status_bar(), status_area);
+        self.render_overlay(frame, area);
+    }
+
+    fn render_overlay(&self, frame: &mut Frame, area: Rect) {
+        match &self.overlay {
+            Overlay::None => {}
+            Overlay::Palette {
+                query,
+                items,
+                selected,
+            } => {
+                let popup = centered_rect(60, 60, area);
+                frame.render_widget(Clear, popup);
+                let list_items: Vec<ListItem> = items
+                    .iter()
+                    .filter(|i| fuzzy_match(query, &i.label))
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let style = if i == *selected {
+                            Style::default().bg(Color::Blue).fg(Color::White)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(item.label.clone()).style(style)
+                    })
+                    .collect();
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" > {query} (Esc to cancel) "));
+                frame.render_widget(List::new(list_items).block(block), popup);
+            }
+            Overlay::Prompt { kind, input } => {
+                let popup = centered_rect(50, 15, area);
+                frame.render_widget(Clear, popup);
+                let title = match kind {
+                    PromptKind::NewSessionRepo => {
+                        " New session -- repo path (Enter to create, Esc to cancel) "
+                    }
+                    PromptKind::Rename(_) => " Rename session (Enter to apply, Esc to cancel) ",
+                };
+                let block = Block::default().borders(Borders::ALL).title(title);
+                frame.render_widget(Paragraph::new(input.as_str()).block(block), popup);
+            }
+        }
     }
 
     fn status_bar(&self) -> Paragraph<'static> {
         let mode = if self.prefix_pending { "Ctrl-B..." } else { "" };
-        let help = "Ctrl-B then: n/p focus, arrows resize, g diff, q quit";
+        let help = "Ctrl-B then: n/p focus, arrows resize, g diff, k palette, q quit";
         let text = if self.status_line.is_empty() {
             help.to_owned()
         } else {
@@ -438,4 +707,38 @@ fn spawn_input_thread() -> UnboundedReceiver<Event> {
         }
     });
     rx
+}
+
+/// Case-insensitive subsequence match: every character of `query`
+/// appears in `label`, in order, not necessarily contiguous -- the same
+/// "fuzzy" a command palette usually means, without a dependency for
+/// something this small. An empty query matches everything.
+fn fuzzy_match(query: &str, label: &str) -> bool {
+    let mut chars = label.to_lowercase().chars().collect::<Vec<_>>().into_iter();
+    query
+        .to_lowercase()
+        .chars()
+        .all(|qc| chars.by_ref().any(|lc| lc == qc))
+}
+
+/// A `width_pct` x `height_pct` `Rect` centered within `area`, for a
+/// modal popup drawn on top of the grid.
+fn centered_rect(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
+    let [_, vertical, _] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - height_pct) / 2),
+            Constraint::Percentage(height_pct),
+            Constraint::Percentage((100 - height_pct) / 2),
+        ])
+        .areas(area);
+    let [_, horizontal, _] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_pct) / 2),
+            Constraint::Percentage(width_pct),
+            Constraint::Percentage((100 - width_pct) / 2),
+        ])
+        .areas(vertical);
+    horizontal
 }
