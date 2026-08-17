@@ -44,20 +44,33 @@ mod tests {
     use super::*;
 
     /// `AgentAdapterPort::supports_fork` and `fork_args` answer two
-    /// different questions asked at two different times (see
-    /// `supports_fork`'s own docs for why they are separate methods, not
-    /// one capability duplicated) -- this is what keeps them from
-    /// drifting apart in practice, run once across every adapter this
-    /// crate ships rather than duplicated per adapter's own test module.
+    /// different questions asked at two different times -- see
+    /// `supports_fork`'s own docs for why a state-dependent adapter
+    /// (Gemini CLI, whose `fork_args` can legitimately return `None` for
+    /// a specific call even though its mechanism works) breaks the
+    /// strict equality this test used to assert in both directions.
+    ///
+    /// The direction that still always holds, for every adapter present
+    /// and future: an adapter that says it does **not** support Fork at
+    /// all must never produce a command line regardless of what it is
+    /// given -- run once here across every adapter this crate ships
+    /// rather than duplicated per adapter's own test module, so a new
+    /// adapter can't silently return `Some` from `fork_args` while also
+    /// answering `false` from `supports_fork`.
     #[test]
-    fn supports_fork_agrees_with_fork_args_for_every_adapter() {
+    fn an_adapter_that_does_not_support_fork_never_produces_fork_args() {
+        let source = sessionmgr_core::ports::ForkSource {
+            native_session_id: Some("source"),
+            workspace_cwd: std::path::Path::new("/workspace"),
+        };
         for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Gemini] {
             let adapter = adapter_for(kind);
-            assert_eq!(
-                adapter.supports_fork(),
-                adapter.fork_args("source", "new", &[]).is_some(),
-                "{kind:?}: supports_fork() disagrees with fork_args(..).is_some()"
-            );
+            if !adapter.supports_fork() {
+                assert!(
+                    adapter.fork_args(source, "new", &[]).is_none(),
+                    "{kind:?}: supports_fork() is false but fork_args(..) still produced a command"
+                );
+            }
         }
     }
 }

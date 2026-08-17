@@ -541,24 +541,30 @@ impl Supervisor {
     /// conversation into a brand-new, independent session.
     ///
     /// See `docs/decisions/0003-resume-fork-spike.md` for how any of this
-    /// is possible at all, and `docs/phase-6-report.md` for the full
-    /// design -- in short, every check below exists because Fork
-    /// genuinely needs all of these things to be true, not because this
-    /// method is being defensive for its own sake:
+    /// is possible at all, and `docs/phase-6-report.md`/`docs/phase-7-report.md`
+    /// for the full design -- in short, every check below exists because
+    /// Fork genuinely needs all of these things to be true, not because
+    /// this method is being defensive for its own sake:
     ///
     /// - `source` must be `Worktree`-kind: only a session that owns a
     ///   branch has code state for the fork to start from.
     /// - `source.agent` must be set, and that agent's own adapter must
-    ///   answer `true` to `supports_fork()` -- as of this phase, only
-    ///   Claude Code.
-    /// - `source.native_session_id` must be recorded -- absent for a
-    ///   session created before Fork existed, or whose adapter did not
-    ///   support pinning one at the time.
+    ///   answer `true` to `supports_fork()` -- as of this phase, Claude
+    ///   Code and Gemini CLI.
     /// - `source`'s own branch must still exist -- reuses
     ///   `sessionmgr_core::parent_readiness` (Phase 5), the exact same
     ///   "does this session's git state still exist" question a
     ///   dependent session's wait-for-parent already asks, just applied
     ///   to a different relationship.
+    /// - The adapter's own `fork_args`, given everything this method
+    ///   knows about `source` (its `native_session_id` if it recorded
+    ///   one, its workspace), must actually produce a command line --
+    ///   **not** implied by `supports_fork()` alone: see
+    ///   [`sessionmgr_core::ports::ForkSource`]'s own docs for why an
+    ///   adapter whose mechanism genuinely works can still have nothing
+    ///   to fork from for *this particular* source session (no recorded
+    ///   native id for a pre-Fork Claude Code session; no located chat
+    ///   file yet for Gemini CLI).
     async fn session_fork(self: &Arc<Self>, source_id: SessionId, pty: bool) -> Result<Response> {
         let source = catalog::read_session(&self.root, &source_id)?;
         if source.kind != SessionKind::Worktree {
@@ -580,12 +586,6 @@ impl Supervisor {
                  which agents do and why"
             )));
         }
-        let Some(source_native_id) = source.native_session_id.clone() else {
-            return Err(Error::conflict(format!(
-                "session {source_id} has no recorded native session id to fork from \
-                 (sessions created before Fork support existed cannot be forked)"
-            )));
-        };
         let Some(source_workspace) = source.workspace.clone() else {
             return Err(Error::conflict(format!(
                 "session {source_id} has no workspace to fork from"
@@ -609,15 +609,24 @@ impl Supervisor {
             .map_err(|e| Error::io("generating a session id", None, e))?;
         let new_native_id = sessionmgr_proc::native_session_uuid()
             .map_err(|e| Error::io("generating a native session id", None, e))?;
-        // Checked again here, not just trusted from the `supports_fork`
-        // check above: that check is a static fact about the adapter,
-        // this call is the actual, adapter-specific translation of
-        // `(source_native_id, new_native_id)` into a real command line,
-        // and `AgentAdapterPort`'s own drift-guard test
-        // (`sessionmgr-agents`) is what keeps the two from disagreeing in
-        // practice rather than this call site having to.
-        let Some(command) = adapter.fork_args(&source_native_id, &new_native_id, &[]) else {
-            return Err(Error::conflict(format!("{agent:?} does not support Fork")));
+        // Not the same question `supports_fork` already answered above:
+        // that is a static fact about the adapter, this is the real,
+        // source-specific attempt to build a command line from whatever
+        // this source session actually recorded -- see `ForkSource`'s
+        // own docs for why the two can disagree for an honest reason,
+        // not just "not supported".
+        let fork_source = sessionmgr_core::ports::ForkSource {
+            native_session_id: source.native_session_id.as_deref(),
+            workspace_cwd: &source_workspace.cwd,
+        };
+        let Some(command) = adapter.fork_args(fork_source, &new_native_id, &[]) else {
+            return Err(Error::conflict(format!(
+                "session {source_id} cannot be forked right now -- {agent:?} supports Fork, \
+                 but could not build a command for this specific session (for Claude Code \
+                 this usually means the session predates Fork support and has no recorded \
+                 native session id; for Gemini CLI it means no matching conversation file \
+                 could be located yet)"
+            )));
         };
 
         // A new, independent worktree, branched from the **source**

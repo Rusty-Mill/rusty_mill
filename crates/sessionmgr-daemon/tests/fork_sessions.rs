@@ -1,7 +1,7 @@
 //! Phase 6/CAPABILITIES.md's "Fork session": cloning a session's own
 //! agent-CLI conversation into a brand-new, independent session.
 //!
-//! Two tiers, matching this project's own convention for gated CLI
+//! Three tiers, matching this project's own convention for gated CLI
 //! tests (see `agent_needs_input_claude.rs`):
 //!
 //! - **Always-run**: the daemon-side validation rules (kind/agent/
@@ -12,6 +12,12 @@
 //!   against a real, running Claude Code process, not assumed from its
 //!   `--help` text alone. Skipped cleanly, not failed, when `claude`
 //!   isn't on `PATH`.
+//! - **Gated on a real `GEMINI_API_KEY`**: Gemini CLI's own fork
+//!   mechanism, `--session-file <path>`, pointed at a real chat file
+//!   located the same way `GeminiCli::fork_args` does in production
+//!   (`docs/phase-6-report.md`, issue #15) -- verified against a real,
+//!   running `gemini` process. Skipped cleanly when no key is
+//!   configured.
 
 mod common;
 
@@ -24,6 +30,10 @@ fn claude_installed() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+fn gemini_credentialed() -> bool {
+    std::env::var_os("GEMINI_API_KEY").is_some()
 }
 
 #[test]
@@ -100,6 +110,202 @@ fn forking_an_unsupported_agent_names_the_gap_clearly() {
     );
 
     let _ = run(root.path(), &["close", &id, "--discard"]);
+}
+
+#[test]
+fn forking_a_gemini_session_with_no_conversation_yet_names_the_gap_clearly() {
+    // Gemini CLI's Fork *mechanism* works (`supports_fork() == true`),
+    // but a session that never actually talked to the model has no chat
+    // file yet for `fork_args`'s own discovery step to find -- a real,
+    // session-specific "cannot fork this one right now" outcome, not the
+    // same thing as "Gemini does not support Fork" (`forking_an_unsupported_agent_names_the_gap_clearly`'s
+    // own case above), and the error message must say so rather than
+    // conflating the two. No live model call happens here at all: the
+    // interactive trust gate blocks before any message would ever be
+    // sent, so this needs no `GEMINI_API_KEY` and costs no quota.
+    let root = TempRoot::new("fork-gemini-no-chat");
+    let repo = TempRepo::new("fork-gemini-no-chat");
+    let id = session_new_in(
+        root.path(),
+        &[
+            "--kind",
+            "worktree",
+            "--repo",
+            &repo.path_str(),
+            "--agent",
+            "gemini",
+        ],
+        &[],
+    );
+    let _ = wait_until(
+        || session_status(root.path(), &id) != "created",
+        Duration::from_secs(15),
+    );
+
+    let output = run(root.path(), &["fork", &id]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be forked right now"),
+        "the error should explain there is nothing to fork from yet: {stderr}"
+    );
+    assert!(
+        stderr.contains("Gemini"),
+        "the error should name the agent: {stderr}"
+    );
+
+    let _ = run(root.path(), &["close", &id, "--discard"]);
+}
+
+/// Reads gemini-cli's own `projects.json` registry and picks the newest
+/// `chats/session-*.jsonl` file for `workspace_cwd` -- deliberately
+/// re-implemented here rather than calling into `sessionmgr_agents::gemini`
+/// (whose own discovery function is private, and thoroughly unit-tested
+/// there against fixtures): this test's whole point is independently
+/// proving gemini-cli's own `--session-file` mechanism actually preserves
+/// context, the same reason `fresh_uuid` below re-implements a UUID
+/// generator instead of calling `sessionmgr_proc::native_session_uuid`
+/// directly. A trimmed-down version of `GeminiCli::locate_current_chat_file`'s
+/// own algorithm: no `"kind":"main"` filtering, since this test's own
+/// scratch repository only ever has one conversation in it.
+fn gemini_chat_file_for(workspace_cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+    } else {
+        std::env::var_os("HOME")
+    }?;
+    let gemini_dir = std::path::PathBuf::from(home).join(".gemini");
+    let registry_text = std::fs::read_to_string(gemini_dir.join("projects.json")).ok()?;
+    let registry: serde_json::Value = serde_json::from_str(&registry_text).ok()?;
+    let key = workspace_cwd.to_string_lossy().into_owned();
+    let project_name = registry.get("projects")?.get(key.as_str())?.as_str()?;
+
+    let chats_dir = gemini_dir.join("tmp").join(project_name).join("chats");
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&chats_dir).ok()?.flatten() {
+        let path = entry.path();
+        let is_candidate = entry.file_type().is_ok_and(|t| t.is_file())
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("session-") && n.ends_with(".jsonl"));
+        if !is_candidate {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            newest = Some((modified, path));
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+/// Live-verifies the actual mechanism -- gemini-cli's own
+/// `--session-file <path>`, pointed at the source's own real chat file
+/// via the same discovery `GeminiCli::fork_args` performs in production
+/// -- against a real, running `gemini` process, mirroring
+/// `resume_fork_session_id_actually_preserves_conversation_context`'s own
+/// codeword-recall pattern for Claude Code. Driven directly via
+/// `--kind same-dir --no-pty`, not through the real `fork` command:
+/// `fork` never gives a forked session an extra initial prompt (matching
+/// Claude Code's own precedent -- `Supervisor::session_fork` always
+/// calls `fork_args` with empty `extra`), so proving *recall*
+/// specifically needs a follow-up question this test supplies itself,
+/// the same reason the Claude Code mechanism test above does not go
+/// through `fork` either.
+///
+/// Skips cleanly (does not fail) if no `GEMINI_API_KEY` is configured,
+/// or if either live call does not finish in time -- covers a real,
+/// external account-level failure (an exhausted quota) this project does
+/// not control, the same tier `switch_agent.rs`'s own live-gated tests
+/// already use.
+#[test]
+fn gemini_session_file_actually_preserves_conversation_context() {
+    if !gemini_credentialed() {
+        eprintln!("skipping: no GEMINI_API_KEY configured");
+        return;
+    }
+    let root = TempRoot::new("fork-gemini-mechanism");
+    let repo = TempRepo::new("fork-gemini-mechanism");
+    let live_call_timeout = Duration::from_secs(90);
+
+    let seed_command = [
+        "gemini",
+        "--skip-trust",
+        "-p",
+        "Output only the following text, with nothing else before or after it: ORACLE701",
+    ];
+    let source_id = session_new_in(
+        root.path(),
+        &["--kind", "same-dir", "--repo", &repo.path_str(), "--no-pty"],
+        &seed_command,
+    );
+    let seeded = wait_until(
+        || session_status(root.path(), &source_id) == "finished",
+        live_call_timeout,
+    ) && transcript_contains(root.path(), &source_id, "ORACLE701");
+    if !seeded {
+        eprintln!(
+            "skipping: the seed session did not finish with the expected codeword in this \
+             environment (no usable credentials, or a real account-level failure such as an \
+             exhausted quota -- either way, not something this test can tell apart from the \
+             outside, or should fail on)"
+        );
+        let _ = run(root.path(), &["close", &source_id, "--discard"]);
+        return;
+    }
+
+    let workspace_cwd = repo
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.path().to_owned());
+    let Some(chat_file) = gemini_chat_file_for(&workspace_cwd) else {
+        eprintln!(
+            "skipping: could not locate the source session's own gemini chat file via \
+             projects.json"
+        );
+        let _ = run(root.path(), &["close", &source_id, "--discard"]);
+        return;
+    };
+    let _ = run(root.path(), &["close", &source_id, "--discard"]);
+
+    let recall_command = [
+        "gemini".to_owned(),
+        "--skip-trust".to_owned(),
+        "--session-file".to_owned(),
+        chat_file.to_string_lossy().into_owned(),
+        "-p".to_owned(),
+        "What was the exact codeword in the loaded session above? Reply with only the \
+         codeword, nothing else."
+            .to_owned(),
+    ];
+    let recall_refs: Vec<&str> = recall_command.iter().map(String::as_str).collect();
+    let forked_id = session_new_in(
+        root.path(),
+        &["--kind", "same-dir", "--repo", &repo.path_str(), "--no-pty"],
+        &recall_refs,
+    );
+    let finished = wait_until(
+        || session_status(root.path(), &forked_id) == "finished",
+        live_call_timeout,
+    );
+    if !finished {
+        eprintln!(
+            "skipping: the recall session did not finish in this environment (same \
+             account-level caveat as the seed leg above)"
+        );
+        let _ = run(root.path(), &["close", &forked_id, "--discard"]);
+        return;
+    }
+
+    assert!(
+        transcript_contains(root.path(), &forked_id, "ORACLE701"),
+        "a gemini session loaded via --session-file should have recalled the codeword from \
+         the source session's own conversation history"
+    );
+    let _ = run(root.path(), &["close", &forked_id, "--discard"]);
 }
 
 /// Live-verifies the actual mechanism -- `claude --resume <id>

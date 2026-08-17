@@ -22,8 +22,13 @@
 //! screen -- but it is source inspection, not a live-fired hook, and
 //! [`has_verified_hooks`] says so honestly rather than folding this into
 //! "verified" the way Claude Code's and Codex's hooks are.
+//!
+//! **Fork is the exception**: [`fork_args`](GeminiCli::fork_args)'s own
+//! discovery step (locating the source session's chat-history file) is
+//! live-confirmed against a real `gemini` bundle and real files it wrote
+//! on disk -- see that method's own docs and issue #15.
 
-use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, HookOutcome};
+use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, ForkSource, HookOutcome};
 
 pub struct GeminiCli;
 
@@ -189,35 +194,164 @@ impl AgentAdapterPort for GeminiCli {
         }
     }
 
-    /// Not supported here, deliberately -- not a gap silently left open.
-    ///
     /// `--session-file <path>` is real, and is in fact the most explicit
-    /// of the three CLIs' mechanisms (`docs/decisions/0003-resume-fork-spike.md`):
-    /// unlike Claude Code's and Codex's id-based resume/fork, it takes an
-    /// arbitrary *file path* to a prior conversation, no native id
-    /// required at all. But that file has to be the source session's own
-    /// current chat-history file, which lives under gemini-cli's own
-    /// per-project temp directory, keyed by a hash of the working
-    /// directory this adapter has not reverse-engineered from the
-    /// installed bundle (only confirmed it exists and roughly where, not
-    /// its exact algorithm). Guessing at that hash and shipping it
-    /// unverified -- there being no credentials in any environment
-    /// available while this was built to check it against a real
-    /// `gemini` process -- is exactly the kind of claim this project's
-    /// own conventions ask to be measured, not assumed. See
-    /// `docs/phase-6-report.md` for the filed follow-up.
+    /// of the three CLIs' mechanisms
+    /// (`docs/decisions/0003-resume-fork-spike.md`): unlike Claude Code's
+    /// and Codex's id-based resume/fork, it takes an arbitrary *file
+    /// path* to a prior conversation, no native id required at all --
+    /// which is why this adapter ignores `new_native_id` entirely: the
+    /// installed bundle's own `resolveSessionId` mints a brand-new
+    /// session id internally whenever `--session-file` is given, rather
+    /// than honoring a caller-supplied `--session-id` alongside it (the
+    /// same reason `launch_args`'s own `native_id` parameter is ignored
+    /// here).
+    ///
+    /// The blocking piece issue #15 originally named -- locating the
+    /// source session's own current chat-history file -- is live-confirmed
+    /// solved, and simpler than the hash this adapter was once worried
+    /// about needing to reverse-engineer: `locate_current_chat_file`'s
+    /// own docs have the full mechanism.
+    ///
+    /// Returns `None` when no matching chat file can be found for
+    /// `source.workspace_cwd` -- a session-specific "nothing to fork from
+    /// right now" outcome (no `projects.json` entry yet, or no `"kind":
+    /// "main"` chat file written yet), not a statement that this
+    /// adapter's Fork mechanism does not work; see [`ForkSource`]'s own
+    /// docs and [`Self::supports_fork`]'s for why the two are different
+    /// questions for this adapter specifically.
     fn fork_args(
         &self,
-        _source_native_id: &str,
+        source: ForkSource<'_>,
         _new_native_id: &str,
-        _extra: &[String],
+        extra: &[String],
     ) -> Option<Vec<String>> {
-        None
+        let gemini_home = gemini_home_dir()?;
+        let chat_file = locate_current_chat_file(&gemini_home, source.workspace_cwd)?;
+        let mut args = vec![
+            "gemini".to_owned(),
+            "--session-file".to_owned(),
+            chat_file.to_string_lossy().into_owned(),
+        ];
+        args.extend(extra.iter().cloned());
+        Some(args)
     }
 
     fn supports_fork(&self) -> bool {
-        false
+        // The *mechanism* works (see `fork_args`'s own docs) -- whether
+        // any single call succeeds depends on whether a matching chat
+        // file exists yet for that call's own workspace, which is not
+        // this method's question. See `AgentAdapterPort::supports_fork`'s
+        // own docs for why these are deliberately different questions for
+        // this adapter.
+        true
     }
+}
+
+/// `gemini`'s own global config directory. Live-confirmed from the
+/// installed `@google/gemini-cli` bundle's own `homedir()`
+/// (`chunk-32XQ54AJ.js`): `GEMINI_CLI_HOME`, if set, otherwise the OS
+/// home directory joined with `.gemini` -- no XDG or other override
+/// exists in the bundle for this specific path.
+fn gemini_home_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("GEMINI_CLI_HOME") {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+    } else {
+        std::env::var_os("HOME")
+    }?;
+    Some(std::path::PathBuf::from(home).join(".gemini"))
+}
+
+/// Locates the source session's own current chat-history file --
+/// `fork_args`'s `--session-file` target -- given `gemini_home` (see
+/// [`gemini_home_dir`]) and the source session's own `workspace_cwd`.
+///
+/// A plain synchronous filesystem lookup, deliberately: unlike Codex's
+/// own discovery problem (issue #14), this needs no post-spawn watch --
+/// by the time anything is forked, the source session has already been
+/// running and its own chat file already exists.
+///
+/// Two live-confirmed facts make this possible without any hash:
+///
+/// 1. `<gemini_home>/projects.json` is a plain JSON registry mapping
+///    each project's own absolute working directory to a short,
+///    human-readable directory name (confirmed live: e.g.
+///    `{"projects": {"/home/user/rusty_yirp": "rusty-yirp"}}`). Read
+///    directly from the installed bundle's own `ProjectRegistry.normalizePath`
+///    (`chunk-32XQ54AJ.js`): a plain `path.resolve`, lowercased only on
+///    `win32` -- no realpath/symlink resolution -- so `workspace_cwd`
+///    (already absolute; sessionmgr builds it from `git rev-parse
+///    --show-toplevel`) is exactly this key on every platform, modulo
+///    that one case-folding rule.
+/// 2. `<gemini_home>/tmp/<name>/chats/` holds each project's own chat
+///    files, in two shapes confirmed by reading real files this bundle
+///    wrote: a flat `session-<timestamp><shortid>.jsonl`, whose first
+///    line reads `{"sessionId":...,"kind":"main",...}` -- the actual
+///    top-level conversation -- and a nested
+///    `<parent-session-id>/<subagent-session-id>.jsonl`, first line
+///    `{"kind":"subagent",...}`, a sub-agent/tool-driven conversation
+///    that is *not* the one to fork. Only the flat, `"kind":"main"`
+///    shape is considered here; the newest such file (by mtime) is the
+///    source's own current conversation.
+///
+/// `None` on any failure along the way (no home directory resolvable, no
+/// registry entry for this workspace, no matching chat file, an I/O or
+/// parse error) -- deliberately not distinguished further, since every
+/// case means the same thing to a caller: nothing to fork from right
+/// now.
+fn locate_current_chat_file(
+    gemini_home: &std::path::Path,
+    workspace_cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let registry_text = std::fs::read_to_string(gemini_home.join("projects.json")).ok()?;
+    let registry: serde_json::Value = serde_json::from_str(&registry_text).ok()?;
+    let key = if cfg!(windows) {
+        workspace_cwd.to_string_lossy().to_lowercase()
+    } else {
+        workspace_cwd.to_string_lossy().into_owned()
+    };
+    let project_name = registry.get("projects")?.get(key.as_str())?.as_str()?;
+
+    let chats_dir = gemini_home.join("tmp").join(project_name).join("chats");
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&chats_dir).ok()?.flatten() {
+        let path = entry.path();
+        let is_candidate = entry.file_type().is_ok_and(|t| t.is_file())
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("session-") && n.ends_with(".jsonl"));
+        if !is_candidate || !first_line_is_main_session(&path) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            newest = Some((modified, path));
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+/// Does `path`'s first line look like gemini's own top-level (not
+/// subagent) conversation record? A substring check on the raw line
+/// rather than full JSON parsing -- the first line is small, stable
+/// metadata written once at session start, and this only needs to tell
+/// `"kind":"main"` apart from `"kind":"subagent"`, not validate the
+/// record's full shape.
+fn first_line_is_main_session(path: &std::path::Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut first_line = String::new();
+    let mut reader = std::io::BufReader::new(file);
+    if std::io::BufRead::read_line(&mut reader, &mut first_line).is_err() {
+        return false;
+    }
+    first_line.contains("\"kind\":\"main\"")
 }
 
 #[cfg(test)]
@@ -257,9 +391,187 @@ mod tests {
     }
 
     #[test]
-    fn fork_is_not_supported() {
-        assert!(!GeminiCli.supports_fork());
-        assert_eq!(GeminiCli.fork_args("source", "new", &[]), None);
+    fn supports_fork_is_true() {
+        // The mechanism is real (see `fork_args`'s own docs) even though
+        // any single call can still come back `None` for a call-specific
+        // reason -- see `locate_current_chat_file`'s own tests below.
+        assert!(GeminiCli.supports_fork());
+    }
+
+    /// A scratch stand-in for `gemini_home_dir()`'s own directory,
+    /// removed on drop. Not a process-wide env var override (which would
+    /// race every other test in this binary running concurrently) --
+    /// `locate_current_chat_file` takes its `gemini_home` as a plain
+    /// argument, so these tests just build one and pass it directly.
+    struct ScratchGeminiHome(std::path::PathBuf);
+
+    impl ScratchGeminiHome {
+        fn new(label: &str) -> Self {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (label, std::process::id(), line!()).hash(&mut hasher);
+            let dir = std::env::temp_dir().join(format!("smgh{:x}", hasher.finish()));
+            std::fs::create_dir_all(&dir).expect("create the scratch gemini home");
+            ScratchGeminiHome(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn write_projects_json(&self, entries: &[(&std::path::Path, &str)]) {
+            let mut projects = serde_json::Map::new();
+            for (cwd, name) in entries {
+                projects.insert(
+                    cwd.to_string_lossy().into_owned(),
+                    serde_json::Value::String((*name).to_owned()),
+                );
+            }
+            let content =
+                serde_json::to_string(&serde_json::json!({ "projects": projects })).unwrap();
+            std::fs::write(self.0.join("projects.json"), content).expect("write projects.json");
+        }
+
+        /// Writes a flat, top-level chat file directly under
+        /// `tmp/<project>/chats/`, with `modified_secs_ago` controlling
+        /// its mtime explicitly (`File::set_modified`, stable since Rust
+        /// 1.75) -- deterministic "which is newest" tests would otherwise
+        /// depend on filesystem timestamp resolution, which is not fine
+        /// enough to trust for files written microseconds apart.
+        fn write_chat_file(
+            &self,
+            project: &str,
+            filename: &str,
+            kind: &str,
+            modified_secs_ago: u64,
+        ) {
+            let dir = self.0.join("tmp").join(project).join("chats");
+            std::fs::create_dir_all(&dir).expect("create chats dir");
+            let path = dir.join(filename);
+            std::fs::write(&path, format!(r#"{{"sessionId":"x","kind":"{kind}"}}"#))
+                .expect("write chat file");
+            let modified =
+                std::time::SystemTime::now() - std::time::Duration::from_secs(modified_secs_ago);
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("reopen chat file");
+            file.set_modified(modified).expect("set mtime");
+        }
+
+        /// Writes a nested subagent-shaped file, one directory deeper
+        /// than the flat shape -- confirmed live not to be a candidate
+        /// (see `locate_current_chat_file`'s own docs).
+        fn write_nested_subagent_file(&self, project: &str, parent_session: &str, filename: &str) {
+            let dir = self
+                .0
+                .join("tmp")
+                .join(project)
+                .join("chats")
+                .join(parent_session);
+            std::fs::create_dir_all(&dir).expect("create nested chats dir");
+            std::fs::write(dir.join(filename), r#"{"kind":"subagent"}"#)
+                .expect("write subagent file");
+        }
+    }
+
+    impl Drop for ScratchGeminiHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn locate_current_chat_file_returns_none_without_a_projects_json() {
+        let home = ScratchGeminiHome::new("no-registry");
+        let workspace = std::path::Path::new("/some/project");
+        assert_eq!(locate_current_chat_file(home.path(), workspace), None);
+    }
+
+    #[test]
+    fn locate_current_chat_file_returns_none_without_a_matching_registry_entry() {
+        let home = ScratchGeminiHome::new("no-entry");
+        let workspace = std::path::Path::new("/some/project");
+        home.write_projects_json(&[(std::path::Path::new("/some/other/project"), "other")]);
+        assert_eq!(locate_current_chat_file(home.path(), workspace), None);
+    }
+
+    #[test]
+    fn locate_current_chat_file_returns_none_with_no_chat_files_yet() {
+        let home = ScratchGeminiHome::new("no-chats-yet");
+        let workspace = std::path::Path::new("/some/project");
+        home.write_projects_json(&[(workspace, "myproj")]);
+        std::fs::create_dir_all(home.path().join("tmp/myproj/chats")).unwrap();
+        assert_eq!(locate_current_chat_file(home.path(), workspace), None);
+    }
+
+    #[test]
+    fn locate_current_chat_file_finds_the_newest_main_session_file() {
+        let home = ScratchGeminiHome::new("newest-wins");
+        let workspace = std::path::Path::new("/some/project");
+        home.write_projects_json(&[(workspace, "myproj")]);
+        home.write_chat_file(
+            "myproj",
+            "session-2026-01-01T00-00-aaaa1111.jsonl",
+            "main",
+            120,
+        );
+        home.write_chat_file(
+            "myproj",
+            "session-2026-01-02T00-00-bbbb2222.jsonl",
+            "main",
+            10,
+        );
+        let found = locate_current_chat_file(home.path(), workspace);
+        assert_eq!(
+            found,
+            Some(
+                home.path()
+                    .join("tmp/myproj/chats/session-2026-01-02T00-00-bbbb2222.jsonl")
+            )
+        );
+    }
+
+    #[test]
+    fn locate_current_chat_file_ignores_nested_subagent_files_even_if_newer() {
+        let home = ScratchGeminiHome::new("ignore-subagent");
+        let workspace = std::path::Path::new("/some/project");
+        home.write_projects_json(&[(workspace, "myproj")]);
+        home.write_chat_file(
+            "myproj",
+            "session-2026-01-01T00-00-aaaa1111.jsonl",
+            "main",
+            120,
+        );
+        // Nested and newer -- and, per its own `Drop`-free write, has no
+        // controlled mtime at all, meaning it is effectively "now",
+        // strictly newer than the flat file above. Still must not win.
+        home.write_nested_subagent_file("myproj", "aaaa1111", "subagent.jsonl");
+        let found = locate_current_chat_file(home.path(), workspace);
+        assert_eq!(
+            found,
+            Some(
+                home.path()
+                    .join("tmp/myproj/chats/session-2026-01-01T00-00-aaaa1111.jsonl")
+            )
+        );
+    }
+
+    #[test]
+    fn locate_current_chat_file_ignores_a_flat_file_that_is_not_kind_main() {
+        let home = ScratchGeminiHome::new("ignore-non-main");
+        let workspace = std::path::Path::new("/some/project");
+        home.write_projects_json(&[(workspace, "myproj")]);
+        // Shaped like a flat, top-level file, but not actually
+        // `"kind":"main"` -- should not happen in practice, but this
+        // guards the filter's own logic rather than assuming it.
+        home.write_chat_file(
+            "myproj",
+            "session-2026-01-01T00-00-aaaa1111.jsonl",
+            "subagent",
+            10,
+        );
+        assert_eq!(locate_current_chat_file(home.path(), workspace), None);
     }
 
     #[test]
