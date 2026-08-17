@@ -267,11 +267,25 @@ time rather than skipping on the sandbox's interactive-PTY limit.
 The four new recall tests did not complete a full run in this
 environment, but not for lack of credentials:
 
-- **Codex**: every live call, from the first `codex exec` on, returned
-  `ERROR: Quota exceeded. Check your plan and billing details.` — a real,
-  authenticated account with no usable billing quota. Confirmed
-  reproducible, not transient (retried multiple times over several
-  minutes).
+- **Codex**: manual `codex exec` probes run directly outside the
+  automated suite consistently returned `ERROR: Quota exceeded. Check
+  your plan and billing details.` — a real, authenticated account with
+  no usable billing quota. Confirmed reproducible, not transient
+  (retried multiple times over several minutes). **Correction, same
+  day** (see `docs/phase-6-report.md`'s own second 2026-08-17 update for
+  the full account): `codex_credentialed()`, the gate the two
+  Codex-involving tests (`codex_source_gemini_target_...`,
+  `gemini_source_codex_target_...`) used, had a real bug at the time
+  this paragraph was first written — it checked only stdout, but `codex
+  login status` writes its message to *stderr* when run without a TTY,
+  so the check always read as "not logged in" regardless of real state.
+  That means these two tests were actually skipping on the *gate*, not
+  on a live-attempted quota error, even though the quota block itself
+  was genuinely real (confirmed by the manual probes above, run
+  independently of the buggy gate). Fixed in the Codex Fork work; a
+  re-run afterward confirmed both tests now correctly reach their real
+  live call and skip on the genuine quota error, matching what the
+  Gemini-only test below already did honestly from the start.
 - **Gemini**: worked initially — one standalone `gemini --skip-trust -p`
   call outside the automated suite genuinely recalled a codeword from a
   rendered handoff, real end-to-end proof the mechanism works — but this
@@ -280,13 +294,18 @@ environment, but not for lack of credentials:
   (`generativelanguage.googleapis.com/generate_content_free_tier_requests,
   limit: 20, model: gemini-3.5-flash`) partway through. Later attempts,
   including a second full test-suite run after waiting out the quota
-  error's own suggested retry delay, still failed the same way.
+  error's own suggested retry delay, still failed the same way. Unlike
+  Codex, this test's own gate (`gemini_credentialed`, a plain
+  `GEMINI_API_KEY` env-var check) had no bug — it genuinely reached the
+  live call and skipped on the real timeout, both before and after the
+  Codex gate fix above.
 
 Both are real, external, account-level constraints this project does not
 control — not a sessionmgr defect, and not the same "no credentials at
 all" gap this report originally documented. The four tests are gated
 (`codex_credentialed`/`gemini_credentialed`, checking real login/env-var
-state) and skip cleanly rather than fail when a live call doesn't finish
+state — see the correction above for `codex_credentialed`'s own bug and
+fix) and skip cleanly rather than fail when a live call doesn't finish
 in time, the same "environment-dependent, not asserted here" convention
 this suite's other live-CLI tests already use — so they skipped
 correctly here rather than reporting a false failure, and will run for
@@ -295,15 +314,25 @@ real wherever these two accounts have usable quota.
 ### Issues #14/#15: same credentials, applied to Fork instead
 
 The same live credentials were used to revisit issues #14 and #15 (see
-each issue's own 2026-08-17 comment for full detail). Neither was closed
-— both turned out to need a change to `Supervisor::session_fork` itself
-(it gates every fork on `source.native_session_id` already being
-recorded, which fits Claude Code's id-based mechanism but not Codex's
-discover-after-spawn one or Gemini's path-based one at all), which is
-bigger than either issue originally scoped and deserves its own PR. But
-real progress was made on the piece each issue was actually blocked on:
-Codex's rollout-file `SessionMeta` (filename, `cwd`, `id`) was confirmed
-live, written before the API call completes or fails; and Gemini's
-file-location question was fully resolved — no hash to reverse-engineer,
-`~/.gemini/projects.json` is a plain, directly-readable cwd-to-directory
-registry.
+each issue's own 2026-08-17 comment for full detail, as first written).
+At the time this paragraph was originally written, neither was closed —
+both appeared to need a change to `Supervisor::session_fork` itself (it
+gated every fork on `source.native_session_id` already being recorded,
+which fit Claude Code's id-based mechanism but not Codex's
+discover-after-spawn one or Gemini's path-based one at all), which
+looked bigger than either issue originally scoped.
+
+**Stale as of later the same day — both are now closed.** That
+`session_fork` change did ship, in `sessionmgr-core::ports::ForkSource`
+and the `session_fork` update accompanying it, and both issues closed
+for real: Gemini CLI Fork (issue #15) once its file-location question
+resolved into a plain `projects.json` registry read, and Codex Fork
+(issue #14) once its own "post-spawn filesystem watch" framing turned
+out to be an unnecessary assumption — Codex's rollout file already
+exists by fork time, so its discovery is a lazy lookup exactly like
+Gemini's, not a watch. See `docs/phase-6-report.md`'s own two dated
+2026-08-17 updates for the full account of what shipped, what could and
+could not be live-verified for each, and a real credential-check bug
+(`codex_credentialed()`'s stdout/stderr issue, also relevant to this
+report's own "What ran live, and what didn't" section above) found and
+fixed along the way.
