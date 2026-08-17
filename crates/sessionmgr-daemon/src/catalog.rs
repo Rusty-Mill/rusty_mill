@@ -154,6 +154,7 @@ pub fn summarize(session: &Session) -> SessionSummary {
         branch: session.workspace.as_ref().and_then(|w| w.branch.clone()),
         created_at_millis: session.created_at_millis,
         exit_code: session.exit_code,
+        agent: session.agent,
     }
 }
 
@@ -233,6 +234,7 @@ mod tests {
             None,
             true,
             1_700_000_000_000,
+            None,
         )
     }
 

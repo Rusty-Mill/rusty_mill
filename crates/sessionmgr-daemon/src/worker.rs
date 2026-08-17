@@ -34,7 +34,7 @@ use std::sync::Arc;
 use rusty_tokio::io::AsyncReadExt;
 use rusty_tokio::io::AsyncWriteExt;
 use rusty_tokio::sync::{broadcast, Mutex, Notify};
-use sessionmgr_core::ports::worker_ref;
+use sessionmgr_core::ports::{worker_ref, AgentAdapterPort, AgentSignal};
 use sessionmgr_core::{SessionId, SessionStatus};
 use sessionmgr_proc::SystemProcessPort;
 use sessionmgr_protocol::{ErrorKind, Request, Response, SessionEvent};
@@ -128,6 +128,15 @@ enum Backend {
     /// Plain pipes, holding the child's stdin so input can still be sent.
     Piped(Mutex<Option<rusty_tokio::process::ChildStdin>>),
 }
+/// Tier-3 `needs_input` state for an agent-backed session: the adapter
+/// plus the `vt100` screen it renders output into, and the last signal
+/// computed, so an unchanged signal never triggers a redundant
+/// transition/write/emit on every single output chunk.
+struct AgentState {
+    adapter: Box<dyn AgentAdapterPort + Send + Sync>,
+    watcher: sessionmgr_agents::ScreenWatcher,
+    last_signal: AgentSignal,
+}
 
 /// Shared worker state, `Arc`ed across the accept loop, the output
 /// reader, and the exit watcher.
@@ -140,6 +149,12 @@ struct Worker {
     /// finished or a shutdown was requested.
     shutdown: Notify,
     child_pid: u32,
+    /// `None` for a session with no `--agent`, or a piped one (agent
+    /// detection needs a real terminal to render into -- ADR-0002).
+    /// `std::sync::Mutex`, not `rusty_tokio`'s: the PTY reader is a
+    /// plain OS thread with no runtime at all (see its own docs), so it
+    /// needs a lock it can take without one.
+    agent: Option<std::sync::Mutex<AgentState>>,
 }
 
 /// The `__worker-main` entrypoint.
@@ -218,6 +233,18 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
     session.transition_to(SessionStatus::Running)?;
     catalog::write_session(&root, &session)?;
 
+    // Tier-3 detection only makes sense for a real terminal (ADR-0002:
+    // an agent CLI is not meaningfully interactive without one), so a
+    // piped agent session gets no adapter even though it has one.
+    let agent = session.agent.filter(|_| session.pty).map(|kind| {
+        let size = TerminalSize::default();
+        std::sync::Mutex::new(AgentState {
+            adapter: sessionmgr_agents::adapter_for(kind),
+            watcher: sessionmgr_agents::ScreenWatcher::new(size.rows, size.cols),
+            last_signal: AgentSignal::Running,
+        })
+    });
+
     let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
     let worker = Arc::new(Worker {
         root: root.clone(),
@@ -226,6 +253,7 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
         backend,
         shutdown: Notify::new(),
         child_pid,
+        agent,
     });
 
     worker.emit(SessionEvent::Status {
@@ -381,9 +409,59 @@ impl Worker {
         if let Err(e) = catalog::append_transcript(&self.root, &self.id, &event) {
             eprintln!("sessionmgr worker: could not append to the transcript: {e}");
         }
+        if let SessionEvent::Output { data } = &event {
+            self.check_agent_signal(data);
+        }
         // An error here means nobody is attached, which is the normal
         // case for a background session and not a problem.
         let _ = self.events.send(event);
+    }
+
+    /// Tier-3 `needs_input`: feeds `data` into the agent's `vt100`
+    /// screen and, if the rendered screen's signal changed since the
+    /// last chunk, transitions and announces it.
+    ///
+    /// A no-op for a session with no adapter (`self.agent` is `None`),
+    /// and for every chunk that does not change the signal -- which is
+    /// most of them, since a CLI's screen typically settles into one
+    /// state (busy, or waiting) across many output chunks in a row, not
+    /// a fresh one on every single read.
+    fn check_agent_signal(&self, data: &[u8]) {
+        let Some(agent) = &self.agent else { return };
+        let signal = {
+            // A short, non-awaiting critical section: fed, rendered, and
+            // compared to the cached signal, all synchronously, so the
+            // lock never needs to survive past this block.
+            let mut state = agent.lock().unwrap_or_else(|e| e.into_inner());
+            state.watcher.feed(data);
+            let signal = state.adapter.needs_input(&state.watcher.text());
+            if signal == state.last_signal {
+                return;
+            }
+            state.last_signal = signal;
+            signal
+        };
+        let new_status = match signal {
+            AgentSignal::Running => SessionStatus::Running,
+            AgentSignal::NeedsInput => SessionStatus::NeedsInput,
+        };
+        match catalog::read_session(&self.root, &self.id) {
+            Ok(mut session) => {
+                // A rejected transition means the session already left
+                // the live states this signal only makes sense within
+                // (it exited between the last chunk and this one, most
+                // likely) -- tier-2's exit status already won that race
+                // and is authoritative, so a stale tier-3 guess is
+                // silently dropped rather than fighting it.
+                if session.transition_to(new_status).is_ok() {
+                    if let Err(e) = catalog::write_session(&self.root, &session) {
+                        eprintln!("sessionmgr worker: could not record {new_status:?}: {e}");
+                    }
+                    self.emit(SessionEvent::Status { status: new_status });
+                }
+            }
+            Err(e) => eprintln!("sessionmgr worker: could not read the session record: {e}"),
+        }
     }
 
     fn record_child_exit(&self, code: Option<i32>) {
@@ -440,6 +518,13 @@ impl Worker {
 
     /// Tells the session's terminal it has been resized.
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        if let Some(agent) = &self.agent {
+            agent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .watcher
+                .resize(rows, cols);
+        }
         match &self.backend {
             Backend::Pty(pty) => pty
                 .resize(TerminalSize { rows, cols })

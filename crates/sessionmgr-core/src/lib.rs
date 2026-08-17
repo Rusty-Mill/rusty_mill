@@ -20,7 +20,7 @@ pub mod workspace;
 
 pub use recovery::{decide_recovery, Liveness, RecoveryAction};
 pub use session::{
-    Disposition, Session, SessionId, SessionIdError, SessionKind, SessionStatus, TransitionError,
-    WorkerRef,
+    AgentKind, Disposition, Session, SessionId, SessionIdError, SessionKind, SessionStatus,
+    TransitionError, WorkerRef,
 };
 pub use workspace::Workspace;

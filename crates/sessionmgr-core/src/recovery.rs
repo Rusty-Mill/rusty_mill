@@ -122,6 +122,7 @@ mod tests {
             None,
             true,
             1_700_000_000_000,
+            None,
         );
         s.status = status;
         s.worker = worker;

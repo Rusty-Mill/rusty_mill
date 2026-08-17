@@ -34,7 +34,7 @@ USAGE:
     sessionmgr <COMMAND>
 
 COMMANDS:
-    new [--kind KIND] [--repo <path>] [--no-pty] [-- <command>...]
+    new [--kind KIND] [--agent AGENT] [--repo <path>] [--no-pty] [-- <command>...]
                                               create a session and start it
     list                                      list every session
     attach <id>                               stream a session's output
@@ -50,6 +50,14 @@ SESSION KINDS:
     same-dir     runs in the repository's own working copy -- NOT isolated;
                  concurrent same-dir sessions can collide with each other
     terminal     a plain shell, no repository (the default)
+
+AGENTS:
+    claude       Claude Code -- tier-3 pattern matching plus a verified
+                 hook mechanism (not yet wired to this tool's status)
+    codex        Codex -- tier-3 pattern matching plus a verified hook
+                 mechanism (not yet wired to this tool's status)
+    Without --agent, a session gets none of the above: `command` runs
+    literally and only process-exit status is ever reported.
 
 CLOSING:
     close <id>              stop the processes; leave any worktree in place
@@ -158,7 +166,20 @@ async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
     // survives-a-kill behaviour is the one proven on Windows.
     let pty = !args.iter().any(|a| a == "--no-pty");
     args.retain(|a| a != "--no-pty");
-    let id = client::session_new(root, kind, command, repo, pty).await?;
+    // `--agent` resolves `command` through that agent's own
+    // `launch_args` instead of treating it as the literal program to
+    // run, and turns on tier-3 `needs_input` detection for the session.
+    let agent = match take_option(&mut args, "--agent")?.as_deref() {
+        None => None,
+        Some("claude" | "claude-code") => Some(sessionmgr_core::AgentKind::ClaudeCode),
+        Some("codex") => Some(sessionmgr_core::AgentKind::Codex),
+        Some(other) => {
+            return Err(Error::usage(format!(
+                "unknown agent `{other}` (expected `claude` or `codex`)"
+            )))
+        }
+    };
+    let id = client::session_new(root, kind, command, repo, pty, agent).await?;
     println!("{id}");
     Ok(())
 }

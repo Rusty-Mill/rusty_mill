@@ -1283,6 +1283,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sessionmgr-agents"
+version = "0.1.0"
+dependencies = [
+ "sessionmgr-core",
+ "vt100",
+]
+
+[[package]]
 name = "sessionmgr-core"
 version = "0.1.0"
 dependencies = [
@@ -1297,6 +1305,7 @@ dependencies = [
  "rusty_tokio",
  "serde",
  "serde_json",
+ "sessionmgr-agents",
  "sessionmgr-core",
  "sessionmgr-git",
  "sessionmgr-proc",

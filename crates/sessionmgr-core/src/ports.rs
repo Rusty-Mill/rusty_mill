@@ -1,10 +1,11 @@
 //! The ports: traits the domain defines and adapter crates implement.
 //!
 //! Only ports that actually have an implementation *and* a caller live
-//! here. `AgentAdapterPort` (Phase 3) is named in the plan but
-//! deliberately not declared yet -- a trait with no implementor is a
-//! guess about an interface, and the agent-adapter interface in
-//! particular depends on the outcome of spikes that have not all run.
+//! here. `AgentAdapterPort` was named in the plan but deliberately not
+//! declared until Phase 3 -- a trait with no implementor is a guess
+//! about an interface. It has two now (`sessionmgr-agents`' `ClaudeCode`
+//! and `Codex`), both driven by real, measured CLI output rather than
+//! assumed shapes.
 
 use std::path::Path;
 
@@ -128,4 +129,50 @@ pub fn worker_ref(port: &dyn ProcessPort, pid: u32) -> WorkerRef {
         pid,
         start_fingerprint: port.start_fingerprint(pid),
     }
+}
+
+/// Everything the domain needs from a per-CLI agent adapter.
+///
+/// Implemented by `sessionmgr-agents`. `launch_args` is the easy half;
+/// `needs_input` is PLAN.md's "hard part" -- tier-3 (pattern-matching)
+/// only, per this trait. Tier 1 (hooks) is a higher-confidence,
+/// out-of-band signal that arrives through a hook callback, not through
+/// output text, so it is not this trait's concern -- it updates a
+/// session's status directly once Phase 4's hook-install work exists.
+/// Tier 2 (process exit) is `Session::record_exit`, already wired for
+/// every session regardless of whether it has an adapter at all.
+pub trait AgentAdapterPort {
+    /// The command line to launch this agent. `extra` is whatever the
+    /// caller supplied beyond `--agent <kind>` -- typically empty
+    /// (bare interactive) or an initial prompt.
+    fn launch_args(&self, extra: &[String]) -> Vec<String>;
+
+    /// Does the CLI's current on-screen state look like it is waiting on
+    /// the user? `screen_text` is already-rendered plain text (one
+    /// screen row per line, escape sequences already interpreted, ANSI
+    /// colors and cursor-positioning gone) -- never raw PTY bytes, which
+    /// keeps this trait free of any terminal-emulation dependency.
+    /// Measured directly (see `docs/phase-3-report.md`): the naive
+    /// alternative, matching against ANSI-stripped raw bytes, silently
+    /// fails whenever a CLI lays out spacing with cursor-positioning
+    /// sequences instead of literal space characters, which both
+    /// adapters this trait has today actually do.
+    ///
+    /// Only ever answers `Running` or `NeedsInput` -- see the trait's
+    /// own docs for why `Finished`/`Errored` are deliberately not this
+    /// tier's call.
+    fn needs_input(&self, screen_text: &str) -> AgentSignal;
+
+    /// Does this CLI have a hook mechanism sessionmgr has verified
+    /// firing for real (not just documented)? Recorded for a future
+    /// confidence badge and for Phase 4's hook-install work; this crate
+    /// never installs a hook itself.
+    fn has_verified_hooks(&self) -> bool;
+}
+
+/// [`AgentAdapterPort::needs_input`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSignal {
+    Running,
+    NeedsInput,
 }

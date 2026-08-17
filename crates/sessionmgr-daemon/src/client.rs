@@ -127,6 +127,7 @@ pub async fn session_new(
     command: Vec<String>,
     repo: Option<PathBuf>,
     pty: bool,
+    agent: Option<sessionmgr_core::AgentKind>,
 ) -> Result<SessionId> {
     match request(
         root,
@@ -135,6 +136,7 @@ pub async fn session_new(
             command,
             repo,
             pty,
+            agent,
         },
     )
     .await?
@@ -299,6 +301,7 @@ mod tests {
             branch: None,
             created_at_millis: 1_700_000_000_000,
             exit_code: None,
+            agent: None,
         };
         let rendered = render_sessions(std::slice::from_ref(&summary));
         assert!(rendered.contains(summary.id.as_str()));

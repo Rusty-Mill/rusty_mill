@@ -198,6 +198,24 @@ impl SessionKind {
     }
 }
 
+/// Which agent CLI a session runs, if any.
+///
+/// `None` on a session (a plain command or shell, or one created without
+/// `--agent`) means exactly what it says: no adapter, no `needs_input`
+/// detection beyond tier-2 process exit, which every session already
+/// gets regardless. Only Claude Code and Codex are named here -- Gemini
+/// CLI's own hook-based signal is confirmed to exist (`gemini hooks`)
+/// but has not been verified firing on this machine (no credentials to
+/// run a real session with), so it gets no adapter yet rather than one
+/// nobody has actually run. Adding it later is a one-variant, one-file
+/// change, not a breaking one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentKind {
+    ClaudeCode,
+    Codex,
+}
+
 /// Where a session is in its lifecycle.
 ///
 /// PLAN.md states the machine as
@@ -363,9 +381,17 @@ pub struct Session {
     pub created_at_millis: u64,
     /// Set when the session's process exits.
     pub exit_code: Option<i32>,
+    /// Which agent CLI this session runs, if any. `None` for a session
+    /// created without `--agent`.
+    ///
+    /// `#[serde(default)]` for the same reason `workspace` and `pty`
+    /// are: a record written before this field existed must still load.
+    #[serde(default)]
+    pub agent: Option<AgentKind>,
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: SessionId,
         kind: SessionKind,
@@ -373,6 +399,7 @@ impl Session {
         workspace: Option<Workspace>,
         pty: bool,
         created_at_millis: u64,
+        agent: Option<AgentKind>,
     ) -> Self {
         Session {
             id,
@@ -385,6 +412,7 @@ impl Session {
             pty,
             created_at_millis,
             exit_code: None,
+            agent,
         }
     }
 
@@ -507,6 +535,7 @@ mod tests {
             None,
             true,
             1_700_000_000_000,
+            None,
         )
     }
 
@@ -706,6 +735,7 @@ mod tests {
             Some(Workspace::worktree(std::path::PathBuf::from("/repo"), &id)),
             true,
             1_700_000_000_000,
+            None,
         )
     }
 
