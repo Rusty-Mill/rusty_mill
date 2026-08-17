@@ -59,6 +59,10 @@ AGENTS:
                  hook mechanism (--hooks wires it to this tool's status)
     codex        Codex -- tier-3 pattern matching, plus a verified hook
                  mechanism (--hooks wires it to this tool's status)
+    gemini       Gemini CLI -- tier-3 pattern matching and a hook config
+                 (--hooks), both built from gemini-cli's own source and
+                 docs rather than a live-verified session (no credentials
+                 on this machine); lower confidence than claude/codex
     Without --agent, a session gets none of the above: `command` runs
     literally and only process-exit status is ever reported.
 
@@ -231,9 +235,10 @@ async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
         None => None,
         Some("claude" | "claude-code") => Some(sessionmgr_core::AgentKind::ClaudeCode),
         Some("codex") => Some(sessionmgr_core::AgentKind::Codex),
+        Some("gemini") => Some(sessionmgr_core::AgentKind::Gemini),
         Some(other) => {
             return Err(Error::usage(format!(
-                "unknown agent `{other}` (expected `claude` or `codex`)"
+                "unknown agent `{other}` (expected `claude`, `codex`, or `gemini`)"
             )))
         }
     };
