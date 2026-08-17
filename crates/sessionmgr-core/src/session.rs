@@ -203,17 +203,17 @@ impl SessionKind {
 /// `None` on a session (a plain command or shell, or one created without
 /// `--agent`) means exactly what it says: no adapter, no `needs_input`
 /// detection beyond tier-2 process exit, which every session already
-/// gets regardless. Only Claude Code and Codex are named here -- Gemini
-/// CLI's own hook-based signal is confirmed to exist (`gemini hooks`)
-/// but has not been verified firing on this machine (no credentials to
-/// run a real session with), so it gets no adapter yet rather than one
-/// nobody has actually run. Adding it later is a one-variant, one-file
-/// change, not a breaking one.
+/// gets regardless. `Gemini`'s own adapter is built from its shipped
+/// source and hooks reference docs rather than a live-captured session
+/// (no credentials on this machine to run a real one) -- see
+/// `sessionmgr_agents::gemini`'s own module docs for exactly what that
+/// does and does not mean for this variant's confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    Gemini,
 }
 
 /// Where a session is in its lifecycle.
