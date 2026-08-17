@@ -215,7 +215,13 @@ fn merging_a_diverged_branch_fails_loudly_and_keeps_the_work() {
         .env("GIT_COMMITTER_EMAIL", "tests@example.invalid")
         .output()
         .expect("run git");
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "git commit --allow-empty failed (status {:?})\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let result = run(root.path(), &["close", &id, "--merge"]);
     assert!(
