@@ -6,7 +6,9 @@ covers the other half — **switch-agent-mid-session, for every agent this
 tool supports**. Unlike Fork, switch-agent needed no per-CLI deferral:
 the design chosen here works uniformly for Claude Code, Codex, and
 Gemini CLI on day one, though only Claude Code could be exercised
-against a real, authenticated process in this environment.
+against a real, authenticated process in this environment when this
+phase was first written. See "Update (2026-08-17)" below for what
+changed once real Codex/Gemini credentials became available.
 
 ## Status
 
@@ -16,7 +18,7 @@ against a real, authenticated process in this environment.
 | `sessionmgr_agents::handoff::render_handoff` | **Done** |
 | `Request::SessionSwitchAgent`, `sessionmgr switch-agent <id> <agent>` | **Done** |
 | Works for every agent (Claude Code, Codex, Gemini CLI) | **Done** — no per-CLI deferral needed |
-| Live verification | **Partial** — real Claude Code as source, live-tested up to the sandbox's own interactive-PTY limit; Codex/Gemini as *target* remain unauthenticated here (same gap as #14/#15) |
+| Live verification | **Partial**, revised 2026-08-17 — see the update below for what real Codex/Gemini credentials did and did not resolve |
 
 ## The design
 
@@ -178,14 +180,16 @@ alone:
 
 ## What is not done
 
-- **Real cross-CLI proof that a handoff actually works for Codex or
-  Gemini as the receiving agent.** The mechanism (an initial-prompt
-  argument) is identical to what already works for Claude Code, and
-  every adapter already accepts it — but "the plumbing exists" and "a
-  real Codex process picks up the thread sensibly" are different
-  claims, and only the first is proven here. Closing this needs real
-  Codex or Gemini credentials in an environment that also has this
-  repo — the same missing precondition as issues #14/#15.
+- **A full, automated, both-legs-in-one-run proof that Codex or Gemini,
+  as the *receiving* agent, recalls a fact from the handoff.** See the
+  2026-08-17 update below: this was attempted for real, with real
+  credentials, and got close — one manual round trip succeeded outright,
+  and the automated test mechanism itself is confirmed correct — but no
+  automated run completed both legs before hitting a real, external
+  account-level quota wall on both providers. The tests are written and
+  gated to skip cleanly rather than fail when that happens, matching this
+  suite's own established convention for exactly this class of
+  environment-dependent gap.
 - **Hook reinstallation across a switch.** A session created with
   `--hooks` has a hook config file installed for its *original* agent
   (e.g. `.claude/settings.json`). Switch-agent does not reinstall an
@@ -202,3 +206,104 @@ alone:
   rather than its least relevant content. Acceptable for a v1 matching
   PLAN.md's own sanctioned fallback wording; a smarter compaction
   strategy is future work, not a defect in this one.
+
+## Update (2026-08-17): live verification with real Codex/Gemini credentials
+
+`OPENAI_API_KEY` and `GEMINI_API_KEY` were configured in this
+environment for the first time, specifically to close the gap this
+report's original "What is not done" named. `codex login --with-api-key`
+succeeded and `gemini` worked directly (it reads the env var with no
+separate login step). This did not fully close the gap, but for a more
+interesting reason than "still no credentials."
+
+### What changed in the test suite
+
+`crates/sessionmgr-daemon/tests/switch_agent.rs` gained a third test
+tier: four `*_recalls_codeword_from_the_rendered_handoff` tests
+(`gemini_source_claude_target`, `claude_source_gemini_target`,
+`codex_source_gemini_target`, `gemini_source_codex_target`), covering
+every source/target combination this report's original gap named
+(Codex/Gemini as source, and as the *receiving* agent). Unlike the
+existing bookkeeping-tier test, these drive each CLI directly through
+`--kind same-dir --no-pty` (mirroring `fork_sessions.rs`'s own
+mechanism-level codeword test, not the full interactive `switch-agent`
+command), call the real `sessionmgr_agents::render_handoff` production
+code, and assert that a *different* CLI, given only the rendered text as
+its initial prompt plus one explicit recall question, can extract a fact
+planted in the source's own transcript.
+
+Two real bugs surfaced and were fixed while building this:
+
+- **The first version seeded the codeword through the *prompt*** ("Remember
+  this codeword, reply OK"), not the reply. `render_handoff` only ever
+  renders a session's own *output* bytes — a one-shot, non-interactive
+  `-p`/`exec` invocation prints just its final answer, with no echo of
+  what it was asked, unlike an interactive terminal. The rendered handoff
+  therefore contained only "OK", and no CLI could have recalled anything
+  from it — confirmed by an actual failing test run, not caught by
+  review. Fixed by making the codeword the assistant's own visible
+  reply instead.
+- **`claude -p` and `codex exec`, run through this project's own
+  `--no-pty` piped-stdio backend, both wait on stdin** before proceeding
+  (`claude` prints "no stdin data received in 3s, proceeding without it"
+  and continues; `codex exec` appeared to wait indefinitely) — because
+  `Backend::Piped` (`worker.rs`) never closes a session's stdin pipe on
+  its own, correct for an interactive session `attach` might still write
+  to, but not what a one-shot invocation needs. Fixed inside the test
+  file only (not production code, which never launches these CLIs'
+  one-shot modes) by wrapping each command in `sh -c '... < /dev/null'`,
+  passing the prompt as `$1` rather than interpolating it into the
+  script string, since a rendered handoff can contain arbitrary
+  characters.
+
+### What ran live, and what didn't
+
+The always-run and bookkeeping-tier tests all passed, including —
+notably, unlike when this report was first written —
+`switch_agent_end_to_end_keeps_the_same_workspace_and_hands_off_the_transcript`,
+which actually reached `needs-input` against a real `claude` process this
+time rather than skipping on the sandbox's interactive-PTY limit.
+
+The four new recall tests did not complete a full run in this
+environment, but not for lack of credentials:
+
+- **Codex**: every live call, from the first `codex exec` on, returned
+  `ERROR: Quota exceeded. Check your plan and billing details.` — a real,
+  authenticated account with no usable billing quota. Confirmed
+  reproducible, not transient (retried multiple times over several
+  minutes).
+- **Gemini**: worked initially — one standalone `gemini --skip-trust -p`
+  call outside the automated suite genuinely recalled a codeword from a
+  rendered handoff, real end-to-end proof the mechanism works — but this
+  session's own testing (many manual probes plus the automated tests'
+  own calls) exhausted the API key's free-tier quota
+  (`generativelanguage.googleapis.com/generate_content_free_tier_requests,
+  limit: 20, model: gemini-3.5-flash`) partway through. Later attempts,
+  including a second full test-suite run after waiting out the quota
+  error's own suggested retry delay, still failed the same way.
+
+Both are real, external, account-level constraints this project does not
+control — not a sessionmgr defect, and not the same "no credentials at
+all" gap this report originally documented. The four tests are gated
+(`codex_credentialed`/`gemini_credentialed`, checking real login/env-var
+state) and skip cleanly rather than fail when a live call doesn't finish
+in time, the same "environment-dependent, not asserted here" convention
+this suite's other live-CLI tests already use — so they skipped
+correctly here rather than reporting a false failure, and will run for
+real wherever these two accounts have usable quota.
+
+### Issues #14/#15: same credentials, applied to Fork instead
+
+The same live credentials were used to revisit issues #14 and #15 (see
+each issue's own 2026-08-17 comment for full detail). Neither was closed
+— both turned out to need a change to `Supervisor::session_fork` itself
+(it gates every fork on `source.native_session_id` already being
+recorded, which fits Claude Code's id-based mechanism but not Codex's
+discover-after-spawn one or Gemini's path-based one at all), which is
+bigger than either issue originally scoped and deserves its own PR. But
+real progress was made on the piece each issue was actually blocked on:
+Codex's rollout-file `SessionMeta` (filename, `cwd`, `id`) was confirmed
+live, written before the API call completes or fails; and Gemini's
+file-location question was fully resolved — no hash to reverse-engineer,
+`~/.gemini/projects.json` is a plain, directly-readable cwd-to-directory
+registry.
