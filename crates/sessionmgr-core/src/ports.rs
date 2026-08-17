@@ -226,58 +226,103 @@ pub trait AgentAdapterPort {
     /// What installing a hook and having it fire for `event` means.
     fn hook_signal(&self, event: &str) -> HookOutcome;
 
-    /// Does this adapter support Fork at all?
+    /// Does this adapter's fork **mechanism** exist at all?
     ///
     /// Answers a **creation-time** question [`Self::fork_args`] cannot:
     /// whether it is worth generating and pinning a native session id
     /// *before* anyone has asked to fork anything, so an ordinary session
     /// is already forkable later with no further machinery. Kept as its
     /// own explicit fact, deliberately, rather than inferred by probing
-    /// `fork_args` with placeholder ids -- the same "answer the question,
-    /// do not infer it" reasoning [`Self::has_verified_hooks`] already
-    /// follows. The two methods are two questions asked at two different
-    /// times, not one capability duplicated: `sessionmgr-agents`' own
-    /// tests assert `supports_fork() == fork_args(..).is_some()` for
-    /// every adapter, which is what keeps them from drifting apart in
-    /// practice.
+    /// `fork_args` with placeholder inputs -- the same "answer the
+    /// question, do not infer it" reasoning [`Self::has_verified_hooks`]
+    /// already follows.
     ///
-    /// As of ADR-0003/Phase 6, only Claude Code answers `true`: it is the
-    /// one CLI of the three this project supports that could actually be
-    /// live-verified in the environment available while this was built
-    /// (real, authenticated `claude` access), not just reasoned about
-    /// from source. See [`Self::fork_args`]'s own docs for why Codex and
-    /// Gemini CLI are not `true` here yet, and what would change that.
+    /// **Not always equivalent to `fork_args(..).is_some()`, and that is
+    /// deliberate, not drift.** For an id-based adapter (Claude Code),
+    /// the two questions really were the same thing for a long time: a
+    /// native id is either present or absent, and `fork_args` never fails
+    /// for any other reason, so `sessionmgr-agents`' own tests could
+    /// assert strict equality between them. Gemini CLI broke that: its
+    /// mechanism is real (this answers `true`), but any single
+    /// `fork_args` call can still come back `None` for a reason that has
+    /// nothing to do with adapter support -- no matching conversation
+    /// file exists yet for this particular workspace. `supports_fork`
+    /// answers "does this adapter's Fork mechanism exist", not "will the
+    /// next `fork_args` call for this specific session succeed" -- see
+    /// [`Self::fork_args`]'s own docs for the full reasoning, and
+    /// `sessionmgr-agents`' tests for how the two are verified separately
+    /// now instead of by one blanket equality.
+    ///
+    /// As of ADR-0003/Phase 6, Claude Code and Gemini CLI both answer
+    /// `true`. Codex does not yet -- see [`Self::fork_args`]'s own docs
+    /// for why, and what would change that.
     fn supports_fork(&self) -> bool;
 
     /// The command line to launch a **forked** session -- a new,
-    /// independent session that starts with a copy of `source_native_id`'s
-    /// own conversation history, per CAPABILITIES.md's observed "Fork
-    /// session" capability and ADR-0003's spike into whether any CLI
-    /// supports being handed externally-tracked prior state at all.
+    /// independent session that starts with a copy of the source
+    /// session's own conversation history, per CAPABILITIES.md's observed
+    /// "Fork session" capability and ADR-0003's spike into whether any
+    /// CLI supports being handed externally-tracked prior state at all.
     ///
-    /// `None` when [`Self::supports_fork`] is `false` for this adapter.
+    /// `source` carries everything any adapter's own mechanism might need
+    /// to identify which conversation to fork -- see [`ForkSource`]'s own
+    /// docs for why that is more than one shared identifier. `new_native_id`
+    /// is the id the *forked* session should itself be pinned to (see
+    /// [`Self::launch_args`]'s own `native_id` parameter), for adapters
+    /// that can pin one; an adapter that cannot ignores it, the same
+    /// defensive posture `launch_args`'s own `native_id` parameter
+    /// already documents.
+    ///
+    /// `None` means this specific call cannot produce a forkable command
+    /// line -- either because [`Self::supports_fork`] is `false` for this
+    /// adapter at all, or (Gemini CLI specifically) because `source`
+    /// doesn't have what this call needs *this time* (no recorded
+    /// conversation file for its workspace yet). Callers that want to
+    /// know which of those two happened should check `supports_fork`
+    /// first.
+    ///
     /// Codex's own fork mechanism is real (`codex fork <id>`, confirmed
     /// via its own test suite in ADR-0003) but needs a *separate*
-    /// native-id-**discovery** mechanism this phase does not build, since
-    /// unlike Claude Code Codex has no flag to let the caller pin a new
-    /// session's id at creation -- see `docs/phase-6-report.md` for
-    /// exactly what is missing and why this was not guessed at instead.
-    /// Gemini CLI's own fork-equivalent (`--session-file`) needs the
-    /// *file path* to the source session's own chat history, which
-    /// requires replicating gemini-cli's internal project-directory
-    /// hashing scheme to locate reliably -- also deferred, also explained
-    /// in the phase report rather than shipped unverified.
-    ///
-    /// `new_native_id` is the id the *forked* session should itself be
-    /// pinned to (see [`Self::launch_args`]'s own `native_id` parameter),
-    /// so a forked session is just as forkable again afterward as an
-    /// ordinary one.
+    /// native-id-**discovery** mechanism this project does not build yet,
+    /// since unlike Claude Code, Codex has no flag to let the caller pin
+    /// a new session's id at creation -- see `docs/phase-6-report.md` and
+    /// issue #14 for exactly what is missing and why this was not
+    /// guessed at instead. Gemini CLI's own fork-equivalent
+    /// (`--session-file`) takes a *path*, not an id, to the source
+    /// session's own chat-history file -- located by reading gemini-cli's
+    /// own `projects.json` registry (confirmed live; no hash to
+    /// reverse-engineer, see issue #15) rather than pinned at launch.
     fn fork_args(
         &self,
-        source_native_id: &str,
+        source: ForkSource<'_>,
         new_native_id: &str,
         extra: &[String],
     ) -> Option<Vec<String>>;
+}
+
+/// Identifies which of the source session's own conversations
+/// [`AgentAdapterPort::fork_args`] should fork.
+///
+/// Deliberately more than a single shared identifier: the CLIs this
+/// project supports do not agree on what "the source" even means for
+/// Fork. Claude Code (and, if issue #14 closes, Codex) resumes by *id*
+/// (`native_session_id`, pinned at the source's own launch time). Gemini
+/// CLI's fork-equivalent, `--session-file`, takes a *path* instead and
+/// has no id concept for this purpose at all -- its own adapter reads
+/// `workspace_cwd` and ignores `native_session_id` entirely. An adapter
+/// reads whichever field its own mechanism needs.
+#[derive(Debug, Clone, Copy)]
+pub struct ForkSource<'a> {
+    /// The source session's own CLI-assigned conversation id, if one was
+    /// pinned at launch (see [`AgentAdapterPort::launch_args`]'s
+    /// `native_id`). `None` for a session created before this adapter
+    /// supported pinning one, or for an adapter that never pins one at
+    /// all (Gemini CLI, today).
+    pub native_session_id: Option<&'a str>,
+    /// The source session's own workspace directory. Always present by
+    /// the time a session could have a live conversation worth forking,
+    /// unlike `native_session_id`.
+    pub workspace_cwd: &'a Path,
 }
 
 /// [`AgentAdapterPort::needs_input`]'s answer.

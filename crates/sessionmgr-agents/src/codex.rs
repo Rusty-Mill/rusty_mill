@@ -9,7 +9,7 @@
 //! is a hook-*installation*-time concern (Phase 4), not something this
 //! adapter's tier-3 fallback needs to account for.
 
-use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, HookOutcome};
+use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, ForkSource, HookOutcome};
 
 pub struct Codex;
 
@@ -117,24 +117,27 @@ impl AgentAdapterPort for Codex {
 
     /// Not supported here, deliberately -- not a gap silently left open.
     ///
-    /// `codex fork <id>` is real (confirmed via Codex's own test suite,
-    /// `docs/decisions/0003-resume-fork-spike.md`), but reaching it needs
-    /// this session's *native* Codex thread id, and Codex has no launch
-    /// flag to let a caller pin one the way Claude Code's `--session-id`
-    /// does -- confirmed absent from a real `codex --help`. The id is
-    /// always self-assigned and would have to be *discovered* after the
-    /// fact (Codex's own rollout files embed it in their filename,
-    /// `rollout-<timestamp>-<thread-id>.jsonl`, which is a workable
-    /// mechanism but a genuinely separate piece of machinery -- a
-    /// post-spawn filesystem watch, not a pure format-producing method
-    /// like this trait's other ones). Building that blind, with no
-    /// credentials in any environment available to verify it against a
-    /// real `codex` process, is exactly the kind of unverified guess this
-    /// project's own conventions ask not to ship. See
-    /// `docs/phase-6-report.md` for the filed follow-up.
+    /// `codex fork <id> -C <dir>` is real, live-confirmed via a real
+    /// installed `codex fork --help` (issue #14's own 2026-08-17
+    /// comment), but reaching it needs this session's *native* Codex
+    /// thread id, and Codex has no launch flag to let a caller pin one
+    /// the way Claude Code's `--session-id` does -- confirmed absent from
+    /// a real `codex --help`. The id is always self-assigned and would
+    /// have to be *discovered* after the fact. Codex's own rollout files
+    /// embed it in their filename (`rollout-<timestamp>-<thread-id>.jsonl`)
+    /// and their first line's `SessionMeta.cwd`/`id` fields -- both
+    /// live-confirmed to exist, written before the API call completes or
+    /// fails -- but turning that into a real discovery mechanism needs a
+    /// post-spawn filesystem watch, a genuinely separate piece of
+    /// machinery unlike this trait's other pure format-producing methods,
+    /// wired into `Supervisor`/`worker.rs` rather than this adapter alone.
+    /// Building that -- plus the `session_fork` control-flow change
+    /// [`ForkSource`]'s own docs describe for a discover-after-spawn
+    /// mechanism -- is real, separate work; see issue #14 for exactly
+    /// what is missing and why this was not guessed at instead.
     fn fork_args(
         &self,
-        _source_native_id: &str,
+        _source: ForkSource<'_>,
         _new_native_id: &str,
         _extra: &[String],
     ) -> Option<Vec<String>> {
@@ -190,7 +193,11 @@ mod tests {
     #[test]
     fn fork_is_not_supported() {
         assert!(!Codex.supports_fork());
-        assert_eq!(Codex.fork_args("source", "new", &[]), None);
+        let source = ForkSource {
+            native_session_id: Some("source"),
+            workspace_cwd: std::path::Path::new("/workspace"),
+        };
+        assert_eq!(Codex.fork_args(source, "new", &[]), None);
     }
 
     #[test]

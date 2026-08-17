@@ -20,7 +20,7 @@ done."
 | `Request::SessionFork`, `sessionmgr fork <id>` | **Done** |
 | Claude Code adapter (`--session-id` pin, `--resume --fork-session`) | **Done, live-verified** |
 | Codex adapter | **Deferred** — filed as [#14](https://github.com/baileyrd/rusty_yirp/issues/14) |
-| Gemini CLI adapter | **Deferred** — filed as [#15](https://github.com/baileyrd/rusty_yirp/issues/15) |
+| Gemini CLI adapter | **Done**, 2026-08-17 — see this report's own dated update below |
 | Live verification | **Done** — real mechanism proven, plus an honest limit on what could be proven in this environment |
 
 ## The design
@@ -166,10 +166,10 @@ this phase's confidence; the end-to-end test is additional coverage for
 whichever environment (a real Windows box, in particular) does not hit
 that limitation.
 
-## Why Codex and Gemini CLI are deferred, not guessed at
+## Why Codex was deferred, not guessed at (Gemini CLI closed this gap 2026-08-17 -- see below)
 
-Both have real fork mechanisms — ADR-0003 already established that.
-Both are missing one specific, identified piece, not "everything":
+Both had real fork mechanisms — ADR-0003 already established that. Both
+were missing one specific, identified piece, not "everything":
 
 - **Codex** (issue [#14](https://github.com/baileyrd/rusty_yirp/issues/14)): no flag to pin a new session's own native
   id at creation (confirmed absent from a real `codex --help`); its own
@@ -233,8 +233,9 @@ build was checked and found fine.
 
 ## What is not done
 
-**Codex and Gemini CLI Fork support** — filed as issues, not silently
-dropped; see above.
+**Codex Fork support** — filed as issue #14, not silently dropped; see
+above and this report's own 2026-08-17 update. (Gemini CLI Fork support
+shipped as of that update.)
 
 **Switch-agent-mid-session** — entirely untouched by this phase.
 ADR-0003 scoped the format each CLI expects, which is the real
@@ -252,3 +253,106 @@ but no TUI-side UI was built in this pass.
 Phase 6+ note also asks for this before committing design effort to it.
 Untouched by this phase; `CAPABILITIES.md` still flags it as sourced
 only from restated marketing copy.
+
+## Update (2026-08-17): Gemini CLI Fork implemented
+
+`GEMINI_API_KEY` was configured in this environment for the first time
+(see `docs/phase-7-report.md`'s own matching update), closing the
+blocker issue #15 named: locating the source session's own current
+chat-history file for `--session-file <path>`.
+
+### The file-location question is solved -- and simpler than expected
+
+No hash needed reverse-engineering after all. Reading the installed
+`@google/gemini-cli` bundle directly (`chunk-32XQ54AJ.js`) turned up
+`~/.gemini/projects.json` (or `$GEMINI_CLI_HOME/projects.json` when that
+env var is set): a plain JSON registry mapping each project's own
+absolute working directory to a short directory name, e.g.
+`{"projects": {"/home/user/rusty_yirp": "rusty-yirp"}}`. `ProjectRegistry`'s
+own key (`normalizePath`) is a plain `path.resolve`, lowercased only on
+`win32` -- no realpath/symlink resolution -- which lines up exactly with
+how `sessionmgr` already builds `Workspace.cwd` (from `git rev-parse
+--show-toplevel`), so no path-normalization work was needed on this
+project's own side either.
+
+One wrinkle issue #15's own research did not know about: `tmp/<name>/chats/`
+holds two shapes. A flat `session-<timestamp><shortid>.jsonl`, whose
+first line reads `{"kind":"main",...}` -- the real top-level
+conversation -- and a nested `<parent-id>/<subagent-id>.jsonl`, first
+line `{"kind":"subagent",...}` -- a tool-driven sub-conversation, not the
+one to fork. `GeminiCli::locate_current_chat_file` (`crates/sessionmgr-agents/src/gemini.rs`)
+only considers the flat, `"kind":"main"` shape, picking the newest by
+mtime.
+
+### `AgentAdapterPort::fork_args` needed a real signature change, not just a Gemini-side fix
+
+The design section above ("Validation order in `Supervisor::session_fork`")
+described step 4 as `source.native_session_id.is_some()`, checked
+*before* calling into the adapter at all -- true for Claude Code, but
+wrong for Gemini CLI, whose actual mechanism is path-based and has no id
+concept at all. Shipping Gemini Fork honestly needed:
+
+- `ForkSource<'a>` (`sessionmgr-core::ports`): replaces `fork_args`'s
+  bare `source_native_id: &str` parameter with a small struct carrying
+  both `native_session_id: Option<&str>` and `workspace_cwd: &Path` --
+  each adapter reads whichever field its own mechanism needs.
+- `Supervisor::session_fork` no longer hard-requires `native_session_id`
+  up front; it now always calls `fork_args` and lets the adapter decide.
+- `AgentAdapterPort::supports_fork()` and `fork_args(..).is_some()` are
+  **no longer asserted equal in both directions** by
+  `sessionmgr-agents`' own test suite -- they still were, for a long
+  time, because Claude Code's `fork_args` never failed for any reason
+  other than "not supported". Gemini CLI breaks that: `supports_fork()`
+  answers "does the mechanism exist" (`true`), while any single
+  `fork_args` call can still return `None` for a real, session-specific
+  reason (no chat file located yet for that workspace). The drift-guard
+  test now asserts the direction that still universally holds --
+  `!supports_fork() ⟹ fork_args(..).is_none()` -- and Gemini's own
+  "finds it when it's there / doesn't when it isn't" behavior is covered
+  by dedicated fixture-based unit tests instead.
+
+### Live verification
+
+Mixed, the same honest way this report's original "Live verification"
+section was: `locate_current_chat_file`'s own discovery algorithm is
+fully unit-tested against real captured JSON shapes (`gemini.rs`'s own
+`ScratchGeminiHome`-based fixtures -- newest-file selection, subagent
+files correctly excluded, missing-registry and no-chat-file-yet cases),
+and the always-run black-box test
+(`forking_a_gemini_session_with_no_conversation_yet_names_the_gap_clearly`)
+passed for real. The new **content-preservation** mechanism test,
+`gemini_session_file_actually_preserves_conversation_context`
+(`fork_sessions.rs`), mirrors Claude Code's own codeword-recall pattern
+but hit the same Gemini free-tier request quota
+`docs/phase-7-report.md` already documents running out mid-session --
+it skipped cleanly rather than asserting past it, the same tier every
+other live-gated test in this suite uses. A standalone manual round trip
+outside the automated suite *did* succeed earlier in this same session,
+real end-to-end proof `--session-file` genuinely loads prior context (not
+merely that the flag is accepted) -- recorded here rather than treated as
+equivalent to the automated test actually passing.
+
+### Tests
+
+9 new unit tests in `crates/sessionmgr-agents/src/gemini.rs`
+(`locate_current_chat_file`'s discovery logic against fixtures) plus
+signature-update tests in `claude_code.rs`/`codex.rs`. The
+`sessionmgr-agents` drift-guard test rewritten (see above). 2 new
+black-box tests in `fork_sessions.rs` (1 always-run, 1 live-gated,
+skipped cleanly here). `cargo fmt --all` (twice) clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace`
+green aside from the same pre-existing, undiffed `agent_needs_input_claude`
+interactive-PTY flake every phase report since 5 has documented, `cargo
++1.88 check --workspace --all-targets` (MSRV) clean.
+
+### What is still not done
+
+**Codex Fork (issue #14)** remains open. Unlike Gemini's file-location
+problem, Codex's own blocker is a genuinely separate piece of
+machinery -- a post-spawn filesystem watch to discover its
+self-assigned thread id, wired into `Supervisor`/`worker.rs` rather than
+a pure adapter method -- plus this session's own billing-quota block
+(see `docs/phase-7-report.md`) still prevents live-verifying
+content-preservation even if that machinery existed. Left for its own
+dedicated PR rather than a rushed addition here; issue #14's own
+2026-08-17 comment has the current state of what is and is not known.

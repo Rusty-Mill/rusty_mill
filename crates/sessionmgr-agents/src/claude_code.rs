@@ -6,7 +6,7 @@
 //! `vt100`. See `docs/phase-3-report.md` for the full capture method and
 //! raw evidence.
 
-use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, HookOutcome};
+use sessionmgr_core::ports::{AgentAdapterPort, AgentSignal, ForkSource, HookOutcome};
 
 pub struct ClaudeCode;
 
@@ -133,10 +133,17 @@ impl AgentAdapterPort for ClaudeCode {
 
     fn fork_args(
         &self,
-        source_native_id: &str,
+        source: ForkSource<'_>,
         new_native_id: &str,
         extra: &[String],
     ) -> Option<Vec<String>> {
+        // `None` here means a session created before Fork existed (or by
+        // an adapter that did not pin one at the time) has nothing to
+        // resume from -- a real, session-specific "cannot fork this one"
+        // outcome even though this adapter's mechanism otherwise always
+        // works, the same distinction `ForkSource`'s own docs describe
+        // for Gemini CLI, just triggered by a different condition here.
+        let source_native_id = source.native_session_id?;
         // `--resume <id> --fork-session`, per `--help`'s own description:
         // "When resuming, create a new session ID instead of reusing the
         // original." Combined with `--session-id`, live-verified in
@@ -202,8 +209,12 @@ mod tests {
     #[test]
     fn fork_args_resumes_the_source_and_pins_the_forks_own_new_id() {
         assert!(ClaudeCode.supports_fork());
+        let source = ForkSource {
+            native_session_id: Some("source-id"),
+            workspace_cwd: std::path::Path::new("/workspace"),
+        };
         let args = ClaudeCode
-            .fork_args("source-id", "new-id", &["continue differently".to_owned()])
+            .fork_args(source, "new-id", &["continue differently".to_owned()])
             .expect("Claude Code supports fork");
         assert_eq!(
             args,
@@ -217,6 +228,20 @@ mod tests {
                 "continue differently".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn fork_args_is_none_without_a_recorded_native_id() {
+        // A session created before Fork existed (or resumed from a
+        // record with no pinned id) has nothing to resume from -- a
+        // real, per-call "cannot fork this one" outcome distinct from
+        // `supports_fork()`, which stays `true`.
+        let source = ForkSource {
+            native_session_id: None,
+            workspace_cwd: std::path::Path::new("/workspace"),
+        };
+        assert!(ClaudeCode.supports_fork());
+        assert_eq!(ClaudeCode.fork_args(source, "new-id", &[]), None);
     }
 
     #[test]
