@@ -1,0 +1,332 @@
+:root {
+  color-scheme: dark;
+  --bg: #14181c;
+  --panel: #1b2027;
+  --border: #2c333c;
+  --border-focus: #4fa3d1;
+  --text: #d8dee4;
+  --text-dim: #7a8390;
+  --accent: #4fa3d1;
+  --danger: #d16b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+#sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+#sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+#new-session-btn {
+  background: var(--accent);
+  color: #0a1116;
+  border: none;
+  border-radius: 4px;
+  width: 22px;
+  height: 22px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#session-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+#session-list li {
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid transparent;
+}
+
+#session-list li:hover {
+  background: #232a33;
+}
+
+#session-list li.focused {
+  border-color: var(--border-focus);
+  background: #232a33;
+}
+
+#session-list li .sid {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#session-list li .status {
+  font-size: 11px;
+}
+
+#session-list li .status.running {
+  color: #6bd18a;
+}
+
+#session-list li .status.needs-input {
+  color: #e0b34a;
+}
+
+#session-list li .status.errored,
+#session-list li .status.crashed {
+  color: var(--danger);
+}
+
+#workspace {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Without this, a flex child's default `min-height: auto` refuses to
+     shrink below its content's intrinsic size -- `#grid`'s own terminal
+     panes have enough intrinsic height that `#workspace` grows past the
+     window instead of constraining `#grid` to the remaining space,
+     pushing `#status-bar` off the bottom of the window entirely. */
+  min-height: 0;
+}
+
+#grid {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  min-height: 0;
+}
+
+#empty-state {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+
+#app.empty #empty-state {
+  display: flex;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #0d0f12;
+}
+
+.pane.focused {
+  border-color: var(--border-focus);
+}
+
+.pane-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.pane-titlebar .pane-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pane-titlebar .pane-status {
+  margin-left: auto;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.pane-terminal {
+  position: absolute;
+  inset: 0;
+  padding: 2px;
+}
+
+.pane-diff {
+  position: absolute;
+  inset: 0;
+  display: none;
+  overflow: hidden;
+}
+
+.pane.diff-mode .pane-terminal {
+  display: none;
+}
+
+.pane.diff-mode .pane-diff {
+  display: flex;
+}
+
+.diff-files {
+  width: 180px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 4px;
+}
+
+.diff-files div {
+  padding: 3px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-files div:hover,
+.diff-files div.selected {
+  background: #232a33;
+}
+
+.diff-text {
+  flex: 1;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  white-space: pre;
+}
+
+.col-resizer {
+  width: 6px;
+  cursor: col-resize;
+  flex-shrink: 0;
+}
+
+.row-resizer {
+  height: 6px;
+  cursor: row-resize;
+  flex-shrink: 0;
+}
+
+#status-bar {
+  border-top: 1px solid var(--border);
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--panel);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  z-index: 50;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.overlay-box {
+  width: 480px;
+  max-width: 90vw;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.overlay-box input {
+  width: 100%;
+  border: none;
+  background: #0d0f12;
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: 14px;
+  outline: none;
+  border-bottom: 1px solid var(--border);
+}
+
+#prompt-title {
+  padding: 10px 14px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.overlay-hint {
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+#palette-list li {
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+#palette-list li.selected {
+  background: var(--accent);
+  color: #0a1116;
+}

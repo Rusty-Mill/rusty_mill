@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>sessionmgr</title>
+  <link rel="stylesheet" href="vendor/xterm/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <span>sessionmgr</span>
+        <button id="new-session-btn" title="New session (Ctrl/Cmd+N)">+</button>
+      </div>
+      <ul id="session-list"></ul>
+    </aside>
+    <main id="workspace">
+      <div id="grid"></div>
+      <div id="empty-state">no sessions -- create one with the + button or Ctrl/Cmd+N</div>
+      <div id="status-bar">
+        <span id="status-text">Ctrl/Cmd+K: command palette</span>
+      </div>
+    </main>
+  </div>
+
+  <div id="palette-overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <input id="palette-input" type="text" placeholder="Type a command..." autocomplete="off" />
+      <ul id="palette-list"></ul>
+    </div>
+  </div>
+
+  <div id="prompt-overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <div id="prompt-title"></div>
+      <input id="prompt-input" type="text" autocomplete="off" />
+      <div class="overlay-hint">Enter to confirm, Esc to cancel</div>
+    </div>
+  </div>
+
+  <script src="boot-diag.js"></script>
+  <script src="vendor/xterm/xterm.js"></script>
+  <script src="vendor/xterm/addon-fit.js"></script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
