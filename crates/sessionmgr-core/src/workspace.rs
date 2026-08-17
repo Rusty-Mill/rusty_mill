@@ -92,6 +92,26 @@ impl Workspace {
         }
     }
 
+    /// A session sharing a **parent session's** already-existing
+    /// worktree, rather than creating one of its own.
+    ///
+    /// `branch: None`, deliberately, even though `cwd` sits on a branch
+    /// the parent created: this session does not *own* that branch, so
+    /// [`Self::owns_worktree`] is `false` and its own close never merges,
+    /// deletes, or otherwise touches it -- only the parent's own close
+    /// can. Getting this right for free (rather than adding a new
+    /// "shared, not owned" flag) is the reason [`Self::owns_worktree`]
+    /// checks `branch.is_some()` at all: a dependent session's teardown
+    /// falls out of the same rule a same-directory session's already
+    /// does, with no extra code.
+    pub fn dependent(parent: &Workspace) -> Self {
+        Workspace {
+            repo: parent.repo.clone(),
+            cwd: parent.cwd.clone(),
+            branch: None,
+        }
+    }
+
     /// Does this workspace own a worktree this tool created and is
     /// therefore responsible for removing?
     pub fn owns_worktree(&self) -> bool {
@@ -135,6 +155,22 @@ mod tests {
             PathBuf::from("/repo")
                 .join(WORKTREE_DIR)
                 .join(id().as_str())
+        );
+    }
+
+    #[test]
+    fn a_dependent_workspace_shares_the_parents_cwd_and_owns_nothing() {
+        let parent = Workspace::worktree(PathBuf::from("/repo"), &id());
+        let dependent = Workspace::dependent(&parent);
+        assert_eq!(dependent.cwd, parent.cwd, "must run alongside the parent");
+        assert_eq!(dependent.repo, parent.repo);
+        assert_eq!(
+            dependent.branch, None,
+            "the parent owns the branch, not this session"
+        );
+        assert!(
+            !dependent.owns_worktree(),
+            "a dependent session's own close must never touch the shared worktree"
         );
     }
 

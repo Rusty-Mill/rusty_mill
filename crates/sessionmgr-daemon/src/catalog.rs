@@ -156,6 +156,7 @@ pub fn summarize(session: &Session) -> SessionSummary {
         exit_code: session.exit_code,
         agent: session.agent,
         name: session.name.clone(),
+        parent: session.parent_id.clone(),
     }
 }
 
@@ -236,6 +237,8 @@ mod tests {
             true,
             1_700_000_000_000,
             None,
+            None,
+            false,
         )
     }
 

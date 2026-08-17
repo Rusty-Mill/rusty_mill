@@ -161,6 +161,8 @@ pub async fn session_new(socket: &Path, repo: std::path::PathBuf) -> Result<Sess
             pty: true,
             agent: None,
             hooks: false,
+            parent: None,
+            wait_for_parent: false,
         })
         .await?;
     expect(response, |r| match r {

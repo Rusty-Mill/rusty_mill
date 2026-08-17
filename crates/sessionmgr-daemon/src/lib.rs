@@ -38,10 +38,15 @@ USAGE:
 COMMANDS:
     new [--kind KIND] [--agent AGENT] [--hooks] [--repo <path>] [--no-pty] [-- <command>...]
                                               create a session and start it
+    new --parent <id> [--start-now] [--agent AGENT] [--no-pty] [-- <command>...]
+                                              create a session dependent on another
+                                              session's worktree (see DEPENDENT SESSIONS)
     list                                      list every session
     attach <id>                               stream a session's output
     close <id> [--merge|--discard]            tear a session down
     rename <id> <name> | rename <id> --clear  set or clear a display label
+    start-now <id>                            stop a waiting dependent session from
+                                              waiting any longer and start it now
     tui                                       grid of session panes (starts a daemon if needed)
     daemon run                                run the supervisor in the foreground
     daemon start                              start the supervisor detached
@@ -53,6 +58,26 @@ SESSION KINDS:
     same-dir     runs in the repository's own working copy -- NOT isolated;
                  concurrent same-dir sessions can collide with each other
     terminal     a plain shell, no repository (the default)
+    dependent    shares a --parent session's worktree; set implicitly by
+                 --parent, never chosen directly with --kind
+
+DEPENDENT SESSIONS:
+    --parent <id> creates a session in <id>'s own worktree instead of
+    creating one of its own -- CAPABILITIES.md's dependent sessions (an
+    --agent given: a chained task, waiting for the parent to finish by
+    default) and dependent terminal sessions (no --agent: a plain shell
+    alongside a still-running agent, for manual work in the same
+    workspace). Requires the parent to be --kind worktree (or itself
+    dependent on one) and does not accept --kind/--repo/--hooks, which a
+    dependent session inherits from its parent instead.
+
+    By default a dependent session is created --status Waiting and does
+    not start until the parent session finishes (its process exits, or it
+    is closed with no disposition, which leaves the worktree in place --
+    --merge/--discard remove it, which fails the dependent session
+    instead of starting it into a workspace that no longer exists).
+    --start-now skips the wait and starts immediately. `start-now <id>`
+    does the same thing later, to a session already Waiting.
 
 AGENTS:
     claude       Claude Code -- tier-3 pattern matching, plus a verified
@@ -114,6 +139,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
         "close" => cmd_close(&root, rest).await,
         "rename" => cmd_rename(&root, rest).await,
+        "start-now" => cmd_start_now(&root, rest).await,
         "tui" => {
             client::ensure_daemon(&root).await?;
             sessionmgr_tui::run(paths::daemon_socket(&root))
@@ -196,21 +222,59 @@ async fn cmd_hook_fire(root: &Path, session_id: String, event: String) -> Result
 
 async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
     let mut args = args.to_vec();
-    let kind = match take_option(&mut args, "--kind")?.as_deref() {
-        None | Some("terminal") => SessionKind::PlainTerminal,
-        Some("worktree") => SessionKind::Worktree,
-        Some("same-dir") | Some("same-directory") => SessionKind::SameDirectory,
-        Some(other) => {
-            return Err(Error::usage(format!(
+    // `--parent` implies a dependent session and is mutually exclusive
+    // with `--kind`/`--repo`: both would otherwise describe *how to
+    // create a workspace*, which a dependent session does not do -- it
+    // reuses its parent's, resolved daemon-side (`Request::SessionNew`'s
+    // own docs).
+    let parent = take_option(&mut args, "--parent")?
+        .map(|raw| raw.parse::<SessionId>())
+        .transpose()
+        .map_err(|e| Error::usage(format!("invalid --parent session id: {e}")))?;
+    let explicit_kind = take_option(&mut args, "--kind")?;
+    // `--start-now` is `Request::SessionNew`'s `wait_for_parent: false`
+    // -- meaningless without `--parent`, so it is rejected on its own
+    // rather than silently ignored.
+    let start_now = args.iter().any(|a| a == "--start-now");
+    args.retain(|a| a != "--start-now");
+
+    let kind = if parent.is_some() {
+        if explicit_kind.is_some() {
+            return Err(Error::usage(
+                "--kind is implied by --parent (always `dependent`); do not pass both",
+            ));
+        }
+        SessionKind::Dependent
+    } else {
+        if start_now {
+            return Err(Error::usage("--start-now needs --parent"));
+        }
+        match explicit_kind.as_deref() {
+            None | Some("terminal") => SessionKind::PlainTerminal,
+            Some("worktree") => SessionKind::Worktree,
+            Some("same-dir") | Some("same-directory") => SessionKind::SameDirectory,
+            Some(other) => {
+                return Err(Error::usage(format!(
                 "unknown session kind `{other}` (expected `worktree`, `same-dir`, or `terminal`)"
             )))
+            }
         }
     };
     // Defaults to the client's own working directory, since that is the
     // one process standing where the user is. The daemon resolves it to a
     // repository root; it is not resolved here, so that `--repo` and the
-    // implicit case go through exactly the same code path.
-    let repo = match take_option(&mut args, "--repo")? {
+    // implicit case go through exactly the same code path. A dependent
+    // session's `needs_repo()` is `false`, so it never hits the implicit
+    // branch; an *explicit* `--repo` alongside `--parent` is caught
+    // below instead of being silently ignored.
+    let explicit_repo = take_option(&mut args, "--repo")?;
+    if parent.is_some() && explicit_repo.is_some() {
+        return Err(Error::usage(
+            "--repo is meaningless for a dependent session; its workspace comes from \
+             --parent's own worktree",
+        ));
+    }
+    let repo = match explicit_repo {
         Some(path) => Some(PathBuf::from(path)),
         None if kind.needs_repo() => Some(
             std::env::current_dir()
@@ -244,14 +308,42 @@ async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
     };
     // `--hooks` installs `agent`'s own hook config into the session's
     // worktree -- opt-in (see Request::SessionNew's own docs for why),
-    // and meaningless without an agent to install hooks for.
+    // and meaningless without an agent to install hooks for. A dependent
+    // session inherits whatever hook config its parent already installed
+    // into the shared worktree, so `--hooks` is rejected for one rather
+    // than silently installing a second, conflicting copy.
     let hooks = args.iter().any(|a| a == "--hooks");
     args.retain(|a| a != "--hooks");
     if hooks && agent.is_none() {
         return Err(Error::usage("--hooks needs --agent <claude|codex>"));
     }
-    let id = client::session_new(root, kind, command, repo, pty, agent, hooks).await?;
+    if hooks && kind == SessionKind::Dependent {
+        return Err(Error::usage(
+            "--hooks is inherited from the parent's own worktree for a dependent session; \
+             pass --hooks on the parent session instead",
+        ));
+    }
+    let wait_for_parent = parent.is_some() && !start_now;
+    let id = client::session_new(
+        root,
+        kind,
+        command,
+        repo,
+        pty,
+        agent,
+        hooks,
+        parent,
+        wait_for_parent,
+    )
+    .await?;
     println!("{id}");
+    Ok(())
+}
+
+async fn cmd_start_now(root: &Path, args: &[String]) -> Result<()> {
+    let id = parse_id(args.first())?;
+    client::session_start_now(root, id).await?;
+    println!("started");
     Ok(())
 }
 

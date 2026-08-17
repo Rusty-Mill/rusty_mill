@@ -162,11 +162,11 @@ impl From<SessionId> for String {
 
 /// What kind of workspace a session runs against.
 ///
-/// The three-way split is replicated deliberately rather than simplified
-/// away. It would be tempting to always isolate -- it is simpler and
-/// safer -- but the three distinct session-start actions are a real part
-/// of the model being matched, and a same-directory session is a
-/// legitimate choice a user makes knowingly, not an oversight to be
+/// The three-way split (four, since Phase 5) is replicated deliberately
+/// rather than simplified away. It would be tempting to always isolate --
+/// it is simpler and safer -- but the distinct session-start actions are
+/// a real part of the model being matched, and a same-directory session
+/// is a legitimate choice a user makes knowingly, not an oversight to be
 /// protected from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -189,10 +189,34 @@ pub enum SessionKind {
     /// The reason this project exists: it is the one capability nothing
     /// on the market combines with Windows support.
     Worktree,
+    /// Runs in a **parent session's** existing worktree, rather than
+    /// creating one of its own.
+    ///
+    /// Phase 5's two CAPABILITIES.md-observed capabilities -- "dependent
+    /// sessions" (a chained task that can wait for the parent to finish)
+    /// and "dependent terminal sessions" (manual work alongside a running
+    /// agent) -- are both this one kind underneath: the only real
+    /// difference between them is whether [`Session::agent`] is set, an
+    /// axis this type already has. See [`Session::parent_id`] for which
+    /// session it depends on and [`crate::workspace::Workspace::dependent`]
+    /// for how its workspace is derived.
+    ///
+    /// Owns no worktree and no branch of its own -- see
+    /// [`crate::workspace::Workspace::dependent`], whose `branch: None`
+    /// is what makes teardown a no-op for this kind (the parent still
+    /// owns the branch, and only the parent's own close can remove it).
+    Dependent,
 }
 
 impl SessionKind {
-    /// Does this kind need a repository to be created against?
+    /// Does this kind need a **repository** to be created against?
+    ///
+    /// `Dependent` deliberately answers `false`: it needs a *parent
+    /// session*, not a repository path from the caller -- its workspace
+    /// is derived entirely from the parent's own workspace (see
+    /// `sessionmgr-daemon::supervisor`'s `resolve_dependent_workspace`),
+    /// and accepting a `--repo` for it would be a value that is silently
+    /// ignored, which is worse than not accepting it at all.
     pub fn needs_repo(self) -> bool {
         matches!(self, SessionKind::SameDirectory | SessionKind::Worktree)
     }
@@ -235,6 +259,18 @@ pub enum AgentKind {
 pub enum SessionStatus {
     /// Record exists; no worker confirmed running yet.
     Created,
+    /// A [`SessionKind::Dependent`] session whose `wait_for_parent` asked
+    /// to hold off starting until its parent session finishes.
+    ///
+    /// **Deliberately has no worker of its own while in this state** --
+    /// unlike every other non-terminal status, so it is *not* one of
+    /// [`Self::expects_live_worker`]'s statuses. Nothing has been spawned
+    /// yet to expect: the daemon (not a worker) polls the parent and
+    /// promotes this session to `Running` once it is ready, so a
+    /// `Waiting` session with no recorded worker is the *ordinary* case,
+    /// not evidence of a crash. See
+    /// `sessionmgr-daemon::supervisor::try_advance_waiting_session`.
+    Waiting,
     /// A worker is running and the session is live.
     Running,
     /// The session is blocked waiting on the user.
@@ -290,6 +326,14 @@ impl SessionStatus {
     ///
     /// This is the question the supervisor asks of every `state.json` it
     /// finds on startup -- see [`crate::recovery::decide_recovery`].
+    ///
+    /// [`Self::Waiting`] is deliberately **not** included, even though it
+    /// is a live, non-terminal status: a `Waiting` session has no worker
+    /// by design (nothing has been spawned yet), so a missing worker is
+    /// the expected shape of that record, not evidence of a crash. If
+    /// this ever included `Waiting`, `decide_recovery` would mark every
+    /// dependent session still waiting on its parent `Crashed` the moment
+    /// the daemon restarted.
     pub fn expects_live_worker(self) -> bool {
         matches!(
             self,
@@ -398,6 +442,33 @@ pub struct Session {
     /// record written before this field existed must still load.
     #[serde(default)]
     pub name: Option<String>,
+    /// The session this one depends on, for [`SessionKind::Dependent`].
+    ///
+    /// `None` for every other kind. Kept as a plain field rather than
+    /// folded into [`SessionKind::Dependent`] as an enum payload so
+    /// `kind` stays a small `Copy` type every existing `match kind`
+    /// keeps working unchanged -- the same reasoning `agent` already
+    /// follows for a session's optional agent CLI.
+    ///
+    /// `#[serde(default)]` for the same reason every other field added
+    /// after Phase 1 has it: a record written by an older build must
+    /// still load.
+    #[serde(default)]
+    pub parent_id: Option<SessionId>,
+    /// Should this session hold off starting until [`Self::parent_id`]'s
+    /// session finishes, rather than starting immediately?
+    ///
+    /// Meaningless (and always `false`) unless `parent_id` is `Some`.
+    /// Read once, at creation: the daemon decides whether to publish
+    /// [`SessionStatus::Waiting`] or start the worker immediately based
+    /// on this value and the parent's status *at that moment* --
+    /// changing it afterwards has no effect. `sessionmgr new`'s
+    /// `--start-now` flag sets this `false`; a running `--start-now`
+    /// request against an already-`Waiting` session is a separate,
+    /// later action (`Request::SessionStartNow`), not a mutation of this
+    /// field.
+    #[serde(default)]
+    pub wait_for_parent: bool,
 }
 
 impl Session {
@@ -410,6 +481,8 @@ impl Session {
         pty: bool,
         created_at_millis: u64,
         agent: Option<AgentKind>,
+        parent_id: Option<SessionId>,
+        wait_for_parent: bool,
     ) -> Self {
         Session {
             id,
@@ -424,6 +497,8 @@ impl Session {
             exit_code: None,
             agent,
             name: None,
+            parent_id,
+            wait_for_parent,
         }
     }
 
@@ -489,9 +564,21 @@ impl Session {
             // executable path is the ordinary way this happens, and
             // forcing it through `Running` first would be a lie.
             (Created, Finished | Errored) => true,
+            // A dependent session with `wait_for_parent` parks here
+            // instead of spawning a worker immediately -- see
+            // `SessionStatus::Waiting`'s own docs.
+            (Created, Waiting) => true,
 
             (Running, NeedsInput | Finished | Errored) => true,
             (NeedsInput, Running | Finished | Errored) => true,
+            // `Running` mirrors `(Created, Running)`: the daemon promotes
+            // a waiting session the same way it starts a fresh one, once
+            // its parent is ready. `Finished`/`Errored` cover the same
+            // immediate-exit case `(Created, Finished | Errored)` does,
+            // plus the parent's workspace having been merged or discarded
+            // out from under this session while it waited -- see
+            // `sessionmgr-daemon::supervisor::try_advance_waiting_session`.
+            (Waiting, Running | Finished | Errored) => true,
 
             // An exited session does not resume. Phase 6+'s
             // fork/switch-agent work is a *new* session seeded from an
@@ -554,6 +641,8 @@ mod tests {
             true,
             1_700_000_000_000,
             None,
+            None,
+            false,
         )
     }
 
@@ -754,6 +843,24 @@ mod tests {
             true,
             1_700_000_000_000,
             None,
+            None,
+            false,
+        )
+    }
+
+    fn dependent_session(parent: &SessionId) -> Session {
+        let id = SessionId::new(1_700_000_000_001, 7);
+        let parent_workspace = Workspace::worktree(std::path::PathBuf::from("/repo"), parent);
+        Session::new(
+            id,
+            SessionKind::Dependent,
+            vec!["sh".to_owned()],
+            Some(Workspace::dependent(&parent_workspace)),
+            true,
+            1_700_000_000_001,
+            None,
+            Some(parent.clone()),
+            true,
         )
     }
 
@@ -823,5 +930,70 @@ mod tests {
         s.status = SessionStatus::Closed;
         assert!(s.record_exit(Some(1)).is_err());
         assert_eq!(s.exit_code, None);
+    }
+
+    #[test]
+    fn a_dependent_session_can_wait_then_start() {
+        let parent = SessionId::new(1_700_000_000_000, 1);
+        let mut s = dependent_session(&parent);
+        assert_eq!(s.kind, SessionKind::Dependent);
+        assert_eq!(s.parent_id, Some(parent));
+        assert!(s.wait_for_parent);
+        assert!(s.transition_to(SessionStatus::Waiting).is_ok());
+        // The daemon promotes it the same way it starts a fresh session.
+        assert!(s.transition_to(SessionStatus::Running).is_ok());
+        assert!(s.transition_to(SessionStatus::Closed).is_ok());
+    }
+
+    #[test]
+    fn a_waiting_session_can_fail_without_ever_running() {
+        // The parent's workspace was merged or discarded before this
+        // session's turn came -- there is nowhere for it to start, and it
+        // never gets a worker at all.
+        let mut s = dependent_session(&SessionId::new(1_700_000_000_000, 1));
+        assert!(s.transition_to(SessionStatus::Waiting).is_ok());
+        assert!(s.transition_to(SessionStatus::Errored).is_ok());
+    }
+
+    #[test]
+    fn a_waiting_session_is_closeable_without_ever_running() {
+        // A user must be able to abandon a session that never got past
+        // waiting, the same as any other live session.
+        let mut s = dependent_session(&SessionId::new(1_700_000_000_000, 1));
+        assert!(s.transition_to(SessionStatus::Waiting).is_ok());
+        assert!(s.transition_to(SessionStatus::Closed).is_ok());
+    }
+
+    #[test]
+    fn waiting_is_not_a_status_a_recovering_supervisor_expects_a_worker_for() {
+        // The whole reason `Waiting` exists as its own status rather than
+        // reusing `Created`: a session parked here by design has no
+        // worker, and `decide_recovery` must not mark it `Crashed` for
+        // that on a daemon restart.
+        assert!(!SessionStatus::Waiting.expects_live_worker());
+        assert!(!SessionStatus::Waiting.is_terminal());
+        assert!(!SessionStatus::Waiting.is_exited());
+    }
+
+    #[test]
+    fn a_waiting_session_cannot_crash_because_it_has_no_worker_to_lose() {
+        let mut s = dependent_session(&SessionId::new(1_700_000_000_000, 1));
+        assert!(s.transition_to(SessionStatus::Waiting).is_ok());
+        assert!(s.transition_to(SessionStatus::Crashed).is_err());
+    }
+
+    #[test]
+    fn a_dependent_session_owns_no_branch_and_always_closes_plainly() {
+        // Reuses the exact rule same-directory sessions already rely on
+        // (`teardown_status`'s `owns_branch` check): a dependent session's
+        // workspace has `branch: None` (the parent owns it), so no
+        // disposition can turn its close into `Merged`/`Discarded`, and
+        // `dispose_workspace` never touches the shared worktree.
+        let parent = SessionId::new(1_700_000_000_000, 1);
+        let s = dependent_session(&parent);
+        assert!(!s.workspace.as_ref().unwrap().owns_worktree());
+        for disposition in [None, Some(Disposition::Merge), Some(Disposition::Discard)] {
+            assert_eq!(s.teardown_status(disposition), SessionStatus::Closed);
+        }
     }
 }

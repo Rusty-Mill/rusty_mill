@@ -123,6 +123,8 @@ mod tests {
             true,
             1_700_000_000_000,
             None,
+            None,
+            false,
         );
         s.status = status;
         s.worker = worker;

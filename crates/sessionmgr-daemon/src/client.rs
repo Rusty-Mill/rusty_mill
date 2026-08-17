@@ -121,6 +121,7 @@ async fn request(root: &Path, request: Request) -> Result<Response> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn session_new(
     root: &Path,
     kind: SessionKind,
@@ -129,6 +130,8 @@ pub async fn session_new(
     pty: bool,
     agent: Option<sessionmgr_core::AgentKind>,
     hooks: bool,
+    parent: Option<SessionId>,
+    wait_for_parent: bool,
 ) -> Result<SessionId> {
     match request(
         root,
@@ -139,6 +142,8 @@ pub async fn session_new(
             pty,
             agent,
             hooks,
+            parent,
+            wait_for_parent,
         },
     )
     .await?
@@ -146,6 +151,17 @@ pub async fn session_new(
         Response::SessionCreated { id } => Ok(id),
         other => Err(Error::protocol(format!(
             "unexpected answer to session-new: {other:?}"
+        ))),
+    }
+}
+
+/// The CAPABILITIES.md "start now" override on a session that is
+/// currently [`sessionmgr_core::SessionStatus::Waiting`].
+pub async fn session_start_now(root: &Path, id: SessionId) -> Result<()> {
+    match request(root, Request::SessionStartNow { id }).await? {
+        Response::Ok => Ok(()),
+        other => Err(Error::protocol(format!(
+            "unexpected answer to session-start-now: {other:?}"
         ))),
     }
 }
@@ -265,11 +281,11 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
         return "no sessions".to_owned();
     }
     let mut out = String::from(
-        "ID            STATUS       KIND            BRANCH                    NAME                 COMMAND\n",
+        "ID            STATUS       KIND            BRANCH                    NAME                 PARENT        COMMAND\n",
     );
     for session in sessions {
         out.push_str(&format!(
-            "{:<13} {:<12} {:<15} {:<25} {:<20} {}\n",
+            "{:<13} {:<12} {:<15} {:<25} {:<20} {:<13} {}\n",
             session.id,
             format!("{:?}", session.status),
             format!("{:?}", session.kind),
@@ -278,6 +294,14 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
             // exactly the property that makes it the unisolated choice.
             session.branch.as_deref().unwrap_or("-"),
             session.name.as_deref().unwrap_or("-"),
+            // `Dependent` sessions are the only kind with a parent; every
+            // other kind shows `-`, matching how `branch` already reads
+            // for the kinds that own none.
+            session
+                .parent
+                .as_ref()
+                .map(SessionId::as_str)
+                .unwrap_or("-"),
             session.command.join(" "),
         ));
     }
@@ -315,6 +339,7 @@ mod tests {
             exit_code: None,
             agent: None,
             name: None,
+            parent: None,
         };
         let rendered = render_sessions(std::slice::from_ref(&summary));
         assert!(rendered.contains(summary.id.as_str()));
