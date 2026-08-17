@@ -104,5 +104,6 @@ fn status_name(status: SessionStatus) -> &'static str {
         SessionStatus::Closed => "closed",
         SessionStatus::Merged => "merged",
         SessionStatus::Discarded => "discarded",
+        SessionStatus::SwitchedAway => "switched-away",
     }
 }

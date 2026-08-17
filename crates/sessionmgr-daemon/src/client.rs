@@ -176,6 +176,21 @@ pub async fn session_fork(root: &Path, id: SessionId, pty: bool) -> Result<Sessi
     }
 }
 
+/// CAPABILITIES.md's "Switch agent mid-session".
+pub async fn session_switch_agent(
+    root: &Path,
+    id: SessionId,
+    agent: sessionmgr_core::AgentKind,
+    pty: bool,
+) -> Result<SessionId> {
+    match request(root, Request::SessionSwitchAgent { id, agent, pty }).await? {
+        Response::SessionCreated { id } => Ok(id),
+        other => Err(Error::protocol(format!(
+            "unexpected answer to session-switch-agent: {other:?}"
+        ))),
+    }
+}
+
 pub async fn session_list(root: &Path) -> Result<Vec<SessionSummary>> {
     match request(root, Request::SessionList).await? {
         Response::Sessions { sessions } => Ok(sessions),
@@ -291,11 +306,11 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
         return "no sessions".to_owned();
     }
     let mut out = String::from(
-        "ID            STATUS       KIND            BRANCH                    NAME                 PARENT        FORKED-FROM   COMMAND\n",
+        "ID            STATUS       KIND            BRANCH                    NAME                 PARENT        FORKED-FROM   SWITCHED-FROM COMMAND\n",
     );
     for session in sessions {
         out.push_str(&format!(
-            "{:<13} {:<12} {:<15} {:<25} {:<20} {:<13} {:<13} {}\n",
+            "{:<13} {:<12} {:<15} {:<25} {:<20} {:<13} {:<13} {:<13} {}\n",
             session.id,
             format!("{:?}", session.status),
             format!("{:?}", session.kind),
@@ -318,6 +333,14 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
             // field reused.
             session
                 .forked_from
+                .as_ref()
+                .map(SessionId::as_str)
+                .unwrap_or("-"),
+            // Only a switched-to session has one of these -- see
+            // `Session::switched_from`'s own docs for why this is a
+            // third relationship, distinct from both fields above.
+            session
+                .switched_from
                 .as_ref()
                 .map(SessionId::as_str)
                 .unwrap_or("-"),
@@ -360,6 +383,7 @@ mod tests {
             name: None,
             parent: None,
             forked_from: None,
+            switched_from: None,
         };
         let rendered = render_sessions(std::slice::from_ref(&summary));
         assert!(rendered.contains(summary.id.as_str()));

@@ -158,6 +158,7 @@ pub fn summarize(session: &Session) -> SessionSummary {
         name: session.name.clone(),
         parent: session.parent_id.clone(),
         forked_from: session.forked_from.clone(),
+        switched_from: session.switched_from.clone(),
     }
 }
 
@@ -240,6 +241,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         )

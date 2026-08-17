@@ -298,6 +298,15 @@ pub enum SessionStatus {
     Merged,
     /// Torn down, and the session's branch and worktree were thrown away.
     Discarded,
+    /// This session's live agent conversation was handed off to a new
+    /// session running a different agent CLI (Phase 7:
+    /// switch-agent-mid-session). A fourth terminal outcome alongside
+    /// `Closed`/`Merged`/`Discarded`: unlike those three, this session's
+    /// own workspace is deliberately **not** disposed of when it reaches
+    /// this state -- it continues to exist, now owned by the new session
+    /// named in `switched_from` on that new session's own record. See
+    /// `docs/phase-7-report.md`.
+    SwitchedAway,
 }
 
 impl SessionStatus {
@@ -310,7 +319,10 @@ impl SessionStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            SessionStatus::Closed | SessionStatus::Merged | SessionStatus::Discarded
+            SessionStatus::Closed
+                | SessionStatus::Merged
+                | SessionStatus::Discarded
+                | SessionStatus::SwitchedAway
         )
     }
 
@@ -502,6 +514,24 @@ pub struct Session {
     /// after Phase 1 has it.
     #[serde(default)]
     pub forked_from: Option<SessionId>,
+    /// The session this one took over from, if it was created by
+    /// [`SessionStatus::SwitchedAway`]'s own mechanism (Phase 7:
+    /// switch-agent-mid-session).
+    ///
+    /// A third, distinct relationship alongside [`Self::parent_id`] and
+    /// [`Self::forked_from`], not a reuse of either: unlike a forked
+    /// session, a switched-to session keeps the *same* workspace as its
+    /// source (there is only one line of work, not two) rather than
+    /// branching a new one -- so `forked_from`'s own "new independent
+    /// worktree" meaning does not apply. And unlike a dependent session,
+    /// it does not wait for its source to finish; its source has already
+    /// stopped by the time this session is created. See
+    /// `docs/phase-7-report.md` for the full design.
+    ///
+    /// `#[serde(default)]` for the same reason every other field added
+    /// after Phase 1 has it.
+    #[serde(default)]
+    pub switched_from: Option<SessionId>,
 }
 
 impl Session {
@@ -518,6 +548,7 @@ impl Session {
         wait_for_parent: bool,
         native_session_id: Option<String>,
         forked_from: Option<SessionId>,
+        switched_from: Option<SessionId>,
     ) -> Self {
         Session {
             id,
@@ -536,6 +567,7 @@ impl Session {
             wait_for_parent,
             native_session_id,
             forked_from,
+            switched_from,
         }
     }
 
@@ -608,6 +640,13 @@ impl Session {
 
             (Running, NeedsInput | Finished | Errored) => true,
             (NeedsInput, Running | Finished | Errored) => true,
+            // A session can only be switched away from while its agent
+            // conversation is actually live -- `Created` has no
+            // conversation yet to hand off, and every other non-live
+            // state is either already terminal (caught above) or a
+            // state switch-agent's own supervisor-side checks reject for
+            // other reasons anyway. See `docs/phase-7-report.md`.
+            (Running | NeedsInput, SwitchedAway) => true,
             // `Running` mirrors `(Created, Running)`: the daemon promotes
             // a waiting session the same way it starts a fresh one, once
             // its parent is ready. `Finished`/`Errored` cover the same
@@ -680,6 +719,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         )
@@ -886,6 +926,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
     }
 
@@ -902,6 +943,7 @@ mod tests {
             None,
             Some(parent.clone()),
             true,
+            None,
             None,
             None,
         )
@@ -963,6 +1005,50 @@ mod tests {
                 "{terminal:?} must not be closeable again"
             );
         }
+    }
+
+    #[test]
+    fn a_live_agent_conversation_can_be_switched_away() {
+        for from in [SessionStatus::Running, SessionStatus::NeedsInput] {
+            let mut s = worktree_session();
+            s.status = from;
+            assert!(
+                s.transition_to(SessionStatus::SwitchedAway).is_ok(),
+                "{from:?} should be switchable away from"
+            );
+            assert!(s.status.is_terminal());
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_live_conversation_cannot_be_switched_away() {
+        // `Created` has no conversation yet to hand off, and every
+        // already-terminal/exited status is rejected by the "nothing
+        // leaves a terminal session" / "an exited session does not
+        // resume" rules above -- switch-agent needs a *live* one.
+        for from in [
+            SessionStatus::Created,
+            SessionStatus::Finished,
+            SessionStatus::Errored,
+            SessionStatus::Crashed,
+            SessionStatus::Closed,
+        ] {
+            let mut s = worktree_session();
+            s.status = from;
+            assert!(
+                s.transition_to(SessionStatus::SwitchedAway).is_err(),
+                "{from:?} should not be switchable away from"
+            );
+        }
+    }
+
+    #[test]
+    fn switched_away_is_terminal_and_not_reclosable() {
+        let mut s = worktree_session();
+        s.status = SessionStatus::Running;
+        assert!(s.transition_to(SessionStatus::SwitchedAway).is_ok());
+        assert!(s.status.is_terminal());
+        assert!(s.transition_to(SessionStatus::Closed).is_err());
     }
 
     #[test]
