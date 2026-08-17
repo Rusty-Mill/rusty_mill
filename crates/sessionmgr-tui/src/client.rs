@@ -13,7 +13,7 @@ use rusty_tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, UnixStream};
 use rusty_tokio::sync::mpsc::UnboundedSender;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use sessionmgr_protocol::{Request, Response, SessionEvent, SessionId};
+use sessionmgr_protocol::{AgentKind, Request, Response, SessionEvent, SessionId};
 
 use crate::error::{Error, Result};
 
@@ -176,6 +176,42 @@ pub async fn session_rename(socket: &Path, id: SessionId, name: Option<String>) 
     let mut conn = Connection::connect(socket).await?;
     let response = conn.request(&Request::SessionRename { id, name }).await?;
     expect(response, |r| matches!(r, Response::Ok).then_some(()))
+}
+
+/// CAPABILITIES.md's "Fork session", always requesting a PTY-backed new
+/// session -- the palette action is a fast keyboard shortcut for the
+/// common interactive case, same reasoning as `session_new`'s own
+/// defaults, not a replacement for `sessionmgr fork <id> --no-pty`.
+pub async fn session_fork(socket: &Path, id: SessionId) -> Result<SessionId> {
+    let mut conn = Connection::connect(socket).await?;
+    let response = conn
+        .request(&Request::SessionFork { id, pty: true })
+        .await?;
+    expect(response, |r| match r {
+        Response::SessionCreated { id } => Some(id),
+        _ => None,
+    })
+}
+
+/// CAPABILITIES.md's "Switch agent mid-session", always requesting a
+/// PTY-backed new session -- same reasoning as [`session_fork`].
+pub async fn session_switch_agent(
+    socket: &Path,
+    id: SessionId,
+    agent: AgentKind,
+) -> Result<SessionId> {
+    let mut conn = Connection::connect(socket).await?;
+    let response = conn
+        .request(&Request::SessionSwitchAgent {
+            id,
+            agent,
+            pty: true,
+        })
+        .await?;
+    expect(response, |r| match r {
+        Response::SessionCreated { id } => Some(id),
+        _ => None,
+    })
 }
 
 /// A live attach: the write half stays open for `SessionInput`/

@@ -206,6 +206,12 @@ alone:
   rather than its least relevant content. Acceptable for a v1 matching
   PLAN.md's own sanctioned fallback wording; a smarter compaction
   strategy is future work, not a defect in this one.
+- **TUI support.** Not mentioned in this report's original scope, but a
+  real gap: switch-agent shipped as a daemon feature and CLI subcommand
+  (`sessionmgr switch-agent <id> <agent>`) only, with no TUI-side way to
+  reach it. Closed 2026-08-17 alongside the equivalent Fork gap — see
+  `docs/phase-6-report.md`'s own "Update (2026-08-17, later still)"
+  section for the full account (issue #22).
 
 ## Update (2026-08-17): live verification with real Codex/Gemini credentials
 

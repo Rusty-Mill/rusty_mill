@@ -22,6 +22,7 @@ done."
 | Codex adapter | **Done**, 2026-08-17 — see this report's own second dated update below |
 | Gemini CLI adapter | **Done**, 2026-08-17 — see this report's own dated update below |
 | Live verification | **Done** — real mechanism proven, plus an honest limit on what could be proven in this environment |
+| TUI command palette action | **Done**, 2026-08-17 — see this report's own third dated update below (issue #22) |
 
 ## The design
 
@@ -247,7 +248,10 @@ work, not started here.
 the wire and in `sessionmgr list`'s new `FORKED-FROM` column, matching
 Phase 5's own precedent for `parent` — enough for a future TUI pass to
 build a "Fork" command-palette action and lineage grouping on top of,
-but no TUI-side UI was built in this pass.
+but no TUI-side UI was built in this pass. The command-palette action
+itself was closed 2026-08-17 (issue #22) — see this report's own third
+dated update below. Lineage grouping in the grid layout remains
+unbuilt.
 
 **Re-verifying the cost/model-routing capability.** PLAN.md's own
 Phase 6+ note also asks for this before committing design effort to it.
@@ -459,3 +463,99 @@ usable billing quota, confirmed reproducible throughout. Nothing further
 is blocked architecturally; this is purely an external account-state gap
 the next environment with working Codex credentials will close by simply
 running the existing, already-correct test suite.
+
+## Update (2026-08-17, later still): TUI command palette actions for Fork and switch-agent
+
+Closes issue #22 ("TUI: add Fork and switch-agent actions to the command
+palette"), filed as the direct successor to this report's own "TUI
+support for Fork" gap above once both Codex and Gemini CLI Fork existed
+for real (the two updates directly above) and it became clear the same
+palette gap applied equally to Phase 7's switch-agent-mid-session, which
+had never had TUI wiring at all, in any pass.
+
+### What changed
+
+`crates/sessionmgr-tui/src/app.rs`'s `PaletteAction` enum gained two
+variants, `Fork` and `SwitchAgent`, alongside the existing
+`NewSession`/`CloseFocused`/`Rename`/`Focus`. Both follow patterns the
+palette already established rather than inventing new ones:
+
+- **`Fork`** mirrors `Focus` and `CloseFocused` — no extra input needed,
+  it applies immediately against the focused session. Wired straight to
+  a new `client::session_fork` (always `pty: true`, the same "fast
+  keyboard shortcut for the common case" reasoning `session_new`'s own
+  palette action already uses — `sessionmgr fork <id> --no-pty` remains
+  the way to opt out of a PTY).
+- **`SwitchAgent`** mirrors `Rename` — it needs one piece of text (the
+  target agent's name) it doesn't have yet, so selecting it opens a new
+  `PromptKind::SwitchAgent(SessionId)` overlay, submitted through a new
+  `client::session_switch_agent`.
+
+Both new `client.rs` functions send `Request::SessionFork`/
+`Request::SessionSwitchAgent` — protocol messages that already existed
+from Phase 6/7, unchanged here. No daemon-side code was touched; this
+is purely a new client role reaching an already-shipped surface, exactly
+as issue #22 scoped it.
+
+One small piece of real logic came with `SwitchAgent`: parsing the
+prompt's free-text agent name (`claude`/`claude-code`/`codex`/`gemini`)
+into an `AgentKind`. `sessionmgr-daemon`'s own CLI already has this
+exact match arm (`parse_agent_name` in `lib.rs`, backing `sessionmgr
+switch-agent <id> <agent>`), but this crate cannot depend on
+`sessionmgr-daemon` — see `client.rs`'s own module docs on why that
+boundary is deliberate, the same reasoning that already duplicates the
+socket-framing code in this crate rather than sharing it. The three-line
+match is duplicated rather than shared, with a doc comment saying so.
+
+### Live verification
+
+Driven with real keystrokes against a real `sessionmgr tui` process
+under a real PTY (Python's `pty`/`os.write` standing in for `hub`'s
+process control this session doesn't have access to — same bytes, same
+socket path, same daemon), against a real, live, credentialed Claude
+Code session:
+
+1. **Fork**: focused a live `claude --session-id <id>` session (`Running`,
+   native id already pinned at launch), opened the palette (`Ctrl-B k`),
+   typed `Fork`, pressed Enter. `sessionmgr list` immediately after
+   showed a brand-new session with `FORKED-FROM` set to the source id,
+   running `claude --resume <id> --fork-session --session-id <new-id>`
+   — the exact command Phase 6's own Claude Code adapter builds, reached
+   this time from the TUI rather than `sessionmgr fork` directly.
+2. **SwitchAgent**: focused a second live Claude Code session, opened
+   the palette, typed `Switch`, pressed Enter to open the prompt, typed
+   `gemini`, pressed Enter. The status line reported `<id> switched
+   agent -> <new-id>`; `sessionmgr list` confirmed the source session at
+   `SwitchedAway` and the new session at `NeedsInput`, running a real
+   `gemini` process whose first prompt was the rendered handoff of the
+   Claude Code session's own transcript — Phase 7's mechanism, reached
+   from the TUI for the first time.
+3. Both runs used a freshly isolated `SESSIONMGR_HOME` (a scratch
+   directory, not the real per-user state root) and were torn down
+   (`sessionmgr close --discard` on every session, `daemon shutdown`,
+   directory removed) immediately after — no state or process left
+   behind on the machine this ran on.
+
+### Tests
+
+2 new unit tests (`app::tests::parse_agent_name_accepts_every_known_agent`,
+`parse_agent_name_rejects_an_unknown_name`) for the one new piece of pure
+logic this update added. No new black-box subprocess tests for the
+palette itself — same reasoning `docs/phase-4-report.md` and
+`docs/phase-4b-report.md` already gave for the palette's original build:
+driving a real terminal UI through `tests/common`'s pattern would mean
+scripting `crossterm` input against a `TestBackend`, and the live
+verification above is this update's acceptance evidence instead.
+
+`cargo build`/`clippy --workspace --all-targets -- -D warnings`/
+`fmt --all --check` all clean. `cargo test --workspace` green aside from
+the same pre-existing, undiffed `agent_needs_input_claude`
+interactive-PTY flake every phase report since 5 has documented
+(confirmed unrelated: reproduces identically on unmodified `main`).
+
+### What is still not done
+
+Lineage grouping in the grid layout (visually clustering a forked
+session next to the session it came from) remains unbuilt — issue #22
+scoped palette actions only, not layout. A graphical/desktop front end
+is separately tracked as issue #23.

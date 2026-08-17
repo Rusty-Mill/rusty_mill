@@ -28,7 +28,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use rusty_tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use sessionmgr_protocol::{SessionEvent, SessionId, SessionKind, SessionStatus};
+use sessionmgr_protocol::{AgentKind, SessionEvent, SessionId, SessionKind, SessionStatus};
 
 use crate::client::{self, Attached};
 use crate::error::Result;
@@ -53,6 +53,8 @@ enum PaletteAction {
     NewSession,
     CloseFocused,
     Rename,
+    Fork,
+    SwitchAgent,
     Focus(usize),
 }
 
@@ -69,6 +71,9 @@ enum PromptKind {
     /// The new display label for this session (or, submitted empty, to
     /// clear it).
     Rename(SessionId),
+    /// The target agent's name (`claude`/`codex`/`gemini`) for
+    /// CAPABILITIES.md's "Switch agent mid-session".
+    SwitchAgent(SessionId),
 }
 
 /// A modal surface drawn on top of the grid, capturing every keystroke
@@ -361,8 +366,8 @@ impl App {
 
     // -- command palette -------------------------------------------------
 
-    /// Builds the palette's item list: the two actions that always make
-    /// sense, the two that need a focused session, and one `Focus: ...`
+    /// Builds the palette's item list: the one action that always makes
+    /// sense, the four that need a focused session, and one `Focus: ...`
     /// entry per *other* open session -- CAPABILITIES.md's Xirp-observed
     /// session switcher, folded into the same palette rather than a
     /// second keybinding, matching its own description.
@@ -379,6 +384,14 @@ impl App {
             items.push(PaletteItem {
                 label: "Rename focused session...".to_owned(),
                 action: PaletteAction::Rename,
+            });
+            items.push(PaletteItem {
+                label: "Fork focused session".to_owned(),
+                action: PaletteAction::Fork,
+            });
+            items.push(PaletteItem {
+                label: "Switch focused session's agent...".to_owned(),
+                action: PaletteAction::SwitchAgent,
             });
         }
         for (i, open) in self.panes.iter().enumerate() {
@@ -488,6 +501,28 @@ impl App {
                     input: open.pane.name.clone().unwrap_or_default(),
                 };
             }
+            PaletteAction::Fork => {
+                let Some(open) = self.panes.get(self.focused) else {
+                    return;
+                };
+                let id = open.pane.id.clone();
+                match client::session_fork(&self.socket, id.clone()).await {
+                    Ok(forked) => {
+                        self.status_line = format!("forked {id} -> {forked}");
+                        self.refresh_sessions().await;
+                    }
+                    Err(e) => self.status_line = format!("fork failed: {e}"),
+                }
+            }
+            PaletteAction::SwitchAgent => {
+                let Some(open) = self.panes.get(self.focused) else {
+                    return;
+                };
+                self.overlay = Overlay::Prompt {
+                    kind: PromptKind::SwitchAgent(open.pane.id.clone()),
+                    input: String::new(),
+                };
+            }
             PaletteAction::Focus(i) => {
                 if i < self.panes.len() {
                     self.focused = i;
@@ -519,6 +554,22 @@ impl App {
                         self.refresh_sessions().await;
                     }
                     Err(e) => self.status_line = format!("rename failed: {e}"),
+                }
+            }
+            PromptKind::SwitchAgent(id) => {
+                let agent = match parse_agent_name(input.trim()) {
+                    Ok(agent) => agent,
+                    Err(e) => {
+                        self.status_line = e;
+                        return;
+                    }
+                };
+                match client::session_switch_agent(&self.socket, id.clone(), agent).await {
+                    Ok(switched) => {
+                        self.status_line = format!("{id} switched agent -> {switched}");
+                        self.refresh_sessions().await;
+                    }
+                    Err(e) => self.status_line = format!("switch-agent failed: {e}"),
                 }
             }
         }
@@ -609,6 +660,9 @@ impl App {
                         " New session -- repo path (Enter to create, Esc to cancel) "
                     }
                     PromptKind::Rename(_) => " Rename session (Enter to apply, Esc to cancel) ",
+                    PromptKind::SwitchAgent(_) => {
+                        " Switch agent -- claude/codex/gemini (Enter to apply, Esc to cancel) "
+                    }
                 };
                 let block = Block::default().borders(Borders::ALL).title(title);
                 frame.render_widget(Paragraph::new(input.as_str()).block(block), popup);
@@ -721,6 +775,24 @@ fn fuzzy_match(query: &str, label: &str) -> bool {
         .all(|qc| chars.by_ref().any(|lc| lc == qc))
 }
 
+/// Parses the palette's free-text agent name into an [`AgentKind`].
+///
+/// Duplicated from `sessionmgr-daemon`'s own `parse_agent_name` (same
+/// three names, same error message shape) rather than shared: this crate
+/// depends on `sessionmgr-protocol` only, never `sessionmgr-daemon` --
+/// see this crate's own module docs on `client.rs` for why that boundary
+/// is deliberate, not an oversight.
+fn parse_agent_name(name: &str) -> std::result::Result<AgentKind, String> {
+    match name {
+        "claude" | "claude-code" => Ok(AgentKind::ClaudeCode),
+        "codex" => Ok(AgentKind::Codex),
+        "gemini" => Ok(AgentKind::Gemini),
+        other => Err(format!(
+            "unknown agent `{other}` (expected `claude`, `codex`, or `gemini`)"
+        )),
+    }
+}
+
 /// A `width_pct` x `height_pct` `Rect` centered within `area`, for a
 /// modal popup drawn on top of the grid.
 fn centered_rect(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
@@ -741,4 +813,23 @@ fn centered_rect(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
         ])
         .areas(vertical);
     horizontal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agent_name_accepts_every_known_agent() {
+        assert_eq!(parse_agent_name("claude"), Ok(AgentKind::ClaudeCode));
+        assert_eq!(parse_agent_name("claude-code"), Ok(AgentKind::ClaudeCode));
+        assert_eq!(parse_agent_name("codex"), Ok(AgentKind::Codex));
+        assert_eq!(parse_agent_name("gemini"), Ok(AgentKind::Gemini));
+    }
+
+    #[test]
+    fn parse_agent_name_rejects_an_unknown_name() {
+        assert!(parse_agent_name("gpt5").is_err());
+        assert!(parse_agent_name("").is_err());
+    }
 }
