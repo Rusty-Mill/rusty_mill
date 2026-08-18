@@ -177,7 +177,7 @@ Ordered to de-risk the two highest-uncertainty items first, and **explicitly gat
 
 - **Per-phase acceptance**: each phase above has a stated exit criterion (Phase 0: pinned dependency builds; Phase 1: `supervisor_restart_recovery.rs` passes + both spikes have an answer; Phase 2: worktree lifecycle tests pass + Defender/path-length smoke tests pass; Phase 3: gated adapter tests pass for whichever CLIs are installed on the dev machine).
 - **Running it for real**: `cargo build --workspace`, then `sessionmgr new --agent claude-code` against a scratch repo, confirm the session survives `taskkill /IM sessionmgr.exe` (simulating the manager app being closed) followed by `sessionmgr daemon` + `sessionmgr list` showing it still running — this is the single behavioral proof the whole persistence architecture exists to deliver, and should be run manually at the end of Phase 1 in addition to the automated `supervisor_restart_recovery.rs` test.
-- **Test suite**: `cargo test --workspace` runs the unit tests and the always-on black-box tests; gated adapter tests run separately (`SESSIONMGR_TEST_CLAUDE_CODE=1 cargo test`, etc.) on whichever CLIs are actually installed.
+- **Test suite**: `cargo test --workspace` runs the unit tests, the always-on black-box tests, and the gated adapter tests together — each gated test probes its own CLI on `PATH` (e.g. `claude --version`) and skips cleanly, printing why, rather than failing when that CLI isn't installed. No separate env-var invocation is needed.
 
 ## Critical files/patterns being reused (not reinvented)
 

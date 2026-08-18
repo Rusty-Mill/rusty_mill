@@ -75,7 +75,7 @@ straight to `SessionStatus::Waiting` and returns — no worker, no pids
 recorded at all. A background daemon task
 (`poll_parent_then_start`, one per waiting session) re-reads the parent's
 status every two seconds via
-[`sessionmgr_core::parent_readiness`](../../crates/sessionmgr-core/src/dependency.rs),
+[`sessionmgr_core::parent_readiness`](../crates/sessionmgr-core/src/dependency.rs),
 a pure function (same shape as `recovery::decide_recovery`) mapping the
 parent's `SessionStatus` to `NotYet` / `Ready` / `Unavailable`. `Ready`
 spawns the worker through the exact same path an ordinary session start
