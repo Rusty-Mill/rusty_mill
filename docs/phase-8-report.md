@@ -268,11 +268,13 @@ frontend, the same role live verification already plays for
 `sessionmgr-tui`'s own command palette (`docs/phase-4b-report.md`).
 
 `cargo build --workspace`/`clippy --workspace --all-targets -- -D
-warnings`/`fmt --all --check` all clean. `cargo test --workspace`
-green aside from the same pre-existing, undiffed
-`agent_needs_input_claude` interactive-PTY flake every phase report
-since 5 has documented (confirmed unrelated: reproduces identically on
-unmodified `main`, and this phase's diff never touches
+warnings`/`fmt --all --check` all clean on the native (Linux) target,
+and, after the CI round covered in "What is not done" below,
+`cargo check`/`clippy` also clean against `x86_64-pc-windows-gnu`.
+`cargo test --workspace` green aside from the same pre-existing,
+undiffed `agent_needs_input_claude` interactive-PTY flake every phase
+report since 5 has documented (confirmed unrelated: reproduces
+identically on unmodified `main`, and this phase's diff never touches
 `sessionmgr-daemon` at all).
 
 ## What is not done
@@ -307,8 +309,36 @@ not an expansion past it either.
 WebView2 (ships with Windows 10/11, unlike the `webkit2gtk` this pass
 installed) rather than anything verified here, and this project is
 otherwise Windows-native per every prior phase report's own closing
-checks. The architecture and dependency choices here are
-platform-agnostic (Tauri itself is the cross-platform layer), but a
-real Windows build/run has not been attempted in this pass -- flagged
-honestly rather than assumed to "just work" the way this project's own
-conventions require for anything not actually run.
+checks. A real Windows *run* (opening the actual window, driving it)
+has not been attempted in this pass -- still flagged honestly rather
+than assumed to "just work."
+
+A real Windows *build*, however, was attempted and mattered: the CI
+round for this phase's own PR caught two genuine bugs the Linux-only
+local loop above could not --
+
+1. `tauri-build`'s Windows resource-generation step requires
+   `icons/icon.ico` at a fixed path, independent of `tauri.conf.json`'s
+   own `bundle.icon` list; only PNG placeholders existed. Fixed by
+   generating a real multi-size ICO.
+2. `client.rs`/`attach.rs` imported `std::os::unix::net::UnixStream`
+   directly -- which **does not exist at all outside `cfg(unix)`**, a
+   hard compile error (`E0433`) on `windows-latest` invisible to every
+   Linux check this phase ran before first pushing. `sessionmgr-daemon`
+   reaches the same sockets on Windows through `rusty_tokio`'s own
+   hand-rolled WinSock layer, deliberately not depended on here (see
+   "Why Tauri, and why real `tokio` inside it is a deliberate
+   exception" above); the fix instead uses `uds_windows`, a narrowly-
+   scoped crate providing the identical `std::os::unix::net` API shape
+   over the same WinSock `AF_UNIX` support, rather than a second
+   from-scratch WinSock client.
+
+Both were caught by real CI (`windows-latest`), diagnosed from its
+actual logs, and fixed. The second fix was additionally verified
+*locally*, not just by re-pushing and waiting: this session installed
+the `x86_64-pc-windows-gnu` Rust target and `mingw-w64` (for
+`windres`, which `build.rs` invokes even under `cargo check`) and
+confirmed `cargo check`/`clippy` both pass clean against it -- a closer
+proxy for the real `windows-latest` (MSVC) target than trusting review
+alone, though not a substitute for it. That MSVC run, and any actual
+interactive use on Windows, remains the next real verification step.
