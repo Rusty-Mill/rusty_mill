@@ -24,4 +24,10 @@ export const ICONS = {
   ),
   search: svg('<circle cx="6.7" cy="6.7" r="4"/><path d="M9.7 9.7L13.3 13.3"/>'),
   chevronDown: svg('<path d="M4 6l4 4 4-4"/>'),
+  grid: svg(
+    '<rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/>',
+  ),
+  expand: svg('<rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/>'),
+  clock: svg('<circle cx="8" cy="8" r="5.5"/><path d="M8 5.3v3l2 1.2"/>'),
+  stop: svg('<rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.3" fill="currentColor" stroke="none"/>'),
 };

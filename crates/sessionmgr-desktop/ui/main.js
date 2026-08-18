@@ -21,6 +21,9 @@ let paneOrder = [];
 let focusedId = null;
 let grid = new Grid(0);
 let everLaidOut = false;
+/** "grid" (the normal multi-pane layout) or "focus" (the focused pane
+ *  alone, filling the workspace) -- toggled by `#view-toggle-btn`. */
+let viewMode = "grid";
 /** Filled in by `layout()`; `applyWeights()` only ever touches these. */
 let rowEls = [];
 let cellEls = []; // cellEls[r][c] -> element (pane.el or a placeholder)
@@ -30,6 +33,11 @@ const appEl = document.getElementById("app");
 const sidebarListEl = document.getElementById("session-list");
 const statusTextEl = document.getElementById("status-text");
 const breadcrumbTextEl = document.getElementById("breadcrumb-text");
+const breadcrumbAgentEl = document.getElementById("breadcrumb-agent");
+const breadcrumbElapsedEl = document.getElementById("breadcrumb-elapsed");
+const diffBtnEl = document.getElementById("diff-btn");
+const viewToggleBtnEl = document.getElementById("view-toggle-btn");
+const stopBtnEl = document.getElementById("stop-btn");
 
 function setStatus(text) {
   statusTextEl.textContent = text;
@@ -80,6 +88,34 @@ function statusInfo(status) {
     default:
       return { label: "Idle", cls: "idle" };
   }
+}
+
+/** `SessionSummary.agent`'s kebab-case wire values, mapped to the same
+ *  short names `parse_agent_name` (Rust side) already accepts back --
+ *  round-trippable, not just cosmetic. `null` means an unadorned shell. */
+function agentLabel(agent) {
+  switch (agent) {
+    case "claude-code":
+      return "claude";
+    case "codex":
+      return "codex";
+    case "gemini":
+      return "gemini";
+    default:
+      return "shell";
+  }
+}
+
+/** A short, human "how long has this been running" string from
+ *  `SessionSummary.created_at_millis` -- the same field `sessionmgr
+ *  list` already prints as an absolute timestamp, just relativized. */
+function elapsedLabel(createdAtMillis) {
+  if (!createdAtMillis) return "";
+  const minutes = Math.max(0, Math.floor((Date.now() - createdAtMillis) / 60000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d`;
 }
 
 // -- fuzzy match, ported from sessionmgr-tui::app::fuzzy_match ------------
@@ -255,10 +291,14 @@ function updateBreadcrumb() {
   const s = focusedId && sessions.get(focusedId);
   if (!s) {
     breadcrumbTextEl.textContent = "No session focused";
+    breadcrumbAgentEl.textContent = "";
+    breadcrumbElapsedEl.innerHTML = "";
     return;
   }
   const proj = deriveProject(s);
   breadcrumbTextEl.textContent = `${proj.label} / ${s.name || "Session"}`;
+  breadcrumbAgentEl.textContent = agentLabel(s.agent);
+  breadcrumbElapsedEl.innerHTML = `${ICONS.clock}<span>${elapsedLabel(s.created_at_millis)}</span>`;
 }
 
 // -- panes ------------------------------------------------------------------
@@ -417,20 +457,31 @@ function focus(id) {
   }
   renderSidebar();
   updateBreadcrumb();
+  if (viewMode === "focus") layout();
 }
 
 // -- layout: row-major grid, shared row/col weights, drag-resizable ------
 
 function layout() {
-  const { rows, cols } = grid;
-  if (paneOrder.length !== grid.rows * grid.cols || grid.rows === 0) {
-    grid = new Grid(paneOrder.length);
-  }
   gridEl.innerHTML = "";
   rowEls = [];
   cellEls = [];
   appEl.classList.toggle("empty", paneOrder.length === 0);
 
+  if (viewMode === "focus" && focusedId && panes.has(focusedId)) {
+    gridEl.style.display = "block";
+    const cell = panes.get(focusedId).el;
+    cell.style.minWidth = "0";
+    cell.style.minHeight = "0";
+    cell.style.height = "100%";
+    gridEl.appendChild(cell);
+    fitAllPanes();
+    return;
+  }
+
+  if (paneOrder.length !== grid.rows * grid.cols || grid.rows === 0) {
+    grid = new Grid(paneOrder.length);
+  }
   gridEl.style.display = "flex";
   gridEl.style.flexDirection = "column";
 
@@ -455,6 +506,10 @@ function layout() {
       }
       cell.style.minWidth = "0";
       cell.style.minHeight = "0";
+      // Clears whatever focus-mode's own `height: 100%` left behind on a
+      // pane that was maximized before switching back to grid view --
+      // an inline height would otherwise fight this row's flex sizing.
+      cell.style.height = "";
       rowEl.appendChild(cell);
       rowCells.push(cell);
     }
@@ -533,6 +588,10 @@ function wireDrag(handle, onMove, vertical = false) {
 
 function fitAllPanes() {
   for (const p of panes.values()) {
+    // In focus mode every non-focused pane is detached from the DOM (see
+    // `layout()`'s early-return branch) -- fitting a detached terminal
+    // reads a zero-size container and would shrink its PTY to 0x0.
+    if (!p.el.isConnected) continue;
     try {
       p.fitAddon.fit();
     } catch {
@@ -671,6 +730,18 @@ async function actionSwitchAgent(id) {
       setStatus(`switch-agent failed: ${e}`);
     }
   });
+}
+
+/** Ctrl-C, sent as a raw byte the same way a terminal keypress would be --
+ *  this is the same `send_input` command a pane's own `term.onData`
+ *  already uses, not a new daemon action. */
+async function actionStopFocused() {
+  if (!focusedId) return;
+  try {
+    await invoke("send_input", { id: focusedId, data: [3] });
+  } catch (e) {
+    setStatus(`stop failed: ${e}`);
+  }
 }
 
 // -- command palette --------------------------------------------------------
@@ -831,6 +902,33 @@ document.getElementById("new-session-btn").addEventListener("click", actionNewSe
 const paletteBtnEl = document.getElementById("palette-btn");
 paletteBtnEl.innerHTML = ICONS.search;
 paletteBtnEl.addEventListener("click", openPalette);
+
+breadcrumbTextEl.addEventListener("click", openPalette);
+breadcrumbAgentEl.addEventListener("click", () => {
+  if (focusedId) actionSwitchAgent(focusedId);
+});
+
+diffBtnEl.innerHTML = ICONS.diff;
+diffBtnEl.addEventListener("click", () => {
+  if (focusedId) actionToggleDiff(focusedId);
+});
+
+function updateViewToggleBtn() {
+  viewToggleBtnEl.innerHTML = viewMode === "focus" ? ICONS.grid : ICONS.expand;
+  viewToggleBtnEl.title = viewMode === "focus" ? "Grid view (show all panes)" : "Focus view (maximize focused pane)";
+}
+updateViewToggleBtn();
+viewToggleBtnEl.addEventListener("click", () => {
+  viewMode = viewMode === "focus" ? "grid" : "focus";
+  updateViewToggleBtn();
+  layout();
+});
+
+stopBtnEl.innerHTML = `${ICONS.stop}<span>Stop</span>`;
+stopBtnEl.addEventListener("click", actionStopFocused);
+
+const kbdBadgeEl = document.getElementById("kbd-badge");
+kbdBadgeEl.textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl+K";
 
 // -- session events ----------------------------------------------------------
 

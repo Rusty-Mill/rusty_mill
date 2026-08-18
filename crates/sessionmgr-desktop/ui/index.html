@@ -20,8 +20,17 @@
     </aside>
     <main id="workspace">
       <div id="breadcrumb-row">
-        <div id="breadcrumb-text">No session focused</div>
-        <button id="palette-btn" class="icon-btn" title="Command palette (Ctrl/Cmd+K)"></button>
+        <div id="breadcrumb-text" title="Open command palette">No session focused</div>
+        <div id="breadcrumb-actions">
+          <span id="breadcrumb-agent" class="agent-pill" title="Switch this session's agent"></span>
+          <span id="breadcrumb-elapsed" class="breadcrumb-meta"></span>
+          <span class="breadcrumb-divider"></span>
+          <button id="diff-btn" class="icon-btn" title="Toggle git diff for focused session"></button>
+          <button id="view-toggle-btn" class="icon-btn" title="Focus view (maximize focused pane)"></button>
+          <button id="stop-btn" class="btn-secondary" title="Send Ctrl-C to the focused session"></button>
+          <button id="palette-btn" class="icon-btn" title="Command palette (Ctrl/Cmd+K)"></button>
+          <span id="kbd-badge" class="kbd-badge"></span>
+        </div>
       </div>
       <div id="grid"></div>
       <div id="empty-state">no sessions -- create one with the + button or Ctrl/Cmd+N</div>
