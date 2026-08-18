@@ -9,13 +9,20 @@
 <body>
   <div id="app">
     <aside id="sidebar">
-      <div id="sidebar-header">
-        <span>sessionmgr</span>
-        <button id="new-session-btn" title="New session (Ctrl/Cmd+N)">+</button>
+      <div id="brand-row">
+        <div id="brand">
+          <span id="brand-mark"><span></span><span></span><span></span><span></span></span>
+          <span id="brand-name">sessionmgr</span>
+        </div>
+        <button id="new-session-btn" title="New session (Ctrl/Cmd+N)">+ New session</button>
       </div>
-      <ul id="session-list"></ul>
+      <div id="session-list"></div>
     </aside>
     <main id="workspace">
+      <div id="breadcrumb-row">
+        <div id="breadcrumb-text">No session focused</div>
+        <button id="palette-btn" class="icon-btn" title="Command palette (Ctrl/Cmd+K)"></button>
+      </div>
       <div id="grid"></div>
       <div id="empty-state">no sessions -- create one with the + button or Ctrl/Cmd+N</div>
       <div id="status-bar">

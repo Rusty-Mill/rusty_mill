@@ -1,11 +1,15 @@
 import { Grid, MIN_WEIGHT } from "./grid.js";
+import { ICONS } from "./icons.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const ATTACHABLE = new Set(["created", "running", "needs-input"]);
-const STATUS_CLASS = new Set(["running", "needs-input", "errored", "crashed"]);
 const POLL_INTERVAL_MS = 2000;
+/** Sessions collapsed in the sidebar, keyed by the same string
+ *  `deriveProject()` returns -- a derived project's own worktree-stripped
+ *  cwd, not anything the daemon assigns. */
+const collapsedGroups = new Set();
 
 /** @type {Map<string, object>} id -> SessionSummary */
 let sessions = new Map();
@@ -25,6 +29,7 @@ const gridEl = document.getElementById("grid");
 const appEl = document.getElementById("app");
 const sidebarListEl = document.getElementById("session-list");
 const statusTextEl = document.getElementById("status-text");
+const breadcrumbTextEl = document.getElementById("breadcrumb-text");
 
 function setStatus(text) {
   statusTextEl.textContent = text;
@@ -35,6 +40,46 @@ function b64ToBytes(b64) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
+}
+
+// -- project grouping, derived client-side ---------------------------------
+//
+// The protocol has no "project name" field -- adding one would mean
+// touching the daemon for what is otherwise a pure front-end redesign.
+// A worktree session's own `cwd` is always `<repo>/.sessionmgr-worktrees/
+// <id>` (see `sessionmgr-core::workspace`), so the repository root is
+// recoverable by stripping that suffix; a same-directory session's `cwd`
+// already *is* the repo root. `key`/`repoRoot` are computed from the
+// original (not backslash-normalized) string so a "new session in this
+// project" action can still hand the daemon a real, native-looking path.
+
+function deriveProject(summary) {
+  const cwd = summary.cwd;
+  if (!cwd) return { key: "__none__", label: "Other sessions", repoRoot: null };
+  const normalized = cwd.replace(/\\/g, "/");
+  const marker = "/.sessionmgr-worktrees/";
+  const idx = normalized.indexOf(marker);
+  const rootNormalized = idx !== -1 ? normalized.slice(0, idx) : normalized;
+  const repoRoot = cwd.slice(0, rootNormalized.length);
+  const segments = rootNormalized.split("/").filter(Boolean);
+  const label = segments[segments.length - 1] || rootNormalized;
+  return { key: rootNormalized, label, repoRoot };
+}
+
+function statusInfo(status) {
+  switch (status) {
+    case "running":
+      return { label: "Working", cls: "working" };
+    case "needs-input":
+      return { label: "Needs input", cls: "needs-input" };
+    case "created":
+      return { label: "Starting", cls: "idle" };
+    case "errored":
+    case "crashed":
+      return { label: "Error", cls: "error" };
+    default:
+      return { label: "Idle", cls: "idle" };
+  }
 }
 
 // -- fuzzy match, ported from sessionmgr-tui::app::fuzzy_match ------------
@@ -69,6 +114,7 @@ async function refreshSessions() {
   }
   sessions = new Map(list.map((s) => [s.id, s]));
   renderSidebar();
+  updateBreadcrumb();
 
   const attachableIds = new Set(list.filter((s) => ATTACHABLE.has(s.status)).map((s) => s.id));
 
@@ -106,23 +152,113 @@ async function refreshSessions() {
 
 function renderSidebar() {
   sidebarListEl.innerHTML = "";
+
+  const groups = new Map();
   for (const s of sessions.values()) {
-    const li = document.createElement("li");
-    if (s.id === focusedId) li.classList.add("focused");
-    const label = document.createElement("div");
-    label.className = "sid";
-    label.textContent = s.name ? `${s.name}` : s.id;
-    const status = document.createElement("div");
-    status.className = "status" + (STATUS_CLASS.has(s.status) ? ` ${s.status}` : "");
-    status.textContent = `${s.status} · ${s.kind}`;
-    li.appendChild(label);
-    li.appendChild(status);
-    li.addEventListener("click", () => {
-      if (panes.has(s.id)) focus(s.id);
-      else setStatus(`${s.id} is ${s.status}; not live`);
-    });
-    sidebarListEl.appendChild(li);
+    const proj = deriveProject(s);
+    if (!groups.has(proj.key)) {
+      groups.set(proj.key, { label: proj.label, repoRoot: proj.repoRoot, items: [] });
+    }
+    groups.get(proj.key).items.push(s);
   }
+  const sortedKeys = [...groups.keys()].sort((a, b) =>
+    groups.get(a).label.toLowerCase().localeCompare(groups.get(b).label.toLowerCase()),
+  );
+
+  for (const key of sortedKeys) {
+    const group = groups.get(key);
+    const collapsed = collapsedGroups.has(key);
+
+    const section = document.createElement("div");
+    section.className = "sidebar-group";
+
+    const header = document.createElement("div");
+    header.className = "sidebar-group-header";
+
+    const chev = document.createElement("span");
+    chev.className = "chevron" + (collapsed ? " collapsed" : "");
+    chev.innerHTML = ICONS.chevronDown;
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "sidebar-group-name";
+    nameSpan.textContent = group.label.toUpperCase();
+    nameSpan.title = group.repoRoot || group.label;
+
+    const addBtn = document.createElement("button");
+    addBtn.className = "icon-btn group-add-btn";
+    addBtn.innerHTML = ICONS.plus;
+    addBtn.title = "New session in this project";
+    addBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (group.repoRoot) actionNewSessionIn(group.repoRoot);
+      else actionNewSession();
+    });
+
+    header.appendChild(chev);
+    header.appendChild(nameSpan);
+    header.appendChild(addBtn);
+    header.addEventListener("click", () => {
+      if (collapsedGroups.has(key)) collapsedGroups.delete(key);
+      else collapsedGroups.add(key);
+      renderSidebar();
+    });
+    section.appendChild(header);
+
+    if (!collapsed) {
+      const list = document.createElement("div");
+      list.className = "sidebar-group-items";
+      for (const s of group.items) {
+        list.appendChild(renderSessionCard(s));
+      }
+      section.appendChild(list);
+    }
+    sidebarListEl.appendChild(section);
+  }
+}
+
+function renderSessionCard(s) {
+  const card = document.createElement("div");
+  card.className = "session-card" + (s.id === focusedId ? " focused" : "");
+
+  const title = document.createElement("div");
+  title.className = "session-card-title";
+  title.textContent = s.name || "Session";
+
+  const branchRow = document.createElement("div");
+  branchRow.className = "session-card-branch";
+  branchRow.innerHTML = ICONS.branch;
+  const branchLabel = document.createElement("span");
+  branchLabel.textContent = s.branch || s.id;
+  branchRow.appendChild(branchLabel);
+
+  const statusRow = document.createElement("div");
+  statusRow.className = "session-card-status";
+  const st = statusInfo(s.status);
+  const dot = document.createElement("span");
+  dot.className = `status-dot ${st.cls}`;
+  const statusLabel = document.createElement("span");
+  statusLabel.textContent = st.label;
+  statusRow.appendChild(dot);
+  statusRow.appendChild(statusLabel);
+
+  card.appendChild(title);
+  card.appendChild(branchRow);
+  card.appendChild(statusRow);
+  card.addEventListener("click", () => {
+    if (panes.has(s.id)) focus(s.id);
+    else setStatus(`${s.id} is ${s.status}; not live`);
+  });
+  return card;
+}
+
+function updateBreadcrumb() {
+  const s = focusedId && sessions.get(focusedId);
+  if (!s) {
+    breadcrumbTextEl.textContent = "No session focused";
+    return;
+  }
+  const proj = deriveProject(s);
+  breadcrumbTextEl.textContent = `${proj.label} / ${s.name || "Session"}`;
 }
 
 // -- panes ------------------------------------------------------------------
@@ -136,31 +272,28 @@ async function addPane(summary) {
   const nameEl = document.createElement("span");
   nameEl.className = "pane-name";
   const statusEl = document.createElement("span");
-  statusEl.className = "pane-status";
+  statusEl.className = "pane-status-pill";
   titlebar.appendChild(nameEl);
   titlebar.appendChild(statusEl);
 
   const toolbar = document.createElement("span");
-  toolbar.style.marginLeft = "auto";
-  toolbar.style.display = "flex";
-  toolbar.style.gap = "4px";
-  const btn = (label, title, onClick) => {
+  toolbar.className = "pane-toolbar";
+  const btn = (icon, title, onClick) => {
     const b = document.createElement("button");
-    b.textContent = label;
+    b.className = "icon-btn";
+    b.innerHTML = icon;
     b.title = title;
-    b.style.cssText =
-      "background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;font-size:10px;padding:1px 5px;";
     b.addEventListener("click", (ev) => {
       ev.stopPropagation();
       onClick();
     });
     toolbar.appendChild(b);
   };
-  btn("diff", "Toggle git diff", () => actionToggleDiff(summary.id));
-  btn("rename", "Rename session", () => actionRename(summary.id));
-  btn("fork", "Fork session", () => actionFork(summary.id));
-  btn("switch", "Switch agent", () => actionSwitchAgent(summary.id));
-  btn("×", "Close session", () => actionClose(summary.id));
+  btn(ICONS.diff, "Toggle git diff", () => actionToggleDiff(summary.id));
+  btn(ICONS.rename, "Rename session", () => actionRename(summary.id));
+  btn(ICONS.fork, "Fork session", () => actionFork(summary.id));
+  btn(ICONS.switchAgent, "Switch agent", () => actionSwitchAgent(summary.id));
+  btn(ICONS.close, "Close session", () => actionClose(summary.id));
   titlebar.appendChild(toolbar);
   titlebar.addEventListener("click", () => focus(summary.id));
 
@@ -190,10 +323,26 @@ async function addPane(summary) {
     fontSize: 13,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
     theme: {
-      background: "#0d0f12",
-      foreground: "#d8dee4",
-      cursor: "#4fa3d1",
-      selectionBackground: "#33404d",
+      background: "#fffdf9",
+      foreground: "#2b2820",
+      cursor: "#dd5b31",
+      selectionBackground: "#f3d8c9",
+      black: "#2b2820",
+      red: "#c0392b",
+      green: "#2e8b57",
+      yellow: "#a8790f",
+      blue: "#3465a4",
+      magenta: "#8e44ad",
+      cyan: "#177f7f",
+      white: "#847c6c",
+      brightBlack: "#a89f8e",
+      brightRed: "#e0483a",
+      brightGreen: "#3aa76d",
+      brightYellow: "#c99418",
+      brightBlue: "#4a7fc1",
+      brightMagenta: "#a569bd",
+      brightCyan: "#1c9d9d",
+      brightWhite: "#2b2820",
     },
   });
   const fitAddon = new window.FitAddon.FitAddon();
@@ -252,7 +401,8 @@ function updatePaneHeader(id) {
   const s = sessions.get(id);
   if (!p) return;
   p.nameEl.textContent = s?.name || id;
-  p.statusEl.textContent = s?.status || "";
+  const st = statusInfo(s?.status);
+  p.statusEl.innerHTML = `<span class="status-dot ${st.cls}"></span>${st.label}`;
 }
 
 function focus(id) {
@@ -266,6 +416,7 @@ function focus(id) {
     p.term.focus();
   }
   renderSidebar();
+  updateBreadcrumb();
 }
 
 // -- layout: row-major grid, shared row/col weights, drag-resizable ------
@@ -461,14 +612,20 @@ async function actionNewSession() {
       setStatus("new session: repo path cannot be empty");
       return;
     }
-    try {
-      const id = await invoke("session_new", { repo: repo.trim(), agent: null });
-      setStatus(`created ${id}`);
-      await refreshSessions();
-    } catch (e) {
-      setStatus(`new session failed: ${e}`);
-    }
+    await actionNewSessionIn(repo.trim());
   });
+}
+
+/** Skips the prompt entirely -- used by a sidebar group's own "+", which
+ *  already knows the project's repo root. */
+async function actionNewSessionIn(repo) {
+  try {
+    const id = await invoke("session_new", { repo, agent: null });
+    setStatus(`created ${id}`);
+    await refreshSessions();
+  } catch (e) {
+    setStatus(`new session failed: ${e}`);
+  }
 }
 
 async function actionClose(id) {
@@ -671,6 +828,10 @@ document.addEventListener(
 
 document.getElementById("new-session-btn").addEventListener("click", actionNewSession);
 
+const paletteBtnEl = document.getElementById("palette-btn");
+paletteBtnEl.innerHTML = ICONS.search;
+paletteBtnEl.addEventListener("click", openPalette);
+
 // -- session events ----------------------------------------------------------
 
 listen("session-event", (evt) => {
@@ -686,6 +847,7 @@ listen("session-event", (evt) => {
       if (s) s.status = event.status;
       updatePaneHeader(id);
       renderSidebar();
+      if (id === focusedId) updateBreadcrumb();
       break;
     }
     case "exited": {
