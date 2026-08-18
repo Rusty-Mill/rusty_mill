@@ -9,6 +9,7 @@ members = [
     "crates/sessionmgr-tui",
     "crates/sessionmgr-agents",
     "crates/sessionmgr-daemon",
+    "crates/sessionmgr-desktop/src-tauri",
 ]
 
 [workspace.package]
