@@ -12,12 +12,13 @@
 //! `paths.rs`: this crate depends on `sessionmgr-protocol` only.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sessionmgr_protocol::{Request, Response};
+
+use crate::unix_stream::UnixStream;
 
 pub fn write_framed<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<(), String> {
     let mut encoded =

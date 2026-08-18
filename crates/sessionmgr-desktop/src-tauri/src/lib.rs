@@ -9,6 +9,7 @@ mod client;
 mod commands;
 mod daemon;
 mod paths;
+mod unix_stream;
 
 use std::collections::HashMap;
 use std::sync::Mutex;

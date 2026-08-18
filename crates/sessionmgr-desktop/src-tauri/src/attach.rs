@@ -11,13 +11,13 @@
 
 use std::io::BufReader;
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use sessionmgr_protocol::{Request, SessionEvent, SessionId};
 use tauri::{AppHandle, Emitter};
 
 use crate::client::write_framed;
+use crate::unix_stream::UnixStream;
 
 pub struct AttachHandle {
     writer: UnixStream,
