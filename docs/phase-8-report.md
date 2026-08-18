@@ -342,3 +342,49 @@ confirmed `cargo check`/`clippy` both pass clean against it -- a closer
 proxy for the real `windows-latest` (MSVC) target than trusting review
 alone, though not a substitute for it. That MSVC run, and any actual
 interactive use on Windows, remains the next real verification step.
+
+## Addendum: visual redesign (follow-up, same phase)
+
+Everything above shipped the original dark, minimal theme. A follow-up
+round of work, prompted directly by user feedback on that first look
+("that looks pretty blah," then a reference screenshot of a comparable
+session-manager UI with the request "can we make it more like this"),
+replaced the visual system and added the controls it was missing. Both
+merged after the report above was last written; neither touched the
+architecture, the protocol boundary, or any daemon-side code.
+
+**Theme**: `ui/style.css` was rewritten from the dark palette to a light
+one -- `--bg: #f5f2ed`, `--accent: #dd5b31` (coral-orange), card-based
+session entries with a status dot per state (working/needs-input/idle/
+error), replacing the earlier flat list.
+
+**Project grouping**: the sidebar now groups sessions by repository,
+derived client-side in `ui/main.js`'s `deriveProject()` from a worktree
+session's own `cwd` (`<repo>/.sessionmgr-worktrees/<id>`, stripped back
+to `<repo>`) -- no daemon or protocol change, since the protocol has no
+"project name" field and this is a pure front-end read of a field it
+already had.
+
+**Breadcrumb controls** (`ui/icons.js`, `ui/index.html`, `ui/main.js`):
+a focus/grid view toggle (`layout()`'s early-return branch maximizes the
+focused pane and detaches the rest from the DOM -- `fitAllPanes()` was
+given an `isConnected` guard so it doesn't shrink a detached pane's PTY
+to 0x0 while it's hidden), a Stop button (`actionStopFocused()`, sends
+byte `3` -- Ctrl-C -- via the existing `send_input` command, no new
+daemon command), a diff toggle and agent-switch pill wired to the
+existing `actionToggleDiff`/`actionSwitchAgent` actions, an elapsed-time
+readout (`elapsedLabel()`, relative from `SessionSummary.created_at_millis`),
+and a platform-aware Ctrl+K/Cmd+K badge (`navigator.platform` check).
+
+**Live verification**: real daemon, two real worktree sessions (a plain
+shell and a `codex` session) under Xvfb, driven with `xdotool` the same
+way the original pass was -- confirmed the view toggle actually
+maximizes and restores the grid with the icon/tooltip swapping, Stop
+sends a real Ctrl-C (observed `^C` and a fresh prompt after interrupting
+a running `sleep`), the diff toggle switches the pane into its
+file-list/diff-text layout, the breadcrumb text opens the command
+palette, and the agent pill opens the switch-agent prompt.
+
+**Not done**: no automated screenshot regression test exists for either
+pass -- both are verified by a human (or an agent) driving the real app
+under Xvfb and reading the screenshots, not by a checked-in visual test.

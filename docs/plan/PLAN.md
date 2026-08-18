@@ -50,6 +50,9 @@ sessionmgr/
         app.rs, grid.rs
         panes/{session_pane.rs, git_diff_pane.rs, terminal_pane.rs}
         client.rs                  # daemon-socket client
+    sessionmgr-desktop/            # Phase 8, not in this original diagram: Tauri v2 GUI client
+      src-tauri/                   #   depends on sessionmgr-protocol only, same boundary as sessionmgr-tui
+      ui/                          #   xterm.js panes, vanilla JS -- see ../phase-8-report.md
   tests/
     common/mod.rs                  # black-box harness, CARGO_BIN_EXE_sessionmgr, rusty_prime_agent-pattern TempDir
     session_lifecycle.rs
@@ -155,7 +158,9 @@ Ordered to de-risk the two highest-uncertainty items first, and **explicitly gat
 - **Phase 3 (gated on Phase 1's hook spike)**: Codex and Gemini adapters. Before this phase's design work starts, resolve whether either CLI has any hook-equivalent — if not, commit explicitly to the degraded-confidence pattern-matching path for that CLI rather than discovering it mid-implementation.
 - **Phase 4**: TUI (grid, panes, diff view, command palette) + session hooks/webhook extensibility, including the secret-scrubbing boundary and the `__hook-fire` no-op requirement.
 - **Phase 5**: dependent sessions (real, independent scope). Fork is *not* in this phase (see below).
-- **Phase 6+ (gated on a dedicated research spike)**: switch-agent-mid-session and Fork together, both blocked on the same unresolved question — whether any of the three CLIs' `--resume`/`--continue`-equivalent flags can accept externally-supplied prior state, and in what format. Cost/model routing is explicitly deprioritized further — CAPABILITIES.md itself flags this capability as sourced only from restated marketing copy, not confirmed hands-on by any source, so re-verify it's a real, distinct feature (not just the already-confirmed mid-session agent-switch described from a cost angle) before committing any design effort to it.
+- **Phase 6+ (gated on a dedicated research spike)**: switch-agent-mid-session and Fork together, both blocked on the same unresolved question — whether any of the three CLIs' `--resume`/`--continue`-equivalent flags can accept externally-supplied prior state, and in what format. Cost/model routing is explicitly deprioritized further — CAPABILITIES.md itself flags this capability as sourced only from restated marketing copy, not confirmed hands-on by any source, so re-verify it's a real, distinct feature (not just the already-confirmed mid-session agent-switch described from a cost angle) before committing any design effort to it. **Status update**: the spike resolved. Fork shipped in Phase 6 (Claude Code first, then Codex and Gemini CLI); switch-agent shipped in Phase 7 across all three CLIs via a rendered-transcript handoff rather than a native per-CLI resume — see [Phase 6 report](../phase-6-report.md) and [Phase 7 report](../phase-7-report.md) for what each CLI's real `--resume`-equivalent turned out to accept.
+- **Phase 7**: switch-agent-mid-session, all three CLIs — see above.
+- **Phase 8 (not in the original roadmap)**: `sessionmgr-desktop`, a Tauri-based graphical client with full interactive parity with the TUI, added after a direct user question surfaced that this tool had no non-terminal UI. See [Phase 8 report](../phase-8-report.md).
 
 ---
 
@@ -177,7 +182,7 @@ Ordered to de-risk the two highest-uncertainty items first, and **explicitly gat
 
 - **Per-phase acceptance**: each phase above has a stated exit criterion (Phase 0: pinned dependency builds; Phase 1: `supervisor_restart_recovery.rs` passes + both spikes have an answer; Phase 2: worktree lifecycle tests pass + Defender/path-length smoke tests pass; Phase 3: gated adapter tests pass for whichever CLIs are installed on the dev machine).
 - **Running it for real**: `cargo build --workspace`, then `sessionmgr new --agent claude-code` against a scratch repo, confirm the session survives `taskkill /IM sessionmgr.exe` (simulating the manager app being closed) followed by `sessionmgr daemon` + `sessionmgr list` showing it still running — this is the single behavioral proof the whole persistence architecture exists to deliver, and should be run manually at the end of Phase 1 in addition to the automated `supervisor_restart_recovery.rs` test.
-- **Test suite**: `cargo test --workspace` runs the unit tests and the always-on black-box tests; gated adapter tests run separately (`SESSIONMGR_TEST_CLAUDE_CODE=1 cargo test`, etc.) on whichever CLIs are actually installed.
+- **Test suite**: `cargo test --workspace` runs the unit tests, the always-on black-box tests, and the gated adapter tests together — each gated test probes its own CLI on `PATH` (e.g. `claude --version`) and skips cleanly, printing why, rather than failing when that CLI isn't installed. No separate env-var invocation is needed.
 
 ## Critical files/patterns being reused (not reinvented)
 

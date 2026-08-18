@@ -50,8 +50,9 @@ PID is never mistaken for a live worker.
 
 ## Status
 
-**Phase 2 complete** — worktree isolation works and is tested against real
-repositories.
+**Phase 8 complete** — a real graphical desktop front end, on top of a
+worktree-isolated session manager with fork, mid-session agent switching, and
+dependent sessions all working against real agent CLIs.
 
 - **Phase 0**: `rusty_tokio` confirmed as the async runtime —
   [ADR-0001](docs/decisions/0001-async-runtime-rusty-tokio.md), including its
@@ -73,15 +74,27 @@ repositories.
   genuine product bugs the Linux suite had not — an unbounded socket wait
   behind a bind-before-recover race, and `terminate()` wrongly failing on an
   already-exited pid. Both fixed; see the
-  [Phase 2 report](docs/phase-2-report.md).
+  [Phase 2 report](docs/phase-2-report.md). The Defender smoke test and the
+  `longPathAware` manifest wiring flagged as outstanding at the time are both
+  since done — see [Phase 2 Windows verification](docs/phase-2-windows-verification.md).
+- **Phase 3/3b/4/4b**: the `sessionmgr-tui` grid dashboard (panes, git diff
+  view, command palette), Codex and Gemini CLI adapters, and session
+  hooks/outbound webhook extensibility.
+- **Phase 5**: dependent sessions (`new --parent`), sharing a running
+  session's worktree.
+- **Phase 6/7**: fork (clone a session's own agent-CLI conversation into a
+  new one) and switch-agent (hand a live conversation off to a different CLI
+  mid-session), both working across Claude Code, Codex, and Gemini CLI.
+- **Phase 8**: [`sessionmgr-desktop`](crates/sessionmgr-desktop) — a
+  Tauri-based graphical client with full interactive parity with the TUI
+  (real xterm.js panes, command palette, git diff view, fork/switch-agent),
+  since redesigned to a light theme with a project-grouped session sidebar.
+  See [Desktop UI](#desktop-ui) below to build and run it.
 
-Still outstanding on Windows: the Defender smoke test, and wiring the
-`longPathAware` manifest into the build via a `build.rs`.
-
-Phase order is deliberate and gated: the highest-uncertainty work (agent-CLI
-"needs input" detection, runtime availability) is proven earliest, and no phase
-whose plan section depends on an earlier spike begins before that spike has an
-actual answer.
+Phase order was deliberate and gated: the highest-uncertainty work (agent-CLI
+"needs input" detection, runtime availability) was proven earliest, and no
+phase whose plan section depended on an earlier spike began before that
+spike had an actual answer.
 
 ## Building
 
@@ -90,6 +103,29 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Gated agent-CLI adapter tests require the real CLIs installed and are opted into
-per CLI (e.g. `SESSIONMGR_TEST_CLAUDE_CODE=1 cargo test`); they skip cleanly
-rather than failing when a CLI is absent.
+Gated agent-CLI adapter tests need the real CLIs installed to exercise
+anything — each one auto-skips (prints a message, doesn't fail) when its CLI
+isn't on `PATH`, so `cargo test --workspace` is always safe to run regardless
+of which CLIs are present.
+
+On Linux, building the workspace also builds `sessionmgr-desktop`
+(`crates/sessionmgr-desktop`), which links against GTK/WebKitGTK. Install the
+dev headers first — see `.github/workflows/ci.yml`'s "Install Tauri Linux
+build dependencies" step for the exact package list. Windows needs nothing
+extra (WebView2 ships with Windows 10/11).
+
+## Desktop UI
+
+`sessionmgr-desktop` is a second binary — a Tauri-based graphical client, an
+alternative to the terminal `sessionmgr tui` with the same session grid,
+command palette, and git diff view. It talks to the same daemon over the
+same protocol as every other client role, so nothing else needs to be
+running differently to use it.
+
+```
+cargo run -p sessionmgr-desktop
+```
+
+It starts a daemon automatically if none is running, same as `sessionmgr
+tui` does. See [Phase 8 report](docs/phase-8-report.md) for the
+architecture and design rationale.

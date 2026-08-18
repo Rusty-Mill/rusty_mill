@@ -393,11 +393,18 @@ directly onto the MVP slice already scoped (`new`/`list`/`attach`/`close`,
 worktree-per-session). Not yet in scope, worth a deliberate decision:
 
 - Fork session (clone session + context) — real scope add, not free.
+  **Shipped in Phase 6** (Claude Code first, then Codex and Gemini CLI) —
+  see `../phase-6-report.md`.
 - Switch agent mid-session while preserving context — the standout feature;
   depends on being able to translate one CLI's conversation format into
   another's resumable state, which is nontrivial per agent pair.
+  **Shipped in Phase 7**, across all three CLIs, via a rendered-transcript
+  handoff rather than a native per-CLI resume — see `../phase-7-report.md`.
 - Dependent/chained sessions — sequencing on top of the worktree model.
+  **Shipped in Phase 5** — see `../phase-5-report.md`.
 - Grid/multi-pane layout — already flagged as v1.1 in `SCOPE.md`.
+  **Shipped**: `sessionmgr-tui`'s grid (Phase 4) and `sessionmgr-desktop`'s
+  own port of the same layout math (Phase 8).
 - Embedded browser, in-app file editor, in-app rules editor — all deferred;
   Files/Skills/Rules tabs read as thin wrappers the reviewer didn't find
   compelling versus just using your own editor.
