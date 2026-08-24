@@ -1580,7 +1580,7 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
         _ => None,
     };
     let mut out = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.chunks_exact(2) {
+    for pair in hex.as_chunks::<2>().0 {
         out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
     }
     Some(out)

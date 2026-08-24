@@ -176,7 +176,9 @@ fn frames_or_none(width: usize, height: usize, frames: Vec<Frame>) -> Option<Gif
 fn read_palette(data: &[u8], at: usize, n: usize) -> Option<Vec<u32>> {
     let raw = data.get(at..at + n * 3)?;
     Some(
-        raw.chunks_exact(3)
+        raw.as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32)
             .collect(),
     )

@@ -7,6 +7,36 @@ test; nothing below is aspirational.
 
 ---
 
+## 2026-08-24 — Broken build restored; `--gpu` flag registration
+
+### 🩹 Fixed
+- **`cargo build` was broken for everyone without a private sibling checkout.**
+  A prior commit added `rusty_font`/`rusty_gui`/`rusty_gpu` as path
+  dependencies (`../rusty_font`, etc.) and switched `rusty_regx` from a git
+  dependency to a path one — none of the three new deps are referenced
+  anywhere in `src`, and none of the four exist as sibling checkouts outside
+  the original author's machine. Cargo must resolve every dependency's
+  manifest regardless of feature activation, so this broke `cargo build`
+  entirely (including CI) with `failed to load manifest for dependency
+  'rusty_font'`, next failing on `rusty_gpu` — easy to mistake for an actual
+  GPU/wgpu error. Removed the three unused path deps; restored `rusty_regx`
+  to its working git dependency.
+- **`--gpu` was a real, working flag that `rusty_term` itself called
+  unrecognized.** `src/gui/window.rs` has always checked `--gpu` directly to
+  select the wgpu renderer (`gui-gpu` build), but `main.rs`'s `KNOWN_FLAGS`
+  table never listed it, so every `--gpu` invocation printed `rusty_term:
+  unrecognized flag `--gpu` (ignored)` and it was missing from `--help`.
+  Registered it; help text and flag-coverage test updated.
+- **Clippy lint drift.** `chunks_exact` with a constant size and manual
+  slice-fill loops now trip newer clippy lints (`chunks_exact_to_as_chunks`,
+  `manual_slice_fill`) under `-D warnings`; these had gone unnoticed because
+  the build breakage above meant CI's clippy job never ran to completion.
+  Switched the affected call sites (`core/{iterm,kitty,parser,png,gif}.rs`,
+  `core/grid.rs`, `core/tests.rs`, `web_bridge/ws.rs`) to `as_chunks`/
+  `slice::fill`; no behavior change.
+
+---
+
 ## 2026-07-27 — Actionable error when stdin/stdout aren't a real console
 
 ### 🩹 Fixed

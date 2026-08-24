@@ -3540,9 +3540,7 @@ impl Grid {
         // default_fg/bg are intentionally untouched: the parser re-syncs them
         // from its (theme-seeded) palette right after — see DECSTR handling.
         self.current_link = 0;
-        for a in &mut self.line_attrs {
-            *a = LineAttr::Single;
-        }
+        self.line_attrs.fill(LineAttr::Single);
     }
 
     /// Screen-alignment test (`DECALN`, `ESC # 8`): fill every cell with `E` and
@@ -3551,9 +3549,7 @@ impl Grid {
         let mut e = Cell::blank();
         e.ch = 'E';
         self.cells.fill(e);
-        for a in &mut self.line_attrs {
-            *a = LineAttr::Single;
-        }
+        self.line_attrs.fill(LineAttr::Single);
         self.wrapped.iter_mut().for_each(|w| *w = false);
         self.dirty.iter_mut().for_each(|d| *d = true);
         self.cursor = (0, 0);

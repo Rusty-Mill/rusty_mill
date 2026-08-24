@@ -54,6 +54,7 @@ const KNOWN_FLAGS: &[(&str, bool)] = &[
     ("--profile", true),
     ("--session", true),
     ("--gui", false),
+    ("--gpu", false),
     ("--single-instance", false),
 ];
 
@@ -79,6 +80,9 @@ fn print_help() {
     println!("        --profile <name>          Apply a named [profile.<name>] bundle");
     println!("        --session <path>          Restore a session file (--gui only)");
     println!("        --gui                     Launch the windowed front-end");
+    println!(
+        "        --gpu                     Use the wgpu GPU renderer (--gui only, gui-gpu build)"
+    );
     println!("        --single-instance         Hand off to a running --gui instance");
     println!();
     println!("Anything after `--`, `-e`, or `--command` is run as the child command,");
@@ -388,6 +392,7 @@ mod tests {
             "--session",
             "/x",
             "--gui",
+            "--gpu",
             "--single-instance",
             "--list-shells",
             "--help",
