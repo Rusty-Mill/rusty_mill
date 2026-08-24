@@ -247,7 +247,9 @@ fn raw_pixels(
 
 /// Pack RGBA8 bytes (from the PNG decoder) into pixels.
 fn rgba_pixels(rgba: &[u8]) -> Vec<Option<u32>> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| rgb_or_transparent(p[0], p[1], p[2], p[3]))
         .collect()
 }

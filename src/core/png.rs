@@ -60,7 +60,7 @@ pub(crate) fn decode(data: &[u8]) -> Option<Image> {
                 have_ihdr = true;
             }
             b"PLTE" => {
-                for px in chunk.chunks_exact(3) {
+                for px in chunk.as_chunks::<3>().0 {
                     palette.push([px[0], px[1], px[2]]);
                 }
             }

@@ -5,7 +5,7 @@ exclude = ["fuzz"]
 
 [package]
 name = "rusty_term"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 default-run = "rusty_term"
 license = "MIT"
@@ -53,13 +53,10 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
 ] }
 rusty_term_l13 = { path = "l13", optional = true }
-rusty_font = { path = "../rusty_font", optional = true }
-rusty_gui = { path = "../rusty_gui", optional = true }
-rusty_gpu = { path = "../rusty_gpu", optional = true }
 # Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
 # ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
 # the search). Optional: only the windowed front-end has a search UI.
-rusty_regx = { path = "../rusty_regx", optional = true }
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "1249a62de68f68e821c13cecd3838d49e52e22b6", optional = true }
 ab_glyph = { version = "0.2", optional = true }
 # Reading the font's GSUB table for ligature shaping. Already in the tree via
 # ab_glyph -> owned_ttf_parser, so this adds no new compiled crate; we only
@@ -106,4 +103,4 @@ windows-sys = { version = "0.59", features = [
 # machine, but worth knowing if `cargo test` is ever run somewhere
 # deliberately offline/air-gapped: it'll fail at dependency resolution,
 # not at a test, which can look confusing out of context.
-rusty_regx = { path = "../rusty_regx" }
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "1249a62de68f68e821c13cecd3838d49e52e22b6" }

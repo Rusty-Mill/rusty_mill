@@ -103,7 +103,9 @@ pub(crate) fn feed(text: &str, g: &mut Grid) {
     };
     // Pack RGBA8 into the grid's pixel format (alpha 0 -> transparent).
     let pixels: Vec<Option<u32>> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| {
             if p[3] == 0 {
                 None
