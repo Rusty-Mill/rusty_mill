@@ -1,7 +1,9 @@
 //! TrueType / OpenType binary table parser — a real `sfnt` table
 //! directory, `cmap` (format 4, the common BMP subtable every Latin-script
-//! font ships), `loca`/`glyf` outline extraction (simple glyphs; composite
-//! glyphs are a known, documented gap), and `head`/`maxp` metadata.
+//! font ships, and format 12, the segmented-coverage subtable used for
+//! full 21-bit Unicode including supplementary-plane characters),
+//! `loca`/`glyf` outline extraction (simple glyphs; composite glyphs are a
+//! known, documented gap), and `head`/`maxp` metadata.
 
 use crate::glyph::{GlyphOutline, Point};
 use alloc::vec::Vec;
@@ -51,7 +53,7 @@ pub struct Font {
     loca_long: bool,
     glyf_range: (usize, usize),
     loca_range: (usize, usize),
-    cmap_subtable: Option<CmapFormat4>,
+    cmap_subtable: Option<CmapSubtable>,
     /// `hhea` table: typographic ascender/descender/line-gap, in font
     /// units (see [`Font::ascender`]/[`Font::descender`]/[`Font::line_gap`]).
     ascender: i16,
@@ -63,6 +65,27 @@ pub struct Font {
     /// compression -- real for every font, not just monospace ones).
     num_h_metrics: u16,
     hmtx_range: (usize, usize),
+}
+
+/// A parsed `cmap` subtable, in whichever of the two formats this parser
+/// supports the font actually shipped.
+enum CmapSubtable {
+    /// Format 4 — the segment-based Unicode BMP (up to U+FFFF) mapping
+    /// every Latin-script TrueType font ships.
+    Format4(CmapFormat4),
+    /// Format 12 — segmented coverage over the full 21-bit Unicode range,
+    /// used by fonts that carry supplementary-plane glyphs (e.g. Nerd
+    /// Fonts' private-use icon ranges above U+FFFF).
+    Format12(CmapFormat12),
+}
+
+impl CmapSubtable {
+    fn lookup(&self, code: u32) -> Option<u16> {
+        match self {
+            CmapSubtable::Format4(t) => t.lookup(code),
+            CmapSubtable::Format12(t) => t.lookup(code),
+        }
+    }
 }
 
 /// A parsed `cmap` format-4 subtable: the segment-based Unicode BMP
@@ -110,6 +133,30 @@ impl CmapFormat4 {
             return None;
         }
         Some((raw as i32).wrapping_add(self.id_deltas[seg] as i32) as u16)
+    }
+}
+
+/// A parsed `cmap` format-12 subtable: an array of `(startCharCode,
+/// endCharCode, startGlyphID)` groups, sorted by `startCharCode` per spec,
+/// each covering a contiguous run of codepoints mapped to consecutive
+/// glyph ids.
+struct CmapFormat12 {
+    groups: Vec<(u32, u32, u32)>,
+}
+
+impl CmapFormat12 {
+    fn lookup(&self, code: u32) -> Option<u16> {
+        // Groups are spec-ordered by startCharCode, so the containing
+        // group (if any) is the last one whose startCharCode <= code.
+        let idx = self.groups.partition_point(|&(start, _, _)| start <= code);
+        if idx == 0 {
+            return None;
+        }
+        let (start, end, start_glyph_id) = self.groups[idx - 1];
+        if code < start || code > end {
+            return None;
+        }
+        u16::try_from(start_glyph_id + (code - start)).ok()
     }
 }
 
@@ -232,9 +279,9 @@ impl Font {
     }
 
     /// Maps a Unicode character to a glyph ID via the font's real `cmap`
-    /// (format 4) subtable, if one was found. Returns `None` (not glyph 0)
-    /// when there's no mapping or no usable `cmap` — glyph 0 is
-    /// conventionally ".notdef", a real glyph, not an absence marker.
+    /// subtable (format 4 or format 12), if one was found. Returns `None`
+    /// (not glyph 0) when there's no mapping or no usable `cmap` — glyph 0
+    /// is conventionally ".notdef", a real glyph, not an absence marker.
     pub fn glyph_index(&self, ch: char) -> Option<u16> {
         self.cmap_subtable.as_ref()?.lookup(ch as u32)
     }
@@ -305,31 +352,65 @@ impl Font {
     }
 }
 
-fn parse_cmap(data: &[u8], cmap_offset: usize, cmap_len: usize) -> Option<CmapFormat4> {
+fn parse_cmap(data: &[u8], cmap_offset: usize, cmap_len: usize) -> Option<CmapSubtable> {
     let cmap = data.get(cmap_offset..cmap_offset + cmap_len)?;
     let num_subtables = u16_at(cmap, 2)?;
 
-    // Prefer platform 3 (Windows) encoding 1 (Unicode BMP), falling back
-    // to platform 0 (Unicode) — the two encodings that use format 4.
-    let mut best_offset = None;
+    // Prefer a format-12 subtable (full 21-bit Unicode, a superset of
+    // format 4's BMP-only coverage) if the font ships one — within
+    // platform 3 (Windows), prefer encoding 10 (full Unicode). Otherwise
+    // fall back to format 4: platform 3 encoding 1 (Unicode BMP), then
+    // platform 0 (Unicode) — the two encodings that use format 4.
+    let mut best_12: Option<usize> = None;
+    let mut best_4: Option<usize> = None;
     for i in 0..num_subtables as usize {
         let rec = 4 + i * 8;
         let platform_id = u16_at(cmap, rec)?;
         let encoding_id = u16_at(cmap, rec + 2)?;
         let offset = u32_at(cmap, rec + 4)? as usize;
-        if platform_id == 3 && encoding_id == 1 {
-            best_offset = Some(offset);
-            break;
-        }
-        if platform_id == 0 && best_offset.is_none() {
-            best_offset = Some(offset);
+        match cmap.get(offset..).and_then(|s| u16_at(s, 0)) {
+            Some(12) if best_12.is_none() || (platform_id == 3 && encoding_id == 10) => {
+                best_12 = Some(offset);
+            }
+            Some(4)
+                if (platform_id == 3 && encoding_id == 1)
+                    || (platform_id == 0 && best_4.is_none()) =>
+            {
+                best_4 = Some(offset);
+            }
+            _ => {}
         }
     }
-    let subtable_offset = best_offset?;
+
+    if let Some(offset) = best_12 {
+        if let Some(t) = parse_cmap_format12(cmap, offset) {
+            return Some(CmapSubtable::Format12(t));
+        }
+    }
+    parse_cmap_format4(cmap, best_4?).map(CmapSubtable::Format4)
+}
+
+fn parse_cmap_format12(cmap: &[u8], offset: usize) -> Option<CmapFormat12> {
+    let subtable = cmap.get(offset..)?;
+    if u16_at(subtable, 0)? != 12 {
+        return None;
+    }
+    let num_groups = u32_at(subtable, 12)? as usize;
+    let mut groups = Vec::with_capacity(num_groups);
+    for i in 0..num_groups {
+        let rec = 16 + i * 12;
+        let start_char_code = u32_at(subtable, rec)?;
+        let end_char_code = u32_at(subtable, rec + 4)?;
+        let start_glyph_id = u32_at(subtable, rec + 8)?;
+        groups.push((start_char_code, end_char_code, start_glyph_id));
+    }
+    Some(CmapFormat12 { groups })
+}
+
+fn parse_cmap_format4(cmap: &[u8], subtable_offset: usize) -> Option<CmapFormat4> {
     let subtable = cmap.get(subtable_offset..)?;
     let format = u16_at(subtable, 0)?;
     if format != 4 {
-        // Format 12 (full Unicode) and others are a documented gap.
         return None;
     }
 
@@ -656,6 +737,124 @@ mod tests {
         assert_ne!(
             m, i,
             "a proportional font's 'M' and 'i' should have different advance widths"
+        );
+    }
+
+    /// Builds a minimal standalone `cmap` table: header + one encoding
+    /// record + a single format-12 subtable with one group mapping
+    /// `[start, end]` to glyph ids starting at `start_glyph`.
+    fn build_format12_cmap(
+        platform_id: u16,
+        encoding_id: u16,
+        start: u32,
+        end: u32,
+        start_glyph: u32,
+    ) -> Vec<u8> {
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&platform_id.to_be_bytes());
+        cmap.extend_from_slice(&encoding_id.to_be_bytes());
+        let subtable_offset: u32 = 4 + 8;
+        cmap.extend_from_slice(&subtable_offset.to_be_bytes());
+
+        cmap.extend_from_slice(&12u16.to_be_bytes()); // format
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        let num_groups: u32 = 1;
+        let length: u32 = 16 + 12 * num_groups;
+        cmap.extend_from_slice(&length.to_be_bytes());
+        cmap.extend_from_slice(&0u32.to_be_bytes()); // language
+        cmap.extend_from_slice(&num_groups.to_be_bytes());
+        cmap.extend_from_slice(&start.to_be_bytes());
+        cmap.extend_from_slice(&end.to_be_bytes());
+        cmap.extend_from_slice(&start_glyph.to_be_bytes());
+        cmap
+    }
+
+    #[test]
+    fn cmap_format_12_maps_supplementary_plane_codepoints() {
+        let cmap = build_format12_cmap(3, 10, 0xF0000, 0xF0010, 500);
+        let subtable = parse_cmap(&cmap, 0, cmap.len()).expect("format-12 cmap should parse");
+        let CmapSubtable::Format12(t) = subtable else {
+            panic!("expected a format-12 subtable to be selected");
+        };
+        assert_eq!(
+            t.lookup(0xF0000),
+            Some(500),
+            "group start should map to startGlyphID"
+        );
+        assert_eq!(
+            t.lookup(0xF0008),
+            Some(508),
+            "mid-group codepoint should map to startGlyphID + offset"
+        );
+        assert_eq!(
+            t.lookup(0xF0010),
+            Some(516),
+            "group end (inclusive) should still resolve"
+        );
+        assert_eq!(
+            t.lookup(0xF0011),
+            None,
+            "a codepoint just past the group's end should not resolve"
+        );
+        assert_eq!(
+            t.lookup(0x41),
+            None,
+            "a BMP codepoint outside any group should not resolve"
+        );
+    }
+
+    #[test]
+    fn cmap_format_12_is_preferred_over_a_bmp_only_format_4_subtable() {
+        // A font can legally carry both a format-4 (platform 3, encoding 1)
+        // and a format-12 (platform 3, encoding 10) subtable — format 12 is
+        // a strict superset, so it should win.
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&2u16.to_be_bytes()); // numTables
+
+        // Encoding record 0: format-4, platform 3 / encoding 1.
+        cmap.extend_from_slice(&3u16.to_be_bytes());
+        cmap.extend_from_slice(&1u16.to_be_bytes());
+        let format4_offset: u32 = 4 + 2 * 8;
+        cmap.extend_from_slice(&format4_offset.to_be_bytes());
+
+        // Encoding record 1: format-12, platform 3 / encoding 10.
+        cmap.extend_from_slice(&3u16.to_be_bytes());
+        cmap.extend_from_slice(&10u16.to_be_bytes());
+        // A 2-segment format-4 subtable is 32 bytes: 14-byte fixed header
+        // + 2-byte reservedPad + 4 parallel arrays (end/start/delta/
+        // rangeOffset) of 2 segments * 2 bytes each = 14 + 2 + 4*(2*2).
+        let format4_len: u32 = 14 + 2 + 4 * (2 * 2);
+        let format12_offset = format4_offset + format4_len;
+        cmap.extend_from_slice(&format12_offset.to_be_bytes());
+
+        // format-4 subtable: single segment covering 'A' (0x41) -> glyph 1,
+        // terminated by the required 0xFFFF end segment.
+        cmap.extend_from_slice(&4u16.to_be_bytes()); // format
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // length (unused by parser)
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // language
+        cmap.extend_from_slice(&4u16.to_be_bytes()); // segCountX2 (2 segments)
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // searchRange (unused)
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // entrySelector (unused)
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // rangeShift (unused)
+        cmap.extend_from_slice(&0x0041u16.to_be_bytes()); // endCode[0]
+        cmap.extend_from_slice(&0xFFFFu16.to_be_bytes()); // endCode[1]
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+        cmap.extend_from_slice(&0x0041u16.to_be_bytes()); // startCode[0]
+        cmap.extend_from_slice(&0xFFFFu16.to_be_bytes()); // startCode[1]
+        cmap.extend_from_slice(&1i16.to_be_bytes()); // idDelta[0]: 0x41 -> glyph 1
+        cmap.extend_from_slice(&1i16.to_be_bytes()); // idDelta[1]
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset[0]
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset[1]
+
+        cmap.extend_from_slice(&build_format12_cmap(3, 10, 0xF0000, 0xF0010, 500)[12..]);
+
+        let subtable = parse_cmap(&cmap, 0, cmap.len()).expect("cmap should parse");
+        assert!(
+            matches!(subtable, CmapSubtable::Format12(_)),
+            "format 12 should be preferred over format 4 when both are present"
         );
     }
 

@@ -24,6 +24,24 @@ change).
 
 ---
 
+## PR #7 — Support cmap format 12 (supplementary-plane Unicode)
+**2026-08-25** · [#7](https://github.com/baileyrd/rusty_font/pull/7)
+
+- **Added:** `cmap` format-12 subtable parsing (`ttf.rs`) — segmented
+  coverage over the full 21-bit Unicode range, used by fonts that carry
+  supplementary-plane glyphs (e.g. Nerd Fonts' Material Design icon
+  ranges above U+FFFF, per [#3](https://github.com/baileyrd/rusty_font/issues/3)).
+  `Font::glyph_index` now resolves those codepoints instead of returning
+  `None`. When a font ships both a format-4 and a format-12 subtable,
+  format 12 is preferred (it's a strict superset of format 4's BMP-only
+  coverage).
+- 2 new unit tests (constructing synthetic `cmap` tables directly, since
+  the existing system-font-backed tests only exercise fonts already on
+  the machine): group lookup at the group's start/middle/end and just
+  past it, and format-12-over-format-4 preference when both are present.
+  17 total, 0 failed.
+- Closes [#3](https://github.com/baileyrd/rusty_font/issues/3).
+
 ## PR #6 — Add standard governance files
 **2026-08-25** · [#6](https://github.com/baileyrd/rusty_font/pull/6)
 
