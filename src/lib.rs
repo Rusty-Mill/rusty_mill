@@ -14,4 +14,4 @@ pub mod pipeline;
 
 pub use color::Color;
 pub use framebuffer::Framebuffer;
-pub use pipeline::Pipeline;
+pub use pipeline::{ClipRect, Pipeline};

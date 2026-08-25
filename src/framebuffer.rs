@@ -44,6 +44,15 @@ impl Framebuffer {
         }
     }
 
+    /// Reads the color at (x, y), or `None` if out of bounds.
+    pub fn get_pixel(&self, x: usize, y: usize) -> Option<Color> {
+        if x < self.width && y < self.height {
+            Some(Color::from_u32(self.buffer[y * self.width + x]))
+        } else {
+            None
+        }
+    }
+
     /// Presents/blits this framebuffer to an OS window.
     pub fn present(&self, _window: &rusty_gui::Window) {
         #[cfg(windows)]
