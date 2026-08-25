@@ -60,14 +60,18 @@ rusty_term_l13 = { path = "l13", optional = true }
 # (see the fix in 2ce3a4c).
 #
 # rusty_font (glyph rasterization) is wired into `gui`, replacing ab_glyph —
-# see src/gui/font.rs. rusty_gui (windowing) and rusty_gpu (framebuffer
-# presentation) are still unused: both are early-stage skeletons (rusty_gui's
-# event pump handles 5 message types on Windows only, no resize, no macOS/
-# Linux backend) nowhere near able to replace winit/softbuffer. Kept pinned
-# so they're available without repeating the path-dep break once they mature.
-rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "9209d84ba6a8dcf6cc38aea52ec74954cf1e80d8", optional = true }
-rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "bdbfc0ba65dbdc8c49e132f57dfe58865bf3a619", optional = true }
-rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "e83aa2103f6568a1d6df56d8461d523929a6d1d8", optional = true }
+# see src/gui/font.rs; now covers composite glyphs, CFF/OTTO, and cmap
+# format 12 (full Nerd Fonts support) as of this pin. rusty_gui (windowing)
+# and rusty_gpu (framebuffer presentation) are still unused: both now have
+# real Windows (full keyboard/resize/wheel/redraw) and Linux/X11 backends,
+# but no macOS backend yet (rusty_gui#3 — deferred upstream, needs-human:
+# no existing Cocoa/AppKit crate to build on and no macOS hardware to
+# verify one against) — nowhere near able to replace winit/softbuffer
+# cross-platform until that lands. Kept pinned so they're available
+# without repeating the path-dep break once they mature.
+rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "9fbc1ca57730b62f0b07f290d9c0c2fba746ead1", optional = true }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "10954f56b7f700538827421b2f60c7f3e1958684", optional = true }
+rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "145f72b01ba83846c62a5eaa1137ab46214c9abb", optional = true }
 # Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
 # ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
 # the search). Optional: only the windowed front-end has a search UI.

@@ -435,8 +435,10 @@ fn rasterize_id(font: &Font, ratio: f32, id: u16) -> Glyph {
     let Some(outline) = font.glyph_outline(id) else {
         return Glyph::blank();
     };
-    // Composite glyphs (a documented rusty_font gap) and truly empty glyphs
-    // (space) both come back with no points; neither has anything to draw.
+    // Truly empty glyphs (space, and any glyph with no outline) come back
+    // with no points; nothing to draw. Composite glyphs are decomposed by
+    // rusty_font itself (real component outlines, not a bounding box) as
+    // of the pin in Cargo.toml, so this is no longer a composite-glyph gap.
     if outline.points.is_empty() {
         return Glyph::blank();
     }
