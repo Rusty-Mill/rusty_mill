@@ -53,6 +53,17 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
 ] }
 rusty_term_l13 = { path = "l13", optional = true }
+# Sibling no_std ecosystem crates (font rasterizer / GUI windowing / GPU
+# framebuffer presenter). Pinned via git+rev, not path: a path dep on a
+# sibling checkout only resolves on the original author's machine, and
+# Cargo resolves every dependency's manifest regardless of feature
+# activation, so a dangling path dep breaks `cargo build` for everyone
+# (see the fix in 2ce3a4c). Currently unused in src; kept optional and
+# pinned so they're available for future integration without repeating
+# that break.
+rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "2177686f81506028685046008bd9e535d6476942", optional = true }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "bdbfc0ba65dbdc8c49e132f57dfe58865bf3a619", optional = true }
+rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "e83aa2103f6568a1d6df56d8461d523929a6d1d8", optional = true }
 # Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
 # ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
 # the search). Optional: only the windowed front-end has a search UI.
