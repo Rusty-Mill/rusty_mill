@@ -22,9 +22,9 @@ One entry per merged PR against `main`, most recent first, each linking to its P
 
 ---
 
-## PR #TBD — Add a real Linux/X11 windowing backend
+## PR #7 — Add a real Linux/X11 windowing backend
 
-**2026-08-25** · [#TBD](TBD)
+**2026-08-25** · [#7](https://github.com/baileyrd/rusty_gui/pull/7)
 
 - **Added:** `Window::new` (Linux) now opens a real X11 display and creates a
   real window via raw Xlib FFI (`XOpenDisplay`/`XCreateSimpleWindow`/etc.),
