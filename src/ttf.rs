@@ -24,7 +24,8 @@ pub enum FontError {
 }
 
 fn u16_at(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+    data.get(offset..offset + 2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
 }
 
 fn i16_at(data: &[u8], offset: usize) -> Option<i16> {
@@ -32,7 +33,8 @@ fn i16_at(data: &[u8], offset: usize) -> Option<i16> {
 }
 
 fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 struct TableRecord {
@@ -100,7 +102,9 @@ impl CmapFormat4 {
         // i.e. relative to *this entry's own address* within the
         // subtable, not the subtable's start.
         let this_entry_addr = self.id_range_offsets_base + seg * 2;
-        let glyph_index_addr = this_entry_addr + id_range_offset as usize + 2 * (code - self.start_codes[seg]) as usize;
+        let glyph_index_addr = this_entry_addr
+            + id_range_offset as usize
+            + 2 * (code - self.start_codes[seg]) as usize;
         let raw = u16_at(&self.subtable, glyph_index_addr)?;
         if raw == 0 {
             return None;
@@ -128,19 +132,26 @@ impl Font {
         let mut tables = Vec::with_capacity(num_tables);
         for i in 0..num_tables {
             let rec_offset = 12 + i * 16;
-            let tag_bytes = bytes.get(rec_offset..rec_offset + 4).ok_or(FontError::TooShort)?;
+            let tag_bytes = bytes
+                .get(rec_offset..rec_offset + 4)
+                .ok_or(FontError::TooShort)?;
             let offset = u32_at(bytes, rec_offset + 8).ok_or(FontError::TooShort)? as usize;
             let length = u32_at(bytes, rec_offset + 12).ok_or(FontError::TooShort)? as usize;
             let mut tag = [0u8; 4];
             tag.copy_from_slice(tag_bytes);
-            tables.push(TableRecord { tag, offset, length });
+            tables.push(TableRecord {
+                tag,
+                offset,
+                length,
+            });
         }
 
         let find = |tag: &[u8; 4]| tables.iter().find(|t| &t.tag == tag);
 
         let head = find(b"head").ok_or(FontError::MissingTable("head"))?;
         let units_per_em = u16_at(bytes, head.offset + 18).ok_or(FontError::Malformed("head"))?;
-        let index_to_loc_format = i16_at(bytes, head.offset + 50).ok_or(FontError::Malformed("head"))?;
+        let index_to_loc_format =
+            i16_at(bytes, head.offset + 50).ok_or(FontError::Malformed("head"))?;
         let loca_long = index_to_loc_format != 0;
 
         let maxp = find(b"maxp").ok_or(FontError::MissingTable("maxp"))?;
@@ -269,10 +280,23 @@ impl Font {
             // box with no points is honest (no fabricated outline) rather
             // than silently drawing nothing where a caller might expect
             // an error.
-            return Some(GlyphOutline { min_x, min_y, max_x, max_y, ..GlyphOutline::default() });
+            return Some(GlyphOutline {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                ..GlyphOutline::default()
+            });
         }
 
-        parse_simple_glyph(glyph_data, number_of_contours as usize, min_x, min_y, max_x, max_y)
+        parse_simple_glyph(
+            glyph_data,
+            number_of_contours as usize,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        )
     }
 
     /// The raw font data slice.
@@ -411,7 +435,14 @@ fn parse_simple_glyph(
         .map(|i| Point::new(xs[i] as f32, ys[i] as f32, flags[i] & 0x01 != 0))
         .collect();
 
-    Some(GlyphOutline { points, contour_ends, min_x, min_y, max_x, max_y })
+    Some(GlyphOutline {
+        points,
+        contour_ends,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    })
 }
 
 #[cfg(test)]
@@ -434,7 +465,10 @@ mod tests {
         // the file, not hardcoded (verified below against a different
         // font whose real value differs).
         assert_eq!(font.units_per_em(), 2048);
-        assert!(font.num_glyphs() > 200, "arial.ttf should define far more than 200 glyphs");
+        assert!(
+            font.num_glyphs() > 200,
+            "arial.ttf should define far more than 200 glyphs"
+        );
     }
 
     #[test]
@@ -451,14 +485,24 @@ mod tests {
         let head_offset = (0..num_tables)
             .find_map(|i| {
                 let rec = 12 + i * 16;
-                (&bytes[rec..rec + 4] == b"head")
-                    .then(|| u32::from_be_bytes([bytes[rec + 8], bytes[rec + 9], bytes[rec + 10], bytes[rec + 11]]) as usize)
+                (&bytes[rec..rec + 4] == b"head").then(|| {
+                    u32::from_be_bytes([
+                        bytes[rec + 8],
+                        bytes[rec + 9],
+                        bytes[rec + 10],
+                        bytes[rec + 11],
+                    ]) as usize
+                })
             })
             .expect("arial.ttf should have a head table");
         bytes[head_offset + 18] = 0x03;
         bytes[head_offset + 19] = 0xE8; // 1000
         let font = Font::parse(&bytes).unwrap();
-        assert_eq!(font.units_per_em(), 1000, "units_per_em should reflect the corrupted value, proving it's a real read");
+        assert_eq!(
+            font.units_per_em(),
+            1000,
+            "units_per_em should reflect the corrupted value, proving it's a real read"
+        );
     }
 
     #[test]
@@ -471,7 +515,10 @@ mod tests {
         let a = font.glyph_index('A').expect("'A' should be mapped");
         let b = font.glyph_index('B').expect("'B' should be mapped");
         let space = font.glyph_index(' ').expect("space should be mapped");
-        assert_ne!(a, b, "different characters should resolve to different glyph ids");
+        assert_ne!(
+            a, b,
+            "different characters should resolve to different glyph ids"
+        );
         assert_ne!(a, 0, "'A' should not resolve to .notdef");
         assert_ne!(space, 0, "space should not resolve to .notdef");
     }
@@ -484,17 +531,33 @@ mod tests {
         };
         let font = Font::parse(&bytes).unwrap();
         let glyph_id = font.glyph_index('A').unwrap();
-        let outline = font.glyph_outline(glyph_id).expect("'A' should have an outline");
+        let outline = font
+            .glyph_outline(glyph_id)
+            .expect("'A' should have an outline");
 
-        assert!(!outline.points.is_empty(), "'A' should have real outline points, not an empty placeholder");
+        assert!(
+            !outline.points.is_empty(),
+            "'A' should have real outline points, not an empty placeholder"
+        );
         assert!(!outline.contour_ends.is_empty());
         // 'A' has a hole (the triangular counter) -- at least 2 contours.
-        assert!(outline.contour_ends.len() >= 2, "'A' should have at least 2 contours (outer + counter)");
+        assert!(
+            outline.contour_ends.len() >= 2,
+            "'A' should have at least 2 contours (outer + counter)"
+        );
 
         let em = font.units_per_em() as f32;
         for p in &outline.points {
-            assert!(p.x > -em && p.x < 2.0 * em, "point x {} should be roughly within the em square", p.x);
-            assert!(p.y > -em && p.y < 2.0 * em, "point y {} should be roughly within the em square", p.y);
+            assert!(
+                p.x > -em && p.x < 2.0 * em,
+                "point x {} should be roughly within the em square",
+                p.x
+            );
+            assert!(
+                p.y > -em && p.y < 2.0 * em,
+                "point y {} should be roughly within the em square",
+                p.y
+            );
         }
     }
 
@@ -507,7 +570,10 @@ mod tests {
         let font = Font::parse(&bytes).unwrap();
         let glyph_id = font.glyph_index(' ').unwrap();
         let outline = font.glyph_outline(glyph_id).unwrap();
-        assert!(outline.points.is_empty(), "space should have no drawable contour");
+        assert!(
+            outline.points.is_empty(),
+            "space should have no drawable contour"
+        );
     }
 
     #[test]
@@ -523,8 +589,12 @@ mod tests {
         let arial_font = Font::parse(&arial).unwrap();
         let courier_font = Font::parse(&courier).unwrap();
 
-        let a_outline = arial_font.glyph_outline(arial_font.glyph_index('A').unwrap()).unwrap();
-        let c_outline = courier_font.glyph_outline(courier_font.glyph_index('A').unwrap()).unwrap();
+        let a_outline = arial_font
+            .glyph_outline(arial_font.glyph_index('A').unwrap())
+            .unwrap();
+        let c_outline = courier_font
+            .glyph_outline(courier_font.glyph_index('A').unwrap())
+            .unwrap();
         // Different fonts should not produce byte-identical point data for
         // the same letter -- a coarse but real signal that this isn't
         // just returning the same hardcoded box for everything.
@@ -541,8 +611,16 @@ mod tests {
         // Arial's ascender is comfortably positive (above the baseline) and
         // the descender comfortably negative (below it) -- real hhea
         // values, not zeroed placeholders.
-        assert!(font.ascender() > 0, "ascender should be positive: {}", font.ascender());
-        assert!(font.descender() < 0, "descender should be negative: {}", font.descender());
+        assert!(
+            font.ascender() > 0,
+            "ascender should be positive: {}",
+            font.ascender()
+        );
+        assert!(
+            font.descender() < 0,
+            "descender should be negative: {}",
+            font.descender()
+        );
         assert!(
             font.ascender() as i32 - font.descender() as i32 > font.units_per_em() as i32 / 2,
             "ascender-descender spread should be a real fraction of the em square"
@@ -559,7 +637,10 @@ mod tests {
         let m = font.advance_width(font.glyph_index('M').unwrap());
         let i = font.advance_width(font.glyph_index('i').unwrap());
         assert!(m > 0, "'M' should have a real nonzero advance width");
-        assert_eq!(m, i, "a monospace font's glyphs should share one advance width");
+        assert_eq!(
+            m, i,
+            "a monospace font's glyphs should share one advance width"
+        );
     }
 
     #[test]
@@ -572,7 +653,10 @@ mod tests {
         let m = font.advance_width(font.glyph_index('M').unwrap());
         let i = font.advance_width(font.glyph_index('i').unwrap());
         assert!(m > 0 && i > 0);
-        assert_ne!(m, i, "a proportional font's 'M' and 'i' should have different advance widths");
+        assert_ne!(
+            m, i,
+            "a proportional font's 'M' and 'i' should have different advance widths"
+        );
     }
 
     #[test]
@@ -584,6 +668,9 @@ mod tests {
     fn non_truetype_version_is_rejected() {
         let mut bytes = alloc::vec![0u8; 12];
         bytes[0..4].copy_from_slice(b"OTTO");
-        assert!(matches!(Font::parse(&bytes), Err(FontError::UnsupportedVersion)));
+        assert!(matches!(
+            Font::parse(&bytes),
+            Err(FontError::UnsupportedVersion)
+        ));
     }
 }

@@ -14,7 +14,11 @@ fn main() {
         for y in (0..size).rev() {
             let mut line = String::new();
             for x in 0..size {
-                line.push(if buffer[y * size + x] == 255 { '#' } else { '.' });
+                line.push(if buffer[y * size + x] == 255 {
+                    '#'
+                } else {
+                    '.'
+                });
             }
             println!("{line}");
         }
