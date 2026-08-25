@@ -24,8 +24,8 @@ change).
 
 ---
 
-## PR — Support CFF-flavor OpenType (`OTTO`) fonts
-**2026-08-25**
+## PR #9 — Support CFF-flavor OpenType (`OTTO`) fonts
+**2026-08-25** · [#9](https://github.com/baileyrd/rusty_font/pull/9)
 
 - **Added:** a new `cff.rs` module — CFF table parsing (INDEX/DICT
   structures, Top DICT, Private DICT, global and local Subrs) and a full
@@ -60,7 +60,6 @@ change).
   longer `UnsupportedVersion`, and an `OTTO` font missing its `CFF `
   table is `MissingTable` (not `UnsupportedVersion`). 25 total, 0 failed.
 - Closes [#5](https://github.com/baileyrd/rusty_font/issues/5).
-- Link will be added once the PR is open.
 
 ## PR #8 — Decompose composite glyphs instead of returning a bounding box
 **2026-08-25** · [#8](https://github.com/baileyrd/rusty_font/pull/8)
