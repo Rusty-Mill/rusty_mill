@@ -19,13 +19,15 @@ rendering:
 
 | Stage | Module | Notes |
 | ---- | ---------- | ----- |
-| Table parsing | `ttf.rs` | Reads `sfnt` table directory, `head`/`maxp`, `cmap` format 4, `loca`/`glyf` — bytes in, `Font`/`GlyphOutline` out. No rendering knowledge. |
+| Table parsing | `ttf.rs` | Reads `sfnt` table directory, `head`/`maxp`, `cmap` (format 4 and format 12), `loca`/`glyf` (simple and composite glyphs) — bytes in, `Font`/`GlyphOutline` out. No rendering knowledge. |
 | Outline model | `glyph.rs` | `Point`/`GlyphOutline` — the shared representation between parsing and rasterizing. Holds no logic. |
 | Rasterization | `rasterizer.rs` | Flattens quadratic Bézier contours to line segments and fills via non-zero winding. Takes a `GlyphOutline`, has no knowledge of font file formats. |
 
 `ttf.rs` and `rasterizer.rs` only communicate through `glyph.rs`'s types,
-which is what keeps format-parsing changes (e.g. adding `cmap` format 12)
-from touching rasterization and vice versa.
+which is what keeps format-parsing changes (adding `cmap` format 12,
+assembling composite glyphs) from touching rasterization and vice versa —
+composite assembly, in particular, is `ttf.rs` recursively resolving and
+transforming other `ttf.rs` outlines, never touching `rasterizer.rs`.
 
 ## Structure
 
@@ -51,7 +53,7 @@ See [docs/adr/](./docs/adr/) for the record of individual decisions and their tr
 
 ## Non-goals
 
-- Composite glyph assembly, `cmap` format 12 (non-BMP Unicode), CFF/`OTTO`
+- Composite-glyph point matching (a rare positioning mode), CFF/`OTTO`
   outlines, and hinting are known gaps — see the README's "Known,
   deliberate gaps" section, not silent omissions.
 - File/network loading of font data is explicitly out of scope — the crate
