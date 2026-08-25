@@ -8,7 +8,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_libc",
  "rusty_std",
- "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=1cefd29418e25eb00a9a043561ea8d8347f56e86)",
+ "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=0c13c780069812e859741c383cebc20fe0647e3f)",
  "rusty_wire",
 ]
 
@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "rusty_win32"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_win32?rev=1cefd29418e25eb00a9a043561ea8d8347f56e86#1cefd29418e25eb00a9a043561ea8d8347f56e86"
+source = "git+https://github.com/baileyrd/rusty_win32?rev=0c13c780069812e859741c383cebc20fe0647e3f#0c13c780069812e859741c383cebc20fe0647e3f"
 
 [[package]]
 name = "rusty_win32"
