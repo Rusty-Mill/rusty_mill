@@ -28,7 +28,11 @@ impl Edge {
     /// horizontal line `y`, or `None` if `y` isn't within this edge's span
     /// (half-open at the top so a shared vertex is never double-counted).
     fn intersect(&self, y: f32) -> Option<(f32, i32)> {
-        let (y_min, y_max, dir) = if self.y0 < self.y1 { (self.y0, self.y1, 1) } else { (self.y1, self.y0, -1) };
+        let (y_min, y_max, dir) = if self.y0 < self.y1 {
+            (self.y0, self.y1, 1)
+        } else {
+            (self.y1, self.y0, -1)
+        };
         if y < y_min || y >= y_max {
             return None;
         }
@@ -41,7 +45,13 @@ impl Edge {
 /// control point, `p2` on-curve) into `segments` line segments, pushing
 /// every point after `p0` (the caller already has `p0` from the previous
 /// point in the contour).
-fn flatten_quad(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), segments: usize, out: &mut Vec<(f32, f32)>) {
+fn flatten_quad(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    segments: usize,
+    out: &mut Vec<(f32, f32)>,
+) {
     for i in 1..=segments {
         let t = i as f32 / segments as f32;
         let mt = 1.0 - t;
@@ -113,7 +123,8 @@ fn build_edges(outline: &GlyphOutline, scale: f32) -> Vec<Edge> {
     let mut edges = Vec::new();
     let mut start = 0usize;
     for &end in &outline.contour_ends {
-        let contour_points = &outline.points[start..=end.min(outline.points.len().saturating_sub(1))];
+        let contour_points =
+            &outline.points[start..=end.min(outline.points.len().saturating_sub(1))];
         let polyline = flatten_contour(contour_points, scale);
         for w in 0..polyline.len() {
             let (x0, y0) = polyline[w];
@@ -161,7 +172,8 @@ impl Rasterizer {
                 let scan_y = y as f32 + (s as f32 + 0.5) / Y_SUBSAMPLES as f32;
                 let mut crossings: Vec<(f32, i32)> =
                     edges.iter().filter_map(|e| e.intersect(scan_y)).collect();
-                crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+                crossings
+                    .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
 
                 let mut winding = 0i32;
                 let mut span_start: Option<f32> = None;
@@ -267,7 +279,10 @@ mod tests {
         // The old stub always filled every pixel except a 2px border,
         // i.e. (32-4)*(32-4) = 784 out of 1024 -- a real glyph like 'I'
         // (a comparatively thin vertical bar) should cover far less.
-        assert!(filled < 400, "a thin glyph like 'I' shouldn't cover most of the 32x32 box (got {filled})");
+        assert!(
+            filled < 400,
+            "a thin glyph like 'I' shouldn't cover most of the 32x32 box (got {filled})"
+        );
     }
 
     #[test]
@@ -285,7 +300,10 @@ mod tests {
         // structure it depends on) is genuinely working, not just "some
         // pixels are on".
         let center = (size / 2) * size + (size / 2);
-        assert_eq!(buffer[center], 0, "the center of 'O' should be its unfilled counter (hole)");
+        assert_eq!(
+            buffer[center], 0,
+            "the center of 'O' should be its unfilled counter (hole)"
+        );
 
         // But 'O' isn't empty overall -- the ring itself must be filled.
         assert!(coverage(&buffer) > 0, "'O' should have a filled ring");
@@ -299,7 +317,11 @@ mod tests {
         };
         let font = Font::parse(&bytes).unwrap();
         let buffer = rasterize_char(&font, ' ', 16);
-        assert_eq!(coverage(&buffer), 0, "space has no outline, so nothing should be filled");
+        assert_eq!(
+            coverage(&buffer),
+            0,
+            "space has no outline, so nothing should be filled"
+        );
     }
 
     #[test]
@@ -312,6 +334,9 @@ mod tests {
         let i_coverage = coverage(&rasterize_char(&font, 'I', 32));
         let m_coverage = coverage(&rasterize_char(&font, 'M', 32));
         // 'M' has substantially more ink than 'I' at the same size.
-        assert!(m_coverage > i_coverage * 2, "'M' ({m_coverage}px) should cover much more than 'I' ({i_coverage}px)");
+        assert!(
+            m_coverage > i_coverage * 2,
+            "'M' ({m_coverage}px) should cover much more than 'I' ({i_coverage}px)"
+        );
     }
 }
