@@ -10,13 +10,17 @@ keywords = ["gpu", "framebuffer", "rasterizer", "graphics", "no-std"]
 categories = ["graphics", "no-std"]
 
 [dependencies]
-rusty_simd = { path = "../rusty_simd" }
-rusty_gui = { path = "../rusty_gui" }
-rusty_font = { path = "../rusty_font" }
-rusty_std = { path = "../rusty_std" }
+# Pinned git deps, not path deps: a `git = "..."` Cargo dependency on
+# this crate clones only this one repository, so a sibling `../rusty_simd`
+# checkout doesn't exist for any external consumer (see rusty_std's
+# Cargo.toml for the same fix, and rusty_tokio#254).
+rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "bdbfc0ba65dbdc8c49e132f57dfe58865bf3a619" }
+rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "2177686f81506028685046008bd9e535d6476942" }
+rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
 
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { path = "../rusty_win32" }
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "1cefd29418e25eb00a9a043561ea8d8347f56e86" }
 
 [features]
 default = []
