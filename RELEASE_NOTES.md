@@ -24,8 +24,8 @@ change).
 
 ---
 
-## PR — Decompose composite glyphs instead of returning a bounding box
-**2026-08-25**
+## PR #8 — Decompose composite glyphs instead of returning a bounding box
+**2026-08-25** · [#8](https://github.com/baileyrd/rusty_font/pull/8)
 
 - **Added:** composite-glyph assembly (`ttf.rs`) — component records
   (flags, referenced glyph index, x/y offset, optional scale/2x2
@@ -49,7 +49,6 @@ change).
   and the point-matching-component-is-skipped fallback. 20 total, 0
   failed.
 - Closes [#4](https://github.com/baileyrd/rusty_font/issues/4).
-- Link will be added once the PR is open.
 
 ## PR #7 — Support cmap format 12 (supplementary-plane Unicode)
 **2026-08-25** · [#7](https://github.com/baileyrd/rusty_font/pull/7)
