@@ -14,6 +14,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - Composite-glyph assembly: `Font::glyph_outline` decomposes and
   transforms component glyphs (scale/2x2 matrix + offset) instead of
   returning a bounding box with no points.
+- CFF-flavor OpenType (`OTTO`) support: a new `cff.rs` module parses the
+  `CFF ` table and interprets Type 2 charstrings, flattened to line
+  segments, so `Font::parse`/`glyph_outline` work on CFF-outline fonts
+  instead of rejecting them as an unsupported version.
 ### Changed
 ### Fixed
 ### Security

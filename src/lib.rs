@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+mod cff;
 pub mod glyph;
 pub mod rasterizer;
 pub mod ttf;

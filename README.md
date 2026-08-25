@@ -21,6 +21,17 @@ rectangle regardless of input. All of that is now real:
   records resolved recursively and transformed — scale, x/y scale, or a
   full 2x2 matrix, plus an offset — into the composite's coordinate
   space).
+- **`cff.rs`** — a real CFF table parser (INDEX/DICT structures, Top DICT
+  and Private DICT, global and local Subrs) and Type 2 charstring
+  interpreter for `OTTO`-tagged (CFF-flavor) OpenType fonts: all the
+  path-drawing operators (moveto/lineto/curveto variants including the
+  `flex` family), hint operators (stem/hint-mask byte-length accounting,
+  so parsing doesn't desync on real fonts' hint data), and subroutine
+  calls (`callsubr`/`callgsubr` with the spec's index bias). CFF's cubic
+  Bézier curves are flattened to on-curve line segments at parse time
+  rather than represented exactly, since the rest of the crate's outline
+  model (and the rasterizer) is shaped around TrueType's on/off-curve
+  quadratic points.
 - **`rasterizer.rs`** — a real scanline rasterizer: flattens TrueType's
   on/off-curve quadratic Bézier contours into line segments, then fills
   with the **non-zero winding rule** (the rule TrueType itself specifies —
@@ -53,8 +64,17 @@ cargo run --example ascii_render
   rare in real-world fonts and isn't implemented; that one component is
   skipped rather than fabricating a position for it, while the rest of
   the composite still assembles.
-- **CFF-outline OpenType** (`OTTO` version tag) isn't supported — only
-  TrueType `glyf`-outline fonts.
+- **CID-keyed CFF** (per-glyph `FDArray`/`FDSelect` private dicts — used
+  mainly for CJK fonts) isn't supported; standard (non-CID) CFF, the
+  common case for a professional OpenType text font, is.
+- **The deprecated `seac`-style accent composition** via CFF's 4/5-arg
+  `endchar` isn't implemented — a documented gap in the same spirit as
+  the TrueType composite point-matching one above.
+- **CFF outlines are flattened, not exact** — Type 2 charstrings' cubic
+  Bézier curves are approximated as line segments at parse time (fixed
+  8-segment subdivision per curve) rather than represented as exact
+  curves, since this crate's outline model is TrueType's on/off-curve
+  quadratic points.
 - **No hinting** — outlines rasterize at their natural shape; no
   instruction execution or grid-fitting.
 
