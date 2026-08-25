@@ -24,7 +24,7 @@ published yet (pre-1.0).
 ---
 
 ## Repo governance setup, and Pipeline coverage blit + clipping (closes #2)
-**2026-08-25** · (not yet merged — link added once this lands)
+**2026-08-25** · [#4](https://github.com/baileyrd/rusty_gpu/pull/4)
 
 - **Added:** applied the standard repo-config governance file set (README,
   ARCHITECTURE, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CHANGELOG,
