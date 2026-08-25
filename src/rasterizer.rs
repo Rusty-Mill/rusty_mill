@@ -133,61 +133,100 @@ impl Rasterizer {
         Self { width, height }
     }
 
-    /// Rasterizes a glyph outline into a 1-byte-per-pixel alpha map,
-    /// scaling from font units to pixels by `scale` (typically
-    /// `pixel_size / units_per_em`). A real scanline fill (non-zero
-    /// winding), not a fixed test pattern — glyphs with a counter (`O`,
-    /// `A`, ...) come out with a real hole, verified in this module's
-    /// tests against real system fonts.
+    /// Rasterizes a glyph outline into a 1-byte-per-pixel antialiased
+    /// coverage map, scaling from font units to pixels by `scale`
+    /// (typically `pixel_size / units_per_em`). A real scanline fill
+    /// (non-zero winding), not a fixed test pattern — glyphs with a
+    /// counter (`O`, `A`, ...) come out with a real hole, verified in this
+    /// module's tests against real system fonts.
+    ///
+    /// Antialiasing is `Y_SUBSAMPLES` sub-scanlines per pixel row, each
+    /// with exact fractional pixel coverage in X (no sub-sampling error
+    /// along the scan direction — a span's start/end pixel gets exactly
+    /// its overlapped fraction, not a rounded in/out decision). A pixel
+    /// fully inside every sub-scanline's span is `255`; a boundary pixel
+    /// is graded, not a hard edge.
     pub fn rasterize(&self, outline: &GlyphOutline, scale: f32) -> Vec<u8> {
+        const Y_SUBSAMPLES: usize = 4;
         let edges = build_edges(outline, scale);
-        let mut buffer = vec![0u8; self.width * self.height];
+        let mut coverage = vec![0f32; self.width * self.height];
         if edges.is_empty() {
-            return buffer;
+            return vec![0u8; self.width * self.height];
         }
 
+        let weight = 1.0 / Y_SUBSAMPLES as f32;
         for y in 0..self.height {
-            let scan_y = y as f32 + 0.5;
-            let mut crossings: Vec<(f32, i32)> =
-                edges.iter().filter_map(|e| e.intersect(scan_y)).collect();
-            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+            let row = &mut coverage[y * self.width..(y + 1) * self.width];
+            for s in 0..Y_SUBSAMPLES {
+                let scan_y = y as f32 + (s as f32 + 0.5) / Y_SUBSAMPLES as f32;
+                let mut crossings: Vec<(f32, i32)> =
+                    edges.iter().filter_map(|e| e.intersect(scan_y)).collect();
+                crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
 
-            let mut winding = 0i32;
-            let mut span_start: Option<f32> = None;
-            for (x, dir) in crossings {
-                let was_inside = winding != 0;
-                winding += dir;
-                let is_inside = winding != 0;
-                if !was_inside && is_inside {
-                    span_start = Some(x);
-                } else if was_inside && !is_inside {
-                    if let Some(sx) = span_start.take() {
-                        fill_span(&mut buffer, self.width, y, sx, x);
+                let mut winding = 0i32;
+                let mut span_start: Option<f32> = None;
+                for (x, dir) in crossings {
+                    let was_inside = winding != 0;
+                    winding += dir;
+                    let is_inside = winding != 0;
+                    if !was_inside && is_inside {
+                        span_start = Some(x);
+                    } else if was_inside && !is_inside {
+                        if let Some(sx) = span_start.take() {
+                            accumulate_span(row, self.width, sx, x, weight);
+                        }
                     }
                 }
             }
         }
-        buffer
+        coverage
+            .iter()
+            .map(|&c| round_nonneg(c.clamp(0.0, 1.0) * 255.0).min(255) as u8)
+            .collect()
     }
 }
 
 /// Rounds a non-negative `f32` to the nearest integer without `f32::round`
 /// (unavailable in `core` — needs `libm`): adding `0.5` then truncating via
-/// `as usize` is round-half-up, which is what's wanted here anyway.
-fn round_nonneg(x: f32) -> usize {
-    (x.max(0.0) + 0.5) as usize
+/// `as u32` is round-half-up, which is what's wanted here anyway.
+fn round_nonneg(x: f32) -> u32 {
+    (x.max(0.0) + 0.5) as u32
 }
 
-fn fill_span(buffer: &mut [u8], width: usize, y: usize, x0: f32, x1: f32) {
-    let start = round_nonneg(x0).min(width);
-    let end = round_nonneg(x1).min(width);
-    if start >= end {
+/// Ceiling of a non-negative `f32` without `f32::ceil` (unavailable in
+/// `core`): truncation already gives the floor, so bump by one when the
+/// value wasn't already an exact integer.
+fn ceil_nonneg(x: f32) -> usize {
+    let floor = x as usize;
+    if floor as f32 == x { floor } else { floor + 1 }
+}
+
+/// Adds `weight` coverage to `row` for the pixel span `[x0, x1)`: a pixel
+/// fully inside the span gets the full `weight`; a pixel the span only
+/// partially overlaps gets `weight` scaled by the overlapped fraction.
+/// This is what makes glyph edges graded instead of a hard on/off cutoff.
+fn accumulate_span(row: &mut [f32], width: usize, x0: f32, x1: f32, weight: f32) {
+    let x0 = x0.max(0.0);
+    let x1 = x1.min(width as f32);
+    if x0 >= x1 {
         return;
     }
-    let row = &mut buffer[y * width..(y + 1) * width];
-    for px in &mut row[start..end] {
-        *px = 255;
+    let start_px = x0 as usize; // truncation == floor for x0 >= 0
+    let end_px = ceil_nonneg(x1).min(width);
+    if start_px >= width {
+        return;
     }
+    if start_px + 1 >= end_px {
+        // The whole span lands within one pixel.
+        row[start_px] += weight * (x1 - x0);
+        return;
+    }
+    row[start_px] += weight * ((start_px + 1) as f32 - x0);
+    for px in &mut row[start_px + 1..end_px - 1] {
+        *px += weight;
+    }
+    let last = end_px - 1;
+    row[last] += weight * (x1 - last as f32);
 }
 
 #[cfg(test)]
@@ -206,8 +245,13 @@ mod tests {
         Rasterizer::new(px, px).rasterize(&outline, scale)
     }
 
+    /// Approximate filled-area in "full pixel" units: summing coverage
+    /// bytes and dividing by 255 turns graded (antialiased) edge pixels
+    /// into a fractional contribution, so this stays a meaningful area
+    /// proxy under AA instead of only counting the now-rare exactly-255
+    /// (fully covered, no edge) pixels.
     fn coverage(buffer: &[u8]) -> usize {
-        buffer.iter().filter(|&&b| b == 255).count()
+        buffer.iter().map(|&b| b as usize).sum::<usize>() / 255
     }
 
     #[test]

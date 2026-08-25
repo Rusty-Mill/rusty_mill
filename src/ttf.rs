@@ -50,6 +50,17 @@ pub struct Font {
     glyf_range: (usize, usize),
     loca_range: (usize, usize),
     cmap_subtable: Option<CmapFormat4>,
+    /// `hhea` table: typographic ascender/descender/line-gap, in font
+    /// units (see [`Font::ascender`]/[`Font::descender`]/[`Font::line_gap`]).
+    ascender: i16,
+    descender: i16,
+    line_gap: i16,
+    /// `hhea.numberOfHMetrics`: the number of `hmtx` entries that carry
+    /// their own advance width. Glyph ids at or beyond this count reuse
+    /// the last entry's advance width (the spec's "monospace tail"
+    /// compression -- real for every font, not just monospace ones).
+    num_h_metrics: u16,
+    hmtx_range: (usize, usize),
 }
 
 /// A parsed `cmap` format-4 subtable: the segment-based Unicode BMP
@@ -140,6 +151,14 @@ impl Font {
 
         let cmap_subtable = find(b"cmap").and_then(|t| parse_cmap(bytes, t.offset, t.length));
 
+        let hhea = find(b"hhea").ok_or(FontError::MissingTable("hhea"))?;
+        let ascender = i16_at(bytes, hhea.offset + 4).ok_or(FontError::Malformed("hhea"))?;
+        let descender = i16_at(bytes, hhea.offset + 6).ok_or(FontError::Malformed("hhea"))?;
+        let line_gap = i16_at(bytes, hhea.offset + 8).ok_or(FontError::Malformed("hhea"))?;
+        let num_h_metrics = u16_at(bytes, hhea.offset + 34).ok_or(FontError::Malformed("hhea"))?;
+
+        let hmtx = find(b"hmtx").ok_or(FontError::MissingTable("hmtx"))?;
+
         Ok(Self {
             data: bytes.to_vec(),
             units_per_em,
@@ -148,6 +167,11 @@ impl Font {
             glyf_range: (glyf.offset, glyf.length),
             loca_range: (loca.offset, loca.length),
             cmap_subtable,
+            ascender,
+            descender,
+            line_gap,
+            num_h_metrics,
+            hmtx_range: (hmtx.offset, hmtx.length),
         })
     }
 
@@ -159,6 +183,41 @@ impl Font {
     /// The number of glyphs this font defines.
     pub fn num_glyphs(&self) -> u16 {
         self.num_glyphs
+    }
+
+    /// Typographic ascender (font units, above the baseline). From `hhea`,
+    /// the metric `hmtx`/layout engines use for line height -- not `OS/2`'s
+    /// separate (and often inconsistent) `sTypoAscender`/`usWinAscent`.
+    pub fn ascender(&self) -> i16 {
+        self.ascender
+    }
+
+    /// Typographic descender (font units, negative -- below the baseline).
+    pub fn descender(&self) -> i16 {
+        self.descender
+    }
+
+    /// Recommended extra line spacing (font units) beyond
+    /// `ascender - descender`, from `hhea.lineGap`.
+    pub fn line_gap(&self) -> i16 {
+        self.line_gap
+    }
+
+    /// A glyph's horizontal advance width (font units), from `hmtx`. Glyph
+    /// ids at or beyond `hhea.numberOfHMetrics` reuse the table's last
+    /// entry -- the spec's compression for runs of glyphs sharing one
+    /// advance (every monospace font's entire glyph set, in practice).
+    /// `0` for an out-of-range or malformed table rather than a panic.
+    pub fn advance_width(&self, glyph_id: u16) -> u16 {
+        let (offset, len) = self.hmtx_range;
+        let Some(hmtx) = self.data.get(offset..offset + len) else {
+            return 0;
+        };
+        if self.num_h_metrics == 0 {
+            return 0;
+        }
+        let idx = (glyph_id as usize).min(self.num_h_metrics as usize - 1);
+        u16_at(hmtx, idx * 4).unwrap_or(0)
     }
 
     /// Maps a Unicode character to a glyph ID via the font's real `cmap`
@@ -470,6 +529,50 @@ mod tests {
         // the same letter -- a coarse but real signal that this isn't
         // just returning the same hardcoded box for everything.
         assert_ne!(a_outline.points.len(), c_outline.points.len());
+    }
+
+    #[test]
+    fn hhea_metrics_are_sane_for_a_real_font() {
+        let Some(bytes) = load_system_font("arial.ttf") else {
+            eprintln!("skipping: arial.ttf not found on this machine");
+            return;
+        };
+        let font = Font::parse(&bytes).unwrap();
+        // Arial's ascender is comfortably positive (above the baseline) and
+        // the descender comfortably negative (below it) -- real hhea
+        // values, not zeroed placeholders.
+        assert!(font.ascender() > 0, "ascender should be positive: {}", font.ascender());
+        assert!(font.descender() < 0, "descender should be negative: {}", font.descender());
+        assert!(
+            font.ascender() as i32 - font.descender() as i32 > font.units_per_em() as i32 / 2,
+            "ascender-descender spread should be a real fraction of the em square"
+        );
+    }
+
+    #[test]
+    fn advance_width_is_uniform_for_a_real_monospace_font() {
+        let Some(bytes) = load_system_font("consola.ttf") else {
+            eprintln!("skipping: consola.ttf not found on this machine");
+            return;
+        };
+        let font = Font::parse(&bytes).unwrap();
+        let m = font.advance_width(font.glyph_index('M').unwrap());
+        let i = font.advance_width(font.glyph_index('i').unwrap());
+        assert!(m > 0, "'M' should have a real nonzero advance width");
+        assert_eq!(m, i, "a monospace font's glyphs should share one advance width");
+    }
+
+    #[test]
+    fn advance_width_differs_for_a_real_proportional_font() {
+        let Some(bytes) = load_system_font("arial.ttf") else {
+            eprintln!("skipping: arial.ttf not found on this machine");
+            return;
+        };
+        let font = Font::parse(&bytes).unwrap();
+        let m = font.advance_width(font.glyph_index('M').unwrap());
+        let i = font.advance_width(font.glyph_index('i').unwrap());
+        assert!(m > 0 && i > 0);
+        assert_ne!(m, i, "a proportional font's 'M' and 'i' should have different advance widths");
     }
 
     #[test]
