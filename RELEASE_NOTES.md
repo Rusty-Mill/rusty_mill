@@ -39,6 +39,11 @@ published yet (pre-1.0).
   (merges [rusty_gui#7](https://github.com/baileyrd/rusty_gui/pull/7), the real
   Linux/X11 window backend) — the previous pin's `Window::raw_handle()` returned
   a null pointer on Linux, which is what made this genuinely blocked before.
+- **Fixed:** CI's first run on this change failed — `rust-lld: error: unable
+  to find library -lX11`. `ubuntu-latest` doesn't ship `libX11` by default;
+  linking against it directly (`#[link(name = "X11")]`) is a real link-time
+  requirement even though the runner has no display to blit to. `ci-rust.yml`
+  now installs `libx11-dev` before building.
 - **Verified against a real (virtual) X server**, not just build+clippy: ran a
   throwaway example under `Xvfb`, blitted a solid background plus an
   off-center rect via `Pipeline::draw_rect`, then read pixels back with a
