@@ -24,8 +24,8 @@ change).
 
 ---
 
-## PR — Support cmap format 12 (supplementary-plane Unicode)
-**2026-08-25**
+## PR #7 — Support cmap format 12 (supplementary-plane Unicode)
+**2026-08-25** · [#7](https://github.com/baileyrd/rusty_font/pull/7)
 
 - **Added:** `cmap` format-12 subtable parsing (`ttf.rs`) — segmented
   coverage over the full 21-bit Unicode range, used by fonts that carry
@@ -41,7 +41,6 @@ change).
   past it, and format-12-over-format-4 preference when both are present.
   17 total, 0 failed.
 - Closes [#3](https://github.com/baileyrd/rusty_font/issues/3).
-- Link will be added once the PR is open.
 
 ## PR #6 — Add standard governance files
 **2026-08-25** · [#6](https://github.com/baileyrd/rusty_font/pull/6)
