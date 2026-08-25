@@ -2,8 +2,8 @@
 //! directory, `cmap` (format 4, the common BMP subtable every Latin-script
 //! font ships, and format 12, the segmented-coverage subtable used for
 //! full 21-bit Unicode including supplementary-plane characters),
-//! `loca`/`glyf` outline extraction (simple glyphs; composite glyphs are a
-//! known, documented gap), and `head`/`maxp` metadata.
+//! `loca`/`glyf` outline extraction (simple glyphs, and composite glyphs
+//! assembled from their component records), and `head`/`maxp` metadata.
 
 use crate::glyph::{GlyphOutline, Point};
 use alloc::vec::Vec;
@@ -37,6 +37,12 @@ fn i16_at(data: &[u8], offset: usize) -> Option<i16> {
 fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
     data.get(offset..offset + 4)
         .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Reads an `F2Dot14` fixed-point value (2 integer bits, 14 fraction
+/// bits) — the encoding a composite glyph's component transform uses.
+fn f2dot14_at(data: &[u8], offset: usize) -> Option<f32> {
+    i16_at(data, offset).map(|v| v as f32 / 16384.0)
 }
 
 struct TableRecord {
@@ -300,14 +306,29 @@ impl Font {
         }
     }
 
+    /// Composite glyphs can in principle reference each other to an
+    /// unbounded (or, in a malformed font, cyclic) depth; this caps how
+    /// far [`Font::glyph_outline`] will recurse before giving up on
+    /// further nesting and falling back to that glyph's bounding box —
+    /// well beyond the 1-2 levels a real accented-Latin composite uses.
+    const MAX_COMPOSITE_DEPTH: u32 = 8;
+
     /// Extracts the vector outline of a glyph by ID — a real simple-glyph
     /// parse (contours, on/off-curve quadratic points, run-length-encoded
-    /// flags and deltas), not a placeholder box. Composite glyphs
-    /// (`numberOfContours < 0`) and glyphs with no outline (e.g. space,
-    /// where `loca[id] == loca[id+1]`) both return `Some` with an empty
-    /// point list — a documented gap for composites, real behavior for
-    /// genuinely empty glyphs.
+    /// flags and deltas) or, for a composite glyph (`numberOfContours <
+    /// 0`), the real assembled outline: each component's referenced glyph
+    /// resolved recursively and its points transformed (2x2 matrix, or
+    /// scale, plus an offset) into the composite's coordinate space. A
+    /// component using point-matching (`ARGS_ARE_XY_VALUES` unset, rare in
+    /// practice) is a documented remaining gap — that one component is
+    /// skipped rather than fabricating a wrong position. Glyphs with no
+    /// outline (e.g. space, where `loca[id] == loca[id+1]`) return `Some`
+    /// with an empty point list — real behavior, not a placeholder.
     pub fn glyph_outline(&self, glyph_id: u16) -> Option<GlyphOutline> {
+        self.glyph_outline_at_depth(glyph_id, 0)
+    }
+
+    fn glyph_outline_at_depth(&self, glyph_id: u16, depth: u32) -> Option<GlyphOutline> {
         let (start, end) = self.loca_entry(glyph_id)?;
         if start >= end {
             return Some(GlyphOutline::default());
@@ -323,17 +344,26 @@ impl Font {
         let max_y = i16_at(glyph_data, 8)?;
 
         if number_of_contours < 0 {
-            // Composite glyph: a documented gap. Returning the bounding
-            // box with no points is honest (no fabricated outline) rather
-            // than silently drawing nothing where a caller might expect
-            // an error.
-            return Some(GlyphOutline {
-                min_x,
-                min_y,
-                max_x,
-                max_y,
-                ..GlyphOutline::default()
-            });
+            let bbox_only = || {
+                Some(GlyphOutline {
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                    ..GlyphOutline::default()
+                })
+            };
+            if depth >= Self::MAX_COMPOSITE_DEPTH {
+                return bbox_only();
+            }
+            // Fall back to the bounding-box-only placeholder if the
+            // component records themselves are malformed -- the glyph
+            // still exists (unlike an out-of-range id, which is a real
+            // `None`), so degrading gracefully is more honest than
+            // failing the whole lookup.
+            return self
+                .parse_composite_glyph(glyph_data, min_x, min_y, max_x, max_y, depth)
+                .or_else(bbox_only);
         }
 
         parse_simple_glyph(
@@ -344,6 +374,101 @@ impl Font {
             max_x,
             max_y,
         )
+    }
+
+    /// Parses a composite glyph's component records (per the `glyf` spec:
+    /// flags, referenced glyph index, x/y offset or point-matching
+    /// indices, and an optional scale/2x2 transform) and concatenates each
+    /// referenced glyph's transformed outline. `contour_ends` is offset by
+    /// the running point count as components are appended, same as any
+    /// outline concatenation.
+    fn parse_composite_glyph(
+        &self,
+        glyph_data: &[u8],
+        min_x: i16,
+        min_y: i16,
+        max_x: i16,
+        max_y: i16,
+        depth: u32,
+    ) -> Option<GlyphOutline> {
+        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+        const WE_HAVE_A_SCALE: u16 = 0x0008;
+        const MORE_COMPONENTS: u16 = 0x0020;
+        const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+        const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+
+        let mut points = Vec::new();
+        let mut contour_ends = Vec::new();
+        let mut cursor = 10usize; // past the 10-byte glyph header
+
+        loop {
+            let flags = u16_at(glyph_data, cursor)?;
+            let component_glyph_id = u16_at(glyph_data, cursor + 2)?;
+            cursor += 4;
+
+            let (dx, dy) = if flags & ARG_1_AND_2_ARE_WORDS != 0 {
+                let a1 = i16_at(glyph_data, cursor)?;
+                let a2 = i16_at(glyph_data, cursor + 2)?;
+                cursor += 4;
+                (a1, a2)
+            } else {
+                let a1 = *glyph_data.get(cursor)? as i8 as i16;
+                let a2 = *glyph_data.get(cursor + 1)? as i8 as i16;
+                cursor += 2;
+                (a1, a2)
+            };
+
+            let (a, b, c, d) = if flags & WE_HAVE_A_SCALE != 0 {
+                let s = f2dot14_at(glyph_data, cursor)?;
+                cursor += 2;
+                (s, 0.0, 0.0, s)
+            } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+                let sx = f2dot14_at(glyph_data, cursor)?;
+                let sy = f2dot14_at(glyph_data, cursor + 2)?;
+                cursor += 4;
+                (sx, 0.0, 0.0, sy)
+            } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+                let a = f2dot14_at(glyph_data, cursor)?;
+                let b = f2dot14_at(glyph_data, cursor + 2)?;
+                let c = f2dot14_at(glyph_data, cursor + 4)?;
+                let d = f2dot14_at(glyph_data, cursor + 6)?;
+                cursor += 8;
+                (a, b, c, d)
+            } else {
+                (1.0, 0.0, 0.0, 1.0)
+            };
+
+            // Point-matching (ARGS_ARE_XY_VALUES unset) isn't supported --
+            // skip assembling this one component rather than fabricating
+            // a wrong position. The cursor has already advanced past its
+            // record either way, so later components still parse.
+            if flags & ARGS_ARE_XY_VALUES != 0 {
+                let child = self.glyph_outline_at_depth(component_glyph_id, depth + 1)?;
+                let point_offset = points.len();
+                for p in &child.points {
+                    points.push(Point::new(
+                        a * p.x + c * p.y + dx as f32,
+                        b * p.x + d * p.y + dy as f32,
+                        p.on_curve,
+                    ));
+                }
+                contour_ends.extend(child.contour_ends.iter().map(|&e| e + point_offset));
+            }
+
+            if flags & MORE_COMPONENTS == 0 {
+                break;
+            }
+        }
+
+        Some(GlyphOutline {
+            points,
+            contour_ends,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        })
     }
 
     /// The raw font data slice.
@@ -532,6 +657,271 @@ mod tests {
 
     fn load_system_font(name: &str) -> Option<Vec<u8>> {
         std::fs::read(alloc::format!("C:\\Windows\\Fonts\\{name}")).ok()
+    }
+
+    /// Builds a minimal but fully valid `sfnt` font from raw table bytes —
+    /// used to test glyph assembly (composite glyphs) without depending
+    /// on a real font file being present on the machine.
+    fn build_sfnt(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let header_len = 12 + 16 * tables.len();
+        let mut offset = header_len;
+        let mut offsets = Vec::with_capacity(tables.len());
+        for (_, data) in tables {
+            offsets.push(offset);
+            offset += data.len();
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        for (i, (tag, data)) in tables.iter().enumerate() {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offsets[i] as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        }
+        for (_, data) in tables {
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
+    /// Builds a single-contour simple glyph from absolute point
+    /// coordinates, all points on-curve, each coordinate stored as a full
+    /// `i16` delta (simplest possible encoding, not the compact one real
+    /// fonts use).
+    fn build_simple_glyph(points: &[(i16, i16)]) -> Vec<u8> {
+        let min_x = points.iter().map(|p| p.0).min().unwrap();
+        let max_x = points.iter().map(|p| p.0).max().unwrap();
+        let min_y = points.iter().map(|p| p.1).min().unwrap();
+        let max_y = points.iter().map(|p| p.1).max().unwrap();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i16.to_be_bytes()); // numberOfContours
+        data.extend_from_slice(&min_x.to_be_bytes());
+        data.extend_from_slice(&min_y.to_be_bytes());
+        data.extend_from_slice(&max_x.to_be_bytes());
+        data.extend_from_slice(&max_y.to_be_bytes());
+        data.extend_from_slice(&((points.len() - 1) as u16).to_be_bytes()); // endPtsOfContours[0]
+        data.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
+        // on-curve, explicit (non-repeated, non-short) deltas for every point
+        data.resize(data.len() + points.len(), 0x01);
+        let mut prev = 0i16;
+        for &(x, _) in points {
+            data.extend_from_slice(&(x - prev).to_be_bytes());
+            prev = x;
+        }
+        let mut prev = 0i16;
+        for &(_, y) in points {
+            data.extend_from_slice(&(y - prev).to_be_bytes());
+            prev = y;
+        }
+        data
+    }
+
+    /// Builds a composite glyph referencing `components` (glyph id, dx,
+    /// dy), each using an identity transform and word-sized xy offsets.
+    fn build_composite_glyph(
+        components: &[(u16, i16, i16)],
+        bbox: (i16, i16, i16, i16),
+    ) -> Vec<u8> {
+        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+        const MORE_COMPONENTS: u16 = 0x0020;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&(-1i16).to_be_bytes()); // numberOfContours
+        data.extend_from_slice(&bbox.0.to_be_bytes());
+        data.extend_from_slice(&bbox.1.to_be_bytes());
+        data.extend_from_slice(&bbox.2.to_be_bytes());
+        data.extend_from_slice(&bbox.3.to_be_bytes());
+        for (i, &(glyph_id, dx, dy)) in components.iter().enumerate() {
+            let is_last = i == components.len() - 1;
+            let mut flags = ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES;
+            if !is_last {
+                flags |= MORE_COMPONENTS;
+            }
+            data.extend_from_slice(&flags.to_be_bytes());
+            data.extend_from_slice(&glyph_id.to_be_bytes());
+            data.extend_from_slice(&dx.to_be_bytes());
+            data.extend_from_slice(&dy.to_be_bytes());
+        }
+        data
+    }
+
+    /// Assembles a minimal font with an empty `.notdef` (glyph 0) followed
+    /// by the given glyphs (already-encoded `glyf` bytes, in glyph-id
+    /// order starting at 1) — just enough tables (`head`/`maxp`/`loca`/
+    /// `glyf`/`hhea`/`hmtx`) for `Font::parse` and `glyph_outline` to work;
+    /// no `cmap`, since these tests address glyphs directly by id.
+    fn build_test_font(glyphs: &[Vec<u8>]) -> Vec<u8> {
+        let num_glyphs = (glyphs.len() + 1) as u16;
+
+        let mut glyf = Vec::new();
+        // loca needs numGlyphs+1 entries: glyph 0 (.notdef) is empty, so
+        // both its start (loca[0]) and end (loca[1]) are 0.
+        let mut loca_offsets = alloc::vec![0u32, 0u32];
+        for g in glyphs {
+            glyf.extend_from_slice(g);
+            loca_offsets.push(glyf.len() as u32);
+        }
+
+        let mut loca = Vec::new();
+        for off in &loca_offsets {
+            loca.extend_from_slice(&off.to_be_bytes());
+        }
+
+        let mut head = alloc::vec![0u8; 54];
+        head[18..20].copy_from_slice(&2048u16.to_be_bytes()); // unitsPerEm
+        head[50..52].copy_from_slice(&1i16.to_be_bytes()); // indexToLocFormat: long
+
+        let mut maxp = alloc::vec![0u8; 6];
+        maxp[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
+
+        let mut hhea = alloc::vec![0u8; 36];
+        hhea[4..6].copy_from_slice(&800i16.to_be_bytes()); // ascender
+        hhea[6..8].copy_from_slice(&(-200i16).to_be_bytes()); // descender
+        hhea[8..10].copy_from_slice(&0i16.to_be_bytes()); // lineGap
+        hhea[34..36].copy_from_slice(&num_glyphs.to_be_bytes()); // numberOfHMetrics
+
+        let mut hmtx = Vec::new();
+        for _ in 0..num_glyphs {
+            hmtx.extend_from_slice(&500u16.to_be_bytes()); // advanceWidth
+            hmtx.extend_from_slice(&0i16.to_be_bytes()); // lsb
+        }
+
+        build_sfnt(&[
+            (b"head", &head),
+            (b"maxp", &maxp),
+            (b"loca", &loca),
+            (b"glyf", &glyf),
+            (b"hhea", &hhea),
+            (b"hmtx", &hmtx),
+        ])
+    }
+
+    #[test]
+    fn composite_glyph_assembles_both_components_with_offsets_applied() {
+        // Glyph 1: a triangle base shape. Glyph 2: a small diacritic mark
+        // offset above it. Glyph 3: a composite combining both, with
+        // component 2 shifted by (100, 800) -- simulating an accented
+        // Latin character built from two component glyphs.
+        let base = build_simple_glyph(&[(0, 0), (400, 0), (200, 600)]);
+        let mark = build_simple_glyph(&[(0, 0), (100, 0), (50, 100)]);
+        let composite = build_composite_glyph(&[(1, 0, 0), (2, 100, 800)], (0, 0, 500, 1000));
+
+        let bytes = build_test_font(&[base, mark, composite]);
+        let font = Font::parse(&bytes).expect("synthetic font should parse");
+
+        let outline = font
+            .glyph_outline(3)
+            .expect("composite glyph should assemble");
+
+        assert_eq!(
+            outline.contour_ends.len(),
+            2,
+            "one contour per component, not merged into one"
+        );
+        assert_eq!(
+            outline.points.len(),
+            6,
+            "all 3 points from each of the 2 components should be present"
+        );
+        // First component: offset (0, 0), so its points pass through
+        // unchanged.
+        assert_eq!(outline.points[0], Point::new(0.0, 0.0, true));
+        assert_eq!(outline.points[1], Point::new(400.0, 0.0, true));
+        assert_eq!(outline.points[2], Point::new(200.0, 600.0, true));
+        // Second component: offset (100, 800) applied to every point.
+        assert_eq!(outline.points[3], Point::new(100.0, 800.0, true));
+        assert_eq!(outline.points[4], Point::new(200.0, 800.0, true));
+        assert_eq!(outline.points[5], Point::new(150.0, 900.0, true));
+        // contour_ends offset by the running point count: component 1 is
+        // points [0..=2], component 2 is [3..=5].
+        assert_eq!(outline.contour_ends, alloc::vec![2, 5]);
+    }
+
+    #[test]
+    fn composite_glyph_component_scale_transform_is_applied() {
+        // A component with WE_HAVE_A_SCALE (0x0008) set: a single F2Dot14
+        // scale factor of 1.5 (0x6000 in 2.14 fixed point -- F2Dot14 is
+        // signed with 2 integer bits, so 2.0 itself isn't representable)
+        // applied to both x and y before the (0, 0) offset.
+        let base = build_simple_glyph(&[(0, 0), (100, 0), (50, 100)]);
+
+        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+        const WE_HAVE_A_SCALE: u16 = 0x0008;
+        let mut composite = Vec::new();
+        composite.extend_from_slice(&(-1i16).to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes());
+        composite.extend_from_slice(&200i16.to_be_bytes());
+        composite.extend_from_slice(&200i16.to_be_bytes());
+        let flags = ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES | WE_HAVE_A_SCALE;
+        composite.extend_from_slice(&flags.to_be_bytes());
+        composite.extend_from_slice(&1u16.to_be_bytes()); // component glyph id
+        composite.extend_from_slice(&0i16.to_be_bytes()); // dx
+        composite.extend_from_slice(&0i16.to_be_bytes()); // dy
+        composite.extend_from_slice(&0x6000u16.to_be_bytes()); // scale = 1.5 in F2Dot14
+
+        let bytes = build_test_font(&[base, composite]);
+        let font = Font::parse(&bytes).expect("synthetic font should parse");
+        let outline = font
+            .glyph_outline(2)
+            .expect("composite glyph should assemble");
+
+        assert_eq!(outline.points[0], Point::new(0.0, 0.0, true));
+        assert_eq!(outline.points[1], Point::new(150.0, 0.0, true));
+        assert_eq!(outline.points[2], Point::new(75.0, 150.0, true));
+    }
+
+    #[test]
+    fn composite_glyph_point_matching_component_is_skipped_not_fabricated() {
+        // Component 1 uses ARGS_ARE_XY_VALUES (real offsets); component 2
+        // omits it (point-matching, a documented unsupported mode). The
+        // assembled outline should contain only component 1's points --
+        // skipped, not a wrong/fabricated position for component 2.
+        let base = build_simple_glyph(&[(0, 0), (100, 0), (50, 100)]);
+        let other = build_simple_glyph(&[(0, 0), (10, 0), (5, 10)]);
+
+        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+        const MORE_COMPONENTS: u16 = 0x0020;
+        let mut composite = Vec::new();
+        composite.extend_from_slice(&(-1i16).to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes());
+        composite.extend_from_slice(&100i16.to_be_bytes());
+        composite.extend_from_slice(&100i16.to_be_bytes());
+        // Component 1: real xy offsets, more components follow.
+        let flags1 = ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES | MORE_COMPONENTS;
+        composite.extend_from_slice(&flags1.to_be_bytes());
+        composite.extend_from_slice(&1u16.to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes());
+        // Component 2: point-matching (ARGS_ARE_XY_VALUES unset), last.
+        let flags2 = ARG_1_AND_2_ARE_WORDS;
+        composite.extend_from_slice(&flags2.to_be_bytes());
+        composite.extend_from_slice(&2u16.to_be_bytes());
+        composite.extend_from_slice(&0i16.to_be_bytes()); // point indices, not offsets
+        composite.extend_from_slice(&0i16.to_be_bytes());
+
+        let bytes = build_test_font(&[base, other, composite]);
+        let font = Font::parse(&bytes).expect("synthetic font should parse");
+        let outline = font
+            .glyph_outline(3)
+            .expect("composite glyph should still assemble the components it can");
+
+        assert_eq!(
+            outline.points.len(),
+            3,
+            "only component 1's 3 points should be present; component 2 is skipped"
+        );
+        assert_eq!(outline.contour_ends, alloc::vec![2]);
     }
 
     #[test]

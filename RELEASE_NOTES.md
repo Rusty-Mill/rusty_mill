@@ -24,6 +24,33 @@ change).
 
 ---
 
+## PR — Decompose composite glyphs instead of returning a bounding box
+**2026-08-25**
+
+- **Added:** composite-glyph assembly (`ttf.rs`) — component records
+  (flags, referenced glyph index, x/y offset, optional scale/2x2
+  transform) are parsed per the `glyf` spec, each referenced glyph
+  resolved recursively via the existing simple-glyph path, transformed,
+  and concatenated into the composite's outline (`contour_ends` offset by
+  the running point count per component). `Font::glyph_outline` now
+  returns the real assembled shape for characters like `é`/`ñ`/`ü` instead
+  of an empty bounding box (per [#4](https://github.com/baileyrd/rusty_font/issues/4)).
+- **Changed:** a recursion depth cap (8 levels) guards against a
+  malformed/cyclic composite font; beyond it (or on genuinely malformed
+  component data), the glyph gracefully degrades to the previous
+  bounding-box-only outline rather than failing the lookup.
+- Known remaining gap: components using point-matching
+  (`ARGS_ARE_XY_VALUES` unset, rare in real-world fonts) are skipped
+  rather than fabricating a position — documented in the README.
+- 3 new unit tests build a minimal synthetic `sfnt` font directly (simple
+  glyphs + a referencing composite), since assembling a controlled
+  multi-component shape isn't something a real system font lets a test
+  dictate: offset-only assembly across two components, a scale transform,
+  and the point-matching-component-is-skipped fallback. 20 total, 0
+  failed.
+- Closes [#4](https://github.com/baileyrd/rusty_font/issues/4).
+- Link will be added once the PR is open.
+
 ## PR #7 — Support cmap format 12 (supplementary-plane Unicode)
 **2026-08-25** · [#7](https://github.com/baileyrd/rusty_font/pull/7)
 

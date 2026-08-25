@@ -11,6 +11,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `cmap` format-12 subtable support (supplementary-plane Unicode
   codepoints, e.g. Nerd Fonts icon ranges above U+FFFF); preferred over
   format 4 when a font ships both.
+- Composite-glyph assembly: `Font::glyph_outline` decomposes and
+  transforms component glyphs (scale/2x2 matrix + offset) instead of
+  returning a bounding box with no points.
 ### Changed
 ### Fixed
 ### Security
