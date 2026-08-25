@@ -22,6 +22,34 @@ One entry per merged PR against `main`, most recent first, each linking to its P
 
 ---
 
+## PR #7 — Add a real Linux/X11 windowing backend
+
+**2026-08-25** · [#7](https://github.com/baileyrd/rusty_gui/pull/7)
+
+- **Added:** `Window::new` (Linux) now opens a real X11 display and creates a
+  real window via raw Xlib FFI (`XOpenDisplay`/`XCreateSimpleWindow`/etc.),
+  hand-rolled directly against `libX11` — no `x11`/`xcb` crate dependency,
+  the same approach `rusty_win32` uses for raw Win32 calls. The previously
+  dead `x11_window` field is now the real window handle. `Window::new`
+  returns `Err` if no X11 display is available (e.g. headless, no
+  `DISPLAY`) instead of silently no-op-ing.
+- **Added:** `poll_events` (Linux) drives a real event loop —
+  `CloseRequested` (via the `WM_DELETE_WINDOW` protocol atom, not just
+  connection teardown), `Resized` (`ConfigureNotify`), `RedrawRequested`
+  (`Expose`), cursor motion, all three mouse buttons, `MouseWheel` (X11
+  reports the wheel as button 4/5 press events), and keyboard press/release
+  with the same `KeyCode`/`ModifiersState`/`ReceivedCharacter` model added
+  for the Windows backend in [#6](https://github.com/baileyrd/rusty_gui/pull/6). `request_redraw()` calls `XClearArea` with
+  `exposures=True`.
+- **Known limitations, stated plainly:** text input uses `XLookupString`,
+  which is Latin-1 only — no IME composition support (same gap as the
+  Windows backend). No teardown (`XCloseDisplay`/`XDestroyWindow`) on drop —
+  matches the existing Windows backend's lack of cleanup, not a new gap.
+- 5 new unit tests for the keysym-to-`KeyCode` and X11-button-to-`MouseButton`
+  mapping tables — these run for real on the existing `ubuntu-latest` CI leg
+  (unlike the Windows-only tests from #6, which only compile-check there).
+- Issue [#3](https://github.com/baileyrd/rusty_gui/issues/3) (macOS backend) remains open/deferred — no existing platform crate covers Cocoa/AppKit, and building one is out of scope for this PR.
+
 ## PR #6 — Flesh out the Windows event pump: resize, full keyboard, text input, mouse wheel/right/middle, redraw
 
 **2026-08-25** · [#6](https://github.com/baileyrd/rusty_gui/pull/6)
