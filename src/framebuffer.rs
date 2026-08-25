@@ -216,4 +216,50 @@ impl Framebuffer {
     pub fn as_slice(&self) -> &[u32] {
         &self.buffer
     }
+
+    /// Bulk-copies `pixels` (row-major, `width * height` long, same packing
+    /// as [`Color::to_u32`]) into the framebuffer in one pass, replacing its
+    /// contents. For a caller that already composited a full frame into its
+    /// own buffer (e.g. a text/UI renderer that doesn't itself draw through
+    /// [`crate::Pipeline`]) and just needs it on screen via [`Self::present`].
+    ///
+    /// # Panics
+    /// If `pixels.len() != width() * height()`.
+    pub fn load(&mut self, pixels: &[u32]) {
+        assert_eq!(
+            pixels.len(),
+            self.width * self.height,
+            "pixel buffer length must equal width * height"
+        );
+        self.buffer.copy_from_slice(pixels);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_replaces_the_buffer_contents_pixel_for_pixel() {
+        let mut fb = Framebuffer::new(2, 2);
+        fb.set_pixel(0, 0, Color::rgb(1, 2, 3));
+        let pixels = [
+            Color::rgb(10, 20, 30).to_u32(),
+            Color::rgb(40, 50, 60).to_u32(),
+            Color::rgb(70, 80, 90).to_u32(),
+            Color::rgb(100, 110, 120).to_u32(),
+        ];
+        fb.load(&pixels);
+        assert_eq!(fb.get_pixel(0, 0), Some(Color::rgb(10, 20, 30)));
+        assert_eq!(fb.get_pixel(1, 0), Some(Color::rgb(40, 50, 60)));
+        assert_eq!(fb.get_pixel(0, 1), Some(Color::rgb(70, 80, 90)));
+        assert_eq!(fb.get_pixel(1, 1), Some(Color::rgb(100, 110, 120)));
+    }
+
+    #[test]
+    #[should_panic(expected = "pixel buffer length must equal width * height")]
+    fn load_panics_on_mismatched_length() {
+        let mut fb = Framebuffer::new(2, 2);
+        fb.load(&[0u32; 3]);
+    }
 }
