@@ -15,9 +15,6 @@
 //! - [`gpu`] — wgpu glyph-atlas renderer (behind `gui-gpu`).
 //! - [`input`] — native key encoding (winit key → terminal bytes).
 //! - [`window`] — the `winit` event loop + window tying it together.
-//! - [`sovereign`] — an alternate, minimal single-window backend on the
-//!   sovereign `rusty_gui`/`rusty_gpu`/`rusty_font` stack instead of
-//!   `winit`/`softbuffer` (behind `gui-sovereign`; Windows/Linux only).
 
 mod access;
 mod boxdraw;
@@ -33,11 +30,7 @@ mod mouse;
 mod render;
 mod settings;
 mod shape;
-#[cfg(feature = "gui-sovereign")]
-mod sovereign;
 mod taskbar;
 mod window;
 
-#[cfg(feature = "gui-sovereign")]
-pub use sovereign::run as run_sovereign;
 pub use window::run;
