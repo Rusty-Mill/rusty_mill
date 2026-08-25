@@ -1,10 +1,13 @@
 //! TrueType / OpenType binary table parser — a real `sfnt` table
 //! directory, `cmap` (format 4, the common BMP subtable every Latin-script
 //! font ships, and format 12, the segmented-coverage subtable used for
-//! full 21-bit Unicode including supplementary-plane characters),
-//! `loca`/`glyf` outline extraction (simple glyphs, and composite glyphs
-//! assembled from their component records), and `head`/`maxp` metadata.
+//! full 21-bit Unicode including supplementary-plane characters), glyph
+//! outline extraction (TrueType `loca`/`glyf` — simple glyphs, and
+//! composite glyphs assembled from their component records — or CFF-flavor
+//! OpenType's `CFF ` table via [`crate::cff`]'s Type 2 charstring
+//! interpreter), and `head`/`maxp` metadata.
 
+use crate::cff::{self, CffTable};
 use crate::glyph::{GlyphOutline, Point};
 use alloc::vec::Vec;
 
@@ -13,12 +16,12 @@ use alloc::vec::Vec;
 pub enum FontError {
     /// The file is too short to contain a valid `sfnt` header.
     TooShort,
-    /// The `sfnt` version isn't one this parser recognizes (TrueType
-    /// `0x00010000`/`true`, or OpenType-with-glyf `OTTO` isn't supported —
-    /// CFF-outline OpenType fonts are a known gap).
+    /// The `sfnt` version isn't one this parser recognizes: TrueType
+    /// (`0x00010000`) and CFF-outline OpenType (`OTTO`) are both
+    /// supported; legacy Mac `true`/`typ1` are not.
     UnsupportedVersion,
-    /// A required table (`head`, `maxp`, `loca`, `glyf`, `cmap`) is
-    /// missing.
+    /// A required table (`head`, `maxp`, `cmap`, `hhea`, `hmtx`, and
+    /// either `loca`+`glyf` or `CFF `) is missing.
     MissingTable(&'static str),
     /// A table's contents didn't parse as expected (truncated, or an
     /// unsupported sub-format).
@@ -51,14 +54,25 @@ struct TableRecord {
     length: usize,
 }
 
-/// A parsed TrueType font handle.
+/// Where a `Font`'s glyph outlines come from — the two mutually exclusive
+/// shapes an `sfnt` container's outline data can take.
+enum OutlineSource {
+    /// TrueType `loca`/`glyf`.
+    TrueType {
+        loca_long: bool,
+        glyf_range: (usize, usize),
+        loca_range: (usize, usize),
+    },
+    /// CFF-flavor OpenType (`OTTO`)'s `CFF ` table.
+    Cff(CffTable),
+}
+
+/// A parsed TrueType or CFF-flavor OpenType font handle.
 pub struct Font {
     data: Vec<u8>,
     units_per_em: u16,
     num_glyphs: u16,
-    loca_long: bool,
-    glyf_range: (usize, usize),
-    loca_range: (usize, usize),
+    outline_source: OutlineSource,
     cmap_subtable: Option<CmapSubtable>,
     /// `hhea` table: typographic ascender/descender/line-gap, in font
     /// units (see [`Font::ascender`]/[`Font::descender`]/[`Font::line_gap`]).
@@ -166,18 +180,23 @@ impl CmapFormat12 {
     }
 }
 
+/// `sfnt` version tag for CFF-flavor OpenType (`OTTO`, big-endian ASCII).
+const OTTO_VERSION: u32 = 0x4F54_544F;
+
 impl Font {
     /// Parses font bytes from a raw slice: the `sfnt` table directory,
-    /// `head`/`maxp` metadata, and (if present) a `cmap` format-4 subtable.
+    /// `head`/`maxp` metadata, a `cmap` subtable (format 4 or 12) if
+    /// present, and the glyph outline source -- TrueType `loca`/`glyf`, or
+    /// (for an `OTTO`-tagged font) a CFF table.
     pub fn parse(bytes: &[u8]) -> Result<Self, FontError> {
         if bytes.len() < 12 {
             return Err(FontError::TooShort);
         }
         let version = u32_at(bytes, 0).ok_or(FontError::TooShort)?;
-        // 0x00010000 = TrueType; `true`/`typ1` (rare, legacy Mac) not
-        // supported; `OTTO` (CFF-outline OpenType) not supported -- both
-        // documented gaps, not silently mishandled.
-        if version != 0x0001_0000 {
+        // 0x00010000 = TrueType; OTTO = CFF-outline OpenType; `true`/`typ1`
+        // (rare, legacy Mac) are not supported -- a documented gap, not
+        // silently mishandled.
+        if version != 0x0001_0000 && version != OTTO_VERSION {
             return Err(FontError::UnsupportedVersion);
         }
         let num_tables = u16_at(bytes, 4).ok_or(FontError::TooShort)? as usize;
@@ -210,8 +229,20 @@ impl Font {
         let maxp = find(b"maxp").ok_or(FontError::MissingTable("maxp"))?;
         let num_glyphs = u16_at(bytes, maxp.offset + 4).ok_or(FontError::Malformed("maxp"))?;
 
-        let loca = find(b"loca").ok_or(FontError::MissingTable("loca"))?;
-        let glyf = find(b"glyf").ok_or(FontError::MissingTable("glyf"))?;
+        let outline_source = if version == OTTO_VERSION {
+            let cff_table = find(b"CFF ").ok_or(FontError::MissingTable("CFF "))?;
+            let cff = cff::parse_cff_table(bytes, cff_table.offset, cff_table.length)
+                .ok_or(FontError::Malformed("CFF "))?;
+            OutlineSource::Cff(cff)
+        } else {
+            let loca = find(b"loca").ok_or(FontError::MissingTable("loca"))?;
+            let glyf = find(b"glyf").ok_or(FontError::MissingTable("glyf"))?;
+            OutlineSource::TrueType {
+                loca_long,
+                glyf_range: (glyf.offset, glyf.length),
+                loca_range: (loca.offset, loca.length),
+            }
+        };
 
         let cmap_subtable = find(b"cmap").and_then(|t| parse_cmap(bytes, t.offset, t.length));
 
@@ -227,9 +258,7 @@ impl Font {
             data: bytes.to_vec(),
             units_per_em,
             num_glyphs,
-            loca_long,
-            glyf_range: (glyf.offset, glyf.length),
-            loca_range: (loca.offset, loca.length),
+            outline_source,
             cmap_subtable,
             ascender,
             descender,
@@ -293,9 +322,16 @@ impl Font {
     }
 
     fn loca_entry(&self, glyph_id: u16) -> Option<(usize, usize)> {
-        let (loca_offset, loca_len) = self.loca_range;
-        let loca_data = self.data.get(loca_offset..loca_offset + loca_len)?;
-        if self.loca_long {
+        let OutlineSource::TrueType {
+            loca_long,
+            loca_range: (loca_offset, loca_len),
+            ..
+        } = &self.outline_source
+        else {
+            return None;
+        };
+        let loca_data = self.data.get(*loca_offset..*loca_offset + *loca_len)?;
+        if *loca_long {
             let start = u32_at(loca_data, glyph_id as usize * 4)? as usize;
             let end = u32_at(loca_data, (glyph_id as usize + 1) * 4)? as usize;
             Some((start, end))
@@ -313,19 +349,30 @@ impl Font {
     /// well beyond the 1-2 levels a real accented-Latin composite uses.
     const MAX_COMPOSITE_DEPTH: u32 = 8;
 
-    /// Extracts the vector outline of a glyph by ID — a real simple-glyph
-    /// parse (contours, on/off-curve quadratic points, run-length-encoded
-    /// flags and deltas) or, for a composite glyph (`numberOfContours <
-    /// 0`), the real assembled outline: each component's referenced glyph
-    /// resolved recursively and its points transformed (2x2 matrix, or
-    /// scale, plus an offset) into the composite's coordinate space. A
-    /// component using point-matching (`ARGS_ARE_XY_VALUES` unset, rare in
-    /// practice) is a documented remaining gap — that one component is
-    /// skipped rather than fabricating a wrong position. Glyphs with no
-    /// outline (e.g. space, where `loca[id] == loca[id+1]`) return `Some`
-    /// with an empty point list — real behavior, not a placeholder.
+    /// Extracts the vector outline of a glyph by ID.
+    ///
+    /// For a TrueType font: a real simple-glyph parse (contours, on/off-curve
+    /// quadratic points, run-length-encoded flags and deltas) or, for a
+    /// composite glyph (`numberOfContours < 0`), the real assembled
+    /// outline: each component's referenced glyph resolved recursively and
+    /// its points transformed (2x2 matrix, or scale, plus an offset) into
+    /// the composite's coordinate space. A component using point-matching
+    /// (`ARGS_ARE_XY_VALUES` unset, rare in practice) is a documented
+    /// remaining gap — that one component is skipped rather than
+    /// fabricating a wrong position. Glyphs with no outline (e.g. space,
+    /// where `loca[id] == loca[id+1]`) return `Some` with an empty point
+    /// list — real behavior, not a placeholder.
+    ///
+    /// For a CFF-flavor OpenType font: the glyph's Type 2 charstring,
+    /// interpreted and flattened into on-curve line segments (see
+    /// [`crate::cff`] — CFF's cubic Bézier curves aren't representable in
+    /// this crate's TrueType-shaped on/off-curve quadratic point model, so
+    /// they're approximated rather than preserved exactly).
     pub fn glyph_outline(&self, glyph_id: u16) -> Option<GlyphOutline> {
-        self.glyph_outline_at_depth(glyph_id, 0)
+        match &self.outline_source {
+            OutlineSource::Cff(table) => cff::glyph_outline(&self.data, table, glyph_id),
+            OutlineSource::TrueType { .. } => self.glyph_outline_at_depth(glyph_id, 0),
+        }
     }
 
     fn glyph_outline_at_depth(&self, glyph_id: u16, depth: u32) -> Option<GlyphOutline> {
@@ -333,7 +380,10 @@ impl Font {
         if start >= end {
             return Some(GlyphOutline::default());
         }
-        let (glyf_offset, glyf_len) = self.glyf_range;
+        let OutlineSource::TrueType { glyf_range, .. } = &self.outline_source else {
+            return None;
+        };
+        let (glyf_offset, glyf_len) = *glyf_range;
         let glyph_data = self.data.get(glyf_offset..glyf_offset + glyf_len)?;
         let glyph_data = glyph_data.get(start..end)?;
 
@@ -924,6 +974,217 @@ mod tests {
         assert_eq!(outline.contour_ends, alloc::vec![2]);
     }
 
+    /// Builds a CFF INDEX using a fixed 1-byte offset size -- only valid
+    /// while every item stays small enough that all offsets fit in a
+    /// `u8`, which holds for these tests' tiny charstrings/dicts.
+    fn build_cff_index(items: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(items.len() as u16).to_be_bytes());
+        if items.is_empty() {
+            return out;
+        }
+        out.push(1u8); // offSize
+        let mut offset = 1usize; // offsets are 1-based
+        out.push(offset as u8);
+        for item in items {
+            offset += item.len();
+            assert!(offset <= 255, "test CFF INDEX offset overflowed a u8");
+            out.push(offset as u8);
+        }
+        for item in items {
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    /// A DICT integer operand, always encoded via the 5-byte (marker 29 +
+    /// `i32`) form regardless of magnitude -- fixed-width, which is what
+    /// lets `build_cff_table` size the Top DICT before its real offset
+    /// values (which depend on what comes after it) are known.
+    fn dict_int(v: i32) -> Vec<u8> {
+        let mut out = alloc::vec![29u8];
+        out.extend_from_slice(&v.to_be_bytes());
+        out
+    }
+
+    fn build_cff_top_dict(
+        charstrings_offset: i32,
+        private_size: i32,
+        private_offset: i32,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(dict_int(charstrings_offset));
+        out.push(17); // CharStrings
+        out.extend(dict_int(private_size));
+        out.extend(dict_int(private_offset));
+        out.push(18); // Private
+        out
+    }
+
+    /// Assembles a minimal, standalone `CFF ` table (Header, Name/Top
+    /// DICT/String/Global Subr INDEXes, CharStrings INDEX, and -- only if
+    /// `local_subrs_items` is non-empty -- a Private DICT + Local Subr
+    /// INDEX) from raw Type 2 charstring/subroutine bytes.
+    fn build_cff_table(
+        charstrings_items: &[&[u8]],
+        global_subrs_items: &[&[u8]],
+        local_subrs_items: &[&[u8]],
+    ) -> Vec<u8> {
+        let header: &[u8] = &[1, 0, 4, 1]; // major, minor, hdrSize, offSize
+        let name_index = build_cff_index(&[b"Test"]);
+        // Top DICT's encoded length doesn't depend on the actual offset
+        // values (dict_int is fixed-width), so size it now with
+        // placeholders to learn where CharStrings will land.
+        let topdict_placeholder = build_cff_top_dict(0, 0, 0);
+        let topdict_index_len = build_cff_index(&[&topdict_placeholder]).len();
+        let string_index = build_cff_index(&[]);
+        let global_subrs_index = build_cff_index(global_subrs_items);
+
+        let charstrings_offset = header.len()
+            + name_index.len()
+            + topdict_index_len
+            + string_index.len()
+            + global_subrs_index.len();
+        let charstrings_index = build_cff_index(charstrings_items);
+
+        // Subrs offset is relative to the Private DICT's own start; a
+        // dict holding just `Subrs` is always dict_int (5 bytes) + the
+        // operator byte (1 byte) = 6 bytes, so the Local Subr INDEX
+        // (placed right after) is always at relative offset 6.
+        let private_dict: Vec<u8> = if local_subrs_items.is_empty() {
+            Vec::new()
+        } else {
+            let mut d = dict_int(6);
+            d.push(19); // Subrs
+            d
+        };
+        let private_offset = charstrings_offset + charstrings_index.len();
+        let local_subrs_index = build_cff_index(local_subrs_items);
+
+        let top_dict = build_cff_top_dict(
+            charstrings_offset as i32,
+            private_dict.len() as i32,
+            private_offset as i32,
+        );
+        let top_dict_index = build_cff_index(&[&top_dict]);
+        assert_eq!(
+            top_dict_index.len(),
+            topdict_index_len,
+            "Top DICT INDEX size must not change once real offsets are substituted"
+        );
+
+        let mut out = Vec::new();
+        out.extend_from_slice(header);
+        out.extend_from_slice(&name_index);
+        out.extend_from_slice(&top_dict_index);
+        out.extend_from_slice(&string_index);
+        out.extend_from_slice(&global_subrs_index);
+        out.extend_from_slice(&charstrings_index);
+        out.extend_from_slice(&private_dict);
+        out.extend_from_slice(&local_subrs_index);
+        out
+    }
+
+    /// Wraps a `CFF ` table in a minimal `OTTO`-tagged `sfnt` font --
+    /// `head`/`maxp`/`hhea`/`hmtx` are required alongside `CFF ` even
+    /// though outlines don't come from `loca`/`glyf`.
+    fn build_otto_font(cff_table: &[u8], num_glyphs: u16) -> Vec<u8> {
+        let head = alloc::vec![0u8; 54];
+        let mut maxp = alloc::vec![0u8; 6];
+        maxp[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
+        let hhea = alloc::vec![0u8; 36];
+        let hmtx = alloc::vec![0u8; 4];
+
+        let mut bytes = build_sfnt(&[
+            (b"CFF ", cff_table),
+            (b"head", &head),
+            (b"maxp", &maxp),
+            (b"hhea", &hhea),
+            (b"hmtx", &hmtx),
+        ]);
+        bytes[0..4].copy_from_slice(b"OTTO");
+        bytes
+    }
+
+    #[test]
+    fn cff_charstring_draws_a_triangle_via_moveto_and_lineto() {
+        // 0 0 rmoveto; 100 0 -50 100 rlineto; endchar
+        let charstring: &[u8] = &[139, 139, 21, 239, 139, 89, 239, 5, 14];
+        let cff = build_cff_table(&[charstring], &[], &[]);
+        let font =
+            Font::parse(&build_otto_font(&cff, 1)).expect("synthetic OTTO font should parse");
+
+        let outline = font.glyph_outline(0).expect("CFF glyph should assemble");
+        assert_eq!(
+            outline.points,
+            alloc::vec![
+                Point::new(0.0, 0.0, true),
+                Point::new(100.0, 0.0, true),
+                Point::new(50.0, 100.0, true),
+            ]
+        );
+        assert_eq!(outline.contour_ends, alloc::vec![2]);
+    }
+
+    #[test]
+    fn cff_charstring_curve_is_flattened_to_line_segments() {
+        // 0 0 rmoveto; 100 0 100 100 0 100 rrcurveto; endchar
+        let charstring: &[u8] = &[139, 139, 21, 239, 139, 239, 239, 139, 239, 8, 14];
+        let cff = build_cff_table(&[charstring], &[], &[]);
+        let font =
+            Font::parse(&build_otto_font(&cff, 1)).expect("synthetic OTTO font should parse");
+
+        let outline = font.glyph_outline(0).expect("CFF glyph should assemble");
+        // The moveto's point, plus a fixed 8-segment flattening of the
+        // one curve.
+        assert_eq!(outline.points.len(), 9);
+        assert_eq!(outline.points[0], Point::new(0.0, 0.0, true));
+        // p0=(0,0) p1=(100,0) p2=(200,100) p3=(200,200) -- the curve's
+        // exact endpoint, which the flattening must land on precisely at
+        // t=1.
+        assert_eq!(
+            *outline.points.last().unwrap(),
+            Point::new(200.0, 200.0, true)
+        );
+        assert_eq!(outline.contour_ends, alloc::vec![8]);
+    }
+
+    #[test]
+    fn cff_charstring_calls_a_global_subroutine() {
+        // Global subr 0: 100 0 rlineto; return
+        let subr: &[u8] = &[239, 139, 5, 11];
+        // Main: 0 0 rmoveto; -107 callgsubr; endchar
+        // (bias for 1 global subr is 107, so index 0 encodes as 0-107=-107)
+        let charstring: &[u8] = &[139, 139, 21, 32, 29, 14];
+        let cff = build_cff_table(&[charstring], &[subr], &[]);
+        let font =
+            Font::parse(&build_otto_font(&cff, 1)).expect("synthetic OTTO font should parse");
+
+        let outline = font.glyph_outline(0).expect("CFF glyph should assemble");
+        assert_eq!(
+            outline.points,
+            alloc::vec![Point::new(0.0, 0.0, true), Point::new(100.0, 0.0, true)]
+        );
+        assert_eq!(outline.contour_ends, alloc::vec![1]);
+    }
+
+    #[test]
+    fn cff_charstring_hintmask_bytes_are_skipped_without_desyncing_the_parser() {
+        // 0 100 hstemhm (1 stem); hintmask <1 byte>; 10 10 rmoveto;
+        // 5 5 rlineto; endchar
+        let charstring: &[u8] = &[139, 239, 18, 19, 0x80, 149, 149, 21, 144, 144, 5, 14];
+        let cff = build_cff_table(&[charstring], &[], &[]);
+        let font =
+            Font::parse(&build_otto_font(&cff, 1)).expect("synthetic OTTO font should parse");
+
+        let outline = font.glyph_outline(0).expect("CFF glyph should assemble");
+        assert_eq!(
+            outline.points,
+            alloc::vec![Point::new(10.0, 10.0, true), Point::new(15.0, 15.0, true)]
+        );
+        assert_eq!(outline.contour_ends, alloc::vec![1]);
+    }
+
     #[test]
     fn parses_a_real_system_font_and_reports_sane_metadata() {
         let Some(bytes) = load_system_font("arial.ttf") else {
@@ -1255,11 +1516,37 @@ mod tests {
 
     #[test]
     fn non_truetype_version_is_rejected() {
+        // `OTTO` (CFF-flavor OpenType) is supported; legacy Mac `true` is
+        // not -- that's the real remaining unsupported version tag.
         let mut bytes = alloc::vec![0u8; 12];
-        bytes[0..4].copy_from_slice(b"OTTO");
+        bytes[0..4].copy_from_slice(b"true");
         assert!(matches!(
             Font::parse(&bytes),
             Err(FontError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
+    fn otto_without_a_cff_table_is_missing_table_not_unsupported_version() {
+        // OTTO itself is a supported version tag; a font claiming it
+        // without shipping a `CFF ` table is malformed, not unsupported.
+        let head = alloc::vec![0u8; 54];
+        let mut maxp = alloc::vec![0u8; 6];
+        maxp[4..6].copy_from_slice(&1u16.to_be_bytes());
+        let hhea = alloc::vec![0u8; 36];
+        let hmtx = alloc::vec![0u8; 4];
+
+        let mut bytes = build_sfnt(&[
+            (b"head", &head),
+            (b"maxp", &maxp),
+            (b"hhea", &hhea),
+            (b"hmtx", &hmtx),
+        ]);
+        bytes[0..4].copy_from_slice(b"OTTO");
+
+        assert!(matches!(
+            Font::parse(&bytes),
+            Err(FontError::MissingTable("CFF "))
         ));
     }
 }

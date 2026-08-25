@@ -24,6 +24,44 @@ change).
 
 ---
 
+## PR — Support CFF-flavor OpenType (`OTTO`) fonts
+**2026-08-25**
+
+- **Added:** a new `cff.rs` module — CFF table parsing (INDEX/DICT
+  structures, Top DICT, Private DICT, global and local Subrs) and a full
+  Type 2 charstring interpreter (all path-drawing operators including
+  the `flex` family, hint/hintmask byte-length accounting,
+  `callsubr`/`callgsubr` with the spec's index bias). `Font::parse`
+  accepts the `OTTO` `sfnt` version tag and `Font::glyph_outline`
+  dispatches to the CFF path for those fonts instead of requiring
+  `loca`/`glyf` (per [#5](https://github.com/baileyrd/rusty_font/issues/5)) —
+  previously any non-TrueType-version font was rejected outright with
+  `FontError::UnsupportedVersion`.
+- **Changed:** `Font`'s internal outline-source fields (`loca_long`,
+  `glyf_range`, `loca_range`) are now one `OutlineSource` enum
+  (`TrueType { .. }` or `Cff(CffTable)`), so `glyph_outline` dispatches
+  cleanly instead of a TrueType-only code path being the only option.
+- CFF's cubic Bézier curves are flattened to on-curve line segments at
+  parse time (fixed 8-segment subdivision) rather than represented
+  exactly, since `GlyphOutline`/`Rasterizer` are shaped around
+  TrueType's on/off-curve quadratic point model — an approximation,
+  documented in the README, not a silent shortcut.
+- Known remaining gaps, scoped out deliberately (documented in the
+  README): CID-keyed CFF (per-glyph `FDArray`/`FDSelect`, mainly a CJK
+  concern) and the deprecated `seac`-style accent composition via
+  4/5-arg `endchar`.
+- 4 new unit tests build a minimal synthetic `CFF `-table-bearing `OTTO`
+  font directly (hand-encoded Type 2 charstring bytes), since real CFF
+  fonts aren't a controllable fixture the way system TrueType fonts are:
+  a moveto/lineto triangle, a curve flattened to the expected point
+  count and exact endpoint, a global-subroutine call with the correct
+  bias, and hint/hintmask bytes not desyncing the operand/operator
+  parser. Plus 2 tests on `Font::parse`'s version handling: `OTTO` is no
+  longer `UnsupportedVersion`, and an `OTTO` font missing its `CFF `
+  table is `MissingTable` (not `UnsupportedVersion`). 25 total, 0 failed.
+- Closes [#5](https://github.com/baileyrd/rusty_font/issues/5).
+- Link will be added once the PR is open.
+
 ## PR #8 — Decompose composite glyphs instead of returning a bounding box
 **2026-08-25** · [#8](https://github.com/baileyrd/rusty_font/pull/8)
 
