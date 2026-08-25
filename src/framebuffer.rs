@@ -44,11 +44,25 @@ impl Framebuffer {
         }
     }
 
+    /// Reads the color at (x, y), or `None` if out of bounds.
+    pub fn get_pixel(&self, x: usize, y: usize) -> Option<Color> {
+        if x < self.width && y < self.height {
+            Some(Color::from_u32(self.buffer[y * self.width + x]))
+        } else {
+            None
+        }
+    }
+
     /// Presents/blits this framebuffer to an OS window.
-    pub fn present(&self, window: &rusty_gui::Window) {
+    pub fn present(&self, _window: &rusty_gui::Window) {
         #[cfg(windows)]
         unsafe {
-            rusty_win32::windowing::blit_pixel_buffer(window.raw_handle(), self.width, self.height, &self.buffer);
+            rusty_win32::windowing::blit_pixel_buffer(
+                _window.raw_handle(),
+                self.width,
+                self.height,
+                &self.buffer,
+            );
         }
     }
 
