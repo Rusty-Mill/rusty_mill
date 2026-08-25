@@ -37,6 +37,15 @@ pub struct POINT {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RECT {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[repr(C)]
 pub struct MSG {
     pub hwnd: HWND,
     pub message: u32,
@@ -96,6 +105,12 @@ unsafe extern "system" {
     ) -> HWND;
     pub fn ShowWindow(h_wnd: HWND, n_cmd_show: i32) -> i32;
     pub fn UpdateWindow(h_wnd: HWND) -> i32;
+    /// Converts a desired *client*-area `RECT` (top-left usually `(0,0)`) in
+    /// place into the *window* `RECT` `CreateWindowExW` needs to produce
+    /// that client size, given the window's style/ex-style (menu-bearing
+    /// windows need `b_menu` true; this crate never creates one).
+    pub fn AdjustWindowRectEx(lp_rect: *mut RECT, dw_style: u32, b_menu: i32, dw_ex_style: u32) -> i32;
+    pub fn GetClientRect(h_wnd: HWND, lp_rect: *mut RECT) -> i32;
     pub fn GetDC(h_wnd: HWND) -> HDC;
     pub fn ReleaseDC(h_wnd: HWND, h_dc: HDC) -> i32;
     pub fn PeekMessageW(
@@ -158,15 +173,28 @@ pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND
 
         RegisterClassExW(&wnd_class);
 
+        // `width`/`height` are the desired *client* area (what a caller
+        // wants to draw into) but `CreateWindowExW`'s nWidth/nHeight are the
+        // *window* size including the title bar and borders `WS_STYLE`
+        // below adds — passing the client size straight through undersizes
+        // the client area by however much chrome the style contributes,
+        // silently, with no signal to the caller (`get_client_size` is what
+        // lets a caller notice after the fact; this is what avoids needing
+        // to notice at all).
+        const WS_STYLE: u32 = 0x00C00000 | 0x00080000 | 0x00040000 | 0x00020000 | 0x00010000; // WS_OVERLAPPEDWINDOW
+        let mut rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+        AdjustWindowRectEx(&mut rect, WS_STYLE, 0, 0);
+        let (win_w, win_h) = (rect.right - rect.left, rect.bottom - rect.top);
+
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
             title_utf16.as_ptr(),
-            0x00C00000 | 0x00080000 | 0x00040000 | 0x00020000 | 0x00010000 | 0x10000000, // WS_OVERLAPPEDWINDOW | WS_VISIBLE
+            WS_STYLE | 0x10000000, // | WS_VISIBLE
             100,
             100,
-            width as i32,
-            height as i32,
+            win_w,
+            win_h,
             core::ptr::null_mut(),
             core::ptr::null_mut(),
             h_instance,
@@ -177,6 +205,30 @@ pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND
         UpdateWindow(hwnd);
 
         hwnd
+    }
+}
+
+/// The window's actual current client-area size in pixels — what
+/// `StretchDIBits`/presentation code should treat as the drawable extent,
+/// since it can differ from whatever size was last requested (DPI, WM_SIZE,
+/// the OS clamping an oversized request to the work area, ...). `(0, 0)` on
+/// a null or otherwise invalid handle rather than panicking.
+///
+/// # Safety
+/// `hwnd` must be a currently-open, valid window handle (or null).
+pub unsafe fn get_client_size(hwnd: HWND) -> (u32, u32) {
+    if hwnd.is_null() {
+        return (0, 0);
+    }
+    unsafe {
+        let mut rect = RECT::default();
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return (0, 0);
+        }
+        (
+            (rect.right - rect.left).max(0) as u32,
+            (rect.bottom - rect.top).max(0) as u32,
+        )
     }
 }
 
