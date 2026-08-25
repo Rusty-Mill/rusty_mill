@@ -296,6 +296,22 @@ impl Window {
     pub fn new(title: &str, width: u32, height: u32) -> Result<Self, &'static str> {
         #[cfg(windows)]
         let hwnd = unsafe { rusty_win32::windowing::create_native_window(title, width, height) };
+        // `create_native_window` now sizes the *window* (via
+        // AdjustWindowRectEx) so its client area matches the request, but
+        // querying the real client rect afterward (rather than trusting the
+        // request) is what lets `width()`/`height()` -- and this crate's own
+        // callers sizing a PTY/framebuffer from them -- stay correct even if
+        // the OS clamps the window to the work area or some other reason
+        // the actual client size ends up different from what was asked for.
+        #[cfg(windows)]
+        let (width, height) = {
+            let (real_w, real_h) = unsafe { rusty_win32::windowing::get_client_size(hwnd) };
+            if real_w > 0 && real_h > 0 {
+                (real_w, real_h)
+            } else {
+                (width, height)
+            }
+        };
 
         #[cfg(target_os = "linux")]
         let (display, x11_window, wm_delete_window) = unsafe {
