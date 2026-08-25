@@ -22,9 +22,9 @@ One entry per merged PR against `main`, most recent first, each linking to its P
 
 ---
 
-## PR #TBD — Add repo-config governance files; fix pre-existing clippy warnings
+## PR #5 — Add repo-config governance files; fix pre-existing clippy warnings
 
-**2026-08-25** · [#TBD](TBD)
+**2026-08-25** · [#5](https://github.com/baileyrd/rusty_gui/pull/5)
 
 - **Added:** standard governance file set (README, CONTRIBUTING, CODE_OF_CONDUCT,
   SECURITY, CHANGELOG, RELEASE_NOTES, ARCHITECTURE, an ADR seed, issue/PR
