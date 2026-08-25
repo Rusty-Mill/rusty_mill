@@ -15,7 +15,7 @@ categories = ["graphics", "no-std"]
 # checkout doesn't exist for any external consumer (see rusty_std's
 # Cargo.toml for the same fix, and rusty_tokio#254).
 rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
-rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "bdbfc0ba65dbdc8c49e132f57dfe58865bf3a619" }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "10954f56b7f700538827421b2f60c7f3e1958684" }
 rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "2177686f81506028685046008bd9e535d6476942" }
 rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
 

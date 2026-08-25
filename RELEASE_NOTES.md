@@ -23,6 +23,46 @@ published yet (pre-1.0).
 
 ---
 
+## Linux X11 presentation path (partial fix for #3)
+**2026-08-25** · (not yet merged — link added once this lands)
+
+- **Added:** `Framebuffer::present` now does a real blit on Linux — hand-rolled
+  raw Xlib FFI (`XOpenDisplay`/`XCreateImage`/`XPutImage`, no `x11`/`xcb` crate
+  dependency), matching how `rusty_win32`'s Windows path and `rusty_gui`'s own
+  Linux window backend call their platform APIs raw. Opens its own `Display`
+  connection per call (mirrors `blit_pixel_buffer`'s per-call `GetDC`/`ReleaseDC`
+  pattern) rather than reusing `rusty_gui::Window`'s private one, which isn't
+  exposed — a second connection to the same X server drawing onto a window it
+  doesn't own is a standard, supported X11 pattern.
+- **Changed:** bumped the `rusty_gui` git pin to
+  [10954f5](https://github.com/baileyrd/rusty_gui/commit/10954f56b7f700538827421b2f60c7f3e1958684)
+  (merges [rusty_gui#7](https://github.com/baileyrd/rusty_gui/pull/7), the real
+  Linux/X11 window backend) — the previous pin's `Window::raw_handle()` returned
+  a null pointer on Linux, which is what made this genuinely blocked before.
+- **Verified against a real (virtual) X server**, not just build+clippy: ran a
+  throwaway example under `Xvfb`, blitted a solid background plus an
+  off-center rect via `Pipeline::draw_rect`, then read pixels back with a
+  second `XGetImage` connection — background, inside the rect, just outside
+  the rect on the same row (catches a `bytes_per_line`/stride bug), and the
+  opposite corner all matched exactly. Not committed as an automated test:
+  it needs a live X server, which this repo's CI (`ubuntu-latest`, headless)
+  doesn't have — same reason `present()` has never had an automated test on
+  the Windows side either.
+- **Known limitation, stated plainly:** assumes the display's default visual
+  is a standard 24/32-bit-depth TrueColor visual in the host's native byte
+  order (true for essentially every modern Linux desktop) — an exotic visual
+  will blit with wrong/garbled colors rather than being detected and
+  rejected. Opens/closes a fresh `Display` connection every call rather than
+  caching one, a real (if currently unmeasured) per-frame cost; documented
+  as a candidate optimization, not fixed here to keep this change simple and
+  free of global mutable state.
+- **Issue #3 stays open, partially:** macOS remains genuinely blocked — no
+  Cocoa/AppKit backend exists in `rusty_gui` yet, and `rusty_gui`'s own
+  [#3](https://github.com/baileyrd/rusty_gui/issues/3) tracks it as
+  out-of-scope for the PR that added the Linux backend.
+
+---
+
 ## Repo governance setup, and Pipeline coverage blit + clipping (closes #2)
 **2026-08-25** · [#4](https://github.com/baileyrd/rusty_gpu/pull/4)
 
