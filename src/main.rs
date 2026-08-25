@@ -55,6 +55,7 @@ const KNOWN_FLAGS: &[(&str, bool)] = &[
     ("--session", true),
     ("--gui", false),
     ("--gpu", false),
+    ("--gui-sovereign", false),
     ("--single-instance", false),
 ];
 
@@ -82,6 +83,12 @@ fn print_help() {
     println!("        --gui                     Launch the windowed front-end");
     println!(
         "        --gpu                     Use the wgpu GPU renderer (--gui only, gui-gpu build)"
+    );
+    println!(
+        "        --gui-sovereign           Launch the minimal sovereign-stack window (gui-sovereign build,"
+    );
+    println!(
+        "                                  Windows/Linux only; no tabs/mouse/clipboard, see src/gui/sovereign.rs)"
     );
     println!("        --single-instance         Hand off to a running --gui instance");
     println!();
@@ -290,6 +297,17 @@ fn main() -> Result<(), std::io::Error> {
             .map_err(|e| std::io::Error::other(e.to_string()));
     }
 
+    // `--gui-sovereign` launches the minimal alternate window backend built
+    // on rusty_gui/rusty_gpu/rusty_font instead of winit/softbuffer/ab_glyph.
+    // Requires the `gui-sovereign` feature. No single-instance/control-socket
+    // handoff — that's control.rs's winit-loop-specific machinery, not
+    // wired here (a real, disclosed gap of this minimal backend, not a bug).
+    #[cfg(feature = "gui-sovereign")]
+    if args.iter().any(|a| a == "--gui-sovereign") {
+        return gui::run_sovereign(backend.as_ref(), &config)
+            .map_err(|e| std::io::Error::other(e.to_string()));
+    }
+
     // A session file describes tabs, which only the windowed front-end has.
     if config.session.is_some() {
         eprintln!("rusty_term: `session` requires the windowed front-end (--gui); ignored");
@@ -393,6 +411,7 @@ mod tests {
             "/x",
             "--gui",
             "--gpu",
+            "--gui-sovereign",
             "--single-instance",
             "--list-shells",
             "--help",

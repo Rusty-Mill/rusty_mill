@@ -28,6 +28,10 @@ l13 = ["dep:rusty_term_l13"]
 gui = ["dep:rusty_font", "dep:ttf-parser", "dep:winit", "dep:softbuffer", "dep:arboard", "dep:rusty_regx", "dep:accesskit", "dep:accesskit_winit"]
 # Adds the wgpu GPU renderer alongside the CPU (softbuffer) one.
 gui-gpu = ["gui", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
+# Alternate minimal single-window backend on the sovereign rusty_gui/
+# rusty_gpu stack instead of winit/softbuffer (Windows/Linux only — see
+# src/gui/sovereign.rs for scope). Implies `gui` for FontCache/draw_grid.
+gui-sovereign = ["gui", "dep:rusty_gui", "dep:rusty_gpu"]
 # WebSocket PTY bridge for the Nebula web frontend (`web/`): the
 # `rusty_term_web_bridge` binary. No new dependencies — RFC 6455 framing and
 # SHA-1 are hand-rolled (src/web_bridge), the runtime is the tokio the
@@ -60,18 +64,18 @@ rusty_term_l13 = { path = "l13", optional = true }
 # (see the fix in 2ce3a4c).
 #
 # rusty_font (glyph rasterization) is wired into `gui`, replacing ab_glyph —
-# see src/gui/font.rs; now covers composite glyphs, CFF/OTTO, and cmap
-# format 12 (full Nerd Fonts support) as of this pin. rusty_gui (windowing)
-# and rusty_gpu (framebuffer presentation) are still unused: both now have
-# real Windows (full keyboard/resize/wheel/redraw) and Linux/X11 backends,
-# but no macOS backend yet (rusty_gui#3 — deferred upstream, needs-human:
-# no existing Cocoa/AppKit crate to build on and no macOS hardware to
-# verify one against) — nowhere near able to replace winit/softbuffer
-# cross-platform until that lands. Kept pinned so they're available
-# without repeating the path-dep break once they mature.
+# see src/gui/font.rs; covers composite glyphs, CFF/OTTO, and cmap format 12
+# (full Nerd Fonts support) as of this pin. rusty_gui (windowing) and
+# rusty_gpu (framebuffer presentation) are wired into the `gui-sovereign`
+# feature — see src/gui/sovereign.rs. Windows/Linux only: no macOS backend
+# yet (rusty_gui#3 — deferred upstream, needs-human: no existing Cocoa/
+# AppKit crate to build on and no macOS hardware to verify one against).
+# `gui-sovereign` is a minimal alternate backend (one window, one PTY
+# session, no tabs/chrome/mouse/clipboard/accessibility), not a drop-in
+# replacement for the full `winit`-based `gui` backend.
 rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "9fbc1ca57730b62f0b07f290d9c0c2fba746ead1", optional = true }
-rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "10954f56b7f700538827421b2f60c7f3e1958684", optional = true }
-rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "145f72b01ba83846c62a5eaa1137ab46214c9abb", optional = true }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "a00d8167a24506e8ebff9b496869a2f07cfc0a2e", optional = true }
+rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "72818c3df05babe3bce1dcfd421deb7d2b6a1caa", optional = true }
 # Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
 # ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
 # the search). Optional: only the windowed front-end has a search UI.

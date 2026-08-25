@@ -2081,23 +2081,23 @@ dependencies = [
 [[package]]
 name = "rusty_gpu"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_gpu?rev=145f72b01ba83846c62a5eaa1137ab46214c9abb#145f72b01ba83846c62a5eaa1137ab46214c9abb"
+source = "git+https://github.com/baileyrd/rusty_gpu?rev=72818c3df05babe3bce1dcfd421deb7d2b6a1caa#72818c3df05babe3bce1dcfd421deb7d2b6a1caa"
 dependencies = [
  "rusty_font 0.1.0 (git+https://github.com/baileyrd/rusty_font?rev=2177686f81506028685046008bd9e535d6476942)",
  "rusty_gui",
  "rusty_simd",
  "rusty_std",
- "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=1cefd29418e25eb00a9a043561ea8d8347f56e86)",
+ "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=0c13c780069812e859741c383cebc20fe0647e3f)",
 ]
 
 [[package]]
 name = "rusty_gui"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_gui?rev=10954f56b7f700538827421b2f60c7f3e1958684#10954f56b7f700538827421b2f60c7f3e1958684"
+source = "git+https://github.com/baileyrd/rusty_gui?rev=a00d8167a24506e8ebff9b496869a2f07cfc0a2e#a00d8167a24506e8ebff9b496869a2f07cfc0a2e"
 dependencies = [
  "rusty_libc",
  "rusty_std",
- "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=1cefd29418e25eb00a9a043561ea8d8347f56e86)",
+ "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=0c13c780069812e859741c383cebc20fe0647e3f)",
  "rusty_wire",
 ]
 
@@ -2172,7 +2172,7 @@ dependencies = [
 [[package]]
 name = "rusty_win32"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_win32?rev=1cefd29418e25eb00a9a043561ea8d8347f56e86#1cefd29418e25eb00a9a043561ea8d8347f56e86"
+source = "git+https://github.com/baileyrd/rusty_win32?rev=0c13c780069812e859741c383cebc20fe0647e3f#0c13c780069812e859741c383cebc20fe0647e3f"
 
 [[package]]
 name = "rusty_win32"
