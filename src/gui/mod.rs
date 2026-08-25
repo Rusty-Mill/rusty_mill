@@ -7,7 +7,7 @@
 //! Layers:
 //! - [`access`] — AccessKit accessibility-tree integration (C20): exposes the
 //!   visible screen text and cursor position to assistive technology.
-//! - [`font`] — monospace glyph rasterization (`ab_glyph`), shared by renderers.
+//! - [`font`] — monospace glyph rasterization (`rusty_font`), shared by renderers.
 //! - [`cpu`] — software compositor: a [`crate::core::Grid`] into a pixel buffer
 //!   (presented via `softbuffer`); pure and headless-testable.
 //! - [`render`] — the `Renderer` trait + CPU (`softbuffer`) presenter.

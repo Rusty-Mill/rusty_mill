@@ -24,8 +24,8 @@ default = []
 l13 = ["dep:rusty_term_l13"]
 # Native window backend (the tcore-font/tcore-app fork): a standalone window
 # instead of rendering into a host terminal. winit for windowing/input,
-# softbuffer for CPU presentation, ab_glyph for glyph rasterization.
-gui = ["dep:ab_glyph", "dep:ttf-parser", "dep:winit", "dep:softbuffer", "dep:arboard", "dep:rusty_regx", "dep:accesskit", "dep:accesskit_winit"]
+# softbuffer for CPU presentation, rusty_font for glyph rasterization.
+gui = ["dep:rusty_font", "dep:ttf-parser", "dep:winit", "dep:softbuffer", "dep:arboard", "dep:rusty_regx", "dep:accesskit", "dep:accesskit_winit"]
 # Adds the wgpu GPU renderer alongside the CPU (softbuffer) one.
 gui-gpu = ["gui", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # WebSocket PTY bridge for the Nebula web frontend (`web/`): the
@@ -53,15 +53,40 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
 ] }
 rusty_term_l13 = { path = "l13", optional = true }
+# Sibling no_std ecosystem crates. Pinned via git+rev, not path: a path dep
+# on a sibling checkout only resolves on the original author's machine, and
+# Cargo resolves every dependency's manifest regardless of feature
+# activation, so a dangling path dep breaks `cargo build` for everyone
+# (see the fix in 2ce3a4c).
+#
+# rusty_font (glyph rasterization) is wired into `gui`, replacing ab_glyph —
+# see src/gui/font.rs; covers composite glyphs, CFF/OTTO, and cmap format 12
+# (full Nerd Fonts support) as of this pin.
+#
+# rusty_gui (windowing) and rusty_gpu (framebuffer presentation) are
+# currently unused: an experimental `gui-sovereign` backend was built and
+# reverted after live testing found a real, unresolved bug — a ConPTY-
+# attached child's PTY output stalls after its initial handshake when
+# attached to a rusty_gui::Window (winit doesn't hit this), tracked at
+# https://github.com/baileyrd/rusty_gui/issues/9. rusty_gui also still has
+# no macOS backend (rusty_gui#3, deferred upstream, needs-human). Kept
+# pinned (and current) so they're available without repeating the path-dep
+# break once rusty_gui#9 is root-caused.
+rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "9fbc1ca57730b62f0b07f290d9c0c2fba746ead1", optional = true }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "a00d8167a24506e8ebff9b496869a2f07cfc0a2e", optional = true }
+rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "72818c3df05babe3bce1dcfd421deb7d2b6a1caa", optional = true }
 # Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
 # ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
 # the search). Optional: only the windowed front-end has a search UI.
 rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "1249a62de68f68e821c13cecd3838d49e52e22b6", optional = true }
-ab_glyph = { version = "0.2", optional = true }
-# Reading the font's GSUB table for ligature shaping. Already in the tree via
-# ab_glyph -> owned_ttf_parser, so this adds no new compiled crate; we only
-# enable opentype-layout (a default feature) and a direct path to it.
-ttf-parser = { version = "0.25", optional = true, default-features = false, features = ["opentype-layout"] }
+# Also used directly (via `Face`) for GSUB ligature shaping (src/gui/shape.rs)
+# and color-emoji CBDT/sbix bitmap strikes (src/gui/font.rs) — rusty_font
+# covers glyph outline rasterization but has no OpenType-layout or bitmap-
+# strike support, so this stays a direct, separate dependency. `std`: without
+# it (or `no-std-float`) ttf-parser's trig-using outline transforms don't
+# build — previously satisfied only incidentally, via feature unification
+# with ab_glyph's own (non-optional) `std`-enabled ttf-parser dependency.
+ttf-parser = { version = "0.25", optional = true, default-features = false, features = ["std", "opentype-layout"] }
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 # System clipboard for the window backend's copy/paste (cross-platform).
