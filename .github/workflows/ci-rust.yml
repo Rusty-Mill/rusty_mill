@@ -29,6 +29,13 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
+      - name: Install libX11 dev headers (Linux only)
+        # The X11 windowing backend links against libX11 directly (no
+        # x11/xcb crate) -- GitHub's ubuntu-latest image isn't guaranteed to
+        # ship the dev headers/libs needed to link it.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
