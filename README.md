@@ -13,9 +13,11 @@ rectangle regardless of input. All of that is now real:
 - **`ttf.rs`** — a real `sfnt` table directory parser: `head`/`maxp`
   metadata, `cmap` format-4 (the segment-based Unicode BMP mapping every
   Latin-script TrueType font ships) with the spec's exact pointer
-  arithmetic, and `loca`/`glyf` simple-glyph outline extraction (contours,
-  on/off-curve quadratic points, run-length-encoded flags and coordinate
-  deltas).
+  arithmetic, `cmap` format-12 (segmented coverage over the full 21-bit
+  Unicode range, used by fonts with supplementary-plane glyphs — verified
+  against a real Nerd Fonts icon set), and `loca`/`glyf` simple-glyph
+  outline extraction (contours, on/off-curve quadratic points,
+  run-length-encoded flags and coordinate deltas).
 - **`rasterizer.rs`** — a real scanline rasterizer: flattens TrueType's
   on/off-curve quadratic Bézier contours into line segments, then fills
   with the **non-zero winding rule** (the rule TrueType itself specifies —
@@ -41,9 +43,6 @@ cargo run --example ascii_render
 - **Composite glyphs** (`numberOfContours < 0` — accented characters like
   `é` built from component glyphs) aren't assembled; `glyph_outline`
   returns the bounding box with no points rather than fabricating one.
-- **`cmap` format 12** (full Unicode, used for characters outside the BMP)
-  isn't parsed — only format 4. Format 4 covers every BMP/Latin-script
-  character.
 - **CFF-outline OpenType** (`OTTO` version tag) isn't supported — only
   TrueType `glyf`-outline fonts.
 - **No hinting** — outlines rasterize at their natural shape; no
