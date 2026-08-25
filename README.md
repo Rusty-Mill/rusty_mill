@@ -57,7 +57,7 @@ relays it through the parser into the host terminal. Before spawning, it sets
 
 | Feature        | Default | What it adds |
 |----------------|:-------:|--------------|
-| `gui`          |         | Native window backend: a `winit` window with a `softbuffer` CPU renderer, `ab_glyph` glyph rasterization, and `ttf-parser`-driven GSUB ligature shaping. |
+| `gui`          |         | Native window backend: a `winit` window with a `softbuffer` CPU renderer, `rusty_font` glyph rasterization, and `ttf-parser`-driven GSUB ligature shaping. |
 | `gui-gpu`      |         | Adds a `wgpu` GPU renderer (glyph atlas + instanced quads) alongside the CPU one. Implies `gui`. |
 | `l13`          |         | L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP plus LSP/ACP negotiation. Lives in its own crate (`l13/`, see below). |
 | `web-bridge`   |         | `rusty_term_web_bridge`: a hand-rolled WebSocket PTY bridge (RFC 6455 handshake + framing, zero new dependencies) for the [web frontend prototype](web/README.md). Binds `127.0.0.1` only. |
@@ -363,7 +363,7 @@ src/
   input.rs           TUI-mode input handling + scrollback keys
   term.rs            TERM probe-and-fallback selection
   gui/               native window backend (features `gui` / `gui-gpu`)
-    font.rs            ab_glyph glyph cache (variants + fallback chain)
+    font.rs            rusty_font glyph cache (variants + fallback chain)
     shape.rs           GSUB ligature shaper (ttf-parser)
     layout.rs          tab / split-pane tree
     cpu.rs             Grid → pixel-buffer compositor (+ image overlay)
@@ -391,8 +391,9 @@ docs/
   (base64 → zlib/DEFLATE → PNG), the baseline JPEG decoder (iTerm2 images), and
   the GSUB ligature shaper are all hand-rolled — no image or text-shaping crates.
   Windowing, GPU, and font crates are pulled in only behind `gui` / `gui-gpu`;
-  the ligature shaper reads the font's GSUB table through `ttf-parser`, which
-  `ab_glyph` already depends on, so it adds no new compiled crate.
+  the ligature shaper reads the font's GSUB table through `ttf-parser`, a
+  separate direct dependency alongside `rusty_font` (which covers outline
+  rasterization but not OpenType layout).
 - **Runtime-agnostic protocol logic.** Everything in `core/` works identically
   under both runtimes; replies ride a response channel back to the PTY master,
   which both runtimes drain.

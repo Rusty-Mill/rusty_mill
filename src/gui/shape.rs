@@ -1,11 +1,12 @@
 //! Minimal GSUB shaper for programming-font ligatures.
 //!
-//! `ab_glyph` maps a codepoint straight to a glyph (no shaping), so ligatures
-//! (`==`, `=>`, `!=`, `fi`, ...) never form. This applies the font's `liga` and
-//! `calt` GSUB features to a run of glyph ids, returning each output glyph with
-//! the number of input glyphs (terminal cells) it spans. The font tables are
-//! read with `ttf-parser` (already in the tree via `ab_glyph`); the substitution
-//! *application* is hand-rolled here.
+//! Plain codepoint-to-glyph lookup has no shaping, so ligatures (`==`, `=>`,
+//! `!=`, `fi`, ...) never form on their own. This applies the font's `liga`
+//! and `calt` GSUB features to a run of glyph ids, returning each output
+//! glyph with the number of input glyphs (terminal cells) it spans. The font
+//! tables are read with `ttf-parser` (a separate, direct dependency — see
+//! `rusty_font`'s scope in `font.rs`, which covers outline rasterization but
+//! not OpenType layout); the substitution *application* is hand-rolled here.
 //!
 //! Supported lookup types: 1 (single), 4 (ligature), 5 (context), 6 (chained
 //! context) in all three formats, with nested lookup records applied

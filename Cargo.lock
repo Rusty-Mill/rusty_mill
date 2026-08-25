@@ -2069,11 +2069,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_font"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_font?rev=9209d84ba6a8dcf6cc38aea52ec74954cf1e80d8#9209d84ba6a8dcf6cc38aea52ec74954cf1e80d8"
+dependencies = [
+ "rusty_simd",
+ "rusty_std",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_gpu"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_gpu?rev=e83aa2103f6568a1d6df56d8461d523929a6d1d8#e83aa2103f6568a1d6df56d8461d523929a6d1d8"
 dependencies = [
- "rusty_font",
+ "rusty_font 0.1.0 (git+https://github.com/baileyrd/rusty_font?rev=2177686f81506028685046008bd9e535d6476942)",
  "rusty_gui",
  "rusty_simd",
  "rusty_std",
@@ -2129,7 +2139,6 @@ dependencies = [
 name = "rusty_term"
 version = "0.1.1"
 dependencies = [
- "ab_glyph",
  "accesskit",
  "accesskit_winit",
  "arboard",
@@ -2137,7 +2146,7 @@ dependencies = [
  "libc",
  "parking_lot",
  "pollster",
- "rusty_font",
+ "rusty_font 0.1.0 (git+https://github.com/baileyrd/rusty_font?rev=9209d84ba6a8dcf6cc38aea52ec74954cf1e80d8)",
  "rusty_gpu",
  "rusty_gui",
  "rusty_regx",

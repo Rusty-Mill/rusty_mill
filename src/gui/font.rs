@@ -1,14 +1,15 @@
 //! Glyph rasterization for the window backend.
 //!
-//! A monospace glyph cache over a TrueType/OpenType font (via `ab_glyph`).
-//! Renderers consume rasterized coverage bitmaps through the [`GlyphSource`]
-//! trait — which a test mock also implements, so the rasterizers can be verified
-//! headlessly without a real font file.
+//! A monospace glyph cache over a TrueType/OpenType font (via `rusty_font`,
+//! the in-house sfnt/glyf parser + scanline rasterizer). Renderers consume
+//! rasterized coverage bitmaps through the [`GlyphSource`] trait — which a
+//! test mock also implements, so the rasterizers can be verified headlessly
+//! without a real font file.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use ab_glyph::{Font, FontVec, GlyphId, PxScale, ScaleFont};
+use rusty_font::{Font, GlyphOutline as SovereignOutline, Point as SovereignPoint, Rasterizer};
 
 use super::shape::Shaper;
 
@@ -99,12 +100,12 @@ pub(crate) trait GlyphSource {
     }
 }
 
-/// A glyph cache over `ab_glyph` fonts at a fixed pixel size, with bold/italic
-/// faces and a fallback chain.
+/// A glyph cache over `rusty_font` fonts at a fixed pixel size, with
+/// bold/italic faces and a fallback chain.
 pub(crate) struct FontCache {
     /// `[Regular, Bold, Italic, BoldItalic]`; index 0 is always present, the
     /// others fall back to Regular when a variant font wasn't provided.
-    faces: [Option<FontVec>; 4],
+    faces: [Option<Font>; 4],
     /// Per-face GSUB ligature shapers (same indexing as `faces`); `None` when the
     /// face has no `liga`/`calt` lookups or ligatures are disabled.
     shapers: [Option<Shaper>; 4],
@@ -112,8 +113,11 @@ pub(crate) struct FontCache {
     /// (`ttf-parser` borrows, so the bytes are kept, not a `Face`).
     emoji: Option<Vec<u8>>,
     /// Fonts tried in order when the chosen face lacks a glyph (CJK, symbols, …).
-    fallback: Vec<FontVec>,
-    scale: PxScale,
+    fallback: Vec<Font>,
+    /// Target pixel em size. Each face can have its own `units_per_em`, so
+    /// the pixels-per-font-unit ratio `rusty_font` rasterizes with is
+    /// computed per face at each call site, not stored pre-divided here.
+    scale: f32,
     cell_w: usize,
     cell_h: usize,
     baseline: i32,
@@ -131,21 +135,22 @@ impl FontCache {
         if ligatures {
             shapers[0] = Shaper::new(set.regular.clone());
         }
-        let regular = FontVec::try_from_vec(set.regular).ok()?;
-        let scale = PxScale::from(px);
-        let scaled = regular.as_scaled(scale);
-        let cell_w = scaled.h_advance(regular.glyph_id('M')).ceil().max(1.0) as usize;
-        let cell_h = (scaled.ascent() - scaled.descent() + scaled.line_gap())
+        let regular = Font::parse(&set.regular).ok()?;
+        let ratio = px / regular.units_per_em() as f32;
+        let advance = regular.advance_width(regular.glyph_index('M').unwrap_or(0));
+        let cell_w = (advance as f32 * ratio).ceil().max(1.0) as usize;
+        let cell_h = ((regular.ascender() - regular.descender() + regular.line_gap()) as f32
+            * ratio)
             .ceil()
             .max(1.0) as usize;
-        let baseline = scaled.ascent().ceil() as i32;
+        let baseline = (regular.ascender() as f32 * ratio).ceil() as i32;
         // Parse a styled variant, building its GSUB shaper from the same bytes.
         let styled = |slot: usize, bytes: Option<Vec<u8>>, sh: &mut [Option<Shaper>; 4]| {
             let bytes = bytes?;
             if ligatures {
                 sh[slot] = Shaper::new(bytes.clone());
             }
-            FontVec::try_from_vec(bytes).ok()
+            Font::parse(&bytes).ok()
         };
         let faces = [
             Some(regular),
@@ -156,14 +161,14 @@ impl FontCache {
         let fallback = set
             .fallback
             .into_iter()
-            .filter_map(|b| FontVec::try_from_vec(b).ok())
+            .filter_map(|b| Font::parse(&b).ok())
             .collect();
         Some(FontCache {
             faces,
             shapers,
             fallback,
             emoji: set.emoji,
-            scale,
+            scale: px,
             cell_w,
             cell_h,
             baseline,
@@ -239,16 +244,16 @@ impl FontCache {
         })
     }
 
-    fn face_for(&self, ch: char, style: Style) -> &FontVec {
+    fn face_for(&self, ch: char, style: Style) -> &Font {
         let styled = self.faces[style as usize]
             .as_ref()
             .unwrap_or_else(|| self.faces[0].as_ref().unwrap());
-        if styled.glyph_id(ch).0 != 0 {
+        if styled.glyph_index(ch).is_some() {
             return styled;
         }
         self.fallback
             .iter()
-            .find(|f| f.glyph_id(ch).0 != 0)
+            .find(|f| f.glyph_index(ch).is_some())
             .unwrap_or(styled)
     }
 
@@ -273,7 +278,8 @@ impl FontCache {
         let face = self.faces[eff]
             .as_ref()
             .unwrap_or_else(|| self.faces[0].as_ref().unwrap());
-        let g = Rc::new(rasterize_id(face, self.scale, GlyphId(gid)));
+        let ratio = self.scale / face.units_per_em() as f32;
+        let g = Rc::new(rasterize_id(face, ratio, gid));
         self.gid_cache.insert((gid, style), Rc::clone(&g));
         g
     }
@@ -300,7 +306,9 @@ impl GlyphSource for FontCache {
             super::boxdraw::synthesize(ch, cw, chh, self.baseline())
                 .or_else(|| self.color_emoji(ch))
                 .unwrap_or_else(|| {
-                    let g = rasterize(self.face_for(ch, style), self.scale, ch);
+                    let face = self.face_for(ch, style);
+                    let ratio = self.scale / face.units_per_em() as f32;
+                    let g = rasterize(face, ratio, ch);
                     // Nerd Font icons and other Private Use Area glyphs are
                     // frequently drawn larger than the cell their width-1
                     // classification allots; contain-fit them so icons never
@@ -328,7 +336,10 @@ impl GlyphSource for FontCache {
         let face = self.faces[eff]
             .as_ref()
             .unwrap_or_else(|| self.faces[0].as_ref().unwrap());
-        let gids: Vec<u16> = text.iter().map(|&c| face.glyph_id(c).0).collect();
+        let gids: Vec<u16> = text
+            .iter()
+            .map(|&c| face.glyph_index(c).unwrap_or(0))
+            .collect();
         let shaped: Vec<(u16, u8)> = match self.shapers[eff].as_ref() {
             Some(sh) => sh.shape(&gids),
             None => gids.iter().map(|&g| (g, 1)).collect(),
@@ -400,35 +411,74 @@ fn constrain_to_cell(g: Glyph, box_w: usize, box_h: usize, baseline: i32) -> Gly
 }
 
 /// Rasterize `ch` to a coverage bitmap (whitespace / unoutlined glyphs yield an
-/// empty bitmap), via its glyph id.
-fn rasterize(font: &FontVec, scale: PxScale, ch: char) -> Glyph {
-    rasterize_id(font, scale, font.glyph_id(ch))
+/// empty bitmap), via its glyph id. `ratio` is the font's own pixels-per-
+/// font-unit scale (`pixel_size / units_per_em`); different faces can have
+/// different `units_per_em`, so it's computed per face at each call site,
+/// not stored globally.
+fn rasterize(font: &Font, ratio: f32, ch: char) -> Glyph {
+    match font.glyph_index(ch) {
+        Some(id) => rasterize_id(font, ratio, id),
+        None => Glyph::blank(),
+    }
 }
 
 /// Rasterize a glyph id to a coverage bitmap.
-fn rasterize_id(font: &FontVec, scale: PxScale, id: GlyphId) -> Glyph {
-    let glyph = id.with_scale(scale);
-    let Some(outlined) = font.outline_glyph(glyph) else {
+///
+/// `rusty_font`'s outline is in raw font-space (origin at the baseline, y
+/// increasing *upward*), and its `Rasterizer` scans a target buffer's row
+/// `y` against that same literal (scaled) coordinate — row 0 sits near the
+/// baseline, not the glyph's top. This shifts and flips the outline into
+/// the tight, top-down pixel-space box this module's callers expect
+/// (matching the previous `ab_glyph` backend's convention): pixel row 0 is
+/// the glyph's topmost row, column 0 its leftmost column.
+fn rasterize_id(font: &Font, ratio: f32, id: u16) -> Glyph {
+    let Some(outline) = font.glyph_outline(id) else {
         return Glyph::blank();
     };
-    let bounds = outlined.px_bounds();
-    let width = bounds.width().ceil() as usize;
-    let height = bounds.height().ceil() as usize;
+    // Composite glyphs (a documented rusty_font gap) and truly empty glyphs
+    // (space) both come back with no points; neither has anything to draw.
+    if outline.points.is_empty() {
+        return Glyph::blank();
+    }
+    let (min_x, min_y, max_x, max_y) = (outline.min_x, outline.min_y, outline.max_x, outline.max_y);
+    if max_x <= min_x || max_y <= min_y {
+        return Glyph::blank();
+    }
+
+    // Outward-rounded pixel-space bounding box, so no edge coverage is
+    // clipped by an inward rounding error.
+    let left_px = (min_x as f32 * ratio).floor();
+    let bottom_px = (min_y as f32 * ratio).floor();
+    let right_px = (max_x as f32 * ratio).ceil();
+    let top_px = (max_y as f32 * ratio).ceil();
+    let width = (right_px - left_px) as usize;
+    let height = (top_px - bottom_px) as usize;
     if width == 0 || height == 0 {
         return Glyph::blank();
     }
-    let mut coverage = vec![0u8; width * height];
-    outlined.draw(|x, y, c| {
-        let (x, y) = (x as usize, y as usize);
-        if x < width && y < height {
-            coverage[y * width + x] = (c * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    });
+
+    // Shift into the box's own coordinate space (in font units, so the
+    // Rasterizer's internal `* ratio` still applies) and flip Y so an
+    // increasing pixel row moves *down* the glyph, not up.
+    let shift_x = left_px / ratio;
+    let flip_y = top_px / ratio;
+    let points: Vec<SovereignPoint> = outline
+        .points
+        .iter()
+        .map(|p| SovereignPoint::new(p.x - shift_x, flip_y - p.y, p.on_curve))
+        .collect();
+    let shifted = SovereignOutline {
+        points,
+        contour_ends: outline.contour_ends,
+        ..SovereignOutline::default()
+    };
+
+    let coverage = Rasterizer::new(width, height).rasterize(&shifted, ratio);
     Glyph {
         width,
         height,
-        left: bounds.min.x.round() as i32,
-        top: bounds.min.y.round() as i32,
+        left: left_px as i32,
+        top: -top_px as i32,
         coverage,
         color: None,
     }
