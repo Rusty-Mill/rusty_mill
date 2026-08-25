@@ -22,9 +22,9 @@ One entry per merged PR against `main`, most recent first, each linking to its P
 
 ---
 
-## PR #TBD — Flesh out the Windows event pump: resize, full keyboard, text input, mouse wheel/right/middle, redraw
+## PR #6 — Flesh out the Windows event pump: resize, full keyboard, text input, mouse wheel/right/middle, redraw
 
-**2026-08-25** · [#TBD](TBD)
+**2026-08-25** · [#6](https://github.com/baileyrd/rusty_gui/pull/6)
 
 - **Added:** `Window::poll_events` (Windows backend) now handles `WM_SIZE`
   (`Event::Resized`, and `width()`/`height()` now reflect the live size),
