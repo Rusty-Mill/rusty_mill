@@ -369,16 +369,14 @@ fn parse_cmap(data: &[u8], cmap_offset: usize, cmap_len: usize) -> Option<CmapSu
         let encoding_id = u16_at(cmap, rec + 2)?;
         let offset = u32_at(cmap, rec + 4)? as usize;
         match cmap.get(offset..).and_then(|s| u16_at(s, 0)) {
-            Some(12) => {
-                if best_12.is_none() || (platform_id == 3 && encoding_id == 10) {
-                    best_12 = Some(offset);
-                }
+            Some(12) if best_12.is_none() || (platform_id == 3 && encoding_id == 10) => {
+                best_12 = Some(offset);
             }
-            Some(4) => {
-                if (platform_id == 3 && encoding_id == 1) || (platform_id == 0 && best_4.is_none())
-                {
-                    best_4 = Some(offset);
-                }
+            Some(4)
+                if (platform_id == 3 && encoding_id == 1)
+                    || (platform_id == 0 && best_4.is_none()) =>
+            {
+                best_4 = Some(offset);
             }
             _ => {}
         }
