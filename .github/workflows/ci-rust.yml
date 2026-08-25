@@ -14,7 +14,15 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # This crate has real `#[cfg(windows)]`-gated code (the Win32 windowing
+    # backend) — an ubuntu-only matrix would never even compile it, let alone
+    # catch a regression there. Linux also has its own `#[cfg(target_os =
+    # "linux")]` backend (X11), so it needs its own leg regardless.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 

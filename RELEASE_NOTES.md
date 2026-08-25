@@ -22,6 +22,34 @@ One entry per merged PR against `main`, most recent first, each linking to its P
 
 ---
 
+## PR #TBD — Flesh out the Windows event pump: resize, full keyboard, text input, mouse wheel/right/middle, redraw
+
+**2026-08-25** · [#TBD](TBD)
+
+- **Added:** `Window::poll_events` (Windows backend) now handles `WM_SIZE`
+  (`Event::Resized`, and `width()`/`height()` now reflect the live size),
+  `WM_KEYUP` (`Event::KeyReleased`) alongside the existing `WM_KEYDOWN`, a full
+  virtual-key table (letters, digits, arrows, Backspace/Tab/Return/Space, not
+  just Escape), `WM_CHAR` (`Event::ReceivedCharacter`, including surrogate-pair
+  decoding), `WM_RBUTTONDOWN/UP` and `WM_MBUTTONDOWN/UP` (right/middle mouse
+  buttons), `WM_MOUSEWHEEL` (`Event::MouseWheel`), and `WM_PAINT`
+  (`Event::RedrawRequested`). `Window::request_redraw` now actually calls
+  `InvalidateRect` instead of being a no-op.
+- **Added:** `Event::MouseWheel`, `Event::ReceivedCharacter`,
+  `Event::ModifiersChanged`, `KeyCode::{Shift,Control,Alt}`, and a new
+  `ModifiersState` type tracking which modifier keys are currently held.
+  Purely additive — no existing public signature changed.
+- **Known limitation, stated plainly:** real IME composition (preedit text,
+  candidate windows) is still not implemented — `WM_CHAR` only covers
+  already-composed UTF-16 text. Full IME support needs its own follow-up
+  (`WM_IME_*` message handling and new `Event` variants for composition
+  state), tracked as remaining scope on issue [#2](https://github.com/baileyrd/rusty_gui/issues/2).
+- Also expands CI to a `[ubuntu-latest, windows-latest]` matrix — the
+  previous ubuntu-only job never even compiled this crate's `#[cfg(windows)]`
+  code, so it would have caught nothing here.
+- 5 new unit tests for the virtual-key-to-`KeyCode` mapping table (run on the
+  `windows-latest` CI leg — this logic doesn't compile on other targets).
+
 ## PR #5 — Add repo-config governance files; fix pre-existing clippy warnings
 
 **2026-08-25** · [#5](https://github.com/baileyrd/rusty_gui/pull/5)

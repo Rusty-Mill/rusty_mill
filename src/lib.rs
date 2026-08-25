@@ -13,5 +13,5 @@ pub mod event;
 pub mod window;
 
 pub use clipboard::Clipboard;
-pub use event::{Event, KeyCode, MouseButton};
+pub use event::{Event, KeyCode, ModifiersState, MouseButton};
 pub use window::{Window, WindowBuilder};
