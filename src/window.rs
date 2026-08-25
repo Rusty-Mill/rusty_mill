@@ -53,7 +53,10 @@ pub struct Window {
     height: u32,
     #[cfg(windows)]
     hwnd: *mut core::ffi::c_void,
+    // Placeholder for the real X11/Wayland backend (issue #4) — not yet
+    // wired into `Window::new`/`poll_events`.
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     x11_window: u64,
 }
 
@@ -103,28 +106,39 @@ impl Window {
 
     /// Polls pending OS events from the window event queue.
     pub fn poll_events(&mut self) -> Vec<Event> {
+        // `mut` is only exercised by the `#[cfg(windows)]` backend below —
+        // other platforms don't populate `events` yet (see issues #3/#4).
+        #[allow(unused_mut)]
         let mut events = Vec::new();
         #[cfg(windows)]
         unsafe {
             let mut msg: rusty_win32::windowing::MSG = core::mem::zeroed();
-            while rusty_win32::windowing::PeekMessageW(&mut msg, core::ptr::null_mut(), 0, 0, 1) != 0 {
+            while rusty_win32::windowing::PeekMessageW(&mut msg, core::ptr::null_mut(), 0, 0, 1)
+                != 0
+            {
                 match msg.message {
-                    0x0010 | 0x0002 => { // WM_CLOSE or WM_DESTROY
+                    0x0010 | 0x0002 => {
+                        // WM_CLOSE or WM_DESTROY
                         events.push(Event::CloseRequested);
                     }
-                    0x0200 => { // WM_MOUSEMOVE
+                    0x0200 => {
+                        // WM_MOUSEMOVE
                         let x = (msg.l_param & 0xFFFF) as f64;
                         let y = ((msg.l_param >> 16) & 0xFFFF) as f64;
                         events.push(Event::CursorMoved(x, y));
                     }
-                    0x0201 => { // WM_LBUTTONDOWN
+                    0x0201 => {
+                        // WM_LBUTTONDOWN
                         events.push(Event::MousePressed(crate::event::MouseButton::Left));
                     }
-                    0x0202 => { // WM_LBUTTONUP
+                    0x0202 => {
+                        // WM_LBUTTONUP
                         events.push(Event::MouseReleased(crate::event::MouseButton::Left));
                     }
-                    0x0100 => { // WM_KEYDOWN
-                        if msg.w_param == 0x1B { // VK_ESCAPE
+                    0x0100 => {
+                        // WM_KEYDOWN
+                        if msg.w_param == 0x1B {
+                            // VK_ESCAPE
                             events.push(Event::KeyPressed(crate::event::KeyCode::Escape));
                         }
                     }
