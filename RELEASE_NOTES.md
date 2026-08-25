@@ -24,8 +24,8 @@ change).
 
 ---
 
-## PR — Add standard governance files
-**2026-08-25**
+## PR #6 — Add standard governance files
+**2026-08-25** · [#6](https://github.com/baileyrd/rusty_font/pull/6)
 
 - **Added:** repo-config's standard governance set — PR/issue templates,
   CONTRIBUTING/CODE_OF_CONDUCT/SECURITY/CHANGELOG/RELEASE_NOTES/ARCHITECTURE,
@@ -39,4 +39,3 @@ change).
   formatting only, no behavior change — so the new CI's `fmt --check` gate
   doesn't start out red against unformatted pre-existing code.
 - 15 unit tests unaffected: 15 passed, 0 failed.
-- Link will be added once the PR is open.
