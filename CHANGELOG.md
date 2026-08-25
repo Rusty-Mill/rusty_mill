@@ -15,7 +15,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `blit_coverage` to a sub-rectangle of the framebuffer (closes #2).
 - `Color::from_u32`, `Framebuffer::get_pixel`: pixel read-back, backing the
   new blend path.
+- `Framebuffer::present` now does a real blit on Linux via hand-rolled raw
+  Xlib FFI, verified against a real Xvfb server (partial fix for #3 — macOS
+  is still blocked upstream).
 ### Changed
+- Bumped the `rusty_gui` git pin to pick up its new Linux/X11 window backend
+  (`rusty_gui#7`), without which `Window::raw_handle()` returned null on
+  Linux.
 ### Fixed
 - `cargo fmt`/`cargo clippy -D warnings` baseline failures surfaced by the new
   CI workflow (unformatted code; `Framebuffer::present`'s `window` param
