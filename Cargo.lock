@@ -399,7 +399,7 @@ dependencies = [
  "rusty_libc 0.0.1 (git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca)",
  "rusty_lines",
  "rusty_regx",
- "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=ee8f842e4e0b961b6a5605ea72d34237d4383f4c)",
+ "rusty_win32 0.1.0 (git+https://github.com/Rusty-Mill/rusty_mill?rev=ee8f842e4e0b961b6a5605ea72d34237d4383f4c)",
 ]
 
 [[package]]
@@ -432,7 +432,7 @@ dependencies = [
 [[package]]
 name = "rusty_regx"
 version = "0.4.0"
-source = "git+https://github.com/baileyrd/rusty_regx?rev=6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3#6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3#6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3"
 
 [[package]]
 name = "rusty_win32"
@@ -442,7 +442,7 @@ source = "git+https://github.com/baileyrd/rusty_win32?branch=main#a128d758c7c568
 [[package]]
 name = "rusty_win32"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_win32?rev=ee8f842e4e0b961b6a5605ea72d34237d4383f4c#ee8f842e4e0b961b6a5605ea72d34237d4383f4c"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=ee8f842e4e0b961b6a5605ea72d34237d4383f4c#ee8f842e4e0b961b6a5605ea72d34237d4383f4c"
 
 [[package]]
 name = "same-file"
