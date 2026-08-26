@@ -1,0 +1,131 @@
+[workspace]
+members = ["l13"]
+# The fuzz crate needs nightly + cargo-fuzz; keep it out of ordinary builds.
+exclude = ["fuzz"]
+
+[package]
+name = "rusty_term"
+version = "0.1.1"
+edition = "2024"
+default-run = "rusty_term"
+license = "MIT"
+description = "A terminal emulator written from scratch in Rust, with a deliberately small dependency surface."
+repository = "https://github.com/baileyrd/rusty_term"
+
+[features]
+default = []
+# The runtime is always tokio (a single async reactor on every platform); see
+# `src/runtime`. It is a hard dependency rather than a feature.
+# L13 structured side-channel: a private-OSC JSON-RPC transport that hosts the
+# adjacent protocols (MCP, plus LSP/ACP negotiation). Lives in its own crate
+# (`l13/`) addressed against a narrow `TerminalState` trait, not `Grid`
+# directly — independently buildable/testable, not welded to this binary.
+# Opt-in so the default terminal stays lean.
+l13 = ["dep:rusty_term_l13"]
+# Native window backend (the tcore-font/tcore-app fork): a standalone window
+# instead of rendering into a host terminal. winit for windowing/input,
+# softbuffer for CPU presentation, rusty_font for glyph rasterization.
+gui = ["dep:rusty_font", "dep:ttf-parser", "dep:winit", "dep:softbuffer", "dep:arboard", "dep:rusty_regx", "dep:accesskit", "dep:accesskit_winit"]
+# Adds the wgpu GPU renderer alongside the CPU (softbuffer) one.
+gui-gpu = ["gui", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
+# WebSocket PTY bridge for the Nebula web frontend (`web/`): the
+# `rusty_term_web_bridge` binary. No new dependencies — RFC 6455 framing and
+# SHA-1 are hand-rolled (src/web_bridge), the runtime is the tokio the
+# terminal already links.
+web-bridge = ["tokio/io-util"]
+
+[[bin]]
+name = "rusty_term_web_bridge"
+path = "src/bin/web_bridge.rs"
+required-features = ["web-bridge"]
+
+[dependencies]
+libc = "0.2.186"
+parking_lot = "0.12"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "time",
+    "sync",
+    "macros",
+] }
+rusty_term_l13 = { path = "l13", optional = true }
+# Sibling no_std ecosystem crates. Pinned via git+rev, not path: a path dep
+# on a sibling checkout only resolves on the original author's machine, and
+# Cargo resolves every dependency's manifest regardless of feature
+# activation, so a dangling path dep breaks `cargo build` for everyone
+# (see the fix in 2ce3a4c).
+#
+# rusty_font (glyph rasterization) is wired into `gui`, replacing ab_glyph —
+# see src/gui/font.rs; covers composite glyphs, CFF/OTTO, and cmap format 12
+# (full Nerd Fonts support) as of this pin.
+#
+# rusty_gui (windowing) and rusty_gpu (framebuffer presentation) are
+# currently unused: an experimental `gui-sovereign` backend was built and
+# reverted after live testing found a real, unresolved bug — a ConPTY-
+# attached child's PTY output stalls after its initial handshake when
+# attached to a rusty_gui::Window (winit doesn't hit this), tracked at
+# https://github.com/baileyrd/rusty_gui/issues/9. rusty_gui also still has
+# no macOS backend (rusty_gui#3, deferred upstream, needs-human). Kept
+# pinned (and current) so they're available without repeating the path-dep
+# break once rusty_gui#9 is root-caused.
+rusty_font = { git = "https://github.com/baileyrd/rusty_font", rev = "9fbc1ca57730b62f0b07f290d9c0c2fba746ead1", optional = true }
+rusty_gui = { git = "https://github.com/baileyrd/rusty_gui", rev = "a00d8167a24506e8ebff9b496869a2f07cfc0a2e", optional = true }
+rusty_gpu = { git = "https://github.com/baileyrd/rusty_gpu", rev = "72818c3df05babe3bce1dcfd421deb7d2b6a1caa", optional = true }
+# Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
+# ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
+# the search). Optional: only the windowed front-end has a search UI.
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "1249a62de68f68e821c13cecd3838d49e52e22b6", optional = true }
+# Also used directly (via `Face`) for GSUB ligature shaping (src/gui/shape.rs)
+# and color-emoji CBDT/sbix bitmap strikes (src/gui/font.rs) — rusty_font
+# covers glyph outline rasterization but has no OpenType-layout or bitmap-
+# strike support, so this stays a direct, separate dependency. `std`: without
+# it (or `no-std-float`) ttf-parser's trig-using outline transforms don't
+# build — previously satisfied only incidentally, via feature unification
+# with ab_glyph's own (non-optional) `std`-enabled ttf-parser dependency.
+ttf-parser = { version = "0.25", optional = true, default-features = false, features = ["std", "opentype-layout"] }
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+# System clipboard for the window backend's copy/paste (cross-platform).
+# `default-features = false` drops image-clipboard support (and its image/png/
+# tiff/jpeg dep tree) — we only move text.
+arboard = { version = "3", optional = true, default-features = false }
+wgpu = { version = "22", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+pollster = { version = "0.3", optional = true }
+# Screen-reader / assistive-tech accessibility tree (C20): exposes the
+# visible grid text and cursor position via the OS accessibility API.
+accesskit = { version = "0.24", optional = true }
+accesskit_winit = { version = "0.33", optional = true }
+
+# ConPTY backend: Windows-only, so the Linux/macOS build never pulls it in.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Dwm",
+] }
+
+[dev-dependencies]
+# The core test suite exercises the search's regex mode without the `gui`
+# feature, so the engine is also a dev-dependency.
+#
+# Being a git dependency means `cargo test` (even for the default,
+# non-`gui` build) needs network access the first time it resolves this
+# crate — there's no crates.io fallback. Harmless in CI and any normal dev
+# machine, but worth knowing if `cargo test` is ever run somewhere
+# deliberately offline/air-gapped: it'll fail at dependency resolution,
+# not at a test, which can look confusing out of context.
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "1249a62de68f68e821c13cecd3838d49e52e22b6" }
