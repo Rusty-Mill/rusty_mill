@@ -15,6 +15,7 @@ members = [
     "crates/rusty_lines",
     "crates/rush",
     "crates/mill-term",
+    "crates/rusty_text",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.

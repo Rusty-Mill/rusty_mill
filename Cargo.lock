@@ -2497,6 +2497,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_text"
+version = "0.1.0"
+dependencies = [
+ "rpath",
+ "rusty_regx",
+]
+
+[[package]]
 name = "rusty_win32"
 version = "0.1.0"
 
