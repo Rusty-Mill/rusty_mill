@@ -8,7 +8,18 @@ members = [
     "crates/rusty_font",
     "crates/rusty_regx",
     "crates/rusty_win32",
+    "crates/rpath",
+    "crates/rusty_diff",
+    "crates/rusty_compress",
+    "crates/rusty_git",
+    "crates/rusty_lines",
+    "crates/rush",
+    "crates/mill-term",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
-exclude = ["crates/rusty_term/fuzz"]
+# crates/rusty_lines/bench is a standalone on-demand benchmark harness
+# (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
+# own, run only via `cd crates/rusty_lines/bench && cargo run --release` —
+# excluded so it doesn't try to join this workspace.
+exclude = ["crates/rusty_term/fuzz", "crates/rush/fuzz", "crates/rusty_lines/bench"]

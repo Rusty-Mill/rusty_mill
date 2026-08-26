@@ -16,15 +16,22 @@ use rusty_term::backend::WindowsBackend;
 use rusty_term::config::Config;
 use rusty_term::core::Grid;
 
-/// Finds `repo/target/{debug,release}/bin[.exe]` by walking up from this
-/// executable's own location — this ecosystem's repos are sibling
-/// directories under one parent (`rush`, `rusty_git`, `rusty_term`, ... all
-/// next to `mill-term`), not a single Cargo workspace with one shared
-/// `target/`, so a sibling's binary never lands under *our* `target/`.
+/// Finds a tool binary by walking up from this executable's own location
+/// (robust to running as `target/{debug,release}/mill-term` under `cargo
+/// run`, or as `target/{debug,release}/deps/mill_term-<hash>` under `cargo
+/// test`). Checks each ancestor two ways: directly (`rush` and `rusty_git`
+/// are workspace siblings now — see Cargo.toml — so their binaries share
+/// this executable's own `target/{debug,release}/`), and under
+/// `repo/target/{debug,release}/bin[.exe]`, for a tool that's still a
+/// standalone sibling checkout outside this workspace (e.g. `rusty_text`).
 fn find_sibling_binary(repo: &str, bin: &str) -> Option<PathBuf> {
     let exe_name = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
     let exe = std::env::current_exe().ok()?;
     for ancestor in exe.ancestors() {
+        let candidate = ancestor.join(&exe_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
         for profile in ["debug", "release"] {
             let candidate = ancestor.join(repo).join("target").join(profile).join(&exe_name);
             if candidate.is_file() {

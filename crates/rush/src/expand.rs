@@ -3343,7 +3343,9 @@ mod tests {
     fn glob_expands_unquoted_pattern() {
         let mut got = one("ls Cargo.*");
         got.sort();
-        assert_eq!(got, vec!["Cargo.lock", "Cargo.toml", "ls"]);
+        // No Cargo.lock in this crate's own directory: this workspace uses
+        // one shared lock at the repo root instead of a per-crate one.
+        assert_eq!(got, vec!["Cargo.toml", "ls"]);
     }
 
     #[test]

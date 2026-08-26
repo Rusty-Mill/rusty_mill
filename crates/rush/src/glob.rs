@@ -578,10 +578,12 @@ mod tests {
 
     #[test]
     fn glob_against_known_files() {
-        // Run from the crate root, these files are stable fixtures.
+        // Run from the crate root, these files are stable fixtures. No
+        // Cargo.lock here: this workspace uses one shared lock at the repo
+        // root instead of a per-crate one.
         let mut m = glob("Cargo.*");
         m.sort();
-        assert_eq!(m, vec!["Cargo.lock", "Cargo.toml"]);
+        assert_eq!(m, vec!["Cargo.toml"]);
 
         assert_eq!(glob("src/lexer.rs"), vec!["src/lexer.rs"]);
         assert!(glob("src/*.rs").contains(&"src/glob.rs".to_string()));

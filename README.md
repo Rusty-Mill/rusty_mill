@@ -1,6 +1,6 @@
 # rusty_mill
 
-The Rusty Mill monorepo: a Cargo workspace consolidating six previously
+The Rusty Mill monorepo: a Cargo workspace consolidating thirteen previously
 standalone `baileyrd/*` crates into one repository, one build, and one CI
 pipeline. Each crate keeps its full original commit history, merged in via
 `git subtree` under `crates/`.
@@ -16,6 +16,13 @@ pipeline. Each crate keeps its full original commit history, merged in via
 | [`rusty_font`](crates/rusty_font) | `crates/rusty_font` | `no_std` TrueType/OpenType parser and glyph rasterizer |
 | [`rusty_regx`](crates/rusty_regx) | `crates/rusty_regx` | Zero-dependency, linear-time POSIX ERE regex engine |
 | [`rusty_win32`](crates/rusty_win32) | `crates/rusty_win32` | Minimal-dependency Win32 API wrapper (leaf crate) |
+| [`rush`](crates/rush) | `crates/rush` | A small, bash-compatible shell |
+| [`rusty_lines`](crates/rusty_lines) | `crates/rusty_lines` | Hand-rolled readline alternative (emacs/vi keymaps, history, completion hooks) |
+| [`mill-term`](crates/mill-term) | `crates/mill-term` | Integrated terminal + environment launcher hosting `rush` inside `rusty_term` |
+| [`rpath`](crates/rpath) | `crates/rpath` | Path translation/normalization for MSYS2/Git Bash/POSIX ↔ Windows |
+| [`rusty_git`](crates/rusty_git) | `crates/rusty_git` | Pure-Rust Git object model, index, refs, and `rgit` CLI |
+| [`rusty_diff`](crates/rusty_diff) | `crates/rusty_diff` | Myers/Patience diff algorithms, unified diff formatting, patch application |
+| [`rusty_compress`](crates/rusty_compress) | `crates/rusty_compress` | Sans-IO DEFLATE/Gzip/Zlib/LZMA stream compression |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -35,14 +42,24 @@ packages a Linux build needs. `rusty_win32` and parts of `rusty_gui`/
 `rusty_gpu` are Windows-only (`cfg(windows)`-gated) and are exercised by
 the workflow's `windows-latest` matrix leg.
 
+`mill-term`'s own test suite has two known, environment-dependent failures
+in this monorepo: `finds_real_sibling_binaries_built_earlier_this_session`
+still expects an `rsed`/`rawk` binary from `rusty_text`, a crate that isn't
+part of this monorepo (or migrated anywhere yet); and
+`augmented_path_prepends_tool_directories_and_keeps_existing_path` hardcodes
+a Windows-style path and only ever passed on a Windows runner. Neither is
+new — both predate this merge.
+
 ## How the crates relate
 
-Dependencies between these six crates are wired as workspace `path`
+Dependencies between these thirteen crates are wired as workspace `path`
 dependencies now that they live in one repo. Dependencies on crates
 **outside** this set — `rusty_simd`, `rusty_std`, `rusty_wire`,
 `rusty_libc`, `rusty_lsp` — remain pinned `git` dependencies with an
 explicit `rev`, unchanged by this merge; those crates aren't part of this
-monorepo.
+monorepo. `mill-term` also still looks for `rusty_text` (`rsed`/`rawk`) as
+an external sibling checkout — not a Cargo dependency, just a `PATH`
+lookup — since that crate hasn't been migrated here.
 
 `rusty_term`'s `gui`/`gui-gpu` backends onto `rusty_gui`/`rusty_gpu` are
 currently disabled/unused pending a fix tracked upstream at
@@ -56,12 +73,19 @@ These crates originated as standalone repos under `baileyrd`:
 [`rusty_gpu`](https://github.com/baileyrd/rusty_gpu),
 [`rusty_gui`](https://github.com/baileyrd/rusty_gui),
 [`rusty_font`](https://github.com/baileyrd/rusty_font),
-[`rusty_regx`](https://github.com/baileyrd/rusty_regx), and
-[`rusty_win32`](https://github.com/baileyrd/rusty_win32). Their full commit
-history, issues, and PRs remain on those repos for reference; only the code
-history was merged here.
+[`rusty_regx`](https://github.com/baileyrd/rusty_regx),
+[`rusty_win32`](https://github.com/baileyrd/rusty_win32),
+[`rush`](https://github.com/baileyrd/rush),
+[`rusty_lines`](https://github.com/baileyrd/rusty_lines),
+[`mill-term`](https://github.com/baileyrd/mill-term),
+[`rpath`](https://github.com/baileyrd/rpath),
+[`rusty_git`](https://github.com/baileyrd/rusty_git),
+[`rusty_diff`](https://github.com/baileyrd/rusty_diff), and
+[`rusty_compress`](https://github.com/baileyrd/rusty_compress). Their full
+commit history, issues, and PRs remain on those repos for reference; only
+the code history was merged here.
 
-Known external consumers pinning these crates via `git` (not yet updated to
-point at this monorepo): `rush` (`rusty_regx`, `rusty_win32`), `rusty_lines`
-(`rusty_win32`), and `mill-term` (`rusty_term`, via a path dependency
-assuming a sibling checkout).
+Known external consumers still pinning the first six crates via `git`+rev
+(not yet updated to point at this monorepo): `rush`, `rusty_lines`, and
+`mill-term` — now merged into this monorepo themselves, and their own
+`Cargo.toml`s already updated to use in-workspace path dependencies instead.
