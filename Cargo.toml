@@ -9,8 +9,11 @@ description = "Integrated terminal and environment launcher for Rusty Mill (MSYS
 rpath = { path = "../rpath" }
 # The actual terminal host: mill-term drives rusty_term::runtime::run
 # directly (not by shelling out to its binary) to render a real PTY-backed
-# session for the child `rush` process.
-rusty_term = { path = "../rusty_term" }
+# session for the child `rush` process. rusty_term moved into the Rusty
+# Mill monorepo (github.com/Rusty-Mill/rusty_mill, crates/rusty_term) and
+# is pinned by rev like the rest of this repo's git dependencies, since a
+# sibling checkout of the old standalone repo no longer exists.
+rusty_term = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "f560da16485c4d118df72a01a90893d19cce35e3" }
 # Real usage: Repository::open/current_branch/status power the startup
 # banner's git-status line. rusty_text (rgit's sibling text-processing
 # crate) is intentionally NOT a Cargo dependency here -- there's no
