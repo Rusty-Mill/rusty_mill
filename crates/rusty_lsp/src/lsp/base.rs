@@ -148,7 +148,7 @@ impl Uri {
             } else {
                 decoded.replace('/', "\\")
             };
-            return Some(PathBuf::from(decoded));
+            Some(PathBuf::from(decoded))
         }
         #[cfg(not(windows))]
         Some(PathBuf::from(decoded))
