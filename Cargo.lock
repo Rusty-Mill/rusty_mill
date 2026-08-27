@@ -1132,6 +1132,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "deranged"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2578,6 +2584,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-conv"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
+
+[[package]]
 name = "num-integer"
 version = "0.1.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3021,6 +3033,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3150,6 +3172,14 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform"
 version = "0.27.0"
 source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
@@ -3158,11 +3188,29 @@ dependencies = [
 
 [[package]]
 name = "platform-bsd"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "libc",
+ "platform 0.22.1",
+]
+
+[[package]]
+name = "platform-bsd"
 version = "0.27.0"
 source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "libc",
- "platform",
+ "platform 0.27.0",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "libc",
+ "platform 0.22.1",
 ]
 
 [[package]]
@@ -3171,7 +3219,17 @@ version = "0.27.0"
 source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "libc",
- "platform",
+ "platform 0.27.0",
+]
+
+[[package]]
+name = "platform-windows"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "platform 0.22.1",
+ "winargv 0.1.0 (git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d)",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3179,8 +3237,8 @@ name = "platform-windows"
 version = "0.27.0"
 source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
- "platform",
- "winargv",
+ "platform 0.27.0",
+ "winargv 0.1.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
  "windows-sys 0.59.0",
 ]
 
@@ -3246,6 +3304,12 @@ checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
  "zerovec",
 ]
+
+[[package]]
+name = "powerfmt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
@@ -3540,6 +3604,19 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
 ]
 
 [[package]]
@@ -4042,6 +4119,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_tls"
+version = "0.10.1"
+dependencies = [
+ "platform 0.22.1",
+ "platform-bsd 0.22.1",
+ "platform-linux 0.22.1",
+ "platform-windows 0.22.1",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rusty_tokio",
+ "time",
+]
+
+[[package]]
 name = "rusty_tokio"
 version = "0.2.0"
 dependencies = [
@@ -4050,10 +4142,10 @@ dependencies = [
  "futures-io",
  "io-uring",
  "libc",
- "platform",
- "platform-bsd",
- "platform-linux",
- "platform-windows",
+ "platform 0.27.0",
+ "platform-bsd 0.27.0",
+ "platform-linux 0.27.0",
+ "platform-windows 0.27.0",
  "rusty_std 0.1.0 (git+https://github.com/baileyrd/rusty_std?rev=3ab2361e4b8bc873ecd8404178cac7288fbff2b7)",
  "rusty_tokio-macros",
  "tracing",
@@ -4820,6 +4912,25 @@ checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "time"
+version = "0.3.55"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
+dependencies = [
+ "deranged",
+ "num-conv",
+ "powerfmt",
+ "serde_core",
+ "time-core",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "tiny-skia"
@@ -5655,9 +5766,17 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "winargv"
 version = "0.1.0"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "platform 0.22.1",
+]
+
+[[package]]
+name = "winargv"
+version = "0.1.0"
 source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
- "platform",
+ "platform 0.27.0",
 ]
 
 [[package]]
@@ -6227,6 +6346,15 @@ name = "xxhash-rust"
 version = "0.8.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"

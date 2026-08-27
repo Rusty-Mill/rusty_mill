@@ -40,7 +40,7 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d9
 # rusty_rdp's own pinning convention for its `platform` dependency
 # (rustils' docs/versioning.md §3: a bare SHA carries the same guarantee
 # as a tag).
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "6d3bb05a45a393e4cf902013b05189dd168f6106", optional = true }
+rusty_tokio = { path = "../rusty_tokio", version = "0.2.0", optional = true }
 # The AEAD primitives under the hand-rolled record layer (see the
 # `handrolled-engine` feature, and docs/adr/0002-*.md §6). The engine
 # hand-rolls the *protocol*; AES-GCM and ChaCha20-Poly1305 stay `ring`,

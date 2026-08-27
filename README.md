@@ -37,6 +37,7 @@ have landed so far.
 | [`rusty_rusqlite`](crates/rusty_rusqlite) | `crates/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
 | [`rusty_libc`](crates/rusty_libc) | `crates/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
 | [`rusty_acp`](crates/rusty_acp) | `crates/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
+| [`rusty_tls`](crates/rusty_tls) | `crates/rusty_tls` | A `rustls`-based TLS library, with an optional `rusty_tokio`-backed async stream and an experimental hand-rolled record-layer engine |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -106,6 +107,14 @@ excluded from this workspace the same way.
 repo (nothing here depends on it, and its own dependencies are all
 crates.io crates, not sibling `baileyrd/*` repos), so nothing needed
 swapping.
+
+`rusty_tls` had an optional (behind its `rusty-tokio` feature) pinned
+`git` dependency on `rusty_tokio`, 27 commits behind what this repo's
+`crates/rusty_tokio` had already reached — switched to a workspace `path`
+dependency, same as `rusty_libc`'s three first-wave consumers. Its
+`crates/rusty_tls/fuzz` is the same standalone-`[workspace]` shape as
+`rusty_libc/bench`/`rusty_lines/bench` (needs nightly for libFuzzer
+instrumentation) — excluded from this workspace the same way.
 
 ## History
 
