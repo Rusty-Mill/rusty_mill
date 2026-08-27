@@ -20,6 +20,7 @@ members = [
     "crates/rusty_tokio",
     "crates/rusty_tokio/rusty_tokio-macros",
     "crates/rusty_rusqlite",
+    "crates/rusty_libc",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -27,4 +28,12 @@ members = [
 # (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
 # own, run only via `cd crates/rusty_lines/bench && cargo run --release` —
 # excluded so it doesn't try to join this workspace.
-exclude = ["crates/rusty_term/fuzz", "crates/rush/fuzz", "crates/rusty_lines/bench"]
+# crates/rusty_libc/bench is the same shape: its own standalone `[workspace]`
+# comparing rusty_libc against the `libc` crate, deliberately outside the
+# library's own zero-dependency build.
+exclude = [
+    "crates/rusty_term/fuzz",
+    "crates/rush/fuzz",
+    "crates/rusty_lines/bench",
+    "crates/rusty_libc/bench",
+]

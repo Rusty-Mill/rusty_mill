@@ -21,7 +21,7 @@ rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc4
 rusty_win32 = { path = "../rusty_win32", version = "0.1.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "73bf01bf20dc8de55a583cbd5719ad829076ccca" }
+rusty_libc = { path = "../rusty_libc", version = "0.0.1" }
 
 [features]
 default = []

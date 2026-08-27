@@ -35,6 +35,7 @@ have landed so far.
 | [`rusty_tokio`](crates/rusty_tokio) | `crates/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
 | [`rusty_tokio-macros`](crates/rusty_tokio/rusty_tokio-macros) | `crates/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
 | [`rusty_rusqlite`](crates/rusty_rusqlite) | `crates/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
+| [`rusty_libc`](crates/rusty_libc) | `crates/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -65,9 +66,11 @@ to this merge.
 Dependencies between these fourteen crates are wired as workspace `path`
 dependencies now that they live in one repo. Dependencies on crates
 **outside** this set — `rusty_simd`, `rusty_std`, `rusty_wire`,
-`rusty_libc`, `rusty_lsp` — remain pinned `git` dependencies with an
-explicit `rev`, unchanged by this merge; those crates aren't part of this
-monorepo. `mill-term` locates `rusty_git`/`rusty_text`'s `rgit`/`rsed`/
+`rusty_lsp` — remain pinned `git` dependencies with an explicit `rev`,
+unchanged by this merge; those crates aren't part of this monorepo (except
+`rusty_libc`, which the second wave below brings in, at which point its
+three in-set consumers switched to a path dependency on it too).
+`mill-term` locates `rusty_git`/`rusty_text`'s `rgit`/`rsed`/
 `rawk` binaries via a `PATH`/shared-`target/`-dir lookup rather than a
 Cargo library dependency — it shells out to them, not their APIs — so that
 relationship stays a build-artifact lookup even though all three now live
@@ -88,6 +91,15 @@ dependencies (from `baileyrd/rusty_std` and `baileyrd/rustils`) stay pinned
 `rusty_rusqlite` has no dependencies at all (`[dependencies]` is empty in
 its own manifest) and nothing in this repo depends on it yet, so nothing
 needed swapping there either.
+
+`rusty_libc` is different: it was already a Linux-only pinned `git`
+dependency of three first-wave crates (`rusty_lines`, `rusty_gui`, `rush`),
+all pinned to the exact commit this merge brought in — those three now use
+a workspace `path` dependency on `crates/rusty_libc` instead. Its own
+`crates/rusty_libc/bench` is a standalone benchmark against the real
+`libc` crate, deliberately outside the library's own zero-dependency
+build (its own `[workspace]` table, same shape as `rusty_lines/bench`) —
+excluded from this workspace the same way.
 
 ## History
 

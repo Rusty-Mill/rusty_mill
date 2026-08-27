@@ -31,7 +31,7 @@ rpath = { path = "../rpath", version = "0.1.0" }
 
 # Linux: rusty_libc is the default backend; libc only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "73bf01bf20dc8de55a583cbd5719ad829076ccca", optional = true }
+rusty_libc = { path = "../rusty_libc", version = "0.0.1", optional = true }
 libc = { version = "0.2", optional = true }
 
 # Other Unix (macOS/BSD): the libc backend is the only option (rusty_libc is
