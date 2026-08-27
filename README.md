@@ -1,9 +1,16 @@
 # rusty_mill
 
-The Rusty Mill monorepo: a Cargo workspace consolidating fourteen previously
+The Rusty Mill monorepo: a Cargo workspace consolidating previously
 standalone `baileyrd/*` crates into one repository, one build, and one CI
 pipeline. Each crate keeps its full original commit history, merged in via
 `git subtree` under `crates/`.
+
+A first wave merged fourteen crates (below the `rusty_term` row through
+`rusty_text`). A second wave, in progress, is merging fourteen more —
+`rusty_tokio`, `rusty_rusqlite`, `rusty_libc`, `rusty_acp`, `rusty_tls`,
+`rusty_serde`, `rusty_lsp`, `rusty_a2a`, `rusty_mcp`, `rusty_stream`,
+`rusty_url`, `rusty_http`, `rusty_json`, and `rusty_oauth` — one crate per
+pull request; this row set reflects whichever of those have landed so far.
 
 ## Crates
 
@@ -24,6 +31,8 @@ pipeline. Each crate keeps its full original commit history, merged in via
 | [`rusty_diff`](crates/rusty_diff) | `crates/rusty_diff` | Myers/Patience diff algorithms, unified diff formatting, patch application |
 | [`rusty_compress`](crates/rusty_compress) | `crates/rusty_compress` | Sans-IO DEFLATE/Gzip/Zlib/LZMA stream compression |
 | [`rusty_text`](crates/rusty_text) | `crates/rusty_text` | Pure-Rust sed (`rsed`) and awk (`rawk`) engines |
+| [`rusty_tokio`](crates/rusty_tokio) | `crates/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
+| [`rusty_tokio-macros`](crates/rusty_tokio/rusty_tokio-macros) | `crates/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -67,6 +76,13 @@ currently disabled/unused pending a fix tracked upstream at
 [`rusty_gui#9`](https://github.com/baileyrd/rusty_gui/issues/9) — not
 addressed by this migration.
 
+`rusty_tokio` doesn't depend on, or get depended on by, any of the other
+crates in this repo, so it needed no path-dependency swap. Its own
+`rusty_std` and `platform`/`platform-linux`/`platform-bsd`/`platform-windows`
+dependencies (from `baileyrd/rusty_std` and `baileyrd/rustils`) stay pinned
+`git` dependencies — those crates are outside this monorepo's scope, same as
+`rusty_simd`/`rusty_wire` above.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -86,3 +102,20 @@ These crates originated as standalone repos under `baileyrd`:
 [`rusty_text`](https://github.com/baileyrd/rusty_text). Their full commit
 history, issues, and PRs remain on those repos for reference; only the code
 history was merged here.
+
+The second wave, merging in the same way, adds:
+[`rusty_tokio`](https://github.com/baileyrd/rusty_tokio) (plus its nested
+`rusty_tokio-macros` crate), [`rusty_rusqlite`](https://github.com/baileyrd/rusty_rusqlite),
+[`rusty_libc`](https://github.com/baileyrd/rusty_libc),
+[`rusty_acp`](https://github.com/baileyrd/rusty_acp),
+[`rusty_tls`](https://github.com/baileyrd/rusty_tls),
+[`rusty_serde`](https://github.com/baileyrd/rusty_serde),
+[`rusty_lsp`](https://github.com/baileyrd/rusty_lsp),
+[`rusty_a2a`](https://github.com/baileyrd/rusty_a2a),
+[`rusty_mcp`](https://github.com/baileyrd/rusty_mcp),
+[`rusty_stream`](https://github.com/baileyrd/rusty_stream),
+[`rusty_url`](https://github.com/baileyrd/rusty_url),
+[`rusty_http`](https://github.com/baileyrd/rusty_http),
+[`rusty_json`](https://github.com/baileyrd/rusty_json), and
+[`rusty_oauth`](https://github.com/baileyrd/rusty_oauth) — merged one at a
+time, so the Crates table above only lists the ones already landed.

@@ -1290,6 +1290,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-uring"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "595a0399f411a508feb2ec1e970a4a30c249351e30208960d58298de8660b0e5"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+]
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2104,6 +2114,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "platform"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform-bsd"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
+dependencies = [
+ "libc",
+ "platform",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
+dependencies = [
+ "libc",
+ "platform",
+]
+
+[[package]]
+name = "platform-windows"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
+dependencies = [
+ "platform",
+ "winargv",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "plotters"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2382,7 +2428,7 @@ name = "rusty_font"
 version = "0.1.0"
 dependencies = [
  "rusty_simd",
- "rusty_std",
+ "rusty_std 0.1.0 (git+https://github.com/baileyrd/rusty_std?rev=99135f32afc48e868d3e17b6e234db4162e1c758)",
  "rusty_wire",
 ]
 
@@ -2403,7 +2449,7 @@ dependencies = [
  "rusty_font",
  "rusty_gui",
  "rusty_simd",
- "rusty_std",
+ "rusty_std 0.1.0 (git+https://github.com/baileyrd/rusty_std?rev=99135f32afc48e868d3e17b6e234db4162e1c758)",
  "rusty_win32 0.1.0",
 ]
 
@@ -2412,7 +2458,7 @@ name = "rusty_gui"
 version = "0.1.0"
 dependencies = [
  "rusty_libc",
- "rusty_std",
+ "rusty_std 0.1.0 (git+https://github.com/baileyrd/rusty_std?rev=99135f32afc48e868d3e17b6e234db4162e1c758)",
  "rusty_win32 0.1.0",
  "rusty_wire",
 ]
@@ -2457,6 +2503,15 @@ version = "0.1.0"
 name = "rusty_simd"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264#38d3fae033d716d8616ef37f087004816d055264"
+
+[[package]]
+name = "rusty_std"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_std?rev=3ab2361e4b8bc873ecd8404178cac7288fbff2b7#3ab2361e4b8bc873ecd8404178cac7288fbff2b7"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=a128d758c7c5683b908a48eb84d0b0e4308fc586)",
+]
 
 [[package]]
 name = "rusty_std"
@@ -2509,6 +2564,34 @@ version = "0.1.0"
 dependencies = [
  "rpath",
  "rusty_regx",
+]
+
+[[package]]
+name = "rusty_tokio"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "crossbeam-deque",
+ "futures-io",
+ "io-uring",
+ "libc",
+ "platform",
+ "platform-bsd",
+ "platform-linux",
+ "platform-windows",
+ "rusty_std 0.1.0 (git+https://github.com/baileyrd/rusty_std?rev=3ab2361e4b8bc873ecd8404178cac7288fbff2b7)",
+ "rusty_tokio-macros",
+ "tracing",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rusty_tokio-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3421,6 +3504,14 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "winargv"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
+dependencies = [
+ "platform",
+]
 
 [[package]]
 name = "windows"
