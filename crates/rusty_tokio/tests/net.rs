@@ -536,7 +536,19 @@ fn udp_tclass_v6_set_and_read_back() {
             eprintln!("skipping: no IPv6 support in this environment");
             return;
         };
-        socket.set_tclass_v6(0x20).unwrap();
+        // Windows defines the IPV6_TCLASS constant but WSAENOPROTOOPT
+        // (raw OS error 10042) on any get/setsockopt call using it --
+        // unlike Linux, Windows only exposes the IPv6 traffic class
+        // per-packet via WSASendMsg ancillary data, not as a persistent
+        // socket option. Same "environment limitation this test isn't
+        // meant to exercise" skip as the no-IPv6-stack case above.
+        if let Err(e) = socket.set_tclass_v6(0x20) {
+            if cfg!(windows) && e.raw_os_error() == Some(10042) {
+                eprintln!("skipping: IPV6_TCLASS is not a supported sockopt on Windows");
+                return;
+            }
+            panic!("set_tclass_v6 failed: {e}");
+        }
         assert_eq!(socket.tclass_v6().unwrap(), 0x20);
     });
 }
