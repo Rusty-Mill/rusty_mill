@@ -372,10 +372,9 @@ fn complete_variable(line: &str, pos: usize) -> Option<(usize, Vec<Candidate>)> 
     let word = &line[start..pos];
     let (prefix, braced) = if let Some(rest) = word.strip_prefix("${") {
         (rest, true)
-    } else if let Some(rest) = word.strip_prefix('$') {
-        (rest, false)
     } else {
-        return None;
+        let rest = word.strip_prefix('$')?;
+        (rest, false)
     };
     // A real variable name is just `[A-Za-z0-9_]*` — anything else in what's
     // typed so far (e.g. `$(`, a already-closed `${...}`) means this isn't a
@@ -771,10 +770,10 @@ pub mod programmable {
             let expanded = crate::expand::expand_dollars(wl).unwrap_or_else(|_| wl.clone());
             out.extend(expanded.split_whitespace().map(str::to_string));
         }
-        if let Some(cmd) = &spec.command {
-            if let Ok(output) = run_capture(cmd) {
-                out.extend(output.lines().map(str::to_string));
-            }
+        if let Some(cmd) = &spec.command
+            && let Ok(output) = run_capture(cmd)
+        {
+            out.extend(output.lines().map(str::to_string));
         }
         if let Some(func) = &spec.function {
             out.extend(run_completion_function(func, words, cword, line));
