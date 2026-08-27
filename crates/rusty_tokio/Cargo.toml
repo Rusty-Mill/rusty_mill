@@ -4,14 +4,7 @@ version = "0.2.0"
 edition = "2021"
 description = "A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives."
 license = "MIT"
-
-# `rusty_tokio-macros` (the `#[main]`/`#[test]` proc-macro attributes)
-# has to be its own crate -- a `proc-macro = true` crate can't export
-# anything else alongside its proc-macros -- so this package's own
-# manifest doubles as the workspace root, mirroring tokio's own
-# `tokio`/`tokio-macros` split.
-[workspace]
-members = ["rusty_tokio-macros"]
+repository = "https://github.com/baileyrd/rusty_tokio"
 
 [dependencies]
 # See "Why a separate crate" in rusty_tokio-macros' own docs.
