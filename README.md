@@ -42,6 +42,7 @@ have landed so far.
 | [`rusty_serde_derive`](crates/rusty_serde/rusty_serde_derive) | `crates/rusty_serde/rusty_serde_derive` | `rusty_serde`'s `#[derive(Serialize, Deserialize)]` proc-macro, hand-written directly on `proc_macro` (no `syn`/`quote`) |
 | [`rusty_serde_erased`](crates/rusty_serde/rusty_serde_erased) | `crates/rusty_serde/rusty_serde_erased` | Minimal unsafe primitive erasing a serializer/deserializer's associated `Ok` type across an object-safe boundary — internal to `rusty_serde` |
 | [`rusty_lsp`](crates/rusty_lsp) | `crates/rusty_lsp` | Small, reusable async Language Server Protocol framework: own the protocol plumbing, implement one trait for your language |
+| [`rusty_a2a`](crates/rusty_a2a) | `crates/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -137,6 +138,11 @@ back to a `git` dependency at the commit this merge found at
 crate uses before its own merge lands — to be swapped to a `path`
 dependency once `crates/rusty_json` exists. Its own `crates/rusty_lsp/fuzz`
 is the same standalone-`[workspace]` shape excluded elsewhere in this file.
+
+`rusty_a2a` has no dependency relationship with anything already in this
+repo — its `client`/`server`/`grpc`/`signing` features pull in only
+crates.io crates (`reqwest`, `axum`, `tonic`, `p256`, ...), no sibling
+`baileyrd/*` repos — so nothing needed swapping.
 
 ## History
 
