@@ -21,6 +21,7 @@ members = [
     "crates/rusty_tokio/rusty_tokio-macros",
     "crates/rusty_rusqlite",
     "crates/rusty_libc",
+    "crates/rusty_acp",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.

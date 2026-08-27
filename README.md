@@ -36,6 +36,7 @@ have landed so far.
 | [`rusty_tokio-macros`](crates/rusty_tokio/rusty_tokio-macros) | `crates/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
 | [`rusty_rusqlite`](crates/rusty_rusqlite) | `crates/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
 | [`rusty_libc`](crates/rusty_libc) | `crates/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
+| [`rusty_acp`](crates/rusty_acp) | `crates/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -100,6 +101,11 @@ a workspace `path` dependency on `crates/rusty_libc` instead. Its own
 `libc` crate, deliberately outside the library's own zero-dependency
 build (its own `[workspace]` table, same shape as `rusty_lines/bench`) —
 excluded from this workspace the same way.
+
+`rusty_acp` has no dependency relationship with any crate already in this
+repo (nothing here depends on it, and its own dependencies are all
+crates.io crates, not sibling `baileyrd/*` repos), so nothing needed
+swapping.
 
 ## History
 
