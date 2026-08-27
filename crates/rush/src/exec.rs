@@ -3207,14 +3207,14 @@ fn open_write(file: &str, mode: crate::parser::RedirMode) -> Result<File, String
 /// keeps the thread out of the Linux build entirely.
 #[cfg(not(target_os = "linux"))]
 pub fn feed_heredoc(child: &mut Child, cmd: &Command) {
-    if let Some(body) = &cmd.heredoc {
-        if let Some(mut stdin) = child.stdin.take() {
-            let body = body.clone();
-            std::thread::spawn(move || {
-                use std::io::Write;
-                let _ = stdin.write_all(body.as_bytes());
-            });
-        }
+    if let Some(body) = &cmd.heredoc
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        let body = body.clone();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(body.as_bytes());
+        });
     }
 }
 
