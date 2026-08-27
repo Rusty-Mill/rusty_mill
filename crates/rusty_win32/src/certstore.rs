@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
+use crate::wide::to_wide;
 
 // CERT_CONTEXT: `size_of` 40, `align_of` 8 on x86_64 — field order and
 // types transcribed from the Windows metadata (`windows-sys`'
@@ -73,10 +74,6 @@ unsafe extern "system" {
     fn CertOpenSystemStoreW(hprov: usize, subsystem_protocol: *const u16) -> RawHandle;
     fn CertEnumCertificatesInStore(store: RawHandle, prev: *const CertContext) -> *mut CertContext;
     fn CertCloseStore(store: RawHandle, flags: u32) -> i32;
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 /// An open system certificate store, closed on drop.

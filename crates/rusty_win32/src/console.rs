@@ -464,7 +464,7 @@ pub fn title() -> Result<alloc::string::String, Win32Error> {
 /// in the window title) that this crate previously had no primitive for at
 /// all.
 pub fn set_title(title: &str) -> Result<(), Win32Error> {
-    let wide: alloc::vec::Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: alloc::vec::Vec<u16> = crate::wide::to_wide(title);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { SetConsoleTitleW(wide.as_ptr()) };
     if ok == 0 {
@@ -1066,7 +1066,7 @@ mod tests {
     /// redirection question by always naming the *actual* attached
     /// console, whatever the std handles say.
     fn open_console(name: &str) -> Option<RawHandle> {
-        let wide: alloc::vec::Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+        let wide: alloc::vec::Vec<u16> = crate::wide::to_wide(name);
         // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string naming a
         // well-known console pseudo-device; the other arguments are
         // documented-valid constants for opening an existing device for

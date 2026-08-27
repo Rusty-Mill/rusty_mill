@@ -326,7 +326,7 @@ pub fn path_security_info(
     path: &str,
     info: SecurityInfoFlags,
 ) -> Result<PathSecurityInfo, crate::error::Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     let mut owner: *mut core::ffi::c_void = core::ptr::null_mut();
     let mut group: *mut core::ffi::c_void = core::ptr::null_mut();
     let mut dacl: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -377,7 +377,7 @@ pub unsafe fn set_path_security_info(
     path: &str,
     info: &PathSecurityInfo,
 ) -> Result<(), crate::error::Win32Error> {
-    let mut wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut wide: Vec<u16> = crate::wide::to_wide(path);
     let mut security_info: u32 = 0;
     if info.owner.is_some() {
         security_info |= OWNER_SECURITY_INFORMATION;
@@ -816,7 +816,7 @@ pub unsafe fn lookup_account_sid(
 /// [`build_trustee_with_sid`]/[`build_acl`] need, the way `chown` accepts
 /// a username rather than requiring a raw SID.
 pub fn lookup_account_name(name: &str) -> Result<(SidBuf, AccountName), crate::error::Win32Error> {
-    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide_name: Vec<u16> = crate::wide::to_wide(name);
     let mut sid_len: u32 = 0;
     let mut domain_len: u32 = 0;
     let mut sid_name_use: i32 = 0;
@@ -941,7 +941,7 @@ impl Drop for ConvertedSid {
 /// Parse a `S-1-5-...` string SID back into a `PSID` —
 /// `ConvertStringSidToSidW`. The reverse of [`sid_to_string`].
 pub fn string_to_sid(s: &str) -> Result<ConvertedSid, crate::error::Win32Error> {
-    let wide: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(s);
     let mut sid: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string live for the
     // whole call; `sid` is a valid out-pointer.
@@ -1259,7 +1259,7 @@ pub unsafe fn sd_to_string(
 /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. The reverse of
 /// [`sd_to_string`].
 pub fn string_to_sd(s: &str) -> Result<ConvertedSecurityDescriptor, crate::error::Win32Error> {
-    let wide: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(s);
     let mut sd: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string live for the
     // whole call; `sd` is a valid out-pointer.
@@ -1453,10 +1453,7 @@ mod tests {
 
     #[test]
     fn build_trustee_with_name_names_the_given_wide_string() {
-        let mut wide: alloc::vec::Vec<u16> = "Everyone"
-            .encode_utf16()
-            .chain(core::iter::once(0))
-            .collect();
+        let mut wide: alloc::vec::Vec<u16> = crate::wide::to_wide("Everyone");
         let expected_ptr = wide.as_mut_ptr();
 
         // SAFETY: `wide` is a valid, NUL-terminated UTF-16 buffer that

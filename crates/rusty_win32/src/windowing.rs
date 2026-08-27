@@ -151,7 +151,7 @@ unsafe extern "system" {
 /// thread-affinity Win32 itself documents for all windowing calls.
 pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND {
     let class_name: Vec<u16> = "RustyMillWindowClass\0".encode_utf16().collect();
-    let title_utf16: Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
+    let title_utf16: Vec<u16> = crate::wide::to_wide(title);
 
     unsafe {
         let h_instance = GetModuleHandleW(core::ptr::null());

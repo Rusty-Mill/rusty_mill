@@ -421,7 +421,7 @@ pub struct FileInfoByHandle {
 /// (matching the real call's own documented behavior) if nothing exists at
 /// `path`, rather than this wrapper inventing a distinct "not found" result.
 pub fn stat(path: &str) -> Result<FileInfo, Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     let mut data = Win32FileAttributeData::default();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `data` is a
     // valid, correctly-sized out-pointer matching what
@@ -456,7 +456,7 @@ const INVALID_FILE_SIZE: u32 = 0xFFFF_FFFF;
 /// common case), this equals [`stat`]'s logical `size`; it's meaningfully
 /// smaller only for a file NTFS is actually compressing on disk.
 pub fn compressed_file_size(path: &str) -> Result<u64, Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     let mut size_high: u32 = 0;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `size_high`
     // is a valid out-pointer.
@@ -583,8 +583,8 @@ pub unsafe fn unlock_file(handle: RawHandle, offset: u64, length: u64) -> Result
 /// same choice `CopyFileW`'s own `bFailIfExists` parameter makes — this
 /// crate doesn't decide that policy itself.
 pub fn copy_file(from: &str, to: &str, fail_if_exists: bool) -> Result<(), Win32Error> {
-    let from_wide: Vec<u16> = from.encode_utf16().chain(core::iter::once(0)).collect();
-    let to_wide: Vec<u16> = to.encode_utf16().chain(core::iter::once(0)).collect();
+    let from_wide: Vec<u16> = crate::wide::to_wide(from);
+    let to_wide: Vec<u16> = crate::wide::to_wide(to);
     // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings.
     let ok = unsafe {
         CopyFileW(
@@ -608,8 +608,8 @@ pub fn copy_file(from: &str, to: &str, fail_if_exists: bool) -> Result<(), Win32
 /// `MOVEFILE_COPY_ALLOWED` lets this succeed across volumes (falling back
 /// to a copy-then-delete internally) rather than failing.
 pub fn move_file(from: &str, to: &str, flags: u32) -> Result<(), Win32Error> {
-    let from_wide: Vec<u16> = from.encode_utf16().chain(core::iter::once(0)).collect();
-    let to_wide: Vec<u16> = to.encode_utf16().chain(core::iter::once(0)).collect();
+    let from_wide: Vec<u16> = crate::wide::to_wide(from);
+    let to_wide: Vec<u16> = crate::wide::to_wide(to);
     // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings;
     // `flags` is a plain bitmask, not a pointer.
     let ok = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) };
@@ -625,7 +625,7 @@ pub fn move_file(from: &str, to: &str, flags: u32) -> Result<(), Win32Error> {
 /// own scope (`RemoveDirectoryW`, out of this crate's current scope, is the
 /// directory-removal counterpart).
 pub fn delete_file(path: &str) -> Result<(), Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { DeleteFileW(wide.as_ptr()) };
     if ok == 0 {
@@ -639,7 +639,7 @@ pub fn delete_file(path: &str) -> Result<(), Win32Error> {
 /// an `mkdir` builtin. Only creates the final path component (unlike `mkdir
 /// -p`); every parent directory must already exist.
 pub fn create_directory(path: &str) -> Result<(), Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
     // `security_attributes = NULL` requests default (non-inheritable)
     // security attributes, a documented valid input.
@@ -656,7 +656,7 @@ pub fn create_directory(path: &str) -> Result<(), Win32Error> {
 /// refuses to remove one with any contents (no `rm -rf`-style recursive
 /// behavior here).
 pub fn remove_directory(path: &str) -> Result<(), Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { RemoveDirectoryW(wide.as_ptr()) };
     if ok == 0 {
@@ -682,14 +682,8 @@ pub fn create_symlink(
     target_path: &str,
     target_is_directory: bool,
 ) -> Result<(), Win32Error> {
-    let link_wide: Vec<u16> = link_path
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
-    let target_wide: Vec<u16> = target_path
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
+    let link_wide: Vec<u16> = crate::wide::to_wide(link_path);
+    let target_wide: Vec<u16> = crate::wide::to_wide(target_path);
     let flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
         | if target_is_directory {
             SYMBOLIC_LINK_FLAG_DIRECTORY
@@ -715,14 +709,8 @@ pub fn create_symlink(
 /// documented `CreateHardLinkW` restriction, not something this wrapper
 /// checks itself.
 pub fn create_hard_link(link_path: &str, target_path: &str) -> Result<(), Win32Error> {
-    let link_wide: Vec<u16> = link_path
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
-    let target_wide: Vec<u16> = target_path
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
+    let link_wide: Vec<u16> = crate::wide::to_wide(link_path);
+    let target_wide: Vec<u16> = crate::wide::to_wide(target_path);
     // SAFETY: `link_wide`/`target_wide` are valid, NUL-terminated UTF-16
     // strings; `security_attributes = NULL` requests default security
     // attributes, a documented valid input.
@@ -787,7 +775,7 @@ pub unsafe fn final_path(handle: RawHandle) -> Result<alloc::string::String, Win
 /// what Unix `readlink` reports, since it's the same string
 /// [`create_symlink`]'s own `target_path` argument produces.
 pub fn readlink(path: &str) -> Result<alloc::string::String, Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
     // `desired_access = 0` (query-only, no read/write) and
     // `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` are
@@ -949,7 +937,7 @@ impl Drop for ReadDir {
 /// every entry in a directory, matching the standard idiom every Win32
 /// directory-listing example uses.
 pub fn read_dir(pattern: &str) -> Result<ReadDir, Win32Error> {
-    let wide: Vec<u16> = pattern.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(pattern);
     let mut data = FindDataW::default();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `data` is a
     // valid, correctly-sized out-pointer.
@@ -991,7 +979,7 @@ fn create_file_impl(
     desired_access: u32,
     creation_disposition: u32,
 ) -> Result<RawHandle, Win32Error> {
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(path);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; sharing both
     // read and write with other opens matches Unix `open`'s default (no
     // exclusive lock); `security_attributes = NULL` and

@@ -11,6 +11,7 @@
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
+use crate::wide::to_wide;
 
 extern crate alloc;
 use alloc::string::String;
@@ -89,10 +90,6 @@ unsafe extern "system" {
         volume_path_name: *mut u16,
         buffer_length: u32,
     ) -> i32;
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 fn from_wide(buf: &[u16]) -> String {
