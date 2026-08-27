@@ -173,66 +173,13 @@ pub(crate) fn close_frame(code: u16) -> Vec<u8> {
 }
 
 /// The `Sec-WebSocket-Accept` value for a client's `Sec-WebSocket-Key`
-/// (RFC 6455 §4.2.2 step 5.4): base64(SHA-1(key + GUID)).
+/// (RFC 6455 §4.2.2 step 5.4): base64(SHA-1(key + GUID)). SHA-1 comes from
+/// the sibling `rusty_sha1` crate, shared with `rusty_git`'s object
+/// hashing rather than a second hand-rolled copy.
 pub(crate) fn accept_key(client_key: &str) -> String {
     let mut input = client_key.trim().as_bytes().to_vec();
     input.extend_from_slice(WS_GUID.as_bytes());
-    base64_encode(&sha1(&input))
-}
-
-/// SHA-1 (FIPS 180-1). Broken for collision resistance and fine here: the
-/// WebSocket handshake uses it as a protocol checksum, not for security —
-/// every conforming implementation must compute exactly this.
-pub(crate) fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-    // Pad: 0x80, zeros, 64-bit big-endian bit length, to a 64-byte multiple.
-    let mut msg = data.to_vec();
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    let mut w = [0u32; 80];
-    for chunk in msg.as_chunks::<64>().0 {
-        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for (i, &wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | (!b & d), 0x5A827999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
-                _ => (b ^ c ^ d, 0xCA62C1D6),
-            };
-            let t = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = t;
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-    }
-    let mut out = [0u8; 20];
-    for (i, word) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
+    base64_encode(&rusty_sha1::sha1(&input))
 }
 
 /// Parse the upgrade request's header block (everything through the blank
@@ -293,30 +240,6 @@ pub(crate) fn origin_allowed(origin: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    #[test]
-    fn sha1_matches_fips_vectors() {
-        assert_eq!(
-            hex(&sha1(b"abc")),
-            "a9993e364706816aba3e25717850c26c9cd0d89d"
-        );
-        assert_eq!(hex(&sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(
-            hex(&sha1(
-                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-            )),
-            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
-        );
-        // Two blocks with length in the second: 64 bytes of 'a'.
-        assert_eq!(
-            hex(&sha1(&[b'a'; 64])),
-            "0098ba824b5c16427bd7a1122a5a442a25ec644d"
-        );
-    }
 
     #[test]
     fn accept_key_matches_the_rfc_example() {
