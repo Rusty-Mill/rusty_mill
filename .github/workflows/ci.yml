@@ -64,6 +64,18 @@ jobs:
       - name: Clippy (workspace, all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
+      # walking target/{debug,release} at runtime rather than through a
+      # Cargo dependency (see the root README's "How the crates relate") --
+      # mill-term only has a *library* dependency on rusty_git, so nothing
+      # in the dependency graph forces cargo to finish building rusty_git's
+      # own `rgit` binary before mill-term's test binary starts running
+      # under a plain `cargo test --workspace`. A separate, blocking build
+      # step first guarantees every workspace binary exists on disk before
+      # any test executes (see #12).
+      - name: Build (workspace, all features)
+        run: cargo build --workspace --all-features
+
       - name: Test (workspace, all features)
         run: cargo test --workspace --all-features
 
