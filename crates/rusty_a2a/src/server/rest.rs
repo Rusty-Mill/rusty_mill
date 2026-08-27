@@ -166,19 +166,22 @@ fn rest_ok_cached<T: serde::Serialize>(value: &T, etag: &str, if_none_match: Opt
 /// credentials for `AgentCard.securitySchemes` from `headers` (and
 /// `query`, where the route has a meaningful query string) and enforces
 /// `AgentCard.securityRequirements` (spec Section 4.5) against them.
-/// Returns an error [`Response`] ready to `return` on failure.
+/// Returns an error [`Response`] (boxed: `clippy::result_large_err` --
+/// `axum::http::Response<axum::body::Body>` is well past the lint's size
+/// threshold) ready to `return *err` on failure.
 async fn require_auth(
     engine: &Engine,
     headers: &HeaderMap,
     query: &HashMap<String, String>,
-) -> Result<Option<AuthContext>, Response> {
-    check_version(headers.get("A2A-Version").and_then(|v| v.to_str().ok())).map_err(rest_error)?;
+) -> Result<Option<AuthContext>, Box<Response>> {
+    check_version(headers.get("A2A-Version").and_then(|v| v.to_str().ok()))
+        .map_err(|e| Box::new(rest_error(e)))?;
 
     let declared_extensions =
         parse_extensions_header(headers.get("A2A-Extensions").and_then(|v| v.to_str().ok()));
     engine
         .check_required_extensions(&declared_extensions)
-        .map_err(rest_error)?;
+        .map_err(|e| Box::new(rest_error(e)))?;
 
     let credentials = extract_credentials(
         &engine.card().security_schemes,
@@ -191,7 +194,10 @@ async fn require_auth(
         Some(query),
         engine.mtls_header(),
     );
-    engine.authenticate(&credentials).await.map_err(rest_error)
+    engine
+        .authenticate(&credentials)
+        .await
+        .map_err(|e| Box::new(rest_error(e)))
 }
 
 /// Like [`axum::Json`], but a rejection (malformed JSON, or JSON that
@@ -310,7 +316,7 @@ async fn message_action_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &HashMap::new()).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if tenant.is_some() {
         req.tenant = tenant;
@@ -373,7 +379,7 @@ async fn get_task_or_subscribe_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &raw_query).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match id_and_action.rsplit_once(':') {
         Some((id, "subscribe")) => {
@@ -434,7 +440,7 @@ async fn list_tasks_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &raw_query).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if tenant.is_some() {
         req.tenant = tenant;
@@ -482,7 +488,7 @@ async fn task_action_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &raw_query).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some((id, action)) = id_and_action.rsplit_once(':') else {
         return rest_error(A2aError::InvalidRequest(format!(
@@ -549,7 +555,7 @@ async fn create_push_notification_config_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &HashMap::new()).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     config.task_id = Some(task_id);
     if tenant.is_some() {
@@ -597,7 +603,7 @@ async fn get_push_notification_config_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &raw_query).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let req = GetTaskPushNotificationConfigRequest {
         tenant,
@@ -652,7 +658,7 @@ async fn list_push_notification_configs_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &raw_query).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let req = ListTaskPushNotificationConfigsRequest {
         tenant,
@@ -699,7 +705,7 @@ async fn delete_push_notification_config_impl(
 ) -> Response {
     let auth = match require_auth(&engine, &headers, &raw_query).await {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let req = DeleteTaskPushNotificationConfigRequest {
         tenant,
