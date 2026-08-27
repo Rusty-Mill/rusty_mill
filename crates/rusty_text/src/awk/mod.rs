@@ -35,7 +35,12 @@ impl AwkProgram {
     /// main rules one record at a time, then `END` rules once. `field_sep`
     /// is awk's `FS` (`" "` for the default whitespace-splitting behavior).
     /// Calls `emit` once per output line, in order.
-    pub fn run<'a>(&self, lines: impl Iterator<Item = &'a str>, field_sep: &str, mut emit: impl FnMut(&str)) {
+    pub fn run<'a>(
+        &self,
+        lines: impl Iterator<Item = &'a str>,
+        field_sep: &str,
+        mut emit: impl FnMut(&str),
+    ) {
         let mut interp = Interp::new(field_sep);
         interp.run_begin(&self.program, &mut emit);
         for line in lines {
@@ -101,7 +106,11 @@ mod tests {
 
     #[test]
     fn begin_and_end_blocks_run_exactly_once_each() {
-        let out = run(r#"BEGIN{print "start"} {print NR} END{print "done"}"#, &["a", "b"], " ");
+        let out = run(
+            r#"BEGIN{print "start"} {print NR} END{print "done"}"#,
+            &["a", "b"],
+            " ",
+        );
         assert_eq!(out, vec!["start", "1", "2", "done"]);
     }
 
@@ -131,13 +140,21 @@ mod tests {
 
     #[test]
     fn if_else_statement() {
-        let out = run(r#"{if ($1 > 5) print "big"; else print "small"}"#, &["10", "2"], " ");
+        let out = run(
+            r#"{if ($1 > 5) print "big"; else print "small"}"#,
+            &["10", "2"],
+            " ",
+        );
         assert_eq!(out, vec!["big", "small"]);
     }
 
     #[test]
     fn logical_and_or() {
-        let out = run(r#"$1 > 1 && $1 < 5 {print "in range"}"#, &["0", "3", "10"], " ");
+        let out = run(
+            r#"$1 > 1 && $1 < 5 {print "in range"}"#,
+            &["0", "3", "10"],
+            " ",
+        );
         assert_eq!(out, vec!["in range"]);
     }
 
@@ -159,7 +176,11 @@ mod tests {
 
     #[test]
     fn user_defined_variable_persists_across_records() {
-        let out = run(r#"{total = total + $1} END{print total}"#, &["1", "2", "3"], " ");
+        let out = run(
+            r#"{total = total + $1} END{print total}"#,
+            &["1", "2", "3"],
+            " ",
+        );
         assert_eq!(out, vec!["6"]);
     }
 

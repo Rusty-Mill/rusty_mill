@@ -35,7 +35,11 @@ pub enum Expr {
     Not(Box<Expr>),
     Neg(Box<Expr>),
     /// `expr ~ /re/` (`negate = true` for `!~`).
-    Match { expr: Box<Expr>, pattern: String, negate: bool },
+    Match {
+        expr: Box<Expr>,
+        pattern: String,
+        negate: bool,
+    },
     Assign(LValue, Box<Expr>),
 }
 

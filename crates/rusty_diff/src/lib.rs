@@ -23,7 +23,10 @@ pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> 
         let mut k = -(d as isize);
         while k <= (d as isize) {
             let idx = (k + offset) as usize;
-            let mut x = if k == -(d as isize) || (k != (d as isize) && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize]) {
+            let mut x = if k == -(d as isize)
+                || (k != (d as isize)
+                    && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize])
+            {
                 v[(k + 1 + offset) as usize]
             } else {
                 v[(k - 1 + offset) as usize] + 1
@@ -61,11 +64,12 @@ fn backtrack<T: PartialEq + Clone>(
         let d = d as isize;
         let k = x - y;
 
-        let prev_k = if k == -d || (k != d && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize]) {
-            k + 1
-        } else {
-            k - 1
-        };
+        let prev_k =
+            if k == -d || (k != d && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize]) {
+                k + 1
+            } else {
+                k - 1
+            };
 
         let prev_x = v[(prev_k + offset) as usize];
         let prev_y = prev_x - prev_k;
@@ -92,7 +96,12 @@ fn backtrack<T: PartialEq + Clone>(
 }
 
 /// Formats a unified diff string between two text strings.
-pub fn format_unified_diff(old_name: &str, new_name: &str, old_text: &str, new_text: &str) -> String {
+pub fn format_unified_diff(
+    old_name: &str,
+    new_name: &str,
+    old_text: &str,
+    new_text: &str,
+) -> String {
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
 
@@ -106,7 +115,11 @@ pub fn format_unified_diff(old_name: &str, new_name: &str, old_text: &str, new_t
         return out;
     }
 
-    out.push_str(&format!("@@ -1,{} +1,{} @@\n", old_lines.len(), new_lines.len()));
+    out.push_str(&format!(
+        "@@ -1,{} +1,{} @@\n",
+        old_lines.len(),
+        new_lines.len()
+    ));
 
     for op in ops {
         match op {
@@ -138,14 +151,22 @@ pub fn apply_patch(original: &str, patch: &str) -> Result<String, String> {
             if orig_idx < orig_lines.len() && orig_lines[orig_idx] == rest {
                 orig_idx += 1;
             } else {
-                return Err(format!("Patch mismatch at line {}: expected '{}'", orig_idx + 1, rest));
+                return Err(format!(
+                    "Patch mismatch at line {}: expected '{}'",
+                    orig_idx + 1,
+                    rest
+                ));
             }
         } else if let Some(rest) = line.strip_prefix(' ') {
             if orig_idx < orig_lines.len() && orig_lines[orig_idx] == rest {
                 result_lines.push(rest);
                 orig_idx += 1;
             } else {
-                return Err(format!("Patch mismatch at line {}: expected '{}'", orig_idx + 1, rest));
+                return Err(format!(
+                    "Patch mismatch at line {}: expected '{}'",
+                    orig_idx + 1,
+                    rest
+                ));
             }
         }
     }

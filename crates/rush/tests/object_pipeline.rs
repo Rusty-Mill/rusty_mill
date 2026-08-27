@@ -70,7 +70,10 @@ fn test_object_builtins_ps_obj() {
     let (items, has) = rush::value::take_pipeline_output();
     assert!(has);
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].get_path("name"), Some(Value::String("rush".to_string())));
+    assert_eq!(
+        items[0].get_path("name"),
+        Some(Value::String("rush".to_string()))
+    );
 }
 
 #[test]
@@ -84,7 +87,12 @@ fn test_object_builtins_where_select_sort() {
 
     // Stage 1: where count -gt 3
     rush::value::set_pipeline_input(items);
-    let code = rush::builtins::try_run(&["where".to_string(), "count".to_string(), "-gt".to_string(), "3".to_string()]);
+    let code = rush::builtins::try_run(&[
+        "where".to_string(),
+        "count".to_string(),
+        "-gt".to_string(),
+        "3".to_string(),
+    ]);
     assert_eq!(code, Some(0));
 
     let (filtered, _) = rush::value::take_pipeline_output();
@@ -97,8 +105,14 @@ fn test_object_builtins_where_select_sort() {
 
     let (sorted, _) = rush::value::take_pipeline_output();
     assert_eq!(sorted.len(), 2);
-    assert_eq!(sorted[0].get_path("name"), Some(Value::String("banana".to_string())));
-    assert_eq!(sorted[1].get_path("name"), Some(Value::String("apple".to_string())));
+    assert_eq!(
+        sorted[0].get_path("name"),
+        Some(Value::String("banana".to_string()))
+    );
+    assert_eq!(
+        sorted[1].get_path("name"),
+        Some(Value::String("apple".to_string()))
+    );
 
     // Stage 3: select name
     rush::value::set_pipeline_input(sorted);
@@ -107,6 +121,9 @@ fn test_object_builtins_where_select_sort() {
 
     let (selected, _) = rush::value::take_pipeline_output();
     assert_eq!(selected.len(), 2);
-    assert_eq!(selected[0].get_path("name"), Some(Value::String("banana".to_string())));
+    assert_eq!(
+        selected[0].get_path("name"),
+        Some(Value::String("banana".to_string()))
+    );
     assert_eq!(selected[0].get_path("count"), None);
 }

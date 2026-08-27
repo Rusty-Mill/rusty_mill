@@ -23,7 +23,10 @@ pub use rusty_lines::Candidate;
 
 /// A `Candidate` whose display and replacement are the same name.
 fn plain(name: String) -> Candidate {
-    Candidate { display: name.clone(), replacement: name }
+    Candidate {
+        display: name.clone(),
+        replacement: name,
+    }
 }
 
 /// The completion entry point: candidates for the word at `pos`, plus the
@@ -43,9 +46,13 @@ pub fn complete(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
         let start = word_start(line, pos);
         let word = &line[start..pos];
         let seg_start = segment_start(line, pos);
-        let words: Vec<String> =
-            line[seg_start..pos].split_whitespace().map(str::to_string).collect();
-        let cword = words.len().saturating_sub(if word.is_empty() { 0 } else { 1 });
+        let words: Vec<String> = line[seg_start..pos]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let cword = words
+            .len()
+            .saturating_sub(if word.is_empty() { 0 } else { 1 });
         let mut full_words = words.clone();
         if word.is_empty() {
             full_words.push(String::new());
@@ -111,9 +118,16 @@ fn complete_path(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
                 continue;
             }
             let is_dir = entry.path().is_dir();
-            let display = if is_dir { format!("{name}/") } else { name.clone() };
+            let display = if is_dir {
+                format!("{name}/")
+            } else {
+                name.clone()
+            };
             let replacement = format!("{dir_part}{name}{}", if is_dir { "/" } else { "" });
-            candidates.push(Candidate { display, replacement });
+            candidates.push(Candidate {
+                display,
+                replacement,
+            });
         }
     }
     candidates.sort_by(|a, b| a.display.cmp(&b.display));
@@ -126,9 +140,18 @@ fn complete_path(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
 /// the separate bash-completion project.
 fn complete_directory(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     let (start, candidates) = complete_path(line, pos);
-    let dir_part_end = line[start..pos].rfind('/').map(|i| start + i + 1).unwrap_or(start);
+    let dir_part_end = line[start..pos]
+        .rfind('/')
+        .map(|i| start + i + 1)
+        .unwrap_or(start);
     let _ = dir_part_end;
-    (start, candidates.into_iter().filter(|c| is_directory(&c.replacement)).collect())
+    (
+        start,
+        candidates
+            .into_iter()
+            .filter(|c| is_directory(&c.replacement))
+            .collect(),
+    )
 }
 
 /// Whether `path` (a candidate's replacement text, so relative to the
@@ -192,7 +215,10 @@ pub fn highlight_line(line: &str) -> String {
             }
             '\'' | '"' => {
                 let quote = c;
-                let close = chars[i + 1..].iter().position(|&q| q == quote).map(|p| i + 1 + p);
+                let close = chars[i + 1..]
+                    .iter()
+                    .position(|&q| q == quote)
+                    .map(|p| i + 1 + p);
                 match close {
                     Some(end) => {
                         out.push_str(YELLOW);
@@ -217,7 +243,9 @@ pub fn highlight_line(line: &str) -> String {
                     }
                     end = (end + 1).min(chars.len());
                 } else {
-                    while end < chars.len() && (chars[end] == '_' || chars[end].is_ascii_alphanumeric()) {
+                    while end < chars.len()
+                        && (chars[end] == '_' || chars[end].is_ascii_alphanumeric())
+                    {
                         end += 1;
                     }
                 }
@@ -241,7 +269,10 @@ pub fn highlight_line(line: &str) -> String {
                 let start = i;
                 while i < chars.len()
                     && !chars[i].is_whitespace()
-                    && !matches!(chars[i], '|' | '&' | ';' | '<' | '>' | '(' | ')' | '\'' | '"' | '$' | '#')
+                    && !matches!(
+                        chars[i],
+                        '|' | '&' | ';' | '<' | '>' | '(' | ')' | '\'' | '"' | '$' | '#'
+                    )
                 {
                     i += 1;
                 }
@@ -308,7 +339,9 @@ fn segment_start(line: &str, pos: usize) -> usize {
 /// whitespace of its own.
 fn in_command_position(line: &str, pos: usize) -> bool {
     let seg_start = segment_start(line, pos);
-    !line[seg_start..pos].trim_start().contains(char::is_whitespace)
+    !line[seg_start..pos]
+        .trim_start()
+        .contains(char::is_whitespace)
 }
 
 /// The current segment's own command name (its first word), or `None` on an
@@ -390,8 +423,15 @@ fn complete_variable(line: &str, pos: usize) -> Option<(usize, Vec<Candidate>)> 
     let candidates = names
         .into_iter()
         .map(|n| {
-            let replacement = if braced { format!("${{{n}}}") } else { format!("${n}") };
-            Candidate { display: n, replacement }
+            let replacement = if braced {
+                format!("${{{n}}}")
+            } else {
+                format!("${n}")
+            };
+            Candidate {
+                display: n,
+                replacement,
+            }
         })
         .collect();
     Some((start, candidates))
@@ -432,7 +472,10 @@ fn complete_alias_name(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     if prefix.contains('=') {
         return (start, Vec::new());
     }
-    let mut names: Vec<String> = crate::alias::all().into_iter().map(|(name, _)| name).collect();
+    let mut names: Vec<String> = crate::alias::all()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     names.retain(|n| n.starts_with(prefix));
     names.sort();
     (start, names.into_iter().map(plain).collect())
@@ -525,7 +568,10 @@ mod tests {
     #[test]
     fn matching_names_filters_by_prefix() {
         let names = ["cd", "cat", "echo", "export"];
-        assert_eq!(matching_names(names, "e"), vec!["echo".to_string(), "export".to_string()]);
+        assert_eq!(
+            matching_names(names, "e"),
+            vec!["echo".to_string(), "export".to_string()]
+        );
     }
 
     #[test]
@@ -543,12 +589,20 @@ mod tests {
         let line = "echo $RUSH_TEST_COMPLETION_V";
         let (start, pairs) = complete_variable(line, line.len()).unwrap();
         assert_eq!(start, 5);
-        assert!(pairs.iter().any(|p| p.replacement == "$RUSH_TEST_COMPLETION_VAR"));
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.replacement == "$RUSH_TEST_COMPLETION_VAR")
+        );
 
         let line = "echo ${RUSH_TEST_COMPLETION_V";
         let (start, pairs) = complete_variable(line, line.len()).unwrap();
         assert_eq!(start, 5);
-        assert!(pairs.iter().any(|p| p.replacement == "${RUSH_TEST_COMPLETION_VAR}"));
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.replacement == "${RUSH_TEST_COMPLETION_VAR}")
+        );
     }
 
     #[test]
@@ -568,7 +622,11 @@ mod tests {
 
         let line = "unset RUSH_TEST_COMPLETION_VAR2";
         let (_, pairs) = complete_variable_name_arg(line, line.len());
-        assert!(pairs.iter().any(|p| p.display == "RUSH_TEST_COMPLETION_VAR2"));
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.display == "RUSH_TEST_COMPLETION_VAR2")
+        );
     }
 
     #[test]
@@ -577,7 +635,11 @@ mod tests {
 
         let line = "unalias rush_test_completion_al";
         let (_, pairs) = complete_alias_name(line, line.len());
-        assert!(pairs.iter().any(|p| p.display == "rush_test_completion_alias"));
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.display == "rush_test_completion_alias")
+        );
 
         let line = "alias rush_test_completion_alias=";
         let (_, pairs) = complete_alias_name(line, line.len());
@@ -589,7 +651,10 @@ mod tests {
     fn job_spec_candidates_formats_as_percent_n_and_filters_by_prefix() {
         let pairs = job_spec_candidates(vec![1, 2, 10], "%1");
         assert_eq!(
-            pairs.iter().map(|p| p.replacement.as_str()).collect::<Vec<_>>(),
+            pairs
+                .iter()
+                .map(|p| p.replacement.as_str())
+                .collect::<Vec<_>>(),
             vec!["%1", "%10"]
         );
 
@@ -602,10 +667,15 @@ mod tests {
         // drive-relative and usually doesn't exist) — use the real temp dir
         // instead so this holds on every platform.
         let tmp_buf = std::env::temp_dir();
-        let tmp = tmp_buf.to_str().unwrap().trim_end_matches(std::path::MAIN_SEPARATOR);
+        let tmp = tmp_buf
+            .to_str()
+            .unwrap()
+            .trim_end_matches(std::path::MAIN_SEPARATOR);
         assert!(is_directory(tmp));
         assert!(is_directory(&format!("{tmp}{}", std::path::MAIN_SEPARATOR)));
-        assert!(!is_directory("/this/path/should/not/exist/anywhere/hopefully"));
+        assert!(!is_directory(
+            "/this/path/should/not/exist/anywhere/hopefully"
+        ));
     }
 
     #[test]
@@ -627,8 +697,14 @@ mod tests {
         crate::alias::abbr_set("gs", "git status");
         assert_eq!(abbr_expansion("gs", 2), Some((0, "git status".to_string())));
         // After a pipe/semicolon: command position again.
-        assert_eq!(abbr_expansion("true | gs", 9), Some((7, "git status".to_string())));
-        assert_eq!(abbr_expansion("true; gs", 8), Some((6, "git status".to_string())));
+        assert_eq!(
+            abbr_expansion("true | gs", 9),
+            Some((7, "git status".to_string()))
+        );
+        assert_eq!(
+            abbr_expansion("true; gs", 8),
+            Some((6, "git status".to_string()))
+        );
         // Argument position: no expansion.
         assert_eq!(abbr_expansion("echo gs", 7), None);
         // Not an abbreviation / empty word: no expansion.
@@ -648,9 +724,15 @@ mod tests {
         assert!(h.starts_with("\x1b[31mnosuchcmd_xyz\x1b[0m"), "got: {h:?}");
 
         let h = highlight_line("echo \"done");
-        assert!(h.contains("\x1b[31m\"done\x1b[0m"), "unmatched quote red: {h:?}");
+        assert!(
+            h.contains("\x1b[31m\"done\x1b[0m"),
+            "unmatched quote red: {h:?}"
+        );
         let h = highlight_line("echo \"done\"");
-        assert!(h.contains("\x1b[33m\"done\"\x1b[0m"), "matched quote yellow: {h:?}");
+        assert!(
+            h.contains("\x1b[33m\"done\"\x1b[0m"),
+            "matched quote yellow: {h:?}"
+        );
 
         let h = highlight_line("echo $HOME # note");
         assert!(h.contains("\x1b[36m$HOME\x1b[0m"), "var cyan: {h:?}");
@@ -666,7 +748,6 @@ mod tests {
         let h = highlight_line("FOO=1 echo x");
         assert!(h.contains("\x1b[32mecho\x1b[0m"), "got: {h:?}");
     }
-
 }
 
 thread_local! {
@@ -685,13 +766,19 @@ pub fn apply_readline_variable(assignment: &str) -> bool {
         None => (assignment.trim(), "on"),
     };
     READLINE_VARS.with(|v| v.borrow_mut().insert(name.to_string(), value.to_string()));
-    matches!(name, "completion-ignore-case" | "show-all-if-ambiguous" | "menu-complete-display-prefix")
+    matches!(
+        name,
+        "completion-ignore-case" | "show-all-if-ambiguous" | "menu-complete-display-prefix"
+    )
 }
 
 /// Whether a readline boolean variable is on (`on`/`1`/`true`).
 pub fn readline_flag(name: &str) -> bool {
     READLINE_VARS.with(|v| {
-        v.borrow().get(name).map(|s| matches!(s.as_str(), "on" | "1" | "true")).unwrap_or(false)
+        v.borrow()
+            .get(name)
+            .map(|s| matches!(s.as_str(), "on" | "1" | "true"))
+            .unwrap_or(false)
     })
 }
 
@@ -760,7 +847,13 @@ pub mod programmable {
     /// being completed) — shared by `compgen` and the live completer.
     /// `line`/`cword`/`words` seed the completion variables for a `-F`
     /// function.
-    pub fn generate(spec: &Spec, word: &str, words: &[String], cword: usize, line: &str) -> Vec<String> {
+    pub fn generate(
+        spec: &Spec,
+        word: &str,
+        words: &[String],
+        cword: usize,
+        line: &str,
+    ) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
 
         for action in &spec.actions {
@@ -801,7 +894,10 @@ pub mod programmable {
     fn action_candidates(action: &str, word: &str) -> Vec<String> {
         match action {
             "command" => {
-                let mut names = crate::builtins::all_names().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                let mut names = crate::builtins::all_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>();
                 names.extend(super::path_executables());
                 names.into_iter().filter(|n| n.starts_with(word)).collect()
             }
@@ -810,9 +906,18 @@ pub mod programmable {
                 .filter(|n| n.starts_with(word))
                 .map(|s| s.to_string())
                 .collect(),
-            "alias" => crate::alias::names().into_iter().filter(|n| n.starts_with(word)).collect(),
-            "function" => crate::func::names().into_iter().filter(|n| n.starts_with(word)).collect(),
-            "variable" => crate::vars::names().into_iter().filter(|n| n.starts_with(word)).collect(),
+            "alias" => crate::alias::names()
+                .into_iter()
+                .filter(|n| n.starts_with(word))
+                .collect(),
+            "function" => crate::func::names()
+                .into_iter()
+                .filter(|n| n.starts_with(word))
+                .collect(),
+            "variable" => crate::vars::names()
+                .into_iter()
+                .filter(|n| n.starts_with(word))
+                .collect(),
             "file" | "directory" => {
                 let (start, cands) = super::complete_path(word, word.len());
                 let _ = start;
@@ -822,19 +927,23 @@ pub mod programmable {
                 }
                 v
             }
-            "keyword" => ["if", "then", "else", "elif", "fi", "for", "while", "until", "do",
-                "done", "case", "esac", "select", "function", "in", "time", "coproc"]
-                .iter()
-                .filter(|k| k.starts_with(word))
-                .map(|s| s.to_string())
-                .collect(),
+            "keyword" => [
+                "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case",
+                "esac", "select", "function", "in", "time", "coproc",
+            ]
+            .iter()
+            .filter(|k| k.starts_with(word))
+            .map(|s| s.to_string())
+            .collect(),
             "job" => crate::vars::names().into_iter().filter(|_| false).collect(), // no stable API
-            "signal" => ["SIGHUP", "SIGINT", "SIGQUIT", "SIGKILL", "SIGTERM", "SIGSTOP",
-                "SIGCONT", "SIGUSR1", "SIGUSR2"]
-                .iter()
-                .filter(|s| s.starts_with(word))
-                .map(|s| s.to_string())
-                .collect(),
+            "signal" => [
+                "SIGHUP", "SIGINT", "SIGQUIT", "SIGKILL", "SIGTERM", "SIGSTOP", "SIGCONT",
+                "SIGUSR1", "SIGUSR2",
+            ]
+            .iter()
+            .filter(|s| s.starts_with(word))
+            .map(|s| s.to_string())
+            .collect(),
             _ => Vec::new(),
         }
     }
@@ -843,7 +952,12 @@ pub mod programmable {
     /// `COMP_LINE`/`COMP_POINT` and the function's positional parameters
     /// (`$1` command, `$2` current word, `$3` previous word — bash's
     /// convention), call it, then read back the `COMPREPLY` array.
-    fn run_completion_function(func: &str, words: &[String], cword: usize, line: &str) -> Vec<String> {
+    fn run_completion_function(
+        func: &str,
+        words: &[String],
+        cword: usize,
+        line: &str,
+    ) -> Vec<String> {
         crate::vars::set_array("COMP_WORDS", words.to_vec());
         crate::vars::set("COMP_CWORD", &cword.to_string());
         crate::vars::set("COMP_LINE", line);
@@ -852,7 +966,11 @@ pub mod programmable {
 
         let cmd = words.first().cloned().unwrap_or_default();
         let cur = words.get(cword).cloned().unwrap_or_default();
-        let prev = if cword > 0 { words.get(cword - 1).cloned().unwrap_or_default() } else { String::new() };
+        let prev = if cword > 0 {
+            words.get(cword - 1).cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
         let argv = vec![func.to_string(), cmd, cur, prev];
         let _ = crate::exec::call_function_for_completion(&argv);
 

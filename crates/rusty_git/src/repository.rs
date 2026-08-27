@@ -10,7 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::gitignore::Gitignore;
 use crate::index::{Index, IndexEntry, MODE_REGULAR};
-use crate::objects::{decode_commit, decode_tree, hash, read_object, write_object, Commit, ObjectError, ObjectKind};
+use crate::objects::{
+    decode_commit, decode_tree, hash, read_object, write_object, Commit, ObjectError, ObjectKind,
+};
 use crate::sha1::{hex, SHA1_DIGEST_LEN};
 use crate::tree_builder::write_tree;
 
@@ -61,7 +63,10 @@ impl Repository {
         fs::create_dir_all(git_dir.join("refs").join("heads")).map_err(|e| e.to_string())?;
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").map_err(|e| e.to_string())?;
 
-        Ok(Repository { git_dir, work_tree: path.to_path_buf() })
+        Ok(Repository {
+            git_dir,
+            work_tree: path.to_path_buf(),
+        })
     }
 
     /// Opens an existing git repository, searching up from `path`.
@@ -70,7 +75,10 @@ impl Repository {
         loop {
             let git_dir = curr.join(".git");
             if git_dir.is_dir() {
-                return Ok(Repository { git_dir, work_tree: curr });
+                return Ok(Repository {
+                    git_dir,
+                    work_tree: curr,
+                });
             }
             if !curr.pop() {
                 break;
@@ -91,7 +99,10 @@ impl Repository {
     }
 
     fn branch_ref_path(&self) -> PathBuf {
-        self.git_dir.join("refs").join("heads").join(self.current_branch())
+        self.git_dir
+            .join("refs")
+            .join("heads")
+            .join(self.current_branch())
     }
 
     /// The hex object id `HEAD` currently points at, or `None` for a
@@ -148,7 +159,12 @@ impl Repository {
         self.add_dir_recursive_inner(dir, index, &gitignore)
     }
 
-    fn add_dir_recursive_inner(&self, dir: &Path, index: &mut Index, gitignore: &Gitignore) -> Result<(), String> {
+    fn add_dir_recursive_inner(
+        &self,
+        dir: &Path,
+        index: &mut Index,
+        gitignore: &Gitignore,
+    ) -> Result<(), String> {
         for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
@@ -169,7 +185,8 @@ impl Repository {
     fn add_file(&self, abs_path: &Path, index: &mut Index) -> Result<(), String> {
         let content = fs::read(abs_path).map_err(|e| e.to_string())?;
         let metadata = fs::metadata(abs_path).map_err(|e| e.to_string())?;
-        let oid = write_object(&self.git_dir, ObjectKind::Blob, &content).map_err(|e| e.to_string())?;
+        let oid =
+            write_object(&self.git_dir, ObjectKind::Blob, &content).map_err(|e| e.to_string())?;
         let rel = abs_path
             .strip_prefix(&self.work_tree)
             .map_err(|e| e.to_string())?
@@ -227,10 +244,19 @@ impl Repository {
 
     /// Recursively flattens a tree object into `path -> raw blob hash`,
     /// joining subtree paths with `/`.
-    fn flatten_tree(&self, tree_oid: &str, prefix: &str, out: &mut BTreeMap<String, [u8; SHA1_DIGEST_LEN]>) -> Result<(), ObjectError> {
+    fn flatten_tree(
+        &self,
+        tree_oid: &str,
+        prefix: &str,
+        out: &mut BTreeMap<String, [u8; SHA1_DIGEST_LEN]>,
+    ) -> Result<(), ObjectError> {
         let (_, content) = read_object(&self.git_dir, tree_oid)?;
         for entry in decode_tree(&content)? {
-            let path = if prefix.is_empty() { entry.name.clone() } else { format!("{prefix}/{}", entry.name) };
+            let path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{prefix}/{}", entry.name)
+            };
             if entry.mode == "40000" {
                 self.flatten_tree(&hex(&entry.hash), &path, out)?;
             } else {
@@ -260,21 +286,33 @@ impl Repository {
         let head = self.head_tree_map();
         let mut entries = Vec::new();
 
-        let index_map: BTreeMap<&str, &IndexEntry> =
-            index.entries().iter().map(|e| (e.path.as_str(), e)).collect();
+        let index_map: BTreeMap<&str, &IndexEntry> = index
+            .entries()
+            .iter()
+            .map(|e| (e.path.as_str(), e))
+            .collect();
 
         for (path, head_hash) in &head {
             match index_map.get(path.as_str()) {
-                None => entries.push(StatusEntry { path: path.clone(), status: "deleted".to_string() }),
+                None => entries.push(StatusEntry {
+                    path: path.clone(),
+                    status: "deleted".to_string(),
+                }),
                 Some(idx_entry) if idx_entry.hash != *head_hash => {
-                    entries.push(StatusEntry { path: path.clone(), status: "modified".to_string() });
+                    entries.push(StatusEntry {
+                        path: path.clone(),
+                        status: "modified".to_string(),
+                    });
                 }
                 _ => {}
             }
         }
         for path in index_map.keys() {
             if !head.contains_key(*path) {
-                entries.push(StatusEntry { path: path.to_string(), status: "new file".to_string() });
+                entries.push(StatusEntry {
+                    path: path.to_string(),
+                    status: "new file".to_string(),
+                });
             }
         }
 
@@ -284,9 +322,15 @@ impl Repository {
             let content = fs::read(self.work_tree.join(rel)).map_err(|e| e.to_string())?;
             let blob_hash = hash(ObjectKind::Blob, &content);
             match index.get(rel) {
-                None => entries.push(StatusEntry { path: rel.clone(), status: "untracked".to_string() }),
+                None => entries.push(StatusEntry {
+                    path: rel.clone(),
+                    status: "untracked".to_string(),
+                }),
                 Some(idx_entry) if idx_entry.hash != blob_hash => {
-                    entries.push(StatusEntry { path: rel.clone(), status: "modified (not staged)".to_string() });
+                    entries.push(StatusEntry {
+                        path: rel.clone(),
+                        status: "modified (not staged)".to_string(),
+                    });
                 }
                 _ => {}
             }
@@ -300,7 +344,12 @@ impl Repository {
         self.collect_worktree_files_inner(dir, out, &gitignore)
     }
 
-    fn collect_worktree_files_inner(&self, dir: &Path, out: &mut Vec<String>, gitignore: &Gitignore) -> Result<(), String> {
+    fn collect_worktree_files_inner(
+        &self,
+        dir: &Path,
+        out: &mut Vec<String>,
+        gitignore: &Gitignore,
+    ) -> Result<(), String> {
         for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
@@ -331,7 +380,11 @@ impl Repository {
             let (_, content) = read_object(&self.git_dir, &oid).map_err(|e| e.to_string())?;
             let commit = decode_commit(&content).map_err(|e| e.to_string())?;
             current = commit.parents.first().cloned();
-            logs.push(CommitLog { hash: oid, message: commit.message.trim_end().to_string(), author: commit.author.clone() });
+            logs.push(CommitLog {
+                hash: oid,
+                message: commit.message.trim_end().to_string(),
+                author: commit.author.clone(),
+            });
         }
         Ok(logs)
     }
@@ -342,7 +395,8 @@ mod tests {
     use super::*;
 
     fn temp_repo(name: &str) -> Repository {
-        let dir = std::env::temp_dir().join(format!("rusty_git_repo_test_{name}_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rusty_git_repo_test_{name}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Repository::init(&dir).unwrap()

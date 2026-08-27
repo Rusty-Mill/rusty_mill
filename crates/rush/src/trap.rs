@@ -49,14 +49,23 @@ extern "C" fn record_signal(sig: crate::sys::c_int) {
 #[cfg(unix)]
 pub fn install_signal_handlers() {
     unsafe {
-        crate::sys::signal(crate::sys::SIGTERM, record_signal as *const () as crate::sys::sighandler_t);
-        crate::sys::signal(crate::sys::SIGHUP, record_signal as *const () as crate::sys::sighandler_t);
+        crate::sys::signal(
+            crate::sys::SIGTERM,
+            record_signal as *const () as crate::sys::sighandler_t,
+        );
+        crate::sys::signal(
+            crate::sys::SIGHUP,
+            record_signal as *const () as crate::sys::sighandler_t,
+        );
     }
 }
 
 #[cfg(unix)]
 fn signal_name(sig: crate::sys::c_int) -> Option<&'static str> {
-    crate::job::SIGNAL_TABLE.iter().find(|&&(_, s)| s == sig).map(|&(n, _)| n)
+    crate::job::SIGNAL_TABLE
+        .iter()
+        .find(|&&(_, s)| s == sig)
+        .map(|&(n, _)| n)
 }
 
 /// Signals whose handler is installed *on trap registration* (C64) — the
@@ -159,17 +168,27 @@ pub fn normalize_signal_spec(spec: &str) -> Option<&'static str> {
         return Some("RETURN");
     }
     if let Ok(n) = spec.parse::<i32>() {
-        return SIGNALS.iter().find(|&&(_, num)| num == n).map(|&(name, _)| name);
+        return SIGNALS
+            .iter()
+            .find(|&&(_, num)| num == n)
+            .map(|&(name, _)| name);
     }
     let upper = spec.to_ascii_uppercase();
     let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
-    SIGNALS.iter().find(|&&(name, _)| name == bare).map(|&(name, _)| name)
+    SIGNALS
+        .iter()
+        .find(|&&(name, _)| name == bare)
+        .map(|&(name, _)| name)
 }
 
 /// The real-signal names and numbers (`EXIT`/pseudo-signals excluded) —
 /// `trap -l`'s listing (C65).
 pub fn signal_list() -> Vec<(&'static str, i32)> {
-    SIGNALS.iter().filter(|&&(_, n)| n != 0).map(|&(n, s)| (n, s)).collect()
+    SIGNALS
+        .iter()
+        .filter(|&&(_, n)| n != 0)
+        .map(|&(n, s)| (n, s))
+        .collect()
 }
 
 pub fn set(name: &str, command: &str) {
@@ -198,12 +217,15 @@ pub fn get(name: &str) -> Option<String> {
 pub fn all() -> Vec<(String, String)> {
     // Inside a subshell that hasn't set traps of its own, report the
     // parent's (see `enter_subshell`).
-    if let Some(snapshot) =
-        SUBSHELL_SNAPSHOT.with(|s| s.borrow().as_ref().map(|m| m.clone()))
-    {
+    if let Some(snapshot) = SUBSHELL_SNAPSHOT.with(|s| s.borrow().as_ref().map(|m| m.clone())) {
         return snapshot.into_iter().collect();
     }
-    TRAPS.with(|t| t.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    TRAPS.with(|t| {
+        t.borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    })
 }
 
 /// Run the trap registered for `name`, if any, discarding its own exit status.

@@ -26,7 +26,11 @@ use rusty_term::core::Grid;
 /// bin[.exe]`, kept as a fallback for a tool that's still a standalone
 /// sibling checkout outside this workspace.
 fn find_sibling_binary(repo: &str, bin: &str) -> Option<PathBuf> {
-    let exe_name = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
+    let exe_name = if cfg!(windows) {
+        format!("{bin}.exe")
+    } else {
+        bin.to_string()
+    };
     let exe = std::env::current_exe().ok()?;
     for ancestor in exe.ancestors() {
         let candidate = ancestor.join(&exe_name);
@@ -34,7 +38,11 @@ fn find_sibling_binary(repo: &str, bin: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
         for profile in ["debug", "release"] {
-            let candidate = ancestor.join(repo).join("target").join(profile).join(&exe_name);
+            let candidate = ancestor
+                .join(repo)
+                .join("target")
+                .join(profile)
+                .join(&exe_name);
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -46,7 +54,11 @@ fn find_sibling_binary(repo: &str, bin: &str) -> Option<PathBuf> {
 /// Resolves `name` to run: prefer a real `PATH` install (the "properly
 /// installed" case), falling back to a sibling dev-workspace build.
 fn resolve_tool(repo: &str, name: &str) -> Option<PathBuf> {
-    let exe_name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let exe_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
             let candidate = dir.join(&exe_name);
@@ -84,7 +96,10 @@ fn print_git_status(cwd: &Path) {
 /// `rawk` are actually reachable from inside the hosted rush session, not
 /// just present somewhere on this machine's disk.
 fn augmented_path(tools: &[PathBuf]) -> std::ffi::OsString {
-    let mut dirs: Vec<PathBuf> = tools.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
+    let mut dirs: Vec<PathBuf> = tools
+        .iter()
+        .filter_map(|p| p.parent().map(Path::to_path_buf))
+        .collect();
     dirs.dedup();
     if let Some(existing) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&existing));
@@ -107,10 +122,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     };
 
-    let tool_paths: Vec<PathBuf> = [("rusty_git", "rgit"), ("rusty_text", "rsed"), ("rusty_text", "rawk")]
-        .iter()
-        .filter_map(|(repo, bin)| resolve_tool(repo, bin))
-        .collect();
+    let tool_paths: Vec<PathBuf> = [
+        ("rusty_git", "rgit"),
+        ("rusty_text", "rsed"),
+        ("rusty_text", "rawk"),
+    ]
+    .iter()
+    .filter_map(|(repo, bin)| resolve_tool(repo, bin))
+    .collect();
     // SAFETY: single-threaded at this point in `main`, before the runtime
     // (matching rusty_term's own main.rs, which sets TERM/COLORTERM the
     // same way for the same reason).
@@ -118,7 +137,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("PATH", augmented_path(&tool_paths));
     }
     if tool_paths.is_empty() {
-        eprintln!("mill-term: rgit/rsed/rawk not found (build rusty_git/rusty_text to enable them)");
+        eprintln!(
+            "mill-term: rgit/rsed/rawk not found (build rusty_git/rusty_text to enable them)"
+        );
     }
 
     println!("Launching rush via rusty_term...\n");
@@ -129,7 +150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend: Box<dyn Backend> = Box::new(WindowsBackend);
 
     let (init_cols, init_rows) = backend.terminal_size().unwrap_or((80, 24));
-    let grid = Arc::new(Mutex::new(Grid::new(init_cols as usize, init_rows as usize)));
+    let grid = Arc::new(Mutex::new(Grid::new(
+        init_cols as usize,
+        init_rows as usize,
+    )));
 
     let config = Config {
         shell: Some(rush_path.to_string_lossy().into_owned()),
@@ -147,7 +171,10 @@ mod tests {
 
     #[test]
     fn finds_real_sibling_binaries_built_earlier_this_session() {
-        assert!(find_sibling_binary("rush", "rush").is_some(), "rush.exe should be found under ../rush/target/*");
+        assert!(
+            find_sibling_binary("rush", "rush").is_some(),
+            "rush.exe should be found under ../rush/target/*"
+        );
         assert!(find_sibling_binary("rusty_git", "rgit").is_some());
         assert!(find_sibling_binary("rusty_text", "rsed").is_some());
         assert!(find_sibling_binary("rusty_text", "rawk").is_some());
@@ -160,10 +187,16 @@ mod tests {
 
     #[test]
     fn augmented_path_prepends_tool_directories_and_keeps_existing_path() {
-        let tools = vec![PathBuf::from(r"C:\fake\rgit.exe"), PathBuf::from(r"C:\fake\rgit.exe")];
+        let tools = vec![
+            PathBuf::from(r"C:\fake\rgit.exe"),
+            PathBuf::from(r"C:\fake\rgit.exe"),
+        ];
         let joined = augmented_path(&tools);
         let joined_str = joined.to_string_lossy();
-        assert!(joined_str.starts_with(r"C:\fake"), "expected tool dir first, got: {joined_str}");
+        assert!(
+            joined_str.starts_with(r"C:\fake"),
+            "expected tool dir first, got: {joined_str}"
+        );
         // The duplicate tool (same parent dir) must not appear twice.
         assert_eq!(joined_str.matches(r"C:\fake").count(), 1);
     }

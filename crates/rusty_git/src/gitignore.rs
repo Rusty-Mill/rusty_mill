@@ -61,9 +61,7 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     fn matches(pattern: &[u8], name: &[u8]) -> bool {
         match pattern.first() {
             None => name.is_empty(),
-            Some(b'*') => {
-                (0..=name.len()).any(|i| matches(&pattern[1..], &name[i..]))
-            }
+            Some(b'*') => (0..=name.len()).any(|i| matches(&pattern[1..], &name[i..])),
             Some(&c) => name.first() == Some(&c) && matches(&pattern[1..], &name[1..]),
         }
     }
@@ -79,7 +77,10 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rusty_git_gitignore_test_{name}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_git_gitignore_test_{name}_{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

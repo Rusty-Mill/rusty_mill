@@ -118,7 +118,10 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                         let mut pairs = Vec::new();
                         for el in &elements {
                             if let Some((key, value_word)) = parse_assoc_literal_element(el) {
-                                pairs.push((resolve_subscript_text(&key)?, expand_word(&value_word)?));
+                                pairs.push((
+                                    resolve_subscript_text(&key)?,
+                                    expand_word(&value_word)?,
+                                ));
                             }
                         }
                         AssignValue::Assoc(pairs)
@@ -131,7 +134,14 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                         AssignValue::Array(values)
                     }
                 };
-                assignments.push((name, if append { AssignOp::Append(value) } else { AssignOp::Set(value) }));
+                assignments.push((
+                    name,
+                    if append {
+                        AssignOp::Append(value)
+                    } else {
+                        AssignOp::Set(value)
+                    },
+                ));
                 idx += 1;
             }
             Some((name, RawAssign::Index(subscript, append, value_word))) => {
@@ -144,7 +154,11 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 // comment).
                 let subscript = resolve_subscript_text(&subscript)?;
                 let value = expand_word(&value_word)?;
-                let op = if append { AssignOp::AppendKey(subscript, value) } else { AssignOp::SetKey(subscript, value) };
+                let op = if append {
+                    AssignOp::AppendKey(subscript, value)
+                } else {
+                    AssignOp::SetKey(subscript, value)
+                };
                 assignments.push((name, op));
                 idx += 1;
             }
@@ -162,7 +176,11 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // unlike bash's own quirk of `declare` acting like `local` when used
     // inside a function — an accepted, documented simplification; use
     // `local` explicitly for function-scoped declarations.)
-    let decl_word = if idx < rc.argv.len() { expand_argv_word(&rc.argv[idx])?.into_iter().next() } else { None };
+    let decl_word = if idx < rc.argv.len() {
+        expand_argv_word(&rc.argv[idx])?.into_iter().next()
+    } else {
+        None
+    };
     // `declare -p`/`-f`/`-F` are introspection, not declaration (C96):
     // route them down the plain-argv path so the builtin dispatcher can
     // see the flag and hand off to `declare_print`.
@@ -174,12 +192,15 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // present, so `export -n`/`-f`/bare `export NAME` keep the builtin
     // path.
     let export_array_form = decl_word.as_deref() == Some("export")
-        && rc.argv[idx + 1..].iter().any(|w| {
-            w.iter().any(|p| matches!(p, WordPart::ArrayLiteral(_)))
-        });
+        && rc.argv[idx + 1..]
+            .iter()
+            .any(|w| w.iter().any(|p| matches!(p, WordPart::ArrayLiteral(_))));
     let (argv, local_decls, decl_attrs) = if !declare_print_form
         && (export_array_form
-            || matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("typeset") | Some("readonly"))) {
+            || matches!(
+                decl_word.as_deref(),
+                Some("local") | Some("declare") | Some("typeset") | Some("readonly")
+            )) {
         let cmd_name = decl_word.unwrap();
         let mut rest = &rc.argv[idx + 1..];
         // Leading flags apply to every name that follows in this same
@@ -199,7 +220,9 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 [WordPart::Unquoted(s)]
                     if s.len() > 1
                         && s.starts_with('-')
-                        && s[1..].chars().all(|c| matches!(c, 'a' | 'A' | 'u' | 'l' | 'i' | 'r' | 'n' | 'x')) =>
+                        && s[1..].chars().all(|c| {
+                            matches!(c, 'a' | 'A' | 'u' | 'l' | 'i' | 'r' | 'n' | 'x')
+                        }) =>
                 {
                     for c in s[1..].chars() {
                         match c {
@@ -238,7 +261,10 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                             let mut pairs = Vec::new();
                             for el in &elements {
                                 if let Some((key, value_word)) = parse_assoc_literal_element(el) {
-                                    pairs.push((resolve_subscript_text(&key)?, expand_word(&value_word)?));
+                                    pairs.push((
+                                        resolve_subscript_text(&key)?,
+                                        expand_word(&value_word)?,
+                                    ));
                                 }
                             }
                             AssignValue::Assoc(pairs)
@@ -251,7 +277,14 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                             AssignValue::Array(values)
                         }
                     };
-                    decls.push((name, Some(if append { AssignOp::Append(value) } else { AssignOp::Set(value) })));
+                    decls.push((
+                        name,
+                        Some(if append {
+                            AssignOp::Append(value)
+                        } else {
+                            AssignOp::Set(value)
+                        }),
+                    ));
                 }
                 // `local arr[i]=x` (indexing a not-yet-local array in the
                 // same breath) isn't supported — falls through to being
@@ -300,7 +333,14 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     };
 
     let (redirects, heredoc) = expand_redirects(&rc.redirects)?;
-    Ok(Command { argv, redirects, assignments, heredoc, local_decls, decl_attrs })
+    Ok(Command {
+        argv,
+        redirects,
+        assignments,
+        heredoc,
+        local_decls,
+        decl_attrs,
+    })
 }
 
 /// Expand a raw redirect list into concrete `Redirect`s plus an optional
@@ -321,12 +361,14 @@ pub fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Option<St
                 file: expand_word(file)?,
                 append: *append,
             }),
-            RawRedirect::Dup { fd, target } => {
-                redirects.push(Redirect::Dup { fd: *fd, target: *target })
-            }
-            RawRedirect::Move { fd, target } => {
-                redirects.push(Redirect::Move { fd: *fd, target: *target })
-            }
+            RawRedirect::Dup { fd, target } => redirects.push(Redirect::Dup {
+                fd: *fd,
+                target: *target,
+            }),
+            RawRedirect::Move { fd, target } => redirects.push(Redirect::Move {
+                fd: *fd,
+                target: *target,
+            }),
             // `{name}>…` (C115): expand the wrapped redirect, then tag it
             // with the variable that receives the allocated fd number.
             RawRedirect::VarFd { name, inner } => {
@@ -360,7 +402,11 @@ pub fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Option<St
             }
             // Its `$`-expansions run unless the delimiter was quoted.
             RawRedirect::Heredoc { body, expand } => {
-                heredoc = Some(if *expand { expand_dollars(body)? } else { body.clone() });
+                heredoc = Some(if *expand {
+                    expand_dollars(body)?
+                } else {
+                    body.clone()
+                });
             }
             // A single word, same expansion as any other redirect target
             // (no splitting/globbing — verified directly: `x="a b"; cat
@@ -474,12 +520,18 @@ fn assignment_split(word: &Word) -> Option<(String, RawAssign)> {
     if after_eq.is_empty()
         && let [WordPart::ArrayLiteral(elements)] = &word[1..]
     {
-        return Some((name.to_string(), RawAssign::Whole(append, RawAssignValue::Array(elements.clone()))));
+        return Some((
+            name.to_string(),
+            RawAssign::Whole(append, RawAssignValue::Array(elements.clone())),
+        ));
     }
 
     let mut value: Word = vec![WordPart::Unquoted(after_eq.to_string())];
     value.extend(word[1..].iter().cloned());
-    Some((name.to_string(), RawAssign::Whole(append, RawAssignValue::Scalar(value))))
+    Some((
+        name.to_string(),
+        RawAssign::Whole(append, RawAssignValue::Scalar(value)),
+    ))
 }
 
 /// Parse one associative-array-literal element (`[key]=value`, no leading
@@ -548,10 +600,13 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
         if let Some(kind) = parse_whole_array_at(s) {
             return Ok(match kind {
                 WholeArrayAt::Values(name) => crate::vars::array_values(&name),
-                WholeArrayAt::Keys(name) if crate::vars::is_assoc(&name) => crate::vars::assoc_keys(&name),
-                WholeArrayAt::Keys(name) => {
-                    crate::vars::array_indices(&name).iter().map(usize::to_string).collect()
+                WholeArrayAt::Keys(name) if crate::vars::is_assoc(&name) => {
+                    crate::vars::assoc_keys(&name)
                 }
+                WholeArrayAt::Keys(name) => crate::vars::array_indices(&name)
+                    .iter()
+                    .map(usize::to_string)
+                    .collect(),
             });
         }
     }
@@ -626,10 +681,12 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
             if let Some(ignore) = crate::vars::get("GLOBIGNORE").filter(|g| !g.is_empty()) {
                 matches.retain(|m| {
                     let base = m.rsplit('/').next().unwrap_or(m);
-                    base != "." && base != ".."
-                        && !ignore.split(':').filter(|p| !p.is_empty()).any(|p| {
-                            crate::glob::match_component(p, m)
-                        })
+                    base != "."
+                        && base != ".."
+                        && !ignore
+                            .split(':')
+                            .filter(|p| !p.is_empty())
+                            .any(|p| crate::glob::match_component(p, m))
                 });
             }
             if !matches.is_empty() {
@@ -673,7 +730,10 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
 /// unchanged when no valid group exists anywhere in the word (the common
 /// case).
 fn brace_expand(word: &Word) -> Vec<Word> {
-    brace_expand_atoms(&word_to_atoms(word)).into_iter().map(|a| atoms_to_word(&a)).collect()
+    brace_expand_atoms(&word_to_atoms(word))
+        .into_iter()
+        .map(|a| atoms_to_word(&a))
+        .collect()
 }
 
 /// One atomic unit of a word's text for brace-expansion scanning: a single
@@ -844,7 +904,12 @@ fn expand_range(content: &[BraceAtom]) -> Option<Vec<Vec<BraceAtom>>> {
         char_range(a, b, step.unwrap_or(1))
     };
 
-    Some(strings.into_iter().map(|s| s.chars().map(BraceAtom::Ch).collect()).collect())
+    Some(
+        strings
+            .into_iter()
+            .map(|s| s.chars().map(BraceAtom::Ch).collect())
+            .collect(),
+    )
 }
 
 /// A parsed numeric range endpoint: its value, whether it triggers
@@ -984,13 +1049,22 @@ impl Ifs {
                 let mut whitespace = Vec::new();
                 let mut other = Vec::new();
                 for c in s.chars() {
-                    let bucket = if matches!(c, ' ' | '\t' | '\n') { &mut whitespace } else { &mut other };
+                    let bucket = if matches!(c, ' ' | '\t' | '\n') {
+                        &mut whitespace
+                    } else {
+                        &mut other
+                    };
                     if !bucket.contains(&c) {
                         bucket.push(c);
                     }
                 }
                 let star_sep = s.chars().next().unwrap().to_string();
-                Ifs { whitespace, other, disabled: false, star_sep }
+                Ifs {
+                    whitespace,
+                    other,
+                    disabled: false,
+                    star_sep,
+                }
             }
         }
     }
@@ -1353,7 +1427,10 @@ fn quoted_embedded_at(s: &str) -> Result<Option<(String, Vec<String>, String)>, 
                         Some(crate::vars::assoc_keys(&name))
                     }
                     Some(WholeArrayAt::Keys(name)) => Some(
-                        crate::vars::array_indices(&name).iter().map(usize::to_string).collect(),
+                        crate::vars::array_indices(&name)
+                            .iter()
+                            .map(usize::to_string)
+                            .collect(),
                     ),
                     None => None,
                 }
@@ -1383,8 +1460,11 @@ fn tilde_expand(text: &str) -> String {
         };
         let expansion = match prefix {
             "" => home_dir(),
-            "+" => crate::vars::get("PWD")
-                .or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string())),
+            "+" => crate::vars::get("PWD").or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|d| d.display().to_string())
+            }),
             "-" => crate::vars::get("OLDPWD"),
             user => passwd_home(user),
         };
@@ -1427,7 +1507,10 @@ pub fn expand_unquoted(text: &str) -> Result<String, String> {
 }
 
 fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, String> {
-    Ok(expand_dollars_chunks(text, allow_process_sub)?.into_iter().map(|(s, _)| s).collect())
+    Ok(expand_dollars_chunks(text, allow_process_sub)?
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect())
 }
 
 /// Chunked output for [`expand_dollars_impl`]: accumulated text spans
@@ -1465,7 +1548,10 @@ pub fn expand_unquoted_chunks(text: &str) -> Result<Vec<(String, bool)>, String>
     expand_dollars_chunks(text, true)
 }
 
-fn expand_dollars_chunks(text: &str, allow_process_sub: bool) -> Result<Vec<(String, bool)>, String> {
+fn expand_dollars_chunks(
+    text: &str,
+    allow_process_sub: bool,
+) -> Result<Vec<(String, bool)>, String> {
     let mut out = Chunks::default();
     let mut chars = text.chars().peekable();
 
@@ -1756,7 +1842,9 @@ enum Subscript<'a> {
 /// `#`/`:-` instead of `[`), so the caller falls through to the existing
 /// non-array handling.
 fn parse_subscript(inner: &str) -> Option<(&str, Subscript<'_>)> {
-    let name_end = inner.find(|c: char| !(c == '_' || c.is_ascii_alphanumeric())).unwrap_or(inner.len());
+    let name_end = inner
+        .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+        .unwrap_or(inner.len());
     let name = &inner[..name_end];
     if !is_valid_name(name) {
         return None;
@@ -1861,7 +1949,10 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         let keys: Vec<String> = if crate::vars::is_assoc(name) {
             crate::vars::assoc_keys(name)
         } else {
-            crate::vars::array_indices(name).iter().map(usize::to_string).collect()
+            crate::vars::array_indices(name)
+                .iter()
+                .map(usize::to_string)
+                .collect()
         };
         return Ok(match sub {
             Subscript::Star => keys.join(&Ifs::current().star_sep),
@@ -1879,10 +1970,16 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         && !prefix.is_empty()
         && is_valid_name(prefix)
     {
-        let mut names: Vec<String> =
-            crate::vars::names().into_iter().filter(|n| n.starts_with(prefix)).collect();
+        let mut names: Vec<String> = crate::vars::names()
+            .into_iter()
+            .filter(|n| n.starts_with(prefix))
+            .collect();
         names.sort();
-        return Ok(if star { names.join(&Ifs::current().star_sep) } else { names.join(" ") });
+        return Ok(if star {
+            names.join(&Ifs::current().star_sep)
+        } else {
+            names.join(" ")
+        });
     }
 
     // `${!var}` — indirect expansion (C60): `$var`'s own value names the
@@ -1891,8 +1988,9 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
     // this same function (`${!v:-def}` applies the default to the
     // *referent*, matching bash).
     if let Some(rest0) = inner.strip_prefix('!') {
-        let name_end =
-            rest0.find(|c: char| !(c == '_' || c.is_ascii_alphanumeric())).unwrap_or(rest0.len());
+        let name_end = rest0
+            .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+            .unwrap_or(rest0.len());
         let (target, ops) = (&rest0[..name_end], &rest0[name_end..]);
         if is_valid_name(target) {
             let referent = var_lookup_checked(target)?;
@@ -1915,7 +2013,9 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         "$" => return Ok(crate::vars::shell_pid().to_string()),
         "-" => return Ok(crate::vars::option_flags()),
         _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
-            let n: usize = inner.parse().map_err(|_| format!("${{{inner}}}: bad substitution"))?;
+            let n: usize = inner
+                .parse()
+                .map_err(|_| format!("${{{inner}}}: bad substitution"))?;
             return arg_checked(n);
         }
         _ => {}
@@ -1932,11 +2032,17 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         let rest = &inner[1..];
         let star = first == '*';
         let values = crate::vars::args();
-        let sep = if star { Ifs::current().star_sep.clone() } else { " ".to_string() };
+        let sep = if star {
+            Ifs::current().star_sep.clone()
+        } else {
+            " ".to_string()
+        };
         if let Some(op) = rest.strip_prefix('@') {
             let mut out = Vec::with_capacity(values.len());
             for v in &values {
-                out.push(at_transform(v, op).ok_or_else(|| format!("${{{inner}}}: bad substitution"))?);
+                out.push(
+                    at_transform(v, op).ok_or_else(|| format!("${{{inner}}}: bad substitution"))?,
+                );
             }
             return Ok(out.join(&sep));
         }
@@ -2000,7 +2106,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         };
         let off = crate::arith::eval(&expand_dollars(off_src)?)?;
         let n = values.len() as i64;
-        let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
+        let start = if off < 0 {
+            (n + off).max(0)
+        } else {
+            off.min(n)
+        };
         let end = match len_src {
             None => n,
             Some(src) => {
@@ -2011,7 +2121,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
                 (start + len).min(n)
             }
         };
-        let sep = if first == '*' { Ifs::current().star_sep.clone() } else { " ".to_string() };
+        let sep = if first == '*' {
+            Ifs::current().star_sep.clone()
+        } else {
+            " ".to_string()
+        };
         return Ok(values[start as usize..end.max(start) as usize].join(&sep));
     }
 
@@ -2025,15 +2139,18 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         if let Some((name, sub)) = parse_subscript(name_and_sub) {
             return Ok(match sub {
                 Subscript::At | Subscript::Star => crate::vars::array_len(name).to_string(),
-                Subscript::Index(expr) => {
-                    read_subscript(name, expr)?.map_or(0, |v| v.chars().count()).to_string()
-                }
+                Subscript::Index(expr) => read_subscript(name, expr)?
+                    .map_or(0, |v| v.chars().count())
+                    .to_string(),
             });
         }
         if !is_valid_name(name_and_sub) {
             return Err(format!("${{{inner}}}: bad substitution"));
         }
-        return Ok(var_lookup_checked(name_and_sub)?.chars().count().to_string());
+        return Ok(var_lookup_checked(name_and_sub)?
+            .chars()
+            .count()
+            .to_string());
     }
 
     // `${arr[N]}` / `${arr[@]}` / `${arr[*]}` — see this function's own doc
@@ -2046,9 +2163,7 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
                 Some(v) => Ok(v),
                 // `set -u` (C132): a missing element is an error, same as
                 // a missing scalar — bash aborts with `a[i]: unbound`.
-                None if crate::vars::nounset() => {
-                    Err(format!("{name}[{expr}]: unbound variable"))
-                }
+                None if crate::vars::nounset() => Err(format!("{name}[{expr}]: unbound variable")),
                 None => Ok(String::new()),
             },
         };
@@ -2070,7 +2185,12 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         let subscript = &inner[open + 1..close];
         let rest = &inner[close + 1..];
         let value = read_subscript(name, subscript)?;
-        return apply_scalar_op(value.as_deref(), rest, inner, &format!("{name}[{subscript}]"));
+        return apply_scalar_op(
+            value.as_deref(),
+            rest,
+            inner,
+            &format!("{name}[{subscript}]"),
+        );
     }
 
     // `${arr[@]^^}`, `${arr[@]:1:2}`… — the scalar operator applied to
@@ -2096,7 +2216,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
             };
             let off = crate::arith::eval(&expand_dollars(off_src)?)?;
             let n = values.len() as i64;
-            let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
+            let start = if off < 0 {
+                (n + off).max(0)
+            } else {
+                off.min(n)
+            };
             let end = match len_src {
                 None => n,
                 Some(src) => {
@@ -2107,7 +2231,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
                     (start + len).min(n)
                 }
             };
-            let sep = if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
+            let sep = if &inner[open + 1..close] == "*" {
+                Ifs::current().star_sep.clone()
+            } else {
+                " ".to_string()
+            };
             return Ok(values[start as usize..end.max(start) as usize].join(&sep));
         }
         // Default/alternate family on the whole array (C132): the array is
@@ -2121,19 +2249,29 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         // whole-array `@K`/`@k` forms, which emit key/value *pairs* (their
         // whole point is `declare -A b=( ${a[@]@K} )` round-tripping).
         if let Some(op) = rest.strip_prefix('@') {
-            let sep =
-                if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
+            let sep = if &inner[open + 1..close] == "*" {
+                Ifs::current().star_sep.clone()
+            } else {
+                " ".to_string()
+            };
             if matches!(op, "K" | "k") {
                 let keys: Vec<String> = if crate::vars::is_assoc(name) {
                     crate::vars::assoc_keys(name)
                 } else {
-                    crate::vars::array_indices(name).iter().map(usize::to_string).collect()
+                    crate::vars::array_indices(name)
+                        .iter()
+                        .map(usize::to_string)
+                        .collect()
                 };
                 let pairs: Vec<String> = keys
                     .iter()
                     .zip(&values)
                     .map(|(k, v)| {
-                        if op == "K" { format!("{k} {}", key_value_quote(v)) } else { format!("{k} {v}") }
+                        if op == "K" {
+                            format!("{k} {}", key_value_quote(v))
+                        } else {
+                            format!("{k} {v}")
+                        }
                     })
                     .collect();
                 return Ok(pairs.join(&sep));
@@ -2162,7 +2300,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
                 return Err(format!("${{{inner}}}: bad substitution"));
             });
         }
-        let sep = if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
+        let sep = if &inner[open + 1..close] == "*" {
+            Ifs::current().star_sep.clone()
+        } else {
+            " ".to_string()
+        };
         return Ok(transformed.join(&sep));
     }
 
@@ -2183,19 +2325,35 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
     // isn't mistaken for the single form plus a literal leading `#`/`%`.
     if let Some(word_src) = rest.strip_prefix("##") {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_prefix_pattern(&var_lookup_checked(name)?, &pattern, true));
+        return Ok(strip_prefix_pattern(
+            &var_lookup_checked(name)?,
+            &pattern,
+            true,
+        ));
     }
     if let Some(word_src) = rest.strip_prefix('#') {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_prefix_pattern(&var_lookup_checked(name)?, &pattern, false));
+        return Ok(strip_prefix_pattern(
+            &var_lookup_checked(name)?,
+            &pattern,
+            false,
+        ));
     }
     if let Some(word_src) = rest.strip_prefix("%%") {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_suffix_pattern(&var_lookup_checked(name)?, &pattern, true));
+        return Ok(strip_suffix_pattern(
+            &var_lookup_checked(name)?,
+            &pattern,
+            true,
+        ));
     }
     if let Some(word_src) = rest.strip_prefix('%') {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_suffix_pattern(&var_lookup_checked(name)?, &pattern, false));
+        return Ok(strip_suffix_pattern(
+            &var_lookup_checked(name)?,
+            &pattern,
+            false,
+        ));
     }
 
     // `${v@Q}` / `@E` / `@a` / `@A` — bash 4.4's parameter transformations
@@ -2252,7 +2410,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         Some('?') => {
             if use_word {
                 let detail = if word.is_empty() {
-                    if colon { "parameter null or not set" } else { "parameter not set" }
+                    if colon {
+                        "parameter null or not set"
+                    } else {
+                        "parameter not set"
+                    }
                 } else {
                     &word
                 };
@@ -2272,20 +2434,41 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
 /// removal, string transforms, value-based `@`-transforms, and the
 /// default/alternate family; `:=` write-back to an element isn't
 /// supported (a documented narrowing — rare).
-fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str, prefix: &str) -> Result<String, String> {
+fn apply_scalar_op(
+    value: Option<&str>,
+    rest: &str,
+    inner: &str,
+    prefix: &str,
+) -> Result<String, String> {
     let present = value.unwrap_or("");
     // Pattern removal (`##`/`%%` before the single forms).
     if let Some(word_src) = rest.strip_prefix("##") {
-        return Ok(strip_prefix_pattern(present, &expand_dollars(word_src)?, true));
+        return Ok(strip_prefix_pattern(
+            present,
+            &expand_dollars(word_src)?,
+            true,
+        ));
     }
     if let Some(word_src) = rest.strip_prefix('#') {
-        return Ok(strip_prefix_pattern(present, &expand_dollars(word_src)?, false));
+        return Ok(strip_prefix_pattern(
+            present,
+            &expand_dollars(word_src)?,
+            false,
+        ));
     }
     if let Some(word_src) = rest.strip_prefix("%%") {
-        return Ok(strip_suffix_pattern(present, &expand_dollars(word_src)?, true));
+        return Ok(strip_suffix_pattern(
+            present,
+            &expand_dollars(word_src)?,
+            true,
+        ));
     }
     if let Some(word_src) = rest.strip_prefix('%') {
-        return Ok(strip_suffix_pattern(present, &expand_dollars(word_src)?, false));
+        return Ok(strip_suffix_pattern(
+            present,
+            &expand_dollars(word_src)?,
+            false,
+        ));
     }
     if let Some(op) = rest.strip_prefix('@') {
         return at_transform(present, op).ok_or_else(|| format!("${{{inner}}}: bad substitution"));
@@ -2308,7 +2491,11 @@ fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str, prefix: &str) -
         Some('?') => {
             if use_word {
                 let detail = if word.is_empty() {
-                    if colon { "parameter null or not set" } else { "parameter not set" }
+                    if colon {
+                        "parameter null or not set"
+                    } else {
+                        "parameter not set"
+                    }
                 } else {
                     &word
                 };
@@ -2337,7 +2524,11 @@ fn whole_array_default(
         Some(c @ ('-' | '+' | '?')) => c,
         _ => return Ok(None),
     };
-    let sep = if star { Ifs::current().star_sep.clone() } else { " ".to_string() };
+    let sep = if star {
+        Ifs::current().star_sep.clone()
+    } else {
+        " ".to_string()
+    };
     let joined = values.join(&sep);
     // "Unset/empty": no elements, or (with colon) they join to empty.
     let empty = values.is_empty() || (colon && joined.is_empty());
@@ -2461,7 +2652,11 @@ pub fn ansi_unescape(value: &str) -> String {
             digits.push(c);
             chars.next();
         }
-        if digits.is_empty() { None } else { u32::from_str_radix(&digits, radix).ok() }
+        if digits.is_empty() {
+            None
+        } else {
+            u32::from_str_radix(&digits, radix).ok()
+        }
     }
     let mut out = String::new();
     let mut chars = value.chars().peekable();
@@ -2471,17 +2666,50 @@ pub fn ansi_unescape(value: &str) -> String {
             continue;
         }
         match chars.peek().copied() {
-            Some('n') => { chars.next(); out.push('\n'); }
-            Some('t') => { chars.next(); out.push('\t'); }
-            Some('r') => { chars.next(); out.push('\r'); }
-            Some('a') => { chars.next(); out.push('\x07'); }
-            Some('b') => { chars.next(); out.push('\x08'); }
-            Some('f') => { chars.next(); out.push('\x0c'); }
-            Some('v') => { chars.next(); out.push('\x0b'); }
-            Some('e' | 'E') => { chars.next(); out.push('\x1b'); }
-            Some('\\') => { chars.next(); out.push('\\'); }
-            Some('\'') => { chars.next(); out.push('\''); }
-            Some('"') => { chars.next(); out.push('"'); }
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            Some('t') => {
+                chars.next();
+                out.push('\t');
+            }
+            Some('r') => {
+                chars.next();
+                out.push('\r');
+            }
+            Some('a') => {
+                chars.next();
+                out.push('\x07');
+            }
+            Some('b') => {
+                chars.next();
+                out.push('\x08');
+            }
+            Some('f') => {
+                chars.next();
+                out.push('\x0c');
+            }
+            Some('v') => {
+                chars.next();
+                out.push('\x0b');
+            }
+            Some('e' | 'E') => {
+                chars.next();
+                out.push('\x1b');
+            }
+            Some('\\') => {
+                chars.next();
+                out.push('\\');
+            }
+            Some('\'') => {
+                chars.next();
+                out.push('\'');
+            }
+            Some('"') => {
+                chars.next();
+                out.push('"');
+            }
             // `\nnn` — one to three octal digits (C119). `\0` alone still
             // yields NUL as the degenerate one-digit case.
             Some('0'..='7') => {
@@ -2514,7 +2742,11 @@ pub fn ansi_unescape(value: &str) -> String {
                 chars.next();
                 match chars.next() {
                     Some(x) => {
-                        let x = if x == '\\' { chars.next().unwrap_or('\\') } else { x };
+                        let x = if x == '\\' {
+                            chars.next().unwrap_or('\\')
+                        } else {
+                            x
+                        };
                         out.push(((x.to_ascii_uppercase() as u8) & 0x1f) as char);
                     }
                     None => out.push_str("\\c"),
@@ -2580,7 +2812,12 @@ fn reconstruct_assignment(name: &str) -> String {
         } else {
             crate::vars::array_indices(name)
                 .into_iter()
-                .map(|i| format!("[{i}]={}", shell_quote(&crate::vars::array_get(name, i).unwrap_or_default())))
+                .map(|i| {
+                    format!(
+                        "[{i}]={}",
+                        shell_quote(&crate::vars::array_get(name, i).unwrap_or_default())
+                    )
+                })
                 .collect()
         };
         return format!("declare -{flags} {name}=({})", elems.join(" "));
@@ -2675,22 +2912,39 @@ pub fn declare_p_line(name: &str) -> String {
         out
     }
     let letters = attr_letters(name);
-    let flags = if letters.is_empty() { "--".to_string() } else { format!("-{letters}") };
+    let flags = if letters.is_empty() {
+        "--".to_string()
+    } else {
+        format!("-{letters}")
+    };
     if crate::vars::is_assoc(name) {
         let elems: String = crate::vars::assoc_keys(name)
             .into_iter()
-            .map(|k| format!("[{k}]={} ", dq(&crate::vars::assoc_get(name, &k).unwrap_or_default())))
+            .map(|k| {
+                format!(
+                    "[{k}]={} ",
+                    dq(&crate::vars::assoc_get(name, &k).unwrap_or_default())
+                )
+            })
             .collect();
         return format!("declare {flags} {name}=({elems})");
     }
     if crate::vars::is_indexed_array(name) {
         let elems: Vec<String> = crate::vars::array_indices(name)
             .into_iter()
-            .map(|i| format!("[{i}]={}", dq(&crate::vars::array_get(name, i).unwrap_or_default())))
+            .map(|i| {
+                format!(
+                    "[{i}]={}",
+                    dq(&crate::vars::array_get(name, i).unwrap_or_default())
+                )
+            })
             .collect();
         return format!("declare {flags} {name}=({})", elems.join(" "));
     }
-    format!("declare {flags} {name}={}", dq(&crate::vars::get(name).unwrap_or_default()))
+    format!(
+        "declare {flags} {name}={}",
+        dq(&crate::vars::get(name).unwrap_or_default())
+    )
 }
 
 /// Whether `rest` (the text after the variable name inside `${...}`)
@@ -2754,9 +3008,18 @@ fn string_transform(value: &str, rest: &str) -> Result<String, String> {
     // converts every character, the single form just the first. An
     // optional trailing pattern restricts which characters convert
     // (`${v^^[a-f]}`), defaulting to `?` (any).
-    for (op, upper, all) in [("^^", true, true), ("^", true, false), (",,", false, true), (",", false, false)] {
+    for (op, upper, all) in [
+        ("^^", true, true),
+        ("^", true, false),
+        (",,", false, true),
+        (",", false, false),
+    ] {
         if let Some(pat_src) = rest.strip_prefix(op) {
-            let pattern = if pat_src.is_empty() { "?".to_string() } else { expand_dollars(pat_src)? };
+            let pattern = if pat_src.is_empty() {
+                "?".to_string()
+            } else {
+                expand_dollars(pat_src)?
+            };
             return Ok(case_convert(value, &pattern, upper, all));
         }
     }
@@ -2773,7 +3036,11 @@ fn string_transform(value: &str, rest: &str) -> Result<String, String> {
         let off = crate::arith::eval(&expand_dollars(off_src)?)?;
         let chars: Vec<char> = value.chars().collect();
         let n = chars.len() as i64;
-        let start = if off < 0 { (n + off).max(0).min(n) } else { off.min(n) };
+        let start = if off < 0 {
+            (n + off).max(0).min(n)
+        } else {
+            off.min(n)
+        };
         let end = match len_src {
             None => n,
             Some(src) => {
@@ -2794,7 +3061,9 @@ fn string_transform(value: &str, rest: &str) -> Result<String, String> {
         if off < 0 && n + off < 0 {
             return Ok(String::new());
         }
-        return Ok(chars[start as usize..end.max(start) as usize].iter().collect());
+        return Ok(chars[start as usize..end.max(start) as usize]
+            .iter()
+            .collect());
     }
     Err(format!("bad substitution: {rest}"))
 }
@@ -3016,7 +3285,11 @@ pub fn expand_ps1(ps1: &str) -> String {
                         fmt.push(fc);
                     }
                 }
-                out.push_str(&prompt_time(if fmt.is_empty() { "%a %b %e %H:%M:%S" } else { &fmt }));
+                out.push_str(&prompt_time(if fmt.is_empty() {
+                    "%a %b %e %H:%M:%S"
+                } else {
+                    &fmt
+                }));
             }
             Some('j') => {
                 #[cfg(unix)]
@@ -3074,13 +3347,18 @@ fn cwd_string_trimmed() -> String {
     {
         cwd = format!("~{}", &cwd[home.len()..]);
     }
-    let trim =
-        crate::vars::get("PROMPT_DIRTRIM").and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0);
+    let trim = crate::vars::get("PROMPT_DIRTRIM")
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0);
     if let Some(n) = trim {
         let parts: Vec<&str> = cwd.split('/').collect();
         if parts.len() > n + 1 {
             let kept = &parts[parts.len() - n..];
-            let lead = if cwd.starts_with('~') { "~/.../" } else { ".../" };
+            let lead = if cwd.starts_with('~') {
+                "~/.../"
+            } else {
+                ".../"
+            };
             return format!("{lead}{}", kept.join("/"));
         }
     }
@@ -3094,7 +3372,10 @@ fn hostname_short() -> String {
 /// The current directory as a plain display string — also `main.rs`'s own
 /// `default_prompt` fallback when `$PS1` isn't set.
 pub fn cwd_string() -> String {
-    std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into())
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "?".into())
 }
 
 fn cwd_basename() -> String {
@@ -3105,7 +3386,9 @@ fn cwd_basename() -> String {
 }
 
 fn username() -> String {
-    crate::vars::get("USER").or_else(|| crate::vars::get("USERNAME")).unwrap_or_else(|| "user".into())
+    crate::vars::get("USER")
+        .or_else(|| crate::vars::get("USERNAME"))
+        .unwrap_or_else(|| "user".into())
 }
 
 fn hostname() -> String {
@@ -3117,7 +3400,11 @@ fn hostname() -> String {
 
 #[cfg(unix)]
 fn prompt_char() -> char {
-    if unsafe { crate::sys::getuid() } == 0 { '#' } else { '$' }
+    if unsafe { crate::sys::getuid() } == 0 {
+        '#'
+    } else {
+        '$'
+    }
 }
 
 #[cfg(not(unix))]
@@ -3227,7 +3514,10 @@ mod tests {
 
     #[test]
     fn star_join_honors_ifs_first_char() {
-        crate::vars::set_args("rush".to_string(), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        crate::vars::set_args(
+            "rush".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
 
         // Unset IFS: `$*`/`${*}` join with a space, same as always.
         crate::vars::unset("IFS");
@@ -3273,7 +3563,13 @@ mod tests {
 
         let c = expand_cmd("A=1 B=2 echo hi");
         assert_eq!(c.argv, vec!["echo", "hi"]);
-        assert_eq!(c.assignments, vec![("A".to_string(), scalar("1")), ("B".to_string(), scalar("2"))]);
+        assert_eq!(
+            c.assignments,
+            vec![
+                ("A".to_string(), scalar("1")),
+                ("B".to_string(), scalar("2"))
+            ]
+        );
     }
 
     #[test]
@@ -3294,7 +3590,13 @@ mod tests {
         use crate::vars::{AssignOp, AssignValue};
         crate::vars::set("RUSH_BASE", "/base");
         let c = expand_cmd("P=$RUSH_BASE/x");
-        assert_eq!(c.assignments, vec![("P".to_string(), AssignOp::Set(AssignValue::Scalar("/base/x".to_string())))]);
+        assert_eq!(
+            c.assignments,
+            vec![(
+                "P".to_string(),
+                AssignOp::Set(AssignValue::Scalar("/base/x".to_string()))
+            )]
+        );
     }
 
     #[test]
@@ -3384,4 +3686,3 @@ mod tests {
         assert_eq!(one("ls no-such-*.zzz"), vec!["ls", "no-such-*.zzz"]);
     }
 }
-

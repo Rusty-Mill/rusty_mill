@@ -109,7 +109,12 @@ unsafe extern "system" {
     /// place into the *window* `RECT` `CreateWindowExW` needs to produce
     /// that client size, given the window's style/ex-style (menu-bearing
     /// windows need `b_menu` true; this crate never creates one).
-    pub fn AdjustWindowRectEx(lp_rect: *mut RECT, dw_style: u32, b_menu: i32, dw_ex_style: u32) -> i32;
+    pub fn AdjustWindowRectEx(
+        lp_rect: *mut RECT,
+        dw_style: u32,
+        b_menu: i32,
+        dw_ex_style: u32,
+    ) -> i32;
     pub fn GetClientRect(h_wnd: HWND, lp_rect: *mut RECT) -> i32;
     pub fn GetDC(h_wnd: HWND) -> HDC;
     pub fn ReleaseDC(h_wnd: HWND, h_dc: HDC) -> i32;
@@ -182,7 +187,12 @@ pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND
         // lets a caller notice after the fact; this is what avoids needing
         // to notice at all).
         const WS_STYLE: u32 = 0x00C00000 | 0x00080000 | 0x00040000 | 0x00020000 | 0x00010000; // WS_OVERLAPPEDWINDOW
-        let mut rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
         AdjustWindowRectEx(&mut rect, WS_STYLE, 0, 0);
         let (win_w, win_h) = (rect.right - rect.left, rect.bottom - rect.top);
 
