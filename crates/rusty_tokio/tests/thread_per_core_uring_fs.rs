@@ -1,3 +1,9 @@
+#![cfg(target_os = "linux")]
+// io-uring-fs is a Cargo feature, not a target predicate -- required-features
+// can't express "only on Linux", so a plain `--features io-uring-fs` build on
+// another OS still tries to compile this file against items `src/io/mod.rs`
+// only re-exports under `cfg(target_os = "linux")`. This file-level cfg is what
+// actually keeps it Linux-only.
 //! Acceptance criteria 1-2: `cargo +stable build --features
 //! thread-per-core,io-uring-fs` (this file only builds under those
 //! features -- see `Cargo.toml`'s `required-features`), and N =

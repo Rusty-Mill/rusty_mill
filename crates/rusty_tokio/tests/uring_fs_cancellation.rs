@@ -1,3 +1,9 @@
+#![cfg(target_os = "linux")]
+// io-uring-fs is a Cargo feature, not a target predicate -- required-features
+// can't express "only on Linux", so a plain `--features io-uring-fs` build on
+// another OS still tries to compile this file against items `src/io/mod.rs`
+// only re-exports under `cfg(target_os = "linux")`. This file-level cfg is what
+// actually keeps it Linux-only.
 //! Acceptance criterion 3: drop an in-flight `read_at`/`write_at`
 //! before completion, and confirm a completion that arrives *after* the
 //! drop doesn't panic, double-free, or touch freed memory. See

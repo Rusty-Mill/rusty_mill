@@ -1,3 +1,9 @@
+#![cfg(target_os = "linux")]
+// io-uring-fs is a Cargo feature, not a target predicate -- required-features
+// can't express "only on Linux", so a plain `--features io-uring-fs` build on
+// another OS still tries to compile this file against items `src/io/mod.rs`
+// only re-exports under `cfg(target_os = "linux")`. This file-level cfg is what
+// actually keeps it Linux-only.
 //! #256: `global_driver` is the only way to obtain a real, production
 //! `Arc<dyn OpDriver>` from outside this crate -- `IoUringDriver` has no
 //! public constructor of its own, by design (see its docs). This

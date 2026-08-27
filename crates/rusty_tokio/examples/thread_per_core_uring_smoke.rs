@@ -13,9 +13,20 @@
 //!     --example thread_per_core_uring_smoke
 //! ```
 
+// `UringFile` is a Cargo-feature-gated re-export that `src/io/mod.rs` only
+// makes available under `cfg(target_os = "linux")` -- required-features
+// can't express "only on Linux", so a bare `--features io-uring-fs` build
+// on another OS needs its own cfg here, or `cargo build --all-features`
+// (rusty_mill's workspace CI) fails to resolve the import on Windows/macOS.
+#[cfg(target_os = "linux")]
 use rusty_tokio::io::UringFile;
+#[cfg(target_os = "linux")]
 use rusty_tokio::Builder;
 
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let n = std::thread::available_parallelism()
         .map(|p| p.get())
@@ -68,11 +79,13 @@ fn main() {
     println!("thread_per_core_uring_smoke: OK ({n} cores)");
 }
 
+#[cfg(target_os = "linux")]
 async fn write_at(file: &UringFile, buf: Vec<u8>, pos: u64) -> (usize, Vec<u8>) {
     let result = file.write_at(buf, pos).await;
     (result.0.expect("write_at failed"), result.1)
 }
 
+#[cfg(target_os = "linux")]
 async fn read_at(file: &UringFile, buf: Vec<u8>, pos: u64) -> (usize, Vec<u8>) {
     let result = file.read_at(buf, pos).await;
     (result.0.expect("read_at failed"), result.1)

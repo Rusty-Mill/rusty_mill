@@ -1,3 +1,9 @@
+#![cfg(target_os = "linux")]
+// io-uring-fs is a Cargo feature, not a target predicate -- required-features
+// can't express "only on Linux", so a plain `--features io-uring-fs` build on
+// another OS still tries to compile this file against items `src/io/mod.rs`
+// only re-exports under `cfg(target_os = "linux")`. This file-level cfg is what
+// actually keeps it Linux-only.
 //! A `rusty_stream`-shaped demonstration of the `OpDriver`/`SimDriver`
 //! seam (handoff item 4): [`SegmentLog`] below is real, working
 //! recovery code -- length-prefixed, CRC-checked records, replayed from
