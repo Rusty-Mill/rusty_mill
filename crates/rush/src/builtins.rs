@@ -1857,14 +1857,7 @@ fn split_read_fields(line: &[u8], protected: &[bool]) -> Vec<ReadField> {
 
     while i < n {
         if is_delim(i) {
-            let mut j = i;
-            let mut hard = 0usize;
-            while j < n && is_delim(j) {
-                if !is_ws(j) {
-                    hard += 1;
-                }
-                j += 1;
-            }
+            let (hard, j) = crate::expand::ifs_run_end(i, n, is_delim, is_ws);
             if hard > 0 {
                 let mut k = i;
                 while k < j {

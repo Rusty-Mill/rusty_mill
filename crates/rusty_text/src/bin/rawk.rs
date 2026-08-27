@@ -2,11 +2,9 @@
 //! `rusty_text::awk`'s module doc for exactly what's implemented.
 
 use std::env;
-use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
-use std::path::Path;
+use std::io::{self, Write};
 
-use rusty_text::AwkProgram;
+use rusty_text::{read_lines, AwkProgram};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -44,20 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let program = AwkProgram::parse(&script_str)?;
 
-    let mut lines: Vec<String> = Vec::new();
-    if files.is_empty() {
-        for line in io::stdin().lock().lines() {
-            lines.push(line?);
-        }
-    } else {
-        for f in &files {
-            let win_path = rpath::posix_to_win32(f);
-            let file = fs::File::open(Path::new(&win_path))?;
-            for line in BufReader::new(file).lines() {
-                lines.push(line?);
-            }
-        }
-    }
+    let lines = read_lines(&files)?;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();

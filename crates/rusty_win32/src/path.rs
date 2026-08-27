@@ -10,6 +10,7 @@
 //! resolve on Windows the way it does on Unix.
 
 use crate::error::Win32Error;
+use crate::wide::to_wide;
 
 extern crate alloc;
 use alloc::string::String;
@@ -49,10 +50,6 @@ unsafe extern "system" {
         unique: u32,
         tmp_file_name: *mut u16,
     ) -> u32;
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 /// Search for `file_name`, appending `extension` if `file_name` has none of

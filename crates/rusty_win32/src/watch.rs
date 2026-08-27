@@ -20,6 +20,7 @@
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
+use crate::wide::to_wide;
 
 extern crate alloc;
 use alloc::string::String;
@@ -135,10 +136,6 @@ unsafe extern "system" {
         wait: i32,
     ) -> i32;
     fn CancelIoEx(file: RawHandle, overlapped: *mut Overlapped) -> i32;
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 /// Open `path` (a directory) for watching via [`read_changes`] —
@@ -328,8 +325,10 @@ fn parse_notifications(buf: &[u8]) -> Vec<FileNotification> {
         // `FileNameLength` bytes) — decode by 2-byte units rather than
         // scanning for a terminator.
         let units: Vec<u16> = buf[name_start..name_end]
-            .chunks_exact(2)
-            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
             .collect();
         out.push(FileNotification {
             action,

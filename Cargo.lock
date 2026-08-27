@@ -2393,6 +2393,7 @@ dependencies = [
  "rpath",
  "rusty_compress",
  "rusty_diff",
+ "rusty_sha1",
 ]
 
 [[package]]
@@ -2449,6 +2450,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_sha1"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_simd"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264#38d3fae033d716d8616ef37f087004816d055264"
@@ -2477,7 +2482,9 @@ dependencies = [
  "rusty_gpu",
  "rusty_gui",
  "rusty_regx",
+ "rusty_sha1",
  "rusty_term_l13",
+ "rusty_win32 0.1.0",
  "softbuffer",
  "tokio",
  "ttf-parser",

@@ -219,7 +219,7 @@ pub unsafe fn open_key(
     subkey: &str,
     access: u32,
 ) -> Result<HKey, crate::error::Win32Error> {
-    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(subkey);
     let mut result: HKey = core::ptr::null_mut();
     // SAFETY: `parent` is caller-supplied per this function's own safety
     // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
@@ -281,7 +281,7 @@ pub unsafe fn create_key(
     subkey: &str,
     access: u32,
 ) -> Result<(HKey, KeyDisposition), crate::error::Win32Error> {
-    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(subkey);
     let mut result: HKey = core::ptr::null_mut();
     let mut disposition: u32 = 0;
     // SAFETY: `parent` is caller-supplied per this function's own safety
@@ -358,8 +358,10 @@ const REG_QWORD: u32 = 11;
 
 fn decode_wide_string(buf: &[u8]) -> alloc::string::String {
     let mut units: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     // A registry `REG_SZ`/`REG_EXPAND_SZ` value is *usually* stored with a
     // trailing NUL folded into its byte count, but the API docs
@@ -373,8 +375,10 @@ fn decode_wide_string(buf: &[u8]) -> alloc::string::String {
 
 fn decode_multi_sz(buf: &[u8]) -> Vec<alloc::string::String> {
     let units: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     let mut strings = Vec::new();
     let mut start = 0;
@@ -426,7 +430,7 @@ pub unsafe fn query_value(
     key: HKey,
     name: &str,
 ) -> Result<RegistryValue, crate::error::Win32Error> {
-    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide_name: Vec<u16> = crate::wide::to_wide(name);
 
     let mut value_type: u32 = 0;
     let mut size: u32 = 0;
@@ -525,7 +529,7 @@ pub unsafe fn set_value(
     name: &str,
     value: &RegistryValue,
 ) -> Result<(), crate::error::Win32Error> {
-    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide_name: Vec<u16> = crate::wide::to_wide(name);
     let (value_type, data) = match value {
         RegistryValue::None => (REG_NONE, Vec::new()),
         RegistryValue::Sz(s) => (REG_SZ, encode_wide_string(s)),
@@ -570,7 +574,7 @@ pub unsafe fn set_value(
 /// returned that hasn't been closed yet, opened/created with
 /// [`KEY_WRITE`] (or a superset of it, e.g. [`KEY_ALL_ACCESS`]) access.
 pub unsafe fn delete_value(key: HKey, name: &str) -> Result<(), crate::error::Win32Error> {
-    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide_name: Vec<u16> = crate::wide::to_wide(name);
     // SAFETY: `key` is caller-supplied per this function's own safety
     // contract; `wide_name` is a valid, NUL-terminated UTF-16 string live
     // for the whole call.
@@ -600,7 +604,7 @@ pub unsafe fn delete_key(
     subkey: &str,
     view: u32,
 ) -> Result<(), crate::error::Win32Error> {
-    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(subkey);
     // SAFETY: `parent` is caller-supplied per this function's own safety
     // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
     // the whole call.
@@ -999,7 +1003,7 @@ pub unsafe fn flush_key(key: HKey) -> Result<(), crate::error::Win32Error> {
 /// roots in this module, or a key [`open_key`]/[`create_key`] previously
 /// returned that hasn't been closed yet.
 pub unsafe fn delete_tree(parent: HKey, subkey: &str) -> Result<(), crate::error::Win32Error> {
-    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(subkey);
     // SAFETY: `parent` is caller-supplied per this function's own safety
     // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
     // the whole call.

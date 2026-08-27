@@ -26,6 +26,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::error::Win32Error;
+use crate::wide::to_wide;
 
 /// `CRED_TYPE_GENERIC` — the generic-secret credential type.
 pub const CRED_TYPE_GENERIC: u32 = 1;
@@ -106,10 +107,6 @@ unsafe extern "system" {
         credential: *mut *mut CredentialW,
     ) -> i32;
     fn CredFree(buffer: *const core::ffi::c_void);
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 /// Store `secret` under `target_name`/`user_name` as a

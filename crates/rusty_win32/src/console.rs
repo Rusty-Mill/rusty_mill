@@ -131,8 +131,9 @@ const WAIT_TIMEOUT: u32 = 258;
 // handle). What "raw mode" means in terms of these — which bits to clear
 // or set — is deliberately *not* decided here, the same way `rusty_libc`
 // exposes `tcgetattr`/`tcsetattr` without baking in a raw-mode recipe:
-// that policy belongs to the line-editor consumer (`rusty_lines`'
-// `term_sys.rs` on Unix), not this crate.
+// that policy belongs to the caller (`rusty_lines`' `term_sys.rs`,
+// `rusty_term`'s Windows ConPTY backend). [`raw_mode_core`] below is the
+// one deliberate exception — see its own doc comment for why.
 /// Ctrl+C/Ctrl-Break are intercepted and converted to the corresponding
 /// `CTRL_*_EVENT` (via [`install_ctrl_handler`]) rather than delivered as
 /// input — set by default. Clearing this is what lets a raw-mode reader see
@@ -362,6 +363,32 @@ pub unsafe fn set_mode(console_handle: RawHandle, mode: u32) -> Result<(), Win32
     }
 }
 
+/// The raw-mode input/output flag transformation two independent
+/// consumers in this workspace converged on: disable line buffering, echo,
+/// and OS-level Ctrl-C handling on input (`ENABLE_LINE_INPUT`/
+/// `ENABLE_ECHO_INPUT`/`ENABLE_PROCESSED_INPUT` off — the Windows analogs
+/// of `ICANON`/`ECHO`/`ISIG`), while decoding VT/ANSI input and
+/// processing VT/ANSI output (`ENABLE_VIRTUAL_TERMINAL_INPUT`/
+/// `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on). Takes the current input and
+/// output mode and returns the new ones; does not call [`set_mode`] itself.
+///
+/// This is the one deliberate exception to this module's otherwise
+/// policy-free convention (see [`set_mode`]'s own doc comment): both
+/// `rusty_lines`' Windows `term_sys` backend and `rusty_term`'s ConPTY
+/// backend independently arrived at byte-identical bits for this core
+/// transformation, so keeping it duplicated a third time wasn't worth the
+/// purity. Each caller still layers its own additional bits on top for
+/// what it needs beyond this shared core, so this function alone is not
+/// "the" raw-mode recipe for either — `rusty_lines` also disables Quick
+/// Edit mode (Windows-only, no Unix analog); `rusty_term` also forces
+/// `ENABLE_PROCESSED_OUTPUT`. See their own call sites.
+pub fn raw_mode_core(input_mode: u32, output_mode: u32) -> (u32, u32) {
+    let input = (input_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+        | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    let output = output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    (input, output)
+}
+
 /// The calling process's console input code page — `GetConsoleCP`, the
 /// analog of `GetConsoleMode` but for character encoding rather than input
 /// behavior. Governs how bytes `ReadFile`/`ReadConsole` deliver (without
@@ -464,7 +491,7 @@ pub fn title() -> Result<alloc::string::String, Win32Error> {
 /// in the window title) that this crate previously had no primitive for at
 /// all.
 pub fn set_title(title: &str) -> Result<(), Win32Error> {
-    let wide: alloc::vec::Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: alloc::vec::Vec<u16> = crate::wide::to_wide(title);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { SetConsoleTitleW(wide.as_ptr()) };
     if ok == 0 {
@@ -1035,6 +1062,28 @@ mod tests {
     use super::*;
     extern crate alloc;
 
+    /// Pure bit-math, no real console handle needed: `raw_mode_core`
+    /// clears exactly the three input bits and sets exactly the two VT
+    /// bits it documents, leaving everything else in the mode untouched.
+    #[test]
+    fn raw_mode_core_clears_and_sets_exactly_the_documented_bits() {
+        let input = ENABLE_LINE_INPUT
+            | ENABLE_ECHO_INPUT
+            | ENABLE_PROCESSED_INPUT
+            | ENABLE_WINDOW_INPUT
+            | ENABLE_MOUSE_INPUT;
+        let output = ENABLE_WRAP_AT_EOL_OUTPUT;
+        let (new_input, new_output) = raw_mode_core(input, output);
+        assert_eq!(
+            new_input,
+            ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT
+        );
+        assert_eq!(
+            new_output,
+            ENABLE_WRAP_AT_EOL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        );
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CreateFileW(
@@ -1066,7 +1115,7 @@ mod tests {
     /// redirection question by always naming the *actual* attached
     /// console, whatever the std handles say.
     fn open_console(name: &str) -> Option<RawHandle> {
-        let wide: alloc::vec::Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+        let wide: alloc::vec::Vec<u16> = crate::wide::to_wide(name);
         // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string naming a
         // well-known console pseudo-device; the other arguments are
         // documented-valid constants for opening an existing device for

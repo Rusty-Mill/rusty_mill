@@ -156,7 +156,7 @@ pub unsafe fn open_service(
     name: &str,
     access: u32,
 ) -> Result<RawHandle, Win32Error> {
-    let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(name);
     // SAFETY: `scm` is caller-supplied per this function's own safety
     // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
     // the whole call.
@@ -725,7 +725,7 @@ pub unsafe fn display_name(
     scm: RawHandle,
     key_name: &str,
 ) -> Result<alloc::string::String, Win32Error> {
-    let wide_key: Vec<u16> = key_name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide_key: Vec<u16> = crate::wide::to_wide(key_name);
     let mut buf_len: u32 = 0;
     for _ in 0..=NAME_QUERY_MAX_RETRIES {
         let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
@@ -771,10 +771,7 @@ pub unsafe fn key_name(
     scm: RawHandle,
     display_name: &str,
 ) -> Result<alloc::string::String, Win32Error> {
-    let wide_display: Vec<u16> = display_name
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
+    let wide_display: Vec<u16> = crate::wide::to_wide(display_name);
     let mut buf_len: u32 = 0;
     for _ in 0..=NAME_QUERY_MAX_RETRIES {
         let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];

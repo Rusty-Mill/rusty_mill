@@ -19,6 +19,7 @@
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
 use crate::time::Timespec;
+use crate::wide::to_wide;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -500,10 +501,7 @@ pub unsafe fn spawn_suspended(
     // `lpCommandLine`'s first token exceeds `MAX_PATH`), so a `&str`'s
     // read-only pointer isn't sufficient — this must be an owned, mutable
     // buffer.
-    let mut wide: Vec<u16> = command_line
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
+    let mut wide: Vec<u16> = crate::wide::to_wide(command_line);
 
     let mut startup_info = StartupInfoW {
         cb: core::mem::size_of::<StartupInfoW>() as u32,
@@ -615,10 +613,7 @@ pub unsafe fn spawn_suspended_with_pseudoconsole(
     command_line: &str,
     hpc: crate::conpty::Hpcon,
 ) -> Result<SpawnedProcess, Win32Error> {
-    let mut wide: Vec<u16> = command_line
-        .encode_utf16()
-        .chain(core::iter::once(0))
-        .collect();
+    let mut wide: Vec<u16> = crate::wide::to_wide(command_line);
 
     let mut attribute_list = crate::conpty::AttributeList::init(1)?;
     // SAFETY: `hpc` is caller-supplied per this function's own safety
@@ -782,10 +777,6 @@ fn parse_environment_entry(
         alloc::string::String::from_utf16_lossy(&units[..equals_index]),
         alloc::string::String::from_utf16_lossy(&units[equals_index + 1..]),
     ))
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 /// Read one live environment variable — `GetEnvironmentVariableW`, the

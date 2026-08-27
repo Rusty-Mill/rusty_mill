@@ -1081,24 +1081,22 @@ impl Splitter {
             return;
         }
 
-        let mut chars = text.chars().peekable();
-        while let Some(&c) = chars.peek() {
-            if ifs.is_delim(c) {
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        let mut i = 0;
+        while i < n {
+            if ifs.is_delim(chars[i]) {
                 // A maximal run of IFS characters: each non-whitespace one is
                 // its own delimiter (hard boundary); whitespace anywhere in
                 // the run is filler, absorbed rather than adding a boundary
                 // of its own — but only when at least one non-whitespace
                 // delimiter is actually present in this run.
-                let mut hard = 0usize;
-                while let Some(&next) = chars.peek() {
-                    if !ifs.is_delim(next) {
-                        break;
-                    }
-                    if !ifs.is_whitespace(next) {
-                        hard += 1;
-                    }
-                    chars.next();
-                }
+                let (hard, j) = ifs_run_end(
+                    i,
+                    n,
+                    |k| ifs.is_delim(chars[k]),
+                    |k| ifs.is_whitespace(chars[k]),
+                );
                 if hard > 0 {
                     for _ in 0..hard {
                         self.hard_boundary();
@@ -1106,11 +1104,13 @@ impl Splitter {
                 } else {
                     self.soft_pending = true;
                 }
+                i = j;
             } else {
-                let mut chunk = String::new();
-                while matches!(chars.peek(), Some(&c) if !ifs.is_delim(c)) {
-                    chunk.push(chars.next().unwrap());
+                let start = i;
+                while i < n && !ifs.is_delim(chars[i]) {
+                    i += 1;
                 }
+                let chunk: String = chars[start..i].iter().collect();
                 let f = self.current();
                 f.plain.push_str(&chunk);
                 f.pattern.push_str(&chunk);
@@ -1132,6 +1132,34 @@ impl Splitter {
         self.fields.last_mut().unwrap().explicit = true;
         self.soft_pending = false;
     }
+}
+
+/// Classify a maximal run of `$IFS` delimiters per POSIX §2.6.5, starting
+/// at `start` (bounded by `len`): each non-whitespace delimiter is always
+/// its own field boundary ("hard"); whitespace delimiters anywhere in the
+/// run are absorbed rather than adding a boundary of their own. Returns
+/// the run's hard-delimiter count and the index just past it.
+///
+/// Shared between [`Splitter::add_split`] (unquoted-expansion word
+/// splitting, char-indexed) and `builtins::split_read_fields` (the `read`
+/// builtin, byte-indexed) — the same run-classification rule, applied over
+/// two different index spaces with different downstream field models (see
+/// `split_read_fields`'s own doc comment for why those stay separate).
+pub(crate) fn ifs_run_end(
+    start: usize,
+    len: usize,
+    is_delim: impl Fn(usize) -> bool,
+    is_whitespace: impl Fn(usize) -> bool,
+) -> (usize, usize) {
+    let mut hard = 0usize;
+    let mut j = start;
+    while j < len && is_delim(j) {
+        if !is_whitespace(j) {
+            hard += 1;
+        }
+        j += 1;
+    }
+    (hard, j)
 }
 
 /// Expand a `[[ ]]` `==`/`!=` right-hand side into a glob pattern (C55):

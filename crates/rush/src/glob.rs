@@ -1,16 +1,25 @@
-//! Filename globbing — hand-rolled, no external crate.
+//! Filename globbing.
 //!
 //! Two layers:
 //!   * [`match_component`] matches one path component against a pattern using
-//!     `*`, `?`, and `[…]` (with ranges and `!`/`^` negation). A backslash
-//!     escapes the next character so quoted metacharacters can be passed
-//!     through literally.
+//!     `*`, `?`, `[…]` (with ranges and `!`/`^` negation), and the bash
+//!     extglob operators `@()`/`?()`/`*()`/`+()`/`!()`. A backslash escapes
+//!     the next character so quoted metacharacters can be passed through
+//!     literally.
 //!   * [`glob`] walks the filesystem component-by-component, so `src/*.rs` and
 //!     `*/*.rs` work. Unmatched patterns return nothing; the caller falls back
 //!     to the literal word (POSIX no-match behaviour).
 //!
 //! Like a POSIX shell, a leading `.` in a filename is only matched when the
-//! pattern's component itself begins with a literal `.` — so `*` skips dotfiles.
+//! pattern's component itself begins with a literal `.` — so `*` skips dotfiles
+//! (`walk` checks this itself, before calling `match_component`).
+//!
+//! `match_component` tries `rusty_regx::Glob` first — the same linear-time,
+//! non-backtracking engine `[[ =~ ]]` uses — falling back to a hand-rolled
+//! backtracking matcher only for what that engine doesn't (yet) cover. See
+//! `match_component`'s own doc comment for exactly when and why, and
+//! `crates/rusty_regx/docs/GLOB_DESIGN.md` (issue #20) for the engine's
+//! design and roadmap toward covering the rest.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -169,12 +178,59 @@ fn unescape(seg: &str) -> String {
 }
 
 /// Match a single path component against a glob pattern.
+///
+/// Tries [`rusty_regx::Glob`] first: the same linear-time, non-backtracking
+/// engine `[[ =~ ]]` uses, closing the DoS hole the fallback below has for
+/// adversarial `*(...)`/`+(...)` nesting (a fuzzer-found input once hung
+/// this crate's own matcher for 30 minutes — see `nested_star_extglob_does_not_blow_up`
+/// below, kept as a regression test on the fallback path itself).
+///
+/// Falls back to the hand-rolled matcher below for what `rusty_regx::Glob`
+/// doesn't (yet) cover, per `crates/rusty_regx/docs/GLOB_DESIGN.md`'s
+/// restricted-v1 scope:
+///   * `!(p)` negation embedded anywhere but as the *entire* pattern (e.g.
+///     `!(a|b)file` — only bare `!(a|b)` is supported so far). `Glob::new`
+///     rejects this (`EmbeddedGlobNegation`), which the `Err` branch below
+///     catches like any other pattern the fast engine can't compile.
+///   * Extglob syntax (`@(`/`?(`/`*(`/`+(`/`!(`) while `shopt -u extglob` is
+///     set: `Glob` has no way to be told "parse these as literal
+///     characters" the way this crate's own shopt-gated check does, so
+///     such patterns must be routed around it entirely rather than given a
+///     chance to compile — an `Ok` here would be a silently *wrong* match,
+///     not a slow one.
 pub fn match_component(pattern: &str, name: &str) -> bool {
+    let extglob = crate::vars::shopt("extglob");
+    if (extglob || !has_extglob_opener(pattern))
+        && let Ok(g) = rusty_regx::Glob::new(pattern)
+    {
+        return g.matches(name);
+    }
     let p: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = name.chars().collect();
     matches(&p, 0, &s, 0)
 }
 
+/// Whether `pattern` contains an unescaped extglob opener (`@(`, `?(`,
+/// `*(`, `+(`, or `!(`) anywhere — used only to route around
+/// `rusty_regx::Glob` when `shopt -u extglob` is set, per
+/// [`match_component`]'s doc comment. Mirrors [`has_meta`]'s own
+/// backslash-skipping so an escaped `\@(` is correctly never flagged.
+fn has_extglob_opener(pattern: &str) -> bool {
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '@' | '?' | '*' | '+' | '!' if chars.peek() == Some(&'(') => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The hand-rolled fallback matcher — see [`match_component`]'s doc
+/// comment for when this runs instead of `rusty_regx::Glob`.
 fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
     loop {
         if pi == p.len() {

@@ -275,6 +275,9 @@ pub mod error;
 pub use error::Win32Error;
 
 #[cfg(windows)]
+mod wide;
+
+#[cfg(windows)]
 pub mod console;
 #[cfg(windows)]
 pub use console::{HandlerRoutine, generate_ctrl_event, install_ctrl_handler, remove_ctrl_handler};

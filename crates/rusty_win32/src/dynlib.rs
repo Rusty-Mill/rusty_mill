@@ -9,6 +9,7 @@
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
+use crate::wide::to_wide;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -18,10 +19,6 @@ unsafe extern "system" {
     fn LoadLibraryW(file_name: *const u16) -> RawHandle;
     fn GetProcAddress(module: RawHandle, proc_name: *const u8) -> *mut core::ffi::c_void;
     fn FreeLibrary(module: RawHandle) -> i32;
-}
-
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 /// Loads `name` (e.g. `"vulkan-1.dll"`) via `LoadLibraryW`, searching the

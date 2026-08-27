@@ -309,7 +309,7 @@ pub const JOB_OBJECT_ALL_ACCESS: u32 = 0x001F_003F;
 /// direction of [`create`], which only ever makes anonymous jobs. No
 /// current `rush` feature asks for this; filed for Win32 parity.
 pub fn open_by_name(name: &str, desired_access: u32) -> Result<RawHandle, Win32Error> {
-    let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::wide::to_wide(name);
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
     // `inherit_handle = 0` (not inheritable) is a documented valid input.
     let job = unsafe { OpenJobObjectW(desired_access, 0, wide.as_ptr()) };
@@ -1139,7 +1139,7 @@ mod tests {
     #[test]
     fn open_by_name_opens_the_same_job_a_named_create_made() {
         let name = "rusty_win32_test_job_open_by_name";
-        let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+        let wide: Vec<u16> = crate::wide::to_wide(name);
         // `create()` only ever makes anonymous jobs — call the private
         // `CreateJobObjectW` extern directly (this test module can, being
         // inside `job.rs` itself) to get a *named* job to open by name.

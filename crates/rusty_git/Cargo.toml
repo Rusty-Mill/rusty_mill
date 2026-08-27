@@ -8,6 +8,10 @@ description = "Pure Rust implementation of Git object model, index, refs, and CL
 [dependencies]
 rusty_diff = { path = "../rusty_diff" }
 rpath = { path = "../rpath" }
+# Object hashing: git's object model is content-addressed by SHA-1. Shared
+# with rusty_term's WebSocket handshake (its `web-bridge` feature) via
+# src/sha1.rs's re-export -- see that module's doc comment.
+rusty_sha1 = { path = "../rusty_sha1" }
 # Loose-object storage: git wraps every object in a zlib stream. rusty_compress's
 # `compress_deflate` only emits RFC 1951 "stored" (uncompressed) blocks today, not
 # real Huffman-coded ones, but stored blocks are a fully spec-legal DEFLATE

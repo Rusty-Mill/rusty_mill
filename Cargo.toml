@@ -12,6 +12,7 @@ members = [
     "crates/rusty_diff",
     "crates/rusty_compress",
     "crates/rusty_git",
+    "crates/rusty_sha1",
     "crates/rusty_lines",
     "crates/rush",
     "crates/mill-term",
