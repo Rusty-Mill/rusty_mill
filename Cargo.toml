@@ -23,6 +23,9 @@ members = [
     "crates/rusty_libc",
     "crates/rusty_acp",
     "crates/rusty_tls",
+    "crates/rusty_serde/rusty_serde",
+    "crates/rusty_serde/rusty_serde_derive",
+    "crates/rusty_serde/rusty_serde_erased",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.

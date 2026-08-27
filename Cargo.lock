@@ -4048,6 +4048,22 @@ name = "rusty_rusqlite"
 version = "0.0.1"
 
 [[package]]
+name = "rusty_serde"
+version = "0.1.0"
+dependencies = [
+ "rusty_serde_derive",
+ "rusty_serde_erased",
+]
+
+[[package]]
+name = "rusty_serde_derive"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_serde_erased"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_sha1"
 version = "0.1.0"
 
