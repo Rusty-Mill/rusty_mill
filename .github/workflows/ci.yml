@@ -52,6 +52,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev
 
+      # rusty_a2a's `grpc` feature runs a build.rs that compiles spec/a2a.proto
+      # via prost-build, which needs a `protoc` binary on PATH. rusty_a2a's own
+      # CI only ever ran on ubuntu-latest, so this is the first time that
+      # feature is built on Windows too.
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
