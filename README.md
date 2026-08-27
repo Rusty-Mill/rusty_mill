@@ -6,11 +6,12 @@ pipeline. Each crate keeps its full original commit history, merged in via
 `git subtree` under `crates/`.
 
 A first wave merged fourteen crates (below the `rusty_term` row through
-`rusty_text`). A second wave, in progress, is merging fourteen more —
+`rusty_text`). A second wave, in progress, is merging fifteen more —
 `rusty_tokio`, `rusty_rusqlite`, `rusty_libc`, `rusty_acp`, `rusty_tls`,
 `rusty_serde`, `rusty_lsp`, `rusty_a2a`, `rusty_mcp`, `rusty_stream`,
-`rusty_url`, `rusty_http`, `rusty_json`, and `rusty_oauth` — one crate per
-pull request; this row set reflects whichever of those have landed so far.
+`rusty_url`, `rusty_http`, `rusty_json`, `rusty_oauth`, and `rustils_async`
+— one crate per pull request; this row set reflects whichever of those
+have landed so far.
 
 ## Crates
 
@@ -33,6 +34,7 @@ pull request; this row set reflects whichever of those have landed so far.
 | [`rusty_text`](crates/rusty_text) | `crates/rusty_text` | Pure-Rust sed (`rsed`) and awk (`rawk`) engines |
 | [`rusty_tokio`](crates/rusty_tokio) | `crates/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
 | [`rusty_tokio-macros`](crates/rusty_tokio/rusty_tokio-macros) | `crates/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
+| [`rusty_rusqlite`](crates/rusty_rusqlite) | `crates/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -83,6 +85,10 @@ dependencies (from `baileyrd/rusty_std` and `baileyrd/rustils`) stay pinned
 `git` dependencies — those crates are outside this monorepo's scope, same as
 `rusty_simd`/`rusty_wire` above.
 
+`rusty_rusqlite` has no dependencies at all (`[dependencies]` is empty in
+its own manifest) and nothing in this repo depends on it yet, so nothing
+needed swapping there either.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -116,6 +122,7 @@ The second wave, merging in the same way, adds:
 [`rusty_stream`](https://github.com/baileyrd/rusty_stream),
 [`rusty_url`](https://github.com/baileyrd/rusty_url),
 [`rusty_http`](https://github.com/baileyrd/rusty_http),
-[`rusty_json`](https://github.com/baileyrd/rusty_json), and
-[`rusty_oauth`](https://github.com/baileyrd/rusty_oauth) — merged one at a
-time, so the Crates table above only lists the ones already landed.
+[`rusty_json`](https://github.com/baileyrd/rusty_json),
+[`rusty_oauth`](https://github.com/baileyrd/rusty_oauth), and
+[`rustils_async`](https://github.com/baileyrd/rustils_async) — merged one
+at a time, so the Crates table above only lists the ones already landed.

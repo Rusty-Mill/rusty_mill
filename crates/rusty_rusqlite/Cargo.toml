@@ -1,0 +1,13 @@
+[package]
+name = "rusty_rusqlite"
+version = "0.0.1"
+edition = "2021"
+description = "Pure-Rust, from-scratch SQLite reimplementation aiming for rusqlite API parity"
+license = "UNLICENSED"
+repository = "https://github.com/baileyrd/rusty_-rusqlite"
+
+[dependencies]
+
+[lib]
+name = "rusty_rusqlite"
+path = "src/lib.rs"
