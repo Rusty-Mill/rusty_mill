@@ -159,7 +159,7 @@ where
     /// stopping a client from forging state.
     pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self {
-            codec: RequestStateCodec::new(key),
+            codec: RequestStateCodec::new_unchecked(key),
             ttl: Some(DEFAULT_TTL),
             max_rounds: DEFAULT_MAX_ROUNDS,
             _marker: PhantomData,

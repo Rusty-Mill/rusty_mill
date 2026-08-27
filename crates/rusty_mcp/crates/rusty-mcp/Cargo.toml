@@ -7,17 +7,22 @@ categories = ["network-programming", "development-tools"]
 readme = "../../README.md"
 # Not published to crates.io. Consume it via a git or path dependency.
 publish = false
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mcp"
+authors = ["rusty_mcp contributors"]
 
-[lints]
-workspace = true
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "warn"
+unwrap_used = "warn"
 
 [dependencies]
-rmcp = { workspace = true, features = [
+rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "macros",
     "schemars",
@@ -26,19 +31,19 @@ rmcp = { workspace = true, features = [
     "request-state",
     "elicitation",
 ] }
-axum = { workspace = true, features = ["json"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Pagination cursors are base64 so clients treat them as opaque.
 base64 = "0.22"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
-tokio-util = { workspace = true }
-clap = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio-util = { version = "0.7", default-features = false }
+clap = { version = "4", features = ["derive", "env"] }
 http = "1"
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
 tower-service = "0.3"
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 tower-layer = "0.3"
 # `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
@@ -52,8 +57,8 @@ tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
 rand = "0.8"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
-rmcp = { workspace = true, features = [
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "client",
     "macros",
@@ -64,9 +69,9 @@ rmcp = { workspace = true, features = [
     "transport-streamable-http-client-reqwest",
 ] }
 rsa = "0.9"
-schemars = { workspace = true }
-serde = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+schemars = "1.0"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util"] }
 
 [features]
 default = []

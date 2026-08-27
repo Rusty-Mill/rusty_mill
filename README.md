@@ -43,6 +43,8 @@ have landed so far.
 | [`rusty_serde_erased`](crates/rusty_serde/rusty_serde_erased) | `crates/rusty_serde/rusty_serde_erased` | Minimal unsafe primitive erasing a serializer/deserializer's associated `Ok` type across an object-safe boundary — internal to `rusty_serde` |
 | [`rusty_lsp`](crates/rusty_lsp) | `crates/rusty_lsp` | Small, reusable async Language Server Protocol framework: own the protocol plumbing, implement one trait for your language |
 | [`rusty_a2a`](crates/rusty_a2a) | `crates/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
+| [`rusty-mcp`](crates/rusty_mcp/crates/rusty-mcp) | `crates/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
+| [`rusty-mcp-demo`](crates/rusty_mcp/crates/rusty-mcp-demo) | `crates/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -143,6 +145,38 @@ is the same standalone-`[workspace]` shape excluded elsewhere in this file.
 repo — its `client`/`server`/`grpc`/`signing` features pull in only
 crates.io crates (`reqwest`, `axum`, `tonic`, `p256`, ...), no sibling
 `baileyrd/*` repos — so nothing needed swapping.
+
+`rusty_mcp` is itself a two-crate Cargo workspace (`rusty-mcp`, its
+scaffold library, and `rusty-mcp-demo`, an example server built on it),
+with no dependency relationship with anything already in this repo — its
+`[dependencies]` are all crates.io crates (`rmcp`, `axum`, `tokio`, ...).
+Its `template/` directory is a `cargo-generate` scaffold whose
+`{{ 'Cargo' }}.toml` is a templated filename, not a real `Cargo.toml`, so
+it was never a workspace member and needed no exclusion.
+
+Its two member crates leaned on `<field>.workspace = true` inheritance
+(edition, license, lints, and most `[dependencies]`) from their own nested
+`crates/rusty_mcp/Cargo.toml` — resolved against *this* workspace's root
+once they're listed as its members, which doesn't declare a
+`[workspace.package]`/`[workspace.dependencies]` of its own. Both
+manifests were rewritten with the equivalent literal values instead,
+matching every other already-merged crate's shape.
+
+Unifying `rusty_mcp` into the same dependency graph as `rusty_acp`
+surfaced a real conflict, the same class of bug as the `rusty_tls`
+`CryptoProvider` one: `rmcp` (a `rusty_mcp` dependency) requires
+`reqwest >=0.13.2`, while `rusty_acp` requested reqwest's
+`rustls-native-certs` feature — present only in `reqwest` 0.13.0/0.13.1,
+folded into the `rustls` feature's now-default `rustls-platform-verifier`
+backend from 0.13.2 onward. Dropped `rustls-native-certs` from
+`rusty_acp`'s feature list (verified against `reqwest` 0.13.2's source
+that `rustls-platform-verifier` is used unconditionally once `rustls` is
+enabled, so no behavior changed) rather than pin `reqwest` backward,
+which would have fought the rest of the ecosystem's forward motion.
+`rusty_mcp`'s own dev-dependency on `reqwest = "0.13.4"` was also relaxed
+to `"0.13"`, matching its other `reqwest` requirement in the same file —
+the exact pin was what forced the unified resolution past 0.13.1 in the
+first place.
 
 ## History
 
