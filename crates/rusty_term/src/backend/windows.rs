@@ -21,11 +21,9 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Console::{
-    CONSOLE_SCREEN_BUFFER_INFO, COORD, ClosePseudoConsole, CreatePseudoConsole, ENABLE_ECHO_INPUT,
-    ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_PROCESSED_OUTPUT,
-    ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
-    GetConsoleScreenBufferInfo, GetStdHandle, HPCON, ResizePseudoConsole, STD_INPUT_HANDLE,
-    STD_OUTPUT_HANDLE, SetConsoleMode,
+    CONSOLE_SCREEN_BUFFER_INFO, COORD, ClosePseudoConsole, CreatePseudoConsole,
+    ENABLE_PROCESSED_OUTPUT, GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, HPCON,
+    ResizePseudoConsole, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -243,12 +241,13 @@ impl Backend for WindowsBackend {
                 }
                 *ORIGINAL_MODES.lock() = Some((in_mode, out_mode));
                 // Raw input: no line buffering, echo, or Ctrl-C handling, but do
-                // decode VT input sequences. Output: enable VT processing.
-                let new_in = (in_mode
-                    & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
-                    | ENABLE_VIRTUAL_TERMINAL_INPUT;
-                let new_out =
-                    out_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+                // decode VT input sequences. Output: enable VT processing. The
+                // core transformation is shared with rusty_lines' Windows
+                // backend via rusty_win32::console::raw_mode_core (see its own
+                // doc comment); ENABLE_PROCESSED_OUTPUT on top is this
+                // backend's own addition.
+                let (new_in, core_out) = rusty_win32::console::raw_mode_core(in_mode, out_mode);
+                let new_out = core_out | ENABLE_PROCESSED_OUTPUT;
                 if SetConsoleMode(hin, new_in) == 0 || SetConsoleMode(hout, new_out) == 0 {
                     return Err(std::io::Error::last_os_error());
                 }

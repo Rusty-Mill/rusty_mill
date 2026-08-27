@@ -367,25 +367,22 @@ mod imp {
     }
 
     /// The editor's raw-mode recipe (Windows shape of the same intent as
-    /// the Unix backends' `apply_raw_flags`): no line buffering or echo
-    /// (`ENABLE_LINE_INPUT`/`ENABLE_ECHO_INPUT` off — the analogs of
-    /// `ICANON`/`ECHO`), Ctrl+C delivered as ordinary input instead of the
-    /// OS terminating the process (`ENABLE_PROCESSED_INPUT` off — the
-    /// analog of `ISIG`), the console's own Quick Edit mouse-selection UI
-    /// disabled (`ENABLE_QUICK_EDIT_MODE` off, gated by
+    /// the Unix backends' `apply_raw_flags`): the core transformation (no
+    /// line buffering or echo, Ctrl+C delivered as ordinary input, VT/ANSI
+    /// escape sequences flowing both directions) comes from
+    /// [`rusty_win32::console::raw_mode_core`] — shared with `rusty_term`'s
+    /// Windows backend, see that function's own doc comment — plus one bit
+    /// this crate alone needs on top: the console's own Quick Edit
+    /// mouse-selection UI disabled (`ENABLE_QUICK_EDIT_MODE` off, gated by
     /// `ENABLE_EXTENDED_FLAGS` on — a Windows-only concern with no Unix
-    /// analog), and VT/ANSI escape sequences flowing both directions
-    /// (`ENABLE_VIRTUAL_TERMINAL_INPUT`/`ENABLE_VIRTUAL_TERMINAL_PROCESSING`
-    /// on — what makes arrow keys arrive as bytes this crate's existing
-    /// CSI decoder already parses, and repaint escape sequences render).
-    /// Output stays otherwise cooked (`ENABLE_PROCESSED_OUTPUT` untouched),
-    /// matching the Unix backends' own "output processing is left on"
-    /// policy.
+    /// analog). Output stays otherwise cooked (`ENABLE_PROCESSED_OUTPUT`
+    /// untouched), matching the Unix backends' own "output processing is
+    /// left on" policy.
     pub fn apply_raw_flags(t: &mut Termios) {
-        t.input_mode &= !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
-        t.input_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_EXTENDED_FLAGS;
+        let (input, output) = rusty_win32::console::raw_mode_core(t.input_mode, t.output_mode);
+        t.input_mode = input | ENABLE_EXTENDED_FLAGS;
         t.input_mode &= !ENABLE_QUICK_EDIT_MODE;
-        t.output_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        t.output_mode = output;
     }
 
     /// Does an attribute set still match the raw-mode recipe? What the

@@ -2484,6 +2484,7 @@ dependencies = [
  "rusty_regx",
  "rusty_sha1",
  "rusty_term_l13",
+ "rusty_win32 0.1.0",
  "softbuffer",
  "tokio",
  "ttf-parser",

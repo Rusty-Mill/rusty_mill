@@ -117,6 +117,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_Graphics_Dwm",
 ] }
+# raw_mode_core() only -- the shared console raw-mode flag transformation
+# this backend and rusty_lines' Windows term_sys both need; see that
+# function's doc comment. Everything else in this backend still goes
+# through windows-sys directly (ConPTY/DWM/hotkeys aren't in rusty_win32's
+# scope), so this is a second Windows FFI layer for one function, not a
+# wholesale switch.
+rusty_win32 = { path = "../rusty_win32", version = "0.1.0", features = ["std"] }
 
 [dev-dependencies]
 # The core test suite exercises the search's regex mode without the `gui`
