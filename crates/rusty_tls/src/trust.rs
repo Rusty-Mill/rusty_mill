@@ -6,6 +6,16 @@ use rustls::{ClientConfig, ConfigBuilder, RootCertStore};
 
 use crate::danger::NoServerCertVerification;
 use crate::error::Error;
+use crate::provider::ring_provider;
+
+/// The entry point every `ClientConfig` in this file builds from, instead
+/// of `ClientConfig::builder()`'s ambient provider lookup — see
+/// `provider.rs` for why.
+fn client_config_entry() -> rustls::ConfigBuilder<ClientConfig, rustls::WantsVerifier> {
+    ClientConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the safe default protocol versions")
+}
 
 /// How a [`TlsStream`](crate::TlsStream) decides whether to trust the
 /// server it connects to. Verify-by-default: [`TrustPolicy::System`] is the
@@ -167,7 +177,7 @@ fn client_config_builder(
             if roots.is_empty() {
                 return Err(Error::NoTrustAnchors);
             }
-            ClientConfig::builder().with_root_certificates(roots)
+            client_config_entry().with_root_certificates(roots)
         }
         TrustPolicy::PinnedAnchors(certs) => {
             let mut roots = RootCertStore::empty();
@@ -177,9 +187,9 @@ fn client_config_builder(
             if roots.is_empty() {
                 return Err(Error::NoTrustAnchors);
             }
-            ClientConfig::builder().with_root_certificates(roots)
+            client_config_entry().with_root_certificates(roots)
         }
-        TrustPolicy::DangerNoVerification => ClientConfig::builder()
+        TrustPolicy::DangerNoVerification => client_config_entry()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoServerCertVerification::new())),
         TrustPolicy::PinnedAnchorsWithRevocation { roots, crls } => {
@@ -190,11 +200,12 @@ fn client_config_builder(
             if root_store.is_empty() {
                 return Err(Error::NoTrustAnchors);
             }
-            let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
-                .with_crls(crls.clone())
-                .build()
-                .map_err(|e| Error::InvalidRevocationConfig(e.to_string()))?;
-            ClientConfig::builder().with_webpki_verifier(verifier)
+            let verifier =
+                WebPkiServerVerifier::builder_with_provider(Arc::new(root_store), ring_provider())
+                    .with_crls(crls.clone())
+                    .build()
+                    .map_err(|e| Error::InvalidRevocationConfig(e.to_string()))?;
+            client_config_entry().with_webpki_verifier(verifier)
         }
     })
 }

@@ -62,11 +62,20 @@ fn spawn_client_auth_server(
 
     let mut roots = RootCertStore::empty();
     roots.add(client_ca_root).unwrap();
-    let client_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-        .build()
-        .unwrap();
+    // Explicit provider -- see the note on the ServerConfig builder below.
+    let client_verifier = WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .unwrap();
     let config = Arc::new(
-        ServerConfig::builder()
+        // Explicit provider: ServerConfig::builder()'s ambient process-level
+        // lookup breaks once a sibling crate in the same build also pulls in
+        // aws-lc-rs alongside this crate's pinned ring -- see src/provider.rs.
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the safe default protocol versions")
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(vec![server_cert_der], server_key_der)
             .expect("valid test cert/key"),

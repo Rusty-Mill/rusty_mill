@@ -10,6 +10,16 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection};
 
 use crate::error::Error;
+use crate::provider::ring_provider;
+
+/// The entry point every `ServerConfig` in this file builds from, instead
+/// of `ServerConfig::builder()`'s ambient provider lookup — see
+/// `provider.rs` for why.
+fn server_config_builder() -> rustls::ConfigBuilder<ServerConfig, rustls::WantsVerifier> {
+    ServerConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the safe default protocol versions")
+}
 
 /// Finishes a `ServerConfig` and wraps it for reuse across every accepted
 /// connection. Sets a real session-ticket producer — `rustls::ServerConfig`
@@ -44,7 +54,7 @@ impl TlsAcceptor {
             .collect();
         let key = PrivateKeyDer::try_from(private_key_der)
             .map_err(|reason| Error::InvalidPrivateKey(reason.to_string()))?;
-        let config = ServerConfig::builder()
+        let config = server_config_builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)?;
         Ok(Self {
@@ -76,11 +86,12 @@ impl TlsAcceptor {
         for der in client_ca_roots_der {
             client_ca_roots.add(CertificateDer::from(der))?;
         }
-        let client_verifier = WebPkiClientVerifier::builder(Arc::new(client_ca_roots))
-            .build()
-            .map_err(|e| Error::InvalidClientCaRoots(e.to_string()))?;
+        let client_verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(client_ca_roots), ring_provider())
+                .build()
+                .map_err(|e| Error::InvalidClientCaRoots(e.to_string()))?;
 
-        let config = ServerConfig::builder()
+        let config = server_config_builder()
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(cert_chain, key)?;
         Ok(Self {
@@ -103,7 +114,7 @@ impl TlsAcceptor {
             .collect();
         let key = PrivateKeyDer::try_from(private_key_der)
             .map_err(|reason| Error::InvalidPrivateKey(reason.to_string()))?;
-        let mut config = ServerConfig::builder()
+        let mut config = server_config_builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)?;
         config.alpn_protocols = alpn_protocols;

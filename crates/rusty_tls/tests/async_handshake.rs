@@ -63,7 +63,12 @@ fn spawn_echo_server(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let config = Arc::new(
-        ServerConfig::builder()
+        // Explicit provider: ServerConfig::builder()'s ambient process-level
+        // lookup breaks once a sibling crate in the same build also pulls in
+        // aws-lc-rs alongside this crate's pinned ring -- see src/provider.rs.
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the safe default protocol versions")
             .with_no_client_auth()
             .with_single_cert(vec![cert_der], key_der)
             .expect("valid test cert/key"),

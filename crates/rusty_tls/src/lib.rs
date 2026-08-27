@@ -50,6 +50,7 @@ mod client;
 mod connector;
 mod danger;
 mod error;
+mod provider;
 mod server;
 mod trust;
 
