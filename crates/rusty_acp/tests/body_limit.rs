@@ -86,10 +86,33 @@ async fn an_ordinary_photo_sized_artifact_is_accepted() {
 async fn something_past_the_limit_is_still_refused() {
     let base_url = server_accepting(None).await;
 
-    // Comfortably past 8 MiB once encoded.
-    let response = submit_artifact(&base_url, DEFAULT_MAX_REQUEST_BYTES).await;
+    // Comfortably past 8 MiB once encoded. Large enough that the client is
+    // still streaming body bytes when axum rejects on the Content-Length
+    // header alone and closes the connection -- unlike the smaller bodies
+    // elsewhere in this file, which fit before the server responds.
+    let part = MessagePart::binary_artifact(
+        "blob",
+        "application/octet-stream",
+        &vec![0u8; DEFAULT_MAX_REQUEST_BYTES][..],
+    );
+    let body = serde_json::json!({
+        "agent_name": "sink",
+        "mode": "async",
+        "input": [rusty_acp::types::Message::new(Role::User, [part])],
+    });
+    let result = reqwest::Client::new().post(format!("{base_url}/runs")).json(&body).send().await;
 
-    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    match result {
+        Ok(response) => assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE),
+        // Windows: the server's early close during that still-in-flight send
+        // surfaces to the client as a hard connection-abort (WSAECONNABORTED)
+        // rather than a readable response -- the OS's TCP stack, not this
+        // crate, treats a reset with unread send data less gracefully than
+        // Linux's does. The rejection still happened; the client just never
+        // gets to see the 413 for it.
+        Err(e) if cfg!(windows) && e.is_request() => {}
+        Err(e) => panic!("unexpected transport error: {e}"),
+    }
 }
 
 /// The 413 names the limit and the way around it.
