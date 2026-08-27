@@ -38,6 +38,9 @@ have landed so far.
 | [`rusty_libc`](crates/rusty_libc) | `crates/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
 | [`rusty_acp`](crates/rusty_acp) | `crates/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
 | [`rusty_tls`](crates/rusty_tls) | `crates/rusty_tls` | A `rustls`-based TLS library, with an optional `rusty_tokio`-backed async stream and an experimental hand-rolled record-layer engine |
+| [`rusty_serde`](crates/rusty_serde/rusty_serde) | `crates/rusty_serde/rusty_serde` | Hand-rolled, dependency-free `Serialize`/`Deserialize` data model plus JSON and RON-inspired formats |
+| [`rusty_serde_derive`](crates/rusty_serde/rusty_serde_derive) | `crates/rusty_serde/rusty_serde_derive` | `rusty_serde`'s `#[derive(Serialize, Deserialize)]` proc-macro, hand-written directly on `proc_macro` (no `syn`/`quote`) |
+| [`rusty_serde_erased`](crates/rusty_serde/rusty_serde_erased) | `crates/rusty_serde/rusty_serde_erased` | Minimal unsafe primitive erasing a serializer/deserializer's associated `Ok` type across an object-safe boundary — internal to `rusty_serde` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -115,6 +118,12 @@ dependency, same as `rusty_libc`'s three first-wave consumers. Its
 `crates/rusty_tls/fuzz` is the same standalone-`[workspace]` shape as
 `rusty_libc/bench`/`rusty_lines/bench` (needs nightly for libFuzzer
 instrumentation) — excluded from this workspace the same way.
+
+`rusty_serde` is itself a three-crate Cargo workspace (`rusty_serde`,
+`rusty_serde_derive`, `rusty_serde_erased`), all with empty or purely
+intra-workspace `[dependencies]` — no nested `[workspace]` table to
+exclude, and no dependency relationship with anything already in this
+repo, so nothing needed swapping.
 
 ## History
 
