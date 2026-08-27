@@ -325,8 +325,10 @@ fn parse_notifications(buf: &[u8]) -> Vec<FileNotification> {
         // `FileNameLength` bytes) — decode by 2-byte units rather than
         // scanning for a terminator.
         let units: Vec<u16> = buf[name_start..name_end]
-            .chunks_exact(2)
-            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
             .collect();
         out.push(FileNotification {
             action,

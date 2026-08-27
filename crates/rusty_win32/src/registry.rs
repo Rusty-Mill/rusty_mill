@@ -358,8 +358,10 @@ const REG_QWORD: u32 = 11;
 
 fn decode_wide_string(buf: &[u8]) -> alloc::string::String {
     let mut units: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     // A registry `REG_SZ`/`REG_EXPAND_SZ` value is *usually* stored with a
     // trailing NUL folded into its byte count, but the API docs
@@ -373,8 +375,10 @@ fn decode_wide_string(buf: &[u8]) -> alloc::string::String {
 
 fn decode_multi_sz(buf: &[u8]) -> Vec<alloc::string::String> {
     let units: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     let mut strings = Vec::new();
     let mut start = 0;

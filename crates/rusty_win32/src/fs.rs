@@ -845,8 +845,10 @@ pub fn readlink(path: &str) -> Result<alloc::string::String, Win32Error> {
     // aligned — the same reason `job::process_ids` reads its own
     // variable-length buffer field-by-field instead of casting.
     let print_name_units: Vec<u16> = print_name_bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     Ok(char::decode_utf16(print_name_units)
         .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))

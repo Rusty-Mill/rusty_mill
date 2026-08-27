@@ -200,10 +200,10 @@ fn unescape(seg: &str) -> String {
 ///     not a slow one.
 pub fn match_component(pattern: &str, name: &str) -> bool {
     let extglob = crate::vars::shopt("extglob");
-    if extglob || !has_extglob_opener(pattern) {
-        if let Ok(g) = rusty_regx::Glob::new(pattern) {
-            return g.matches(name);
-        }
+    if (extglob || !has_extglob_opener(pattern))
+        && let Ok(g) = rusty_regx::Glob::new(pattern)
+    {
+        return g.matches(name);
     }
     let p: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = name.chars().collect();

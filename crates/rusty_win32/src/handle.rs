@@ -343,7 +343,7 @@ pub unsafe fn set_std_handle(slot: u32, handle: RawHandle) -> Result<(), Win32Er
 /// function only creates/opens the object itself.
 pub fn create_mutex(name: Option<&str>, initial_owner: bool) -> Result<RawHandle, Win32Error> {
     extern crate alloc;
-    let wide: Option<alloc::vec::Vec<u16>> = name.map(|n| crate::wide::to_wide(n));
+    let wide: Option<alloc::vec::Vec<u16>> = name.map(crate::wide::to_wide);
     let name_ptr = wide.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
     // SAFETY: `mutex_attributes = NULL` requests default (non-inheritable)
     // security attributes, a documented valid input; `name_ptr` is either
@@ -391,7 +391,7 @@ pub fn create_semaphore(
     maximum_count: i32,
 ) -> Result<RawHandle, Win32Error> {
     extern crate alloc;
-    let wide: Option<alloc::vec::Vec<u16>> = name.map(|n| crate::wide::to_wide(n));
+    let wide: Option<alloc::vec::Vec<u16>> = name.map(crate::wide::to_wide);
     let name_ptr = wide.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
     // SAFETY: `semaphore_attributes = NULL` requests default (non-inheritable)
     // security attributes, a documented valid input; `name_ptr` is either
