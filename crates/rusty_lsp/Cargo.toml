@@ -38,10 +38,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = { version = "0.1", optional = true }
-# Sovereign async runtime support over `rusty_tokio` (pinned to the platform SHA rev).
+# Sovereign async runtime support over `rusty_tokio`; already merged into
+# this workspace at crates/rusty_tokio, so a plain path dependency.
 rusty_tokio = { path = "../rusty_tokio", optional = true }
-# Sovereign JSON support over `rusty_json`.
-rusty_json = { path = "../rusty_json", optional = true }
+# Sovereign JSON support over `rusty_json`. Not yet merged into this
+# workspace (tracked separately) -- pinned git dependency until it lands,
+# same as every other on-deck sibling crate before its own merge; switch
+# to a path dependency once crates/rusty_json exists.
+rusty_json = { git = "https://github.com/baileyrd/rusty_json", rev = "45ca45319586cc9c9b9aff712d8103fafb3d43d6", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }

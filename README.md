@@ -41,6 +41,7 @@ have landed so far.
 | [`rusty_serde`](crates/rusty_serde/rusty_serde) | `crates/rusty_serde/rusty_serde` | Hand-rolled, dependency-free `Serialize`/`Deserialize` data model plus JSON and RON-inspired formats |
 | [`rusty_serde_derive`](crates/rusty_serde/rusty_serde_derive) | `crates/rusty_serde/rusty_serde_derive` | `rusty_serde`'s `#[derive(Serialize, Deserialize)]` proc-macro, hand-written directly on `proc_macro` (no `syn`/`quote`) |
 | [`rusty_serde_erased`](crates/rusty_serde/rusty_serde_erased) | `crates/rusty_serde/rusty_serde_erased` | Minimal unsafe primitive erasing a serializer/deserializer's associated `Ok` type across an object-safe boundary — internal to `rusty_serde` |
+| [`rusty_lsp`](crates/rusty_lsp) | `crates/rusty_lsp` | Small, reusable async Language Server Protocol framework: own the protocol plumbing, implement one trait for your language |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -124,6 +125,18 @@ instrumentation) — excluded from this workspace the same way.
 intra-workspace `[dependencies]` — no nested `[workspace]` table to
 exclude, and no dependency relationship with anything already in this
 repo, so nothing needed swapping.
+
+`rusty_lsp` already carried optional `path = "../rusty_tokio"` and
+`path = "../rusty_json"` dependencies (behind its `rusty-tokio`/`rusty-json`
+features) from before this merge — its own repo was set up assuming a flat
+sibling checkout next to those two crates. `../rusty_tokio` now resolves
+correctly on its own, since `crates/rusty_tokio` already exists in this
+workspace. `rusty_json` hasn't been merged yet, so its entry was pinned
+back to a `git` dependency at the commit this merge found at
+`baileyrd/rusty_json`'s HEAD — the same shape every other on-deck sibling
+crate uses before its own merge lands — to be swapped to a `path`
+dependency once `crates/rusty_json` exists. Its own `crates/rusty_lsp/fuzz`
+is the same standalone-`[workspace]` shape excluded elsewhere in this file.
 
 ## History
 
