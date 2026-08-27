@@ -705,10 +705,10 @@ fn lex_gt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
 /// `seed` is optional leading text (e.g. a digit run that wasn't an fd).
 fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, LexError> {
     let mut parts: Word = Vec::new();
-    if let Some(s) = seed {
-        if !s.is_empty() {
-            parts.push(WordPart::Unquoted(s));
-        }
+    if let Some(s) = seed
+        && !s.is_empty()
+    {
+        parts.push(WordPart::Unquoted(s));
     }
 
     loop {
@@ -781,40 +781,40 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                         break;
                     }
                     // Inside double quotes, backslash escapes ", \, and $.
-                    if qc == '\\' {
-                        if let Some(&next) = chars.peek() {
-                            // `\$` must produce a literal `$` (POSIX-mandated,
-                            // same as bash/ksh/zsh) — one that stays literal
-                            // through expansion, not just a backslash-free `$`
-                            // indistinguishable from a real, unescaped one
-                            // (which is all that pushing it into `s` here
-                            // would produce, since `s` becomes a
-                            // `WordPart::Quoted` string later re-scanned for
-                            // `$`/`$(...)`). Flushing `s` so far and emitting a
-                            // separate `WordPart::Literal("$")` — never
-                            // re-expanded, by definition — keeps that promise
-                            // without needing new escape-recognition logic in
-                            // `expand.rs` itself.
-                            if next == '$' {
-                                chars.next();
-                                if !s.is_empty() {
-                                    push_quoted(&mut parts, &s);
-                                    s = String::new();
-                                }
-                                push_literal(&mut parts, "$");
-                                continue;
+                    if qc == '\\'
+                        && let Some(&next) = chars.peek()
+                    {
+                        // `\$` must produce a literal `$` (POSIX-mandated,
+                        // same as bash/ksh/zsh) — one that stays literal
+                        // through expansion, not just a backslash-free `$`
+                        // indistinguishable from a real, unescaped one
+                        // (which is all that pushing it into `s` here
+                        // would produce, since `s` becomes a
+                        // `WordPart::Quoted` string later re-scanned for
+                        // `$`/`$(...)`). Flushing `s` so far and emitting a
+                        // separate `WordPart::Literal("$")` — never
+                        // re-expanded, by definition — keeps that promise
+                        // without needing new escape-recognition logic in
+                        // `expand.rs` itself.
+                        if next == '$' {
+                            chars.next();
+                            if !s.is_empty() {
+                                push_quoted(&mut parts, &s);
+                                s = String::new();
                             }
-                            if matches!(next, '"' | '\\' | '`') {
-                                s.push(chars.next().unwrap());
-                                continue;
-                            }
-                            // Backslash-newline is a line continuation even
-                            // inside double quotes (POSIX; C79): both
-                            // characters vanish.
-                            if next == '\n' {
-                                chars.next();
-                                continue;
-                            }
+                            push_literal(&mut parts, "$");
+                            continue;
+                        }
+                        if matches!(next, '"' | '\\' | '`') {
+                            s.push(chars.next().unwrap());
+                            continue;
+                        }
+                        // Backslash-newline is a line continuation even
+                        // inside double quotes (POSIX; C79): both
+                        // characters vanish.
+                        if next == '\n' {
+                            chars.next();
+                            continue;
                         }
                     }
                     // Keep `$(...)`/`${...}` whole so an inner `"` or space

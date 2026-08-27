@@ -25,11 +25,7 @@ impl Value {
         for part in parts {
             match current {
                 Value::Object(map) => {
-                    if let Some(val) = map.get(part) {
-                        current = val.clone();
-                    } else {
-                        return None;
-                    }
+                    current = map.get(part)?.clone();
                 }
                 _ => return None,
             }

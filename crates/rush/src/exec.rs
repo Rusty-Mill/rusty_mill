@@ -1710,10 +1710,14 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
                 } else {
                     match mode {
                         RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                        // `<>`: open for read+write without truncating --
+                        // existing content past what's written stays intact,
+                        // unlike `>`/`>|`'s truncate-then-write.
                         RedirMode::ReadWrite => File::options()
                             .read(true)
                             .write(true)
                             .create(true)
+                            .truncate(false)
                             .open(file)
                             .map_err(|e| format!("{file}: {e}"))?,
                         RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
@@ -2602,10 +2606,8 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
             }
         } else if !is_last {
             prev_stdout = child.stdout.take().map(Stdio::from);
-        } else if capture {
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_string(&mut captured).map_err(|e| e.to_string())?;
-            }
+        } else if capture && let Some(mut out) = child.stdout.take() {
+            out.read_to_string(&mut captured).map_err(|e| e.to_string())?;
         }
         // `build_stage` already gave this stage its own console process
         // group (`CREATE_NEW_PROCESS_GROUP`) — register its pid (which
@@ -2795,10 +2797,12 @@ pub fn build_stage(
             Redirect::File { fd, file, mode } => {
                 let f = match mode {
                     RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                    // `<>` opens read-write without truncating, POSIX's rule.
                     RedirMode::ReadWrite => File::options()
                         .read(true)
                         .write(true)
                         .create(true)
+                        .truncate(false)
                         .open(file)
                         .map_err(|e| format!("{file}: {e}"))?,
                     RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
@@ -3000,10 +3004,12 @@ fn allocate_varfd(inner: &Redirect) -> Result<i32, String> {
         Redirect::File { file, mode, .. } => {
             let f = match mode {
                 RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                // `<>` opens read-write without truncating, POSIX's rule.
                 RedirMode::ReadWrite => File::options()
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(file)
                     .map_err(|e| format!("{file}: {e}"))?,
                 _ => open_write(file, *mode)?,
@@ -3201,14 +3207,14 @@ fn open_write(file: &str, mode: crate::parser::RedirMode) -> Result<File, String
 /// keeps the thread out of the Linux build entirely.
 #[cfg(not(target_os = "linux"))]
 pub fn feed_heredoc(child: &mut Child, cmd: &Command) {
-    if let Some(body) = &cmd.heredoc {
-        if let Some(mut stdin) = child.stdin.take() {
-            let body = body.clone();
-            std::thread::spawn(move || {
-                use std::io::Write;
-                let _ = stdin.write_all(body.as_bytes());
-            });
-        }
+    if let Some(body) = &cmd.heredoc
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        let body = body.clone();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(body.as_bytes());
+        });
     }
 }
 

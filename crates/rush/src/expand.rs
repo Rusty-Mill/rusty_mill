@@ -424,10 +424,9 @@ fn assignment_split(word: &Word) -> Option<(String, RawAssign)> {
                         let after = &s[close + 1..];
                         let (append, after_op) = if let Some(rest) = after.strip_prefix("+=") {
                             (true, rest)
-                        } else if let Some(rest) = after.strip_prefix('=') {
-                            (false, rest)
                         } else {
-                            return None;
+                            let rest = after.strip_prefix('=')?;
+                            (false, rest)
                         };
                         let mut value: Word = vec![WordPart::Unquoted(after_op.to_string())];
                         value.extend(word[i + 1..].iter().cloned());
@@ -448,10 +447,9 @@ fn assignment_split(word: &Word) -> Option<(String, RawAssign)> {
             let after_bracket = &text[close + 1..];
             let (append, after_op) = if let Some(rest) = after_bracket.strip_prefix("+=") {
                 (true, rest)
-            } else if let Some(rest) = after_bracket.strip_prefix('=') {
-                (false, rest)
             } else {
-                return None;
+                let rest = after_bracket.strip_prefix('=')?;
+                (false, rest)
             };
             let mut value: Word = vec![WordPart::Unquoted(after_op.to_string())];
             value.extend(word[1..].iter().cloned());
@@ -1693,12 +1691,11 @@ fn command_substitute(src: &str) -> Result<String, String> {
 /// correctly returns `None` for both "never set" and "explicitly unset",
 /// same as real bash doesn't distinguish them either.
 fn var_raw(name: &str) -> Option<String> {
-    if let Some((base, path)) = name.split_once('.') {
-        if let Some(val) = crate::vars::get_object(base) {
-            if let Some(subval) = val.get_path(path) {
-                return Some(subval.to_display_string());
-            }
-        }
+    if let Some((base, path)) = name.split_once('.')
+        && let Some(val) = crate::vars::get_object(base)
+        && let Some(subval) = val.get_path(path)
+    {
+        return Some(subval.to_display_string());
     }
     crate::vars::get(name)
 }

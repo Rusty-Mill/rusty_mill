@@ -924,12 +924,12 @@ impl Parser {
     fn expect_name(&mut self) -> Result<String, ParseError> {
         match self.peek() {
             Some(Token::Word(parts)) => {
-                if let [WordPart::Unquoted(s)] = parts.as_slice() {
-                    if is_name(s) {
-                        let name = s.clone();
-                        self.pos += 1;
-                        return Ok(name);
-                    }
+                if let [WordPart::Unquoted(s)] = parts.as_slice()
+                    && is_name(s)
+                {
+                    let name = s.clone();
+                    self.pos += 1;
+                    return Ok(name);
                 }
                 Err(ParseError::Syntax("expected a variable name".into()))
             }
@@ -950,10 +950,10 @@ impl Parser {
 
 /// The reserved word a token represents, if it's a single unquoted keyword.
 fn as_keyword(tok: &Token) -> Option<&'static str> {
-    if let Token::Word(parts) = tok {
-        if let [WordPart::Unquoted(s)] = parts.as_slice() {
-            return RESERVED.iter().copied().find(|&kw| kw == s);
-        }
+    if let Token::Word(parts) = tok
+        && let [WordPart::Unquoted(s)] = parts.as_slice()
+    {
+        return RESERVED.iter().copied().find(|&kw| kw == s);
     }
     None
 }

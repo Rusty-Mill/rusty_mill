@@ -1424,10 +1424,9 @@ pub fn array_append(name: &str, elements: Vec<String>) {
                     }
                     VarValue::Assoc(_) | VarValue::Object(_) => unreachable!("checked above"),
                 };
-                let mut next = a.keys().next_back().map_or(0, |k| k + 1);
-                for e in elements {
+                let start = a.keys().next_back().map_or(0, |k| k + 1);
+                for (next, e) in (start..).zip(elements) {
                     a.insert(next, e);
-                    next += 1;
                 }
             }
             None => {

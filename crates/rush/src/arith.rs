@@ -336,11 +336,11 @@ impl Parser {
 
     /// Consume the current token if it is one of `ops`.
     fn eat(&mut self, ops: &[&str]) -> Option<&'static str> {
-        if let Some(op) = self.peek_op() {
-            if ops.contains(&op) {
-                self.pos += 1;
-                return Some(op);
-            }
+        if let Some(op) = self.peek_op()
+            && ops.contains(&op)
+        {
+            self.pos += 1;
+            return Some(op);
         }
         None
     }

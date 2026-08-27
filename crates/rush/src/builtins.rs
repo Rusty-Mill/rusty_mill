@@ -909,15 +909,14 @@ mod printf {
             return "0".to_string();
         }
         let exp = v.abs().log10().floor() as i32;
-        let s = if exp < -4 || exp >= sig as i32 {
+        if exp < -4 || exp >= sig as i32 {
             let e = format_exp(v, sig - 1, 'e');
             // Strip trailing zeros in the mantissa.
             strip_g_zeros(&e)
         } else {
             let prec = (sig as i32 - 1 - exp).max(0) as usize;
             strip_g_zeros(&format!("{v:.prec$}"))
-        };
-        s
+        }
     }
 
     fn strip_g_zeros(s: &str) -> String {
@@ -1634,7 +1633,7 @@ fn mapfile_cmd(argv: &[String]) -> i32 {
         // lines, with the target index and the line as trailing arguments.
         read_in_batch += 1;
         if let Some(cb) = &callback
-            && read_in_batch % quantum == 0
+            && read_in_batch.is_multiple_of(quantum)
         {
             let idx = origin + lines.len();
             let cmd = format!("{cb} {idx} {}", single_quote(&line));
@@ -3333,7 +3332,7 @@ fn parse_comp_spec(args: &[String]) -> Result<(crate::completion::programmable::
             // to complete can itself look like an option, e.g.
             // `compgen -W '…' -- -x`).
             "--" => {
-                operands.extend(it.map(|a| a.clone()));
+                operands.extend(it.cloned());
                 break;
             }
             other if other.starts_with('-') => {
