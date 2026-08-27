@@ -368,12 +368,21 @@ fn parse_extglob(p: &[char], open: usize) -> Option<(Vec<Vec<char>>, usize)> {
 /// does NOT match `?(a)x`), `*`/`+` are 0+/1+ repetitions, `@` exactly
 /// one, and `!` matches any prefix that is *not* matched in full by any
 /// alternative (`abfile` matches `!(a|b)file`; `afile` doesn't).
-fn match_extglob(kind: char, alts: &[Vec<char>], p: &[char], rest: usize, s: &[char], si: usize) -> bool {
-    let alt_matches = |from: usize, to: usize| alts.iter().any(|alt| matches(alt, 0, &s[from..to], 0));
+fn match_extglob(
+    kind: char,
+    alts: &[Vec<char>],
+    p: &[char],
+    rest: usize,
+    s: &[char],
+    si: usize,
+) -> bool {
+    let alt_matches =
+        |from: usize, to: usize| alts.iter().any(|alt| matches(alt, 0, &s[from..to], 0));
     match kind {
         '@' => (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k)),
         '?' => {
-            matches(p, rest, s, si) || (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k))
+            matches(p, rest, s, si)
+                || (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k))
         }
         '!' => (si..=s.len()).any(|k| !alt_matches(si, k) && matches(p, rest, s, k)),
         // `*` / `+`: repetitions. Try the tail at every point reachable by
@@ -405,8 +414,9 @@ fn match_extglob(kind: char, alts: &[Vec<char>], p: &[char], rest: usize, s: &[c
                     return true;
                 }
                 // Consume one more non-empty alternative-matched chunk.
-                let result = ((from + 1)..=s.len())
-                    .any(|k| alt_matches(from, k) && reachable(alt_matches, p, rest, s, k, true, memo));
+                let result = ((from + 1)..=s.len()).any(|k| {
+                    alt_matches(from, k) && reachable(alt_matches, p, rest, s, k, true, memo)
+                });
                 if min_done {
                     memo[from] = Some(result);
                 }
@@ -610,15 +620,18 @@ mod tests {
     #[test]
     fn nested_star_extglob_does_not_blow_up() {
         let s: String = [
-            63u8, 40, 63, 40, 42, 63, 40, 42, 40, 42, 41, 1, 0, 41, 49, 63, 42, 63, 40, 63, 40, 42, 63,
-            40, 42, 40, 42, 41, 1, 0, 41, 49, 63, 42, 35, 35,
+            63u8, 40, 63, 40, 42, 63, 40, 42, 40, 42, 41, 1, 0, 41, 49, 63, 42, 63, 40, 63, 40, 42,
+            63, 40, 42, 40, 42, 41, 1, 0, 41, 49, 63, 42, 35, 35,
         ]
         .into_iter()
         .map(|b| b as char)
         .collect();
         let start = std::time::Instant::now();
         let _ = match_component(&s, &s);
-        assert!(start.elapsed().as_secs() < 5, "match_component took too long: pathological backtracking regressed");
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "match_component took too long: pathological backtracking regressed"
+        );
     }
 
     #[test]

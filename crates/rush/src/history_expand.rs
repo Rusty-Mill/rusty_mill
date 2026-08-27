@@ -83,7 +83,9 @@ pub fn expand(line: &str, history: &[String]) -> Result<Option<String>, String> 
 /// space), verified directly to be left completely untouched by real bash
 /// too, with no error.
 fn resolve(rest: &[char], history: &[String]) -> Result<Option<(String, usize)>, String> {
-    let Some(&next) = rest.get(1) else { return Ok(None) };
+    let Some(&next) = rest.get(1) else {
+        return Ok(None);
+    };
 
     // The previous command's own word designators — `$`/`^`/`*` always
     // refer to it; bare `:N` (no event specifier before the `:`) does too.
@@ -166,7 +168,9 @@ fn resolve(rest: &[char], history: &[String]) -> Result<Option<(String, usize)>,
 /// word; this gives `"a`, matching a plain `split_whitespace` instead).
 /// `event_desc` is just this reference's own text, for the error message.
 fn previous_words<'h>(history: &'h [String], event_desc: &str) -> Result<Vec<&'h str>, String> {
-    let prev = history.last().ok_or_else(|| format!("{event_desc}: event not found"))?;
+    let prev = history
+        .last()
+        .ok_or_else(|| format!("{event_desc}: event not found"))?;
     Ok(prev.split_whitespace().collect())
 }
 
@@ -178,8 +182,14 @@ fn previous_words<'h>(history: &'h [String], event_desc: &str) -> Result<Vec<&'h
 /// *argument*" — errors, matching real bash's own "bad word specifier".
 fn word_designator(words: &[&str], designator: char) -> Result<String, String> {
     match designator {
-        '$' => words.last().map(|s| s.to_string()).ok_or_else(|| "!$: event not found".into()),
-        '^' => words.get(1).map(|s| s.to_string()).ok_or_else(|| "!^: bad word specifier".into()),
+        '$' => words
+            .last()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "!$: event not found".into()),
+        '^' => words
+            .get(1)
+            .map(|s| s.to_string())
+            .ok_or_else(|| "!^: bad word specifier".into()),
         '*' => Ok(words.get(1..).unwrap_or(&[]).join(" ")),
         _ => unreachable!(),
     }
@@ -213,7 +223,10 @@ mod tests {
 
     #[test]
     fn bang_bang_repeats_the_last_command() {
-        assert_eq!(expand("!!", &hist(&["echo one", "echo two"])), Ok(Some("echo two".into())));
+        assert_eq!(
+            expand("!!", &hist(&["echo one", "echo two"])),
+            Ok(Some("echo two".into()))
+        );
     }
 
     #[test]
@@ -253,7 +266,10 @@ mod tests {
 
     #[test]
     fn concatenates_mid_word_like_sudo_bang_bang() {
-        assert_eq!(expand("sudo !!", &hist(&["echo hi"])), Ok(Some("sudo echo hi".into())));
+        assert_eq!(
+            expand("sudo !!", &hist(&["echo hi"])),
+            Ok(Some("sudo echo hi".into()))
+        );
     }
 
     #[test]
@@ -268,7 +284,10 @@ mod tests {
         // produces the identical end result without duplicating that logic.
         assert_eq!(expand(r"echo \!!", &h), Ok(None));
         // Double quotes do *not* suppress it, unlike single quotes.
-        assert_eq!(expand(r#"echo "!!""#, &h), Ok(Some(r#"echo "echo hi""#.into())));
+        assert_eq!(
+            expand(r#"echo "!!""#, &h),
+            Ok(Some(r#"echo "echo hi""#.into()))
+        );
     }
 
     #[test]

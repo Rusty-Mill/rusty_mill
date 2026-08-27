@@ -58,7 +58,9 @@ impl Hooks for ShellHooks {
     fn host_binding(&self, tag: &str, line: &mut String, cursor: &mut usize) {
         // `bind -x` (C128): run the bound command with READLINE_LINE /
         // READLINE_POINT set, then read them back into the buffer.
-        let Some(cmd) = builtins::host_binding_command(tag) else { return };
+        let Some(cmd) = builtins::host_binding_command(tag) else {
+            return;
+        };
         vars::set("READLINE_LINE", line);
         vars::set("READLINE_POINT", &cursor.to_string());
         if let Ok(list) = parser::parse(&cmd) {
@@ -272,7 +274,13 @@ fn main() -> std::io::Result<()> {
         vars::set("UID", &uid);
         vars::set("EUID", &uid); // sys carries no geteuid; same value
         for name in ["UID", "EUID"] {
-            vars::set_attrs(name, vars::Attrs { readonly: true, ..Default::default() });
+            vars::set_attrs(
+                name,
+                vars::Attrs {
+                    readonly: true,
+                    ..Default::default()
+                },
+            );
         }
     }
     if vars::get("HOSTNAME").is_none()
@@ -287,7 +295,11 @@ fn main() -> std::io::Result<()> {
     vars::set("HOSTTYPE", std::env::consts::ARCH);
     vars::set(
         "OSTYPE",
-        if cfg!(target_os = "linux") { "linux-gnu" } else { std::env::consts::OS },
+        if cfg!(target_os = "linux") {
+            "linux-gnu"
+        } else {
+            std::env::consts::OS
+        },
     );
     vars::set(
         "MACHTYPE",
@@ -322,7 +334,13 @@ fn main() -> std::io::Result<()> {
             vars::get("MACHTYPE").unwrap_or_default(),
         ],
     );
-    vars::set_attrs("BASH_VERSINFO", vars::Attrs { readonly: true, ..Default::default() });
+    vars::set_attrs(
+        "BASH_VERSINFO",
+        vars::Attrs {
+            readonly: true,
+            ..Default::default()
+        },
+    );
     // `$DIRSTACK` (bash's array view of the `pushd`/`popd` stack):
     // `DIRSTACK[0]` is always the current directory even before any
     // `pushd`, so seed it once at startup rather than waiting for the
@@ -343,7 +361,10 @@ fn main() -> std::io::Result<()> {
         vars::set("IFS", " \t\n");
     }
     // `$SHLVL` increments per nested shell (C106) and stays exported.
-    let shlvl = vars::get("SHLVL").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
+    let shlvl = vars::get("SHLVL")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        + 1;
     vars::set_exported("SHLVL", &shlvl.to_string());
 
     let args: Vec<String> = std::env::args().collect();
@@ -405,7 +426,9 @@ fn main() -> std::io::Result<()> {
             flags
                 if flags.len() > 1
                     && flags.starts_with('-')
-                    && flags[1..].chars().all(|c| matches!(c, 'c' | 's' | 'i' | 'l' | 'r' | 'n')) =>
+                    && flags[1..]
+                        .chars()
+                        .all(|c| matches!(c, 'c' | 's' | 'i' | 'l' | 'r' | 'n')) =>
             {
                 for c in flags[1..].chars() {
                     match c {
@@ -473,7 +496,10 @@ fn main() -> std::io::Result<()> {
     // Non-interactive modes: `rush FILE [args…]`; otherwise the REPL.
     match args.get(idx).map(String::as_str) {
         Some(file) => {
-            vars::set_args(file.to_string(), args.get(idx + 1..).unwrap_or(&[]).to_vec());
+            vars::set_args(
+                file.to_string(),
+                args.get(idx + 1..).unwrap_or(&[]).to_vec(),
+            );
             vars::push_source(file); // `${BASH_SOURCE[0]}` (C67); empty under `-c`, same as bash
             source_bash_env();
             match std::fs::read_to_string(file) {
@@ -532,7 +558,9 @@ fn apply_pending_binds(rl: &mut Editor) {
         };
     }
     builtins::set_bindings_snapshot(
-        rl.bindings().map(|(spec, action)| (spec, format!("{action:?}"))).collect(),
+        rl.bindings()
+            .map(|(spec, action)| (spec, format!("{action:?}")))
+            .collect(),
     );
 }
 
@@ -665,7 +693,11 @@ fn interactive() -> std::io::Result<()> {
             }
             run_prompt_command(); // C126
         }
-        let prompt = if buffer.is_empty() { prompt() } else { prompt_ps2() };
+        let prompt = if buffer.is_empty() {
+            prompt()
+        } else {
+            prompt_ps2()
+        };
         // The right prompt ($RPS1, C71): ordinary `$`-expansion each
         // time, like $PS3 — empty (hidden) when unset.
         let rprompt = vars::get("RPS1")
@@ -800,7 +832,10 @@ mod tests {
     fn ansi_and_bracket_escapes() {
         // C125: `\e` becomes ESC and `\[`/`\]` vanish — the standard
         // colored PS1 used to render as literal `\[\e[32m\]` garbage.
-        assert_eq!(expand::expand_ps1(r"\[\e[32m\]x\[\e[0m\]"), "\x1b[32mx\x1b[0m");
+        assert_eq!(
+            expand::expand_ps1(r"\[\e[32m\]x\[\e[0m\]"),
+            "\x1b[32mx\x1b[0m"
+        );
         assert_eq!(expand::expand_ps1(r"\a\r"), "\x07\r");
         assert_eq!(expand::expand_ps1(r"\007"), "\x07");
         assert_eq!(expand::expand_ps1(r"\s"), "rush");

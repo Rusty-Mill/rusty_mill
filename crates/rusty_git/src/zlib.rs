@@ -34,7 +34,10 @@ impl core::fmt::Display for ZlibError {
         match self {
             ZlibError::Truncated => write!(f, "zlib stream truncated"),
             ZlibError::BadHeader => write!(f, "zlib header invalid or not DEFLATE"),
-            ZlibError::BadDeflate => write!(f, "DEFLATE payload corrupt or uses an unsupported block type"),
+            ZlibError::BadDeflate => write!(
+                f,
+                "DEFLATE payload corrupt or uses an unsupported block type"
+            ),
             ZlibError::ChecksumMismatch => write!(f, "zlib Adler-32 checksum mismatch"),
         }
     }

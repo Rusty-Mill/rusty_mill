@@ -40,17 +40,17 @@ pub enum WordPart {
 pub enum Token {
     /// A word, ready for the expansion stage.
     Word(Word),
-    Pipe,             // |
-    Redirect(Redir),  // < > >> 2> 2>> 2>&1 &> …
-    Semi,             // ;
-    DSemi,            // ;; (case item terminator: stop)
-    SemiAmp,          // ;& (case item terminator: fall through unconditionally)
-    DSemiAmp,         // ;;& (case item terminator: resume pattern testing)
-    And,              // &&
-    Or,               // ||
-    Amp,              // & (single — background)
-    LParen,           // (
-    RParen,           // )
+    Pipe,            // |
+    Redirect(Redir), // < > >> 2> 2>> 2>&1 &> …
+    Semi,            // ;
+    DSemi,           // ;; (case item terminator: stop)
+    SemiAmp,         // ;& (case item terminator: fall through unconditionally)
+    DSemiAmp,        // ;;& (case item terminator: resume pattern testing)
+    And,             // &&
+    Or,              // ||
+    Amp,             // & (single — background)
+    LParen,          // (
+    RParen,          // )
     /// `((...))` with no space between the two `(` — an arithmetic
     /// command or a C-style `for ((init; cond; update))` header, always
     /// (unconditionally, matching real bash exactly, verified directly)
@@ -66,7 +66,7 @@ pub enum Token {
     /// quoting structure (the parser/evaluator needs it — an unquoted RHS
     /// of `==` is a glob pattern, a quoted one is literal).
     CondExpr(Vec<CondTok>),
-    Newline,          // a line break (also lets `&&`/`|` continue)
+    Newline, // a line break (also lets `&&`/`|` continue)
 }
 
 /// One token inside a `[[ ... ]]` construct (C55).
@@ -95,21 +95,24 @@ pub struct Redir {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirOp {
-    Read,        // `<`        — fd from a file
-    ReadWrite,   // `<>`       — fd opened read-write (C121)
-    Write,       // `>`        — fd to a file (truncate; refused for an existing regular file under `set -C`)
-    Clobber,     // `>|`       — fd to a file (truncate even under `set -C`, C50)
-    Append,      // `>>`       — fd to a file (append)
-    Both,        // `&>`       — stdout+stderr to a file (truncate)
-    BothAppend,  // `&>>`      — stdout+stderr to a file (append)
-    Dup(u32),    // `>&n`/`<&n`— fd duplicates fd n
-    Move(u32),   // `>&n-`/`<&n-` — dup then close n (C111)
+    Read,       // `<`        — fd from a file
+    ReadWrite,  // `<>`       — fd opened read-write (C121)
+    Write, // `>`        — fd to a file (truncate; refused for an existing regular file under `set -C`)
+    Clobber, // `>|`       — fd to a file (truncate even under `set -C`, C50)
+    Append, // `>>`       — fd to a file (append)
+    Both,  // `&>`       — stdout+stderr to a file (truncate)
+    BothAppend, // `&>>`      — stdout+stderr to a file (append)
+    Dup(u32), // `>&n`/`<&n`— fd duplicates fd n
+    Move(u32), // `>&n-`/`<&n-` — dup then close n (C111)
     /// `>&$word`/`<&"${arr[N]}"` — the target fd comes from a word,
     /// resolved at expansion time (C66's coproc plumbing).
     DupWord,
     /// `<<` here-document: `body` is the collected text, `expand` is false when
     /// the delimiter was quoted.
-    Heredoc { body: String, expand: bool },
+    Heredoc {
+        body: String,
+        expand: bool,
+    },
     /// `<<<` here-string (bash/ksh/zsh — not POSIX sh/dash): the next word,
     /// `$`-expanded and with a trailing `\n` appended, becomes stdin — the
     /// parser reads that word same as it would for `<`'s filename, and
@@ -142,8 +145,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                 // The bodies of any here-docs opened on this line follow now.
                 for p in pending.drain(..) {
                     let body = collect_heredoc_body(&mut chars, &p.delim, p.strip)?;
-                    if let Token::Redirect(Redir { op: RedirOp::Heredoc { body: slot, .. }, .. }) =
-                        &mut tokens[p.idx]
+                    if let Token::Redirect(Redir {
+                        op: RedirOp::Heredoc { body: slot, .. },
+                        ..
+                    }) = &mut tokens[p.idx]
                     {
                         *slot = body;
                     }
@@ -168,7 +173,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     // desugared right here to exactly `2>&1 |`, its
                     // documented meaning.
                     chars.next();
-                    tokens.push(Token::Redirect(Redir { fd: 2, op: RedirOp::Dup(1), varfd: None }));
+                    tokens.push(Token::Redirect(Redir {
+                        fd: 2,
+                        op: RedirOp::Dup(1),
+                        varfd: None,
+                    }));
                     tokens.push(Token::Pipe);
                 } else {
                     tokens.push(Token::Pipe);
@@ -190,7 +199,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                         } else {
                             RedirOp::Both
                         };
-                        tokens.push(Token::Redirect(Redir { fd: 1, op, varfd: None }));
+                        tokens.push(Token::Redirect(Redir {
+                            fd: 1,
+                            op,
+                            varfd: None,
+                        }));
                     }
                     _ => tokens.push(Token::Amp),
                 }
@@ -250,7 +263,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                         // read by the parser same as any other redirect's
                         // filename, not here in the lexer.
                         chars.next();
-                        tokens.push(Token::Redirect(Redir { fd: 0, op: RedirOp::HereString, varfd: None }));
+                        tokens.push(Token::Redirect(Redir {
+                            fd: 0,
+                            op: RedirOp::HereString,
+                            varfd: None,
+                        }));
                         continue;
                     }
                     // `<<` / `<<-` here-document.
@@ -266,11 +283,18 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     tokens.push(Token::Redirect(Redir {
                         varfd: None,
                         fd: 0,
-                        op: RedirOp::Heredoc { body: String::new(), expand },
+                        op: RedirOp::Heredoc {
+                            body: String::new(),
+                            expand,
+                        },
                     }));
                     pending.push(Pending { idx, delim, strip });
                 } else {
-                    tokens.push(Token::Redirect(Redir { fd: 0, op: lex_lt_op(&mut chars)?, varfd: None }));
+                    tokens.push(Token::Redirect(Redir {
+                        fd: 0,
+                        op: lex_lt_op(&mut chars)?,
+                        varfd: None,
+                    }));
                 }
             }
             '>' => {
@@ -283,7 +307,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     tokens.push(Token::Word(word));
                     continue;
                 }
-                tokens.push(Token::Redirect(Redir { fd: 1, op: lex_gt_op(&mut chars)?, varfd: None }));
+                tokens.push(Token::Redirect(Redir {
+                    fd: 1,
+                    op: lex_gt_op(&mut chars)?,
+                    varfd: None,
+                }));
             }
             // A digit run immediately before `<`/`>` is an explicit fd (`2>`);
             // otherwise it's the start of a word.
@@ -569,7 +597,9 @@ fn read_heredoc_delim(chars: &mut Peekable<Chars>) -> Result<(String, bool), Lex
         }
     }
     if delim.is_empty() {
-        return Err(LexError::Syntax("expected a here-document delimiter".into()));
+        return Err(LexError::Syntax(
+            "expected a here-document delimiter".into(),
+        ));
     }
     Ok((delim, expand))
 }
@@ -586,7 +616,11 @@ fn collect_heredoc_body(
         let Some(line) = read_line(chars) else {
             return Err(LexError::Incomplete); // EOF before the delimiter
         };
-        let content = if strip { line.trim_start_matches('\t') } else { &line };
+        let content = if strip {
+            line.trim_start_matches('\t')
+        } else {
+            &line
+        };
         if content == delim {
             return Ok(body);
         }
@@ -614,8 +648,16 @@ fn read_line(chars: &mut Peekable<Chars>) -> Option<String> {
 /// a leading file-descriptor number (`2>`), if one was lexed.
 fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, LexError> {
     match chars.next() {
-        Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: lex_lt_op(chars)?, varfd: None }),
-        Some('>') => Ok(Redir { fd: explicit_fd.unwrap_or(1), op: lex_gt_op(chars)?, varfd: None }),
+        Some('<') => Ok(Redir {
+            fd: explicit_fd.unwrap_or(0),
+            op: lex_lt_op(chars)?,
+            varfd: None,
+        }),
+        Some('>') => Ok(Redir {
+            fd: explicit_fd.unwrap_or(1),
+            op: lex_gt_op(chars)?,
+            varfd: None,
+        }),
         _ => unreachable!("lex_redirect called off a redirection"),
     }
 }
@@ -643,9 +685,9 @@ fn lex_lt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
             if target.is_empty() {
                 RedirOp::DupWord // `<&$word` (C66) — see lex_gt_op's twin arm
             } else {
-                let t = target
-                    .parse()
-                    .map_err(|_| LexError::Syntax("expected a file descriptor after `<&`".into()))?;
+                let t = target.parse().map_err(|_| {
+                    LexError::Syntax("expected a file descriptor after `<&`".into())
+                })?;
                 if chars.peek() == Some(&'-') {
                     chars.next();
                     RedirOp::Move(t) // `<&n-` (C111)
@@ -680,9 +722,9 @@ fn lex_gt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
                 // the parser reads the word like any redirect target.
                 RedirOp::DupWord
             } else {
-                let t = target
-                    .parse()
-                    .map_err(|_| LexError::Syntax("expected a file descriptor after `>&`".into()))?;
+                let t = target.parse().map_err(|_| {
+                    LexError::Syntax("expected a file descriptor after `>&`".into())
+                })?;
                 if chars.peek() == Some(&'-') {
                     chars.next();
                     RedirOp::Move(t) // `>&n-` (C111)
@@ -758,7 +800,7 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                     || c == '\t'
                     || matches!(c, '|' | '<' | '>' | '&' | ';' | '\n' | '\r' | '(' | ')') =>
             {
-                break
+                break;
             }
             Some(&'\'') => {
                 chars.next();
@@ -1183,7 +1225,10 @@ mod tests {
     fn double_quotes_group_words() {
         assert_eq!(
             lex("echo \"hello world\"").unwrap(),
-            vec![bare("echo"), Token::Word(vec![WordPart::Quoted("hello world".into())])]
+            vec![
+                bare("echo"),
+                Token::Word(vec![WordPart::Quoted("hello world".into())])
+            ]
         );
     }
 
@@ -1200,7 +1245,10 @@ mod tests {
             lex("echo \"\\$?\"").unwrap(),
             vec![
                 bare("echo"),
-                Token::Word(vec![WordPart::Literal("$".into()), WordPart::Quoted("?".into())]),
+                Token::Word(vec![
+                    WordPart::Literal("$".into()),
+                    WordPart::Quoted("?".into())
+                ]),
             ]
         );
     }
@@ -1209,7 +1257,10 @@ mod tests {
     fn escaped_dollar_alone_in_double_quotes_has_no_spurious_trailing_part() {
         assert_eq!(
             lex("echo \"\\$\"").unwrap(),
-            vec![bare("echo"), Token::Word(vec![WordPart::Literal("$".into())])]
+            vec![
+                bare("echo"),
+                Token::Word(vec![WordPart::Literal("$".into())])
+            ]
         );
     }
 
@@ -1224,7 +1275,10 @@ mod tests {
         // the `\$` case by whatever comes after it.
         assert_eq!(
             lex("echo \"\\\\$FOO\"").unwrap(),
-            vec![bare("echo"), Token::Word(vec![WordPart::Quoted("\\$FOO".into())])]
+            vec![
+                bare("echo"),
+                Token::Word(vec![WordPart::Quoted("\\$FOO".into())])
+            ]
         );
     }
 
@@ -1232,7 +1286,10 @@ mod tests {
     fn single_quotes_are_literal() {
         assert_eq!(
             lex("echo '$x'").unwrap(),
-            vec![bare("echo"), Token::Word(vec![WordPart::Literal("$x".into())])]
+            vec![
+                bare("echo"),
+                Token::Word(vec![WordPart::Literal("$x".into())])
+            ]
         );
     }
 
@@ -1257,7 +1314,9 @@ mod tests {
         // Spaces and the pipe inside `$(...)` must not split the word.
         assert_eq!(
             lex("$(ls | wc -l)").unwrap(),
-            vec![Token::Word(vec![WordPart::Unquoted("$(ls | wc -l)".into())])]
+            vec![Token::Word(vec![WordPart::Unquoted(
+                "$(ls | wc -l)".into()
+            )])]
         );
     }
 
@@ -1282,7 +1341,11 @@ mod tests {
                 Token::Pipe,
                 bare("grep"),
                 bare("x"),
-                Token::Redirect(Redir { fd: 1, op: RedirOp::Write, varfd: None }),
+                Token::Redirect(Redir {
+                    fd: 1,
+                    op: RedirOp::Write,
+                    varfd: None
+                }),
                 bare("out"),
             ]
         );
@@ -1291,7 +1354,13 @@ mod tests {
     #[test]
     fn fd_aware_redirects() {
         use RedirOp::*;
-        let r = |fd, op| Token::Redirect(Redir { fd, op, varfd: None });
+        let r = |fd, op| {
+            Token::Redirect(Redir {
+                fd,
+                op,
+                varfd: None,
+            })
+        };
         assert_eq!(lex("> f").unwrap(), vec![r(1, Write), bare("f")]);
         assert_eq!(lex(">> f").unwrap(), vec![r(1, Append), bare("f")]);
         assert_eq!(lex("< f").unwrap(), vec![r(0, Read), bare("f")]);
@@ -1312,7 +1381,13 @@ mod tests {
     #[test]
     fn fd_dup_read_side_parses_too() {
         use RedirOp::*;
-        let r = |fd, op| Token::Redirect(Redir { fd, op, varfd: None });
+        let r = |fd, op| {
+            Token::Redirect(Redir {
+                fd,
+                op,
+                varfd: None,
+            })
+        };
         assert_eq!(lex("<&5").unwrap(), vec![r(0, Dup(5))]);
         assert_eq!(lex("4<&5").unwrap(), vec![r(4, Dup(5))]);
         // Still a plain read when there's no `&`.
@@ -1323,9 +1398,10 @@ mod tests {
     fn heredoc_collects_body() {
         let body = |src| {
             lex(src).unwrap().into_iter().find_map(|t| match t {
-                Token::Redirect(Redir { op: RedirOp::Heredoc { body, expand }, .. }) => {
-                    Some((body, expand))
-                }
+                Token::Redirect(Redir {
+                    op: RedirOp::Heredoc { body, expand },
+                    ..
+                }) => Some((body, expand)),
                 _ => None,
             })
         };
@@ -1334,9 +1410,15 @@ mod tests {
             Some(("line1\nline2\n".to_string(), true))
         );
         // A quoted delimiter disables expansion.
-        assert_eq!(body("cat <<'EOF'\n$x\nEOF\n"), Some(("$x\n".to_string(), false)));
+        assert_eq!(
+            body("cat <<'EOF'\n$x\nEOF\n"),
+            Some(("$x\n".to_string(), false))
+        );
         // `<<-` strips leading tabs from body and the delimiter line.
-        assert_eq!(body("cat <<-EOF\n\tindented\n\tEOF\n"), Some(("indented\n".to_string(), true)));
+        assert_eq!(
+            body("cat <<-EOF\n\tindented\n\tEOF\n"),
+            Some(("indented\n".to_string(), true))
+        );
     }
 
     #[test]
@@ -1372,18 +1454,27 @@ mod tests {
 
     #[test]
     fn comment_to_end_of_line() {
-        assert_eq!(lex("echo hi # a comment").unwrap(), vec![bare("echo"), bare("hi")]);
+        assert_eq!(
+            lex("echo hi # a comment").unwrap(),
+            vec![bare("echo"), bare("hi")]
+        );
         assert!(lex("# whole line").unwrap().is_empty());
     }
 
     #[test]
     fn hash_is_literal_mid_word_or_quoted() {
         // Mid-word `#` is part of the word.
-        assert_eq!(lex("echo foo#bar").unwrap(), vec![bare("echo"), bare("foo#bar")]);
+        assert_eq!(
+            lex("echo foo#bar").unwrap(),
+            vec![bare("echo"), bare("foo#bar")]
+        );
         // Quoted `#` is literal too.
         assert_eq!(
             lex("echo '# x'").unwrap(),
-            vec![bare("echo"), Token::Word(vec![WordPart::Literal("# x".into())])]
+            vec![
+                bare("echo"),
+                Token::Word(vec![WordPart::Literal("# x".into())])
+            ]
         );
     }
 

@@ -86,13 +86,69 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 /// Names `try_run` dispatches directly (excludes the platform-specific ones
 /// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
 pub const NAMES: &[&str] = &[
-    "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
-    ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
-    "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
-    "readonly", "let", "builtin", "history", "times", "help", "caller", "enable", "suspend",
-    "fc", "complete", "compgen", "compopt", "bind", "ls-obj", "ps-obj", "from-json", "to-json",
-    "where", "select", "sort-obj",
+    "cd",
+    "pwd",
+    "echo",
+    "export",
+    "unset",
+    "test",
+    "[",
+    "break",
+    "continue",
+    "return",
+    "true",
+    ":",
+    "false",
+    "exit",
+    "alias",
+    "unalias",
+    "set",
+    "trap",
+    "read",
+    "printf",
+    "shift",
+    "local",
+    "getopts",
+    "command",
+    "type",
+    "hash",
+    ".",
+    "source",
+    "eval",
+    "exec",
+    "umask",
+    "ulimit",
+    "shopt",
+    "mapfile",
+    "readarray",
+    "abbr",
+    "unabbr",
+    "pushd",
+    "popd",
+    "dirs",
+    "declare",
+    "typeset",
+    "readonly",
+    "let",
+    "builtin",
+    "history",
+    "times",
+    "help",
+    "caller",
+    "enable",
+    "suspend",
+    "fc",
+    "complete",
+    "compgen",
+    "compopt",
+    "bind",
+    "ls-obj",
+    "ps-obj",
+    "from-json",
+    "to-json",
+    "where",
+    "select",
+    "sort-obj",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -255,14 +311,18 @@ fn printf_cmd(argv: &[String]) -> i32 {
                     // arguments consumed *before* the value.
                     let width_arg = if conv.wants_width_star() {
                         let a = args.get(idx).and_then(|a| a.trim().parse::<i64>().ok());
-                        if args.get(idx).is_some() { idx += 1; }
+                        if args.get(idx).is_some() {
+                            idx += 1;
+                        }
                         a
                     } else {
                         None
                     };
                     let prec_arg = if conv.wants_precision_star() {
                         let a = args.get(idx).and_then(|a| a.trim().parse::<i64>().ok());
-                        if args.get(idx).is_some() { idx += 1; }
+                        if args.get(idx).is_some() {
+                            idx += 1;
+                        }
                         a
                     } else {
                         None
@@ -561,7 +621,10 @@ mod printf {
         }
         conv.spec = chars.next().ok_or("missing conversion specifier")?;
         if !"diouxXcsbqfFeEgGaA".contains(conv.spec) {
-            return Err(format!("`%{}': invalid conversion specification", conv.spec));
+            return Err(format!(
+                "`%{}': invalid conversion specification",
+                conv.spec
+            ));
         }
         Ok(conv)
     }
@@ -569,13 +632,36 @@ mod printf {
     /// A strftime subset for `%(fmt)T` (C99), UTC: civil date via the
     /// days-from-epoch algorithm, no timezone database.
     pub fn strftime(fmt: &str, epoch: i64) -> String {
-        const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"];
-        const DAYS: [&str; 7] =
-            ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const MONTHS: [&str; 12] = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ];
+        const DAYS: [&str; 7] = [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ];
         let days = epoch.div_euclid(86400);
         let secs_of_day = epoch.rem_euclid(86400);
-        let (hour, min, sec) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+        let (hour, min, sec) = (
+            secs_of_day / 3600,
+            (secs_of_day % 3600) / 60,
+            secs_of_day % 60,
+        );
         // Howard Hinnant's civil-from-days.
         let z = days + 719468;
         let era = z.div_euclid(146097);
@@ -790,7 +876,10 @@ mod printf {
                 }
                 (truncate(&expanded, conv.precision), false)
             }
-            'c' => (raw.chars().next().map(String::from).unwrap_or_default(), false),
+            'c' => (
+                raw.chars().next().map(String::from).unwrap_or_default(),
+                false,
+            ),
             'd' | 'i' => {
                 let n = parse_int();
                 (signed(n, conv), true)
@@ -811,7 +900,10 @@ mod printf {
                         .unwrap_or(0),
                     _ => parse_int(),
                 };
-                (strftime(conv.time_fmt.as_deref().unwrap_or("%X"), secs), false)
+                (
+                    strftime(conv.time_fmt.as_deref().unwrap_or("%X"), secs),
+                    false,
+                )
             }
             _ => unreachable!("parse_conv only accepts known specifiers"),
         };
@@ -833,7 +925,10 @@ mod printf {
         };
         let mag = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
             i64::from_str_radix(hex, 16).ok()?
-        } else if body.len() > 1 && body.starts_with('0') && body.bytes().all(|b| b.is_ascii_digit()) {
+        } else if body.len() > 1
+            && body.starts_with('0')
+            && body.bytes().all(|b| b.is_ascii_digit())
+        {
             i64::from_str_radix(body, 8).ok()?
         } else {
             body.parse().ok()?
@@ -898,8 +993,12 @@ mod printf {
         } else {
             (rounded, exp)
         };
-        format!("{}{mant_str}{e}{}{:02}", if neg { "-" } else { "" },
-            if exp < 0 { '-' } else { '+' }, exp.abs())
+        format!(
+            "{}{mant_str}{e}{}{:02}",
+            if neg { "-" } else { "" },
+            if exp < 0 { '-' } else { '+' },
+            exp.abs()
+        )
     }
 
     /// C's `%g`: `%e` or `%f`, whichever is shorter, trailing zeros
@@ -943,7 +1042,11 @@ mod printf {
             format!("{sign}0x1p{}{}", if exp < 0 { '-' } else { '+' }, exp.abs())
         } else {
             let hex = format!("{mantissa:013x}").trim_end_matches('0').to_string();
-            format!("{sign}0x1.{hex}p{}{}", if exp < 0 { '-' } else { '+' }, exp.abs())
+            format!(
+                "{sign}0x1.{hex}p{}{}",
+                if exp < 0 { '-' } else { '+' },
+                exp.abs()
+            )
         }
     }
 
@@ -1008,7 +1111,11 @@ thread_local! {
 /// The stack as bash's `dirs` shows it, one entry per element: the current
 /// directory first, then the pushed entries, `$HOME` abbreviated to `~`.
 fn dirs_entries() -> Vec<String> {
-    let mut entries = vec![std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default()];
+    let mut entries = vec![
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+    ];
     DIR_STACK.with(|s| entries.extend(s.borrow().iter().rev().cloned()));
     let home = crate::vars::get("HOME").unwrap_or_default();
     entries
@@ -1028,7 +1135,9 @@ fn dirs_display() -> String {
 }
 
 fn current_dir_string() -> Option<String> {
-    std::env::current_dir().ok().map(|p| p.display().to_string())
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string())
 }
 
 /// Mirror the stack into `$DIRSTACK`, bash's own array view of it —
@@ -1079,7 +1188,10 @@ fn pushd_cmd(argv: &[String]) -> i32 {
 /// (0 = the current directory, so `+0` is the plain form; higher indices
 /// remove without changing directory, bash's own rule).
 fn popd_cmd(argv: &[String]) -> i32 {
-    if let Some(n) = argv.get(1).and_then(|a| a.strip_prefix('+')).and_then(|r| r.parse::<usize>().ok())
+    if let Some(n) = argv
+        .get(1)
+        .and_then(|a| a.strip_prefix('+'))
+        .and_then(|r| r.parse::<usize>().ok())
         && n >= 1
     {
         let removed = DIR_STACK.with(|s| {
@@ -1170,7 +1282,10 @@ fn cd_fallback_target(target: &str) -> Option<String> {
     }
     if crate::vars::interactive() {
         let path = Path::new(target);
-        let (parent, name) = (path.parent().filter(|p| !p.as_os_str().is_empty()), path.file_name()?);
+        let (parent, name) = (
+            path.parent().filter(|p| !p.as_os_str().is_empty()),
+            path.file_name()?,
+        );
         let parent = parent.unwrap_or(Path::new("."));
         let name = name.to_string_lossy();
         let mut candidates = Vec::new();
@@ -1178,7 +1293,8 @@ fn cd_fallback_target(target: &str) -> Option<String> {
             for entry in entries.flatten() {
                 let entry_name = entry.file_name().to_string_lossy().into_owned();
                 if entry.path().is_dir()
-                    && (entry_name.eq_ignore_ascii_case(&name) || edit_distance(&entry_name, &name) <= 2)
+                    && (entry_name.eq_ignore_ascii_case(&name)
+                        || edit_distance(&entry_name, &name) <= 2)
                 {
                     candidates.push(entry.path().display().to_string());
                 }
@@ -1596,14 +1712,21 @@ fn mapfile_cmd(argv: &[String]) -> i32 {
         }
     }
     let name = name.unwrap_or("MAPFILE");
-    let mut valid = name.chars().next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
+    let mut valid = name
+        .chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
     valid &= name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric());
     if !valid {
         eprintln!("{}: {name}: not a valid identifier", argv[0]);
         return 1;
     }
     let mut lines = Vec::new();
-    let raw_opts = ReadOpts { raw: true, delim, ..ReadOpts::default() };
+    let raw_opts = ReadOpts {
+        raw: true,
+        delim,
+        ..ReadOpts::default()
+    };
     let mut skipped = 0usize;
     let mut read_in_batch = 0usize;
     loop {
@@ -1691,15 +1814,16 @@ fn read_logical_line(opts: &ReadOpts) -> (Vec<u8>, Vec<bool>, i32) {
     // `-t`: a whole-call deadline, enforced by putting the fd in
     // non-blocking mode and polling (Linux constants; the default
     // backend is Linux-only — elsewhere `-t` degrades to blocking).
-    let deadline = opts.timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+    let deadline = opts
+        .timeout
+        .map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
     #[cfg(target_os = "linux")]
     let restore_flags = deadline.and_then(|_| {
         const F_GETFL: i32 = 3;
         const F_SETFL: i32 = 4;
         const O_NONBLOCK: i32 = 0o4000;
         let flags = unsafe { crate::sys::fcntl(opts.fd, F_GETFL, 0) };
-        (flags != -1
-            && unsafe { crate::sys::fcntl(opts.fd, F_SETFL, flags | O_NONBLOCK) } != -1)
+        (flags != -1 && unsafe { crate::sys::fcntl(opts.fd, F_SETFL, flags | O_NONBLOCK) } != -1)
             .then_some((F_SETFL, flags))
     });
     #[cfg(not(target_os = "linux"))]
@@ -1724,12 +1848,10 @@ fn read_logical_line(opts: &ReadOpts) -> (Vec<u8>, Vec<bool>, i32) {
             match n {
                 Ok(0) => return Ok(None),
                 Ok(_) => return Ok(Some(byte[0])),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    match deadline {
-                        Some(d) if std::time::Instant::now() >= d => return Err(142),
-                        _ => std::thread::sleep(std::time::Duration::from_millis(5)),
-                    }
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => match deadline {
+                    Some(d) if std::time::Instant::now() >= d => return Err(142),
+                    _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+                },
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => return Ok(None),
             }
@@ -1799,19 +1921,29 @@ impl ReadIfs {
                 other: Vec::new(),
                 disabled: false,
             },
-            Some(s) if s.is_empty() => {
-                ReadIfs { whitespace: Vec::new(), other: Vec::new(), disabled: true }
-            }
+            Some(s) if s.is_empty() => ReadIfs {
+                whitespace: Vec::new(),
+                other: Vec::new(),
+                disabled: true,
+            },
             Some(s) => {
                 let mut whitespace = Vec::new();
                 let mut other = Vec::new();
                 for &b in s.as_bytes() {
-                    let bucket = if matches!(b, b' ' | b'\t' | b'\n') { &mut whitespace } else { &mut other };
+                    let bucket = if matches!(b, b' ' | b'\t' | b'\n') {
+                        &mut whitespace
+                    } else {
+                        &mut other
+                    };
                     if !bucket.contains(&b) {
                         bucket.push(b);
                     }
                 }
-                ReadIfs { whitespace, other, disabled: false }
+                ReadIfs {
+                    whitespace,
+                    other,
+                    disabled: false,
+                }
             }
         }
     }
@@ -1843,7 +1975,14 @@ impl ReadIfs {
 fn split_read_fields(line: &[u8], protected: &[bool]) -> Vec<ReadField> {
     let ifs = ReadIfs::current();
     if ifs.disabled {
-        return if line.is_empty() { Vec::new() } else { vec![ReadField { start: 0, end: line.len() }] };
+        return if line.is_empty() {
+            Vec::new()
+        } else {
+            vec![ReadField {
+                start: 0,
+                end: line.len(),
+            }]
+        };
     }
 
     let is_delim = |i: usize| !protected[i] && ifs.is_delim(line[i]);
@@ -1948,8 +2087,9 @@ const UNARY_OPS: &[&str] = &[
     // File-type/attribute tests, matching `[[ ]]`'s set (C132).
     "-h", "-L", "-N", "-O", "-G", "-k", "-u", "-g", "-S", "-b", "-c", "-p", "-t",
 ];
-const BINARY_OPS: &[&str] =
-    &["=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "<", ">", "-nt", "-ot", "-ef"];
+const BINARY_OPS: &[&str] = &[
+    "=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "<", ">", "-nt", "-ot", "-ef",
+];
 
 /// `EXPR1 -o EXPR2` (lowest precedence, left-assoc): true if either side is.
 fn test_eval(args: &[String]) -> Result<bool, String> {
@@ -2046,7 +2186,10 @@ fn test_unary(op: &str, s: &str) -> Result<bool, String> {
         "-e" => Path::new(s).exists(),
         "-f" => Path::new(s).is_file(),
         "-d" => Path::new(s).is_dir(),
-        "-s" => Path::new(s).metadata().map(|m| m.len() > 0).unwrap_or(false),
+        "-s" => Path::new(s)
+            .metadata()
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
         // Permission bits aren't portable; approximate with existence.
         "-r" | "-w" | "-x" => Path::new(s).exists(),
         // Symlink (via symlink_metadata, so a dangling link still reports
@@ -2089,7 +2232,10 @@ fn test_unary(op: &str, s: &str) -> Result<bool, String> {
 }
 
 fn test_binary(a: &str, op: &str, b: &str) -> Result<bool, String> {
-    let int = |s: &str| s.parse::<i64>().map_err(|_| format!("integer expected: `{s}`"));
+    let int = |s: &str| {
+        s.parse::<i64>()
+            .map_err(|_| format!("integer expected: `{s}`"))
+    };
     Ok(match op {
         "=" | "==" => a == b,
         "!=" => a != b,
@@ -2395,8 +2541,12 @@ fn unset(argv: &[String]) -> i32 {
                     continue;
                 }
                 match target {
-                    Some(UnsetTarget::Index(array, index)) => crate::vars::array_unset_index(&array, index),
-                    Some(UnsetTarget::Key(array, key)) => crate::vars::assoc_unset_key(&array, &key),
+                    Some(UnsetTarget::Index(array, index)) => {
+                        crate::vars::array_unset_index(&array, index)
+                    }
+                    Some(UnsetTarget::Key(array, key)) => {
+                        crate::vars::assoc_unset_key(&array, &key)
+                    }
                     None => crate::vars::unset(name),
                 }
             }
@@ -2630,13 +2780,25 @@ pub fn declare_from_decls(
         // `declare -u x` keeps both), same as real bash — see
         // `vars::set_attrs`.
         if attrs.any() {
-            crate::vars::set_attrs(name, crate::vars::Attrs { readonly: false, ..attrs });
+            crate::vars::set_attrs(
+                name,
+                crate::vars::Attrs {
+                    readonly: false,
+                    ..attrs
+                },
+            );
         }
         if let Some(op) = op {
             crate::vars::assign(name, op);
         }
         if attrs.readonly {
-            crate::vars::set_attrs(name, crate::vars::Attrs { readonly: true, ..Default::default() });
+            crate::vars::set_attrs(
+                name,
+                crate::vars::Attrs {
+                    readonly: true,
+                    ..Default::default()
+                },
+            );
         }
         // `declare -x` marks the name exported (C135) — even a bare
         // `declare -x name` with no value, so a later assignment inherits
@@ -2682,12 +2844,24 @@ pub fn readonly_from_decls(
             continue;
         }
         if attrs.any() {
-            crate::vars::set_attrs(name, crate::vars::Attrs { readonly: false, ..attrs });
+            crate::vars::set_attrs(
+                name,
+                crate::vars::Attrs {
+                    readonly: false,
+                    ..attrs
+                },
+            );
         }
         if let Some(op) = op {
             crate::vars::assign(name, op);
         }
-        crate::vars::set_attrs(name, crate::vars::Attrs { readonly: true, ..Default::default() });
+        crate::vars::set_attrs(
+            name,
+            crate::vars::Attrs {
+                readonly: true,
+                ..Default::default()
+            },
+        );
     }
     status
 }
@@ -2711,16 +2885,29 @@ fn getopts_cmd(argv: &[String]) -> i32 {
         eprintln!("getopts: usage: getopts optstring name [arg ...]");
         return 2;
     };
-    let args: Vec<String> = if argv.len() > 3 { argv[3..].to_vec() } else { crate::vars::args() };
+    let args: Vec<String> = if argv.len() > 3 {
+        argv[3..].to_vec()
+    } else {
+        crate::vars::args()
+    };
 
     let silent = optstring.starts_with(':');
     let opts = optstring.trim_start_matches(':');
 
-    let optind = crate::vars::get("OPTIND").and_then(|s| s.parse().ok()).unwrap_or(1).max(1);
+    let optind = crate::vars::get("OPTIND")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
     let char_pos = crate::vars::getopts_char_pos(optind);
 
     // `(new_optind, new_char_pos, exit_status, name's new value, $OPTARG)`.
-    let (new_optind, new_char_pos, status, name_value, optarg): (usize, usize, i32, String, Option<String>) = 'outcome: {
+    let (new_optind, new_char_pos, status, name_value, optarg): (
+        usize,
+        usize,
+        i32,
+        String,
+        Option<String>,
+    ) = 'outcome: {
         if char_pos == 0 {
             match args.get(optind - 1).map(String::as_str) {
                 None => break 'outcome (optind, 0, 1, "?".to_string(), None),
@@ -2960,10 +3147,14 @@ fn find_executable(p: &Path) -> Option<std::path::PathBuf> {
         return None;
     }
     let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    pathext.split(';').map(str::trim).filter(|e| !e.is_empty()).find_map(|ext| {
-        let candidate = p.with_extension(ext.trim_start_matches('.'));
-        is_executable_file(&candidate).then_some(candidate)
-    })
+    pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .find_map(|ext| {
+            let candidate = p.with_extension(ext.trim_start_matches('.'));
+            is_executable_file(&candidate).then_some(candidate)
+        })
 }
 
 /// `command [-v|-V] name [args...]` — with `-v`/`-V`, describes how `name`
@@ -3007,7 +3198,9 @@ fn command_cmd(argv: &[String]) -> i32 {
         Some(v) => command_v(&argv[idx..], v, default_path),
         None if idx >= argv.len() => 0,
         None => {
-            eprintln!("command: running a command isn't supported here (only as the sole stage of a pipeline)");
+            eprintln!(
+                "command: running a command isn't supported here (only as the sole stage of a pipeline)"
+            );
             127
         }
     }
@@ -3015,7 +3208,10 @@ fn command_cmd(argv: &[String]) -> i32 {
 
 fn command_v(names: &[String], verbose: bool, default_path: bool) -> i32 {
     if names.is_empty() {
-        eprintln!("command: usage: command -{} name ...", if verbose { "V" } else { "v" });
+        eprintln!(
+            "command: usage: command -{} name ...",
+            if verbose { "V" } else { "v" }
+        );
         return 2;
     }
     let mut found_any = false;
@@ -3059,7 +3255,9 @@ fn type_cmd(argv: &[String]) -> i32 {
     let mut force_path = false;
     let mut idx = 1;
     while idx < argv.len() {
-        let Some(flags) = argv[idx].strip_prefix('-').filter(|f| !f.is_empty() && f.chars().all(|c| matches!(c, 't' | 'a' | 'p' | 'P' | 'f'))) else {
+        let Some(flags) = argv[idx].strip_prefix('-').filter(|f| {
+            !f.is_empty() && f.chars().all(|c| matches!(c, 't' | 'a' | 'p' | 'P' | 'f'))
+        }) else {
             break;
         };
         for c in flags.chars() {
@@ -3112,7 +3310,14 @@ fn type_cmd(argv: &[String]) -> i32 {
             continue;
         }
         for kind in kinds {
-            println!("{}", if just_kind { kind.label().to_string() } else { kind.describe(name) });
+            println!(
+                "{}",
+                if just_kind {
+                    kind.label().to_string()
+                } else {
+                    kind.describe(name)
+                }
+            );
         }
     }
     status
@@ -3283,12 +3488,18 @@ fn suspend_cmd() -> i32 {
 /// defined (and re-exported) function. Malformed values are skipped.
 pub fn import_functions() {
     for name in crate::vars::names() {
-        let Some(func_name) = name.strip_prefix("BASH_FUNC_").and_then(|n| n.strip_suffix("%%"))
+        let Some(func_name) = name
+            .strip_prefix("BASH_FUNC_")
+            .and_then(|n| n.strip_suffix("%%"))
         else {
             continue;
         };
-        let Some(value) = crate::vars::get(&name) else { continue };
-        let Some(body_src) = value.trim_start().strip_prefix("()") else { continue };
+        let Some(value) = crate::vars::get(&name) else {
+            continue;
+        };
+        let Some(body_src) = value.trim_start().strip_prefix("()") else {
+            continue;
+        };
         if let Ok(list) = crate::parser::parse(&format!("{func_name} () {}", body_src.trim_start()))
             && let Some(crate::parser::RawCommand::Compound(rc)) =
                 list.jobs.first().map(|j| &j.list.first.commands[0])
@@ -3301,13 +3512,19 @@ pub fn import_functions() {
 
 /// Parse the shared `complete`/`compgen` option set into a `Spec` (C93),
 /// returning `(spec, operands)`.
-fn parse_comp_spec(args: &[String]) -> Result<(crate::completion::programmable::Spec, Vec<String>), String> {
+fn parse_comp_spec(
+    args: &[String],
+) -> Result<(crate::completion::programmable::Spec, Vec<String>), String> {
     use crate::completion::programmable::Spec;
     let mut spec = Spec::default();
     let mut operands = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        let mut take = || it.next().cloned().ok_or_else(|| "option requires an argument".to_string());
+        let mut take = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| "option requires an argument".to_string())
+        };
         match arg.as_str() {
             "-F" => spec.function = Some(take()?),
             "-C" => spec.command = Some(take()?),
@@ -3473,8 +3690,10 @@ fn bind_cmd(argv: &[String]) -> i32 {
                     return 1;
                 };
                 match readline_action(&action) {
-                    Some(mapped) => PENDING_BINDS
-                        .with(|b| b.borrow_mut().push(PendingBind::Action(keys, mapped.to_string()))),
+                    Some(mapped) => PENDING_BINDS.with(|b| {
+                        b.borrow_mut()
+                            .push(PendingBind::Action(keys, mapped.to_string()))
+                    }),
                     None => {
                         eprintln!("bind: {action}: unknown function name");
                         return 1;
@@ -3537,7 +3756,11 @@ fn complete_cmd(argv: &[String]) -> i32 {
     }
     // `-D` (default) / `-E` (empty line) consume no name.
     let default = argv.iter().any(|a| a == "-D" || a == "-E");
-    let filtered: Vec<String> = argv[1..].iter().filter(|a| *a != "-D" && *a != "-E").cloned().collect();
+    let filtered: Vec<String> = argv[1..]
+        .iter()
+        .filter(|a| *a != "-D" && *a != "-E")
+        .cloned()
+        .collect();
     let (spec, names) = match parse_comp_spec(&filtered) {
         Ok(r) => r,
         Err(e) => {
@@ -3550,7 +3773,9 @@ fn complete_cmd(argv: &[String]) -> i32 {
         return 0;
     }
     if names.is_empty() {
-        eprintln!("complete: usage: complete [-abcdefgjksuv] [-o option] [-A action] [-F function] [-C command] [-W wordlist] [-P prefix] [-S suffix] name...");
+        eprintln!(
+            "complete: usage: complete [-abcdefgjksuv] [-o option] [-A action] [-F function] [-C command] [-W wordlist] [-P prefix] [-S suffix] name..."
+        );
         return 2;
     }
     for name in &names {
@@ -3611,7 +3836,11 @@ fn fc_cmd(argv: &[String]) -> i32 {
     // negative = from the end, text = most recent entry with that prefix.
     let resolve = |spec: &str| -> Option<usize> {
         if let Ok(n) = spec.parse::<i64>() {
-            let idx = if n < 0 { entries.len() as i64 + n } else { n - 1 };
+            let idx = if n < 0 {
+                entries.len() as i64 + n
+            } else {
+                n - 1
+            };
             return usize::try_from(idx).ok().filter(|&i| i < entries.len());
         }
         entries.iter().rposition(|e| e.starts_with(spec))
@@ -3638,7 +3867,9 @@ fn fc_cmd(argv: &[String]) -> i32 {
             flags
                 if flags.len() > 1
                     && flags.starts_with('-')
-                    && flags[1..].chars().all(|c| matches!(c, 'l' | 'n' | 'r' | 's')) =>
+                    && flags[1..]
+                        .chars()
+                        .all(|c| matches!(c, 'l' | 'n' | 'r' | 's')) =>
             {
                 for c in flags[1..].chars() {
                     match c {
@@ -3657,9 +3888,11 @@ fn fc_cmd(argv: &[String]) -> i32 {
     if substitute {
         // `fc -s [pat=rep] [spec]`.
         let (replace, spec) = match operands.first() {
-            Some(op) if op.contains('=') && resolve(op).is_none() => {
-                (op.split_once('=').map(|(p, r)| (p.to_string(), r.to_string())), operands.get(1))
-            }
+            Some(op) if op.contains('=') && resolve(op).is_none() => (
+                op.split_once('=')
+                    .map(|(p, r)| (p.to_string(), r.to_string())),
+                operands.get(1),
+            ),
             first => (None, first),
         };
         let Some(idx) = spec.map_or(Some(entries.len() - 1), |s| resolve(s)) else {
@@ -3677,7 +3910,13 @@ fn fc_cmd(argv: &[String]) -> i32 {
     }
 
     let first = operands.first().map_or_else(
-        || if list { entries.len().saturating_sub(16) } else { entries.len() - 1 },
+        || {
+            if list {
+                entries.len().saturating_sub(16)
+            } else {
+                entries.len() - 1
+            }
+        },
         |s| resolve(s).unwrap_or(0),
     );
     let last = operands.get(1).and_then(|s| resolve(s)).unwrap_or(if list {
@@ -3686,7 +3925,11 @@ fn fc_cmd(argv: &[String]) -> i32 {
         first
     });
     let (lo, hi) = (first.min(last), first.max(last));
-    let mut range: Vec<(usize, &String)> = entries[lo..=hi].iter().enumerate().map(|(i, e)| (lo + i, e)).collect();
+    let mut range: Vec<(usize, &String)> = entries[lo..=hi]
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (lo + i, e))
+        .collect();
     if reverse != (first > last) {
         range.reverse();
     }
@@ -3709,8 +3952,15 @@ fn fc_cmd(argv: &[String]) -> i32 {
         .or_else(|| crate::vars::get("EDITOR").filter(|e| !e.is_empty()))
         .unwrap_or_else(|| "vi".to_string());
     let path = std::env::temp_dir().join(format!("rush-fc-{}", std::process::id()));
-    let body: String = range.iter().map(|(_, e)| format!("{e}
-")).collect();
+    let body: String = range
+        .iter()
+        .map(|(_, e)| {
+            format!(
+                "{e}
+"
+            )
+        })
+        .collect();
     if let Err(e) = std::fs::write(&path, &body) {
         eprintln!("fc: {e}");
         return 1;
@@ -3754,9 +4004,9 @@ fn run_fc_source(src: &str) -> i32 {
 /// loop already appends incrementally — C123).
 fn history_cmd(argv: &[String]) -> i32 {
     let histfile = || {
-        crate::vars::get("HISTFILE").filter(|f| !f.is_empty()).or_else(|| {
-            crate::vars::get("HOME").map(|h| format!("{h}/.rush_history"))
-        })
+        crate::vars::get("HISTFILE")
+            .filter(|f| !f.is_empty())
+            .or_else(|| crate::vars::get("HOME").map(|h| format!("{h}/.rush_history")))
     };
     match argv.get(1).map(String::as_str) {
         Some("-c") => {
@@ -3766,7 +4016,10 @@ fn history_cmd(argv: &[String]) -> i32 {
             0
         }
         Some("-d") => {
-            let Some(n) = argv.get(2).and_then(|v| v.parse::<usize>().ok()).filter(|&n| n >= 1)
+            let Some(n) = argv
+                .get(2)
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n >= 1)
             else {
                 eprintln!("history: -d: history position required");
                 return 2;
@@ -3930,8 +4183,12 @@ fn hash_cmd(argv: &[String]) -> i32 {
     }
     let names = &argv[1..];
     if names.is_empty() {
-        let entries: Vec<(String, String)> =
-            HASH_TABLE.with(|t| t.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let entries: Vec<(String, String)> = HASH_TABLE.with(|t| {
+            t.borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
         if entries.is_empty() {
             println!("hash: hash table empty");
         } else {
@@ -3946,7 +4203,10 @@ fn hash_cmd(argv: &[String]) -> i32 {
     for name in names {
         match resolve_in_path(name) {
             Some(path) => {
-                HASH_TABLE.with(|t| t.borrow_mut().insert(name.clone(), path.display().to_string()));
+                HASH_TABLE.with(|t| {
+                    t.borrow_mut()
+                        .insert(name.clone(), path.display().to_string())
+                });
             }
             None => {
                 eprintln!("hash: {name}: not found");
@@ -4068,33 +4328,135 @@ const ULIMIT_RESOURCES: &[UlimitResource] = &[
     // bash lists resources alphabetically by flag letter; uppercase `-R`
     // sorts ahead of the lowercase letters, so it heads `ulimit -a`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'R', resource: crate::sys::RLIMIT_RTTIME as i32, label: "real-time non-blocking time  (microseconds, -R)", scale: 1, synthetic: None },
-    UlimitResource { letter: 'c', resource: crate::sys::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512, synthetic: None },
-    UlimitResource { letter: 'd', resource: crate::sys::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024, synthetic: None },
+    UlimitResource {
+        letter: 'R',
+        resource: crate::sys::RLIMIT_RTTIME as i32,
+        label: "real-time non-blocking time  (microseconds, -R)",
+        scale: 1,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'c',
+        resource: crate::sys::RLIMIT_CORE as i32,
+        label: "core file size              (blocks, -c)",
+        scale: 512,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'd',
+        resource: crate::sys::RLIMIT_DATA as i32,
+        label: "data seg size               (kbytes, -d)",
+        scale: 1024,
+        synthetic: None,
+    },
     // bash lists resources alphabetically by flag letter, so `-e` precedes `-f`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'e', resource: crate::sys::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1, synthetic: None },
-    UlimitResource { letter: 'f', resource: crate::sys::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512, synthetic: None },
+    UlimitResource {
+        letter: 'e',
+        resource: crate::sys::RLIMIT_NICE as i32,
+        label: "scheduling priority                 (-e)",
+        scale: 1,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'f',
+        resource: crate::sys::RLIMIT_FSIZE as i32,
+        label: "file size                   (blocks, -f)",
+        scale: 512,
+        synthetic: None,
+    },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'i', resource: crate::sys::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1, synthetic: None },
-    UlimitResource { letter: 'l', resource: crate::sys::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024, synthetic: None },
-    UlimitResource { letter: 'm', resource: crate::sys::RLIMIT_RSS as i32, label: "max memory size             (kbytes, -m)", scale: 1024, synthetic: None },
-    UlimitResource { letter: 'n', resource: crate::sys::RLIMIT_NOFILE as i32, label: "open files                          (-n)", scale: 1, synthetic: None },
+    UlimitResource {
+        letter: 'i',
+        resource: crate::sys::RLIMIT_SIGPENDING as i32,
+        label: "pending signals                     (-i)",
+        scale: 1,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'l',
+        resource: crate::sys::RLIMIT_MEMLOCK as i32,
+        label: "max locked memory           (kbytes, -l)",
+        scale: 1024,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'm',
+        resource: crate::sys::RLIMIT_RSS as i32,
+        label: "max memory size             (kbytes, -m)",
+        scale: 1024,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'n',
+        resource: crate::sys::RLIMIT_NOFILE as i32,
+        label: "open files                          (-n)",
+        scale: 1,
+        synthetic: None,
+    },
     // `-p` pipe size is a bash pseudo-resource: a fixed atomic pipe-buffer
     // size (`PIPE_BUF` = 4096 bytes = 8 × 512-byte blocks), read-only. It
     // sorts between `-n` and `-q`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'p', resource: 0, label: "pipe size                (512 bytes, -p)", scale: 512, synthetic: Some(4096) },
+    UlimitResource {
+        letter: 'p',
+        resource: 0,
+        label: "pipe size                (512 bytes, -p)",
+        scale: 512,
+        synthetic: Some(4096),
+    },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'q', resource: crate::sys::RLIMIT_MSGQUEUE as i32, label: "POSIX message queues         (bytes, -q)", scale: 1, synthetic: None },
+    UlimitResource {
+        letter: 'q',
+        resource: crate::sys::RLIMIT_MSGQUEUE as i32,
+        label: "POSIX message queues         (bytes, -q)",
+        scale: 1,
+        synthetic: None,
+    },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'r', resource: crate::sys::RLIMIT_RTPRIO as i32, label: "real-time priority                  (-r)", scale: 1, synthetic: None },
-    UlimitResource { letter: 's', resource: crate::sys::RLIMIT_STACK as i32, label: "stack size                  (kbytes, -s)", scale: 1024, synthetic: None },
-    UlimitResource { letter: 't', resource: crate::sys::RLIMIT_CPU as i32, label: "cpu time                   (seconds, -t)", scale: 1, synthetic: None },
-    UlimitResource { letter: 'u', resource: crate::sys::RLIMIT_NPROC as i32, label: "max user processes                  (-u)", scale: 1, synthetic: None },
-    UlimitResource { letter: 'v', resource: crate::sys::RLIMIT_AS as i32, label: "virtual memory              (kbytes, -v)", scale: 1024, synthetic: None },
+    UlimitResource {
+        letter: 'r',
+        resource: crate::sys::RLIMIT_RTPRIO as i32,
+        label: "real-time priority                  (-r)",
+        scale: 1,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 's',
+        resource: crate::sys::RLIMIT_STACK as i32,
+        label: "stack size                  (kbytes, -s)",
+        scale: 1024,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 't',
+        resource: crate::sys::RLIMIT_CPU as i32,
+        label: "cpu time                   (seconds, -t)",
+        scale: 1,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'u',
+        resource: crate::sys::RLIMIT_NPROC as i32,
+        label: "max user processes                  (-u)",
+        scale: 1,
+        synthetic: None,
+    },
+    UlimitResource {
+        letter: 'v',
+        resource: crate::sys::RLIMIT_AS as i32,
+        label: "virtual memory              (kbytes, -v)",
+        scale: 1024,
+        synthetic: None,
+    },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'x', resource: crate::sys::RLIMIT_LOCKS as i32, label: "file locks                          (-x)", scale: 1, synthetic: None },
+    UlimitResource {
+        letter: 'x',
+        resource: crate::sys::RLIMIT_LOCKS as i32,
+        label: "file locks                          (-x)",
+        scale: 1,
+        synthetic: None,
+    },
 ];
 
 /// `ulimit [-SH] [-a | -<letter> [limit]]` (C46) — get/set process resource
@@ -4115,7 +4477,10 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
     let mut operand: Option<&str> = None;
 
     for arg in &argv[1..] {
-        if let Some(flags) = arg.strip_prefix('-').filter(|f| !f.is_empty() && f.chars().all(char::is_alphabetic)) {
+        if let Some(flags) = arg
+            .strip_prefix('-')
+            .filter(|f| !f.is_empty() && f.chars().all(char::is_alphabetic))
+        {
             for c in flags.chars() {
                 match c {
                     'S' => soft_only = true,
@@ -4124,7 +4489,13 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
                     c if ULIMIT_RESOURCES.iter().any(|r| r.letter == c) => letter = Some(c),
                     _ => {
                         eprintln!("ulimit: -{c}: invalid option");
-                        eprintln!("ulimit: usage: ulimit [-SHa{}] [limit]", ULIMIT_RESOURCES.iter().map(|r| r.letter).collect::<String>());
+                        eprintln!(
+                            "ulimit: usage: ulimit [-SHa{}] [limit]",
+                            ULIMIT_RESOURCES
+                                .iter()
+                                .map(|r| r.letter)
+                                .collect::<String>()
+                        );
                         return 2;
                     }
                 }
@@ -4138,14 +4509,24 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
     }
 
     let display = |raw: crate::sys::rlim_t, scale: u64| -> String {
-        if raw == crate::sys::RLIM_INFINITY { "unlimited".to_string() } else { (raw / scale).to_string() }
+        if raw == crate::sys::RLIM_INFINITY {
+            "unlimited".to_string()
+        } else {
+            (raw / scale).to_string()
+        }
     };
     let get = |res: &UlimitResource| -> Option<crate::sys::rlimit> {
         // A pseudo-resource (`-p`) reports its fixed value for both limits.
         if let Some(v) = res.synthetic {
-            return Some(crate::sys::rlimit { rlim_cur: v as _, rlim_max: v as _ });
+            return Some(crate::sys::rlimit {
+                rlim_cur: v as _,
+                rlim_max: v as _,
+            });
         }
-        let mut rl = crate::sys::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = crate::sys::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         (unsafe { crate::sys::getrlimit(res.resource as _, &mut rl) } == 0).then_some(rl)
     };
 
@@ -4201,7 +4582,10 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
         rl.rlim_max = new_raw;
     }
     if unsafe { crate::sys::setrlimit(res.resource as _, &rl) } != 0 {
-        eprintln!("ulimit: cannot modify limit: {}", crate::sys::last_os_error());
+        eprintln!(
+            "ulimit: cannot modify limit: {}",
+            crate::sys::last_os_error()
+        );
         return 1;
     }
     0
@@ -4228,10 +4612,7 @@ fn eval_cmd(argv: &[String]) -> i32 {
 }
 
 fn exit(argv: &[String]) -> Option<i32> {
-    let code = argv
-        .get(1)
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
+    let code = argv.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
     crate::trap::exit_shell(code);
 }
 
@@ -4489,10 +4870,9 @@ fn set_cmd(argv: &[String]) -> i32 {
                             // Accepted but inert (C107) — see the letter
                             // cluster above.
                             Some(
-                                "braceexpand" | "errtrace" | "hashall"
-                                | "histexpand" | "history" | "ignoreeof" | "keyword"
-                                | "monitor" | "notify" | "onecmd" | "physical" | "posix"
-                                | "privileged" | "verbose",
+                                "braceexpand" | "errtrace" | "hashall" | "histexpand" | "history"
+                                | "ignoreeof" | "keyword" | "monitor" | "notify" | "onecmd"
+                                | "physical" | "posix" | "privileged" | "verbose",
                             ) => {}
                             Some(name) => {
                                 eprintln!("set: {name}: invalid option name");
@@ -4584,8 +4964,10 @@ fn trap_cmd(argv: &[String]) -> i32 {
     // `trap -p [name...]` (C65): print registered traps re-runnably —
     // the same format bare `trap` uses, optionally filtered.
     if argv.get(1).map(String::as_str) == Some("-p") {
-        let filter: Vec<&str> =
-            argv[2..].iter().filter_map(|s| crate::trap::normalize_signal_spec(s)).collect();
+        let filter: Vec<&str> = argv[2..]
+            .iter()
+            .filter_map(|s| crate::trap::normalize_signal_spec(s))
+            .collect();
         for (name, command) in crate::trap::all() {
             if !argv[2..].is_empty() && !filter.contains(&name.as_str()) {
                 continue;
@@ -4606,8 +4988,12 @@ fn trap_cmd(argv: &[String]) -> i32 {
     }
     // A leading `--` ends option parsing (C101) — load-bearing because
     // `trap -p`'s own re-runnable output uses it (`trap -- 'cmd' EXIT`).
-    let argv: Vec<&String> =
-        argv.iter().enumerate().filter(|&(i, a)| !(i == 1 && a == "--")).map(|(_, a)| a).collect();
+    let argv: Vec<&String> = argv
+        .iter()
+        .enumerate()
+        .filter(|&(i, a)| !(i == 1 && a == "--"))
+        .map(|(_, a)| a)
+        .collect();
     if argv.len() < 2 {
         return 0; // bare `trap --`
     }
@@ -4641,11 +5027,14 @@ fn trap_cmd(argv: &[String]) -> i32 {
 /// still needs real OS-level pipes: `is_builtin` alone can't tell these
 /// apart, since `echo`/`read`/etc. are builtins too.
 pub fn is_object_cmdlet(name: &str) -> bool {
-    matches!(name, "ls-obj" | "ps-obj" | "from-json" | "to-json" | "where" | "select" | "sort-obj")
+    matches!(
+        name,
+        "ls-obj" | "ps-obj" | "from-json" | "to-json" | "where" | "select" | "sort-obj"
+    )
 }
 
 pub fn ls_obj_cmd(argv: &[String]) -> i32 {
-    use crate::value::{push_pipeline_output, Value};
+    use crate::value::{Value, push_pipeline_output};
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -4688,7 +5077,7 @@ pub fn ls_obj_cmd(argv: &[String]) -> i32 {
 }
 
 pub fn ps_obj_cmd(_argv: &[String]) -> i32 {
-    use crate::value::{push_pipeline_output, Value};
+    use crate::value::{Value, push_pipeline_output};
     use std::collections::BTreeMap;
 
     let mut map = BTreeMap::new();
@@ -4699,7 +5088,7 @@ pub fn ps_obj_cmd(_argv: &[String]) -> i32 {
 }
 
 pub fn from_json_cmd(_argv: &[String]) -> i32 {
-    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+    use crate::value::{Value, push_pipeline_output, take_pipeline_input};
     use std::io::Read;
 
     let inputs = take_pipeline_input();
@@ -4735,7 +5124,7 @@ pub fn from_json_cmd(_argv: &[String]) -> i32 {
 }
 
 pub fn to_json_cmd(argv: &[String]) -> i32 {
-    use crate::value::{take_pipeline_input, Value};
+    use crate::value::{Value, take_pipeline_input};
     use std::io::Read;
 
     let compact = argv.iter().any(|a| a == "-c" || a == "--compact");
@@ -4766,7 +5155,7 @@ pub fn to_json_cmd(argv: &[String]) -> i32 {
 }
 
 pub fn where_cmd(argv: &[String]) -> i32 {
-    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+    use crate::value::{Value, push_pipeline_output, take_pipeline_input};
 
     if argv.len() < 2 {
         eprintln!("usage: where <field> [op] [value]");
@@ -4786,18 +5175,22 @@ pub fn where_cmd(argv: &[String]) -> i32 {
             (Some(val), "truthy") => val.is_truthy(),
             (Some(val), "-eq" | "==" | "=") => val.to_display_string() == target_val_str,
             (Some(val), "-ne" | "!=") => val.to_display_string() != target_val_str,
-            (Some(Value::Int(i)), "-gt" | ">") => {
-                target_val_str.parse::<i64>().map(|t| i > t).unwrap_or(false)
-            }
-            (Some(Value::Int(i)), "-lt" | "<") => {
-                target_val_str.parse::<i64>().map(|t| i < t).unwrap_or(false)
-            }
-            (Some(Value::Int(i)), "-ge" | ">=") => {
-                target_val_str.parse::<i64>().map(|t| i >= t).unwrap_or(false)
-            }
-            (Some(Value::Int(i)), "-le" | "<=") => {
-                target_val_str.parse::<i64>().map(|t| i <= t).unwrap_or(false)
-            }
+            (Some(Value::Int(i)), "-gt" | ">") => target_val_str
+                .parse::<i64>()
+                .map(|t| i > t)
+                .unwrap_or(false),
+            (Some(Value::Int(i)), "-lt" | "<") => target_val_str
+                .parse::<i64>()
+                .map(|t| i < t)
+                .unwrap_or(false),
+            (Some(Value::Int(i)), "-ge" | ">=") => target_val_str
+                .parse::<i64>()
+                .map(|t| i >= t)
+                .unwrap_or(false),
+            (Some(Value::Int(i)), "-le" | "<=") => target_val_str
+                .parse::<i64>()
+                .map(|t| i <= t)
+                .unwrap_or(false),
             (Some(val), "-gt" | ">") => val.to_display_string().as_str() > target_val_str,
             (Some(val), "-lt" | "<") => val.to_display_string().as_str() < target_val_str,
             (Some(val), "-ge" | ">=") => val.to_display_string().as_str() >= target_val_str,
@@ -4814,7 +5207,7 @@ pub fn where_cmd(argv: &[String]) -> i32 {
 }
 
 pub fn select_cmd(argv: &[String]) -> i32 {
-    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+    use crate::value::{Value, push_pipeline_output, take_pipeline_input};
     use std::collections::BTreeMap;
 
     if argv.len() < 2 {
@@ -4840,7 +5233,7 @@ pub fn select_cmd(argv: &[String]) -> i32 {
 }
 
 pub fn sort_obj_cmd(argv: &[String]) -> i32 {
-    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+    use crate::value::{Value, push_pipeline_output, take_pipeline_input};
 
     let field = match argv.get(1) {
         Some(f) if f != "-r" => f.clone(),
@@ -4863,11 +5256,7 @@ pub fn sort_obj_cmd(argv: &[String]) -> i32 {
             (None, Some(_)) => std::cmp::Ordering::Less,
             (None, None) => std::cmp::Ordering::Equal,
         };
-        if reverse {
-            cmp.reverse()
-        } else {
-            cmp
-        }
+        if reverse { cmp.reverse() } else { cmp }
     });
 
     for item in inputs {
@@ -4888,7 +5277,10 @@ mod tests {
     // C72: interactive-only spelling correction and the distance helper.
     #[test]
     fn cd_spelling_correction() {
-        assert_eq!(edit_distance("correctme", "CorrectMe".to_lowercase().as_str()), 0);
+        assert_eq!(
+            edit_distance("correctme", "CorrectMe".to_lowercase().as_str()),
+            0
+        );
         assert_eq!(edit_distance("shre", "share"), 1);
         assert_eq!(edit_distance("abc", "xyz"), 3);
 
@@ -4903,7 +5295,10 @@ mod tests {
         // Interactive: the unique close-spelled sibling is offered.
         crate::vars::set_interactive(true);
         let corrected = cd_fallback_target(typo.to_str().unwrap());
-        assert_eq!(corrected.as_deref(), Some(dir.join("CorrectMe").to_str().unwrap()));
+        assert_eq!(
+            corrected.as_deref(),
+            Some(dir.join("CorrectMe").to_str().unwrap())
+        );
         crate::vars::set_interactive(false);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -4946,8 +5341,14 @@ mod tests {
 
         // `-a` binds tighter than `-o`, matching bash: `1 = 2 -o 1 = 1 -a 1 =
         // 2` groups as `(1 = 2) -o ((1 = 1) -a (1 = 2))` = F -o F = false.
-        assert_eq!(ev(&["1", "=", "2", "-o", "1", "=", "1", "-a", "1", "=", "2"]), Ok(false));
-        assert_eq!(ev(&["1", "=", "1", "-o", "1", "=", "1", "-a", "1", "=", "2"]), Ok(true));
+        assert_eq!(
+            ev(&["1", "=", "2", "-o", "1", "=", "1", "-a", "1", "=", "2"]),
+            Ok(false)
+        );
+        assert_eq!(
+            ev(&["1", "=", "1", "-o", "1", "=", "1", "-a", "1", "=", "2"]),
+            Ok(true)
+        );
 
         // `!` negates only the next primary, not a whole trailing `-a`/`-o`
         // chain — matches real bash (verified against it directly): `! F -a
@@ -4957,7 +5358,10 @@ mod tests {
 
         // Unary/binary operators still combine with `-a`/`-o`.
         assert_eq!(ev(&["-f", "Cargo.toml", "-a", "-d", "src"]), Ok(true));
-        assert_eq!(ev(&["-f", "Cargo.toml", "-a", "-f", "no-such-file-xyz"]), Ok(false));
+        assert_eq!(
+            ev(&["-f", "Cargo.toml", "-a", "-f", "no-such-file-xyz"]),
+            Ok(false)
+        );
     }
 
     /// Split `line` (no backslash-escaping) on `ifs` (setting `$IFS`, or
@@ -5040,7 +5444,10 @@ mod tests {
         assert_eq!(render("a\\tb\\nc\\\\d", &[]), "a\tb\nc\\d");
 
         // Width/flags on integers.
-        assert_eq!(render("%5d|%-5d|%05d", &["3", "3", "3"]), "    3|3    |00003");
+        assert_eq!(
+            render("%5d|%-5d|%05d", &["3", "3", "3"]),
+            "    3|3    |00003"
+        );
         assert_eq!(render("%+d % d", &["5", "5"]), "+5  5");
         assert_eq!(render("%3d", &["-5"]), " -5");
         assert_eq!(render("%03d", &["-5"]), "-05");
@@ -5063,7 +5470,10 @@ mod tests {
 
         // No argument-consuming conversion at all: extra args are ignored,
         // format runs exactly once.
-        assert_eq!(render("no conversions here", &["a", "b", "c"]), "no conversions here");
+        assert_eq!(
+            render("no conversions here", &["a", "b", "c"]),
+            "no conversions here"
+        );
 
         // More arguments than the format consumes: it cycles, with the
         // final (partial) cycle defaulting whatever's missing.
@@ -5077,7 +5487,9 @@ mod tests {
     #[test]
     fn printf_invalid_number_reports_error_but_still_formats() {
         let pieces = printf::parse_format("%d").unwrap();
-        let printf::Piece::Conv(conv) = &pieces[0] else { panic!("expected a conversion") };
+        let printf::Piece::Conv(conv) = &pieces[0] else {
+            panic!("expected a conversion")
+        };
         let r = printf::format_conv(conv, "abc");
         assert_eq!(r.text, "0");
         assert_eq!(r.error.as_deref(), Some("abc: invalid number"));

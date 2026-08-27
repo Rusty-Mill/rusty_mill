@@ -180,12 +180,20 @@ impl Parser {
             Token::Match => {
                 self.advance();
                 let pattern = self.expect_regex()?;
-                Ok(Expr::Match { expr: Box::new(left), pattern, negate: false })
+                Ok(Expr::Match {
+                    expr: Box::new(left),
+                    pattern,
+                    negate: false,
+                })
             }
             Token::NotMatch => {
                 self.advance();
                 let pattern = self.expect_regex()?;
-                Ok(Expr::Match { expr: Box::new(left), pattern, negate: true })
+                Ok(Expr::Match {
+                    expr: Box::new(left),
+                    pattern,
+                    negate: true,
+                })
             }
             _ => Ok(left),
         }
@@ -194,7 +202,9 @@ impl Parser {
     fn expect_regex(&mut self) -> Result<String, String> {
         match self.advance() {
             Token::Regex(r) => Ok(r),
-            other => Err(format!("expected a /regex/ after '~'/'!~', found {other:?}")),
+            other => Err(format!(
+                "expected a /regex/ after '~'/'!~', found {other:?}"
+            )),
         }
     }
 
@@ -288,7 +298,11 @@ impl Parser {
         match self.advance() {
             Token::Number(n) => Ok(Expr::Num(n)),
             Token::String(s) => Ok(Expr::Str(s)),
-            Token::Regex(r) => Ok(Expr::Match { expr: Box::new(Expr::Field(Box::new(Expr::Num(0.0)))), pattern: r, negate: false }),
+            Token::Regex(r) => Ok(Expr::Match {
+                expr: Box::new(Expr::Field(Box::new(Expr::Num(0.0)))),
+                pattern: r,
+                negate: false,
+            }),
             Token::Ident(name) => Ok(Expr::Var(name)),
             Token::Dollar => {
                 let inner = self.parse_unary()?;

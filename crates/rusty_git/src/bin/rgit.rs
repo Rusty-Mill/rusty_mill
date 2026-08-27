@@ -24,7 +24,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let win_path = rpath::posix_to_win32(target);
             let path = Path::new(&win_path);
             let repo = Repository::init(path)?;
-            println!("Initialized empty Git repository in {}", repo.git_dir.display());
+            println!(
+                "Initialized empty Git repository in {}",
+                repo.git_dir.display()
+            );
         }
         "add" => {
             let cwd = env::current_dir()?;
@@ -81,7 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if e.status != "modified (not staged)" {
                     continue;
                 }
-                let Some(idx_entry) = index.get(&e.path) else { continue };
+                let Some(idx_entry) = index.get(&e.path) else {
+                    continue;
+                };
                 let old_oid = rusty_git::sha1::hex(&idx_entry.hash);
                 let (kind, old_content) = read_object(&repo.git_dir, &old_oid)?;
                 if kind != ObjectKind::Blob {
@@ -90,7 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let new_content = std::fs::read(repo.work_tree.join(&e.path))?;
                 let old_text = String::from_utf8_lossy(&old_content);
                 let new_text = String::from_utf8_lossy(&new_content);
-                print!("{}", rusty_diff::format_unified_diff(&e.path, &e.path, &old_text, &new_text));
+                print!(
+                    "{}",
+                    rusty_diff::format_unified_diff(&e.path, &e.path, &old_text, &new_text)
+                );
                 printed_any = true;
             }
             if !printed_any {

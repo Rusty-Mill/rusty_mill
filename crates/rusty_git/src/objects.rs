@@ -70,7 +70,10 @@ impl fmt::Display for ObjectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ObjectError::NotFound(h) => write!(f, "object {h} not found"),
-            ObjectError::Corrupt(h) => write!(f, "object {h} is corrupt or unreadable: see zlib module docs"),
+            ObjectError::Corrupt(h) => write!(
+                f,
+                "object {h} is corrupt or unreadable: see zlib module docs"
+            ),
             ObjectError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
@@ -101,7 +104,11 @@ pub fn object_path(git_dir: &Path, oid_hex: &str) -> std::path::PathBuf {
 /// Writes `content` as a loose object of `kind`, returning its hex object id.
 /// A no-op (beyond recomputing the hash) if the object is already stored —
 /// git's own content-addressed dedup.
-pub fn write_object(git_dir: &Path, kind: ObjectKind, content: &[u8]) -> Result<String, ObjectError> {
+pub fn write_object(
+    git_dir: &Path,
+    kind: ObjectKind,
+    content: &[u8],
+) -> Result<String, ObjectError> {
     let framed = frame(kind, content);
     let oid = hex(&sha1(&framed));
     let path = object_path(git_dir, &oid);
@@ -121,18 +128,23 @@ pub fn write_object(git_dir: &Path, kind: ObjectKind, content: &[u8]) -> Result<
 pub fn read_object(git_dir: &Path, oid_hex: &str) -> Result<(ObjectKind, Vec<u8>), ObjectError> {
     let path = object_path(git_dir, oid_hex);
     let compressed = fs::read(&path).map_err(|_| ObjectError::NotFound(oid_hex.to_string()))?;
-    let framed = zlib::decompress(&compressed).map_err(|_| ObjectError::Corrupt(oid_hex.to_string()))?;
+    let framed =
+        zlib::decompress(&compressed).map_err(|_| ObjectError::Corrupt(oid_hex.to_string()))?;
 
     let nul = framed
         .iter()
         .position(|&b| b == 0)
         .ok_or_else(|| ObjectError::Corrupt(oid_hex.to_string()))?;
-    let header = std::str::from_utf8(&framed[..nul]).map_err(|_| ObjectError::Corrupt(oid_hex.to_string()))?;
+    let header = std::str::from_utf8(&framed[..nul])
+        .map_err(|_| ObjectError::Corrupt(oid_hex.to_string()))?;
     let (kind_str, len_str) = header
         .split_once(' ')
         .ok_or_else(|| ObjectError::Corrupt(oid_hex.to_string()))?;
-    let kind = ObjectKind::parse(kind_str).ok_or_else(|| ObjectError::Corrupt(oid_hex.to_string()))?;
-    let len: usize = len_str.parse().map_err(|_| ObjectError::Corrupt(oid_hex.to_string()))?;
+    let kind =
+        ObjectKind::parse(kind_str).ok_or_else(|| ObjectError::Corrupt(oid_hex.to_string()))?;
+    let len: usize = len_str
+        .parse()
+        .map_err(|_| ObjectError::Corrupt(oid_hex.to_string()))?;
 
     let content = framed[nul + 1..].to_vec();
     if content.len() != len {
@@ -251,7 +263,8 @@ pub fn encode_commit(commit: &Commit) -> Vec<u8> {
 
 /// Decodes a commit object's content.
 pub fn decode_commit(content: &[u8]) -> Result<Commit, ObjectError> {
-    let text = std::str::from_utf8(content).map_err(|_| ObjectError::Corrupt("commit".to_string()))?;
+    let text =
+        std::str::from_utf8(content).map_err(|_| ObjectError::Corrupt("commit".to_string()))?;
     let (header, message) = text
         .split_once("\n\n")
         .ok_or_else(|| ObjectError::Corrupt("commit".to_string()))?;
@@ -300,9 +313,21 @@ mod tests {
         // a/x.txt + a.txt + b, `git write-tree | git ls-tree` produces
         // exactly this order (a.txt, then the a/ subtree, then b).
         let entries = vec![
-            TreeEntry { mode: "100644".into(), name: "b".into(), hash: [1; 20] },
-            TreeEntry { mode: "40000".into(), name: "a".into(), hash: [2; 20] },
-            TreeEntry { mode: "100644".into(), name: "a.txt".into(), hash: [3; 20] },
+            TreeEntry {
+                mode: "100644".into(),
+                name: "b".into(),
+                hash: [1; 20],
+            },
+            TreeEntry {
+                mode: "40000".into(),
+                name: "a".into(),
+                hash: [2; 20],
+            },
+            TreeEntry {
+                mode: "100644".into(),
+                name: "a.txt".into(),
+                hash: [3; 20],
+            },
         ];
         let encoded = encode_tree(&entries);
         let decoded = decode_tree(&encoded).unwrap();
@@ -313,8 +338,16 @@ mod tests {
     #[test]
     fn tree_round_trips() {
         let entries = vec![
-            TreeEntry { mode: "100644".into(), name: "README.md".into(), hash: [0xAB; 20] },
-            TreeEntry { mode: "40000".into(), name: "src".into(), hash: [0xCD; 20] },
+            TreeEntry {
+                mode: "100644".into(),
+                name: "README.md".into(),
+                hash: [0xAB; 20],
+            },
+            TreeEntry {
+                mode: "40000".into(),
+                name: "src".into(),
+                hash: [0xCD; 20],
+            },
         ];
         let encoded = encode_tree(&entries);
         let decoded = decode_tree(&encoded).unwrap();
@@ -339,7 +372,8 @@ mod tests {
 
     #[test]
     fn write_then_read_object_round_trips() {
-        let dir = std::env::temp_dir().join(format!("rusty_git_objects_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rusty_git_objects_test_{}", std::process::id()));
         let git_dir = dir.join(".git");
         std::fs::create_dir_all(&git_dir).unwrap();
 

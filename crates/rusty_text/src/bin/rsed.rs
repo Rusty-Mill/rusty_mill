@@ -52,9 +52,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (idx, line) in lines.iter().enumerate() {
         let is_last = idx + 1 == lines.len();
-        let quit = script.run_line(&mut state, idx + 1, is_last, line, suppress_auto_print, |l| {
-            let _ = writeln!(out, "{l}");
-        });
+        let quit = script.run_line(
+            &mut state,
+            idx + 1,
+            is_last,
+            line,
+            suppress_auto_print,
+            |l| {
+                let _ = writeln!(out, "{l}");
+            },
+        );
         if quit {
             break;
         }

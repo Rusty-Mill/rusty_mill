@@ -143,9 +143,8 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             // A leading 0 means octal (C116), same as bash/C — `010` is 8,
             // and `08` is the classic "value too great for base" error.
             let n: i64 = if text.len() > 1 && text.starts_with('0') {
-                i64::from_str_radix(&text, 8).map_err(|_| {
-                    format!("value too great for base (error token is \"{text}\")")
-                })?
+                i64::from_str_radix(&text, 8)
+                    .map_err(|_| format!("value too great for base (error token is \"{text}\")"))?
             } else {
                 text.parse().map_err(|_| "number too large".to_string())?
             };
@@ -184,7 +183,11 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
         } else {
             // Three-character operators, then two-character, then
             // single-character — longest match wins.
-            let three = if i + 2 < chars.len() { Some([chars[i], chars[i + 1], chars[i + 2]]) } else { None };
+            let three = if i + 2 < chars.len() {
+                Some([chars[i], chars[i + 1], chars[i + 2]])
+            } else {
+                None
+            };
             let op3 = three.and_then(|p| match p {
                 ['<', '<', '='] => Some("<<="),
                 ['>', '>', '='] => Some(">>="),
@@ -196,7 +199,11 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 continue;
             }
 
-            let two = if i + 1 < chars.len() { Some([chars[i], chars[i + 1]]) } else { None };
+            let two = if i + 1 < chars.len() {
+                Some([chars[i], chars[i + 1]])
+            } else {
+                None
+            };
             let op2 = two.and_then(|p| match p {
                 ['=', '='] => Some("=="),
                 ['!', '='] => Some("!="),
@@ -381,9 +388,10 @@ impl Parser {
                 None
             };
             let assign_op = match self.tokens.get(lookahead) {
-                Some(Tok::Op(op @ ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|="))) => {
-                    Some(*op)
-                }
+                Some(Tok::Op(
+                    op @ ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^="
+                    | "|="),
+                )) => Some(*op),
                 _ => None,
             };
             if let Some(op) = assign_op {
@@ -412,7 +420,11 @@ impl Parser {
                 return Err("expected `:` in ternary expression".into());
             }
             let else_v = self.parse_ternary()?;
-            return Ok(Expr::Ternary(Box::new(cond), Box::new(then_v), Box::new(else_v)));
+            return Ok(Expr::Ternary(
+                Box::new(cond),
+                Box::new(then_v),
+                Box::new(else_v),
+            ));
         }
         Ok(cond)
     }
@@ -694,7 +706,11 @@ fn eval_expr(e: &Expr) -> Result<i64, String> {
 /// the old value it already captured instead.
 fn apply_delta(name: &str, op: &str) -> Result<i64, String> {
     let cur = var_value(name)?;
-    let new = if op == "++" { cur.wrapping_add(1) } else { cur.wrapping_sub(1) };
+    let new = if op == "++" {
+        cur.wrapping_add(1)
+    } else {
+        cur.wrapping_sub(1)
+    };
     crate::vars::set(name, &new.to_string());
     Ok(new)
 }
@@ -726,7 +742,11 @@ fn array_elem_set(name: &str, subscript: &str, value: i64) {
 /// As [`apply_delta`], for an array/assoc-array element.
 fn apply_elem_delta(name: &str, subscript: &str, op: &str) -> Result<i64, String> {
     let cur = array_elem_value(name, subscript)?;
-    let new = if op == "++" { cur.wrapping_add(1) } else { cur.wrapping_sub(1) };
+    let new = if op == "++" {
+        cur.wrapping_add(1)
+    } else {
+        cur.wrapping_sub(1)
+    };
     array_elem_set(name, subscript, new);
     Ok(new)
 }
@@ -922,7 +942,10 @@ mod tests {
 
         // An associative array's subscript is a literal string key, not a
         // re-evaluated arithmetic expression.
-        crate::vars::set_assoc("RUSH_MAP", vec![("x".into(), "5".into()), ("y".into(), "10".into())]);
+        crate::vars::set_assoc(
+            "RUSH_MAP",
+            vec![("x".into(), "5".into()), ("y".into(), "10".into())],
+        );
         assert_eq!(eval("RUSH_MAP[x] + 1"), Ok(6));
         assert_eq!(eval("RUSH_MAP[x] = 20"), Ok(20));
         assert_eq!(crate::vars::assoc_get("RUSH_MAP", "x"), Some("20".into()));

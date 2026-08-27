@@ -174,7 +174,9 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn new(s: &'a str) -> Self {
-        Cursor { chars: s.chars().peekable() }
+        Cursor {
+            chars: s.chars().peekable(),
+        }
     }
 
     fn skip_separators(&mut self) {
@@ -243,7 +245,9 @@ impl SedScript {
                 while matches!(cursor.peek(), Some(c) if c.is_ascii_digit()) {
                     num.push(cursor.next().unwrap());
                 }
-                Ok(Some(Address::Line(num.parse().map_err(|_| "bad line number".to_string())?)))
+                Ok(Some(Address::Line(
+                    num.parse().map_err(|_| "bad line number".to_string())?,
+                )))
             }
             Some('$') => {
                 cursor.next();
@@ -304,7 +308,9 @@ impl SedScript {
                     }
                 }
                 if !num_buf.is_empty() {
-                    start_occurrence = num_buf.parse().map_err(|_| "bad occurrence number".to_string())?;
+                    start_occurrence = num_buf
+                        .parse()
+                        .map_err(|_| "bad occurrence number".to_string())?;
                 }
 
                 let pattern = if case_insensitive {
@@ -407,7 +413,10 @@ impl SedScript {
 
     /// Fresh per-run range-tracking state, sized for this script.
     pub fn new_state(&self) -> Vec<RangeState> {
-        self.commands.iter().map(|_| RangeState::default()).collect()
+        self.commands
+            .iter()
+            .map(|_| RangeState::default())
+            .collect()
     }
 }
 
@@ -432,7 +441,9 @@ mod tests {
         let mut out = Vec::new();
         for (i, line) in input.iter().enumerate() {
             let is_last = i + 1 == input.len();
-            let quit = parsed.run_line(&mut state, i + 1, is_last, line, suppress, |l| out.push(l.to_string()));
+            let quit = parsed.run_line(&mut state, i + 1, is_last, line, suppress, |l| {
+                out.push(l.to_string())
+            });
             if quit {
                 break;
             }

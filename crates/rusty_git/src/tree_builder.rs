@@ -10,7 +10,10 @@ use crate::objects::{encode_tree, write_object, ObjectError, ObjectKind, TreeEnt
 use crate::sha1::SHA1_DIGEST_LEN;
 
 enum Node {
-    File { mode: u32, hash: [u8; SHA1_DIGEST_LEN] },
+    File {
+        mode: u32,
+        hash: [u8; SHA1_DIGEST_LEN],
+    },
     Dir(BTreeMap<String, Node>),
 }
 
@@ -28,7 +31,12 @@ pub fn write_tree(git_dir: &Path, entries: &[IndexEntry]) -> Result<String, Obje
     write_node(git_dir, &Node::Dir(root))
 }
 
-fn insert(dir: &mut BTreeMap<String, Node>, parts: &[&str], mode: u32, hash: [u8; SHA1_DIGEST_LEN]) {
+fn insert(
+    dir: &mut BTreeMap<String, Node>,
+    parts: &[&str],
+    mode: u32,
+    hash: [u8; SHA1_DIGEST_LEN],
+) {
     match parts {
         [] => {}
         [only] => {
@@ -67,7 +75,8 @@ fn write_node(git_dir: &Path, node: &Node) -> Result<String, ObjectError> {
                         let child_oid = write_node(git_dir, child)?;
                         let mut hash = [0u8; SHA1_DIGEST_LEN];
                         for (i, byte) in hash.iter_mut().enumerate() {
-                            *byte = u8::from_str_radix(&child_oid[i * 2..i * 2 + 2], 16).unwrap_or(0);
+                            *byte =
+                                u8::from_str_radix(&child_oid[i * 2..i * 2 + 2], 16).unwrap_or(0);
                         }
                         tree_entries.push(TreeEntry {
                             mode: "40000".to_string(),
@@ -132,11 +141,15 @@ mod tests {
 
     #[test]
     fn nested_entries_build_a_subtree_referenced_by_the_root() {
-        let dir = std::env::temp_dir().join(format!("rusty_git_tree_nested_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rusty_git_tree_nested_{}", std::process::id()));
         let git_dir = dir.join(".git");
         std::fs::create_dir_all(&git_dir).unwrap();
 
-        let entries = vec![entry("README.md", b"root file"), entry("src/main.rs", b"fn main() {}")];
+        let entries = vec![
+            entry("README.md", b"root file"),
+            entry("src/main.rs", b"fn main() {}"),
+        ];
         let root_oid = write_tree(&git_dir, &entries).unwrap();
 
         let (_, root_content) = read_object(&git_dir, &root_oid).unwrap();

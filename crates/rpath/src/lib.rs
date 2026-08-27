@@ -123,7 +123,11 @@ pub fn convert_path_list(path_list: &str, target_style: PathStyle) -> String {
 pub fn normalize_path(path: &str) -> String {
     let is_abs_posix = path.starts_with('/');
     let is_win_drive = is_win32_path(path);
-    let sep = if is_win_drive || path.contains('\\') { '\\' } else { '/' };
+    let sep = if is_win_drive || path.contains('\\') {
+        '\\'
+    } else {
+        '/'
+    };
 
     let parts = path.split(&['/', '\\'][..]);
     let mut stack: Vec<&str> = Vec::new();
@@ -158,7 +162,10 @@ mod tests {
     #[test]
     fn test_posix_to_win32() {
         assert_eq!(posix_to_win32("/c/dev/Rusty_Mill"), r"C:\dev\Rusty_Mill");
-        assert_eq!(posix_to_win32("/d/work/project/file.txt"), r"D:\work\project\file.txt");
+        assert_eq!(
+            posix_to_win32("/d/work/project/file.txt"),
+            r"D:\work\project\file.txt"
+        );
         assert_eq!(posix_to_win32("/c"), r"C:\");
         assert_eq!(posix_to_win32("/dev/null"), r"NUL");
     }
@@ -166,7 +173,10 @@ mod tests {
     #[test]
     fn test_win32_to_posix() {
         assert_eq!(win32_to_posix(r"C:\dev\Rusty_Mill"), "/c/dev/Rusty_Mill");
-        assert_eq!(win32_to_posix(r"D:\work\project\file.txt"), "/d/work/project/file.txt");
+        assert_eq!(
+            win32_to_posix(r"D:\work\project\file.txt"),
+            "/d/work/project/file.txt"
+        );
         assert_eq!(win32_to_posix("C:"), "/c/");
         assert_eq!(win32_to_posix("NUL"), "/dev/null");
     }

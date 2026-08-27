@@ -32,7 +32,12 @@ pub fn abbr_unset(name: &str) -> bool {
 
 /// All abbreviations, name-sorted.
 pub fn abbr_all() -> Vec<(String, String)> {
-    ABBRS.with(|a| a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    ABBRS.with(|a| {
+        a.borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    })
 }
 
 pub fn set(name: &str, value: &str) {
@@ -93,7 +98,12 @@ pub fn names() -> Vec<String> {
 }
 
 pub fn all() -> Vec<(String, String)> {
-    ALIASES.with(|a| a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    ALIASES.with(|a| {
+        a.borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    })
 }
 
 #[cfg(test)]

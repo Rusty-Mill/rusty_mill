@@ -37,7 +37,11 @@ pub use imp::*;
 
 // Backend selection is target-driven: rusty_libc on Linux (the default), the
 // libc crate on other Unix. `libc-backend` forces libc on Linux too.
-#[cfg(all(target_os = "linux", not(feature = "rusty-libc"), not(feature = "libc-backend")))]
+#[cfg(all(
+    target_os = "linux",
+    not(feature = "rusty-libc"),
+    not(feature = "libc-backend")
+))]
 compile_error!("no backend: enable the default `rusty-libc`, or `libc-backend`");
 
 /// Build a rewound, memory-backed file containing `body` — the thread-free
@@ -73,11 +77,11 @@ mod imp {
     // `libc-backend`), unlike the Linux-only RLIMIT_* cluster below.
     #[allow(unused_imports)]
     pub use libc::{
-        FD_CLOEXEC, F_GETFD, F_SETFD, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE,
-        RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_STACK, RLIM_INFINITY,
-        SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL,
-        SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1,
-        SIGUSR2, SIG_DFL, SIG_IGN, STDIN_FILENO, WCONTINUED, WNOHANG, WUNTRACED,
+        F_GETFD, F_SETFD, FD_CLOEXEC, RLIM_INFINITY, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU,
+        RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS,
+        RLIMIT_STACK, SIG_DFL, SIG_IGN, SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP,
+        SIGILL, SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP,
+        SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, STDIN_FILENO, WCONTINUED, WNOHANG, WUNTRACED,
     };
     // `RLIMIT_RTTIME`/`RLIMIT_LOCKS`/`RLIMIT_MSGQUEUE`/`RLIMIT_NICE`/
     // `RLIMIT_RTPRIO`/`RLIMIT_SIGPENDING` are Linux-only in the `libc`
@@ -191,7 +195,11 @@ mod imp {
     /// Poll `fd` for readability with a zero timeout — true if a read would
     /// not block (data available or EOF). Backs `read -t 0`.
     pub fn poll_readable(fd: c_int) -> bool {
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         unsafe { libc::poll(&mut pfd, 1, 0) > 0 }
     }
 
@@ -207,9 +215,13 @@ mod imp {
 }
 
 // ---- rusty-libc backend: Linux default -----------------------------------
-#[cfg(all(target_os = "linux", feature = "rusty-libc", not(feature = "libc-backend")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "rusty-libc",
+    not(feature = "libc-backend")
+))]
 mod imp {
-    use rusty_libc::{fd, process, rlimit as rl, signal as sig, termios, umask as um, wait, Errno};
+    use rusty_libc::{Errno, fd, process, rlimit as rl, signal as sig, termios, umask as um, wait};
     use std::cell::Cell;
 
     // C types rush uses. Linux is the only target for this backend, so these
@@ -236,16 +248,16 @@ mod imp {
     // `F_GETFD` is only referenced on the non-Linux here-doc path, so allow it
     // to be unused on Linux.
     #[allow(unused_imports)]
-    pub use rusty_libc::fd::{FD_CLOEXEC, F_GETFD, F_SETFD};
+    pub use rusty_libc::fd::{F_GETFD, F_SETFD, FD_CLOEXEC};
     pub use rusty_libc::rlimit::{
-        RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_LOCKS, RLIMIT_MEMLOCK,
-        RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_RTPRIO,
-        RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK, RLIM_INFINITY,
+        RLIM_INFINITY, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_LOCKS,
+        RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS,
+        RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK,
     };
     pub use rusty_libc::signal::{
-        SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL,
-        SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1,
-        SIGUSR2, SIG_DFL, SIG_IGN,
+        SIG_DFL, SIG_IGN, SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL,
+        SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN,
+        SIGTTOU, SIGUSR1, SIGUSR2,
     };
     pub use rusty_libc::wait::{WCONTINUED, WNOHANG, WUNTRACED};
 
@@ -280,7 +292,11 @@ mod imp {
     /// Poll `fd` for readability with a zero timeout — true if a read would
     /// not block (data available or EOF). Backs `read -t 0`.
     pub fn poll_readable(fd: c_int) -> bool {
-        let mut fds = [fd::PollFd { fd, events: fd::POLLIN, revents: 0 }];
+        let mut fds = [fd::PollFd {
+            fd,
+            events: fd::POLLIN,
+            revents: 0,
+        }];
         matches!(fd::poll(&mut fds, 0), Ok(n) if n > 0)
     }
 

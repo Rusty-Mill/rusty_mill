@@ -72,10 +72,7 @@ fn bench_glob_match(c: &mut Criterion) {
 
     group.bench_function("extglob_alternation", |b| {
         b.iter(|| {
-            rush::glob::match_component(
-                black_box("@(foo|bar|baz)*.txt"),
-                black_box("bazqux.txt"),
-            )
+            rush::glob::match_component(black_box("@(foo|bar|baz)*.txt"), black_box("bazqux.txt"))
         })
     });
 
@@ -110,5 +107,11 @@ fn bench_variable_expansion(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_lex_parse, bench_arith, bench_glob_match, bench_variable_expansion);
+criterion_group!(
+    benches,
+    bench_lex_parse,
+    bench_arith,
+    bench_glob_match,
+    bench_variable_expansion
+);
 criterion_main!(benches);

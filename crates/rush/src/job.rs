@@ -133,9 +133,10 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
             // (C82) — it can't be exec'd as an external command, which is
             // what `echo hi | read x` / `alias | cat` used to attempt.
             Stage::Simple(cmd)
-                if cmd.argv.first().is_some_and(|n| {
-                    crate::func::exists(n) || crate::builtins::is_builtin(n)
-                }) =>
+                if cmd
+                    .argv
+                    .first()
+                    .is_some_and(|n| crate::func::exists(n) || crate::builtins::is_builtin(n)) =>
             {
                 let (pid, next_stdin) =
                     spawn_builtin_stage(cmd, prev_stdin.take(), is_last, target_pgid)?;
@@ -179,8 +180,7 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
                     // cover.
                     Err(e) if i == 0 && is_last => {
                         return Ok(SpawnOutcome::Immediate(crate::exec::spawn_failure_status(
-                            &cmd.argv,
-                            &e,
+                            &cmd.argv, &e,
                         )));
                     }
                     Err(e) => return Err(format!("{}: {e}", cmd.argv[0])),
@@ -196,7 +196,10 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
                     // SAFETY: `ChildStdout` uniquely owns this fd; taking it
                     // and rewrapping as a `File` only changes the type doing
                     // the owning, not the fd itself.
-                    child.stdout.take().map(|s| unsafe { File::from_raw_fd(s.into_raw_fd()) })
+                    child
+                        .stdout
+                        .take()
+                        .map(|s| unsafe { File::from_raw_fd(s.into_raw_fd()) })
                 } else {
                     None
                 };
@@ -244,7 +247,11 @@ fn spawn_builtin_stage(
     is_last: bool,
     target_pgid: pid_t,
 ) -> Result<(pid_t, Option<File>), String> {
-    let next_pipe = if is_last { None } else { Some(crate::exec::make_pipe()?) };
+    let next_pipe = if is_last {
+        None
+    } else {
+        Some(crate::exec::make_pipe()?)
+    };
 
     match unsafe { crate::sys::fork() } {
         -1 => Err(crate::sys::last_os_error().to_string()),
@@ -292,7 +299,11 @@ fn spawn_compound_stage(
     is_last: bool,
     target_pgid: pid_t,
 ) -> Result<(pid_t, Option<File>), String> {
-    let next_pipe = if is_last { None } else { Some(crate::exec::make_pipe()?) };
+    let next_pipe = if is_last {
+        None
+    } else {
+        Some(crate::exec::make_pipe()?)
+    };
 
     match unsafe { crate::sys::fork() } {
         -1 => Err(crate::sys::last_os_error().to_string()),
@@ -565,8 +576,13 @@ fn wait_next() -> (Option<pid_t>, i32) {
 /// prints a completion notice — that's the interactive prompt's own job).
 fn wait_all() {
     loop {
-        let pgid =
-            STATE.with(|s| s.borrow().jobs.iter().find(|j| j.state != JobState::Done).map(|j| j.pgid));
+        let pgid = STATE.with(|s| {
+            s.borrow()
+                .jobs
+                .iter()
+                .find(|j| j.state != JobState::Done)
+                .map(|j| j.pgid)
+        });
         let Some(pgid) = pgid else { break };
         wait_job_pgid(pgid);
     }
@@ -604,10 +620,17 @@ fn wait_one(target: &str) -> i32 {
             eprintln!("wait: {target}: no such job");
             return 127;
         };
-        let last_pid =
-            STATE.with(|s| s.borrow().jobs.iter().find(|j| j.pgid == pgid).and_then(|j| j.pids.last().copied()));
+        let last_pid = STATE.with(|s| {
+            s.borrow()
+                .jobs
+                .iter()
+                .find(|j| j.pgid == pgid)
+                .and_then(|j| j.pids.last().copied())
+        });
         wait_job_pgid(pgid);
-        return last_pid.and_then(|p| REAPED.with(|r| r.borrow().get(&p).copied())).unwrap_or(0);
+        return last_pid
+            .and_then(|p| REAPED.with(|r| r.borrow().get(&p).copied()))
+            .unwrap_or(0);
     }
 
     let Ok(pid) = target.parse::<pid_t>() else {
@@ -641,8 +664,10 @@ fn kill_cmd(argv: &[String]) -> i32 {
     if argv.get(1).map(String::as_str) == Some("-l") {
         match argv.get(2) {
             None => {
-                let names: Vec<String> =
-                    SIGNAL_TABLE.iter().map(|(n, s)| format!("{s}) SIG{n}")).collect();
+                let names: Vec<String> = SIGNAL_TABLE
+                    .iter()
+                    .map(|(n, s)| format!("{s}) SIG{n}"))
+                    .collect();
                 println!("{}", names.join(" "));
                 return 0;
             }
@@ -785,7 +810,10 @@ fn parse_signal(name: &str) -> Option<c_int> {
     }
     let upper = name.to_ascii_uppercase();
     let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
-    SIGNAL_TABLE.iter().find(|(n, _)| *n == bare).map(|&(_, s)| s)
+    SIGNAL_TABLE
+        .iter()
+        .find(|(n, _)| *n == bare)
+        .map(|&(_, s)| s)
 }
 
 /// `jobs [-l|-p]` (C64): `-l` adds the process-group id to each line,
@@ -1084,10 +1112,14 @@ mod tests {
 
     #[test]
     fn foreground_single_command_reports_exit_status() {
-        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "exit 0"])] };
+        let pipeline = Pipeline {
+            commands: vec![cmd(&["sh", "-c", "exit 0"])],
+        };
         assert_eq!(run_foreground(&pipeline).unwrap(), 0);
 
-        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "exit 1"])] };
+        let pipeline = Pipeline {
+            commands: vec![cmd(&["sh", "-c", "exit 1"])],
+        };
         assert_eq!(run_foreground(&pipeline).unwrap(), 1);
     }
 
@@ -1106,7 +1138,9 @@ mod tests {
         // A child killed by a signal reports the conventional 128+signal
         // code — exercises `exit_code`'s `wifsignaled` branch via a real
         // signaled process, not a hand-encoded status.
-        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "kill -TERM $$"])] };
+        let pipeline = Pipeline {
+            commands: vec![cmd(&["sh", "-c", "kill -TERM $$"])],
+        };
         assert_eq!(run_foreground(&pipeline).unwrap(), 128 + 15);
     }
 
@@ -1117,17 +1151,25 @@ mod tests {
         // job control needs a tty to hand the terminal back to), so it would
         // silently no-op here. Drive the same underlying bookkeeping
         // (`update_by_pid`/`notify_and_prune`) directly instead.
-        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "exit 0"])] };
+        let pipeline = Pipeline {
+            commands: vec![cmd(&["sh", "-c", "exit 0"])],
+        };
         run_background(&pipeline).unwrap();
 
         let pid = STATE.with(|s| s.borrow().jobs.last().unwrap().pids[0]);
         let mut status: c_int = 0;
         let waited = unsafe { crate::sys::waitpid(pid, &mut status, 0) };
-        assert_eq!(waited, pid, "the background child should still be ours to reap");
+        assert_eq!(
+            waited, pid,
+            "the background child should still be ours to reap"
+        );
         update_by_pid(pid, status);
         notify_and_prune();
 
         let still_present = STATE.with(|s| s.borrow().jobs.iter().any(|j| j.pids.contains(&pid)));
-        assert!(!still_present, "a finished job should be pruned after notify_and_prune");
+        assert!(
+            !still_present,
+            "a finished job should be pruned after notify_and_prune"
+        );
     }
 }

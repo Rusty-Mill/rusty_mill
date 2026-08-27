@@ -76,8 +76,16 @@ impl Value {
     }
 
     fn write_json(&self, out: &mut String, pretty: bool, indent_level: usize) {
-        let indent = if pretty { "  ".repeat(indent_level) } else { String::new() };
-        let next_indent = if pretty { "  ".repeat(indent_level + 1) } else { String::new() };
+        let indent = if pretty {
+            "  ".repeat(indent_level)
+        } else {
+            String::new()
+        };
+        let next_indent = if pretty {
+            "  ".repeat(indent_level + 1)
+        } else {
+            String::new()
+        };
         let newline = if pretty { "\n" } else { "" };
         let space = if pretty { " " } else { "" };
 

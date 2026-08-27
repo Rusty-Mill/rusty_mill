@@ -58,7 +58,10 @@ static STARTUP_STDIN: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(usize::MAX);
 
 pub fn capture_startup_stdin() {
-    STARTUP_STDIN.store(get(STD_INPUT_HANDLE) as usize, std::sync::atomic::Ordering::Relaxed);
+    STARTUP_STDIN.store(
+        get(STD_INPUT_HANDLE) as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Has a redirect (`read x < f`, `exec 0< f`, a here-doc) swapped the stdin

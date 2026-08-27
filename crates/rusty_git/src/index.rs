@@ -73,7 +73,9 @@ pub struct Index {
 impl Index {
     /// An empty index (a freshly-initialized repository's staging area).
     pub fn new() -> Self {
-        Index { entries: Vec::new() }
+        Index {
+            entries: Vec::new(),
+        }
     }
 
     /// The staged entries, sorted by path (git's own required order).
@@ -215,7 +217,12 @@ impl Index {
             }
             cursor += unpadded + pad;
 
-            entries.push(IndexEntry { mode, size, hash, path });
+            entries.push(IndexEntry {
+                mode,
+                size,
+                hash,
+                path,
+            });
         }
 
         Ok(Index { entries })
@@ -230,7 +237,8 @@ impl Index {
             Err(_) => return Ok(Index::new()),
         };
         let mut data = Vec::new();
-        file.read_to_end(&mut data).map_err(|_| IndexError::Truncated)?;
+        file.read_to_end(&mut data)
+            .map_err(|_| IndexError::Truncated)?;
         Self::from_bytes(&data)
     }
 
@@ -321,7 +329,10 @@ mod tests {
 
     #[test]
     fn read_returns_empty_index_when_no_file_exists() {
-        let dir = std::env::temp_dir().join(format!("rusty_git_index_test_missing_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_git_index_test_missing_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::read(&dir).unwrap();
@@ -331,7 +342,8 @@ mod tests {
 
     #[test]
     fn write_then_read_round_trips_on_disk() {
-        let dir = std::env::temp_dir().join(format!("rusty_git_index_test_disk_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rusty_git_index_test_disk_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

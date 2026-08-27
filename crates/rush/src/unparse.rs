@@ -197,7 +197,8 @@ impl Printer {
                     } else {
                         self.stmt(&format!("<<'{delim}'"));
                     }
-                    self.pending_heredocs.push((body.clone(), delim.to_string(), !expand));
+                    self.pending_heredocs
+                        .push((body.clone(), delim.to_string(), !expand));
                 }
                 RawRedirect::VarFd { name, inner } => {
                     self.stmt(&format!("{{{name}}}"));
@@ -227,7 +228,10 @@ impl Printer {
                 self.inline_list(list);
                 self.stmt(" )");
             }
-            Compound::If { branches, else_body } => {
+            Compound::If {
+                branches,
+                else_body,
+            } => {
                 for (i, (cond, body)) in branches.iter().enumerate() {
                     self.stmt(if i == 0 { "if " } else { "elif " });
                     self.inline_list(cond);
@@ -256,7 +260,12 @@ impl Printer {
                 self.indent -= 1;
                 self.stmt("done");
             }
-            Compound::For { var, words, has_in, body } => {
+            Compound::For {
+                var,
+                words,
+                has_in,
+                body,
+            } => {
                 self.stmt(&format!("for {var}"));
                 if *has_in {
                     self.stmt(" in");
@@ -273,7 +282,12 @@ impl Printer {
                 self.indent -= 1;
                 self.stmt("done");
             }
-            Compound::Select { var, words, has_in, body } => {
+            Compound::Select {
+                var,
+                words,
+                has_in,
+                body,
+            } => {
                 self.stmt(&format!("select {var}"));
                 if *has_in {
                     self.stmt(" in");
@@ -290,7 +304,12 @@ impl Printer {
                 self.indent -= 1;
                 self.stmt("done");
             }
-            Compound::CFor { init, cond, update, body } => {
+            Compound::CFor {
+                init,
+                cond,
+                update,
+                body,
+            } => {
                 self.stmt(&format!(
                     "for (({}; {}; {})); do",
                     init.as_deref().unwrap_or(""),

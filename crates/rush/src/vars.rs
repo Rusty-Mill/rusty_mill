@@ -340,9 +340,15 @@ pub const SHOPT_DEFAULTS: &[(&str, bool)] = &[
 
 /// Current value of a `shopt` option; `false` for an unknown name.
 pub fn shopt(name: &str) -> bool {
-    SHOPTS.with(|m| m.borrow().get(name).copied()).unwrap_or_else(|| {
-        SHOPT_DEFAULTS.iter().find(|(n, _)| *n == name).map(|&(_, d)| d).unwrap_or(false)
-    })
+    SHOPTS
+        .with(|m| m.borrow().get(name).copied())
+        .unwrap_or_else(|| {
+            SHOPT_DEFAULTS
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|&(_, d)| d)
+                .unwrap_or(false)
+        })
 }
 
 /// Set a `shopt` option; `false` if the name isn't recognized.
@@ -374,7 +380,11 @@ pub fn set_shell_pid() {
 /// pid if never seeded (e.g. a unit test).
 pub fn shell_pid() -> u32 {
     let cached = SHELL_PID.with(std::cell::Cell::get);
-    if cached == 0 { std::process::id() } else { cached }
+    if cached == 0 {
+        std::process::id()
+    } else {
+        cached
+    }
 }
 
 fn dynamic_var(name: &str) -> Option<String> {
@@ -462,7 +472,9 @@ fn next_random() -> u16 {
                 .unwrap_or(0);
             std::process::id() as u64 ^ (t << 16) ^ 0x9e3779b97f4a7c15
         });
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*state >> 33) & 0x7fff) as u16
     })
 }
@@ -556,7 +568,8 @@ pub fn resolve_name(name: &str) -> String {
 /// plain assignment will choose.
 pub fn set_nameref(refname: &str, target: &str) {
     NAMEREFS.with(|m| {
-        m.borrow_mut().insert(refname.to_string(), target.to_string());
+        m.borrow_mut()
+            .insert(refname.to_string(), target.to_string());
     });
 }
 
@@ -850,7 +863,9 @@ pub fn get_object(name: &str) -> Option<crate::value::Value> {
         v.borrow().get(name).map(|x| match &x.value {
             VarValue::Scalar(s) => crate::value::Value::String(s.clone()),
             VarValue::Array(a) => crate::value::Value::List(
-                a.values().map(|s| crate::value::Value::String(s.clone())).collect(),
+                a.values()
+                    .map(|s| crate::value::Value::String(s.clone()))
+                    .collect(),
             ),
             VarValue::Assoc(a) => {
                 let mut map = BTreeMap::new();
@@ -893,13 +908,23 @@ pub fn set_object(name: &str, val: crate::value::Value) {
 pub fn is_indexed_array(name: &str) -> bool {
     let name = &resolve_name(name);
     let name = name.as_str();
-    VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Array(_))))
+    VARS.with(|v| {
+        matches!(
+            v.borrow().get(name).map(|x| &x.value),
+            Some(VarValue::Array(_))
+        )
+    })
 }
 
 pub fn is_assoc(name: &str) -> bool {
     let name = &resolve_name(name);
     let name = name.as_str();
-    VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Assoc(_))))
+    VARS.with(|v| {
+        matches!(
+            v.borrow().get(name).map(|x| &x.value),
+            Some(VarValue::Assoc(_))
+        )
+    })
 }
 
 /// Remove a shell variable (`unset NAME`) — scalar or array, the whole
@@ -959,8 +984,13 @@ fn readonly_rejected(name: &str) -> bool {
 /// (`declare -r x="1"`, `declare -ar`/`-Ar` for arrays, bare `declare -r
 /// name` for a readonly name that is still unset).
 pub fn readonly_listing() -> Vec<String> {
-    let mut names: Vec<String> =
-        ATTRS.with(|a| a.borrow().iter().filter(|(_, at)| at.readonly).map(|(n, _)| n.clone()).collect());
+    let mut names: Vec<String> = ATTRS.with(|a| {
+        a.borrow()
+            .iter()
+            .filter(|(_, at)| at.readonly)
+            .map(|(n, _)| n.clone())
+            .collect()
+    });
     names.sort();
     names
         .into_iter()
@@ -969,14 +999,18 @@ pub fn readonly_listing() -> Vec<String> {
                 None => format!("declare -r {name}"),
                 Some(VarValue::Scalar(s)) => format!("declare -r {name}=\"{s}\""),
                 Some(VarValue::Array(a)) => {
-                    let elems: Vec<String> = a.iter().map(|(i, v)| format!("[{i}]=\"{v}\"")).collect();
+                    let elems: Vec<String> =
+                        a.iter().map(|(i, v)| format!("[{i}]=\"{v}\"")).collect();
                     format!("declare -ar {name}=({})", elems.join(" "))
                 }
                 Some(VarValue::Assoc(a)) => {
-                    let elems: Vec<String> = a.iter().map(|(k, v)| format!("[{k}]=\"{v}\"")).collect();
+                    let elems: Vec<String> =
+                        a.iter().map(|(k, v)| format!("[{k}]=\"{v}\"")).collect();
                     format!("declare -Ar {name}=({})", elems.join(" "))
                 }
-                Some(VarValue::Object(o)) => format!("declare -r {name}=\"{}\"", o.to_display_string()),
+                Some(VarValue::Object(o)) => {
+                    format!("declare -r {name}=\"{}\"", o.to_display_string())
+                }
             })
         })
         .collect()
@@ -1117,7 +1151,13 @@ pub fn set(name: &str, value: &str) {
                 }
             },
             None => {
-                m.insert(name.to_string(), Var { value: VarValue::Scalar(value.to_string()), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Scalar(value.to_string()),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1141,7 +1181,13 @@ pub fn set_exported(name: &str, value: &str) {
         return;
     };
     VARS.with(|v| {
-        v.borrow_mut().insert(name.to_string(), Var { value: VarValue::Scalar(value), exported: true });
+        v.borrow_mut().insert(
+            name.to_string(),
+            Var {
+                value: VarValue::Scalar(value),
+                exported: true,
+            },
+        );
     });
 }
 
@@ -1153,7 +1199,10 @@ pub fn export(name: &str) {
     VARS.with(|v| {
         v.borrow_mut()
             .entry(name.to_string())
-            .or_insert_with(|| Var { value: VarValue::Scalar(String::new()), exported: false })
+            .or_insert_with(|| Var {
+                value: VarValue::Scalar(String::new()),
+                exported: false,
+            })
             .exported = true;
     });
 }
@@ -1161,7 +1210,11 @@ pub fn export(name: &str) {
 /// Whether `name` is currently exported (`declare -p`'s `x` letter, C96).
 pub fn is_exported(name: &str) -> bool {
     let name = &resolve_name(name);
-    VARS.with(|v| v.borrow().get(name.as_str()).is_some_and(|var| var.exported))
+    VARS.with(|v| {
+        v.borrow()
+            .get(name.as_str())
+            .is_some_and(|var| var.exported)
+    })
 }
 
 /// Drop the export flag without touching the value (`export -n NAME`,
@@ -1197,7 +1250,13 @@ pub fn set_array(name: &str, elements: Vec<String>) {
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         let exported = m.get(name).is_some_and(|x| x.exported);
-        m.insert(name.to_string(), Var { value: VarValue::Array(array), exported });
+        m.insert(
+            name.to_string(),
+            Var {
+                value: VarValue::Array(array),
+                exported,
+            },
+        );
     });
 }
 
@@ -1215,7 +1274,13 @@ pub fn set_assoc(name: &str, pairs: Vec<(String, String)>) {
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         let exported = m.get(name).is_some_and(|x| x.exported);
-        m.insert(name.to_string(), Var { value: VarValue::Assoc(assoc), exported });
+        m.insert(
+            name.to_string(),
+            Var {
+                value: VarValue::Assoc(assoc),
+                exported,
+            },
+        );
     });
 }
 
@@ -1348,7 +1413,13 @@ pub fn array_set(name: &str, index: usize, value: &str) {
             None => {
                 let mut a = BTreeMap::new();
                 a.insert(index, value.to_string());
-                m.insert(name.to_string(), Var { value: VarValue::Array(a), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Array(a),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1386,7 +1457,13 @@ pub fn array_append_index(name: &str, index: usize, value: &str) {
             None => {
                 let mut a = BTreeMap::new();
                 a.insert(index, value.to_string());
-                m.insert(name.to_string(), Var { value: VarValue::Array(a), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Array(a),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1419,7 +1496,9 @@ pub fn array_append(name: &str, elements: Vec<String>) {
                         let mut a = BTreeMap::new();
                         a.insert(0, old);
                         var.value = VarValue::Array(a);
-                        let VarValue::Array(a) = &mut var.value else { unreachable!() };
+                        let VarValue::Array(a) = &mut var.value else {
+                            unreachable!()
+                        };
                         a
                     }
                     VarValue::Assoc(_) | VarValue::Object(_) => unreachable!("checked above"),
@@ -1431,7 +1510,13 @@ pub fn array_append(name: &str, elements: Vec<String>) {
             }
             None => {
                 let array: BTreeMap<usize, String> = elements.into_iter().enumerate().collect();
-                m.insert(name.to_string(), Var { value: VarValue::Array(array), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Array(array),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1476,7 +1561,13 @@ pub fn append_scalar(name: &str, value: &str) {
                 VarValue::Object(_) => {}
             },
             None => {
-                m.insert(name.to_string(), Var { value: VarValue::Scalar(value.to_string()), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Scalar(value.to_string()),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1537,7 +1628,13 @@ fn assoc_set(name: &str, key: &str, value: &str) {
             None => {
                 let mut a = BTreeMap::new();
                 a.insert(key.to_string(), value.to_string());
-                m.insert(name.to_string(), Var { value: VarValue::Assoc(a), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Assoc(a),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1562,7 +1659,13 @@ fn assoc_append_key(name: &str, key: &str, value: &str) {
             None => {
                 let mut a = BTreeMap::new();
                 a.insert(key.to_string(), value.to_string());
-                m.insert(name.to_string(), Var { value: VarValue::Assoc(a), exported: false });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Assoc(a),
+                        exported: false,
+                    },
+                );
             }
         }
     });
@@ -1585,12 +1688,20 @@ pub fn assoc_merge(name: &str, pairs: Vec<(String, String)>) {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
             Some(var) if matches!(var.value, VarValue::Assoc(_)) => {
-                let VarValue::Assoc(a) = &mut var.value else { unreachable!() };
+                let VarValue::Assoc(a) = &mut var.value else {
+                    unreachable!()
+                };
                 a.extend(pairs);
             }
             _ => {
                 let exported = m.get(name).is_some_and(|x| x.exported);
-                m.insert(name.to_string(), Var { value: VarValue::Assoc(pairs.into_iter().collect()), exported });
+                m.insert(
+                    name.to_string(),
+                    Var {
+                        value: VarValue::Assoc(pairs.into_iter().collect()),
+                        exported,
+                    },
+                );
             }
         }
     });
@@ -1744,14 +1855,26 @@ pub fn declare_local_attrs(name: &str, value: Option<&str>, attrs: Attrs) -> boo
         // `-r` installs only *after* the initializer applies, so
         // `local -r v=x` can still set its own value (C45); the other
         // attributes install first so the initializer transforms (C43).
-        reset_attrs(name, Attrs { readonly: false, ..attrs });
+        reset_attrs(
+            name,
+            Attrs {
+                readonly: false,
+                ..attrs
+            },
+        );
         match value {
             Some(v) => set(name, v),
             None if !already_local => remove_value(name),
             None => {}
         }
         if attrs.readonly {
-            set_attrs(name, Attrs { readonly: true, ..Default::default() });
+            set_attrs(
+                name,
+                Attrs {
+                    readonly: true,
+                    ..Default::default()
+                },
+            );
         }
     }
     declared
@@ -1772,10 +1895,22 @@ fn is_local_in_current_frame(name: &str) -> bool {
 pub fn declare_local_array_attrs(name: &str, elements: Vec<String>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
-        reset_attrs(name, Attrs { readonly: false, ..attrs });
+        reset_attrs(
+            name,
+            Attrs {
+                readonly: false,
+                ..attrs
+            },
+        );
         set_array(name, elements);
         if attrs.readonly {
-            set_attrs(name, Attrs { readonly: true, ..Default::default() });
+            set_attrs(
+                name,
+                Attrs {
+                    readonly: true,
+                    ..Default::default()
+                },
+            );
         }
     }
     declared
@@ -1786,10 +1921,22 @@ pub fn declare_local_array_attrs(name: &str, elements: Vec<String>, attrs: Attrs
 pub fn declare_local_assoc_attrs(name: &str, pairs: Vec<(String, String)>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
-        reset_attrs(name, Attrs { readonly: false, ..attrs });
+        reset_attrs(
+            name,
+            Attrs {
+                readonly: false,
+                ..attrs
+            },
+        );
         set_assoc(name, pairs);
         if attrs.readonly {
-            set_attrs(name, Attrs { readonly: true, ..Default::default() });
+            set_attrs(
+                name,
+                Attrs {
+                    readonly: true,
+                    ..Default::default()
+                },
+            );
         }
     }
     declared
@@ -1822,7 +1969,12 @@ fn capture_for_local(name: &str) -> bool {
         };
         if !frame.iter().any(|(n, ..)| n == name) {
             let prior = VARS.with(|v| v.borrow().get(name).map(|x| (x.value.clone(), x.exported)));
-            frame.push((name.to_string(), prior, attrs_of(name), nameref_target(name)));
+            frame.push((
+                name.to_string(),
+                prior,
+                attrs_of(name),
+                nameref_target(name),
+            ));
         }
         true
     })
@@ -1902,7 +2054,10 @@ mod tests {
 
     #[test]
     fn shift_drops_leading_positional_params() {
-        set_args("prog".to_string(), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        set_args(
+            "prog".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
 
         assert!(shift(1));
         assert_eq!(args(), vec!["b", "c"]);
@@ -1923,7 +2078,11 @@ mod tests {
 
     #[test]
     fn local_outside_a_function_is_rejected() {
-        assert!(!declare_local_attrs("RUSH_LOCAL_TOP", Some("1"), Attrs::default()));
+        assert!(!declare_local_attrs(
+            "RUSH_LOCAL_TOP",
+            Some("1"),
+            Attrs::default()
+        ));
         // Rejected: must not fall through to setting it as a plain global.
         assert_eq!(get("RUSH_LOCAL_TOP"), None);
     }
@@ -1933,7 +2092,11 @@ mod tests {
         set("RUSH_LOCAL_X", "outer");
 
         push_local_frame();
-        assert!(declare_local_attrs("RUSH_LOCAL_X", Some("inner"), Attrs::default()));
+        assert!(declare_local_attrs(
+            "RUSH_LOCAL_X",
+            Some("inner"),
+            Attrs::default()
+        ));
         assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("inner"));
 
         // A bare `local name` (no `=value`) leaves it genuinely unset, not
@@ -1943,7 +2106,11 @@ mod tests {
 
         // A second `local` for the same name in the *same* frame doesn't
         // re-capture — it must still restore to the pre-frame value.
-        assert!(declare_local_attrs("RUSH_LOCAL_X", Some("inner2"), Attrs::default()));
+        assert!(declare_local_attrs(
+            "RUSH_LOCAL_X",
+            Some("inner2"),
+            Attrs::default()
+        ));
         assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("inner2"));
 
         pop_local_frame();
@@ -2060,7 +2227,11 @@ mod tests {
         set_array("RUSH_LOCAL_ARR", vec!["outer".into()]);
 
         push_local_frame();
-        assert!(declare_local_array_attrs("RUSH_LOCAL_ARR", vec!["inner1".into(), "inner2".into()], Attrs::default()));
+        assert!(declare_local_array_attrs(
+            "RUSH_LOCAL_ARR",
+            vec!["inner1".into(), "inner2".into()],
+            Attrs::default()
+        ));
         assert_eq!(array_values("RUSH_LOCAL_ARR"), vec!["inner1", "inner2"]);
         pop_local_frame();
 
@@ -2071,7 +2242,10 @@ mod tests {
     #[test]
     fn assoc_basic_set_get_and_whole_array_reads() {
         unset("RUSH_ASSOC");
-        set_assoc("RUSH_ASSOC", vec![("a".into(), "1".into()), ("b".into(), "2".into())]);
+        set_assoc(
+            "RUSH_ASSOC",
+            vec![("a".into(), "1".into()), ("b".into(), "2".into())],
+        );
         assert!(is_assoc("RUSH_ASSOC"));
         assert_eq!(assoc_get("RUSH_ASSOC", "a").as_deref(), Some("1"));
         assert_eq!(assoc_get("RUSH_ASSOC", "missing"), None);
@@ -2103,9 +2277,15 @@ mod tests {
     #[test]
     fn assoc_merge_upserts_and_unset_key_leaves_the_rest() {
         unset("RUSH_MERGE");
-        set_assoc("RUSH_MERGE", vec![("a".into(), "1".into()), ("b".into(), "2".into())]);
+        set_assoc(
+            "RUSH_MERGE",
+            vec![("a".into(), "1".into()), ("b".into(), "2".into())],
+        );
         // A later pair overwrites an earlier one for the same key.
-        assoc_merge("RUSH_MERGE", vec![("c".into(), "3".into()), ("a".into(), "99".into())]);
+        assoc_merge(
+            "RUSH_MERGE",
+            vec![("c".into(), "3".into()), ("a".into(), "99".into())],
+        );
         assert_eq!(assoc_get("RUSH_MERGE", "a").as_deref(), Some("99"));
         assert_eq!(assoc_get("RUSH_MERGE", "c").as_deref(), Some("3"));
         assert_eq!(array_len("RUSH_MERGE"), 3);
@@ -2122,7 +2302,11 @@ mod tests {
         set_assoc("RUSH_LOCAL_ASSOC", vec![("a".into(), "outer".into())]);
 
         push_local_frame();
-        assert!(declare_local_assoc_attrs("RUSH_LOCAL_ASSOC", vec![("a".into(), "inner".into())], Attrs::default()));
+        assert!(declare_local_assoc_attrs(
+            "RUSH_LOCAL_ASSOC",
+            vec![("a".into(), "inner".into())],
+            Attrs::default()
+        ));
         assert_eq!(assoc_get("RUSH_LOCAL_ASSOC", "a").as_deref(), Some("inner"));
         pop_local_frame();
 
@@ -2155,8 +2339,14 @@ mod tests {
     // each expectation below mirrors a directly-verified bash behavior.
     #[test]
     fn attrs_transform_assignments() {
-        let upper = Attrs { upper: true, ..Default::default() };
-        let integer = Attrs { integer: true, ..Default::default() };
+        let upper = Attrs {
+            upper: true,
+            ..Default::default()
+        };
+        let integer = Attrs {
+            integer: true,
+            ..Default::default()
+        };
 
         unset("RUSH_ATTR_U");
         set_attrs("RUSH_ATTR_U", upper);
@@ -2195,13 +2385,32 @@ mod tests {
     #[test]
     fn upper_and_lower_interact_like_bash() {
         unset("RUSH_ATTR_UL");
-        set_attrs("RUSH_ATTR_UL", Attrs { lower: true, ..Default::default() });
-        set_attrs("RUSH_ATTR_UL", Attrs { upper: true, ..Default::default() });
+        set_attrs(
+            "RUSH_ATTR_UL",
+            Attrs {
+                lower: true,
+                ..Default::default()
+            },
+        );
+        set_attrs(
+            "RUSH_ATTR_UL",
+            Attrs {
+                upper: true,
+                ..Default::default()
+            },
+        );
         set("RUSH_ATTR_UL", "Abc");
         assert_eq!(get("RUSH_ATTR_UL").as_deref(), Some("ABC"));
         unset("RUSH_ATTR_UL");
 
-        set_attrs("RUSH_ATTR_UL", Attrs { upper: true, lower: true, ..Default::default() });
+        set_attrs(
+            "RUSH_ATTR_UL",
+            Attrs {
+                upper: true,
+                lower: true,
+                ..Default::default()
+            },
+        );
         set("RUSH_ATTR_UL", "Abc");
         assert_eq!(get("RUSH_ATTR_UL").as_deref(), Some("Abc"));
         unset("RUSH_ATTR_UL");
@@ -2216,7 +2425,10 @@ mod tests {
         set("RUSH_ATTR_LOCAL", "Outer");
 
         push_local_frame();
-        let upper = Attrs { upper: true, ..Default::default() };
+        let upper = Attrs {
+            upper: true,
+            ..Default::default()
+        };
         assert!(declare_local_attrs("RUSH_ATTR_LOCAL", None, upper));
         set("RUSH_ATTR_LOCAL", "hi");
         assert_eq!(get("RUSH_ATTR_LOCAL").as_deref(), Some("HI"));
@@ -2232,7 +2444,13 @@ mod tests {
     fn readonly_rejects_mutation() {
         unset("RUSH_RO");
         set("RUSH_RO", "1");
-        set_attrs("RUSH_RO", Attrs { readonly: true, ..Default::default() });
+        set_attrs(
+            "RUSH_RO",
+            Attrs {
+                readonly: true,
+                ..Default::default()
+            },
+        );
         assert!(is_readonly("RUSH_RO"));
 
         set("RUSH_RO", "2");
@@ -2255,14 +2473,38 @@ mod tests {
     #[test]
     fn readonly_listing_formats_like_bash() {
         set("RUSH_RO_LIST_B", "two words");
-        set_attrs("RUSH_RO_LIST_B", Attrs { readonly: true, ..Default::default() });
-        set_attrs("RUSH_RO_LIST_A", Attrs { readonly: true, ..Default::default() });
+        set_attrs(
+            "RUSH_RO_LIST_B",
+            Attrs {
+                readonly: true,
+                ..Default::default()
+            },
+        );
+        set_attrs(
+            "RUSH_RO_LIST_A",
+            Attrs {
+                readonly: true,
+                ..Default::default()
+            },
+        );
 
         let lines = readonly_listing();
-        assert!(lines.contains(&"declare -r RUSH_RO_LIST_A".to_string()), "got: {lines:?}");
-        assert!(lines.contains(&"declare -r RUSH_RO_LIST_B=\"two words\"".to_string()), "got: {lines:?}");
-        let a = lines.iter().position(|l| l.contains("RUSH_RO_LIST_A")).unwrap();
-        let b = lines.iter().position(|l| l.contains("RUSH_RO_LIST_B")).unwrap();
+        assert!(
+            lines.contains(&"declare -r RUSH_RO_LIST_A".to_string()),
+            "got: {lines:?}"
+        );
+        assert!(
+            lines.contains(&"declare -r RUSH_RO_LIST_B=\"two words\"".to_string()),
+            "got: {lines:?}"
+        );
+        let a = lines
+            .iter()
+            .position(|l| l.contains("RUSH_RO_LIST_A"))
+            .unwrap();
+        let b = lines
+            .iter()
+            .position(|l| l.contains("RUSH_RO_LIST_B"))
+            .unwrap();
         assert!(a < b, "sorted order");
 
         ATTRS.with(|m| {

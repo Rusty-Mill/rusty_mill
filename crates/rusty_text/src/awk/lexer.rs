@@ -56,7 +56,10 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Lexer { chars: src.chars().peekable(), expect_operand: true }
+        Lexer {
+            chars: src.chars().peekable(),
+            expect_operand: true,
+        }
     }
 
     fn skip_ws_and_comments(&mut self) {
@@ -89,7 +92,9 @@ impl<'a> Lexer<'a> {
 
     fn next_token(&mut self) -> Result<Token, String> {
         self.skip_ws_and_comments();
-        let Some(&c) = self.chars.peek() else { return Ok(Token::Eof) };
+        let Some(&c) = self.chars.peek() else {
+            return Ok(Token::Eof);
+        };
 
         let tok = match c {
             '0'..='9' => self.read_number(),

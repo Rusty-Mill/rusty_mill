@@ -25,7 +25,9 @@ use std::io::Read;
 use std::process::{Child, Command as OsCommand, Stdio};
 
 use crate::builtins;
-use crate::parser::{AndOrList, CommandList, Compound, Connector, Job, RawCommand, RawCompound, RawPipeline};
+use crate::parser::{
+    AndOrList, CommandList, Compound, Connector, Job, RawCommand, RawCompound, RawPipeline,
+};
 
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -55,7 +57,11 @@ pub struct Command {
 #[derive(Debug, Clone)]
 pub enum Redirect {
     /// `[fd]< file` / `[fd]> file` / `[fd]>> file`.
-    File { fd: u32, file: String, mode: RedirMode },
+    File {
+        fd: u32,
+        file: String,
+        mode: RedirMode,
+    },
     /// `&> file` / `&>> file`.
     Both { file: String, append: bool },
     /// `fd>&target` (e.g. `2>&1`).
@@ -210,7 +216,8 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     // A non-final `&&`/`||` element and a `!`-negated pipeline run with
     // errexit suppressed (C81) — reaching into any function bodies they
     // call, which is exactly the `myfunc || handler` interop pattern.
-    let mut status = run_pipeline_suppressible(&list.first, !list.rest.is_empty() || list.first.negated)?;
+    let mut status =
+        run_pipeline_suppressible(&list.first, !list.rest.is_empty() || list.first.negated)?;
     crate::vars::set_last_status(status);
     // If there's no `rest`, `first` *is* the last pipeline, and it just ran.
     // A `!`-negated pipeline reports `last_ran = false` even when it did
@@ -289,7 +296,12 @@ fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
                 && let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r)
             {
                 let fields: Vec<&str> = rest.split_whitespace().collect();
-                let field = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                let field = |i: usize| {
+                    fields
+                        .get(i)
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
                 // After the comm field: state=0 …, utime=11, stime=12,
                 // cutime=13, cstime=14. Bash's `time` reports the shell's
                 // own CPU (in-process builtins/loops) *plus* reaped
@@ -311,7 +323,12 @@ fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
         }
     }
     fn minutes(seconds: f64, precision: usize) -> String {
-        format!("{}m{:.*}s", (seconds / 60.0) as u64, precision, seconds % 60.0)
+        format!(
+            "{}m{:.*}s",
+            (seconds / 60.0) as u64,
+            precision,
+            seconds % 60.0
+        )
     }
 
     let (cu0, cs0) = child_cpu_seconds();
@@ -322,9 +339,11 @@ fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
     let (user, sys) = (cu1 - cu0, cs1 - cs0);
 
     if raw.time_posix {
-        eprintln!("real {real:.2}
+        eprintln!(
+            "real {real:.2}
 user {user:.2}
-sys {sys:.2}");
+sys {sys:.2}"
+        );
         return status;
     }
     match crate::vars::get("TIMEFORMAT") {
@@ -355,7 +374,11 @@ sys	{}",
                     chars.next();
                 }
                 let value = |v: f64| {
-                    if long { minutes(v, precision) } else { format!("{v:.precision$}") }
+                    if long {
+                        minutes(v, precision)
+                    } else {
+                        format!("{v:.precision$}")
+                    }
                 };
                 match chars.next() {
                     Some('R') => out.push_str(&value(real)),
@@ -363,7 +386,11 @@ sys	{}",
                     Some('S') => out.push_str(&value(sys)),
                     Some('P') => out.push_str(&format!(
                         "{:.2}",
-                        if real > 0.0 { (user + sys) / real * 100.0 } else { 0.0 }
+                        if real > 0.0 {
+                            (user + sys) / real * 100.0
+                        } else {
+                            0.0
+                        }
                     )),
                     Some('%') => out.push('%'),
                     Some(other) => {
@@ -448,7 +475,10 @@ pub fn run_compound(compound: &Compound) -> Result<i32, String> {
                 Ok(2)
             }
         },
-        Compound::If { branches, else_body } => {
+        Compound::If {
+            branches,
+            else_body,
+        } => {
             for (cond, body) in branches {
                 if exec_cond(cond)? == 0 {
                     return exec_list(body);
@@ -473,11 +503,20 @@ pub fn run_compound(compound: &Compound) -> Result<i32, String> {
             }
             Ok(status)
         }
-        Compound::For { var, words, has_in, body } => {
+        Compound::For {
+            var,
+            words,
+            has_in,
+            body,
+        } => {
             // POSIX: omitting `in` iterates the positional parameters ("$@"),
             // as if `in "$@"` had been written; an explicit `in` with no
             // words (`for x in; do ...`) is a real empty list instead.
-            let values = if *has_in { crate::expand::expand_words(words)? } else { crate::vars::args() };
+            let values = if *has_in {
+                crate::expand::expand_words(words)?
+            } else {
+                crate::vars::args()
+            };
             // A readonly loop variable is fatal, same as a bare assignment
             // (verified: bash aborts before the first iteration).
             if !values.is_empty() && crate::vars::is_readonly(var) {
@@ -496,7 +535,12 @@ pub fn run_compound(compound: &Compound) -> Result<i32, String> {
         // `for ((init; cond; update)); do BODY; done` — C-style. `cond`
         // empty means always-true (`for ((;;))` is a real infinite loop,
         // verified directly); `init`/`update` empty are no-ops.
-        Compound::CFor { init, cond, update, body } => {
+        Compound::CFor {
+            init,
+            cond,
+            update,
+            body,
+        } => {
             if let Some(e) = init {
                 eval_arith_stmt(e)?;
             }
@@ -514,8 +558,10 @@ pub fn run_compound(compound: &Compound) -> Result<i32, String> {
                 // re-testing `cond` — real C `for` semantics, verified
                 // directly; `break` (here, or propagating from an outer
                 // loop via `break N`/`continue N`) does not.
-                let ran_to_completion =
-                    matches!(crate::vars::loop_ctl(), None | Some(crate::vars::LoopCtl::Continue(1)));
+                let ran_to_completion = matches!(
+                    crate::vars::loop_ctl(),
+                    None | Some(crate::vars::LoopCtl::Continue(1))
+                );
                 if ran_to_completion && let Some(e) = update {
                     eval_arith_stmt(e)?;
                 }
@@ -553,8 +599,17 @@ pub fn run_compound(compound: &Compound) -> Result<i32, String> {
         // directly (unlike `while read line; do …; done`, whose status
         // after its own final failing `read` stays whatever the loop
         // body's last iteration returned).
-        Compound::Select { var, words, has_in, body } => {
-            let values = if *has_in { crate::expand::expand_words(words)? } else { crate::vars::args() };
+        Compound::Select {
+            var,
+            words,
+            has_in,
+            body,
+        } => {
+            let values = if *has_in {
+                crate::expand::expand_words(words)?
+            } else {
+                crate::vars::args()
+            };
             if values.is_empty() {
                 return Ok(0);
             }
@@ -752,10 +807,15 @@ fn call_function(argv: &[String]) -> Result<i32, String> {
     // stack limit (~2700 frames aborts the whole process with SIGABRT) —
     // a runaway recursion must be a recoverable shell error, not a crash.
     let depth = crate::vars::function_depth();
-    let funcnest = crate::vars::get("FUNCNEST").and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0);
+    let funcnest = crate::vars::get("FUNCNEST")
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0);
     let cap = funcnest.unwrap_or(1000).min(1000);
     if depth >= cap {
-        return Err(format!("{}: maximum function nesting level exceeded ({cap})", argv[0]));
+        return Err(format!(
+            "{}: maximum function nesting level exceeded ({cap})",
+            argv[0]
+        ));
     }
     let body = crate::func::get(&argv[0]).expect("function is defined");
 
@@ -783,9 +843,7 @@ fn call_function(argv: &[String]) -> Result<i32, String> {
 
     // `trap 'cmd' RETURN` (C65) fires as the function returns — always under
     // functrace, otherwise only when the body set its own RETURN trap.
-    if crate::vars::functrace()
-        || (return_after.is_some() && return_after != return_before)
-    {
+    if crate::vars::functrace() || (return_after.is_some() && return_after != return_before) {
         crate::trap::fire_preserving("RETURN");
     }
 
@@ -843,7 +901,9 @@ fn resolve_source_path(name: &str) -> Option<std::path::PathBuf> {
     }
     // `vars::get` alone — no `std::env` fallback (C36/C40).
     let path = crate::vars::get("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|c| c.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|c| c.is_file())
 }
 
 /// `eval arg...` — join `args` with a single space, parse the result, and run
@@ -1080,7 +1140,11 @@ fn trace_prefix() -> String {
     match chars.next() {
         Some(c) => {
             let rest: String = chars.collect();
-            format!("{}{rest}", c.to_string().repeat(crate::vars::trace_depth() as usize + 1))
+            format!(
+                "{}{rest}",
+                c.to_string()
+                    .repeat(crate::vars::trace_depth() as usize + 1)
+            )
         }
         None => String::new(),
     }
@@ -1090,7 +1154,9 @@ fn trace_prefix() -> String {
 /// contains whitespace or a shell-special character, else printed as-is.
 fn trace_quote(word: &str) -> String {
     let needs_quote = word.is_empty()
-        || word.chars().any(|c| c.is_whitespace() || "'\"$&|;<>()`\\*?[]{}~#".contains(c));
+        || word
+            .chars()
+            .any(|c| c.is_whitespace() || "'\"$&|;<>()`\\*?[]{}~#".contains(c));
     if needs_quote {
         format!("'{}'", word.replace('\'', r"'\''"))
     } else {
@@ -1112,10 +1178,22 @@ fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
         AssignOp::Set(AssignValue::Scalar(v)) => format!("{name}={v}"),
         AssignOp::Append(AssignValue::Scalar(v)) => format!("{name}+={v}"),
         AssignOp::Set(AssignValue::Array(vs)) => {
-            format!("{name}=({})", vs.iter().map(|v| trace_quote(v)).collect::<Vec<_>>().join(" "))
+            format!(
+                "{name}=({})",
+                vs.iter()
+                    .map(|v| trace_quote(v))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         }
         AssignOp::Append(AssignValue::Array(vs)) => {
-            format!("{name}+=({})", vs.iter().map(|v| trace_quote(v)).collect::<Vec<_>>().join(" "))
+            format!(
+                "{name}+=({})",
+                vs.iter()
+                    .map(|v| trace_quote(v))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         }
         AssignOp::Set(AssignValue::Assoc(pairs)) => {
             format!("{name}=({})", trace_assoc_pairs(pairs))
@@ -1129,7 +1207,11 @@ fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
 }
 
 fn trace_assoc_pairs(pairs: &[(String, String)]) -> String {
-    pairs.iter().map(|(k, v)| format!("[{k}]={}", trace_quote(v))).collect::<Vec<_>>().join(" ")
+    pairs
+        .iter()
+        .map(|(k, v)| format!("[{k}]={}", trace_quote(v)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `coproc` (C66), Unix only: two real pipes, a fork, and two shell
@@ -1169,7 +1251,13 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             drop(to_child_write);
             drop(from_child_read);
             drop(from_child_write);
-            let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false, line: 0, timed: false, time_posix: false };
+            let pipeline = crate::parser::RawPipeline {
+                commands: vec![cmd.clone()],
+                negated: false,
+                line: 0,
+                timed: false,
+                time_posix: false,
+            };
             crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = run_foreground(&pipeline).unwrap_or(1);
             crate::trap::exit_shell(status);
@@ -1221,8 +1309,14 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                 // where) it's unquoted — `[[ $x = "a"* ]]` matches anything
                 // starting with a literal `a` (verified against bash);
                 // `expand_cond_pattern` backslash-escapes the quoted parts.
-                "=" | "==" => Ok(match_nocase_aware(&crate::expand::expand_cond_pattern(rhs)?, &l)),
-                "!=" => Ok(!match_nocase_aware(&crate::expand::expand_cond_pattern(rhs)?, &l)),
+                "=" | "==" => Ok(match_nocase_aware(
+                    &crate::expand::expand_cond_pattern(rhs)?,
+                    &l,
+                )),
+                "!=" => Ok(!match_nocase_aware(
+                    &crate::expand::expand_cond_pattern(rhs)?,
+                    &l,
+                )),
                 // Lexicographic string comparison — `<`/`>` never
                 // redirect inside `[[` (that misparse was C55's own
                 // headline repro).
@@ -1260,8 +1354,12 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                                 false
                             }
                         }
-                        "-nt" => matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a > b),
-                        _ => matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a < b),
+                        "-nt" => {
+                            matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a > b)
+                        }
+                        _ => {
+                            matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a < b)
+                        }
                     })
                 }
                 // `=~` (C56): an unanchored ERE search with POSIX
@@ -1430,10 +1528,16 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
             // `command name [args...]`: run bypassing function lookup — the
             // whole point of `command` in this form (C12) — otherwise
             // proceeding exactly as a plain simple command would.
-            if inner.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
+            if inner
+                .argv
+                .first()
+                .is_some_and(|name| builtins::is_builtin(name))
+            {
                 return run_builtin_foreground(&inner);
             }
-            let pipeline = Pipeline { commands: vec![Stage::Simple(inner)] };
+            let pipeline = Pipeline {
+                commands: vec![Stage::Simple(inner)],
+            };
             #[cfg(unix)]
             {
                 return crate::job::run_foreground(&pipeline);
@@ -1444,10 +1548,18 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
             }
         }
         // A defined function shadows external commands (but not builtins).
-        if cmd.argv.first().is_some_and(|name| crate::func::exists(name)) {
+        if cmd
+            .argv
+            .first()
+            .is_some_and(|name| crate::func::exists(name))
+        {
             return with_prefix_assignments(cmd, || call_function(&cmd.argv));
         }
-        if cmd.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
+        if cmd
+            .argv
+            .first()
+            .is_some_and(|name| builtins::is_builtin(name))
+        {
             return with_prefix_assignments(cmd, || run_builtin_foreground(cmd));
         }
         // `autocd` (C108): a lone directory name that isn't a command
@@ -1506,7 +1618,10 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
     // real OS-level pipes between `echo` and `read`, not the object stream).
     let all_object_cmdlets = pipeline.commands.len() > 1
         && pipeline.commands.iter().all(|stage| match stage {
-            Stage::Simple(c) => c.argv.first().is_some_and(|name| builtins::is_object_cmdlet(name)),
+            Stage::Simple(c) => c
+                .argv
+                .first()
+                .is_some_and(|name| builtins::is_object_cmdlet(name)),
             _ => false,
         });
 
@@ -1588,7 +1703,13 @@ fn with_prefix_assignments<F: FnOnce() -> R, R>(cmd: &Command, run: F) -> R {
     let saved: Vec<(String, Option<String>, bool)> = cmd
         .assignments
         .iter()
-        .map(|(name, _)| (name.clone(), crate::vars::get(name), crate::vars::is_exported(name)))
+        .map(|(name, _)| {
+            (
+                name.clone(),
+                crate::vars::get(name),
+                crate::vars::is_exported(name),
+            )
+        })
         .collect();
     for (name, op) in &cmd.assignments {
         crate::vars::assign(name, op);
@@ -1627,11 +1748,16 @@ fn dispatch_builtin(cmd: &Command) -> i32 {
         // `typeset` is ksh/zsh's own spelling of `declare` (C49) — ksh93
         // has *only* typeset; bash and zsh accept both as synonyms.
         Some("declare") | Some("typeset")
-            if matches!(cmd.argv.get(1).map(String::as_str), Some("-p" | "-f" | "-F")) =>
+            if matches!(
+                cmd.argv.get(1).map(String::as_str),
+                Some("-p" | "-f" | "-F")
+            ) =>
         {
             builtins::declare_print(&cmd.argv)
         }
-        Some("declare") | Some("typeset") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
+        Some("declare") | Some("typeset") => {
+            builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs)
+        }
         Some("readonly") => builtins::readonly_from_decls(&cmd.local_decls, cmd.decl_attrs),
         // `export NAME=(...)` (C132): create the array, then mark exported
         // (array export is a no-op in bash too, but the assignment runs).
@@ -1720,7 +1846,9 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
                             .truncate(false)
                             .open(file)
                             .map_err(|e| format!("{file}: {e}"))?,
-                        RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
+                        RedirMode::Write | RedirMode::Clobber | RedirMode::Append => {
+                            open_write(file, *mode)?
+                        }
                     }
                 };
                 // Any fd, not just 0/1/2 — `StdioGuard.saved` is keyed by
@@ -1728,7 +1856,14 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
                 redirect_to(&mut guard, *fd as i32, f)?;
             }
             Redirect::Both { file, append } => {
-                let f = open_write(file, if *append { crate::parser::RedirMode::Append } else { crate::parser::RedirMode::Write })?;
+                let f = open_write(
+                    file,
+                    if *append {
+                        crate::parser::RedirMode::Append
+                    } else {
+                        crate::parser::RedirMode::Write
+                    },
+                )?;
                 let g = f.try_clone().map_err(|e| e.to_string())?;
                 redirect_to(&mut guard, 1, f)?;
                 redirect_to(&mut guard, 2, g)?;
@@ -1838,7 +1973,10 @@ fn set_cloexec(f: &File) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
     let fd = f.as_raw_fd();
     let flags = unsafe { crate::sys::fcntl(fd, crate::sys::F_GETFD, 0) };
-    if flags == -1 || unsafe { crate::sys::fcntl(fd, crate::sys::F_SETFD, flags | crate::sys::FD_CLOEXEC) } == -1 {
+    if flags == -1
+        || unsafe { crate::sys::fcntl(fd, crate::sys::F_SETFD, flags | crate::sys::FD_CLOEXEC) }
+            == -1
+    {
         return Err(crate::sys::last_os_error().to_string());
     }
     Ok(())
@@ -1896,14 +2034,14 @@ impl Drop for StdioGuard {
 /// standard descriptors exist here: a redirect naming fd 3+ is a clear
 /// runtime error rather than a silent collapse onto stdout.
 #[cfg(not(unix))]
-pub fn redirect_stdio(
-    redirects: &[Redirect],
-    heredoc: Option<&str>,
-) -> Result<StdioGuard, String> {
+pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<StdioGuard, String> {
     use crate::winstdio as win;
     use std::os::windows::io::AsRawHandle;
 
-    let mut guard = StdioGuard { saved: Vec::new(), owned: Vec::new() };
+    let mut guard = StdioGuard {
+        saved: Vec::new(),
+        owned: Vec::new(),
+    };
 
     for r in redirects {
         match r {
@@ -1924,13 +2062,22 @@ pub fn redirect_stdio(
                         .truncate(false)
                         .open(file)
                         .map_err(|e| format!("{file}: {e}"))?,
-                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
+                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => {
+                        open_write(file, *mode)?
+                    }
                 };
                 guard.point(*fd as i32, f.as_raw_handle())?;
                 guard.owned.push(Box::new(f));
             }
             Redirect::Both { file, append } => {
-                let f = open_write(file, if *append { RedirMode::Append } else { RedirMode::Write })?;
+                let f = open_write(
+                    file,
+                    if *append {
+                        RedirMode::Append
+                    } else {
+                        RedirMode::Write
+                    },
+                )?;
                 // One open file in both slots — the same shared cursor a
                 // dup'd Unix descriptor pair has, so interleaved stdout and
                 // stderr writes append rather than clobber each other.
@@ -2155,7 +2302,10 @@ fn capture_pipeline_expanded(raw: &RawPipeline, out: &mut String) -> Result<i32,
     // (its side effects, `$(cd /tmp)` included, don't escape).
     #[cfg(unix)]
     if let [Stage::Simple(cmd)] = pipeline.commands.as_slice()
-        && cmd.argv.first().is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
+        && cmd
+            .argv
+            .first()
+            .is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
     {
         let (status, captured) = capture_shell_command(cmd)?;
         out.push_str(&captured);
@@ -2168,7 +2318,10 @@ fn capture_pipeline_expanded(raw: &RawPipeline, out: &mut String) -> Result<i32,
     // like an external command already is, just running this one call.
     #[cfg(not(unix))]
     if let [Stage::Simple(cmd)] = pipeline.commands.as_slice()
-        && cmd.argv.first().is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
+        && cmd
+            .argv
+            .first()
+            .is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
     {
         let (status, captured) = capture_via_self_reexec(cmd)?;
         out.push_str(&captured);
@@ -2233,7 +2386,8 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
             drop(write);
             let mut captured = String::new();
             let mut read = read;
-            read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+            read.read_to_string(&mut captured)
+                .map_err(|e| e.to_string())?;
             loop {
                 let mut status: crate::sys::c_int = 0;
                 if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
@@ -2288,7 +2442,8 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
             drop(write);
             let mut captured = String::new();
             let mut read = read;
-            read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+            read.read_to_string(&mut captured)
+                .map_err(|e| e.to_string())?;
             loop {
                 let mut status: crate::sys::c_int = 0;
                 if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
@@ -2343,7 +2498,10 @@ fn capture_via_self_reexec(cmd: &Command) -> Result<(i32, String), String> {
     if let Some(name) = cmd.argv.first()
         && let Some(body) = crate::func::get(name)
     {
-        command.env(format!("BASH_FUNC_{name}%%"), crate::unparse::function_export_value(&body));
+        command.env(
+            format!("BASH_FUNC_{name}%%"),
+            crate::unparse::function_export_value(&body),
+        );
     }
     command.stdout(Stdio::piped());
     let output = command.output().map_err(|e| e.to_string())?;
@@ -2438,7 +2596,11 @@ pub fn process_substitute(src: &str, write_side: bool) -> Result<String, String>
             // table, though: real bash's own `jobs -l` doesn't list a
             // process substitution either, even though `$!`/`wait $!` can
             // still reach it directly by pid.
-            let (keep, other) = if write_side { (write, read) } else { (read, write) };
+            let (keep, other) = if write_side {
+                (write, read)
+            } else {
+                (read, write)
+            };
             drop(other);
             let fd = keep.as_raw_fd();
             crate::vars::set_last_bg_pid(pid);
@@ -2600,14 +2762,16 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
             // we read stdout+stderr from directly.
             if is_last && capture {
                 let mut out = read;
-                out.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+                out.read_to_string(&mut captured)
+                    .map_err(|e| e.to_string())?;
             } else {
                 prev_stdout = Some(Stdio::from(read));
             }
         } else if !is_last {
             prev_stdout = child.stdout.take().map(Stdio::from);
         } else if capture && let Some(mut out) = child.stdout.take() {
-            out.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+            out.read_to_string(&mut captured)
+                .map_err(|e| e.to_string())?;
         }
         // `build_stage` already gave this stage its own console process
         // group (`CREATE_NEW_PROCESS_GROUP`) — register its pid (which
@@ -2647,7 +2811,12 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
 /// failure" — specifically the one closest to the end).
 pub fn pipeline_status(stage_statuses: &[i32]) -> i32 {
     if crate::vars::pipefail() {
-        stage_statuses.iter().rev().find(|&&s| s != 0).copied().unwrap_or(0)
+        stage_statuses
+            .iter()
+            .rev()
+            .find(|&&s| s != 0)
+            .copied()
+            .unwrap_or(0)
     } else {
         *stage_statuses.last().unwrap_or(&0)
     }
@@ -2728,7 +2897,9 @@ pub fn build_stage(
         .ok_or_else(|| "empty command".to_string())?;
     // Restricted shell (C104): no `/` in command names.
     if crate::vars::restricted() && program.contains('/') {
-        return Err(format!("{program}: restricted: cannot specify `/' in command names"));
+        return Err(format!(
+            "{program}: restricted: cannot specify `/' in command names"
+        ));
     }
     let mut command = OsCommand::new(resolve_program(program));
     command.args(&cmd.argv[1..]);
@@ -2782,7 +2953,11 @@ pub fn build_stage(
     // stage feeds another (or is being captured); the redirects below override
     // in source order, so `> f 2>&1` sends both to `f`.
     let mut stdin_sink: Option<Stdio> = stdin_src;
-    let mut stdout_sink = if !is_last || capture { Sink::Pipe } else { Sink::Inherit };
+    let mut stdout_sink = if !is_last || capture {
+        Sink::Pipe
+    } else {
+        Sink::Inherit
+    };
     let mut stderr_sink = Sink::Inherit;
     let mut real_pipe_read: Option<File> = None;
     // Any fd other than 0/1/2 (`cmd 3>file`, `cmd 4<&3`) — `Command` only
@@ -2805,7 +2980,9 @@ pub fn build_stage(
                         .truncate(false)
                         .open(file)
                         .map_err(|e| format!("{file}: {e}"))?,
-                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
+                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => {
+                        open_write(file, *mode)?
+                    }
                 };
                 match fd {
                     0 => stdin_sink = Some(Stdio::from(f)),
@@ -2815,7 +2992,14 @@ pub fn build_stage(
                 }
             }
             Redirect::Both { file, append } => {
-                let f = open_write(file, if *append { crate::parser::RedirMode::Append } else { crate::parser::RedirMode::Write })?;
+                let f = open_write(
+                    file,
+                    if *append {
+                        crate::parser::RedirMode::Append
+                    } else {
+                        crate::parser::RedirMode::Write
+                    },
+                )?;
                 let g = f.try_clone().map_err(|e| e.to_string())?;
                 stdout_sink = Sink::File(f);
                 stderr_sink = Sink::File(g);
@@ -2838,7 +3022,10 @@ pub fn build_stage(
                     // point in the sequence (Rust's own stdio setup for
                     // 0/1/2, or an earlier entry here for 3+), so a plain
                     // `dup2(target, fd)` at `pre_exec` time is enough.
-                    extra_fds.push(FdAction::Dup { source: *target, dest: *fd });
+                    extra_fds.push(FdAction::Dup {
+                        source: *target,
+                        dest: *fd,
+                    });
                 }
             }
             // `{name}>…` (C115) allocates in the *parent* (the variable
@@ -2853,14 +3040,19 @@ pub fn build_stage(
                 #[cfg(not(unix))]
                 {
                     let _ = inner;
-                    return Err(format!("{name}: `{{varname}}>` redirection unsupported off Unix"));
+                    return Err(format!(
+                        "{name}: `{{varname}}>` redirection unsupported off Unix"
+                    ));
                 }
             }
             // For an external child, close/move are pre_exec fd surgery
             // (C111) — same sequencing rules as the extra-fd dups above.
             Redirect::Close { fd } => extra_fds.push(FdAction::Close(*fd)),
             Redirect::Move { fd, target } => {
-                extra_fds.push(FdAction::Dup { source: *target, dest: *fd });
+                extra_fds.push(FdAction::Dup {
+                    source: *target,
+                    dest: *fd,
+                });
                 extra_fds.push(FdAction::Close(*target));
             }
         }
@@ -2979,15 +3171,15 @@ fn net_pseudo_device(path: &str) -> Result<Option<File>, String> {
     let Some((host, port)) = rest.split_once('/') else {
         return Err(format!("{path}: invalid network path"));
     };
-    let port: u16 =
-        port.parse().map_err(|_| format!("{path}: invalid port"))?;
+    let port: u16 = port.parse().map_err(|_| format!("{path}: invalid port"))?;
     let raw = if proto == "tcp" {
         std::net::TcpStream::connect((host, port))
             .map_err(|e| format!("{path}: {e}"))?
             .into_raw_fd()
     } else {
         let sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).map_err(|e| format!("{path}: {e}"))?;
-        sock.connect((host, port)).map_err(|e| format!("{path}: {e}"))?;
+        sock.connect((host, port))
+            .map_err(|e| format!("{path}: {e}"))?;
         sock.into_raw_fd()
     };
     Ok(Some(unsafe { File::from_raw_fd(raw) }))
@@ -3076,7 +3268,10 @@ impl Sink {
 /// independent fds onto the *same* pipe), and the read end is stashed in
 /// `real_pipe_read` for the caller to use as the next stage's stdin.
 #[cfg(unix)]
-fn clone_or_materialize(sink: &mut Sink, real_pipe_read: &mut Option<File>) -> Result<Sink, String> {
+fn clone_or_materialize(
+    sink: &mut Sink,
+    real_pipe_read: &mut Option<File>,
+) -> Result<Sink, String> {
     if matches!(sink, Sink::Pipe) {
         let (read, write) = make_pipe()?;
         *real_pipe_read = Some(read);
@@ -3092,7 +3287,10 @@ fn clone_or_materialize(sink: &mut Sink, real_pipe_read: &mut Option<File>) -> R
 /// duping a piped fd falls back to inherit (see docs/ARCHITECTURE.md's Windows
 /// note).
 #[cfg(not(unix))]
-fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> Result<Sink, String> {
+fn clone_or_materialize(
+    sink: &mut Sink,
+    _real_pipe_read: &mut Option<File>,
+) -> Result<Sink, String> {
     match sink {
         Sink::Inherit | Sink::Pipe => Ok(Sink::Inherit),
         Sink::File(f) => f.try_clone().map(Sink::File).map_err(|e| e.to_string()),
@@ -3252,4 +3450,3 @@ pub fn pipeline_text(pipeline: &Pipeline) -> String {
         .collect::<Vec<_>>()
         .join(" | ")
 }
-

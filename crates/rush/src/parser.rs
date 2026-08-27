@@ -98,7 +98,11 @@ pub struct RawCompound {
 #[derive(Debug, Clone)]
 pub enum RawRedirect {
     /// `[fd]< file` / `[fd]> file` / `[fd]>> file`.
-    File { fd: u32, file: Word, mode: RedirMode },
+    File {
+        fd: u32,
+        file: Word,
+        mode: RedirMode,
+    },
     /// `&> file` / `&>> file` — stdout and stderr to one file.
     Both { file: Word, append: bool },
     /// `fd>&target` — `fd` duplicates `target` (e.g. `2>&1`).
@@ -110,7 +114,10 @@ pub enum RawRedirect {
     DupWord { fd: u32, word: Word },
     /// `{name}>file` (C115): perform `inner` on a freshly-allocated fd
     /// (>= 10) and assign that fd's number to `name`.
-    VarFd { name: String, inner: Box<RawRedirect> },
+    VarFd {
+        name: String,
+        inner: Box<RawRedirect>,
+    },
     /// `<<DELIM` here-document; `body` is the collected text, expanded unless the
     /// delimiter was quoted.
     Heredoc { body: String, expand: bool },
@@ -153,13 +160,15 @@ pub enum CondAst {
 }
 
 /// The binary operators `[[ ]]` recognizes (C55; `=~` reserved for C56).
-const COND_BINARY_OPS: &[&str] =
-    &["=", "==", "!=", "=~", "<", ">", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-nt", "-ot", "-ef"];
+const COND_BINARY_OPS: &[&str] = &[
+    "=", "==", "!=", "=~", "<", ">", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-nt", "-ot", "-ef",
+];
 /// The unary operators `[[ ]]` recognizes — `test`'s set plus `-a`
 /// (exists; unary-only inside `[[`, where the binary `-a` combinator
 /// doesn't exist) and `-h`/`-L` (symlink).
-const COND_UNARY_OPS: &[&str] =
-    &["-a", "-e", "-f", "-d", "-s", "-r", "-w", "-x", "-z", "-n", "-h", "-L"];
+const COND_UNARY_OPS: &[&str] = &[
+    "-a", "-e", "-f", "-d", "-s", "-r", "-w", "-x", "-z", "-n", "-h", "-L",
+];
 
 /// Recursive-descent parse of a lexed `[[ ... ]]` interior:
 /// `or := and (\'||\' and)*`, `and := not (\'&&\' not)*`,
@@ -224,7 +233,9 @@ fn cond_op_text(tok: Option<&lexer::CondTok>) -> Option<&str> {
 
 fn cond_primary(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, ParseError> {
     let Some(lexer::CondTok::Word(first)) = toks.get(*pos) else {
-        return Err(ParseError::Syntax("expected an operand inside `[[ ]]`".into()));
+        return Err(ParseError::Syntax(
+            "expected an operand inside `[[ ]]`".into(),
+        ));
     };
     // Unary operator with an operand following.
     if let Some(op) = cond_op_text(toks.get(*pos)).filter(|op| COND_UNARY_OPS.contains(op))
@@ -237,7 +248,9 @@ fn cond_primary(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, Par
     // Binary operator between two operands.
     if let Some(op) = cond_op_text(toks.get(*pos + 1)).filter(|op| COND_BINARY_OPS.contains(op)) {
         let Some(lexer::CondTok::Word(rhs)) = toks.get(*pos + 2) else {
-            return Err(ParseError::Syntax(format!("`{op}': argument expected inside `[[ ]]`")));
+            return Err(ParseError::Syntax(format!(
+                "`{op}': argument expected inside `[[ ]]`"
+            )));
         };
         let node = CondAst::Binary(first.clone(), op.to_string(), rhs.clone());
         *pos += 3;
@@ -366,12 +379,18 @@ pub fn parse(input: &str) -> Result<CommandList, ParseError> {
         lexer::LexError::Incomplete => ParseError::Incomplete,
         lexer::LexError::Syntax(msg) => ParseError::Syntax(msg),
     })?;
-    let mut p = Parser { toks: tokens, pos: 0 };
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+    };
 
     let list = p.parse_list()?;
     p.skip_separators();
     if let Some(tok) = p.peek() {
-        return Err(ParseError::Syntax(format!("unexpected `{}`", describe(tok))));
+        return Err(ParseError::Syntax(format!(
+            "unexpected `{}`",
+            describe(tok)
+        )));
     }
     Ok(list)
 }
@@ -422,7 +441,10 @@ impl Parser {
     fn at_list_end(&self) -> bool {
         // `;;`/`;&`/`;;&` all close a `case` item's body; `)` closes a
         // subshell.
-        if matches!(self.peek(), Some(Token::DSemi | Token::SemiAmp | Token::DSemiAmp | Token::RParen)) {
+        if matches!(
+            self.peek(),
+            Some(Token::DSemi | Token::SemiAmp | Token::DSemiAmp | Token::RParen)
+        ) {
             return true;
         }
         match self.peek_keyword() {
@@ -508,7 +530,13 @@ impl Parser {
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
-        Ok(RawPipeline { commands, negated, line, timed, time_posix })
+        Ok(RawPipeline {
+            commands,
+            negated,
+            line,
+            timed,
+            time_posix,
+        })
     }
 
     fn parse_command(&mut self) -> Result<RawCommand, ParseError> {
@@ -522,12 +550,16 @@ impl Parser {
         // `((expr))` — an arithmetic command, always (see `Token::DblParen`'s
         // own doc comment on why this never falls back to nested subshells).
         } else if let Some(Token::DblParen(_)) = self.peek() {
-            let Some(Token::DblParen(expr)) = self.advance() else { unreachable!() };
+            let Some(Token::DblParen(expr)) = self.advance() else {
+                unreachable!()
+            };
             Compound::Arith(expr)
         // `[[ expr ]]` — the extended test (C55), already lexed in its own
         // mode; parsed into a recursive `CondAst` here.
         } else if let Some(Token::CondExpr(_)) = self.peek() {
-            let Some(Token::CondExpr(toks)) = self.advance() else { unreachable!() };
+            let Some(Token::CondExpr(toks)) = self.advance() else {
+                unreachable!()
+            };
             Compound::Cond(parse_cond_expr(&toks)?)
         // A bare `(` starts a subshell.
         } else if matches!(self.peek(), Some(Token::LParen)) {
@@ -550,7 +582,10 @@ impl Parser {
         // Only redirects (never argv words) can legally follow a compound's
         // closing keyword — `while …; done < file`, `{ …; } > log`.
         let redirects = self.parse_trailing_redirects()?;
-        Ok(RawCommand::Compound(RawCompound { compound: Box::new(compound), redirects }))
+        Ok(RawCommand::Compound(RawCompound {
+            compound: Box::new(compound),
+            redirects,
+        }))
     }
 
     /// `coproc [NAME] command` (C66). A NAME is accepted only when the
@@ -572,7 +607,10 @@ impl Parser {
             self.pos += 1;
         }
         let cmd = self.parse_command()?;
-        Ok(Compound::Coproc { name, cmd: Box::new(cmd) })
+        Ok(Compound::Coproc {
+            name,
+            cmd: Box::new(cmd),
+        })
     }
 
     /// Parse zero or more redirects with no argv words — used for whatever
@@ -597,29 +635,49 @@ impl Parser {
                 file: self.expect_word("<>")?,
                 mode: RedirMode::ReadWrite,
             },
-            RedirOp::Read => {
-                RawRedirect::File { fd: r.fd, file: self.expect_word("<")?, mode: RedirMode::Read }
-            }
-            RedirOp::Write => {
-                RawRedirect::File { fd: r.fd, file: self.expect_word(">")?, mode: RedirMode::Write }
-            }
-            RedirOp::Clobber => {
-                RawRedirect::File { fd: r.fd, file: self.expect_word(">|")?, mode: RedirMode::Clobber }
-            }
-            RedirOp::Append => {
-                RawRedirect::File { fd: r.fd, file: self.expect_word(">>")?, mode: RedirMode::Append }
-            }
-            RedirOp::Both => RawRedirect::Both { file: self.expect_word("&>")?, append: false },
-            RedirOp::BothAppend => RawRedirect::Both { file: self.expect_word("&>>")?, append: true },
+            RedirOp::Read => RawRedirect::File {
+                fd: r.fd,
+                file: self.expect_word("<")?,
+                mode: RedirMode::Read,
+            },
+            RedirOp::Write => RawRedirect::File {
+                fd: r.fd,
+                file: self.expect_word(">")?,
+                mode: RedirMode::Write,
+            },
+            RedirOp::Clobber => RawRedirect::File {
+                fd: r.fd,
+                file: self.expect_word(">|")?,
+                mode: RedirMode::Clobber,
+            },
+            RedirOp::Append => RawRedirect::File {
+                fd: r.fd,
+                file: self.expect_word(">>")?,
+                mode: RedirMode::Append,
+            },
+            RedirOp::Both => RawRedirect::Both {
+                file: self.expect_word("&>")?,
+                append: false,
+            },
+            RedirOp::BothAppend => RawRedirect::Both {
+                file: self.expect_word("&>>")?,
+                append: true,
+            },
             RedirOp::Dup(target) => RawRedirect::Dup { fd: r.fd, target },
             RedirOp::Move(target) => RawRedirect::Move { fd: r.fd, target },
-            RedirOp::DupWord => RawRedirect::DupWord { fd: r.fd, word: self.expect_word(">&")? },
+            RedirOp::DupWord => RawRedirect::DupWord {
+                fd: r.fd,
+                word: self.expect_word(">&")?,
+            },
             RedirOp::Heredoc { body, expand } => RawRedirect::Heredoc { body, expand },
             RedirOp::HereString => RawRedirect::HereString(self.expect_word("<<<")?),
         };
         // `{name}>…` (C115) wraps whatever operator followed it.
         Ok(match r.varfd {
-            Some(name) => RawRedirect::VarFd { name, inner: Box::new(raw) },
+            Some(name) => RawRedirect::VarFd {
+                name,
+                inner: Box::new(raw),
+            },
             None => raw,
         })
     }
@@ -737,7 +795,10 @@ impl Parser {
             None
         };
         self.expect_keyword("fi")?;
-        Ok(Compound::If { branches, else_body })
+        Ok(Compound::If {
+            branches,
+            else_body,
+        })
     }
 
     fn parse_cond_then(&mut self) -> Result<(CommandList, CommandList), ParseError> {
@@ -763,7 +824,9 @@ impl Parser {
         // unambiguous (no space is needed between `for` and `((`, verified
         // directly — `for((i=0;...` parses the same as `for ((i=0;...`).
         if let Some(Token::DblParen(_)) = self.peek() {
-            let Some(Token::DblParen(header)) = self.advance() else { unreachable!() };
+            let Some(Token::DblParen(header)) = self.advance() else {
+                unreachable!()
+            };
             let clauses: Vec<&str> = header.split(';').collect();
             let [init, cond, update] = clauses.as_slice() else {
                 return Err(ParseError::Syntax(
@@ -804,7 +867,12 @@ impl Parser {
         self.expect_keyword("do")?;
         let body = self.parse_list()?;
         self.expect_keyword("done")?;
-        Ok(Compound::For { var, words, has_in, body })
+        Ok(Compound::For {
+            var,
+            words,
+            has_in,
+            body,
+        })
     }
 
     /// `select NAME [in WORDS]; do BODY; done` — identical grammar to
@@ -829,7 +897,12 @@ impl Parser {
         self.expect_keyword("do")?;
         let body = self.parse_list()?;
         self.expect_keyword("done")?;
-        Ok(Compound::Select { var, words, has_in, body })
+        Ok(Compound::Select {
+            var,
+            words,
+            has_in,
+            body,
+        })
     }
 
     fn parse_case(&mut self) -> Result<Compound, ParseError> {
@@ -916,7 +989,9 @@ impl Parser {
         match self.advance() {
             Some(Token::Word(w)) => Ok(w),
             None => Err(ParseError::Incomplete),
-            _ => Err(ParseError::Syntax(format!("expected filename after `{after}`"))),
+            _ => Err(ParseError::Syntax(format!(
+                "expected filename after `{after}`"
+            ))),
         }
     }
 
@@ -960,7 +1035,10 @@ fn as_keyword(tok: &Token) -> Option<&'static str> {
 
 /// Reserved words that begin a command (vs. ones that close a construct).
 fn is_command_start(kw: &str) -> bool {
-    matches!(kw, "if" | "while" | "until" | "for" | "select" | "case" | "coproc" | "{")
+    matches!(
+        kw,
+        "if" | "while" | "until" | "for" | "select" | "case" | "coproc" | "{"
+    )
 }
 
 fn is_name(s: &str) -> bool {
@@ -1084,7 +1162,10 @@ mod tests {
         }
         match first_cmd(&parse_ok("cmd > f 2>&1")) {
             RawCommand::Simple(s) => {
-                assert!(matches!(s.redirects[1], RawRedirect::Dup { fd: 2, target: 1 }));
+                assert!(matches!(
+                    s.redirects[1],
+                    RawRedirect::Dup { fd: 2, target: 1 }
+                ));
             }
             _ => panic!(),
         }
@@ -1134,7 +1215,10 @@ mod tests {
         let p = parse_ok("if true; then echo yes; else echo no; fi");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::If { branches, else_body } => {
+                Compound::If {
+                    branches,
+                    else_body,
+                } => {
                     assert_eq!(branches.len(), 1);
                     assert!(else_body.is_some());
                 }
@@ -1149,7 +1233,10 @@ mod tests {
         let p = parse_ok("if a; then b; elif c; then d; elif e; then f; fi");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::If { branches, else_body } => {
+                Compound::If {
+                    branches,
+                    else_body,
+                } => {
                     assert_eq!(branches.len(), 3);
                     assert!(else_body.is_none());
                 }
@@ -1168,7 +1255,9 @@ mod tests {
         let p = parse_ok("for x in a b c; do echo $x; done");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::For { var, words, has_in, .. } => {
+                Compound::For {
+                    var, words, has_in, ..
+                } => {
                     assert_eq!(var, "x");
                     assert_eq!(words.len(), 3);
                     assert!(has_in);
@@ -1184,7 +1273,9 @@ mod tests {
         let p = parse_ok("for x; do echo $x; done");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::For { var, words, has_in, .. } => {
+                Compound::For {
+                    var, words, has_in, ..
+                } => {
                     assert_eq!(var, "x");
                     assert!(words.is_empty());
                     assert!(!has_in);
@@ -1200,7 +1291,9 @@ mod tests {
         let p = parse_ok("select x in a b c; do echo $x; done");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::Select { var, words, has_in, .. } => {
+                Compound::Select {
+                    var, words, has_in, ..
+                } => {
                     assert_eq!(var, "x");
                     assert_eq!(words.len(), 3);
                     assert!(has_in);
@@ -1228,7 +1321,9 @@ mod tests {
         let p = parse_ok("for ((i=0;i<3;i++)); do echo $i; done");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::CFor { init, cond, update, .. } => {
+                Compound::CFor {
+                    init, cond, update, ..
+                } => {
                     assert_eq!(init.as_deref(), Some("i=0"));
                     assert_eq!(cond.as_deref(), Some("i<3"));
                     assert_eq!(update.as_deref(), Some("i++"));
@@ -1241,7 +1336,9 @@ mod tests {
         let p = parse_ok("for ((;;)); do echo x; done");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.compound.as_ref() {
-                Compound::CFor { init, cond, update, .. } => {
+                Compound::CFor {
+                    init, cond, update, ..
+                } => {
                     assert!(init.is_none());
                     assert!(cond.is_none());
                     assert!(update.is_none());
@@ -1292,7 +1389,9 @@ mod tests {
     #[test]
     fn subshell() {
         match first_cmd(&parse_ok("(cd x; ls)")) {
-            RawCommand::Compound(c) => assert!(matches!(c.compound.as_ref(), Compound::Subshell(_))),
+            RawCommand::Compound(c) => {
+                assert!(matches!(c.compound.as_ref(), Compound::Subshell(_)))
+            }
             _ => panic!("expected subshell"),
         }
         assert!(matches!(parse("(echo hi"), Err(ParseError::Incomplete)));
@@ -1312,7 +1411,10 @@ mod tests {
             RawCommand::Compound(_)
         ));
         // `name` is a plain word when not followed by `()`.
-        assert_eq!(argv_text(first_cmd(&parse_ok("greet hi"))), vec!["greet", "hi"]);
+        assert_eq!(
+            argv_text(first_cmd(&parse_ok("greet hi"))),
+            vec!["greet", "hi"]
+        );
     }
 
     #[test]
@@ -1323,8 +1425,14 @@ mod tests {
 
     #[test]
     fn incomplete_compound_reports_incomplete() {
-        assert!(matches!(parse("if true; then echo hi"), Err(ParseError::Incomplete)));
-        assert!(matches!(parse("while true; do"), Err(ParseError::Incomplete)));
+        assert!(matches!(
+            parse("if true; then echo hi"),
+            Err(ParseError::Incomplete)
+        ));
+        assert!(matches!(
+            parse("while true; do"),
+            Err(ParseError::Incomplete)
+        ));
         assert!(matches!(parse("for x in a b"), Err(ParseError::Incomplete)));
     }
 

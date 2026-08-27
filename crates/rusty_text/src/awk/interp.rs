@@ -81,7 +81,9 @@ fn parse_leading_number(s: &str) -> f64 {
 
 fn compare(a: &Value, b: &Value) -> std::cmp::Ordering {
     if a.looks_numeric() && b.looks_numeric() {
-        a.to_num().partial_cmp(&b.to_num()).unwrap_or(std::cmp::Ordering::Equal)
+        a.to_num()
+            .partial_cmp(&b.to_num())
+            .unwrap_or(std::cmp::Ordering::Equal)
     } else {
         a.to_str().cmp(&b.to_str())
     }
@@ -119,7 +121,10 @@ impl Interp {
         } else {
             // Multi-char FS: literal substring split. Real awk treats this
             // as an ERE; that's a known, documented scope cut here.
-            self.record.split(self.fs.as_str()).map(str::to_string).collect()
+            self.record
+                .split(self.fs.as_str())
+                .map(str::to_string)
+                .collect()
         };
     }
 
@@ -163,7 +168,11 @@ impl Interp {
             "NF" => Value::Num(self.fields.len() as f64),
             "FS" => Value::Str(self.fs.clone()),
             "OFS" => Value::Str(self.ofs.clone()),
-            _ => self.vars.get(name).cloned().unwrap_or(Value::Str(String::new())),
+            _ => self
+                .vars
+                .get(name)
+                .cloned()
+                .unwrap_or(Value::Str(String::new())),
         }
     }
 
@@ -200,12 +209,18 @@ impl Interp {
             Expr::BinOp(op, a, b) => self.eval_binop(op, a, b),
             Expr::Not(e) => Value::Num(if self.eval(e).truthy() { 0.0 } else { 1.0 }),
             Expr::Neg(e) => Value::Num(-self.eval(e).to_num()),
-            Expr::Match { expr, pattern, negate } => {
+            Expr::Match {
+                expr,
+                pattern,
+                negate,
+            } => {
                 let text = self.eval(expr).to_str();
                 // Compiled fresh per evaluation -- a known perf
                 // simplification (no compiled-regex cache), fine at the
                 // line-processing scale this engine targets.
-                let is_match = Regex::new(pattern).map(|re| re.is_match(&text)).unwrap_or(false);
+                let is_match = Regex::new(pattern)
+                    .map(|re| re.is_match(&text))
+                    .unwrap_or(false);
                 Value::Num(if is_match != *negate { 1.0 } else { 0.0 })
             }
             Expr::Assign(lvalue, value_expr) => {

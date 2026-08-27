@@ -19,7 +19,10 @@ pub mod tree_builder;
 pub mod zlib;
 
 pub use index::{Index, IndexEntry};
-pub use objects::{decode_commit, decode_tree, encode_commit, encode_tree, Commit, ObjectError, ObjectKind, TreeEntry};
+pub use objects::{
+    decode_commit, decode_tree, encode_commit, encode_tree, Commit, ObjectError, ObjectKind,
+    TreeEntry,
+};
 pub use repository::{CommitLog, Repository, StatusEntry};
 
 #[cfg(test)]
@@ -33,11 +36,18 @@ mod real_git_interop_tests {
     use std::process::Command;
 
     fn git_available() -> bool {
-        Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rusty_git_real_interop_{name}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_git_real_interop_{name}_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -77,7 +87,9 @@ mod real_git_interop_tests {
         let repo = Repository::init(&dir).unwrap();
         std::fs::write(dir.join("hello.txt"), b"hello world").unwrap();
         repo.add(&["hello.txt".to_string()]).unwrap();
-        let commit_oid = repo.create_commit("Initial commit", "Rusty Git <rusty@git.test>").unwrap();
+        let commit_oid = repo
+            .create_commit("Initial commit", "Rusty Git <rusty@git.test>")
+            .unwrap();
 
         let output = Command::new("git")
             .arg("--git-dir")
@@ -90,7 +102,10 @@ mod real_git_interop_tests {
             .expect("git log should run");
         assert!(output.status.success(), "git log failed: {:?}", output);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains(&commit_oid[..7]), "expected {commit_oid} in: {stdout}");
+        assert!(
+            stdout.contains(&commit_oid[..7]),
+            "expected {commit_oid} in: {stdout}"
+        );
         assert!(stdout.contains("Initial commit"));
 
         let ls_tree = Command::new("git")
@@ -131,7 +146,10 @@ mod real_git_interop_tests {
         assert!(output.status.success(), "git ls-files failed: {:?}", output);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("a.txt"), "expected a.txt in: {stdout}");
-        assert!(stdout.contains("sub/b.txt"), "expected sub/b.txt in: {stdout}");
+        assert!(
+            stdout.contains("sub/b.txt"),
+            "expected sub/b.txt in: {stdout}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
