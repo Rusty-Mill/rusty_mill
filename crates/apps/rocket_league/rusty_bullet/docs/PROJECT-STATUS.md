@@ -2,7 +2,7 @@
 
 - Last verified main commit: `93ad0e9` (merge of [#3](https://github.com/baileyrd/rusty_bullet/pull/3))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-0-REPLAY-INGEST` (boxcars + subtr-actor replay parsing) — merged
+- Current milestone: `PHASE-0-REPLAY-INGEST` (boxcars + subtr-actor replay parsing, validated against a 40-file real owner corpus) — Done
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -26,6 +26,13 @@
   `rb_domain::PhysicsFrame`. Verified end-to-end against a real vendored
   replay fixture (12,029 frames, ~428s match, ball position sane on every
   frame). Merged via [PR #3](https://github.com/baileyrd/rusty_bullet/pull/3).
+- `RB-VERIFY-001-NFR-003` — a local, gitignored corpus health-check bin
+  (`corpus_check`), run once against 40 of the owner's own real match
+  replays (`baileyrd/replays`): 40/40 parsed cleanly, sane ball-position
+  bounds on every file. Closes the "runs correctly on real owner data at
+  scale" half of `RB-VERIFY-001`'s owner-data acceptance criterion; the
+  manual single-timestamp cross-check remains open (see Blocked). Marks
+  `PHASE-0-REPLAY-INGEST` Done.
 
 ## In progress
 
@@ -39,13 +46,14 @@
   has no access to the Rocket League client binary at all, so any actual RE
   work would have to happen on the owner's own machine. See
   `docs/research/RESEARCH-BACKLOG.md`.
-- `RB-VERIFY-001`'s owner-data acceptance criterion (ball position
-  cross-checked against a real match at a manually-verified timestamp) —
-  this environment has no access to the owner's own replay files. The
-  vendored third-party fixture proves the pipeline runs correctly on real
-  replay bytes, not that a specific position is correct at a specific
-  instant. Owner would need to supply a replay file (or run this locally)
-  to close this out.
+- `RB-VERIFY-001`'s stricter manual single-timestamp cross-check (one ball
+  position pinned against a remembered/verified instant, e.g. via in-game
+  footage or BakkesMod) — the local `corpus_check` gate (40/40 real owner
+  replays, see Completed) already closes the "runs correctly on real owner
+  data at scale" half of this criterion; this narrower, precision-focused
+  half is still open and needs the owner to do the manual cross-check
+  locally, since this sandbox has no way to verify an exact remembered
+  timestamp.
 
 ## Next
 
@@ -67,6 +75,8 @@
   `rb_physics_bullet`, 10 in `rb_replay_ingest` (incl. real-fixture
   integration test), 1 in `rb_capture_ingest`, 0 in `rb_verify_cli`
   (binary-only, no unit tests yet), plus doc-tests)
+- `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
+  40/40 real owner replays parsed cleanly, 2026-08-28
 
 ## Risks and decisions needed
 

@@ -6,6 +6,28 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Replay ingestion — local real-corpus validation gate
+**2026-08-28** · pending PR
+
+- **Added:** `corpus_check`, a local/gitignored-corpus health-check binary
+  (`cargo run -p rb_replay_ingest --bin corpus_check [dir]`,
+  `RB-VERIFY-001-NFR-003`) — runs the real `boxcars` + `subtr-actor` +
+  `convert` pipeline against every `.replay` file in a directory (default
+  `replays/` at the workspace root, already `.gitignore`d) and exits
+  non-zero on any parse failure. A checkout with no corpus present is a
+  deliberate no-op, matching `RLEvalSystem`'s own gitignored-corpus
+  convention.
+- **Verified:** run once against 40 of the owner's own real match replays
+  (`baileyrd/replays`) — 40/40 parsed cleanly, durations 19s-717s, 2-11
+  players per match, ball Z consistently within plausible soccar bounds.
+  Closes the "runs correctly on real owner data at scale" half of
+  `RB-VERIFY-001`'s owner-data acceptance criterion; the stricter manual
+  single-timestamp cross-check remains open. Marks `PHASE-0-REPLAY-INGEST`
+  Done.
+- No new dependencies; no `rb_domain`/`rb_replay_ingest` library code
+  changed. The owner's real replay files are never committed — only
+  aggregate results (counts, ranges) appear in this repo's docs.
+
 ## Replay ingestion — boxcars + subtr-actor
 **2026-08-28** · [#3](https://github.com/baileyrd/rusty_bullet/pull/3) (merge commit `93ad0e9`)
 

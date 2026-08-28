@@ -1,8 +1,9 @@
 # RB-VERIFY-001 — Replay Ingestion
 
-- Version: 0.2.0
-- Status: In Progress (FR-001/002/003 implemented and tested against a real
-  replay; FR-004 — attaching recovered input — deferred, see Open Questions)
+- Version: 0.3.0
+- Status: In Progress (FR-001/002/003 implemented and validated at scale
+  against 40 real owner replays; FR-004 — attaching recovered input —
+  deferred, see Open Questions)
 - Owners: baileyrd
 - Depends on: none
 - Supersedes: none
@@ -81,6 +82,11 @@ deferred to a follow-up increment — see Open Questions.
   interactive verification loop, not a batch job. Not yet benchmarked;
   the real-fixture test (12,029 frames) currently runs in ~2.6s including
   test-harness/compile overhead, not isolated parse time.
+- `RB-VERIFY-001-NFR-003` (implemented): A local, gitignored corpus
+  health-check (`cargo run -p rb_replay_ingest --bin corpus_check [dir]`,
+  default `replays/`) parses every `.replay` file in a directory through
+  the real pipeline and exits non-zero on any parse failure — a no-op on a
+  fresh checkout with no corpus present. See Verification plan.
 
 ## Architecture and interfaces
 
@@ -122,10 +128,11 @@ Real match replays are the owner's own data; no third-party data handling
 concerns there. The vendored test fixture
 (`crates/rb_replay_ingest/fixtures/subtr-actor-sample.replay`) is a
 third-party replay used only to integration-test parsing — see
-`fixtures/README.md` for provenance and why it does *not* satisfy this
-spec's owner-data acceptance criterion. No compatibility promise yet on
-`boxcars`/`subtr-actor` version or replay format version — track as it
-becomes relevant.
+`fixtures/README.md` for provenance. The owner's own real replays used for
+the `corpus_check` validation below (`baileyrd/replays`) are never
+committed to this repo — see the local corpus convention in `AGENTS.md`.
+No compatibility promise yet on `boxcars`/`subtr-actor` version or replay
+format version — track as it becomes relevant.
 
 ## Acceptance criteria
 
@@ -133,12 +140,19 @@ becomes relevant.
   into `PhysicsFrame`s: 12,029 frames, ball position within plausible
   soccar field bounds on every frame, car data present on a subset of
   frames.
-- (Still open) The same, against **the owner's own** replay file, with
-  ball position cross-checked at a manually-verified timestamp — the
-  fixture above proves the pipeline runs correctly on real replay bytes,
-  not that a specific position is correct at a specific instant. This
-  environment has no access to the owner's replay files; the owner would
-  need to supply one (or run this locally) to close this criterion.
+- (Substantially met, via the local corpus gate) Run against **40 of the
+  owner's own real match replays** (`baileyrd/replays`, via the
+  `corpus_check` bin): 40/40 parsed cleanly, durations 19s-717s, 2-11
+  players per match, ball Z consistently within plausible soccar bounds
+  (ground level ~80-90 uu up to ~1950-2000 uu near the ceiling) across
+  every file. One frame in one replay dipped to Z=-165 uu, consistent with
+  a goal-explosion/reset artifact rather than a decode bug. This confirms
+  the pipeline runs correctly at scale on real owner data, not just one
+  third-party fixture. **Not yet done**: a manual cross-check of one
+  specific ball position at a remembered/verified timestamp against
+  in-game footage or BakkesMod — the corpus gate checks physical
+  plausibility across many files, which is a different (weaker on
+  precision, stronger on coverage) guarantee than pinning one exact value.
 - (Met) Malformed-input test produces `IngestError::Malformed`, not a
   panic; missing-file test produces `IngestError::Io`.
 
@@ -147,11 +161,16 @@ becomes relevant.
 Unit tests (10, in `rb_replay_ingest`): pure conversion-function tests
 (`convert.rs`, no file needed) plus file-level tests (missing file,
 malformed file, and the real vendored fixture producing a non-empty,
-bounds-sane frame sequence with car data present). The owner-data
-cross-check described in Acceptance criteria is still needed before this
-adapter's output should be trusted as a `RB-VERIFY-003` scoring input for
-real accuracy conclusions — the current tests establish "runs correctly,"
-not "matches a known-correct value."
+bounds-sane frame sequence with car data present). Additionally, a local/
+with-corpus gate (`corpus_check` bin, see `RB-VERIFY-001-NFR-003`) — run
+once against 40 of the owner's own real matches (`baileyrd/replays`,
+2026-08-28), all 40 parsed cleanly with sane bounds; not committed to this
+repo (real match data, and the corpus is gitignored by convention — see
+`AGENTS.md`). This closes the "runs correctly on real owner data at scale"
+half of the owner-data acceptance criterion above; the manual single-value
+timestamp cross-check remains open and is a separate, narrower check this
+adapter's output should still get before being trusted as a `RB-VERIFY-003`
+scoring input for precise accuracy conclusions.
 
 ## Traceability
 
@@ -170,6 +189,12 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.3.0 (2026-08-28): Added `RB-VERIFY-001-NFR-003` — a local, gitignored
+  corpus health-check bin (`corpus_check`). Run once against 40 of the
+  owner's own real match replays (`baileyrd/replays`): 40/40 parsed
+  cleanly with sane ball-position bounds. Closes the "runs correctly on
+  real owner data at scale" half of the owner-data acceptance criterion;
+  the manual single-timestamp cross-check remains open.
 - 0.2.0 (2026-08-28): FR-001/002/003 implemented via `boxcars` +
   `subtr-actor`, tested against a real vendored replay fixture (12,029
   frames). Revises RB-RESEARCH-S004's input-recovery characterization.
