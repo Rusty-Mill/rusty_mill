@@ -42,7 +42,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::UnexpectedEof { needed, available } => {
-                write!(f, "unexpected EOF: needed {needed} bytes, but only {available} available")
+                write!(
+                    f,
+                    "unexpected EOF: needed {needed} bytes, but only {available} available"
+                )
             }
             Error::InvalidValue { field, value } => {
                 write!(f, "invalid value for {field}: {value}")
