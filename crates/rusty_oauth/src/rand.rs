@@ -52,13 +52,15 @@ mod imp {
 mod imp {
     use super::RandError;
 
-    #[allow(non_camel_case_types)]
+    // Named to match the Windows API exactly, not Rust convention -- an
+    // FFI binding is clearer when it reads the way the real API docs do.
+    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
     type NTSTATUS = i32;
-    #[allow(non_camel_case_types)]
+    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
     type ULONG = u32;
-    #[allow(non_camel_case_types)]
+    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
     type PUCHAR = *mut u8;
-    #[allow(non_camel_case_types)]
+    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
     type PVOID = *mut core::ffi::c_void;
 
     const BCRYPT_USE_SYSTEM_PREFERRED_RNG: ULONG = 0x0000_0002;
