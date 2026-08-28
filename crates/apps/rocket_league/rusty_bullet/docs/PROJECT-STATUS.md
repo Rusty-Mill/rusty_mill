@@ -1,6 +1,6 @@
 # Project Status
 
-- Last verified main commit: `a1b8a47` (merge of [#11](https://github.com/baileyrd/rusty_bullet/pull/11))
+- Last verified main commit: `59266ea` (merge of [#13](https://github.com/baileyrd/rusty_bullet/pull/13))
 - Verified at: 2026-08-28
 - Current milestone: `PHASE-0-EXIT` (`RB-VERIFY-003`'s ball scoring, car scoring, and timestamp-tolerant alignment are all now implemented; `rb_verify_cli` runs end-to-end mechanically, not yet a real fidelity comparison) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
