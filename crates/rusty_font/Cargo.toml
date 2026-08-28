@@ -10,11 +10,11 @@ keywords = ["font", "truetype", "rasterizer", "ttf", "no-std"]
 categories = ["text-processing", "no-std"]
 
 [dependencies]
-# Pinned git deps, not path deps: a `git = "..."` Cargo dependency on
-# this crate clones only this one repository, so a sibling `../rusty_wire`
-# checkout doesn't exist for any external consumer (see rusty_std's
-# Cargo.toml for the same fix, and rusty_tokio#254).
-rusty_wire = { git = "https://github.com/baileyrd/rusty_wire", rev = "4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b" }
+# rusty_wire is now a sibling in this same workspace -- plain path
+# dependency. rusty_simd/rusty_std remain pinned git deps (a `git = "..."`
+# dependency clones only that one repository, so a sibling checkout
+# doesn't exist for any external consumer) until they're merged in too.
+rusty_wire = { path = "../rusty_wire" }
 rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
 rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
 
