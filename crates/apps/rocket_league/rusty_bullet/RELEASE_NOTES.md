@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Timestamp-tolerant alignment
-**2026-08-28** · pending PR
+**2026-08-28** · [#13](https://github.com/baileyrd/rusty_bullet/pull/13) (merge commit `59266ea`)
 
 - **Added:** `rb_domain::divergence::score` now aligns frames by nearest
   `timestamp_secs` instead of list index (`RB-VERIFY-003-FR-003`) — an
