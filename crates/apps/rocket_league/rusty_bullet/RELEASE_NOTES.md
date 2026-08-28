@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Replay ingestion — boxcars + subtr-actor
-**2026-08-28** · not yet merged; link added once merged
+**2026-08-28** · [#3](https://github.com/baileyrd/rusty_bullet/pull/3) (merge commit `93ad0e9`)
 
 - **Added:** `rb_replay_ingest` now really parses `.replay` files
   (`RB-VERIFY-001-FR-001/002/003`): `boxcars` parses the raw replay/network

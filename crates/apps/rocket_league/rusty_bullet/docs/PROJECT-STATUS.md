@@ -1,9 +1,9 @@
 # Project Status
 
-- Last verified main commit: `966cef8` (see note below — will update once this work merges)
+- Last verified main commit: `93ad0e9` (merge of [#3](https://github.com/baileyrd/rusty_bullet/pull/3))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-0-REPLAY-INGEST` (boxcars + subtr-actor replay parsing)
-- Health: green — workspace builds, `fmt`/`clippy`/`test` all pass
+- Current milestone: `PHASE-0-REPLAY-INGEST` (boxcars + subtr-actor replay parsing) — merged
+- Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
 
@@ -18,20 +18,18 @@
   (ball) vs. static plane (ground) — per ADR-0004. Merged via
   [PR #1](https://github.com/baileyrd/rusty_bullet/pull/1).
 - Status/workflow sync — merged via [PR #2](https://github.com/baileyrd/rusty_bullet/pull/2).
+- `RB-VERIFY-001-FR-001/002/003` — `rb_replay_ingest` now really parses
+  `.replay` files: `boxcars` parses the replay/network stream,
+  `subtr-actor` resolves it into frame-indexed ball/car `RigidBody` state
+  (avoiding a hand-rolled actor-graph resolver — see the crate's
+  `Cargo.toml` dependency comment), and `convert.rs` maps that to
+  `rb_domain::PhysicsFrame`. Verified end-to-end against a real vendored
+  replay fixture (12,029 frames, ~428s match, ball position sane on every
+  frame). Merged via [PR #3](https://github.com/baileyrd/rusty_bullet/pull/3).
 
 ## In progress
 
-- `PHASE-0-REPLAY-INGEST` — `rb_replay_ingest` now implements
-  `RB-VERIFY-001-FR-001/002/003` for real: `boxcars` parses the replay/
-  network stream, `subtr-actor` resolves it into frame-indexed ball/car
-  `RigidBody` state (avoiding a hand-rolled actor-graph resolver — see the
-  crate's `Cargo.toml` dependency comment), and `convert.rs` maps that to
-  `rb_domain::PhysicsFrame`. Verified end-to-end against a real vendored
-  replay fixture (12,029 frames, ~428s match, ball position sane on every
-  frame). `RB-VERIFY-001-FR-004` (attaching recovered input) is
-  deliberately deferred — it needs an `rb_domain` schema decision made
-  jointly with `RB-VERIFY-002`, not bolted on ad hoc. Not yet merged (this
-  branch).
+- None.
 
 ## Blocked
 
