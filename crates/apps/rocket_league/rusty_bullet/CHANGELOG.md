@@ -50,6 +50,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   and multi-contact manifold resolution in the solver. `PhysicsWorld`
   gains an optional car body (`with_car`). Box-vs-sphere collision and
   driven car input remain not implemented.
+- `rb_physics_bullet`: ball-vs-car collision, completing
+  `RB-PHYSICS-001-FR-004` — analytic sphere-vs-box contact generation
+  (`collision::sphere_vs_box`/`contact_between`, handling both the
+  ordinary and deep-penetration cases) and a two-dynamic-body
+  sequential-impulse solver path (`solver::resolve_contact_between`).
+  `rb_domain::Quat` gains `conjugate`. Box-vs-box collision and driven car
+  input remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
@@ -57,6 +64,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet`'s `Sphere` type is replaced by `RigidBody` (with a
   `Shape` enum for sphere/box); `RigidBody::sphere(...)` replaces
   `Sphere::new(...)`.
+- `rb_physics_bullet::PhysicsWorld::step` is restructured into Bullet's
+  actual staged pipeline (integrate every body's velocity → resolve every
+  contact → integrate every body's transform) instead of stepping each
+  body fully in isolation, so ball-vs-car contact resolution sees the same
+  pre-integration state ground contacts do.
 ### Fixed
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —

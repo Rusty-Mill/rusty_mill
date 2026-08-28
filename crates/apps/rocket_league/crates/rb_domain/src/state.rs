@@ -200,6 +200,20 @@ impl Quat {
         *v + (uv * self.w + uuv) * 2.0
     }
 
+    /// The inverse rotation — matches `btQuaternion::inverse()`, which for
+    /// a unit quaternion (every `Quat` in this codebase always is one) is
+    /// just the conjugate: negate the vector part, keep `w`. Needed to
+    /// transform a world-space point into a rotated body's local frame
+    /// (`rb_physics_bullet`'s box-vs-sphere collision test).
+    pub fn conjugate(&self) -> Quat {
+        Quat {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
+    }
+
     /// Angular distance to another rotation, in radians (`0.0` = identical
     /// orientation, up to `PI` = maximally different). Used by
     /// `rb_domain::divergence` to score car-rotation drift
@@ -369,6 +383,17 @@ mod tests {
         let quarter_turn_z = Quat::new(0.0, 0.0, half.sin(), half.cos());
         let angle = Quat::IDENTITY.angle_to(&quarter_turn_z);
         assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn conjugate_undoes_a_rotation() {
+        let half = std::f32::consts::FRAC_PI_4;
+        let quarter_turn_z = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let v = Vec3::new(1.0, 2.0, 3.0);
+        let round_tripped = quarter_turn_z
+            .conjugate()
+            .rotate(&quarter_turn_z.rotate(&v));
+        assert!((round_tripped - v).length() < 1e-5);
     }
 
     #[test]
