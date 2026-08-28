@@ -4,18 +4,29 @@
 //! parsing and human-readable output only, no logic of its own (see
 //! `lib.rs` for why the actual wiring lives there instead).
 
-use rb_verify_cli::score_replay_against_capture;
+use rb_verify_cli::{score_replay_against_capture, DEFAULT_MAX_TIMESTAMP_DELTA_SECS};
 use std::env;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let (Some(replay_path), Some(capture_path)) = (args.next(), args.next()) else {
-        eprintln!("usage: rb-verify <replay-file> <capture-file>");
+        eprintln!("usage: rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]");
         return ExitCode::FAILURE;
     };
 
-    match score_replay_against_capture(replay_path, capture_path) {
+    let max_timestamp_delta_secs = match args.next() {
+        Some(raw) => match raw.parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("invalid max-timestamp-delta-secs: {raw:?}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    };
+
+    match score_replay_against_capture(replay_path, capture_path, max_timestamp_delta_secs) {
         Err(e) => {
             eprintln!("ingestion failed: {e}");
             ExitCode::FAILURE
