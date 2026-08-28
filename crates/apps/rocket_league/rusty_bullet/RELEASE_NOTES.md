@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Ball-vs-car collision
-**2026-08-28** · pending PR
+**2026-08-28** · [#17](https://github.com/baileyrd/rusty_bullet/pull/17) · `2f12c8f`
 
 - **Added:** `rb_physics_bullet` gains analytic sphere-vs-box contact
   generation (`collision::sphere_vs_box`, dispatched via
