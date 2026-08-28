@@ -71,20 +71,20 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 
 ## Open (tracked, not yet decided)
 
-### RB-RESEARCH-O001 — Build vs. integrate physics engine
+### RB-RESEARCH-O001 — Build vs. integrate physics engine (RESOLVED)
 
 - **Question**: Roll a from-scratch physics core (more control, matters
   more for the preservation goal and for tuning against the divergence
   metric) vs. integrate an existing engine (e.g. Rapier — faster path to a
   working netcode testbed, less faithful to Rocket League's actual
   Bullet-based car feel)?
-- **Status**: Open. Explicitly not decided by ADR-0003 (which settles the
-  fidelity *target*, not the implementation approach).
-- **Revisit trigger**: Once the Phase 0 verification pipeline exists and
-  can score both a from-scratch prototype and an integrated-engine
-  prototype against the same recorded ground truth, decide based on actual
-  divergence numbers rather than priors. Do not decide before that data
-  exists.
+- **Status**: Resolved by [ADR-0004](../adr/0004-bullet3-source-port-for-physics-core.md):
+  neither "unguided from scratch" nor "integrate an unrelated engine" — a
+  direct, cited Rust port of Bullet3's own (public, zlib-licensed)
+  algorithms, implemented as `crates/rb_physics_bullet`. Decided ahead of
+  `PHASE-0-EXIT` divergence data existing, on the strength of Bullet3's
+  direct relevance and permissive license — see ADR-0004's "Validation and
+  revisit triggers" for what would reopen this.
 - **Owner**: baileyrd.
 
 ### RB-RESEARCH-O002 — Binary reverse engineering as a supplementary source
@@ -92,18 +92,52 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 - **Question**: Should this project reverse-engineer the shipped Rocket
   League client binary to recover client-side physics constants, as a
   supplementary verification source beyond replay/BakkesMod data?
-- **Status**: Open, with real legal/practical ambiguity. No prior art found
-  doing this specifically (for Rocket League's physics constants).
-- **Constraints to resolve before proceeding**: EULA/ToS terms around
-  reverse engineering; whether any output derived from it (constants,
-  documentation) would be safe to keep in this repository, given the
-  project's stated non-goal of using or redistributing any Psyonix code
-  (see SYSTEM-ARCHITECTURE.md "Legal and IP boundary"). Extracting a
-  numeric constant is a materially different question from extracting
-  code, and that distinction hasn't been legally evaluated here.
-- **Revisit trigger**: Requires explicit owner sign-off after that
-  legal/practical review — not an inferred green light from this document
-  or from project momentum. Not blocking Phase 0 or Phase 1 start.
+- **Status**: Open — legal review below completed; practical work not
+  started and currently blocked (see "Practical blocker"). No prior art
+  found doing this specifically (for Rocket League's physics constants).
+- **Legal review findings** (2026-08-28, web search against Epic Games'
+  and Psyonix's current public terms — not legal advice, and not a
+  substitute for the owner's own counsel before acting on it):
+  - Psyonix's own EULA page (psyonix.com/eula) redirects to Epic Games'
+    Terms of Service/EULA family. Epic's EULAs (Epic Games Store EULA,
+    Fortnite EULA, and the general pattern across their agreements)
+    contain an explicit contractual clause prohibiting reverse
+    engineering, decompiling, or disassembling the software, and deriving
+    source code from it.
+  - Rocket League's Code of Conduct separately prohibits "exposing
+    unreleased features or content found within Rocket League's code,"
+    which would plausibly also cover publishing anything recovered via
+    binary RE, independent of the EULA's RE clause itself.
+  - This is a **contractual** prohibition (breach of the EULA the owner
+    agreed to by installing/playing the game), which is a different legal
+    question from the U.S. DMCA's §1201(f) interoperability exception
+    (which permits some circumvention specifically for achieving
+    interoperability of independently created software) — this backlog
+    entry does not attempt to resolve how those two interact for this
+    specific case; that is exactly the kind of judgment call that needs
+    the owner's own legal counsel, not a research-backlog conclusion.
+  - Net effect of the legal review: proceeding would likely breach the
+    EULA the owner has agreed to, independent of whether it's otherwise
+    lawful. That's a real cost (account/access risk at minimum) this
+    backlog did not previously make concrete.
+- **Practical blocker** (2026-08-28): this project's current working
+  environment (a sandboxed cloud dev container) has no Rocket League
+  installation and no access to the client binary at all. Any actual RE
+  work would have to happen on the owner's own machine, not in this
+  session — this document can research the legal question but cannot
+  itself perform or stage binary analysis here.
+- **Constraints to resolve before proceeding**: given the above, whether
+  any output derived from it (constants, documentation) would be safe to
+  keep in this repository at all, given the project's stated non-goal of
+  using or redistributing any Psyonix code (see SYSTEM-ARCHITECTURE.md
+  "Legal and IP boundary"). Extracting a numeric constant is arguably a
+  different question from extracting code, but that distinction has not
+  been legally evaluated here and shouldn't be assumed favorable.
+- **Revisit trigger**: Requires explicit owner sign-off after the owner's
+  own review of the above (ideally with actual legal counsel, given the
+  EULA breach risk this review surfaced) — not an inferred green light
+  from this document or from project momentum. Not blocking Phase 0 or
+  Phase 1 start; both have proceeded without it.
 - **Owner**: baileyrd.
 
 ### RB-RESEARCH-O003 — Scope of BakkesMod offline-capture tooling
@@ -123,6 +157,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 
 ## Change history
 
+- 2026-08-28: RB-RESEARCH-O001 resolved (ADR-0004: direct Bullet3 source
+  port). RB-RESEARCH-O002's legal review completed (Epic/Psyonix EULA and
+  Code of Conduct both prohibit reverse engineering contractually; DMCA
+  §1201(f) interoperability exception is a separate, unresolved question
+  needing the owner's own counsel) and its practical blocker documented
+  (no Rocket League client binary accessible in this environment) — still
+  open pending owner sign-off, not advanced further.
 - 2026-08-28: Initial backlog created at bootstrap, transcribing prior
   research into settled entries and the three open questions from the
   project handoff.

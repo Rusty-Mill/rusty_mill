@@ -1,0 +1,67 @@
+# Third-Party Notices
+
+## Bullet Physics (Bullet3) — algorithm port
+
+`crates/rb_physics_bullet` is a from-scratch Rust **translation of specific
+algorithms** from [Bullet Physics (bullet3)](https://github.com/bulletphysics/bullet3),
+not a binding, a vendored copy, or a build of Bullet's C++ source. No
+Bullet3 source file is copied, compiled, or linked into this repository —
+the Rust code was written independently, informed by reading the referenced
+functions to reproduce their math and control flow faithfully.
+
+This notice exists to satisfy zlib license condition 1 (the origin of this
+software must not be misrepresented) and to comply with condition 2
+(altered source versions must be plainly marked as such) for the portions
+of `rb_physics_bullet` derived from Bullet3.
+
+### Bullet3's license (as it applies to the original work this ports)
+
+```
+Bullet Continuous Collision Detection and Physics Library
+Copyright (c) 2003-2006 Erwin Coumans  https://bulletphysics.org
+
+This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from
+the use of this software.
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software in
+   a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
+Full text: <https://github.com/bulletphysics/bullet3/blob/main/LICENSE.txt>.
+
+### What was ported, from where
+
+Each `rb_physics_bullet` module names its Bullet3 source file(s) in its
+module doc comment. Summary, with the exact functions this port's
+algorithms are derived from:
+
+| `rb_physics_bullet` module | Bullet3 source | Function(s) ported |
+|---|---|---|
+| `integrate::apply_gravity`, `apply_damping`, `integrate_velocities` | `src/BulletDynamics/Dynamics/btRigidBody.cpp` | `applyGravity`, `applyDamping`, `integrateVelocities` |
+| `integrate::integrate_transform` | `src/LinearMath/btTransformUtil.h` | `btTransformUtil::integrateTransform` |
+| `solver::setup_rows`, `resolve_row` | `src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp` | `setupContactConstraint`, `setupFrictionConstraint`, `resolveSingleConstraintRowGeneric`, `resolveSingleConstraintRowLowerLimit`, `restitutionCurve` |
+| `solver::plane_space` | `src/LinearMath/btVector3.h` | `btPlaneSpace1` |
+
+Deliberate, documented deviations from the original algorithms (no split
+impulse, no SIMD, scalar-only inertia, no warm-starting/sleeping, a
+different restitution/friction combine mode) are noted in the relevant Rust
+module's doc comments and in `RB-PHYSICS-001`/ADR-0004 — this port does not
+claim behavioral equivalence with upstream Bullet3, only that its core
+integration and contact-solving math is derived from it.
+
+### Not from Bullet3
+
+Rocket League's own modified/forked Bullet integration is **not** available
+publicly and is not used, referenced, or reverse-engineered by this port —
+see `docs/architecture/SYSTEM-ARCHITECTURE.md`'s "Legal and IP boundary".
+Everything in this file concerns the public, zlib-licensed upstream Bullet3
+project only.

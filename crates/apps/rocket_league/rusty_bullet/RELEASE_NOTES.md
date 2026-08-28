@@ -6,6 +6,33 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Physics core v0 — Bullet3 port (sphere vs. ground)
+**2026-08-28** · commits on `claude/rocket-league-server-clone-u74q45` (not yet merged; links added once merged)
+
+- **Added:** `rb_physics_bullet`, a from-scratch Rust port of specific
+  Bullet3 (zlib-licensed) algorithms — rigid-body integration
+  (`btRigidBody`) and the sequential-impulse contact solver
+  (`btSequentialImpulseConstraintSolver`) — scoped to a dynamic sphere (the
+  ball) against a static plane (the ground). Resolves the build-vs-integrate
+  physics question via ADR-0004, ahead of `PHASE-0-EXIT` divergence data
+  existing, on the strength of Bullet3's direct relevance and permissive
+  license.
+- **Added:** vector/quaternion algebra (dot, cross, normalize, quaternion
+  product/rotation) on `rb_domain`'s `Vec3`/`Quat`, justified by the
+  physics crate as a second real consumer.
+- Known, deliberate scope cuts stated plainly: no car (box) rigid bodies or
+  general 3x3 inertia tensor yet, no split impulse, no warm-starting or
+  sleeping — a bouncy (restitution > 0) resting contact does not settle
+  under this solver, by design of what v0 covers, not by accident. See
+  `RB-PHYSICS-001` and `rb_physics_bullet::solver`'s module doc.
+- Also completed the legal/practical review `RB-RESEARCH-O002` (binary
+  reverse engineering of the shipped client) needed: Epic/Psyonix's EULA
+  and Rocket League's Code of Conduct both contractually prohibit reverse
+  engineering, and this sandbox has no access to the game binary regardless
+  — still open pending the owner's own legal counsel and sign-off.
+- 26 new unit tests (41 total in the workspace); `cargo fmt --check`,
+  `clippy -D warnings`, and `cargo test --workspace` all pass.
+
 ## Repo bootstrap — full lifecycle baseline
 **2026-08-28** · commit on `claude/rocket-league-server-clone-u74q45` (not yet merged; link added once merged)
 
