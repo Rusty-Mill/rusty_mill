@@ -5311,6 +5311,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_url"
+version = "0.1.0"
+dependencies = [
+ "idna",
+]
+
+[[package]]
 name = "rusty_win32"
 version = "0.1.0"
 

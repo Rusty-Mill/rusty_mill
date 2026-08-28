@@ -46,6 +46,7 @@ have landed so far.
 | [`rusty-mcp`](crates/rusty_mcp/crates/rusty-mcp) | `crates/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
 | [`rusty-mcp-demo`](crates/rusty_mcp/crates/rusty-mcp-demo) | `crates/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
 | [`rusty_stream`](crates/rusty_stream) | `crates/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
+| [`rusty_url`](crates/rusty_url) | `crates/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -195,6 +196,13 @@ does the reverse (Windows-only behind `cfg`, portable everywhere else).
 Rather than rewrite its internals to be cross-platform, the workflow
 excludes it (`--exclude rusty_stream`) from the `windows-latest` leg's
 `--workspace` clippy/build/test steps specifically.
+
+`rusty_url` has no dependency relationship with anything already in this
+repo — its one dependency, `idna`, is a crates.io crate — so nothing
+needed swapping. Unlike `rusty_stream`, it already `cfg`-gates its
+Windows-specific `file://` path handling internally, so it's expected to
+be portable across both CI platforms despite its own CI only ever having
+run on `ubuntu-latest`.
 
 ## History
 
