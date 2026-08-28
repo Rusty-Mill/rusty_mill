@@ -1,14 +1,23 @@
 [package]
 name = "platform-async"
 description = "Async trait counterparts to rustils::platform. Starts with the process domain only. No I/O, no unsafe."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
-platform.workspace = true
+# Pinned to a rev, not a branch, matching rustils' own D-12/D-15 pattern
+# for its pinned git dependencies (rusty_libc/rusty_win32): one source of
+# truth for the sync types this workspace builds an async layer above,
+# bumped deliberately rather than floating. `rustils` is a separate repo
+# outside this monorepo's consolidation scope, so this stays a pinned
+# git dependency rather than a path dependency.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -51,6 +51,12 @@ have landed so far.
 | [`rusty_json`](crates/rusty_json) | `crates/rusty_json` | From-scratch JSON library, `no_std`-capable, with `serde` interop |
 | [`rusty_json-derive`](crates/rusty_json/rusty_json-derive) | `crates/rusty_json/rusty_json-derive` | `rusty_json`'s `#[derive(RustyJson)]` proc-macro |
 | [`rusty_oauth`](crates/rusty_oauth) | `crates/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |
+| [`reactor-core`](crates/rustils_async/crates/reactor-core) | `crates/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
+| [`platform-async`](crates/rustils_async/crates/platform-async) | `crates/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
+| [`platform-async-mock`](crates/rustils_async/crates/platform-async-mock) | `crates/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |
+| [`platform-async-linux`](crates/rustils_async/crates/platform-async-linux) | `crates/rustils_async/crates/platform-async-linux` | The real Linux backend for `platform-async`: `pidfd` + `epoll` async wait path |
+| [`threading`](crates/rustils_async/crates/threading) | `crates/rustils_async/crates/threading` | Minimal multithreading primitives: scoped-thread spawn, `Mutex`/`RwLock` with explicit poisoning policy |
+| [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -236,6 +242,25 @@ lists none, in either `[dependencies]` or `[dev-dependencies]`), so
 nothing needed swapping despite its `Cargo.toml` naming an HTTP client
 and JSON in its description — it hand-rolls both concerns internally
 rather than depending on `rusty_http`/`rusty_json`.
+
+`rustils_async` was itself a six-crate nested Cargo workspace
+(`reactor-core`, `platform-async`, `platform-async-mock`,
+`platform-async-linux`, `threading`, `coreutils-async`) — de-inherited
+from `.workspace = true` the same way `rusty_mcp` and `rusty_serde`
+were, since this outer root doesn't declare a `[workspace.package]`/
+`[workspace.dependencies]` for a nested workspace's fields to keep
+resolving against once it joins `members` directly. Its `platform`/
+`platform-mock`/`platform-linux` dependencies are pinned `git` revs
+against `baileyrd/rustils` — a separate repo outside this monorepo's
+consolidation scope, the same shape as `rusty_stream`'s `rusty_wire`
+dependency — so those stayed pinned `git` dependencies rather than
+becoming `path` dependencies; the sibling crates within this same
+crate group (`platform-async`, `reactor-core`, `platform-async-linux`)
+became `path` dependencies on each other. `platform-async-linux`
+self-gates its entire body behind `#![cfg(target_os = "linux")]` at
+the crate root (a no-op crate everywhere else), so — unlike
+`rusty_stream`'s io_uring dependency — it needed no CI workaround: it
+follows `rusty_win32`'s portable-by-internal-`cfg` shape instead.
 
 ## History
 
