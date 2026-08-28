@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Box-shaped car bodies
-**2026-08-28** · pending PR
+**2026-08-28** · [#15](https://github.com/baileyrd/rusty_bullet/pull/15) · `24468cf`
 
 - **Added:** `rb_physics_bullet` gains a unified `RigidBody`/`Shape`
   design (`RB-PHYSICS-001-FR-004`) — one rigid-body type serving both the
