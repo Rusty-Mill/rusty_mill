@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Car-state divergence scoring
-**2026-08-28** · pending PR
+**2026-08-28** · [#11](https://github.com/baileyrd/rusty_bullet/pull/11) (merge commit `a1b8a47`)
 
 - **Added:** `rb_domain::divergence::DivergenceScore` gains a `cars:
   CarDivergence` field — mean/max car position distance, rotation distance
