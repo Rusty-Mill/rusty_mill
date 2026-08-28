@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Ball-vs-car collision
+**2026-08-28** · pending PR
+
+- **Added:** `rb_physics_bullet` gains analytic sphere-vs-box contact
+  generation (`collision::sphere_vs_box`, dispatched via
+  `collision::contact_between`) completing `RB-PHYSICS-001-FR-004` — the
+  ball and car now actually collide with each other, not just the ground.
+  A closed-form closest-point-on-box query handles the ordinary case; a
+  second case handles the sphere's center already being inside the box
+  (deep penetration), pushing out through whichever face is nearest.
+- **Added:** a two-dynamic-body sequential-impulse solver path
+  (`solver::resolve_contact_between`), generalizing the existing
+  body-vs-static-plane constraint rows to carry both bodies' mass/inertia
+  contributions — the generic path Bullet's real solver always runs
+  (`resolve_contacts`'s one-body-only shortcut only worked because a
+  static plane's side of that math is always zero).
+- **Added:** `rb_domain::Quat::conjugate` (`btQuaternion::inverse`),
+  needed to transform a world-space point into a rotated box's local
+  frame.
+- **Changed:** `PhysicsWorld::step` is restructured into Bullet's actual
+  staged pipeline — integrate every body's velocity, then resolve every
+  contact (ground contacts for each body, then the one ball-vs-car
+  contact), then integrate every body's transform — instead of stepping
+  each body fully in isolation, so ball-vs-car resolution sees the same
+  pre-integration state ground contacts do.
+- **Not implemented** (explicitly, not silently dropped): box-vs-box
+  collision (two cars against each other) — this scope has exactly one
+  car, so it never arises; driven car input remains a free rigid box with
+  nothing coupling throttle/steer/boost into it.
+- 11 new unit tests in `rb_physics_bullet` (58 total) and 1 in `rb_domain`
+  (23 total), including an end-to-end `PhysicsWorld::step` test confirming
+  a ball shot at a stationary car actually bounces off it instead of
+  tunnelling through, and solver tests confirming the two-body path
+  conserves linear momentum and leaves a much heavier body barely moving
+  from a much lighter body's impact.
+
+---
+
 ## Box-shaped car bodies
 **2026-08-28** · [#15](https://github.com/baileyrd/rusty_bullet/pull/15) · `24468cf`
 

@@ -2,7 +2,7 @@
 
 - Last verified main commit: `24468cf` (merge of [#15](https://github.com/baileyrd/rusty_bullet/pull/15))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution all implemented in `rb_physics_bullet`; box-vs-sphere collision and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, and ball-vs-car collision all implemented in `rb_physics_bullet`; box-vs-box collision, driven car input, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -97,6 +97,25 @@
   tests (47 total in `rb_physics_bullet`), including a dropped-box
   settling test confirming multi-contact resolution keeps a symmetric
   box level instead of spuriously tipping it.
+- `RB-PHYSICS-001-FR-004` (ball-vs-car collision, completing FR-004) —
+  `rb_physics_bullet` gains analytic sphere-vs-box contact generation
+  (`collision::sphere_vs_box`, a closed-form closest-point-on-box query
+  handling both the ordinary case and a sphere-center-embedded-in-box
+  deep-penetration case) and a two-dynamic-body sequential-impulse solver
+  path (`solver::resolve_contact_between`) generalizing the existing
+  body-vs-static-plane rows to carry both bodies' mass/inertia
+  contributions, rather than assuming one side is static. `PhysicsWorld::step`
+  was restructured into Bullet's actual staged pipeline (integrate every
+  body's velocity → resolve every contact, ground and ball-vs-car → integrate
+  every body's transform) so ball-vs-car resolution sees the same
+  pre-integration state ground contacts do. `rb_domain::Quat` gains
+  `conjugate` (needed to transform a world point into the box's local
+  frame). **Not** implemented: box-vs-box collision (doesn't block this
+  scope — there's only one car) and driven car input. 11 new unit tests in
+  `rb_physics_bullet` (58 total) plus 1 in `rb_domain` (23 total),
+  including an end-to-end `PhysicsWorld::step` test confirming a ball shot
+  at a stationary car actually bounces off it instead of tunnelling
+  through.
 
 ## In progress
 
@@ -133,28 +152,29 @@
   produces still isn't a meaningful fidelity comparison — there's still no
   Phase 1 candidate physics engine wired up to actually consume recorded
   inputs and produce a comparable trajectory (`rb_physics_bullet` now has
-  a car body, but nothing yet connects it to recorded controller input or
-  to `rb_verify_cli`).
-- `RB-PHYSICS-001`'s box-vs-sphere (car-vs-ball) collision and driven car
-  input — both real, not-yet-started follow-up work (see the spec's
-  Non-goals/Open questions), needed before a car in this physics core can
-  do anything beyond free-fall and resting on the ground in isolation.
+  a car body and ball-vs-car collision, but nothing yet connects it to
+  recorded controller input or to `rb_verify_cli`).
+- `RB-PHYSICS-001`'s box-vs-box collision (two cars against each other)
+  and driven car input — both real, not-yet-started follow-up work (see
+  the spec's Non-goals/Open questions); box-vs-box doesn't block this
+  scope (only one car exists), but driven input is needed before a car in
+  this physics core can do anything beyond free-fall, resting on the
+  ground, and passively bouncing off the ball.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. Box-vs-sphere (car-vs-ball) collision and/or driven car input — either
-   is real follow-up work for `rb_physics_bullet` now that box bodies
-   exist; `RB-PHYSICS-001-FR-005` (constant calibration) needs
-   `PHASE-0-EXIT` real data regardless.
+2. Driven car input — real follow-up work for `rb_physics_bullet` now that
+   box bodies and ball-vs-car collision both exist; `RB-PHYSICS-001-FR-005`
+   (constant calibration) needs `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (96 tests: 22 in `rb_domain`, 47 in
+- `cargo test --workspace`: pass (108 tests: 23 in `rb_domain`, 58 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

@@ -1,9 +1,16 @@
 //! Sequential-impulse contact solver, ported from
 //! `bullet3/src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp`
-//! (zlib license — see `THIRD_PARTY_NOTICES.md`), resolving one dynamic
-//! body (sphere or box, via `RigidBody`'s general 3x3 inverse inertia
-//! tensor — see `body.rs`) against one static plane's contact manifold
-//! (`resolve_contacts`, 1 to 4 points depending on shape/orientation).
+//! (zlib license — see `THIRD_PARTY_NOTICES.md`). Two paths:
+//! - `resolve_contacts`: one dynamic body (sphere or box, via `RigidBody`'s
+//!   general 3x3 inverse inertia tensor — see `body.rs`) against one static
+//!   plane's contact manifold (1 to 4 points depending on shape/orientation).
+//! - `resolve_contact_between`: two dynamic bodies against each other's
+//!   single contact point (the ball-vs-car case — `sphere_vs_box` never
+//!   produces more than one). This is the generic two-body path Bullet's
+//!   real solver always runs (every constraint row carries both bodies'
+//!   mass/inertia contributions); `resolve_contacts` only got away with a
+//!   one-body-only version because a static plane's side of that math is
+//!   always zero.
 //!
 //! Deliberate, documented deviations from Bullet's actual solver (tracked
 //! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
@@ -263,11 +270,225 @@ pub fn resolve_contacts(body: &mut RigidBody, plane: &StaticPlane, contacts: &[C
     body.angular_velocity += delta.angular;
 }
 
+/// Like `ConstraintRow`, but carrying both bodies' torque axis/angular
+/// component (`_a`/`_b`) instead of assuming one side is static.
+struct TwoBodyRow {
+    direction: Vec3,
+    torque_axis_a: Vec3,
+    angular_component_a: Vec3,
+    torque_axis_b: Vec3,
+    angular_component_b: Vec3,
+    jac_diag_ab_inv: f32,
+    rhs: f32,
+    cfm: f32,
+    lower_limit: f32,
+    upper_limit: f32,
+    applied_impulse: f32,
+}
+
+/// Two-body version of `effective_mass_denom`: each body contributes its
+/// own `inv_mass + direction · (angular_component × rel_pos)` term to the
+/// shared denominator, matching Bullet's generic (both-sides-dynamic)
+/// constraint setup.
+#[allow(clippy::type_complexity)]
+fn effective_mass_denom_two_body(
+    a: &RigidBody,
+    b: &RigidBody,
+    rel_pos_a: &Vec3,
+    rel_pos_b: &Vec3,
+    direction: &Vec3,
+) -> (Vec3, Vec3, Vec3, Vec3, f32) {
+    let torque_axis_a = rel_pos_a.cross(direction);
+    let angular_component_a = a.inv_inertia_world().mul_vec3(&torque_axis_a);
+    let torque_axis_b = rel_pos_b.cross(direction);
+    let angular_component_b = b.inv_inertia_world().mul_vec3(&torque_axis_b);
+    let denom = a.inv_mass()
+        + b.inv_mass()
+        + direction.dot(&angular_component_a.cross(rel_pos_a))
+        + direction.dot(&angular_component_b.cross(rel_pos_b));
+    (
+        torque_axis_a,
+        angular_component_a,
+        torque_axis_b,
+        angular_component_b,
+        denom,
+    )
+}
+
+/// Per-body accumulated velocity change for the two-body solver — the
+/// two-body analog of `DeltaVelocity`.
+struct TwoBodyDelta {
+    linear_a: Vec3,
+    angular_a: Vec3,
+    linear_b: Vec3,
+    angular_b: Vec3,
+}
+
+impl TwoBodyDelta {
+    fn zero() -> TwoBodyDelta {
+        TwoBodyDelta {
+            linear_a: Vec3::ZERO,
+            angular_a: Vec3::ZERO,
+            linear_b: Vec3::ZERO,
+            angular_b: Vec3::ZERO,
+        }
+    }
+}
+
+/// Two-body version of `setup_rows`. `combined_restitution` is passed in
+/// explicitly (rather than stashed on a copied body, as `resolve_contacts`
+/// does) since here there's no single "the body" to stash it on.
+fn setup_two_body_rows(
+    a: &RigidBody,
+    b: &RigidBody,
+    contact: &Contact,
+    combined_restitution: f32,
+    dt: f32,
+) -> [TwoBodyRow; 3] {
+    let rel_pos_a = contact.point - a.position;
+    let rel_pos_b = contact.point - b.position;
+    let inv_dt = 1.0 / dt;
+
+    let relative_velocity_along = |dir: &Vec3| -> f32 {
+        dir.dot(&(a.velocity_at_point(&rel_pos_a) - b.velocity_at_point(&rel_pos_b)))
+    };
+
+    let (
+        normal_torque_axis_a,
+        normal_angular_component_a,
+        normal_torque_axis_b,
+        normal_angular_component_b,
+        denom,
+    ) = effective_mass_denom_two_body(a, b, &rel_pos_a, &rel_pos_b, &contact.normal);
+    let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
+
+    let rel_vel = relative_velocity_along(&contact.normal);
+    let restitution = restitution_curve(
+        rel_vel,
+        combined_restitution,
+        RESTITUTION_VELOCITY_THRESHOLD,
+    );
+
+    let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
+    let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
+        (0.0, restitution - rel_vel - gap_with_slop * inv_dt)
+    } else {
+        (-gap_with_slop * ERP2 * inv_dt, restitution - rel_vel)
+    };
+
+    let normal_row = TwoBodyRow {
+        direction: contact.normal,
+        torque_axis_a: normal_torque_axis_a,
+        angular_component_a: normal_angular_component_a,
+        torque_axis_b: normal_torque_axis_b,
+        angular_component_b: normal_angular_component_b,
+        jac_diag_ab_inv,
+        rhs: (positional_error + velocity_error) * jac_diag_ab_inv,
+        cfm: GLOBAL_CFM * jac_diag_ab_inv,
+        lower_limit: 0.0,
+        upper_limit: UPPER_LIMIT,
+        applied_impulse: 0.0,
+    };
+
+    let (t1, t2) = plane_space(&contact.normal);
+    let friction_row = |dir: Vec3| -> TwoBodyRow {
+        let (torque_axis_a, angular_component_a, torque_axis_b, angular_component_b, denom) =
+            effective_mass_denom_two_body(a, b, &rel_pos_a, &rel_pos_b, &dir);
+        let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
+        let rel_vel = relative_velocity_along(&dir);
+        TwoBodyRow {
+            direction: dir,
+            torque_axis_a,
+            angular_component_a,
+            torque_axis_b,
+            angular_component_b,
+            jac_diag_ab_inv,
+            rhs: -rel_vel * jac_diag_ab_inv,
+            cfm: 0.0,
+            lower_limit: 0.0,
+            upper_limit: 0.0,
+            applied_impulse: 0.0,
+        }
+    };
+
+    [normal_row, friction_row(t1), friction_row(t2)]
+}
+
+/// Two-body version of `resolve_row`: the relative-velocity term along a
+/// row's direction is body A's contribution minus body B's, and a solved
+/// impulse pushes A along `+direction` and B along `-direction` (Newton's
+/// third law) — matching `contact_between`'s normal convention (points
+/// from B toward A).
+fn resolve_two_body_row(
+    row: &mut TwoBodyRow,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    delta: &mut TwoBodyDelta,
+) {
+    let delta_vel_dot_n = row.direction.dot(&delta.linear_a)
+        + row.torque_axis_a.dot(&delta.angular_a)
+        - row.direction.dot(&delta.linear_b)
+        - row.torque_axis_b.dot(&delta.angular_b);
+
+    let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+
+    let sum = row.applied_impulse + delta_impulse;
+    if sum < row.lower_limit {
+        delta_impulse = row.lower_limit - row.applied_impulse;
+        row.applied_impulse = row.lower_limit;
+    } else if sum > row.upper_limit {
+        delta_impulse = row.upper_limit - row.applied_impulse;
+        row.applied_impulse = row.upper_limit;
+    } else {
+        row.applied_impulse = sum;
+    }
+
+    delta.linear_a += row.direction * (inv_mass_a * delta_impulse);
+    delta.angular_a += row.angular_component_a * delta_impulse;
+    delta.linear_b -= row.direction * (inv_mass_b * delta_impulse);
+    delta.angular_b -= row.angular_component_b * delta_impulse;
+}
+
+/// Resolves one contact point between two dynamic bodies (`a`, `b`) —
+/// `contact` must have come from `collision::contact_between(a, b)` (its
+/// `normal` convention and `rel_pos` derivation both assume that argument
+/// order). Only ever called with exactly one contact (unlike
+/// `resolve_contacts`'s manifold): `sphere_vs_box`, the only two-dynamic-
+/// body pairing in this scope, always produces at most one point.
+pub fn resolve_contact_between(a: &mut RigidBody, b: &mut RigidBody, contact: &Contact, dt: f32) {
+    let combined_restitution = combine_restitution(a.restitution, b.restitution);
+    let combined_friction = combine_friction(a.friction, b.friction);
+
+    let mut rows = setup_two_body_rows(a, b, contact, combined_restitution, dt);
+    let mut delta = TwoBodyDelta::zero();
+    let inv_mass_a = a.inv_mass();
+    let inv_mass_b = b.inv_mass();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, &mut delta);
+
+        let friction_limit = combined_friction * rows[0].applied_impulse;
+        rows[1].lower_limit = -friction_limit;
+        rows[1].upper_limit = friction_limit;
+        rows[2].lower_limit = -friction_limit;
+        rows[2].upper_limit = friction_limit;
+
+        resolve_two_body_row(&mut rows[1], inv_mass_a, inv_mass_b, &mut delta);
+        resolve_two_body_row(&mut rows[2], inv_mass_a, inv_mass_b, &mut delta);
+    }
+
+    a.linear_velocity += delta.linear_a;
+    a.angular_velocity += delta.angular_a;
+    b.linear_velocity += delta.linear_b;
+    b.angular_velocity += delta.angular_b;
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::collision::contacts_vs_plane;
+    use crate::collision::{contact_between, contacts_vs_plane};
 
     fn ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
@@ -391,5 +612,83 @@ mod tests {
         assert!(p.dot(&q).abs() < 1e-6);
         assert!((p.length() - 1.0).abs() < 1e-5);
         assert!((q.length() - 1.0).abs() < 1e-5);
+    }
+
+    fn car_at_origin() -> RigidBody {
+        RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, Vec3::ZERO)
+    }
+
+    fn overlapping_ball() -> RigidBody {
+        RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0))
+    }
+
+    /// Zero penetration on purpose: the deep overlap `overlapping_ball()`
+    /// gives is realistic for "detected mid-frame", but its Baumgarte
+    /// positional-correction term (proportional to penetration depth) then
+    /// dominates the post-solve relative velocity, which isn't what this
+    /// test means to check — same reasoning as `downward_impact_bounces_up_
+    /// proportional_to_restitution` using an exactly-touching sphere.
+    fn touching_ball() -> RigidBody {
+        RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 92.75, 0.0, 0.0))
+    }
+
+    #[test]
+    fn inelastic_head_on_collision_leaves_no_residual_closing_speed() {
+        let mut ball = touching_ball();
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
+        let mut car = car_at_origin();
+        car.restitution = 0.0;
+        let contact = contact_between(&ball, &car).unwrap();
+        resolve_contact_between(&mut ball, &mut car, &contact, 1.0 / 60.0);
+        let rel_vel = contact
+            .normal
+            .dot(&(ball.linear_velocity - car.linear_velocity));
+        assert!(
+            rel_vel.abs() < 1e-2,
+            "expected no residual closing speed, got {rel_vel}"
+        );
+    }
+
+    #[test]
+    fn collision_conserves_linear_momentum() {
+        let mut ball = overlapping_ball();
+        ball.restitution = 0.8;
+        ball.linear_velocity = Vec3::new(-500.0, 0.0, 0.0);
+        let mut car = car_at_origin();
+        car.restitution = 0.8;
+        car.linear_velocity = Vec3::new(50.0, 0.0, 0.0);
+        let before = ball.linear_velocity * ball.mass() + car.linear_velocity * car.mass();
+        let contact = contact_between(&ball, &car).unwrap();
+        resolve_contact_between(&mut ball, &mut car, &contact, 1.0 / 60.0);
+        let after = ball.linear_velocity * ball.mass() + car.linear_velocity * car.mass();
+        assert!(
+            (before - after).length() < 1.0,
+            "expected momentum conservation, before={before:?} after={after:?}"
+        );
+    }
+
+    #[test]
+    fn a_much_heavier_body_barely_moves_from_the_collision() {
+        // The car (mass 180) is vastly heavier than the ball (mass 1) —
+        // the ball should bounce back while the car barely budges, the
+        // same qualitative behavior as a ball bouncing off a wall.
+        let mut ball = touching_ball();
+        ball.restitution = 0.6;
+        ball.linear_velocity = Vec3::new(-500.0, 0.0, 0.0);
+        let mut car = car_at_origin();
+        car.restitution = 0.6;
+        let contact = contact_between(&ball, &car).unwrap();
+        resolve_contact_between(&mut ball, &mut car, &contact, 1.0 / 60.0);
+        assert!(
+            ball.linear_velocity.x > 0.0,
+            "expected the light ball to bounce back, got {}",
+            ball.linear_velocity.x
+        );
+        assert!(
+            car.linear_velocity.x.abs() < 10.0,
+            "expected the much heavier car to barely move, got {}",
+            car.linear_velocity.x
+        );
     }
 }

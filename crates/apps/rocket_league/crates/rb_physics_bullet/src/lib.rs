@@ -1,10 +1,10 @@
 //! `rb_physics_bullet` — a from-scratch Rust port of Bullet Physics'
 //! (zlib-licensed) rigid-body integration and sequential-impulse contact
 //! solver, covering a dynamic sphere (the ball) and a dynamic box (a car),
-//! each against a static plane (the ground). See `RB-PHYSICS-001` and
-//! ADR-0004 for why a port rather than a from-scratch design or an
-//! integrated engine like Rapier, and `THIRD_PARTY_NOTICES.md` for the
-//! required zlib attribution.
+//! each against a static plane (the ground) and against each other. See
+//! `RB-PHYSICS-001` and ADR-0004 for why a port rather than a from-scratch
+//! design or an integrated engine like Rapier, and `THIRD_PARTY_NOTICES.md`
+//! for the required zlib attribution.
 //!
 //! Module layout mirrors the pipeline a `stepSimulation` call runs
 //! (`btDiscreteDynamicsWorld::stepSimulation`):
@@ -15,8 +15,8 @@
 //! needed one, but shares the same code path — see `body.rs`).
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
-//! box-vs-sphere (car-vs-ball) collision — both bodies currently only
-//! collide with the ground, never each other; split impulse;
+//! box-vs-box collision (two cars against each other — this scope has
+//! exactly one car, so it never arises); split impulse;
 //! warm-starting/sleeping; and consuming a recorded input sequence — a car
 //! body here is a free rigid box, not a driven vehicle, so `simulate`
 //! simulates the scene in isolation from its own initial state.

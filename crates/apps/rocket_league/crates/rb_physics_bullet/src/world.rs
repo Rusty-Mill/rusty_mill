@@ -9,10 +9,10 @@ use crate::{integrate, solver};
 use rb_domain::{BallState, CarState, PhysicsFrame, Vec3};
 
 /// The whole simulated scene: one ball-like sphere, an optional car-like
-/// box, and one ground plane. Ball and car each collide only with the
-/// ground in this scope — box-vs-sphere (car-vs-ball) collision is real,
-/// not-yet-implemented follow-up work (`RB-PHYSICS-001-FR-004`'s open
-/// items), not something silently assumed away.
+/// box, and one ground plane. Both collide with the ground, and (when a
+/// car is present) with each other (`collision::contact_between`) — the
+/// only two-dynamic-body pairing this scope needs, since there's exactly
+/// one ball and one car.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub car: Option<RigidBody>,
@@ -48,24 +48,33 @@ impl PhysicsWorld {
         self
     }
 
-    /// Advances one body by `dt` seconds against `ground`: apply forces,
-    /// integrate velocities, detect and resolve every ground contact (a
-    /// manifold of 1 to 4 points depending on shape/orientation — see
-    /// `collision::contacts_vs_plane`), then integrate the transform and
-    /// refresh the body's world-space inertia tensor for its new
-    /// orientation — the same ordering as
-    /// `btDiscreteDynamicsWorld::stepSimulation`'s single-substep path.
-    fn step_body(body: &mut RigidBody, ground: &StaticPlane, gravity: Vec3, dt: f32) {
+    /// Applies forces and integrates velocities for one body — the first
+    /// phase of `btDiscreteDynamicsWorld::stepSimulation`
+    /// (`predictUnconstrainedMotion`, run for every body before any
+    /// collision detection happens).
+    fn apply_forces_and_integrate_velocities(body: &mut RigidBody, gravity: Vec3, dt: f32) {
         body.clear_forces();
         integrate::apply_gravity(body, gravity);
         integrate::apply_damping(body, dt);
         integrate::integrate_velocities(body, dt);
+    }
 
+    /// Detects and resolves `body`'s ground contact (a manifold of 1 to 4
+    /// points depending on shape/orientation — see
+    /// `collision::contacts_vs_plane`), if any.
+    fn resolve_ground_contact(body: &mut RigidBody, ground: &StaticPlane, dt: f32) {
         let contacts = collision::contacts_vs_plane(body, ground);
         if !contacts.is_empty() {
             solver::resolve_contacts(body, ground, &contacts, dt);
         }
+    }
 
+    /// Integrates `body`'s transform from its (already-resolved) velocity,
+    /// then refreshes its world-space inertia tensor for the new
+    /// orientation — the last phase of `stepSimulation`
+    /// (`integrateTransforms`), run once every contact this step has been
+    /// resolved.
+    fn integrate_transform_and_refresh_inertia(body: &mut RigidBody, dt: f32) {
         let (position, orientation) = integrate::integrate_transform(
             body.position,
             body.orientation,
@@ -78,12 +87,35 @@ impl PhysicsWorld {
         body.update_inertia_tensor();
     }
 
-    /// Advances the whole scene by `dt` seconds.
+    /// Advances the whole scene by `dt` seconds, matching
+    /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
+    /// every body's unconstrained velocity, then detect and resolve every
+    /// contact (ground contacts for each body, then the one ball-vs-car
+    /// contact, if a car is present and actually touching), then integrate
+    /// every body's transform — never resolving one body's transform before
+    /// another body's contacts have had a chance to affect it.
     pub fn step(&mut self, dt: f32) {
-        Self::step_body(&mut self.ball, &self.ground, self.gravity, dt);
+        Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
         if let Some(car) = &mut self.car {
-            Self::step_body(car, &self.ground, self.gravity, dt);
+            Self::apply_forces_and_integrate_velocities(car, self.gravity, dt);
         }
+
+        Self::resolve_ground_contact(&mut self.ball, &self.ground, dt);
+        if let Some(car) = &mut self.car {
+            Self::resolve_ground_contact(car, &self.ground, dt);
+        }
+
+        if let Some(car) = &mut self.car {
+            if let Some(contact) = collision::contact_between(&self.ball, car) {
+                solver::resolve_contact_between(&mut self.ball, car, &contact, dt);
+            }
+        }
+
+        Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
+        if let Some(car) = &mut self.car {
+            Self::integrate_transform_and_refresh_inertia(car, dt);
+        }
+
         self.elapsed_secs += dt;
     }
 
@@ -308,5 +340,54 @@ mod tests {
         let frame = world.frame();
         assert_eq!(frame.cars.len(), 1);
         assert_eq!(frame.cars[0].player_id, 0);
+    }
+
+    #[test]
+    fn ball_bounces_off_a_stationary_car_instead_of_passing_through() {
+        // Both bodies float well above the ground and gravity is zeroed,
+        // isolating the ball-vs-car collision this test actually checks
+        // from ground contact — a real end-to-end proof that
+        // `PhysicsWorld::step` now resolves the two dynamic bodies against
+        // each other, not just each against the ground.
+        let car_position = Vec3::new(300.0, 0.0, 100.0);
+        let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let mut car = RigidBody::car_box(car_half_extents, 180.0, car_position);
+        car.restitution = 0.5;
+
+        let ball_radius = 92.75;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(
+                car_position.x - car_half_extents.x - ball_radius - 100.0,
+                0.0,
+                100.0,
+            ),
+        );
+        ball.restitution = 0.5;
+        ball.linear_velocity = Vec3::new(300.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let car_after = world.car.expect("car should still be present");
+        let contact_surface_x = car_after.position.x - car_half_extents.x - ball_radius;
+        assert!(
+            world.ball.position.x < contact_surface_x + 1.0,
+            "expected the ball to stop at the car's surface rather than tunnel through, \
+             ball x={}, car surface x={}",
+            world.ball.position.x,
+            contact_surface_x
+        );
+        assert!(
+            world.ball.linear_velocity.x < 0.0,
+            "expected the ball to bounce back, got vx={}",
+            world.ball.linear_velocity.x
+        );
     }
 }

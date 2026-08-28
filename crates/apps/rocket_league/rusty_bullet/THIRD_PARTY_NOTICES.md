@@ -54,9 +54,12 @@ algorithms are derived from:
 | `body::Shape::local_inertia` | `src/BulletCollision/CollisionShapes/btSphereShape.h`, `btBoxShape.h` | `btSphereShape::calculateLocalInertia`, `btBoxShape::calculateLocalInertia` |
 | `mat3::Mat3::from_quat` | `src/LinearMath/btMatrix3x3.h` | `btMatrix3x3::setRotation` |
 | `mat3::Mat3::scaled_columns` | `src/LinearMath/btMatrix3x3.h` | `btMatrix3x3::scaled` |
+| `state::Quat::conjugate` (in `rb_domain`, used by `collision::sphere_vs_box`) | `src/LinearMath/btQuaternion.h` | `btQuaternion::inverse` |
+| `collision::sphere_vs_box` | `src/BulletCollision/CollisionDispatch/btBoxBoxCollisionAlgorithm.cpp` (closest-point-on-box structure) | closed-form equivalent of the closest-point query `btBoxSphereCollisionAlgorithm` runs via general support mapping — see the function's own doc comment for why a box's closest point to an external point reduces to a plain per-axis clamp |
+| `solver::setup_two_body_rows`, `resolve_two_body_row`, `resolve_contact_between` | `src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp` | the same `setupContactConstraint`/`resolveSingleConstraintRowGeneric` family as `solver::setup_rows`/`resolve_row`, generalized to carry both bodies' mass/inertia contributions (Bullet's solver always does; `resolve_contacts`' one-body-only version only worked because a static plane's side is always zero) |
 
 Deliberate, documented deviations from the original algorithms (no split
-impulse, no SIMD, no warm-starting/sleeping, no box-vs-sphere collision, a
+impulse, no SIMD, no warm-starting/sleeping, no box-vs-box collision, a
 different restitution/friction combine mode) are noted in the relevant Rust
 module's doc comments and in `RB-PHYSICS-001`/ADR-0004 — this port does not
 claim behavioral equivalence with upstream Bullet3, only that its core
