@@ -50,9 +50,13 @@ algorithms are derived from:
 | `integrate::integrate_transform` | `src/LinearMath/btTransformUtil.h` | `btTransformUtil::integrateTransform` |
 | `solver::setup_rows`, `resolve_row` | `src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp` | `setupContactConstraint`, `setupFrictionConstraint`, `resolveSingleConstraintRowGeneric`, `resolveSingleConstraintRowLowerLimit`, `restitutionCurve` |
 | `solver::plane_space` | `src/LinearMath/btVector3.h` | `btPlaneSpace1` |
+| `body::RigidBody::update_inertia_tensor` | `src/BulletDynamics/Dynamics/btRigidBody.cpp` | `btRigidBody::updateInertiaTensor` |
+| `body::Shape::local_inertia` | `src/BulletCollision/CollisionShapes/btSphereShape.h`, `btBoxShape.h` | `btSphereShape::calculateLocalInertia`, `btBoxShape::calculateLocalInertia` |
+| `mat3::Mat3::from_quat` | `src/LinearMath/btMatrix3x3.h` | `btMatrix3x3::setRotation` |
+| `mat3::Mat3::scaled_columns` | `src/LinearMath/btMatrix3x3.h` | `btMatrix3x3::scaled` |
 
 Deliberate, documented deviations from the original algorithms (no split
-impulse, no SIMD, scalar-only inertia, no warm-starting/sleeping, a
+impulse, no SIMD, no warm-starting/sleeping, no box-vs-sphere collision, a
 different restitution/friction combine mode) are noted in the relevant Rust
 module's doc comments and in `RB-PHYSICS-001`/ADR-0004 — this port does not
 claim behavioral equivalence with upstream Bullet3, only that its core

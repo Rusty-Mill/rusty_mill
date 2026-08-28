@@ -44,10 +44,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `DEFAULT_MAX_TIMESTAMP_DELTA_SECS` and an optional third CLI argument
   to override it. `RB-VERIFY-003` now has all three functional
   requirements implemented.
+- `rb_physics_bullet`: box-shaped car bodies (`RB-PHYSICS-001-FR-004`) —
+  a unified `RigidBody`/`Shape` design, a general 3x3 inverse inertia
+  tensor (`Mat3`), analytic box-vs-plane contact generation (1-4 points),
+  and multi-contact manifold resolution in the solver. `PhysicsWorld`
+  gains an optional car body (`with_car`). Box-vs-sphere collision and
+  driven car input remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
   raw `Debug` dump, now including car-divergence stats.
+- `rb_physics_bullet`'s `Sphere` type is replaced by `RigidBody` (with a
+  `Shape` enum for sphere/box); `RigidBody::sphere(...)` replaces
+  `Sphere::new(...)`.
 ### Fixed
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —
