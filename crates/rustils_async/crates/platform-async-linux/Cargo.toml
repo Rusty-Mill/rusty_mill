@@ -1,0 +1,20 @@
+[package]
+name = "platform-async-linux"
+description = "Linux backend for platform-async: reuses platform-linux's spawn, adds a pidfd + epoll async wait path. Unsafe confined to sys/."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+platform.workspace = true
+platform-linux.workspace = true
+platform-async.workspace = true
+reactor-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

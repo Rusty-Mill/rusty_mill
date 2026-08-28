@@ -1,0 +1,11 @@
+[package]
+name = "reactor-core"
+description = "Runtime-agnostic async-io primitives (Rusty-Mill AKB ADR-0160: a provider framework, not a universal capability). No I/O, no unsafe, no hidden runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

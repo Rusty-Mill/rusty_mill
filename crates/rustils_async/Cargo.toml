@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/reactor-core",
+    "crates/platform-async",
+    "crates/platform-async-mock",
+    "crates/platform-async-linux",
+    "crates/threading",
+    "crates/coreutils-async",
+]
+
+[workspace.package]
+# See docs/adr/0001-native-async-rustils.md for why this workspace exists
+# and docs/versioning.md (once written) for the bump rule this will
+# follow once a second crate group needs one — Atlas ATLAS-300 is still
+# Seed, so no ecosystem-wide Rust workspace policy is normative yet.
+version = "0.1.0"
+edition = "2021"
+# Matches rustils' own MSRV floor (pinned dependency, same toolchain
+# assumptions).
+rust-version = "1.75"
+repository = "https://github.com/baileyrd/rustils_async"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+reactor-core = { path = "crates/reactor-core" }
+platform-async = { path = "crates/platform-async" }
+platform-async-mock = { path = "crates/platform-async-mock" }
+platform-async-linux = { path = "crates/platform-async-linux" }
+threading = { path = "crates/threading" }
+
+# Pinned to a rev, not a branch, matching rustils' own D-12/D-15 pattern
+# for its pinned git dependencies (rusty_libc/rusty_win32): one source of
+# truth for the sync types this workspace builds an async layer above,
+# bumped deliberately rather than floating.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+
+libc = "0.2"
+
+[workspace.lints.rust]
+# rustils' own default (overridden to `forbid` in pure crates; unsafe is
+# opt-in per-crate in the one backend that needs it).
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"

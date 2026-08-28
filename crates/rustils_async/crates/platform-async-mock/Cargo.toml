@@ -1,0 +1,16 @@
+[package]
+name = "platform-async-mock"
+description = "In-memory async backend for platform-async, wrapping rustils' platform-mock. For consumer tests without a real OS reactor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+platform.workspace = true
+platform-mock.workspace = true
+platform-async.workspace = true
+
+[lints]
+workspace = true
