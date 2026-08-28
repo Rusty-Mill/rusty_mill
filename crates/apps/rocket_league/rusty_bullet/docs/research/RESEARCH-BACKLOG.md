@@ -60,9 +60,8 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   not raw analog stick position, and throttle/steer are single bytes, not
   full per-axis controller resolution), so "lossy/inferred at best" was
   too pessimistic, not wrong in spirit. See `RB-VERIFY-001`'s Non-goals for
-  the corrected framing. Not yet wired into `rb_domain`'s types (FR-004,
-  still open) — this is a finding about what's recoverable, not a claim
-  that the pipeline surfaces it yet.
+  the corrected framing. Wired into `rb_domain::CarState.input` as of
+  `RB-VERIFY-001-FR-004` / ADR-0005 (2026-08-28).
 
 ### RB-RESEARCH-S005 — BakkesMod is offline-only ground truth now
 
@@ -153,23 +152,25 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   Phase 1 start; both have proceeded without it.
 - **Owner**: baileyrd.
 
-### RB-RESEARCH-O003 — Scope of BakkesMod offline-capture tooling
+### RB-RESEARCH-O003 — Scope of BakkesMod offline-capture tooling (RESOLVED)
 
 - **Question**: Does the BakkesMod-side capture tool (RB-VERIFY-002) need
   to be a proper, reusable capture harness (versioned format, configurable
   sampling, robust to BakkesMod API changes) or is a one-off script
   sufficient for Phase 0's needs?
-- **Status**: Open.
-- **Revisit trigger**: Decide once RB-VERIFY-002 is actually being
-  implemented and the real frequency of re-capturing becomes clear (a
-  single one-time capture favors a script; a workflow of repeated
-  captures across many local sessions favors a harness). Default to the
-  smaller option (script) absent evidence a harness is needed, per the
-  "no speculative abstraction" convention.
+- **Status**: Resolved by [ADR-0005](../adr/0005-capture-file-format-and-input-schema.md):
+  a one-off script writing an unversioned JSON-Lines format, not a
+  reusable harness — decided per this entry's own stated default, at the
+  point `RB-VERIFY-002`'s `rb_capture_ingest` side was actually
+  implemented. No re-capturing workflow exists yet to justify more.
 - **Owner**: baileyrd.
 
 ## Change history
 
+- 2026-08-28: RB-RESEARCH-O003 resolved (ADR-0005: JSON-Lines capture
+  format, one-off script not a harness), decided while implementing
+  `rb_capture_ingest`. RB-RESEARCH-S004 updated: replay-recovered input is
+  now wired into `rb_domain::CarState.input` (`RB-VERIFY-001-FR-004`).
 - 2026-08-28: RB-RESEARCH-O001 resolved (ADR-0004: direct Bullet3 source
   port). RB-RESEARCH-O002's legal review completed (Epic/Psyonix EULA and
   Code of Conduct both prohibit reverse engineering contractually; DMCA

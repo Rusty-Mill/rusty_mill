@@ -1,6 +1,6 @@
 [package]
 name = "rb_capture_ingest"
-description = "BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): implements PhysicsStateSource by parsing BakkesMod ControllerInput + state captures. Capture format/writer not yet built."
+description = "BakkesMod offline-capture ingestion adapter (RB-VERIFY-002): implements PhysicsStateSource by parsing the JSON-Lines capture format (ADR-0005). BakkesMod-side plugin that writes it not yet built."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,9 @@ workspace = true
 
 [dependencies]
 rb_domain = { path = "../rb_domain" }
+# Required by RB-VERIFY-002: the capture file format is JSON Lines (see
+# ADR-0005) — serde/serde_json is the ubiquitous, well-audited way to decode
+# it; hand-rolling a JSON parser would be reinventing a solved problem for no
+# benefit (no performance evidence yet that it's needed, see NFR-002).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

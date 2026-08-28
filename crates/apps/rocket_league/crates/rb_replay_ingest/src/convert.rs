@@ -5,7 +5,7 @@
 //! constructors) so these functions can be unit-tested directly with
 //! hand-built `boxcars`/`subtr_actor` enum values instead.
 
-use rb_domain::{BallState, CarState, Quat, Vec3};
+use rb_domain::{BallState, CarState, ControllerInput, Quat, Vec3};
 use subtr_actor::{BallFrame, PlayerFrame, ReplayData};
 
 fn rigid_body_to_parts(rb: &boxcars::RigidBody) -> (Vec3, Quat, Vec3, Vec3) {
@@ -51,6 +51,42 @@ fn ball_frame_to_state(frame: &BallFrame) -> Option<BallState> {
     }
 }
 
+/// Rocket League replicates throttle/steer as a raw byte (~128 neutral, 0/255
+/// at the extremes); `rb_domain::ControllerInput` uses -1.0..1.0 to match
+/// BakkesMod's own `ControllerInput` convention (see ADR-0005) — normalize
+/// here so both adapters' output lands in the same range.
+fn axis_byte_to_analog(raw: u8) -> f32 {
+    ((f32::from(raw) - 128.0) / 127.0).clamp(-1.0, 1.0)
+}
+
+/// `subtr_actor::PlayerInputFrame`'s throttle/steer bytes are themselves
+/// `Option` (the replay didn't replicate a change to that property this
+/// tick, not "this axis is unrecoverable") — absence defaults to neutral
+/// (`0.0`), unlike `pitch`/`yaw`/`roll`, which stay permanently `None` for
+/// replay-sourced input: a replay only ever exposes a one-shot dodge
+/// impulse/torque vector, a different kind of quantity from an instantaneous
+/// analog stick angle (see `rb_replay_ingest`'s non-goals) — fabricating a
+/// pitch/yaw/roll value from it would misrepresent what was actually
+/// recovered.
+fn player_input_to_controller_input(
+    input: &subtr_actor::PlayerInputFrame,
+    boost_active: bool,
+    jump_active: bool,
+    double_jump_active: bool,
+    powerslide_active: bool,
+) -> ControllerInput {
+    ControllerInput {
+        throttle: input.throttle.map(axis_byte_to_analog).unwrap_or(0.0),
+        steer: input.steer.map(axis_byte_to_analog).unwrap_or(0.0),
+        pitch: None,
+        yaw: None,
+        roll: None,
+        jump: jump_active || double_jump_active,
+        boost: boost_active,
+        handbrake: powerslide_active,
+    }
+}
+
 /// `player_id` is a stable per-replay index (0, 1, 2, ... in the order
 /// `subtr_actor` lists players), not a platform account ID —
 /// `boxcars::RemoteId` is a multi-platform enum (Steam/Epic/PlayStation/...)
@@ -63,6 +99,11 @@ fn player_frame_to_state(frame: &PlayerFrame, player_id: u32) -> Option<CarState
         PlayerFrame::Data {
             rigid_body,
             boost_amount,
+            boost_active,
+            powerslide_active,
+            jump_active,
+            double_jump_active,
+            input,
             ..
         } => {
             let (position, rotation, velocity, angular_velocity) = rigid_body_to_parts(rigid_body);
@@ -73,6 +114,13 @@ fn player_frame_to_state(frame: &PlayerFrame, player_id: u32) -> Option<CarState
                 velocity,
                 angular_velocity,
                 boost_amount: boost_raw_to_percent(*boost_amount),
+                input: Some(player_input_to_controller_input(
+                    input,
+                    *boost_active,
+                    *jump_active,
+                    *double_jump_active,
+                    *powerslide_active,
+                )),
             })
         }
     }
@@ -197,7 +245,7 @@ mod tests {
         let frame = PlayerFrame::Data {
             rigid_body: rigid_body((5.0, -5.0, 17.0)),
             boost_amount: 255.0,
-            boost_active: false,
+            boost_active: true,
             powerslide_active: false,
             jump_active: false,
             double_jump_active: false,
@@ -206,11 +254,69 @@ mod tests {
             team: None,
             is_team_0: None,
             camera: Default::default(),
-            input: Default::default(),
+            input: subtr_actor::PlayerInputFrame {
+                throttle: Some(255),
+                steer: Some(0),
+                ..Default::default()
+            },
         };
         let state = player_frame_to_state(&frame, 3).unwrap();
         assert_eq!(state.player_id, 3);
         assert_eq!(state.position, Vec3::new(5.0, -5.0, 17.0));
         assert!((state.boost_amount - 100.0).abs() < 1e-4);
+
+        let input = state.input.unwrap();
+        assert!((input.throttle - 1.0).abs() < 1e-2);
+        assert!((input.steer - (-1.0)).abs() < 1e-2);
+        assert_eq!(input.pitch, None);
+        assert!(input.boost);
+        assert!(!input.jump);
+        assert!(!input.handbrake);
+    }
+
+    #[test]
+    fn axis_byte_neutral_and_extremes_convert_correctly() {
+        assert!((axis_byte_to_analog(128) - 0.0).abs() < 1e-2);
+        assert!((axis_byte_to_analog(255) - 1.0).abs() < 1e-2);
+        assert!((axis_byte_to_analog(0) - (-1.0)).abs() < 1e-2);
+    }
+
+    #[test]
+    fn missing_axis_bytes_default_to_neutral_not_unrecoverable() {
+        let input = player_input_to_controller_input(
+            &subtr_actor::PlayerInputFrame::default(),
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(input.throttle, 0.0);
+        assert_eq!(input.steer, 0.0);
+    }
+
+    #[test]
+    fn jump_active_or_double_jump_active_both_set_jump() {
+        let input = player_input_to_controller_input(
+            &subtr_actor::PlayerInputFrame::default(),
+            false,
+            false,
+            true,
+            false,
+        );
+        assert!(input.jump, "double_jump_active alone should still set jump");
+    }
+
+    #[test]
+    fn replay_input_never_recovers_analog_pitch_yaw_roll() {
+        let input = player_input_to_controller_input(
+            &subtr_actor::PlayerInputFrame::default(),
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(input.pitch, None);
+        assert_eq!(input.yaw, None);
+        assert_eq!(input.roll, None);
     }
 }

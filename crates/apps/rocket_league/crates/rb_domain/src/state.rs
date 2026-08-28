@@ -1,7 +1,8 @@
 //! Physics state types shared by every ingestion adapter and the divergence
 //! scorer. Field set matches what the GDC 2018 talk and replay/BakkesMod
 //! data actually expose: position, rotation, velocity, angular velocity,
-//! and (for cars) boost amount. See `RB-VERIFY-001`/`RB-VERIFY-002`.
+//! (for cars) boost amount, and (for cars) recovered controller input. See
+//! `RB-VERIFY-001`/`RB-VERIFY-002` and ADR-0005 (input schema).
 
 /// A 3D vector. Not `nalgebra`/`glam` on purpose: the domain crate has zero
 /// dependencies until a second real numeric need justifies pulling one in.
@@ -208,6 +209,33 @@ pub struct BallState {
     pub angular_velocity: Vec3,
 }
 
+/// Raw controller input for one car at one tick.
+///
+/// Shared by both ingestion adapters (`RB-VERIFY-001-FR-004`,
+/// `RB-VERIFY-002-FR-001`), which recover different subsets of it:
+/// `rb_capture_ingest`'s BakkesMod captures record every field directly
+/// (BakkesMod's `ControllerInput` exposes analog pitch/yaw/roll at capture
+/// time), while `rb_replay_ingest` only ever has `throttle`/`steer`
+/// (replicated bytes) and the boolean flags — a replay never replicates
+/// instantaneous analog stick angles, so `pitch`/`yaw`/`roll` are `None`
+/// there, not a guessed `0.0`. See ADR-0005.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ControllerInput {
+    /// -1.0 (full reverse) to 1.0 (full forward).
+    pub throttle: f32,
+    /// -1.0 (full left) to 1.0 (full right).
+    pub steer: f32,
+    /// -1.0..1.0, `None` when the source can't recover an analog value.
+    pub pitch: Option<f32>,
+    /// -1.0..1.0, `None` when the source can't recover an analog value.
+    pub yaw: Option<f32>,
+    /// -1.0..1.0, `None` when the source can't recover an analog value.
+    pub roll: Option<f32>,
+    pub jump: bool,
+    pub boost: bool,
+    pub handbrake: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CarState {
     pub player_id: u32,
@@ -216,6 +244,10 @@ pub struct CarState {
     pub velocity: Vec3,
     pub angular_velocity: Vec3,
     pub boost_amount: f32,
+    /// `None` when the source this frame came from doesn't recover input at
+    /// all (currently: never for `rb_capture_ingest`, which always attaches
+    /// it; see `ControllerInput`'s doc comment for what varies by source).
+    pub input: Option<ControllerInput>,
 }
 
 /// One simulation tick's worth of authoritative-or-recorded state.

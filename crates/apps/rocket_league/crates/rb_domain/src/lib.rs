@@ -15,4 +15,4 @@ pub mod state;
 pub use divergence::DivergenceScore;
 pub use error::IngestError;
 pub use port::PhysicsStateSource;
-pub use state::{BallState, CarState, PhysicsFrame, Quat, Vec3};
+pub use state::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
