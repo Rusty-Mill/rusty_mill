@@ -45,6 +45,7 @@ have landed so far.
 | [`rusty_a2a`](crates/rusty_a2a) | `crates/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
 | [`rusty-mcp`](crates/rusty_mcp/crates/rusty-mcp) | `crates/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
 | [`rusty-mcp-demo`](crates/rusty_mcp/crates/rusty-mcp-demo) | `crates/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
+| [`rusty_stream`](crates/rusty_stream) | `crates/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -177,6 +178,23 @@ which would have fought the rest of the ecosystem's forward motion.
 to `"0.13"`, matching its other `reqwest` requirement in the same file —
 the exact pin was what forced the unified resolution past 0.13.1 in the
 first place.
+
+`rusty_stream` had a pinned `git` dependency on `rusty_tokio` (with its
+`thread-per-core`/`io-uring-fs` features, at the exact commit ADR-0002 D3
+verified) — switched to a workspace `path` dependency on
+`crates/rusty_tokio`, which already carries that commit's
+`uring_global_driver` API and beyond. Its other dependency, `rusty_wire`,
+is outside this monorepo's scope (same as `rusty_simd`/`rusty_std`/
+`rusty_wire` noted earlier) and stays a pinned `git` dependency.
+
+`rusty_stream`'s design is built on io_uring, a Linux-only kernel
+interface — its own CI only ever ran on `ubuntu-latest`, and its source
+uses `rusty_tokio`'s `io-uring-fs` types unconditionally rather than
+behind a `cfg(target_os = "linux")` no-op shell the way `rusty_win32`
+does the reverse (Windows-only behind `cfg`, portable everywhere else).
+Rather than rewrite its internals to be cross-platform, the workflow
+excludes it (`--exclude rusty_stream`) from the `windows-latest` leg's
+`--workspace` clippy/build/test steps specifically.
 
 ## History
 

@@ -1,0 +1,20 @@
+[package]
+name = "rusty_stream"
+version = "0.1.0"
+edition = "2021"
+description = "Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio."
+publish = false
+
+[dependencies]
+# rusty_tokio is merged into this workspace at crates/rusty_tokio, which
+# already carries `uring_global_driver` (issue #256) -- a workspace path
+# dependency tracks it in lockstep instead of the pinned rev this crate
+# used standalone.
+rusty_tokio = { path = "../rusty_tokio", features = [
+    "thread-per-core",
+    "io-uring-fs",
+] }
+# ADR-0002 D1: rusty_stream's own protocol, built on rusty_wire's Reader/
+# Writer byte-cursor primitives rather than a redundant hand-rolled one.
+# Pinned rev, same reasoning as rusty_tokio above.
+rusty_wire = { git = "https://github.com/baileyrd/rusty_wire", rev = "4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b" }
