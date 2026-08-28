@@ -6,6 +6,34 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Replay ingestion — boxcars + subtr-actor
+**2026-08-28** · not yet merged; link added once merged
+
+- **Added:** `rb_replay_ingest` now really parses `.replay` files
+  (`RB-VERIFY-001-FR-001/002/003`): `boxcars` parses the raw replay/network
+  stream, `subtr-actor` resolves it into frame-indexed ball/car
+  `RigidBody` state, and a new `convert.rs` maps that into
+  `rb_domain::PhysicsFrame`. Verified end-to-end against a real vendored
+  replay fixture (12,029 frames, ~428s match).
+- **Added:** `subtr-actor` as a dependency, justified in
+  `Cargo.toml` — avoids hand-rolling `boxcars`' actor-graph resolution
+  (net-cache/property-id resolution, quantized rotation decoding), a
+  substantial and error-prone parsing layer with an existing,
+  permissively-licensed, purpose-built solution.
+- **Changed:** `RB-RESEARCH-S004`'s "replay input is lossy/inferred at
+  best" finding is revised — `subtr-actor` actually recovers raw
+  throttle/steer bytes and boost/jump/dodge/powerslide booleans directly
+  from the replay's replicated input actor. Still not wired into
+  `rb_domain`'s types (`RB-VERIFY-001-FR-004` stays open pending a schema
+  decision made jointly with `RB-VERIFY-002`).
+- Known limitation stated plainly: the vendored fixture is a third
+  party's replay, used only to prove the pipeline runs correctly on real
+  bytes — it does not satisfy `RB-VERIFY-001`'s acceptance criterion of a
+  manually-verified position check against the owner's own match, since
+  this environment has no access to the owner's replay files.
+- 10 new unit tests (51 total in the workspace); `cargo fmt --check`,
+  `clippy -D warnings`, and `cargo test --workspace` all pass.
+
 ## Physics core v0 — Bullet3 port (sphere vs. ground)
 **2026-08-28** · [#1](https://github.com/baileyrd/rusty_bullet/pull/1) (merge commit `7bdc3fc`)
 

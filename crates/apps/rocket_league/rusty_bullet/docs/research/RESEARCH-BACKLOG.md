@@ -50,6 +50,19 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 - **Confidence basis**: Confirmed against prior first-hand experience
   building a replay viewer/analyzer over ~1,000 replay files.
 - **Used by**: RB-VERIFY-001 (non-goals), ADR-0002.
+- **Update (2026-08-28, RB-VERIFY-001 implementation)**: More precise than
+  originally stated. `subtr-actor` (the crate `rb_replay_ingest` uses on
+  top of `boxcars`) recovers real input state directly from the replay's
+  replicated vehicle-input actor: raw throttle/steer bytes, and boolean
+  flags for boost-active/jump/double-jump/dodge/powerslide — not purely
+  inferred from position deltas. Still coarser than live controller
+  telemetry (dodge direction comes through as an impulse/torque vector,
+  not raw analog stick position, and throttle/steer are single bytes, not
+  full per-axis controller resolution), so "lossy/inferred at best" was
+  too pessimistic, not wrong in spirit. See `RB-VERIFY-001`'s Non-goals for
+  the corrected framing. Not yet wired into `rb_domain`'s types (FR-004,
+  still open) — this is a finding about what's recoverable, not a claim
+  that the pipeline surfaces it yet.
 
 ### RB-RESEARCH-S005 — BakkesMod is offline-only ground truth now
 

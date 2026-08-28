@@ -16,6 +16,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   sequential-impulse contact solver, scoped to a dynamic sphere vs. a
   static plane (ADR-0004). Vector/quaternion algebra added to
   `rb_domain::state`.
+- `rb_replay_ingest`: real `.replay` parsing via `boxcars` + `subtr-actor`
+  (`RB-VERIFY-001-FR-001/002/003`), verified against a vendored real
+  replay fixture.
 ### Changed
 ### Fixed
 ### Security
