@@ -1,0 +1,26 @@
+[package]
+name = "rusty_std"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_std"
+keywords = ["std", "no-std", "sovereign", "kernel", "libc"]
+categories = ["no-std", "os"]
+
+[dependencies]
+# Pinned git deps, not path deps: a `git = "..."` Cargo dependency on
+# this crate clones only this one repository, so a sibling `../rusty_libc`
+# checkout doesn't exist for any external consumer (see rusty_tokio#254).
+rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "73bf01bf20dc8de55a583cbd5719ad829076ccca", optional = true }
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "a128d758c7c5683b908a48eb84d0b0e4308fc586", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "73bf01bf20dc8de55a583cbd5719ad829076ccca" }
+
+[target.'cfg(windows)'.dependencies]
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "a128d758c7c5683b908a48eb84d0b0e4308fc586" }
+
+[features]
+default = []
