@@ -1,6 +1,6 @@
 # Project Status
 
-- Last verified main commit: `f10d017` (merge of [#9](https://github.com/baileyrd/rusty_bullet/pull/9))
+- Last verified main commit: `a1b8a47` (merge of [#11](https://github.com/baileyrd/rusty_bullet/pull/11))
 - Verified at: 2026-08-28
 - Current milestone: `PHASE-0-EXIT` (`rb_verify_cli` wires ingestion to divergence scoring, now including car position/rotation/velocity; runs end-to-end mechanically, not yet a real fidelity comparison) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
