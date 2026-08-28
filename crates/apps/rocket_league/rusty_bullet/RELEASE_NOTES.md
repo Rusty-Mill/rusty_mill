@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Divergence scoring CLI wiring
-**2026-08-28** · pending PR
+**2026-08-28** · [#9](https://github.com/baileyrd/rusty_bullet/pull/9) (merge commit `f10d017`)
 
 - **Added:** `rb_verify_cli::score_replay_against_capture` (new `lib.rs`)
   — the actual composition-root wiring, ingesting a replay via
