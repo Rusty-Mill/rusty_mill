@@ -5175,6 +5175,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_oauth"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_regx"
 version = "0.5.0"
 dependencies = [

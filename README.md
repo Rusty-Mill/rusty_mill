@@ -50,6 +50,7 @@ have landed so far.
 | [`rusty_http`](crates/rusty_http) | `crates/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
 | [`rusty_json`](crates/rusty_json) | `crates/rusty_json` | From-scratch JSON library, `no_std`-capable, with `serde` interop |
 | [`rusty_json-derive`](crates/rusty_json/rusty_json-derive) | `crates/rusty_json/rusty_json-derive` | `rusty_json`'s `#[derive(RustyJson)]` proc-macro |
+| [`rusty_oauth`](crates/rusty_oauth) | `crates/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -229,6 +230,12 @@ swapped to a `path` dependency on the now-merged `crates/rusty_json`.
 `rusty_json-derive`, its proc-macro companion, was already a `path`
 dependency within the standalone repo and needed no changes beyond
 joining the workspace `members` list alongside it.
+
+`rusty_oauth` has zero dependencies of any kind (its own `Cargo.toml`
+lists none, in either `[dependencies]` or `[dev-dependencies]`), so
+nothing needed swapping despite its `Cargo.toml` naming an HTTP client
+and JSON in its description — it hand-rolls both concerns internally
+rather than depending on `rusty_http`/`rusty_json`.
 
 ## History
 
