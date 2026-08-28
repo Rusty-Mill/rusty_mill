@@ -16,5 +16,6 @@ rusty_tokio = { path = "../rusty_tokio", features = [
 ] }
 # ADR-0002 D1: rusty_stream's own protocol, built on rusty_wire's Reader/
 # Writer byte-cursor primitives rather than a redundant hand-rolled one.
-# Pinned rev, same reasoning as rusty_tokio above.
-rusty_wire = { git = "https://github.com/baileyrd/rusty_wire", rev = "4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b" }
+# Now a path dependency on the sibling crate merged into this same
+# workspace.
+rusty_wire = { path = "../rusty_wire" }

@@ -57,6 +57,7 @@ have landed so far.
 | [`platform-async-linux`](crates/rustils_async/crates/platform-async-linux) | `crates/rustils_async/crates/platform-async-linux` | The real Linux backend for `platform-async`: `pidfd` + `epoll` async wait path |
 | [`threading`](crates/rustils_async/crates/threading) | `crates/rustils_async/crates/threading` | Minimal multithreading primitives: scoped-thread spawn, `Mutex`/`RwLock` with explicit poisoning policy |
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
+| [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -86,11 +87,13 @@ to this merge.
 
 Dependencies between these fourteen crates are wired as workspace `path`
 dependencies now that they live in one repo. Dependencies on crates
-**outside** this set — `rusty_simd`, `rusty_std`, `rusty_wire`,
-`rusty_lsp` — remain pinned `git` dependencies with an explicit `rev`,
-unchanged by this merge; those crates aren't part of this monorepo (except
-`rusty_libc`, which the second wave below brings in, at which point its
-three in-set consumers switched to a path dependency on it too).
+**outside** this set at the time — `rusty_simd`, `rusty_std`, `rusty_wire`,
+`rusty_lsp` — remained pinned `git` dependencies with an explicit `rev`,
+unchanged by this merge; each swapped to a `path` dependency once its own
+crate joined this monorepo later (`rusty_libc`'s three in-set consumers in
+the second wave below, `rusty_lsp`'s own later merge, and `rusty_wire`'s
+three consumers — `rusty_font`, `rusty_gui`, `rusty_stream` — noted where
+each is discussed). `rusty_simd`/`rusty_std` are the two still outstanding.
 `mill-term` locates `rusty_git`/`rusty_text`'s `rgit`/`rsed`/
 `rawk` binaries via a `PATH`/shared-`target/`-dir lookup rather than a
 Cargo library dependency — it shells out to them, not their APIs — so that
@@ -107,7 +110,7 @@ crates in this repo, so it needed no path-dependency swap. Its own
 `rusty_std` and `platform`/`platform-linux`/`platform-bsd`/`platform-windows`
 dependencies (from `baileyrd/rusty_std` and `baileyrd/rustils`) stay pinned
 `git` dependencies — those crates are outside this monorepo's scope, same as
-`rusty_simd`/`rusty_wire` above.
+`rusty_simd` above.
 
 `rusty_rusqlite` has no dependencies at all (`[dependencies]` is empty in
 its own manifest) and nothing in this repo depends on it yet, so nothing
@@ -195,8 +198,10 @@ first place.
 verified) — switched to a workspace `path` dependency on
 `crates/rusty_tokio`, which already carries that commit's
 `uring_global_driver` API and beyond. Its other dependency, `rusty_wire`,
-is outside this monorepo's scope (same as `rusty_simd`/`rusty_std`/
-`rusty_wire` noted earlier) and stays a pinned `git` dependency.
+was outside this monorepo's scope at the time and stayed pinned `git`;
+now that `rusty_wire` has its own entry in this workspace, that pin
+became a `path` dependency too (`rusty_font` and `rusty_gui`'s own
+`rusty_wire` pins swapped the same way at the same time — see below).
 
 `rusty_stream`'s design is built on io_uring, a Linux-only kernel
 interface — its own CI only ever ran on `ubuntu-latest`, and its source
@@ -252,15 +257,24 @@ were, since this outer root doesn't declare a `[workspace.package]`/
 resolving against once it joins `members` directly. Its `platform`/
 `platform-mock`/`platform-linux` dependencies are pinned `git` revs
 against `baileyrd/rustils` — a separate repo outside this monorepo's
-consolidation scope, the same shape as `rusty_stream`'s `rusty_wire`
-dependency — so those stayed pinned `git` dependencies rather than
-becoming `path` dependencies; the sibling crates within this same
+consolidation scope, the same shape `rusty_stream`'s `rusty_wire`
+dependency used to have before `rusty_wire` itself joined this
+workspace (below) — so those stayed pinned `git` dependencies rather
+than becoming `path` dependencies; the sibling crates within this same
 crate group (`platform-async`, `reactor-core`, `platform-async-linux`)
 became `path` dependencies on each other. `platform-async-linux`
 self-gates its entire body behind `#![cfg(target_os = "linux")]` at
 the crate root (a no-op crate everywhere else), so — unlike
 `rusty_stream`'s io_uring dependency — it needed no CI workaround: it
 follows `rusty_win32`'s portable-by-internal-`cfg` shape instead.
+
+`rusty_wire` itself has no dependencies of its own (a minimal,
+zero-dependency byte cursor) — its own merge is entirely about
+retiring three forward pins that predate it: `rusty_font`, `rusty_gui`,
+and `rusty_stream` each pinned it to a `git` rev (all three at the
+exact same commit, `rusty_wire`'s current `main` HEAD) before it had a
+home in this workspace. All three swapped to a `path` dependency on
+`crates/rusty_wire` as part of this same import.
 
 ## History
 
@@ -299,3 +313,7 @@ The second wave, merging in the same way, adds:
 [`rusty_oauth`](https://github.com/baileyrd/rusty_oauth), and
 [`rustils_async`](https://github.com/baileyrd/rustils_async) — merged one
 at a time, so the Crates table above only lists the ones already landed.
+
+A third wave continues the same way, starting with
+[`rusty_wire`](https://github.com/baileyrd/rusty_wire) — merged one at a
+time, same process.
