@@ -12,6 +12,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - Cargo workspace (`rb_domain`, `rb_replay_ingest`, `rb_capture_ingest`,
   `rb_verify_cli`) with a working, unit-tested divergence-scoring algorithm
   and stubbed ingestion adapters.
+- `rb_physics_bullet`: a Rust port of Bullet3's rigid-body integration and
+  sequential-impulse contact solver, scoped to a dynamic sphere vs. a
+  static plane (ADR-0004). Vector/quaternion algebra added to
+  `rb_domain::state`.
 ### Changed
 ### Fixed
 ### Security
