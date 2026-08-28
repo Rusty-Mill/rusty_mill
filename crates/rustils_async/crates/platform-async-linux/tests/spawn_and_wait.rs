@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Exercises the real reactor against a real process — not a mock —
 //! proving the pidfd + epoll path actually delivers a wakeup instead of
 //! resolving trivially.

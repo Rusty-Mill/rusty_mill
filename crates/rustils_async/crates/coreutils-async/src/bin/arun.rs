@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! `arun <program> [args…]` — async port of rustils' `rrun`: spawn a
 //! program through [`platform_async::process::AsyncSpawner`] and
 //! propagate its exit status, awaiting termination through
@@ -7,11 +6,27 @@
 //! surface that `rrun` plays for the sync one — see that binary's own
 //! doc comment in rustils: "the reference consumer that gates the
 //! process domain's native backends."
+//!
+//! Linux-only, like `platform-async-linux` itself: the `[[bin]]` target
+//! is declared unconditionally in `Cargo.toml` (Cargo has no target-cfg
+//! syntax for that section), so `main` is split in two here rather than
+//! gating the whole file — a non-Linux build still needs a `main` to
+//! link, it just reports why there's nothing to run.
 
+#[cfg(target_os = "linux")]
 use platform::process::{Command, ExitStatus};
+#[cfg(target_os = "linux")]
 use platform_async::process::AsyncSpawner;
+#[cfg(target_os = "linux")]
 use platform_async_linux::AsyncLinuxSpawner;
 
+#[cfg(not(target_os = "linux"))]
+fn main() -> std::process::ExitCode {
+    eprintln!("arun: only supported on Linux (platform-async-linux has no backend here)");
+    std::process::ExitCode::FAILURE
+}
+
+#[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args_os().skip(1);
     let Some(program) = args.next() else {

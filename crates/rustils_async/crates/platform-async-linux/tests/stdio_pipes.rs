@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Exercises `AsyncChild::take_stdin`/`take_stdout` against a real
 //! `/bin/cat` child through a real OS pipe — proves the parent-side
 //! handles actually round-trip bytes, not just that the API compiles.

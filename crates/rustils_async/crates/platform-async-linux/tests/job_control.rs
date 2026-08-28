@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Exercises `AsyncChild::wait_job`/`try_wait_job` against a real child —
 //! stop, continue, then terminate — and confirms the reap-state stash is
 //! shared correctly with the plain `wait`/`try_wait` path.

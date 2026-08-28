@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Exercises `AsyncSpawner::is_zombie` against a real child — running,
 //! killed-but-unreaped, then reaped — mirroring rustils' own
 //! `linux_is_zombie_detects_an_unreaped_child`.
