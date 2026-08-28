@@ -1,6 +1,6 @@
 # Project Status
 
-- Last verified main commit: `93ad0e9` (merge of [#3](https://github.com/baileyrd/rusty_bullet/pull/3))
+- Last verified main commit: `0b2253d` (merge of [#5](https://github.com/baileyrd/rusty_bullet/pull/5))
 - Verified at: 2026-08-28
 - Current milestone: `PHASE-0-REPLAY-INGEST` (boxcars + subtr-actor replay parsing, validated against a 40-file real owner corpus) — Done
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
