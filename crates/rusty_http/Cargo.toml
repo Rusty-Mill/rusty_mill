@@ -17,13 +17,11 @@ repository = "https://github.com/baileyrd/rusty_http"
 # Optional (see the `rusty-tokio` feature below): the async adapter drives
 # the sans-IO core over `rusty_tokio`'s own `AsyncRead`/`AsyncWrite` traits
 # and reactor, mirroring rusty_tls' layout -- the async adapter belongs
-# here, behind a feature, not in `rusty_tokio` itself. Pinned to the same
-# rev rusty_tls/rusty_request already pin, not just tidy: this crate's own
-# `AsyncTransport` is generic over `rusty_tokio`'s `AsyncRead`/`AsyncWrite`,
-# and Cargo treats two different revs of the same git dependency as two
-# unrelated crates, so trait/type identity has to line up with whatever
-# rev a consumer's other rusty_tokio-dependent crates already use.
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8", optional = true }
+# here, behind a feature, not in `rusty_tokio` itself. Now a path dependency
+# on the sibling crate merged into this same workspace, so its
+# `AsyncRead`/`AsyncWrite` trait identity is unified with every other
+# consumer in the workspace by construction -- no rev-pinning needed.
+rusty_tokio = { path = "../rusty_tokio", optional = true }
 # Optional (see the `tokio` feature below): a second async adapter,
 # alongside `rusty-tokio`'s, driving the sans-IO core over real crates.io
 # tokio's `AsyncRead`/`AsyncWrite` instead -- for a consumer (`rusty_tail`)
