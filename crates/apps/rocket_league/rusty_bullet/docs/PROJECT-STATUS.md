@@ -2,7 +2,7 @@
 
 - Last verified main commit: `f10d017` (merge of [#9](https://github.com/baileyrd/rusty_bullet/pull/9))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-0-EXIT` (`rb_verify_cli` wires ingestion to divergence scoring; runs end-to-end mechanically, not yet a real fidelity comparison) — In Progress
+- Current milestone: `PHASE-0-EXIT` (`rb_verify_cli` wires ingestion to divergence scoring, now including car position/rotation/velocity; runs end-to-end mechanically, not yet a real fidelity comparison) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -51,6 +51,17 @@
   fixture: `frames compared: 5, mean ball distance: 0.25 uu, max ball
   distance: 0.25 uu`. Proves the pipeline runs end-to-end without erroring
   — not yet a fidelity measurement (see Blocked/Next).
+- `RB-VERIFY-003-FR-002` (car-state scoring) — `DivergenceScore` gains a
+  `cars: CarDivergence` field (mean/max position, rotation, velocity
+  distance, pairs compared), matching recorded-to-candidate cars by
+  `player_id` within each frame pair; a car present on only one side is
+  skipped, not an error. New `Quat::angle_to` computes rotation distance
+  (radians), using an `atan2`-based half-angle form rather than `acos`
+  since `acos` is numerically unstable exactly where it matters most here
+  (near-identical rotations). 8 new unit tests. Manually re-run: `car
+  pairs compared: 5, mean car position/rotation/velocity distance: 2823.85
+  uu / 2.36 rad / 1369.44 uu/s` (large numbers expected — unrelated
+  matches, not a fidelity signal).
 
 ## In progress
 
@@ -81,13 +92,13 @@
   `PHASE-0-CAPTURE-INGEST`'s exit gate — needs this plugin built and run on
   the owner's own machine.
 - `PHASE-0-EXIT`'s exit gate isn't fully met yet: `rb_verify_cli` runs
-  end-to-end today, but only against a real replay + a *synthetic* capture
-  (see above), and the divergence number it produces isn't a meaningful
-  fidelity comparison — `RB-VERIFY-003-FR-002`/`FR-003` (car-state
-  scoring, timestamp-tolerant alignment) are still open, and there's no
-  Phase 1 candidate physics engine capable of consuming recorded inputs
-  and producing a comparable trajectory yet (car bodies aren't
-  implemented — `RB-PHYSICS-001-FR-004`).
+  end-to-end today (ball and car scoring both included), but only against
+  a real replay + a *synthetic* capture (see above), and the divergence
+  number it produces isn't a meaningful fidelity comparison —
+  `RB-VERIFY-003-FR-003` (timestamp-tolerant alignment) is still open, and
+  there's no Phase 1 candidate physics engine capable of consuming
+  recorded inputs and producing a comparable trajectory yet (car bodies
+  aren't implemented — `RB-PHYSICS-001-FR-004`).
 
 ## Next
 
@@ -96,15 +107,14 @@
    Windows/BakkesMod/game environment (this sandbox can't).
 2. `RB-PHYSICS-001-FR-004` — extend `rb_physics_bullet` to box-shaped car
    bodies (general 3x3 inertia, box collision, multi-contact resolution).
-3. `RB-VERIFY-003-FR-002`/`FR-003` — car-state scoring and timestamp-
-   tolerant alignment, needed before a real candidate-vs-recorded run
-   means anything.
+3. `RB-VERIFY-003-FR-003` — timestamp-tolerant alignment, needed before a
+   real candidate-vs-recorded run means anything.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (66 tests: 13 in `rb_domain`, 26 in
+- `cargo test --workspace`: pass (73 tests: 20 in `rb_domain`, 26 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
@@ -112,8 +122,9 @@
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`
   (manual, 2026-08-28): `frames compared: 5, mean ball distance: 0.25 uu,
-  max ball distance: 0.25 uu` against the real replay fixture + synthetic
-  capture fixture.
+  max ball distance: 0.25 uu, car pairs compared: 5, mean car
+  position/rotation/velocity distance: 2823.85 uu / 2.36 rad / 1369.44
+  uu/s` against the real replay fixture + synthetic capture fixture.
 
 ## Risks and decisions needed
 

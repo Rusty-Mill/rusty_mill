@@ -199,6 +199,27 @@ impl Quat {
         let uuv = q.cross(&uv);
         *v + (uv * self.w + uuv) * 2.0
     }
+
+    /// Angular distance to another rotation, in radians (`0.0` = identical
+    /// orientation, up to `PI` = maximally different). Used by
+    /// `rb_domain::divergence` to score car-rotation drift
+    /// (`RB-VERIFY-003-FR-002`).
+    ///
+    /// Takes the absolute value of the quaternion dot product first: `q`
+    /// and `-q` represent the exact same rotation (a unit quaternion's
+    /// double cover), so without it a candidate's sign-flipped but
+    /// physically identical orientation would score as maximally
+    /// diverged instead of zero. Uses the `atan2`-based half-angle form
+    /// rather than `2.0 * dot.acos()`: `acos` is numerically unstable
+    /// right where it matters most for this metric (near-identical
+    /// rotations, where its derivative blows up), which would make two
+    /// inputs that are identical up to ordinary `f32` rounding error
+    /// score a spuriously large angle instead of ~0.
+    pub fn angle_to(&self, other: &Quat) -> f32 {
+        let dot = (self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w).abs();
+        let sin_half = (1.0 - dot * dot).max(0.0).sqrt();
+        2.0 * sin_half.atan2(dot)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -329,5 +350,34 @@ mod tests {
         let rotated = half_turn_z.rotate(&Vec3::new(1.0, 0.0, 0.0));
         assert!((rotated.x + 1.0).abs() < 1e-5);
         assert!((rotated.y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn angle_to_identical_rotation_is_zero() {
+        // Tolerance is looser than other tests here on purpose: `q` isn't
+        // exactly unit-length (sin/cos rounding), and `acos`/`atan2` near
+        // dot=1 amplify that tiny residual more than elsewhere — still
+        // far below any angle this metric needs to resolve.
+        let half = std::f32::consts::FRAC_PI_4;
+        let q = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        assert!(q.angle_to(&q).abs() < 1e-3);
+    }
+
+    #[test]
+    fn angle_to_quarter_turn_is_half_pi() {
+        let half = std::f32::consts::FRAC_PI_4;
+        let quarter_turn_z = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let angle = Quat::IDENTITY.angle_to(&quarter_turn_z);
+        assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn angle_to_ignores_the_quaternion_double_cover() {
+        // -q represents the exact same rotation as q (same tolerance
+        // rationale as angle_to_identical_rotation_is_zero).
+        let half = std::f32::consts::FRAC_PI_4;
+        let q = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let negated = Quat::new(-q.x, -q.y, -q.z, -q.w);
+        assert!(q.angle_to(&negated).abs() < 1e-3);
     }
 }

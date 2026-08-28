@@ -6,6 +6,35 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Car-state divergence scoring
+**2026-08-28** · pending PR
+
+- **Added:** `rb_domain::divergence::DivergenceScore` gains a `cars:
+  CarDivergence` field — mean/max car position distance, rotation distance
+  (radians), and velocity distance, plus the number of car pairs compared
+  (`RB-VERIFY-003-FR-002`). Cars are matched between the recorded and
+  candidate sequences by `player_id` within each frame pair; a car present
+  on only one side of a pair is skipped for that frame, not an error.
+- **Added:** `Quat::angle_to` (`rb_domain::state`) — the angle between two
+  rotations, in radians. Uses an `atan2`-based half-angle formula rather
+  than the more obvious `2.0 * dot.acos()`: `acos` is numerically unstable
+  exactly where this metric cares most (near-identical rotations, where a
+  tiny `f32` rounding difference would otherwise produce a spuriously
+  large angle). Handles the quaternion double-cover (`q` and `-q` are the
+  same rotation) via the dot product's absolute value.
+- **Changed:** `rb-verify`'s output now prints car-pair count and
+  position/rotation/velocity stats alongside the existing ball stats.
+- **Verified:** 8 new unit tests in `rb_domain` (4 car-scoring cases: 
+  identical states, known position/velocity offsets, a known rotation
+  offset, a car unmatched on one side; 3 for `angle_to`). Manually re-run
+  end-to-end against the same real replay fixture + synthetic capture
+  fixture: `car pairs compared: 5, mean car position/rotation/velocity
+  distance: 2823.85 uu / 2.36 rad / 1369.44 uu/s`. As before, these
+  numbers are not a fidelity signal — the two fixtures are unrelated
+  matches — they only confirm car scoring runs correctly end-to-end.
+- 8 new unit tests (73 total in the workspace); `cargo fmt --check`,
+  `clippy -D warnings`, and `cargo test --workspace` all pass.
+
 ## Divergence scoring CLI wiring
 **2026-08-28** · [#9](https://github.com/baileyrd/rusty_bullet/pull/9) (merge commit `f10d017`)
 
