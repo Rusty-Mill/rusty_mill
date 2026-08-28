@@ -24,6 +24,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   real match replays (40/40 clean), closing the "runs correctly on real
   owner data at scale" half of `RB-VERIFY-001`'s owner-data acceptance
   criterion.
+- `rb_domain::ControllerInput` and `CarState.input` (ADR-0005), a shared
+  controller-input schema; `rb_replay_ingest` now attaches recovered input
+  to every car (`RB-VERIFY-001-FR-004`).
+- `rb_capture_ingest`: real capture-file parsing via a new JSON-Lines
+  format (`RB-VERIFY-002-FR-002`/`NFR-001`, ADR-0005), verified against a
+  synthetic fixture. The BakkesMod-side plugin that would write a real
+  capture (`RB-VERIFY-002-FR-001`) is not yet built.
 ### Changed
 ### Fixed
 ### Security

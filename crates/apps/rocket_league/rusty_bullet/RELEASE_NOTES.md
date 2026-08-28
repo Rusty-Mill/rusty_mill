@@ -6,8 +6,42 @@ keyed by the commit/PR that shipped them.
 
 ---
 
-## Replay ingestion — local real-corpus validation gate
+## BakkesMod capture ingestion — JSON-Lines parser + shared input schema
 **2026-08-28** · pending PR
+
+- **Added:** `rb_domain::ControllerInput` and `CarState.input:
+  Option<ControllerInput>` (ADR-0005) — a shared controller-input schema
+  for both ingestion adapters. `throttle`/`steer` are always a number;
+  `pitch`/`yaw`/`roll` are `Option<f32>` since only BakkesMod captures can
+  ever populate them (a replay's dodge impulse/torque vectors are a
+  different kind of quantity, not an analog stick angle). Resolves
+  `RB-VERIFY-001-FR-004`, deferred since replay ingestion landed.
+- **Changed:** `rb_replay_ingest::convert` now attaches recovered input
+  (throttle/steer normalized from replicated bytes, jump/boost/handbrake
+  from `subtr_actor`'s boolean flags) to every car it converts. 4 new unit
+  tests (14 total in the crate).
+- **Added:** `rb_capture_ingest` now really parses capture files
+  (`RB-VERIFY-002-FR-002`/`NFR-001`): the capture format is JSON Lines, one
+  `{"timestamp_secs", "ball", "cars"}` object per tick (ADR-0005), decoded
+  via a new `wire` module (`serde`/`serde_json`, justified in
+  `Cargo.toml`) into `rb_domain::PhysicsFrame`s with every car's `input`
+  populated. 10 new unit tests, run against a synthetic, hand-authored
+  fixture — see `crates/rb_capture_ingest/fixtures/README.md`.
+- **Resolved:** `RB-RESEARCH-O003` (BakkesMod tooling scope) — a one-off
+  script writing an unversioned format, not a reusable harness, per
+  ADR-0005.
+- Known limitation stated plainly, mirroring `RB-RESEARCH-O002`'s own
+  practical blocker: the BakkesMod-side plugin that would actually write a
+  capture file (`RB-VERIFY-002-FR-001`) has not been built — this
+  sandboxed environment has no Rocket League, BakkesMod, or Windows
+  environment to build or run it in. `PHASE-0-CAPTURE-INGEST`'s exit gate
+  (a real capture, cross-checked against BakkesMod's own overlay) stays
+  open until the owner builds and runs that plugin on their own machine.
+- 14 new unit tests (63 total in the workspace); `cargo fmt --check`,
+  `clippy -D warnings`, and `cargo test --workspace` all pass.
+
+## Replay ingestion — local real-corpus validation gate
+**2026-08-28** · [#5](https://github.com/baileyrd/rusty_bullet/pull/5) (merge commit `0b2253d`)
 
 - **Added:** `corpus_check`, a local/gitignored-corpus health-check binary
   (`cargo run -p rb_replay_ingest --bin corpus_check [dir]`,

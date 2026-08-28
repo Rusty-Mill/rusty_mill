@@ -1,9 +1,8 @@
 # RB-VERIFY-001 — Replay Ingestion
 
-- Version: 0.3.0
-- Status: In Progress (FR-001/002/003 implemented and validated at scale
-  against 40 real owner replays; FR-004 — attaching recovered input —
-  deferred, see Open Questions)
+- Version: 0.4.0
+- Status: In Progress (FR-001/002/003/004 implemented; FR-001/002/003
+  validated at scale against 40 real owner replays)
 - Owners: baileyrd
 - Depends on: none
 - Supersedes: none
@@ -16,9 +15,8 @@ can serve as one of the two ground-truth sources for divergence scoring
 (`RB-VERIFY-003`).
 
 In scope: parsing ball and car position/rotation/velocity/angular
-velocity/boost state per frame. Attaching recovered controller input
-(throttle, steer, jump, boost, air-roll) is in scope for this spec but
-deferred to a follow-up increment — see Open Questions.
+velocity/boost state per frame, and attaching recovered controller input
+(throttle, steer, jump, boost, handbrake) to each car — see FR-004.
 
 ## Non-goals
 
@@ -33,10 +31,10 @@ deferred to a follow-up increment — see Open Questions.
   boost/jump/double-jump/dodge/powerslide — not just physics-derived
   inference. That's more than S004 assumed, though still coarser than a
   live controller's full analog resolution (dodge direction is an impulse/
-  torque vector, not raw stick position). Attaching it to `PhysicsFrame`
-  is real work still to do (`RB-domain` has no input field yet) — see Open
-  Questions — this non-goal is about accuracy expectations, not about
-  whether it's technically recoverable.
+  torque vector, not raw stick position, so it's never mapped onto
+  `ControllerInput.pitch`/`yaw`/`roll` — see FR-004 and ADR-0005). This
+  non-goal is about accuracy expectations, not about whether it's
+  technically recoverable or attached (it now is, see FR-004).
 - Not responsible for divergence scoring itself (`RB-VERIFY-003`) or for
   BakkesMod capture parsing (`RB-VERIFY-002`).
 
@@ -67,13 +65,16 @@ deferred to a follow-up increment — see Open Questions.
   velocity, angular velocity, boost amount) is extracted per player, per
   frame; a car absent from a given frame is simply left out of that
   frame's `cars`, not an error.
-- `RB-VERIFY-001-FR-004` (open): Attach recovered input (throttle/steer
-  bytes, boost/jump/double-jump/dodge/powerslide booleans — all available
-  from `subtr_actor::PlayerFrame::Data::input`/boolean fields already) to
-  the output. Deferred because `rb_domain::CarState`/`PhysicsFrame` have no
-  input field yet, and adding one is a domain-schema decision that should
-  be made once (considering `RB-VERIFY-002`'s BakkesMod input too), not
-  bolted on ad hoc here.
+- `RB-VERIFY-001-FR-004` (implemented): Attach recovered input to each
+  car's `rb_domain::CarState.input`: throttle/steer (normalized from
+  `subtr_actor::PlayerFrame::Data::input`'s raw bytes to -1.0..1.0),
+  `jump` (`jump_active || double_jump_active`), `boost` (`boost_active`),
+  `handbrake` (`powerslide_active`). `pitch`/`yaw`/`roll` are always `None`
+  — a replay never replicates an instantaneous analog stick angle, only a
+  one-shot dodge impulse/torque vector, a different kind of quantity (see
+  Non-goals). The `ControllerInput` type and this "some fields structurally
+  absent" design were decided jointly with `RB-VERIFY-002` in
+  [ADR-0005](../../adr/0005-capture-file-format-and-input-schema.md).
 - `RB-VERIFY-001-NFR-001` (implemented): A malformed or truncated replay
   file produces `Err(IngestError::Malformed(_))`, never a panic. A missing
   file produces `Err(IngestError::Io(_))`.
@@ -158,7 +159,7 @@ format version — track as it becomes relevant.
 
 ## Verification plan
 
-Unit tests (10, in `rb_replay_ingest`): pure conversion-function tests
+Unit tests (14, in `rb_replay_ingest`): pure conversion-function tests
 (`convert.rs`, no file needed) plus file-level tests (missing file,
 malformed file, and the real vendored fixture producing a non-empty,
 bounds-sane frame sequence with car data present). Additionally, a local/
@@ -178,9 +179,6 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Open questions
 
-- FR-004 (attaching recovered input) — needs an `rb_domain` schema
-  decision (an input field on `CarState`, or a parallel structure) made
-  jointly with `RB-VERIFY-002`, not decided here.
 - NFR-002 (parse performance) — not yet benchmarked in isolation from test
   overhead.
 - Whether the vendored third-party fixture is sufficient for ongoing CI, or
@@ -189,6 +187,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.4.0 (2026-08-28): FR-004 implemented — `convert.rs` now populates
+  `CarState.input` from `subtr_actor`'s already-recovered throttle/steer
+  bytes and boost/jump/handbrake booleans, using the `ControllerInput`
+  type ADR-0005 decided jointly with `RB-VERIFY-002`. 4 new unit tests (14
+  total).
 - 0.3.0 (2026-08-28): Added `RB-VERIFY-001-NFR-003` — a local, gitignored
   corpus health-check bin (`corpus_check`). Run once against 40 of the
   owner's own real match replays (`baileyrd/replays`): 40/40 parsed

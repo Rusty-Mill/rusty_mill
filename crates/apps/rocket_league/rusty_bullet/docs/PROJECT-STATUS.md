@@ -2,7 +2,7 @@
 
 - Last verified main commit: `0b2253d` (merge of [#5](https://github.com/baileyrd/rusty_bullet/pull/5))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-0-REPLAY-INGEST` (boxcars + subtr-actor replay parsing, validated against a 40-file real owner corpus) — Done
+- Current milestone: `PHASE-0-CAPTURE-INGEST` (`rb_capture_ingest` JSON-Lines parser implemented; BakkesMod-side plugin not built, blocked on owner's own environment) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -33,6 +33,17 @@
   scale" half of `RB-VERIFY-001`'s owner-data acceptance criterion; the
   manual single-timestamp cross-check remains open (see Blocked). Marks
   `PHASE-0-REPLAY-INGEST` Done.
+- `ADR-0005` — decided the capture file format (JSON Lines) and a shared
+  `rb_domain::ControllerInput` schema, resolving `RB-RESEARCH-O003` and the
+  domain-schema question `RB-VERIFY-001-FR-004` had deferred.
+  `RB-VERIFY-001-FR-004` — `rb_replay_ingest` now attaches recovered input
+  (throttle/steer/jump/boost/handbrake) to `CarState.input`; `pitch`/`yaw`/
+  `roll` stay `None` for replay-sourced input (never recoverable from a
+  replay, see ADR-0005).
+- `RB-VERIFY-002-FR-002`/`NFR-001` — `rb_capture_ingest` parses the
+  JSON-Lines capture format into `PhysicsFrame`s with `CarState.input`
+  always populated, tested against a synthetic hand-authored fixture (no
+  real BakkesMod capture exists — see Blocked).
 
 ## In progress
 
@@ -54,27 +65,32 @@
   half is still open and needs the owner to do the manual cross-check
   locally, since this sandbox has no way to verify an exact remembered
   timestamp.
+- `RB-VERIFY-002-FR-001` (the BakkesMod-side capture plugin) — this
+  sandboxed environment has no Rocket League install, no BakkesMod, and no
+  Windows to build a BakkesMod SDK plugin on at all (same practical
+  blocker as `RB-RESEARCH-O002`). `rb_capture_ingest`'s Rust-side parser is
+  implemented and tested against a synthetic fixture, but a real capture
+  file — and therefore `RB-VERIFY-002`'s acceptance criteria and
+  `PHASE-0-CAPTURE-INGEST`'s exit gate — needs this plugin built and run on
+  the owner's own machine.
 
 ## Next
 
-1. `PHASE-0-CAPTURE-INGEST` — BakkesMod offline capture ingestion
-   (`RB-VERIFY-002`). Needs the owner's own local/offline capture, since
-   this sandbox can't run Rocket League or BakkesMod.
-2. `RB-VERIFY-001-FR-004` / `RB-VERIFY-002` input schema — decide how
-   recovered input (replay-derived throttle/steer/booleans; BakkesMod
-   `ControllerInput`) attaches to `rb_domain`'s types, once both adapters'
-   real shapes are known.
-3. `RB-PHYSICS-001-FR-004` — extend `rb_physics_bullet` to box-shaped car
+1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
+   capture plugin against ADR-0005's JSON-Lines format, on the owner's own
+   Windows/BakkesMod/game environment (this sandbox can't).
+2. `RB-PHYSICS-001-FR-004` — extend `rb_physics_bullet` to box-shaped car
    bodies (general 3x3 inertia, box collision, multi-contact resolution).
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (51 tests: 13 in `rb_domain`, 26 in
-  `rb_physics_bullet`, 10 in `rb_replay_ingest` (incl. real-fixture
-  integration test), 1 in `rb_capture_ingest`, 0 in `rb_verify_cli`
-  (binary-only, no unit tests yet), plus doc-tests)
+- `cargo test --workspace`: pass (63 tests: 13 in `rb_domain`, 26 in
+  `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
+  integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
+  test), 0 in `rb_verify_cli` (binary-only, no unit tests yet), plus
+  doc-tests)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 
@@ -86,8 +102,5 @@
   sign-off after legal/practical review before any work starts, and needs
   the owner's own machine/game install since this sandbox has neither.
   Owner: baileyrd.
-- `RB-RESEARCH-O003` (capture tooling scope) — decide at
-  `PHASE-0-CAPTURE-INGEST` start. Owner: baileyrd.
-- `RB-VERIFY-001-FR-004` input schema — decide jointly with
-  `RB-VERIFY-002`, not before both adapters' real shapes are known. Owner:
-  baileyrd.
+- `RB-RESEARCH-O003` (capture tooling scope) — **resolved**, see ADR-0005
+  (one-off script, JSON-Lines format).
