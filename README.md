@@ -48,6 +48,8 @@ have landed so far.
 | [`rusty_stream`](crates/rusty_stream) | `crates/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty_url`](crates/rusty_url) | `crates/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
 | [`rusty_http`](crates/rusty_http) | `crates/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
+| [`rusty_json`](crates/rusty_json) | `crates/rusty_json` | From-scratch JSON library, `no_std`-capable, with `serde` interop |
+| [`rusty_json-derive`](crates/rusty_json/rusty_json-derive) | `crates/rusty_json/rusty_json-derive` | `rusty_json`'s `#[derive(RustyJson)]` proc-macro |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -216,6 +218,17 @@ and is unrelated to anything in this workspace, so it's left untouched.
 Despite its name, `rusty_http`'s own `Url` type is a from-scratch
 sans-IO parsing primitive, not a dependency on `rusty_url` — the two
 crates don't relate.
+
+`rusty_json` has no dependency relationship of its own — its one
+non-dev dependency, `serde`, is a crates.io crate — but it retires a
+forward pin: `rusty_lsp`'s optional `rusty-json` feature pinned
+`rusty_json` to a `git` rev (tracking a not-yet-merged sibling, same
+shape as `rusty_lsp`'s own `rusty_json` pin before this crate existed
+in the workspace) matching `rusty_json`'s current `main` HEAD exactly —
+swapped to a `path` dependency on the now-merged `crates/rusty_json`.
+`rusty_json-derive`, its proc-macro companion, was already a `path`
+dependency within the standalone repo and needed no changes beyond
+joining the workspace `members` list alongside it.
 
 ## History
 

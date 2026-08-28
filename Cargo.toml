@@ -33,6 +33,8 @@ members = [
     "crates/rusty_stream",
     "crates/rusty_url",
     "crates/rusty_http",
+    "crates/rusty_json",
+    "crates/rusty_json/rusty_json-derive",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
