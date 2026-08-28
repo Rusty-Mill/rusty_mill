@@ -1,6 +1,6 @@
 # Project Status
 
-- Last verified main commit: `0b2253d` (merge of [#5](https://github.com/baileyrd/rusty_bullet/pull/5))
+- Last verified main commit: `dc7e82f` (merge of [#7](https://github.com/baileyrd/rusty_bullet/pull/7))
 - Verified at: 2026-08-28
 - Current milestone: `PHASE-0-CAPTURE-INGEST` (`rb_capture_ingest` JSON-Lines parser implemented; BakkesMod-side plugin not built, blocked on owner's own environment) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`

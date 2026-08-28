@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## BakkesMod capture ingestion — JSON-Lines parser + shared input schema
-**2026-08-28** · pending PR
+**2026-08-28** · [#7](https://github.com/baileyrd/rusty_bullet/pull/7) (merge commit `dc7e82f`)
 
 - **Added:** `rb_domain::ControllerInput` and `CarState.input:
   Option<ControllerInput>` (ADR-0005) — a shared controller-input schema
