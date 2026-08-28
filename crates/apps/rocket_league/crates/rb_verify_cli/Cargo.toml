@@ -1,0 +1,20 @@
+[package]
+name = "rb_verify_cli"
+description = "Composition root for the Phase 0 verification pipeline: wires ingestion adapters to the divergence scorer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rb-verify"
+path = "src/main.rs"
+
+[dependencies]
+rb_domain = { path = "../rb_domain" }
+rb_replay_ingest = { path = "../rb_replay_ingest" }
+rb_capture_ingest = { path = "../rb_capture_ingest" }

@@ -1,0 +1,13 @@
+[package]
+name = "rb_domain"
+description = "Domain types and ports for rusty_bullet: physics frames, divergence scoring, and the PhysicsStateSource port that ingestion adapters implement."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
