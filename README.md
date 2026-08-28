@@ -47,6 +47,7 @@ have landed so far.
 | [`rusty-mcp-demo`](crates/rusty_mcp/crates/rusty-mcp-demo) | `crates/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
 | [`rusty_stream`](crates/rusty_stream) | `crates/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty_url`](crates/rusty_url) | `crates/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
+| [`rusty_http`](crates/rusty_http) | `crates/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -203,6 +204,18 @@ needed swapping. Unlike `rusty_stream`, it already `cfg`-gates its
 Windows-specific `file://` path handling internally, so it's expected to
 be portable across both CI platforms despite its own CI only ever having
 run on `ubuntu-latest`.
+
+`rusty_http`'s optional `rusty-tokio` feature pulled `rusty_tokio` as a
+pinned `git` dependency, rev-locked to match what its sibling consumers
+(`rusty_tls`, `rusty_request`) pinned — swapped to a `path` dependency on
+the now-merged `crates/rusty_tokio`, unifying `AsyncRead`/`AsyncWrite`
+trait identity across the workspace by construction instead of by rev
+bookkeeping. Its other optional adapter depends on real crates.io `tokio`
+directly (a `rusty_tail` migration need, per its own `ARCHITECTURE.md`)
+and is unrelated to anything in this workspace, so it's left untouched.
+Despite its name, `rusty_http`'s own `Url` type is a from-scratch
+sans-IO parsing primitive, not a dependency on `rusty_url` — the two
+crates don't relate.
 
 ## History
 
