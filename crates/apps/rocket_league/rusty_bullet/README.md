@@ -66,3 +66,8 @@ at your option. This project is an independent reimplementation and is not
 affiliated with, endorsed by, or associated with Psyonix or Epic Games;
 "Rocket League" is their trademark, referenced here only to describe
 compatibility intent.
+
+`crates/rb_physics_bullet` ports specific algorithms from the zlib-licensed
+[Bullet Physics](https://github.com/bulletphysics/bullet3) project — see
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for attribution and
+exactly what was ported from where.
