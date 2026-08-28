@@ -1,8 +1,8 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.1.0
-- Status: Draft (core algorithm implemented at bootstrap; alignment/
-  resampling and car-state scoring are open)
+- Version: 0.2.0
+- Status: Draft (core algorithm implemented at bootstrap and wired into
+  `rb_verify_cli`; alignment/resampling and car-state scoring are open)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-001, RB-VERIFY-002
 - Supersedes: none
@@ -56,7 +56,13 @@ them.
 
 `rb_domain::divergence::score(recorded: &[PhysicsFrame], candidate:
 &[PhysicsFrame]) -> DivergenceScore`. Pure function, no I/O — callable from
-`rb_verify_cli` or any future test harness.
+`rb_verify_cli` or any future test harness. `rb_verify_cli::score_replay_against_capture`
+(in `crates/rb_verify_cli/src/lib.rs`) is the actual composition-root
+wiring: it ingests a replay file via `rb_replay_ingest` as the "recorded"
+sequence and a capture file via `rb_capture_ingest` as the "candidate"
+sequence, then calls `score`. The `rb-verify` binary (`main.rs`) is a thin
+argument-parsing/output wrapper over that function, kept separate so the
+wiring itself is unit-testable without spawning a process.
 
 ## Data/state and invariants
 
@@ -84,11 +90,24 @@ None beyond what applies to the frame data itself (see
 
 ## Verification plan
 
-Unit tests (existing, in `rb_domain`) plus, once a Phase 1 candidate
-physics engine exists, an end-to-end run: recorded inputs from
-`RB-VERIFY-002` fed into the candidate engine, output compared against the
-recorded outcome via this scorer. That end-to-end run is Phase 0's overall
-exit criterion — see [docs/roadmap/ROADMAP.md](../../roadmap/ROADMAP.md).
+Unit tests (4, in `rb_domain::divergence`) for the scoring algorithm
+itself, plus 3 tests in `rb_verify_cli` exercising the real wiring
+(`score_replay_against_capture`) against `rb_replay_ingest`'s vendored
+replay fixture and `rb_capture_ingest`'s synthetic capture fixture: a
+happy-path run producing a non-empty score, and a missing-file case for
+each input reporting `IngestError::Io`. Manually run once
+(`cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`,
+2026-08-28) against those same two fixtures: `frames compared: 5, mean
+ball distance: 0.25 uu, max ball distance: 0.25 uu`. This proves the
+ingestion → scoring pipeline runs end-to-end without erroring across both
+real adapters — it is **not** a fidelity measurement: the replay and the
+capture are unrelated matches (one real, one synthetic) with no physical
+reason to resemble each other, so the number itself means nothing yet.
+The actual end-to-end run this metric exists for — recorded inputs from
+`RB-VERIFY-002` fed into a real Phase 1 candidate physics engine, output
+compared against the recorded outcome — still needs that candidate engine
+to exist (car bodies, not just sphere-vs-plane) and `RB-VERIFY-002-FR-001`'s
+real BakkesMod capture, neither of which exist yet.
 
 ## Traceability
 
@@ -103,5 +122,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.2.0 (2026-08-28): `rb_verify_cli::score_replay_against_capture` wires
+  `score` to the real ingestion adapters (composition root factored out of
+  `main.rs` into a testable `lib.rs`). 3 new tests; manually run
+  end-to-end against a real replay fixture + synthetic capture fixture,
+  proving the pipeline runs without erroring. Explicitly not a fidelity
+  measurement yet — see Verification plan.
 - 0.1.0 (2026-08-28): Initial draft; core ball-position scoring implemented
   and tested at bootstrap.

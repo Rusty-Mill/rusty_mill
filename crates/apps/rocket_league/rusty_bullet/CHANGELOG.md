@@ -31,7 +31,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   format (`RB-VERIFY-002-FR-002`/`NFR-001`, ADR-0005), verified against a
   synthetic fixture. The BakkesMod-side plugin that would write a real
   capture (`RB-VERIFY-002-FR-001`) is not yet built.
+- `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
+  `rb_domain::divergence::score`. Manually run end-to-end against a real
+  replay fixture and a capture file; not yet a fidelity measurement (see
+  `RB-VERIFY-003`'s open FR-002/FR-003).
 ### Changed
+- `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
+  `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
+  raw `Debug` dump.
 ### Fixed
 ### Security
 

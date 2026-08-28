@@ -5,7 +5,7 @@ requirement, defect, maintenance policy, or ADR.
 
 | Requirement | Roadmap | Decision/interface | Implementation | Verification | PR/release | State |
 |---|---|---|---|---|---|---|
-| `RB-VERIFY-003-FR-001` | `PHASE-0-BOOTSTRAP` | `rb_domain::divergence::score` | `crates/rb_domain/src/divergence.rs` | `rb_domain::divergence::tests` (4 tests) | bootstrap commit | Implemented, Verified |
+| `RB-VERIFY-003-FR-001` | `PHASE-0-BOOTSTRAP`, `PHASE-0-EXIT` | `rb_domain::divergence::score`, `rb_verify_cli::score_replay_against_capture` | `crates/rb_domain/src/divergence.rs`, `crates/rb_verify_cli/src/lib.rs` | `rb_domain::divergence::tests` (4 tests) + `rb_verify_cli` tests (3) + manual end-to-end run (5 frames, mean/max 0.25 uu) | bootstrap + cli-wiring commits | Implemented, Verified (algorithm; CLI wiring mechanical only, not yet a fidelity comparison) |
 | `RB-VERIFY-003-NFR-001` | `PHASE-0-BOOTSTRAP` | `rb_domain::divergence::score` | `crates/rb_domain/src/divergence.rs` | `empty_inputs_score_zero_not_nan` | bootstrap commit | Implemented, Verified |
 | `RB-VERIFY-003-FR-002` (car-state scoring) | `PHASE-0-EXIT` | — | not started | not started | — | Not Started |
 | `RB-VERIFY-003-FR-003` (timestamp alignment) | `PHASE-0-EXIT` | — | not started | not started | — | Not Started |
