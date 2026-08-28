@@ -5216,6 +5216,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_stream"
+version = "0.1.0"
+dependencies = [
+ "rusty_tokio",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_term"
 version = "0.1.1"
 dependencies = [

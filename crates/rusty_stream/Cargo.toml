@@ -6,15 +6,11 @@ description = "Single-node durable log for RustyMill, built on rusty_wire and ru
 publish = false
 
 [dependencies]
-# Pinned to the exact commit verified in ADR-0002 D3 (thread-per-core +
-# io-uring-fs both built, tested, straced, and ASAN-checked in that ADR) --
-# not a branch reference, so a future rusty_tokio change can't silently
-# change what this crate builds against. Bump deliberately, re-verify the
-# same way. Bumped past 5a97dfa2 to pick up `uring_global_driver` (issue
-# #256) -- the only public way to obtain a real, production
-# `Arc<dyn OpDriver>`, which `main.rs`'s standalone server needs and
-# nothing before this commit could get.
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "193ff3c630e90500831e9f38b534986deccc88eb", features = [
+# rusty_tokio is merged into this workspace at crates/rusty_tokio, which
+# already carries `uring_global_driver` (issue #256) -- a workspace path
+# dependency tracks it in lockstep instead of the pinned rev this crate
+# used standalone.
+rusty_tokio = { path = "../rusty_tokio", features = [
     "thread-per-core",
     "io-uring-fs",
 ] }
