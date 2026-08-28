@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Physics core v0 — Bullet3 port (sphere vs. ground)
-**2026-08-28** · commits on `claude/rocket-league-server-clone-u74q45` (not yet merged; links added once merged)
+**2026-08-28** · [#1](https://github.com/baileyrd/rusty_bullet/pull/1) (merge commit `7bdc3fc`)
 
 - **Added:** `rb_physics_bullet`, a from-scratch Rust port of specific
   Bullet3 (zlib-licensed) algorithms — rigid-body integration
@@ -34,7 +34,7 @@ keyed by the commit/PR that shipped them.
   `clippy -D warnings`, and `cargo test --workspace` all pass.
 
 ## Repo bootstrap — full lifecycle baseline
-**2026-08-28** · commit on `claude/rocket-league-server-clone-u74q45` (not yet merged; link added once merged)
+**2026-08-28** · landed directly on `main` at commit `5be2078` (predates this repo's "always PR" convention; no PR exists for it)
 
 - **Added:** Full `rust-repo-lifecycle` + `repo-config` bootstrap: charter,
   system architecture, a 6-spec tree (`RB-VERIFY-001/002/003` fully

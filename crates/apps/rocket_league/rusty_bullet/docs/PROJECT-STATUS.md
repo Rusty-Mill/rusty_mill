@@ -1,9 +1,9 @@
 # Project Status
 
-- Last verified main commit: *(pending first push to `main` — see note below)*
+- Last verified main commit: `7bdc3fc` (merge of [#1](https://github.com/baileyrd/rusty_bullet/pull/1))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-1-PHYSICS-CORE-V0` (Bullet3 port, sphere-vs-plane)
-- Health: green — workspace builds, `fmt`/`clippy`/`test` all pass
+- Current milestone: `PHASE-1-PHYSICS-CORE-V0` (Bullet3 port, sphere-vs-plane) — merged
+- Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
 
@@ -23,12 +23,12 @@
   deceleration + spin coupling). `RB-RESEARCH-O001` (build vs. integrate)
   resolved by this decision.
 
-Evidence for both: commits on `claude/rocket-league-server-clone-u74q45`
-(not yet merged to `main`).
+Evidence for both: merged via [PR #1](https://github.com/baileyrd/rusty_bullet/pull/1)
+(merge commit `7bdc3fc`, CI green before merge).
 
 ## In progress
 
-- None — both units above are complete pending review/merge of this branch.
+- None.
 
 ## Blocked
 
@@ -71,6 +71,3 @@ Evidence for both: commits on `claude/rocket-league-server-clone-u74q45`
   Owner: baileyrd.
 - `RB-RESEARCH-O003` (capture tooling scope) — decide at
   `PHASE-0-CAPTURE-INGEST` start. Owner: baileyrd.
-- This is a fresh repo with no `main` history yet; the note above about
-  "last verified main commit" should be filled in once this branch is
-  merged.

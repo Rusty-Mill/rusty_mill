@@ -5,6 +5,14 @@
 `main` is authoritative. Chat history, task descriptions, local branches,
 and reports are proposals or working state until merged.
 
+## Standing rule: always PR, merge, sync
+
+Per explicit owner direction, every change — including doc-only and
+status-checkpoint updates — lands through a PR against `main`, merged with
+a merge commit once CI is green, followed by refreshing local `main`. No
+direct pushes to `main`, even for trivial changes. This applies regardless
+of executor mode.
+
 ## Executor detection
 
 Detected fresh each session from environment capabilities, never from a
