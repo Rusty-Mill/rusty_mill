@@ -72,8 +72,25 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # rusty_stream's design is built on io_uring, a Linux-only kernel
+      # interface -- its own CI only ever ran on ubuntu-latest, and its
+      # source uses rusty_tokio's io-uring-fs types unconditionally rather
+      # than behind a `cfg(target_os = "linux")` no-op shell the way
+      # rusty_win32 does the reverse (Windows-only behind cfg, portable
+      # everywhere else). Excluded from windows-latest rather than
+      # rewriting its internals to be cross-platform.
+      - name: Set per-OS workspace flags
+        id: os-flags
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "exclude=--exclude rusty_stream" >> "$GITHUB_OUTPUT"
+          else
+            echo "exclude=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Clippy (workspace, all features)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace ${{ steps.os-flags.outputs.exclude }} --all-targets --all-features -- -D warnings
 
       # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
       # walking target/{debug,release} at runtime rather than through a
@@ -85,10 +102,10 @@ jobs:
       # step first guarantees every workspace binary exists on disk before
       # any test executes (see #12).
       - name: Build (workspace, all features)
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace ${{ steps.os-flags.outputs.exclude }} --all-features
 
       - name: Test (workspace, all features)
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace ${{ steps.os-flags.outputs.exclude }} --all-features
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/rusty_win32/Cargo.toml) — this mirrors its own CI's

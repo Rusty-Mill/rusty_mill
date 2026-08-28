@@ -187,6 +187,15 @@ verified) — switched to a workspace `path` dependency on
 is outside this monorepo's scope (same as `rusty_simd`/`rusty_std`/
 `rusty_wire` noted earlier) and stays a pinned `git` dependency.
 
+`rusty_stream`'s design is built on io_uring, a Linux-only kernel
+interface — its own CI only ever ran on `ubuntu-latest`, and its source
+uses `rusty_tokio`'s `io-uring-fs` types unconditionally rather than
+behind a `cfg(target_os = "linux")` no-op shell the way `rusty_win32`
+does the reverse (Windows-only behind `cfg`, portable everywhere else).
+Rather than rewrite its internals to be cross-platform, the workflow
+excludes it (`--exclude rusty_stream`) from the `windows-latest` leg's
+`--workspace` clippy/build/test steps specifically.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
