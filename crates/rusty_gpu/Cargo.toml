@@ -10,14 +10,14 @@ keywords = ["gpu", "framebuffer", "rasterizer", "graphics", "no-std"]
 categories = ["graphics", "no-std"]
 
 [dependencies]
-# Pinned git deps, not path deps: a `git = "..."` Cargo dependency on
-# this crate clones only this one repository, so a sibling `../rusty_simd`
-# checkout doesn't exist for any external consumer (see rusty_std's
-# Cargo.toml for the same fix, and rusty_tokio#254).
+# rusty_std is now a sibling in this same workspace -- plain path
+# dependency. rusty_simd remains a pinned git dep (a `git = "..."`
+# dependency clones only that one repository, so a sibling checkout
+# doesn't exist for any external consumer) until it's merged in too.
 rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
 rusty_gui = { path = "../rusty_gui", version = "0.1.0" }
 rusty_font = { path = "../rusty_font", version = "0.1.0" }
-rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
+rusty_std = { path = "../rusty_std" }
 
 [target.'cfg(windows)'.dependencies]
 rusty_win32 = { path = "../rusty_win32", version = "0.1.0" }

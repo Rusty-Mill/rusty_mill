@@ -10,13 +10,13 @@ keywords = ["font", "truetype", "rasterizer", "ttf", "no-std"]
 categories = ["text-processing", "no-std"]
 
 [dependencies]
-# rusty_wire is now a sibling in this same workspace -- plain path
-# dependency. rusty_simd/rusty_std remain pinned git deps (a `git = "..."`
+# rusty_wire/rusty_std are now siblings in this same workspace -- plain
+# path dependencies. rusty_simd remains a pinned git dep (a `git = "..."`
 # dependency clones only that one repository, so a sibling checkout
-# doesn't exist for any external consumer) until they're merged in too.
+# doesn't exist for any external consumer) until it's merged in too.
 rusty_wire = { path = "../rusty_wire" }
 rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
-rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
+rusty_std = { path = "../rusty_std" }
 
 [features]
 default = []

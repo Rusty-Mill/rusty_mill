@@ -58,6 +58,7 @@ have landed so far.
 | [`threading`](crates/rustils_async/crates/threading) | `crates/rustils_async/crates/threading` | Minimal multithreading primitives: scoped-thread spawn, `Mutex`/`RwLock` with explicit poisoning policy |
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
+| [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -93,7 +94,9 @@ unchanged by this merge; each swapped to a `path` dependency once its own
 crate joined this monorepo later (`rusty_libc`'s three in-set consumers in
 the second wave below, `rusty_lsp`'s own later merge, and `rusty_wire`'s
 three consumers — `rusty_font`, `rusty_gui`, `rusty_stream` — noted where
-each is discussed). `rusty_simd`/`rusty_std` are the two still outstanding.
+each is discussed, and `rusty_std`'s four consumers — `rusty_font`,
+`rusty_gui`, `rusty_gpu`, `rusty_tokio` — likewise). `rusty_simd` is the
+one still outstanding.
 `mill-term` locates `rusty_git`/`rusty_text`'s `rgit`/`rsed`/
 `rawk` binaries via a `PATH`/shared-`target/`-dir lookup rather than a
 Cargo library dependency — it shells out to them, not their APIs — so that
@@ -105,12 +108,16 @@ currently disabled/unused pending a fix tracked upstream at
 [`rusty_gui#9`](https://github.com/baileyrd/rusty_gui/issues/9) — not
 addressed by this migration.
 
-`rusty_tokio` doesn't depend on, or get depended on by, any of the other
-crates in this repo, so it needed no path-dependency swap. Its own
-`rusty_std` and `platform`/`platform-linux`/`platform-bsd`/`platform-windows`
-dependencies (from `baileyrd/rusty_std` and `baileyrd/rustils`) stay pinned
-`git` dependencies — those crates are outside this monorepo's scope, same as
-`rusty_simd` above.
+`rusty_tokio` doesn't get depended on by any of the other crates in this
+repo, and until `rusty_std` merged it didn't depend on any either. Its
+`rusty_std` dependency swapped to a `path` dependency along with
+`rusty_std`'s three other pre-existing consumers below — its pinned rev
+(`3ab2361e`) predated the merge commit that landed on `rusty_std`'s own
+`main` (`99135f3`) but was content-identical (an empty diff between the
+two), so the swap is a pure mechanical change, not a version bump. Its
+`platform`/`platform-linux`/`platform-bsd`/`platform-windows` dependencies
+(from `baileyrd/rustils`) stay pinned `git` dependencies — that crate is
+outside this monorepo's scope, same as `rusty_simd` above.
 
 `rusty_rusqlite` has no dependencies at all (`[dependencies]` is empty in
 its own manifest) and nothing in this repo depends on it yet, so nothing
@@ -275,6 +282,21 @@ and `rusty_stream` each pinned it to a `git` rev (all three at the
 exact same commit, `rusty_wire`'s current `main` HEAD) before it had a
 home in this workspace. All three swapped to a `path` dependency on
 `crates/rusty_wire` as part of this same import.
+
+`rusty_std` retires four forward pins the same way — `rusty_font`,
+`rusty_gui`, `rusty_gpu`, `rusty_tokio` — three at `rusty_std`'s exact
+current `main` HEAD, `rusty_tokio`'s one commit earlier but
+content-identical (see above). `rusty_std` also has its own two
+dependencies on already-merged siblings, `rusty_libc` and `rusty_win32`
+(optional, feature-gated per target OS) — both swapped to `path`
+dependencies too. Unlike every other pin retired in this series so
+far, `rusty_win32`'s pinned rev was **not** current: a real diff (2,984
+insertions across 31 files) separated it from this workspace's
+`crates/rusty_win32`, reflecting genuine API growth since `rusty_std`
+took that pin. Verified by building and testing `rusty_std` against
+the current `rusty_win32` (both toolchains, plus a Windows
+cross-compile check) rather than assuming compatibility from the
+mechanical rev-to-path pattern the other swaps in this series follow.
 
 ## History
 
