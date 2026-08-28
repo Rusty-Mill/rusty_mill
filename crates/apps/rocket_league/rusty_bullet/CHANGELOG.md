@@ -34,11 +34,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
   `rb_domain::divergence::score`. Manually run end-to-end against a real
   replay fixture and a capture file; not yet a fidelity measurement (see
-  `RB-VERIFY-003`'s open FR-002/FR-003).
+  `RB-VERIFY-003`'s open FR-003).
+- `rb_domain::divergence::score` now also scores car position/rotation/
+  velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
+  sequences by `player_id`. New `Quat::angle_to` computes rotation
+  distance.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
-  raw `Debug` dump.
+  raw `Debug` dump, now including car-divergence stats.
 ### Fixed
 ### Security
 

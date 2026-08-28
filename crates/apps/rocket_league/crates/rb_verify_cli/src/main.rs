@@ -21,9 +21,22 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         Ok(score) => {
-            println!("frames compared:   {}", score.frames_compared);
+            println!("frames compared:    {}", score.frames_compared);
             println!("mean ball distance: {:.2} uu", score.mean_ball_distance);
             println!("max ball distance:  {:.2} uu", score.max_ball_distance);
+            println!("car pairs compared: {}", score.cars.pairs_compared);
+            println!(
+                "mean car position/rotation/velocity distance: {:.2} uu / {:.2} rad / {:.2} uu/s",
+                score.cars.mean_position_distance,
+                score.cars.mean_rotation_distance,
+                score.cars.mean_velocity_distance
+            );
+            println!(
+                "max  car position/rotation/velocity distance: {:.2} uu / {:.2} rad / {:.2} uu/s",
+                score.cars.max_position_distance,
+                score.cars.max_rotation_distance,
+                score.cars.max_velocity_distance
+            );
             ExitCode::SUCCESS
         }
     }
