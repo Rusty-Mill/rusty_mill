@@ -1,14 +1,10 @@
 //! `rb-verify`: Phase 0 verification pipeline entry point.
 //!
-//! Composition root only — wires `rb_replay_ingest`/`rb_capture_ingest`
-//! (adapters) to `rb_domain::divergence::score` (domain logic). Both
-//! adapters are stubs until Phase 0 delivery work lands their real parsing
-//! backends, so this currently reports that rather than pretending to
-//! produce a score. See `docs/roadmap/ROADMAP.md` Phase 0 exit criteria.
+//! Thin CLI over `rb_verify_cli::score_replay_against_capture` — argument
+//! parsing and human-readable output only, no logic of its own (see
+//! `lib.rs` for why the actual wiring lives there instead).
 
-use rb_capture_ingest::CaptureFileSource;
-use rb_domain::PhysicsStateSource;
-use rb_replay_ingest::ReplayFileSource;
+use rb_verify_cli::score_replay_against_capture;
 use std::env;
 use std::process::ExitCode;
 
@@ -19,17 +15,15 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let replay = ReplayFileSource::new(replay_path);
-    let capture = CaptureFileSource::new(capture_path);
-
-    match (replay.frames(), capture.frames()) {
-        (Err(e), _) | (_, Err(e)) => {
-            eprintln!("ingestion not ready yet: {e}");
+    match score_replay_against_capture(replay_path, capture_path) {
+        Err(e) => {
+            eprintln!("ingestion failed: {e}");
             ExitCode::FAILURE
         }
-        (Ok(recorded), Ok(candidate)) => {
-            let result = rb_domain::divergence::score(&recorded, &candidate);
-            println!("{result:?}");
+        Ok(score) => {
+            println!("frames compared:   {}", score.frames_compared);
+            println!("mean ball distance: {:.2} uu", score.mean_ball_distance);
+            println!("max ball distance:  {:.2} uu", score.max_ball_distance);
             ExitCode::SUCCESS
         }
     }

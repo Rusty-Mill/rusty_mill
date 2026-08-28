@@ -6,6 +6,29 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Divergence scoring CLI wiring
+**2026-08-28** · pending PR
+
+- **Added:** `rb_verify_cli::score_replay_against_capture` (new `lib.rs`)
+  — the actual composition-root wiring, ingesting a replay via
+  `rb_replay_ingest` and a capture via `rb_capture_ingest` and running
+  `rb_domain::divergence::score` on the results. `main.rs` is now a thin
+  argument-parsing/output wrapper over it, kept separate so the wiring
+  itself is unit-testable without spawning a process.
+- **Changed:** `rb-verify`'s output is now a small human-readable summary
+  (frames compared, mean/max ball distance) instead of a raw `Debug` dump.
+- **Verified:** 3 new unit tests against `rb_replay_ingest`'s vendored
+  replay fixture and `rb_capture_ingest`'s synthetic capture fixture
+  (happy path, missing-replay, missing-capture). Manually run end-to-end:
+  `frames compared: 5, mean ball distance: 0.25 uu, max ball distance:
+  0.25 uu`. This proves the ingest → score pipeline runs without erroring
+  across both real adapters — explicitly **not** a fidelity measurement,
+  since the replay and capture are unrelated matches and
+  `RB-VERIFY-003-FR-002`/`FR-003` (car-state scoring, timestamp-tolerant
+  alignment) are still open.
+- 3 new unit tests (66 total in the workspace); `cargo fmt --check`,
+  `clippy -D warnings`, and `cargo test --workspace` all pass.
+
 ## BakkesMod capture ingestion — JSON-Lines parser + shared input schema
 **2026-08-28** · [#7](https://github.com/baileyrd/rusty_bullet/pull/7) (merge commit `dc7e82f`)
 
