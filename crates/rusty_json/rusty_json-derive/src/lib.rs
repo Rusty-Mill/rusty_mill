@@ -14,7 +14,7 @@ pub fn derive_rusty_json(input: TokenStream) -> TokenStream {
         impl {name} {{
             /// Serializes this struct into a JSON string using sovereign rusty_json.
             pub fn to_json_string(&self) -> String {{
-                alloc::format!("{{ \"_type\": \"{}\" }}", "{name}")
+                alloc::format!("{{{{ \"_type\": \"{{}}\" }}}}", "{name}")
             }}
 
             /// Deserializes a struct from a JSON string using sovereign rusty_json.
