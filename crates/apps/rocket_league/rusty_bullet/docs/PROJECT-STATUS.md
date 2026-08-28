@@ -2,7 +2,7 @@
 
 - Last verified main commit: `59266ea` (merge of [#13](https://github.com/baileyrd/rusty_bullet/pull/13))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-0-EXIT` (`RB-VERIFY-003`'s ball scoring, car scoring, and timestamp-tolerant alignment are all now implemented; `rb_verify_cli` runs end-to-end mechanically, not yet a real fidelity comparison) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution all implemented in `rb_physics_bullet`; box-vs-sphere collision and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -78,6 +78,25 @@
   mean car position/rotation/velocity distance: 2816.42 uu / 2.36 rad /
   1307.87 uu/s`. `RB-VERIFY-003` now has all three functional
   requirements implemented.
+- `RB-PHYSICS-001-FR-004` (box-shaped car bodies) — `rb_physics_bullet`
+  gains a unified `RigidBody`/`Shape` design (sphere or box, matching
+  Bullet's own rigid-body-plus-collision-shape architecture) and a general
+  3x3 inverse inertia tensor (`Mat3`, recomputed from orientation each
+  step, shared by both shapes — a sphere's is mathematically
+  orientation-independent, so this doesn't change ball behavior).
+  Box-vs-plane contact generation tests all 8 corners against the plane
+  (exact, not an approximation), producing 1-4 contacts depending on
+  orientation; the solver now resolves an entire manifold together
+  (multi-contact resolution) instead of one contact at a time.
+  `PhysicsWorld` gains an optional car body (`with_car`), stepped and
+  collided against the ground independently from the ball. **Not**
+  implemented: box-vs-sphere (car-vs-ball) collision — the two bodies
+  never collide with each other yet (needs a real convex narrow-phase
+  algorithm, SAT or GJK/EPA); driven car input (a car here is a free
+  rigid box, nothing couples throttle/steer/boost into it). 21 new unit
+  tests (47 total in `rb_physics_bullet`), including a dropped-box
+  settling test confirming multi-contact resolution keeps a symmetric
+  box level instead of spuriously tipping it.
 
 ## In progress
 
@@ -111,26 +130,31 @@
   end-to-end today with all of `RB-VERIFY-003` implemented (ball scoring,
   car scoring, timestamp-tolerant alignment), but only against a real
   replay + a *synthetic* capture (see above), and the divergence number it
-  produces still isn't a meaningful fidelity comparison — there's no Phase
-  1 candidate physics engine capable of consuming recorded inputs and
-  producing a comparable trajectory yet (car bodies aren't implemented —
-  `RB-PHYSICS-001-FR-004`).
+  produces still isn't a meaningful fidelity comparison — there's still no
+  Phase 1 candidate physics engine wired up to actually consume recorded
+  inputs and produce a comparable trajectory (`rb_physics_bullet` now has
+  a car body, but nothing yet connects it to recorded controller input or
+  to `rb_verify_cli`).
+- `RB-PHYSICS-001`'s box-vs-sphere (car-vs-ball) collision and driven car
+  input — both real, not-yet-started follow-up work (see the spec's
+  Non-goals/Open questions), needed before a car in this physics core can
+  do anything beyond free-fall and resting on the ground in isolation.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. `RB-PHYSICS-001-FR-004` — extend `rb_physics_bullet` to box-shaped car
-   bodies (general 3x3 inertia, box collision, multi-contact resolution) —
-   the last real blocker before a candidate-vs-recorded run can produce a
-   meaningful divergence score.
+2. Box-vs-sphere (car-vs-ball) collision and/or driven car input — either
+   is real follow-up work for `rb_physics_bullet` now that box bodies
+   exist; `RB-PHYSICS-001-FR-005` (constant calibration) needs
+   `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (75 tests: 22 in `rb_domain`, 26 in
+- `cargo test --workspace`: pass (96 tests: 22 in `rb_domain`, 47 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

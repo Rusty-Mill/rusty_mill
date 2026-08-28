@@ -6,6 +6,50 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Box-shaped car bodies
+**2026-08-28** · pending PR
+
+- **Added:** `rb_physics_bullet` gains a unified `RigidBody`/`Shape`
+  design (`RB-PHYSICS-001-FR-004`) — one rigid-body type serving both the
+  ball (sphere) and a car (box), matching Bullet's own architecture
+  (`btRigidBody` plus a polymorphic `btCollisionShape`) rather than a
+  separate type per shape. `Sphere` is gone; `RigidBody::sphere(...)` and
+  `RigidBody::car_box(half_extents, ...)` are the new constructors.
+- **Added:** `Mat3`, a general 3x3 matrix (ported from
+  `btMatrix3x3::setRotation`/`scaled`) — needed because a box's inertia
+  tensor is anisotropic, unlike a sphere's isotropic (scalar) one.
+  `RigidBody` now carries `inv_inertia_local` (diagonal, body frame) and
+  recomputes a full `inv_inertia_world` matrix each step
+  (`update_inertia_tensor`) from the body's current orientation. A
+  sphere's `inv_inertia_world` is mathematically orientation-independent,
+  so this is a strict generalization — sphere behavior is unchanged.
+- **Added:** analytic box-vs-plane contact generation — tests all 8
+  corners against the plane (exact for a box vs. an infinite plane, not
+  an approximation), producing 1 to 4 contacts depending on orientation
+  (4 resting flat, 2 on an edge, 1 on a corner).
+- **Added:** multi-contact manifold resolution — the solver now resolves
+  an entire manifold (`resolve_contacts`, 1-4 points) together each
+  iteration, sharing one accumulated velocity delta, instead of one
+  contact at a time. A box dropped flat settles without spuriously
+  tipping onto an edge — verified by a dedicated test.
+- **Added:** `PhysicsWorld::with_car`, an optional car body stepped and
+  collided against the ground independently from the ball.
+- **Not implemented** (explicitly, not silently dropped): box-vs-sphere
+  (car-vs-ball) collision — the two bodies never collide with each other
+  yet, needing a real convex narrow-phase algorithm (SAT or GJK/EPA);
+  driven car input — a car here is a free rigid box, nothing couples
+  throttle/steer/boost into it; constant calibration
+  (`RB-PHYSICS-001-FR-005`) still needs real `PHASE-0-EXIT` data.
+- **Verified:** 21 new unit tests (47 total in `rb_physics_bullet`, 96 in
+  the workspace): box inertia formula, orientation-dependent inertia
+  (unlike a sphere's), box-vs-plane contact counts for flat/edge/corner/
+  embedded cases, a box in free-fall matching the same kinematics as a
+  sphere, and — the key multi-contact regression test — a box dropped
+  flat settling on the ground without tipping over or accumulating
+  spurious spin.
+- 21 new unit tests; `cargo fmt --check`, `clippy -D warnings`, and
+  `cargo test --workspace` all pass.
+
 ## Timestamp-tolerant alignment
 **2026-08-28** · [#13](https://github.com/baileyrd/rusty_bullet/pull/13) (merge commit `59266ea`)
 

@@ -4,7 +4,7 @@
 //! `THIRD_PARTY_NOTICES.md`). Scalar-only (no SIMD), since this is a
 //! from-scratch Rust translation, not a binding — see ADR-0004.
 
-use crate::body::Sphere;
+use crate::body::RigidBody;
 use rb_domain::{Quat, Vec3};
 
 /// `MAX_ANGVEL` in `btRigidBody.cpp`: collision calculations become
@@ -17,10 +17,10 @@ const ANGULAR_MOTION_THRESHOLD: f32 = 0.5 * std::f32::consts::FRAC_PI_2;
 /// Port of `btRigidBody::applyGravity` + `applyCentralForce`: accumulates a
 /// gravity force (`mass * gravity_accel`) into the body's force
 /// accumulator. A no-op contract-wise for anything with zero inverse mass
-/// would apply here too, but `Sphere` is always dynamic in this scope (see
+/// would apply here too, but `RigidBody` is always dynamic in this scope (see
 /// `body.rs`), so that branch from Bullet's `isStaticOrKinematicObject()`
 /// check doesn't apply.
-pub fn apply_gravity(body: &mut Sphere, gravity_accel: Vec3) {
+pub fn apply_gravity(body: &mut RigidBody, gravity_accel: Vec3) {
     body.apply_central_force(gravity_accel * body.mass());
 }
 
@@ -29,7 +29,7 @@ pub fn apply_gravity(body: &mut Sphere, gravity_accel: Vec3) {
 /// `m_additionalDamping` extra-stability branch is intentionally omitted —
 /// it's an opt-in stability hack in upstream Bullet, off by default, and
 /// not part of the core algorithm this port targets.
-pub fn apply_damping(body: &mut Sphere, dt: f32) {
+pub fn apply_damping(body: &mut RigidBody, dt: f32) {
     body.linear_velocity *= (1.0 - body.linear_damping).max(0.0).powf(dt);
     body.angular_velocity *= (1.0 - body.angular_damping).max(0.0).powf(dt);
 }
@@ -37,11 +37,10 @@ pub fn apply_damping(body: &mut Sphere, dt: f32) {
 /// Port of `btRigidBody::integrateVelocities`: semi-implicit Euler update
 /// of linear/angular velocity from the accumulated force/torque, with
 /// Bullet's angular-velocity clamp.
-pub fn integrate_velocities(body: &mut Sphere, dt: f32) {
+pub fn integrate_velocities(body: &mut RigidBody, dt: f32) {
     let inv_mass = body.inv_mass();
-    let inv_inertia = body.inv_inertia();
     body.linear_velocity += body.total_force() * (inv_mass * dt);
-    body.angular_velocity += body.total_torque() * (inv_inertia * dt);
+    body.angular_velocity += body.inv_inertia_world().mul_vec3(&body.total_torque()) * dt;
 
     let angvel = body.angular_velocity.length();
     if angvel * dt > MAX_ANGVEL {
@@ -100,14 +99,14 @@ mod tests {
 
     #[test]
     fn gravity_accumulates_force_proportional_to_mass() {
-        let mut s = Sphere::new(1.0, 2.0, Vec3::ZERO);
+        let mut s = RigidBody::sphere(1.0, 2.0, Vec3::ZERO);
         apply_gravity(&mut s, Vec3::new(0.0, 0.0, -10.0));
         assert_eq!(s.total_force(), Vec3::new(0.0, 0.0, -20.0));
     }
 
     #[test]
     fn zero_damping_leaves_velocity_unchanged() {
-        let mut s = Sphere::new(1.0, 1.0, Vec3::ZERO);
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         s.linear_velocity = Vec3::new(3.0, 0.0, 0.0);
         apply_damping(&mut s, 1.0 / 60.0);
         assert_eq!(s.linear_velocity, Vec3::new(3.0, 0.0, 0.0));
@@ -115,7 +114,7 @@ mod tests {
 
     #[test]
     fn full_damping_zeroes_velocity_immediately() {
-        let mut s = Sphere::new(1.0, 1.0, Vec3::ZERO);
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         s.linear_velocity = Vec3::new(3.0, 0.0, 0.0);
         s.linear_damping = 1.0;
         apply_damping(&mut s, 1.0 / 60.0);
@@ -124,7 +123,7 @@ mod tests {
 
     #[test]
     fn integrate_velocities_applies_semi_implicit_euler_step() {
-        let mut s = Sphere::new(1.0, 2.0, Vec3::ZERO);
+        let mut s = RigidBody::sphere(1.0, 2.0, Vec3::ZERO);
         apply_gravity(&mut s, Vec3::new(0.0, 0.0, -10.0));
         integrate_velocities(&mut s, 0.5);
         // dv = F/m * dt = (0,0,-20)/2 * 0.5 = (0,0,-5)
@@ -133,7 +132,7 @@ mod tests {
 
     #[test]
     fn angular_velocity_is_clamped_to_max_angvel() {
-        let mut s = Sphere::new(1.0, 1.0, Vec3::ZERO);
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         s.apply_torque(Vec3::new(0.0, 0.0, 1_000_000.0));
         integrate_velocities(&mut s, 1.0);
         assert!(s.angular_velocity.length() * 1.0 <= MAX_ANGVEL + 1e-4);

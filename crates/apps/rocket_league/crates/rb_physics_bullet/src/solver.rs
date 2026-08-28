@@ -1,7 +1,9 @@
 //! Sequential-impulse contact solver, ported from
 //! `bullet3/src/BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.cpp`
-//! (zlib license — see `THIRD_PARTY_NOTICES.md`), scoped to one dynamic
-//! sphere against one static plane per contact.
+//! (zlib license — see `THIRD_PARTY_NOTICES.md`), resolving one dynamic
+//! body (sphere or box, via `RigidBody`'s general 3x3 inverse inertia
+//! tensor — see `body.rs`) against one static plane's contact manifold
+//! (`resolve_contacts`, 1 to 4 points depending on shape/orientation).
 //!
 //! Deliberate, documented deviations from Bullet's actual solver (tracked
 //! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
@@ -15,9 +17,6 @@
 //! - **No SIMD.** Scalar translation of the SSE2/SSE4/FMA3 code paths —
 //!   this is a from-scratch Rust port, not a binding (see ADR-0004), and
 //!   correctness came before micro-optimization for v0.
-//! - **Scalar inertia only.** Valid for a sphere (isotropic inertia); a
-//!   general 3x3 inverse inertia tensor is required once box-shaped car
-//!   bodies are added.
 //! - **No warm-starting or sleeping.** Real Bullet carries `m_appliedImpulse`
 //!   across frames (warm starting) and puts settled bodies to sleep. This
 //!   port re-derives every contact's impulses from zero each frame, which
@@ -36,7 +35,7 @@
 //!   ground behavior (`RB-VERIFY-001`/`RB-VERIFY-002` data). Tracked as an
 //!   open item in `RB-PHYSICS-001`, not asserted as settled.
 
-use crate::body::{Sphere, StaticPlane};
+use crate::body::{RigidBody, StaticPlane};
 use crate::collision::Contact;
 use rb_domain::Vec3;
 
@@ -107,10 +106,10 @@ struct ConstraintRow {
     applied_impulse: f32,
 }
 
-fn effective_mass_denom(sphere: &Sphere, rel_pos: &Vec3, direction: &Vec3) -> (Vec3, Vec3, f32) {
+fn effective_mass_denom(body: &RigidBody, rel_pos: &Vec3, direction: &Vec3) -> (Vec3, Vec3, f32) {
     let torque_axis = rel_pos.cross(direction);
-    let angular_component = torque_axis * sphere.inv_inertia();
-    let denom = sphere.inv_mass() + direction.dot(&angular_component.cross(rel_pos));
+    let angular_component = body.inv_inertia_world().mul_vec3(&torque_axis);
+    let denom = body.inv_mass() + direction.dot(&angular_component.cross(rel_pos));
     (torque_axis, angular_component, denom)
 }
 
@@ -137,17 +136,16 @@ impl DeltaVelocity {
 /// porting `setupContactConstraint` + `setFrictionConstraintImpulse`
 /// against a static body B (the plane), which is why every `rb1`-branch in
 /// the original is simply the zero case here.
-fn setup_rows(sphere: &Sphere, contact: &Contact, dt: f32) -> [ConstraintRow; 3] {
-    let rel_pos = contact.point - sphere.position;
+fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3] {
+    let rel_pos = contact.point - body.position;
     let inv_dt = 1.0 / dt;
 
     let (normal_torque_axis, normal_angular_component, denom) =
-        effective_mass_denom(sphere, &rel_pos, &contact.normal);
+        effective_mass_denom(body, &rel_pos, &contact.normal);
     let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
 
-    let rel_vel = contact.normal.dot(&sphere.velocity_at_point(&rel_pos));
-    let restitution =
-        restitution_curve(rel_vel, sphere.restitution, RESTITUTION_VELOCITY_THRESHOLD);
+    let rel_vel = contact.normal.dot(&body.velocity_at_point(&rel_pos));
+    let restitution = restitution_curve(rel_vel, body.restitution, RESTITUTION_VELOCITY_THRESHOLD);
 
     let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
     let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
@@ -174,9 +172,9 @@ fn setup_rows(sphere: &Sphere, contact: &Contact, dt: f32) -> [ConstraintRow; 3]
     // 0 in the default no-conveyor-belt case) — a friction row needs a
     // nonzero `rhs` to ever apply an impulse; it isn't "no correction".
     let friction_row = |dir: Vec3| -> ConstraintRow {
-        let (torque_axis, angular_component, denom) = effective_mass_denom(sphere, &rel_pos, &dir);
+        let (torque_axis, angular_component, denom) = effective_mass_denom(body, &rel_pos, &dir);
         let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
-        let rel_vel = dir.dot(&sphere.velocity_at_point(&rel_pos));
+        let rel_vel = dir.dot(&body.velocity_at_point(&rel_pos));
         ConstraintRow {
             direction: dir,
             torque_axis,
@@ -196,7 +194,7 @@ fn setup_rows(sphere: &Sphere, contact: &Contact, dt: f32) -> [ConstraintRow; 3]
 /// Port of `resolveSingleConstraintRowGeneric`/`...LowerLimit`: one
 /// projected-Gauss-Seidel update of a single constraint row against the
 /// body's currently-accumulated delta velocity.
-fn resolve_row(row: &mut ConstraintRow, sphere_inv_mass: f32, delta: &mut DeltaVelocity) {
+fn resolve_row(row: &mut ConstraintRow, inv_mass: f32, delta: &mut DeltaVelocity) {
     let delta_vel_dot_n = row.direction.dot(&delta.linear) + row.torque_axis.dot(&delta.angular);
 
     let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
@@ -213,77 +211,95 @@ fn resolve_row(row: &mut ConstraintRow, sphere_inv_mass: f32, delta: &mut DeltaV
         row.applied_impulse = sum;
     }
 
-    delta.linear += row.direction * (sphere_inv_mass * delta_impulse);
+    delta.linear += row.direction * (inv_mass * delta_impulse);
     delta.angular += row.angular_component * delta_impulse;
 }
 
-/// Resolves one sphere-vs-plane contact by running `SOLVER_ITERATIONS`
-/// passes of the sequential impulse solver (normal row, then both friction
-/// rows with limits re-derived from the normal row's current impulse —
-/// matching Bullet's per-iteration friction reclamping), then applies the
-/// accumulated velocity change to `sphere` once.
-pub fn resolve_contact(sphere: &mut Sphere, plane: &StaticPlane, contact: &Contact, dt: f32) {
-    let combined_restitution = combine_restitution(sphere.restitution, plane.restitution);
-    let combined_friction = combine_friction(sphere.friction, plane.friction);
-
-    let mut effective_sphere = *sphere;
-    effective_sphere.restitution = combined_restitution;
-
-    let mut rows = setup_rows(&effective_sphere, contact, dt);
-    let mut delta = DeltaVelocity::zero();
-    let inv_mass = sphere.inv_mass();
-
-    for _ in 0..SOLVER_ITERATIONS {
-        resolve_row(&mut rows[0], inv_mass, &mut delta);
-
-        let friction_limit = combined_friction * rows[0].applied_impulse;
-        rows[1].lower_limit = -friction_limit;
-        rows[1].upper_limit = friction_limit;
-        rows[2].lower_limit = -friction_limit;
-        rows[2].upper_limit = friction_limit;
-
-        resolve_row(&mut rows[1], inv_mass, &mut delta);
-        resolve_row(&mut rows[2], inv_mass, &mut delta);
+/// Resolves an entire contact manifold (1 to 4 points — a box resting flat
+/// generates up to 4, matching `RB-PHYSICS-001-FR-004`'s multi-contact
+/// requirement; a sphere always generates exactly 1) against one static
+/// plane. Runs `SOLVER_ITERATIONS` passes of the sequential impulse
+/// solver, each pass resolving every contact's normal row and then every
+/// contact's friction rows (limits re-derived from that same contact's
+/// current normal impulse — matching Bullet's per-iteration friction
+/// reclamping), sharing one accumulated `DeltaVelocity` across the whole
+/// manifold so an earlier contact's resolution already influences a later
+/// contact's `rhs` baseline within the same iteration — then applies the
+/// accumulated velocity change to `body` once.
+pub fn resolve_contacts(body: &mut RigidBody, plane: &StaticPlane, contacts: &[Contact], dt: f32) {
+    if contacts.is_empty() {
+        return;
     }
 
-    sphere.linear_velocity += delta.linear;
-    sphere.angular_velocity += delta.angular;
+    let combined_restitution = combine_restitution(body.restitution, plane.restitution);
+    let combined_friction = combine_friction(body.friction, plane.friction);
+
+    let mut effective_body = *body;
+    effective_body.restitution = combined_restitution;
+
+    let mut manifold: Vec<[ConstraintRow; 3]> = contacts
+        .iter()
+        .map(|c| setup_rows(&effective_body, c, dt))
+        .collect();
+    let mut delta = DeltaVelocity::zero();
+    let inv_mass = body.inv_mass();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for rows in &mut manifold {
+            resolve_row(&mut rows[0], inv_mass, &mut delta);
+
+            let friction_limit = combined_friction * rows[0].applied_impulse;
+            rows[1].lower_limit = -friction_limit;
+            rows[1].upper_limit = friction_limit;
+            rows[2].lower_limit = -friction_limit;
+            rows[2].upper_limit = friction_limit;
+
+            resolve_row(&mut rows[1], inv_mass, &mut delta);
+            resolve_row(&mut rows[2], inv_mass, &mut delta);
+        }
+    }
+
+    body.linear_velocity += delta.linear;
+    body.angular_velocity += delta.angular;
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::collision::sphere_vs_plane;
+    use crate::collision::contacts_vs_plane;
 
     fn ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
     }
 
-    fn resting_sphere() -> Sphere {
-        let mut s = Sphere::new(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+    fn resting_sphere() -> RigidBody {
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
         s.restitution = 0.0;
         s.friction = 0.5;
         s
+    }
+
+    fn resolve_single(body: &mut RigidBody, plane: &StaticPlane, dt: f32) {
+        let contacts = contacts_vs_plane(body, plane);
+        resolve_contacts(body, plane, &contacts, dt);
     }
 
     #[test]
     fn resting_sphere_with_zero_restitution_has_zero_bounce_velocity() {
         let mut s = resting_sphere();
         let ground = ground();
-        let contact = sphere_vs_plane(&s, &ground).unwrap();
-        resolve_contact(&mut s, &ground, &contact, 1.0 / 60.0);
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
         assert!(s.linear_velocity.z.abs() < 1e-4);
     }
 
     #[test]
     fn downward_impact_bounces_up_proportional_to_restitution() {
-        let mut s = Sphere::new(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
         s.restitution = 1.0;
         s.linear_velocity = Vec3::new(0.0, 0.0, -10.0);
         let ground = ground();
-        let contact = sphere_vs_plane(&s, &ground).unwrap();
-        resolve_contact(&mut s, &ground, &contact, 1.0 / 60.0);
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
         // Combined restitution averages sphere (1.0) and plane (0.5
         // default) to 0.75, so expect a strong but not fully elastic bounce.
         assert!(
@@ -295,7 +311,7 @@ mod tests {
 
     #[test]
     fn zero_restitution_impact_does_not_bounce_past_the_planes_own_restitution() {
-        let mut s = Sphere::new(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
         s.restitution = 0.0;
         s.linear_velocity = Vec3::new(0.0, 0.0, -10.0);
         // Zero out the plane's contribution too, isolating "no bounce" from
@@ -304,8 +320,7 @@ mod tests {
             restitution: 0.0,
             ..ground()
         };
-        let contact = sphere_vs_plane(&s, &ground).unwrap();
-        resolve_contact(&mut s, &ground, &contact, 1.0 / 60.0);
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
         assert!(
             s.linear_velocity.z <= 1e-3,
             "expected no bounce, got {}",
@@ -325,14 +340,46 @@ mod tests {
         // against).
         s.linear_velocity = Vec3::new(5.0, 0.0, -1.0);
         let ground = ground();
-        let contact = sphere_vs_plane(&s, &ground).unwrap();
-        resolve_contact(&mut s, &ground, &contact, 1.0 / 60.0);
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
         assert!(
             s.linear_velocity.x < 5.0,
             "friction should have removed some tangential speed"
         );
         // Friction couples into spin for a sphere in contact.
         assert!(s.angular_velocity.length() > 0.0);
+    }
+
+    #[test]
+    fn resolve_contacts_with_an_empty_manifold_is_a_no_op() {
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 10.0));
+        let before = s.linear_velocity;
+        resolve_contacts(&mut s, &ground(), &[], 1.0 / 60.0);
+        assert_eq!(s.linear_velocity, before);
+    }
+
+    #[test]
+    fn resting_box_with_symmetric_contacts_settles_without_net_rotation() {
+        // A box resting flat and falling straight down generates 4
+        // symmetric contacts (RB-PHYSICS-001-FR-004's multi-contact case);
+        // resolving them together should cancel out to zero net torque by
+        // symmetry, not spin the box from solving corners one at a time.
+        let mut b = RigidBody::car_box(Vec3::new(1.0, 1.0, 0.5), 1.0, Vec3::new(0.0, 0.0, 0.5));
+        b.restitution = 0.0;
+        b.friction = 0.5;
+        b.linear_velocity = Vec3::new(0.0, 0.0, -1.0);
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..ground()
+        };
+        let contacts = contacts_vs_plane(&b, &ground);
+        assert_eq!(contacts.len(), 4);
+        resolve_contacts(&mut b, &ground, &contacts, 1.0 / 60.0);
+        assert!(b.linear_velocity.z.abs() < 1e-3);
+        assert!(
+            b.angular_velocity.length() < 1e-3,
+            "expected no net spin from symmetric contacts, got {:?}",
+            b.angular_velocity
+        );
     }
 
     #[test]
