@@ -19,6 +19,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_replay_ingest`: real `.replay` parsing via `boxcars` + `subtr-actor`
   (`RB-VERIFY-001-FR-001/002/003`), verified against a vendored real
   replay fixture.
+- `rb_replay_ingest`: `corpus_check` bin, a local/gitignored-corpus health
+  check (`RB-VERIFY-001-NFR-003`) — validated against 40 of the owner's
+  real match replays (40/40 clean), closing the "runs correctly on real
+  owner data at scale" half of `RB-VERIFY-001`'s owner-data acceptance
+  criterion.
 ### Changed
 ### Fixed
 ### Security

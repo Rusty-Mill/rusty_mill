@@ -19,7 +19,7 @@ these.
     scoring, ports). No I/O, no third-party dependencies unless a second
     real call site justifies one.
   - `crates/rb_replay_ingest` — adapter implementing `PhysicsStateSource`
-    over replay files (`boxcars`, once wired up).
+    over replay files (`boxcars` + `subtr-actor`).
   - `crates/rb_capture_ingest` — adapter implementing `PhysicsStateSource`
     over BakkesMod offline captures.
   - `crates/rb_verify_cli` — composition root binary (`rb-verify`); wires
@@ -68,6 +68,21 @@ process, not project architecture.
   `docs/adr/` cadence note in [WORKFLOW.md](./WORKFLOW.md). This project is
   in active major development, so that cadence is roughly one ADR per
   delivery cycle, not just for rare forks.
+
+## Local replay corpus (optional, gitignored)
+
+A `replays/` directory at the workspace root (already in `.gitignore`) is
+the convention for the owner's own real match `.replay` files — never
+committed, since they're personal data (player names, teammates, match
+history), unlike the third-party fixture vendored under
+`crates/rb_replay_ingest/fixtures/`. When present, run
+`cargo run -p rb_replay_ingest --bin corpus_check [-- <dir>]` to parse every
+file in it through the real pipeline and report frame count/duration/ball-Z
+sanity per file, non-zero exit on any parse failure. This is a local gate,
+not a CI one — a checkout with no `replays/` directory is a deliberate
+no-op (the same "gitignored corpus, no-op when absent" pattern `RLEvalSystem`
+uses for its own 180-replay corpus). Don't add another corpus-only check
+without checking whether this one already covers it.
 
 ## Definition of done
 
