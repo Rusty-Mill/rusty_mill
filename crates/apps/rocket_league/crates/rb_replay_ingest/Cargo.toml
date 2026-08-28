@@ -1,6 +1,6 @@
 [package]
 name = "rb_replay_ingest"
-description = "Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files. Parser backend not yet wired up."
+description = "Replay-file ingestion adapter (RB-VERIFY-001): implements PhysicsStateSource by parsing .replay files via boxcars + subtr-actor."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,14 @@ workspace = true
 
 [dependencies]
 rb_domain = { path = "../rb_domain" }
+# Required by RB-VERIFY-001: the actual Rocket League replay parser.
+boxcars = "0.11"
+# boxcars only parses the raw network stream into per-actor attribute
+# updates; resolving which actor is the ball/which are cars and tracking
+# their RigidBody state over time (net-cache/property-id resolution,
+# quantized rotation decoding, version differences) is a substantial,
+# error-prone parser layer on its own. subtr-actor (MIT, actively
+# maintained, purpose-built for this) already solves it — reimplementing
+# it here would be reinventing a hard, already-solved problem, not saving
+# a dependency.
+subtr-actor = "1.2"
