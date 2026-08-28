@@ -36,6 +36,12 @@ members = [
     "crates/rusty_json",
     "crates/rusty_json/rusty_json-derive",
     "crates/rusty_oauth",
+    "crates/rustils_async/crates/reactor-core",
+    "crates/rustils_async/crates/platform-async",
+    "crates/rustils_async/crates/platform-async-mock",
+    "crates/rustils_async/crates/platform-async-linux",
+    "crates/rustils_async/crates/threading",
+    "crates/rustils_async/crates/coreutils-async",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.

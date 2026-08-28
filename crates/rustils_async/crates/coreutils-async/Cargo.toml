@@ -1,0 +1,27 @@
+[package]
+name = "coreutils-async"
+description = "Reference consumer for platform-async: arun, an async port of rustils' rrun."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
+
+[dependencies]
+# `rustils` is a separate repo outside this monorepo's consolidation
+# scope -- stays a pinned git dependency, matching platform-async's own.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+platform-async = { path = "../platform-async" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-async-linux = { path = "../platform-async-linux" }
+
+[[bin]]
+name = "arun"
+path = "src/bin/arun.rs"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

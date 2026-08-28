@@ -1,0 +1,21 @@
+[package]
+name = "platform-async-mock"
+description = "In-memory async backend for platform-async, wrapping rustils' platform-mock. For consumer tests without a real OS reactor."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
+
+[dependencies]
+# `rustils` is a separate repo outside this monorepo's consolidation
+# scope -- stays a pinned git dependency, matching platform-async's own.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+platform-async = { path = "../platform-async" }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
