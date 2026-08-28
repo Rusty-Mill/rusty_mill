@@ -1,0 +1,24 @@
+[package]
+name = "rusty_stream"
+version = "0.1.0"
+edition = "2021"
+description = "Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio."
+publish = false
+
+[dependencies]
+# Pinned to the exact commit verified in ADR-0002 D3 (thread-per-core +
+# io-uring-fs both built, tested, straced, and ASAN-checked in that ADR) --
+# not a branch reference, so a future rusty_tokio change can't silently
+# change what this crate builds against. Bump deliberately, re-verify the
+# same way. Bumped past 5a97dfa2 to pick up `uring_global_driver` (issue
+# #256) -- the only public way to obtain a real, production
+# `Arc<dyn OpDriver>`, which `main.rs`'s standalone server needs and
+# nothing before this commit could get.
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "193ff3c630e90500831e9f38b534986deccc88eb", features = [
+    "thread-per-core",
+    "io-uring-fs",
+] }
+# ADR-0002 D1: rusty_stream's own protocol, built on rusty_wire's Reader/
+# Writer byte-cursor primitives rather than a redundant hand-rolled one.
+# Pinned rev, same reasoning as rusty_tokio above.
+rusty_wire = { git = "https://github.com/baileyrd/rusty_wire", rev = "4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b" }
