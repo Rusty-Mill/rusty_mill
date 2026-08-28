@@ -6,6 +6,48 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Timestamp-tolerant alignment
+**2026-08-28** · pending PR
+
+- **Added:** `rb_domain::divergence::score` now aligns frames by nearest
+  `timestamp_secs` instead of list index (`RB-VERIFY-003-FR-003`) — an
+  `O(recorded.len() + candidate.len())` merge over both sequences'
+  existing chronological order, not a binary search per frame. A match
+  only counts if the two frames' timestamps are within a new required
+  `max_timestamp_delta_secs` parameter; a recorded frame with nothing
+  that close on the candidate side is skipped, not force-matched to the
+  nearest-but-still-distant option. `DivergenceScore.frames_compared`'s
+  meaning changes accordingly: it's no longer capped at
+  `min(recorded.len(), candidate.len())` — a much shorter candidate
+  sequence can now be matched against every recorded frame within
+  tolerance of it.
+- **Added:** `rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS` (0.02s,
+  reasoned from the vendored replay fixture's own ~0.036s average
+  sampling interval, not yet empirically tuned) and an optional third
+  `rb-verify` CLI argument to override it.
+- **Fixed:** implementing real timestamp alignment surfaced an actual bug
+  in `rb_capture_ingest`'s synthetic fixture — its timestamps started at
+  `0.0`, but the vendored replay fixture's ball doesn't produce a frame
+  until roughly **11.78 seconds** in (kickoff countdown; frames before the
+  ball spawns are omitted by design). The old index-pairwise comparison
+  silently compared these temporally unrelated frames anyway, since it
+  only ever looked at list position — exactly the failure mode FR-003
+  exists to catch. Corrected the fixture's timestamps to actually overlap
+  the replay's real timeline.
+- **Verified:** 2 new unit tests in `rb_domain::divergence` (different
+  tick rates aligning correctly with hand-computed expected matches; a
+  shorter candidate sequence still matching every in-tolerance recorded
+  frame). One existing test was replaced since its premise — sequence
+  length alone caps how many frames compare — no longer holds. Manually
+  re-run end-to-end against the corrected fixtures (default 0.02s
+  tolerance): `frames compared: 6, mean ball distance: 0.25 uu, max ball
+  distance: 0.25 uu, car pairs compared: 6, mean car
+  position/rotation/velocity distance: 2816.42 uu / 2.36 rad / 1307.87
+  uu/s`. `RB-VERIFY-003` now has all three functional requirements
+  implemented.
+- 2 new unit tests (75 total in the workspace); `cargo fmt --check`,
+  `clippy -D warnings`, and `cargo test --workspace` all pass.
+
 ## Car-state divergence scoring
 **2026-08-28** · [#11](https://github.com/baileyrd/rusty_bullet/pull/11) (merge commit `a1b8a47`)
 

@@ -33,17 +33,26 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   capture (`RB-VERIFY-002-FR-001`) is not yet built.
 - `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
   `rb_domain::divergence::score`. Manually run end-to-end against a real
-  replay fixture and a capture file; not yet a fidelity measurement (see
-  `RB-VERIFY-003`'s open FR-003).
+  replay fixture and a capture file; not yet a fidelity measurement.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation
   distance.
+- `rb_domain::divergence::score` now aligns frames by nearest timestamp
+  instead of list index (`RB-VERIFY-003-FR-003`), within a new required
+  `max_timestamp_delta_secs` parameter. `rb_verify_cli` gains
+  `DEFAULT_MAX_TIMESTAMP_DELTA_SECS` and an optional third CLI argument
+  to override it. `RB-VERIFY-003` now has all three functional
+  requirements implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
   raw `Debug` dump, now including car-divergence stats.
 ### Fixed
+- `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
+  overlap the vendored replay fixture's real timeline (off by ~11.78s) —
+  invisible under the old index-pairwise frame comparison, surfaced once
+  real timestamp alignment landed. Corrected.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

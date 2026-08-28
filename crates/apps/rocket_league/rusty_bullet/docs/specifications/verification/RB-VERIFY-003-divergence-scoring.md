@@ -1,8 +1,9 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.3.0
-- Status: Draft (ball- and car-state scoring implemented and wired into
-  `rb_verify_cli`; timestamp-tolerant alignment/resampling is open)
+- Version: 0.4.0
+- Status: Draft (all three functional requirements implemented and wired
+  into `rb_verify_cli`; open questions remain about calibrating an actual
+  "good enough" threshold, see Open questions)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-001, RB-VERIFY-002
 - Supersedes: none
@@ -51,31 +52,47 @@ them.
   frame, not an error. Rotation distance is the angle between the two
   quaternions (`Quat::angle_to`, radians), not a per-axis Euler
   difference.
-- `RB-VERIFY-003-FR-003` (open): Timestamp-tolerant alignment between
-  sequences sampled at different tick rates or with a start-time offset,
-  rather than the current index-pairwise simplification (see
-  `rb_domain::divergence`'s doc comment on why that simplification was
-  acceptable for bootstrap but isn't the final answer).
+- `RB-VERIFY-003-FR-003` (implemented): Timestamp-tolerant alignment
+  between sequences sampled at different tick rates or with a start-time
+  offset, replacing the original index-pairwise simplification. Each
+  recorded frame is matched to the candidate frame nearest it in
+  `timestamp_secs` (an `O(recorded.len() + candidate.len())` merge over
+  both sequences' existing chronological order, not a binary search per
+  frame); a match only counts if the two frames are within a caller-
+  supplied `max_timestamp_delta_secs` of each other, so sequences that
+  don't actually overlap in time don't get force-matched to whatever's
+  nearest-but-still-distant. See Architecture and interfaces.
 - `RB-VERIFY-003-NFR-001` (implemented): Scoring an empty or
   mismatched-length pair of sequences never panics or produces `NaN`.
 
 ## Architecture and interfaces
 
 `rb_domain::divergence::score(recorded: &[PhysicsFrame], candidate:
-&[PhysicsFrame]) -> DivergenceScore`. Pure function, no I/O — callable from
-`rb_verify_cli` or any future test harness. `rb_verify_cli::score_replay_against_capture`
-(in `crates/rb_verify_cli/src/lib.rs`) is the actual composition-root
-wiring: it ingests a replay file via `rb_replay_ingest` as the "recorded"
-sequence and a capture file via `rb_capture_ingest` as the "candidate"
-sequence, then calls `score`. The `rb-verify` binary (`main.rs`) is a thin
-argument-parsing/output wrapper over that function, kept separate so the
-wiring itself is unit-testable without spawning a process.
+&[PhysicsFrame], max_timestamp_delta_secs: f32) -> DivergenceScore`. Pure
+function, no I/O — callable from `rb_verify_cli` or any future test
+harness. `max_timestamp_delta_secs` is a required parameter, not a baked-in
+default: what counts as "the same instant" depends on both sequences'
+actual sampling rates, which this function has no way to know on its own.
+`rb_verify_cli::score_replay_against_capture` (in
+`crates/rb_verify_cli/src/lib.rs`) is the actual composition-root wiring:
+it ingests a replay file via `rb_replay_ingest` as the "recorded" sequence
+and a capture file via `rb_capture_ingest` as the "candidate" sequence,
+then calls `score`. The `rb-verify` binary (`main.rs`) is a thin
+argument-parsing/output wrapper over that function (an optional third CLI
+argument overrides `rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`),
+kept separate so the wiring itself is unit-testable without spawning a
+process.
 
 ## Data/state and invariants
 
-`DivergenceScore.frames_compared` is always
-`min(recorded.len(), candidate.len())`; `mean_ball_distance` is `0.0` (not
-`NaN`) when `frames_compared == 0`. `DivergenceScore.cars.pairs_compared`
+`DivergenceScore.frames_compared` counts recorded frames matched to a
+candidate frame within `max_timestamp_delta_secs` — **not**
+`min(recorded.len(), candidate.len())` (that was the old index-pairwise
+behavior; nearest-timestamp matching can compare every recorded frame
+against a much shorter candidate sequence, or compare none at all if the
+two sequences' timestamps never come within tolerance of each other).
+`mean_ball_distance` is `0.0` (not `NaN`) when `frames_compared == 0`.
+`DivergenceScore.cars.pairs_compared`
 counts matched car pairs across all compared frames (not frames, and not
 `min(total recorded cars, total candidate cars)`): within each compared
 frame pair, a recorded car is matched to a candidate car by equal
@@ -95,8 +112,8 @@ None beyond what applies to the frame data itself (see
 ## Acceptance criteria
 
 - Implemented (ball scoring): identical trajectories score zero; a known
-  constant offset scores exactly that offset; mismatched lengths compare
-  only the overlap; empty inputs score zero without panicking.
+  constant offset scores exactly that offset; empty inputs score zero
+  without panicking.
 - Implemented (car scoring, FR-002): identical car states score zero
   across position/rotation/velocity; known position/velocity offsets score
   exactly that distance; a known rotation offset scores the correct angle;
@@ -104,38 +121,64 @@ None beyond what applies to the frame data itself (see
   (and doesn't panic); empty/no-car inputs score zero, not `NaN`. (All
   covered by unit tests in `rb_domain::divergence::tests` and
   `rb_domain::state::tests` for `Quat::angle_to`.)
-- Open: timestamp-tolerant alignment gets its own acceptance criteria once
-  designed (FR-003).
+- Implemented (timestamp alignment, FR-003): two sequences sampled at
+  different, irregular tick rates align by nearest timestamp, not list
+  index, and the resulting per-pair distances match hand-computed
+  expectations; a shorter candidate sequence can still be matched against
+  every recorded frame it's within tolerance of (not capped at
+  `min(len, len)`); frames whose nearest available match still exceeds
+  `max_timestamp_delta_secs` are skipped, not force-matched. (Covered by
+  unit tests in `rb_domain::divergence::tests`.)
 
 ## Verification plan
 
-Unit tests (8, in `rb_domain::divergence`) for the scoring algorithm
-itself (4 ball-scoring, 4 car-scoring: identical states, position/velocity
-offsets, rotation offset, a car unmatched on one side), plus 3 tests in
-`rb_domain::state` for `Quat::angle_to` (identical rotation, a known
-quarter-turn angle, and the quaternion double-cover case), plus 3 tests in
-`rb_verify_cli` exercising the real wiring (`score_replay_against_capture`)
-against `rb_replay_ingest`'s vendored replay fixture and
-`rb_capture_ingest`'s synthetic capture fixture: a happy-path run
-producing a non-empty score, and a missing-file case for each input
-reporting `IngestError::Io`. Manually run once
-(`cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`,
-2026-08-28) against those same two fixtures: `frames compared: 5, mean
-ball distance: 0.25 uu, max ball distance: 0.25 uu, car pairs compared: 5,
-mean car position/rotation/velocity distance: 2823.85 uu / 2.36 rad /
-1369.44 uu/s` (both fixtures happen to carry a car with `player_id` 0 in
-every frame, so all 5 frame pairs produced a matched car pair). This
-proves the ingestion → scoring pipeline runs end-to-end without erroring
-across both real adapters, car scoring included — it is **not** a fidelity
-measurement: the replay and the capture are unrelated matches (one real,
-one synthetic) with no physical reason to resemble each other, so the
-(very large) car-distance numbers above mean nothing beyond "these are two
-different matches," not "car scoring is broken." The actual end-to-end run
-this metric exists for — recorded inputs from `RB-VERIFY-002` fed into a
-real Phase 1 candidate physics engine, output compared against the
-recorded outcome — still needs that candidate engine to exist (car
-bodies, not just sphere-vs-plane) and `RB-VERIFY-002-FR-001`'s real
-BakkesMod capture, neither of which exist yet.
+Unit tests (10, in `rb_domain::divergence`) for the scoring algorithm
+itself (6 ball/alignment-scoring — including two added for FR-003:
+different-tick-rate sequences aligning by nearest timestamp with
+hand-computed expected matches, and a shorter sequence still matching
+every in-tolerance recorded frame — and 4 car-scoring: identical states,
+position/velocity offsets, rotation offset, a car unmatched on one side),
+plus 3 tests in `rb_domain::state` for `Quat::angle_to` (identical
+rotation, a known quarter-turn angle, and the quaternion double-cover
+case), plus 3 tests in `rb_verify_cli` exercising the real wiring
+(`score_replay_against_capture`) against `rb_replay_ingest`'s vendored
+replay fixture and `rb_capture_ingest`'s synthetic capture fixture: a
+happy-path run producing a non-empty score, and a missing-file case for
+each input reporting `IngestError::Io`.
+
+Implementing real timestamp alignment surfaced an actual bug in the
+synthetic capture fixture: it was originally authored with timestamps
+starting at `0.0`, without checking them against the vendored replay
+fixture's real timeline — the replay's ball doesn't spawn (and so
+produces no `PhysicsFrame`s, per `rb_replay_ingest`'s "frames where the
+ball is unavailable are omitted" rule) until roughly **11.78 seconds** in
+(kickoff countdown). Under the old index-pairwise comparison this went
+unnoticed, since frame 0 was compared to frame 0 regardless of what
+timestamp either actually carried — exactly the failure mode FR-003 exists
+to catch. The fixture's timestamps were corrected to start at `11.78`
+(same relative spacing) so it actually overlaps the replay's real
+timeline; see `crates/rb_capture_ingest/fixtures/README.md`.
+
+Manually run once (`cargo run -p rb_verify_cli --bin rb-verify -- <replay>
+<capture>`, 2026-08-28, using `rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`
+= `0.02`) against those same two (now time-aligned) fixtures: `frames
+compared: 6, mean ball distance: 0.25 uu, max ball distance: 0.25 uu, car
+pairs compared: 6, mean car position/rotation/velocity distance: 2816.42
+uu / 2.36 rad / 1307.87 uu/s, max car position/rotation/velocity distance:
+2912.18 uu / 2.36 rad / 1627.83 uu/s`. This proves the ingestion → scoring
+pipeline runs end-to-end without erroring across both real adapters, with
+real timestamp-tolerant alignment now actually engaged (not merely
+present but vacuous, as it would have been against the old, disjoint
+fixture timestamps) — it is still **not** a fidelity measurement: the
+replay and the capture are unrelated matches (one real, one synthetic)
+with no physical reason to resemble each other, so the (very large)
+car-distance numbers above mean nothing beyond "these are two different
+matches," not "car scoring is broken." The actual end-to-end run this
+metric exists for — recorded inputs from `RB-VERIFY-002` fed into a real
+Phase 1 candidate physics engine, output compared against the recorded
+outcome — still needs that candidate engine to exist (car bodies, not
+just sphere-vs-plane) and `RB-VERIFY-002-FR-001`'s real BakkesMod capture,
+neither of which exist yet.
 
 ## Traceability
 
@@ -143,14 +186,32 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Open questions
 
-- FR-003 above.
 - What divergence threshold counts as "good enough" fidelity for Phase 1 to
   exit — not yet defined; likely needs a first real candidate engine run to
   calibrate against, rather than an arbitrary number chosen in advance.
-  Now that both ball and car scoring exist, this applies to both.
+  Applies to ball scoring, car scoring, and now the timestamp-alignment
+  tolerance (`rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`) alike —
+  all three are currently reasoned defaults, not empirically tuned ones.
+- Whether `max_timestamp_delta_secs` should ever become adaptive (e.g.
+  derived from each sequence's own observed average tick interval) rather
+  than a single caller-supplied constant — not needed yet since no real
+  candidate engine exists to expose a case where a fixed value is wrong.
 
 ## Change history
 
+- 0.4.0 (2026-08-28): FR-003 implemented — `score` gains a required
+  `max_timestamp_delta_secs` parameter and now aligns frames by nearest
+  timestamp (an `O(n+m)` merge over both sequences' existing chronological
+  order) instead of list index; a match outside tolerance is skipped, not
+  force-matched. `frames_compared`'s meaning changes accordingly (see Data/
+  state and invariants). `rb_verify_cli` gains
+  `DEFAULT_MAX_TIMESTAMP_DELTA_SECS` and an optional third CLI argument to
+  override it. Fixed a real timestamp bug this surfaced in
+  `rb_capture_ingest`'s synthetic fixture (see Verification plan). 2 new
+  unit tests in `rb_domain::divergence` (10 total); one existing test
+  (`mismatched_lengths_compare_only_the_overlap`) was replaced since its
+  premise — sequence length alone caps how many frames compare — no
+  longer holds under nearest-timestamp matching.
 - 0.3.0 (2026-08-28): FR-002 implemented — `DivergenceScore` gains a
   `cars: CarDivergence` field (mean/max position, rotation, velocity
   distance, pairs compared); cars are matched between sequences by
