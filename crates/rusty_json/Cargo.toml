@@ -1,0 +1,26 @@
+[package]
+name = "rusty_json"
+version = "0.1.0"
+edition = "2021"
+description = "A from-scratch JSON library for Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_json"
+readme = "README.md"
+keywords = ["json", "serialization", "no_std"]
+categories = ["encoding", "no-std"]
+
+[lib]
+name = "rusty_json"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["alloc"] }
+rusty_json-derive = { path = "rusty_json-derive", version = "0.1.0", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

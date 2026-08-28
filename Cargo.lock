@@ -5112,12 +5112,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_http"
+version = "0.1.0"
+dependencies = [
+ "rusty_tokio",
+ "tokio",
+]
+
+[[package]]
 name = "rusty_json"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_json?rev=45ca45319586cc9c9b9aff712d8103fafb3d43d6#45ca45319586cc9c9b9aff712d8103fafb3d43d6"
 dependencies = [
+ "rusty_json-derive",
  "serde",
+ "serde_json",
 ]
+
+[[package]]
+name = "rusty_json-derive"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_libc"
