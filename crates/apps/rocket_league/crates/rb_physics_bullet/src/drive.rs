@@ -1,11 +1,11 @@
 //! Driven car input: couples `rb_domain::ControllerInput` into forces and
 //! torques on a car `RigidBody`. Ground-driving (throttle, steering),
-//! boost, and handbrake/drift in this increment. Throttle, steering, and
-//! handbrake are gated on the car actually touching the ground (a
-//! free-floating box has no wheels to grip or lock, so airborne input does
-//! nothing for any of them here); boost is not — it's a rocket, not an
-//! engine, so it works identically grounded or airborne, the same way it
-//! does in real Rocket League.
+//! boost, handbrake/drift, and a single ground jump in this increment.
+//! Throttle, steering, handbrake, and jump are gated on the car actually
+//! touching the ground (a free-floating box has no wheels to grip, lock,
+//! or push off of, so airborne input does nothing for any of them here);
+//! boost is not — it's a rocket, not an engine, so it works identically
+//! grounded or airborne, the same way it does in real Rocket League.
 //!
 //! Handbrake is modeled as a temporary ground-friction reduction rather
 //! than a separate lateral-slip system: this port has no per-wheel tire
@@ -19,25 +19,41 @@
 //! reuses machinery the solver already has rather than inventing a second
 //! grip model.
 //!
+//! Jump is a single, fixed-height vertical impulse fired on the *rising
+//! edge* of `ControllerInput.jump` (a fresh press, not merely "held") while
+//! grounded — holding the button through the resulting airborne period
+//! doesn't re-fire it, and releasing then re-pressing while still airborne
+//! doesn't fire it either (this increment has no double jump to grant).
+//! Edge detection needs one bit of state to remember "was jump held as of
+//! last step," carried by the caller (`PhysicsWorld::car_jump_held`) and
+//! passed in as `jump_held`, the same pattern `boost_amount` already uses
+//! for a resource that must persist across calls.
+//!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): jump and air-control (pitch/yaw/roll torque while airborne).
-//! A car with no input set (or all-neutral `ControllerInput::default()`)
-//! behaves exactly as a free rigid box always has — this module only ever
-//! adds force/torque or adjusts the existing friction property, never
-//! removes physics outright.
+//! dropped): double jump/dodge (a second airborne jump, usually paired
+//! with a directional impulse/torque), variable jump height (real Rocket
+//! League adds extra upward accel for as long as jump is held, up to a
+//! cap — this port always applies the same fixed impulse regardless of
+//! how long the button is held), wall jump (needs arena walls, which don't
+//! exist in this scope), and air control (pitch/yaw/roll torque while
+//! airborne). A car with no input set (or all-neutral
+//! `ControllerInput::default()`) behaves exactly as a free rigid box
+//! always has — this module only ever adds force/torque/impulse or
+//! adjusts the existing friction property, never removes physics outright.
 //!
 //! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
 //! — it's this project's own model of Rocket League's driving mechanics,
 //! since the real numbers are not public. `MAX_CAR_SPEED`, `MAX_BOOST`,
-//! and `BOOST_ACCELERATION` are commonly-cited community-reverse-engineered
-//! approximations (the same body of public research `PhysicsWorld::new`'s
-//! gravity constant comes from); `THROTTLE_ACCELERATION` and
-//! `BOOST_CONSUMPTION_RATE` are simplified constants standing in for
-//! Rocket League's real speed-dependent throttle curve and boost-drain
-//! behavior; `STEER_TORQUE` and `HANDBRAKE_FRICTION_MULTIPLIER` are
-//! uncalibrated placeholders chosen only to produce a visibly responsive
-//! turn/slide for this car's mass/inertia in tests. None of these are
-//! independently confirmed by this project — see `RB-PHYSICS-001-FR-005`.
+//! `BOOST_ACCELERATION`, and `JUMP_SPEED` are commonly-cited
+//! community-reverse-engineered approximations (the same body of public
+//! research `PhysicsWorld::new`'s gravity constant comes from);
+//! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
+//! constants standing in for Rocket League's real speed-dependent throttle
+//! curve and boost-drain behavior; `STEER_TORQUE` and
+//! `HANDBRAKE_FRICTION_MULTIPLIER` are uncalibrated placeholders chosen
+//! only to produce a visibly responsive turn/slide for this car's
+//! mass/inertia in tests. None of these are independently confirmed by
+//! this project — see `RB-PHYSICS-001-FR-005`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -88,6 +104,12 @@ const BOOST_CONSUMPTION_RATE: f32 = 33.3;
 /// tire model to calibrate a real rear-grip-loss number against.
 const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 
+/// Commonly-cited approximate jump impulse speed (uu/s), applied as an
+/// instantaneous vertical velocity change (not a continuous force) on a
+/// fresh grounded jump press — a flat speed regardless of the car's mass,
+/// matching how the real jump impulse doesn't scale with car mass either.
+const JUMP_SPEED: f32 = 292.0;
+
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
 }
@@ -96,24 +118,33 @@ fn up_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0))
 }
 
-/// Applies throttle, steering, boost, and handbrake as forces/torques (or,
-/// for handbrake, a temporary friction adjustment) on `car`. Throttle,
-/// steering, and handbrake are a no-op unless `on_ground`; boost isn't
-/// gated on ground contact, but is a no-op once `*boost_amount` reaches
-/// zero. `base_friction` is the car's own nominal (non-handbraking)
-/// friction — handbrake temporarily reduces `car.friction` below it while
-/// held and grounded, and restores it otherwise, so callers don't need a
-/// separate restore step. Call once per step, before
-/// `integrate::integrate_velocities`, alongside `apply_gravity`.
+/// Applies throttle, steering, boost, handbrake, and jump as
+/// forces/torques/impulses (or, for handbrake, a temporary friction
+/// adjustment) on `car`. Throttle, steering, handbrake, and jump are a
+/// no-op unless `on_ground`; boost isn't gated on ground contact, but is a
+/// no-op once `*boost_amount` reaches zero. `base_friction` is the car's
+/// own nominal (non-handbraking) friction — handbrake temporarily reduces
+/// `car.friction` below it while held and grounded, and restores it
+/// otherwise, so callers don't need a separate restore step. `jump_held`
+/// is the car's `input.jump` value as of the *previous* call — jump fires
+/// only on a rising edge (`input.jump && !*jump_held`), so a continued
+/// press doesn't re-fire every step; it's updated to `input.jump` on every
+/// call, including while airborne, so a fresh press is still required
+/// after landing even if the button was never released mid-air. Call once
+/// per step, before `integrate::integrate_velocities`, alongside
+/// `apply_gravity`.
 pub fn apply_driven_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
     on_ground: bool,
     boost_amount: &mut f32,
+    jump_held: &mut bool,
     base_friction: f32,
     dt: f32,
 ) {
     let forward = forward_axis(car);
+    let jump_pressed = input.jump && !*jump_held;
+    *jump_held = input.jump;
 
     if on_ground {
         let forward_speed = car.linear_velocity.dot(&forward);
@@ -137,6 +168,14 @@ pub fn apply_driven_forces(
         } else {
             base_friction
         };
+
+        if jump_pressed {
+            // An instantaneous velocity change, not a continuous force —
+            // apply_impulse divides by mass internally, so scaling by
+            // car.mass() here cancels that out and yields a flat
+            // JUMP_SPEED velocity change regardless of the car's mass.
+            car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+        }
     }
 
     if input.boost && *boost_amount > 0.0 {
@@ -171,12 +210,25 @@ mod tests {
         boost_amount: &mut f32,
         dt: f32,
     ) {
+        let mut jump_held = false;
+        step_with_input_and_jump_state(car, input, on_ground, boost_amount, &mut jump_held, dt);
+    }
+
+    fn step_with_input_and_jump_state(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        on_ground: bool,
+        boost_amount: &mut f32,
+        jump_held: &mut bool,
+        dt: f32,
+    ) {
         car.clear_forces();
         apply_driven_forces(
             car,
             input,
             on_ground,
             boost_amount,
+            jump_held,
             DEFAULT_TEST_FRICTION,
             dt,
         );
@@ -207,6 +259,13 @@ mod tests {
     fn full_handbrake() -> ControllerInput {
         ControllerInput {
             handbrake: true,
+            ..Default::default()
+        }
+    }
+
+    fn full_jump() -> ControllerInput {
+        ControllerInput {
+            jump: true,
             ..Default::default()
         }
     }
@@ -427,6 +486,100 @@ mod tests {
         assert_eq!(
             c.friction, DEFAULT_TEST_FRICTION,
             "releasing handbrake should restore the car's base friction"
+        );
+    }
+
+    #[test]
+    fn jump_gives_a_grounded_car_upward_velocity() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(&mut c, &full_jump(), true, &mut boost, 1.0 / 60.0);
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity, got {}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn jump_has_no_effect_while_airborne() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(&mut c, &full_jump(), false, &mut boost, 1.0 / 60.0);
+        assert_eq!(
+            c.linear_velocity.z, 0.0,
+            "airborne jump shouldn't add upward velocity — nothing to push off of"
+        );
+    }
+
+    #[test]
+    fn holding_jump_does_not_refire_every_step() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        step_with_input_and_jump_state(
+            &mut c,
+            &full_jump(),
+            true,
+            &mut boost,
+            &mut jump_held,
+            1.0 / 60.0,
+        );
+        let velocity_after_first_press = c.linear_velocity.z;
+        // Still held, still (nominally) grounded — a second call with the
+        // same jump_held state must not add a second impulse.
+        step_with_input_and_jump_state(
+            &mut c,
+            &full_jump(),
+            true,
+            &mut boost,
+            &mut jump_held,
+            1.0 / 60.0,
+        );
+        assert!(
+            c.linear_velocity.z <= velocity_after_first_press + 1.0,
+            "expected holding jump to not re-fire a second impulse, \
+             velocity after first press={velocity_after_first_press}, after second={}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn releasing_and_repressing_jump_fires_again() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        step_with_input_and_jump_state(
+            &mut c,
+            &full_jump(),
+            true,
+            &mut boost,
+            &mut jump_held,
+            1.0 / 60.0,
+        );
+        let velocity_after_first_press = c.linear_velocity.z;
+        // Release, then press again — this must fire a second impulse.
+        step_with_input_and_jump_state(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            &mut boost,
+            &mut jump_held,
+            1.0 / 60.0,
+        );
+        step_with_input_and_jump_state(
+            &mut c,
+            &full_jump(),
+            true,
+            &mut boost,
+            &mut jump_held,
+            1.0 / 60.0,
+        );
+        assert!(
+            c.linear_velocity.z > velocity_after_first_press,
+            "expected releasing then re-pressing jump to fire again, \
+             velocity after first press={velocity_after_first_press}, after second press={}",
+            c.linear_velocity.z
         );
     }
 }
