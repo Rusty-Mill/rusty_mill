@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Handbrake input
+**2026-08-29** · PR pending · commit pending
+
+- **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a
+  handbrake mechanic (`RB-PHYSICS-001-FR-009`) — while
+  `ControllerInput.handbrake` is held and the car is grounded (gated like
+  throttle/steering — a free-floating box has no wheels to lock), the
+  car's `RigidBody.friction` is temporarily multiplied by a new
+  `HANDBRAKE_FRICTION_MULTIPLIER`, letting the car's existing momentum
+  carry it into a slide instead of gripping the ground and turning
+  cleanly. Releasing handbrake restores the car's own friction.
+- **Design note:** this reuses the ground-contact solver's existing
+  Coulomb-friction machinery rather than inventing a separate lateral-slip
+  system — this port has no per-wheel tire model, so there's no
+  rear-specific grip to lose the way a real car's handbrake works. A
+  uniform, temporary reduction of the whole car's one friction value is a
+  deliberately simple stand-in, not a claim of mechanistic fidelity.
+- **Added:** `PhysicsWorld` gains a parallel `car_base_friction: Vec<f32>`,
+  snapshotted from each car's own constructed `friction` by `with_car`, so
+  handbrake restores the car's own base value on release — not some
+  crate-wide default, even when a car was built with a custom friction.
+- **Constants, honestly labeled:** `HANDBRAKE_FRICTION_MULTIPLIER` is an
+  uncalibrated placeholder with no public reference at all (like
+  `STEER_TORQUE`), chosen only to produce a visibly reduced (not zero)
+  grip in tests.
+- **Not implemented** (explicitly, not silently dropped): jump and air
+  control (pitch/yaw/roll torque while airborne) — each a distinct real
+  mechanic, tracked as separate follow-up work.
+- 5 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (86
+  total): handbrake reduces friction while grounded, has no effect while
+  airborne, and releasing it restores the car's base friction; releasing
+  handbrake restores a car's own *non-default* base friction (not a
+  hardcoded constant); and — the real end-to-end proof — a car already
+  sliding sideways in a live `PhysicsWorld::step` loop retains more of
+  that slide under handbrake's reduced friction than under normal grip.
+
+---
+
 ## Boost input
 **2026-08-29** · [#25](https://github.com/baileyrd/rusty_bullet/pull/25) · `40e70cd`
 

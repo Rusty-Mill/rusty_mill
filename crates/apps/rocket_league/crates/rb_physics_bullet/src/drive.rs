@@ -1,17 +1,30 @@
 //! Driven car input: couples `rb_domain::ControllerInput` into forces and
-//! torques on a car `RigidBody`. Ground-driving (throttle, steering) plus
-//! boost in this increment. Throttle and steering are gated on the car
-//! actually touching the ground (a free-floating box has no wheels to
-//! grip, so airborne throttle/steer input does nothing here); boost is
-//! not — it's a rocket, not an engine, so it works identically grounded
-//! or airborne, the same way it does in real Rocket League.
+//! torques on a car `RigidBody`. Ground-driving (throttle, steering),
+//! boost, and handbrake/drift in this increment. Throttle, steering, and
+//! handbrake are gated on the car actually touching the ground (a
+//! free-floating box has no wheels to grip or lock, so airborne input does
+//! nothing for any of them here); boost is not — it's a rocket, not an
+//! engine, so it works identically grounded or airborne, the same way it
+//! does in real Rocket League.
+//!
+//! Handbrake is modeled as a temporary ground-friction reduction rather
+//! than a separate lateral-slip system: this port has no per-wheel tire
+//! model (the car is one rigid box), so there's no distinct "rear grip"
+//! to lose the way a real car's handbrake works. Instead, while `handbrake`
+//! is held and the car is grounded, `RigidBody.friction` — the same
+//! material property the ground-contact solver already reads for Coulomb
+//! friction — is temporarily reduced, letting the box's existing momentum
+//! carry it into a slide instead of gripping the ground and turning
+//! cleanly. Releasing handbrake restores the car's original friction. This
+//! reuses machinery the solver already has rather than inventing a second
+//! grip model.
 //!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): jump, air-control (pitch/yaw/roll torque while airborne), and
-//! handbrake/drift. A car with no input set (or all-neutral
-//! `ControllerInput::default()`) behaves exactly as a free rigid box
-//! always has — this module only ever adds force/torque, never removes
-//! the existing physics.
+//! dropped): jump and air-control (pitch/yaw/roll torque while airborne).
+//! A car with no input set (or all-neutral `ControllerInput::default()`)
+//! behaves exactly as a free rigid box always has — this module only ever
+//! adds force/torque or adjusts the existing friction property, never
+//! removes physics outright.
 //!
 //! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
 //! — it's this project's own model of Rocket League's driving mechanics,
@@ -21,10 +34,10 @@
 //! gravity constant comes from); `THROTTLE_ACCELERATION` and
 //! `BOOST_CONSUMPTION_RATE` are simplified constants standing in for
 //! Rocket League's real speed-dependent throttle curve and boost-drain
-//! behavior; `STEER_TORQUE` is an uncalibrated placeholder chosen only to
-//! produce a visibly responsive turn in this car's mass/inertia for tests.
-//! None of these are independently confirmed by this project — see
-//! `RB-PHYSICS-001-FR-005`.
+//! behavior; `STEER_TORQUE` and `HANDBRAKE_FRICTION_MULTIPLIER` are
+//! uncalibrated placeholders chosen only to produce a visibly responsive
+//! turn/slide for this car's mass/inertia in tests. None of these are
+//! independently confirmed by this project — see `RB-PHYSICS-001-FR-005`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -66,6 +79,15 @@ pub const MAX_BOOST: f32 = 100.0;
 /// zero-throttle/wavedash edge cases isn't modeled.
 const BOOST_CONSUMPTION_RATE: f32 = 33.3;
 
+/// Uncalibrated placeholder: while grounded and `handbrake` is held, the
+/// car's `RigidBody.friction` is multiplied by this factor before the
+/// ground-contact solver runs, sharply reducing grip so existing momentum
+/// carries the car into a slide instead of a clean turn. Chosen only to
+/// produce a visibly reduced (not zero) grip in tests, not derived from any
+/// measured or documented Rocket League value — this port has no per-wheel
+/// tire model to calibrate a real rear-grip-loss number against.
+const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
+
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
 }
@@ -74,16 +96,21 @@ fn up_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0))
 }
 
-/// Applies throttle, steering, and boost as forces/torques on `car`.
-/// Throttle and steering are a no-op unless `on_ground`; boost isn't
+/// Applies throttle, steering, boost, and handbrake as forces/torques (or,
+/// for handbrake, a temporary friction adjustment) on `car`. Throttle,
+/// steering, and handbrake are a no-op unless `on_ground`; boost isn't
 /// gated on ground contact, but is a no-op once `*boost_amount` reaches
-/// zero. Call once per step, before `integrate::integrate_velocities`,
-/// alongside `apply_gravity`.
+/// zero. `base_friction` is the car's own nominal (non-handbraking)
+/// friction — handbrake temporarily reduces `car.friction` below it while
+/// held and grounded, and restores it otherwise, so callers don't need a
+/// separate restore step. Call once per step, before
+/// `integrate::integrate_velocities`, alongside `apply_gravity`.
 pub fn apply_driven_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
     on_ground: bool,
     boost_amount: &mut f32,
+    base_friction: f32,
     dt: f32,
 ) {
     let forward = forward_axis(car);
@@ -104,6 +131,12 @@ pub fn apply_driven_forces(
                 car.apply_torque(up_axis(car) * (steer * STEER_TORQUE * speed_factor));
             }
         }
+
+        car.friction = if input.handbrake {
+            base_friction * HANDBRAKE_FRICTION_MULTIPLIER
+        } else {
+            base_friction
+        };
     }
 
     if input.boost && *boost_amount > 0.0 {
@@ -125,6 +158,8 @@ mod tests {
     use super::*;
     use crate::integrate;
 
+    const DEFAULT_TEST_FRICTION: f32 = 0.5;
+
     fn car() -> RigidBody {
         RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, Vec3::ZERO)
     }
@@ -137,7 +172,14 @@ mod tests {
         dt: f32,
     ) {
         car.clear_forces();
-        apply_driven_forces(car, input, on_ground, boost_amount, dt);
+        apply_driven_forces(
+            car,
+            input,
+            on_ground,
+            boost_amount,
+            DEFAULT_TEST_FRICTION,
+            dt,
+        );
         integrate::integrate_velocities(car, dt);
     }
 
@@ -162,6 +204,13 @@ mod tests {
         }
     }
 
+    fn full_handbrake() -> ControllerInput {
+        ControllerInput {
+            handbrake: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn neutral_input_applies_no_force_or_torque() {
         let mut c = car();
@@ -176,6 +225,10 @@ mod tests {
         assert_eq!(c.linear_velocity, Vec3::ZERO);
         assert_eq!(c.angular_velocity, Vec3::ZERO);
         assert_eq!(boost, MAX_BOOST, "unused boost shouldn't drain");
+        assert_eq!(
+            c.friction, DEFAULT_TEST_FRICTION,
+            "no handbrake input shouldn't touch friction"
+        );
     }
 
     #[test]
@@ -329,6 +382,51 @@ mod tests {
         assert!(
             boost < MAX_BOOST,
             "expected held boost to still drain even at max speed"
+        );
+    }
+
+    #[test]
+    fn handbrake_reduces_friction_while_grounded() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(&mut c, &full_handbrake(), true, &mut boost, 1.0 / 60.0);
+        assert_eq!(
+            c.friction,
+            DEFAULT_TEST_FRICTION * HANDBRAKE_FRICTION_MULTIPLIER,
+            "expected handbrake to reduce friction below its base value"
+        );
+    }
+
+    #[test]
+    fn handbrake_has_no_effect_on_friction_while_airborne() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(&mut c, &full_handbrake(), false, &mut boost, 1.0 / 60.0);
+        assert_eq!(
+            c.friction, DEFAULT_TEST_FRICTION,
+            "airborne handbrake shouldn't touch friction — no wheels to lock"
+        );
+    }
+
+    #[test]
+    fn releasing_handbrake_restores_friction() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(&mut c, &full_handbrake(), true, &mut boost, 1.0 / 60.0);
+        assert!(
+            c.friction < DEFAULT_TEST_FRICTION,
+            "handbrake should have engaged"
+        );
+        step_with_input(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            &mut boost,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.friction, DEFAULT_TEST_FRICTION,
+            "releasing handbrake should restore the car's base friction"
         );
     }
 }
