@@ -45,6 +45,7 @@ members = [
     "crates/rusty_wire",
     "crates/rusty_std",
     "crates/rusty_sqlite",
+    "crates/rusty_wiremock",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
