@@ -16,10 +16,11 @@
 //! needed one, but shares the same code path — see `body.rs`).
 //!
 //! `drive` couples `rb_domain::ControllerInput` into ground-driving forces
-//! (throttle, steering), boost, handbrake, a single ground jump, and
+//! (throttle, steering), boost, handbrake, a ground jump, a double jump, and
 //! airborne pitch/yaw/roll (air control) on a car — see its own module doc
-//! for what's deliberately still out of scope (double jump/dodge,
-//! variable jump height, wall jump).
+//! for what's deliberately still out of scope (the dodge directional
+//! impulse/torque a real double jump pairs with, variable jump height,
+//! wall jump).
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`

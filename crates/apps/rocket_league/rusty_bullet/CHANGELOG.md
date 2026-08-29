@@ -101,6 +101,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `ControllerInput.pitch`/`yaw`/`roll`, gated on the car *not* touching
   the ground, not speed-scaled (unlike ground steering). Double
   jump/dodge, variable jump height, and wall jump remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-012`) — double jump: one
+  more, identical `JUMP_SPEED` impulse fired on a fresh airborne press of
+  `ControllerInput.jump`, reusing the ground jump's own rising-edge
+  detection and the `JUMP_SPEED` constant (now `pub`) itself. Gated on a
+  new per-car `double_jump_available` flag rather than ground contact —
+  restored on landing, consumed by use. `PhysicsWorld` gains
+  `car_double_jump_available: Vec<bool>`. The dodge directional
+  impulse/torque, variable jump height, and wall jump remain not
+  implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

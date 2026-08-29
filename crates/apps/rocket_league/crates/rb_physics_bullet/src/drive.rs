@@ -43,13 +43,26 @@
 //! since Rocket League's actual pitch/yaw/roll rates differ from each
 //! other; this port doesn't model that difference.
 //!
+//! Double jump reuses the ground jump's own rising-edge detection
+//! (`jump_pressed`) rather than a second edge-detector: the same fresh
+//! press, while airborne, fires one more instantaneous `JUMP_SPEED`
+//! impulse — gated on a per-car `double_jump_available` flag instead of on
+//! `on_ground`. Landing (any step where `on_ground` is true) unconditionally
+//! restores availability; an airborne fresh press consumes it, so it can
+//! fire at most once per airborne period no matter how many times jump is
+//! released and re-pressed after that. This deliberately excludes the
+//! "dodge" directional flip real Rocket League pairs a double jump with (a
+//! sideways/forward impulse and torque from the stick direction at the
+//! moment of the second press) — that's a distinct, still-unimplemented
+//! mechanic, not folded into this increment.
+//!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): double jump/dodge (a second airborne jump, usually paired
-//! with a directional impulse/torque), variable jump height (real Rocket
-//! League adds extra upward accel for as long as jump is held, up to a
-//! cap — this port always applies the same fixed impulse regardless of
-//! how long the button is held), and wall jump (needs arena walls, which
-//! don't exist in this scope). A car with no input set (or all-neutral
+//! dropped): the dodge directional impulse/torque a real double jump pairs
+//! with (see above), variable jump height (real Rocket League adds extra
+//! upward accel for as long as jump is held, up to a cap — this port
+//! always applies the same fixed impulse regardless of how long the
+//! button is held), and wall jump (needs arena walls, which don't exist in
+//! this scope). A car with no input set (or all-neutral
 //! `ControllerInput::default()`) behaves exactly as a free rigid box
 //! always has — this module only ever adds force/torque/impulse or
 //! adjusts the existing friction property, never removes physics outright.
@@ -121,7 +134,10 @@ const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 /// instantaneous vertical velocity change (not a continuous force) on a
 /// fresh grounded jump press — a flat speed regardless of the car's mass,
 /// matching how the real jump impulse doesn't scale with car mass either.
-const JUMP_SPEED: f32 = 292.0;
+/// Also reused as the double jump's impulse magnitude (see the module doc
+/// comment) — `pub` so `world.rs`'s end-to-end tests can assert against it
+/// directly, the same way `MAX_CAR_SPEED`/`MAX_BOOST` already are.
+pub const JUMP_SPEED: f32 = 292.0;
 
 /// Uncalibrated placeholder air-control torque magnitude, shared by pitch,
 /// yaw, and roll (about the car's local right, up, and forward axes
@@ -148,28 +164,34 @@ fn right_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0))
 }
 
-/// Applies throttle, steering, boost, handbrake, jump, and air control as
-/// forces/torques/impulses (or, for handbrake, a temporary friction
-/// adjustment) on `car`. Throttle, steering, handbrake, and jump are a
-/// no-op unless `on_ground`; air control is the reverse — a no-op unless
-/// *not* `on_ground`; boost isn't gated on ground contact at all, but is a
-/// no-op once `*boost_amount` reaches zero. `base_friction` is the car's
-/// own nominal (non-handbraking) friction — handbrake temporarily reduces
-/// `car.friction` below it while held and grounded, and restores it
-/// otherwise, so callers don't need a separate restore step. `jump_held`
-/// is the car's `input.jump` value as of the *previous* call — jump fires
-/// only on a rising edge (`input.jump && !*jump_held`), so a continued
-/// press doesn't re-fire every step; it's updated to `input.jump` on every
-/// call, including while airborne, so a fresh press is still required
-/// after landing even if the button was never released mid-air. Call once
-/// per step, before `integrate::integrate_velocities`, alongside
-/// `apply_gravity`.
+/// Applies throttle, steering, boost, handbrake, jump, double jump, and air
+/// control as forces/torques/impulses (or, for handbrake, a temporary
+/// friction adjustment) on `car`. Throttle, steering, handbrake, and jump
+/// are a no-op unless `on_ground`; air control and double jump are the
+/// reverse — a no-op unless *not* `on_ground`; boost isn't gated on ground
+/// contact at all, but is a no-op once `*boost_amount` reaches zero.
+/// `base_friction` is the car's own nominal (non-handbraking) friction —
+/// handbrake temporarily reduces `car.friction` below it while held and
+/// grounded, and restores it otherwise, so callers don't need a separate
+/// restore step. `jump_held` is the car's `input.jump` value as of the
+/// *previous* call — jump (ground or double) fires only on a rising edge
+/// (`input.jump && !*jump_held`), so a continued press doesn't re-fire
+/// every step; it's updated to `input.jump` on every call, including while
+/// airborne, so a fresh press is still required for a double jump even if
+/// the button was never released after the ground jump. `double_jump_available`
+/// is whether the car still has a double jump to spend this airborne
+/// period — landing (`on_ground`) unconditionally sets it back to `true`;
+/// a fresh airborne press that fires the double jump sets it to `false`
+/// until the next landing. Call once per step, before
+/// `integrate::integrate_velocities`, alongside `apply_gravity`.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
     on_ground: bool,
     boost_amount: &mut f32,
     jump_held: &mut bool,
+    double_jump_available: &mut bool,
     base_friction: f32,
     dt: f32,
 ) {
@@ -178,6 +200,10 @@ pub fn apply_driven_forces(
     *jump_held = input.jump;
 
     if on_ground {
+        // Landing (or simply resting) always restores the double jump,
+        // regardless of this step's input.
+        *double_jump_available = true;
+
         let forward_speed = car.linear_velocity.dot(&forward);
         let throttle = input.throttle.clamp(-1.0, 1.0);
         if throttle != 0.0 && throttle.signum() * forward_speed < MAX_CAR_SPEED {
@@ -226,6 +252,15 @@ pub fn apply_driven_forces(
         if roll != 0.0 {
             car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE));
         }
+
+        if jump_pressed && *double_jump_available {
+            // Same fixed-magnitude impulse as the ground jump — reusing
+            // JUMP_SPEED rather than a second, separately-calibrated
+            // constant, since this port has no public reference for a
+            // distinct double-jump speed either.
+            car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+            *double_jump_available = false;
+        }
     }
 
     if input.boost && *boost_amount > 0.0 {
@@ -272,6 +307,28 @@ mod tests {
         jump_held: &mut bool,
         dt: f32,
     ) {
+        let mut double_jump_available = true;
+        step_with_input_and_double_jump_state(
+            car,
+            input,
+            on_ground,
+            boost_amount,
+            jump_held,
+            &mut double_jump_available,
+            dt,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_input_and_double_jump_state(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        on_ground: bool,
+        boost_amount: &mut f32,
+        jump_held: &mut bool,
+        double_jump_available: &mut bool,
+        dt: f32,
+    ) {
         car.clear_forces();
         apply_driven_forces(
             car,
@@ -279,6 +336,7 @@ mod tests {
             on_ground,
             boost_amount,
             jump_held,
+            double_jump_available,
             DEFAULT_TEST_FRICTION,
             dt,
         );
@@ -573,17 +631,6 @@ mod tests {
     }
 
     #[test]
-    fn jump_has_no_effect_while_airborne() {
-        let mut c = car();
-        let mut boost = MAX_BOOST;
-        step_with_input(&mut c, &full_jump(), false, &mut boost, 1.0 / 60.0);
-        assert_eq!(
-            c.linear_velocity.z, 0.0,
-            "airborne jump shouldn't add upward velocity — nothing to push off of"
-        );
-    }
-
-    #[test]
     fn holding_jump_does_not_refire_every_step() {
         let mut c = car();
         let mut boost = MAX_BOOST;
@@ -651,6 +698,112 @@ mod tests {
             "expected releasing then re-pressing jump to fire again, \
              velocity after first press={velocity_after_first_press}, after second press={}",
             c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn double_jump_gives_an_airborne_car_upward_velocity_when_available() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        // step_with_input's throwaway jump_held/double_jump_available both
+        // start fresh (unheld, available), so a single airborne jump press
+        // here is exactly the "double jump available" case.
+        step_with_input(&mut c, &full_jump(), false, &mut boost, 1.0 / 60.0);
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity from an available double jump, got {}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn double_jump_has_no_effect_when_unavailable() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = false;
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &full_jump(),
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.linear_velocity.z, 0.0,
+            "expected an unavailable double jump to add no upward velocity"
+        );
+    }
+
+    #[test]
+    fn double_jump_is_consumed_after_use_and_does_not_refire() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &full_jump(),
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        let velocity_after_double_jump = c.linear_velocity.z;
+        assert!(
+            !double_jump_available,
+            "expected using the double jump to consume it"
+        );
+
+        // Release, then press again while still airborne — must not fire a
+        // second impulse now that the double jump is spent.
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &full_jump(),
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.z - velocity_after_double_jump).abs() < 1.0,
+            "expected a spent double jump to not refire, velocity after first use=\
+             {velocity_after_double_jump}, after second press={}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn landing_restores_double_jump_availability() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = false;
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            double_jump_available,
+            "expected touching the ground to restore the double jump"
         );
     }
 
