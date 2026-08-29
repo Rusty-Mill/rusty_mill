@@ -2,14 +2,9 @@
 //! sphere-vs-box (ball-vs-car), and box-vs-box (car-vs-car). The plane and
 //! sphere-vs-box tests are closed-form (see their own doc comments);
 //! box-vs-box needs a real separating-axis test (`box_vs_box`), since two
-//! arbitrarily-oriented boxes have no such shortcut.
-//!
-//! `PhysicsWorld` has exactly one car in this scope, so `box_vs_box` has no
-//! live caller yet through `contacts_between` — it's unit-tested directly
-//! below. Wiring it into a real two-or-more-car scene needs `PhysicsWorld`
-//! to support multiple cars, which is a distinct, larger, still-open piece
-//! of follow-up work (see `RB-PHYSICS-001`'s open questions), not something
-//! this change does silently or skips silently.
+//! arbitrarily-oriented boxes have no such shortcut. `PhysicsWorld` now
+//! calls `box_vs_box` (via `contacts_between`) for every pair of cars in
+//! its scene, not just as a unit-tested-in-isolation capability.
 
 use crate::body::{RigidBody, Shape};
 use rb_domain::{Quat, Vec3};

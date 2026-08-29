@@ -64,6 +64,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `PhysicsWorld`: this scope has exactly one car, so the collision has no
   live caller yet — multi-car `PhysicsWorld` support remains not
   implemented.
+- `rb_physics_bullet`: multi-car `PhysicsWorld` support, completing
+  `RB-PHYSICS-001-FR-006` — `PhysicsWorld::step` now resolves every car's
+  ground contact, every ball-vs-car pair, and every car-vs-car pair
+  (running `box_vs_box` for real in a live scene for the first time), one
+  pair at a time. A combined multi-body solve across 3+ simultaneously
+  touching bodies and driven car input remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
@@ -82,6 +88,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `resolve_contacts_between` and now takes a manifold slice (was a single
   `&Contact`) — needed to support box-vs-box's up-to-4-point case
   uniformly with sphere-vs-box's single point.
+- `rb_physics_bullet::PhysicsWorld.car: Option<RigidBody>` is renamed
+  `cars: Vec<RigidBody>` (breaking); `with_car` now appends instead of
+  replacing, so it's callable any number of times to build a multi-car
+  scene.
 ### Fixed
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —

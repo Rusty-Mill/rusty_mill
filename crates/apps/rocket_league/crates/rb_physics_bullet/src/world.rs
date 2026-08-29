@@ -8,14 +8,15 @@ use crate::collision;
 use crate::{integrate, solver};
 use rb_domain::{BallState, CarState, PhysicsFrame, Vec3};
 
-/// The whole simulated scene: one ball-like sphere, an optional car-like
-/// box, and one ground plane. Both collide with the ground, and (when a
-/// car is present) with each other (`collision::contact_between`) — the
-/// only two-dynamic-body pairing this scope needs, since there's exactly
-/// one ball and one car.
+/// The whole simulated scene: one ball-like sphere, zero or more car-like
+/// boxes, and one ground plane. Every body collides with the ground; every
+/// car also collides with the ball and with every other car
+/// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
+/// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
+/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
-    pub car: Option<RigidBody>,
+    pub cars: Vec<RigidBody>,
     pub ground: StaticPlane,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -34,17 +35,19 @@ impl PhysicsWorld {
     pub fn new(ball: RigidBody, ground: StaticPlane) -> PhysicsWorld {
         PhysicsWorld {
             ball,
-            car: None,
+            cars: Vec::new(),
             ground,
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
     }
 
-    /// Adds a car-shaped body to the scene, stepped alongside the ball
-    /// (against the ground only — see the struct doc comment).
+    /// Adds one car-shaped body to the scene. Callable more than once —
+    /// `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` builds a
+    /// two-car scene — since a car's `player_id` in `frame()` is just its
+    /// index in `cars`, added cars are always appended, never inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
-        self.car = Some(car);
+        self.cars.push(car);
         self
     }
 
@@ -87,33 +90,55 @@ impl PhysicsWorld {
         body.update_inertia_tensor();
     }
 
+    /// Detects and resolves the contact manifold, if any, between two
+    /// dynamic bodies already known not to alias — the shared step for
+    /// ball-vs-car and car-vs-car resolution.
+    fn resolve_dynamic_contact(a: &mut RigidBody, b: &mut RigidBody, dt: f32) {
+        let contacts = collision::contacts_between(a, b);
+        if !contacts.is_empty() {
+            solver::resolve_contacts_between(a, b, &contacts, dt);
+        }
+    }
+
     /// Advances the whole scene by `dt` seconds, matching
     /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
     /// every body's unconstrained velocity, then detect and resolve every
-    /// contact (ground contacts for each body, then the one ball-vs-car
-    /// contact, if a car is present and actually touching), then integrate
-    /// every body's transform — never resolving one body's transform before
-    /// another body's contacts have had a chance to affect it.
+    /// contact (ground contacts for every body, then every ball-vs-car
+    /// pair, then every car-vs-car pair), then integrate every body's
+    /// transform — never resolving one body's transform before another
+    /// body's contacts have had a chance to affect it.
+    ///
+    /// Car-vs-car and ball-vs-car pairs are resolved one pair at a time
+    /// (each running its own full `SOLVER_ITERATIONS` pass), not as one
+    /// combined multi-body solve across every simultaneous contact —
+    /// simpler than Bullet's actual interleaved-across-islands solver, and
+    /// a real approximation once 3+ bodies are mutually touching in the
+    /// same step (e.g. a car pinned between the ball and another car),
+    /// tracked as open follow-up in `RB-PHYSICS-001`, not hidden.
     pub fn step(&mut self, dt: f32) {
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        if let Some(car) = &mut self.car {
+        for car in &mut self.cars {
             Self::apply_forces_and_integrate_velocities(car, self.gravity, dt);
         }
 
         Self::resolve_ground_contact(&mut self.ball, &self.ground, dt);
-        if let Some(car) = &mut self.car {
+        for car in &mut self.cars {
             Self::resolve_ground_contact(car, &self.ground, dt);
         }
 
-        if let Some(car) = &mut self.car {
-            let contacts = collision::contacts_between(&self.ball, car);
-            if !contacts.is_empty() {
-                solver::resolve_contacts_between(&mut self.ball, car, &contacts, dt);
+        for car in &mut self.cars {
+            Self::resolve_dynamic_contact(&mut self.ball, car, dt);
+        }
+
+        for i in 0..self.cars.len() {
+            for j in (i + 1)..self.cars.len() {
+                let (left, right) = self.cars.split_at_mut(j);
+                Self::resolve_dynamic_contact(&mut left[i], &mut right[0], dt);
             }
         }
 
         Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
-        if let Some(car) = &mut self.car {
+        for car in &mut self.cars {
             Self::integrate_transform_and_refresh_inertia(car, dt);
         }
 
@@ -121,22 +146,24 @@ impl PhysicsWorld {
     }
 
     /// The scene's current state as a `PhysicsFrame`, for consumption by
-    /// `RB-VERIFY-003`'s divergence scorer. `cars` holds one `CarState`
-    /// (`player_id` 0, no recovered input — there's no input source in
-    /// this scope) when `car` is present, otherwise it's empty.
+    /// `RB-VERIFY-003`'s divergence scorer. One `CarState` per car in
+    /// `self.cars`, `player_id` set to each car's index (no recovered
+    /// input — there's no input source in this scope).
     pub fn frame(&self) -> PhysicsFrame {
-        let cars = match &self.car {
-            Some(car) => vec![CarState {
-                player_id: 0,
+        let cars = self
+            .cars
+            .iter()
+            .enumerate()
+            .map(|(i, car)| CarState {
+                player_id: i as u32,
                 position: car.position,
                 rotation: car.orientation,
                 velocity: car.linear_velocity,
                 angular_velocity: car.angular_velocity,
                 boost_amount: 0.0,
                 input: None,
-            }],
-            None => Vec::new(),
-        };
+            })
+            .collect();
         PhysicsFrame {
             timestamp_secs: self.elapsed_secs,
             ball: BallState {
@@ -282,7 +309,7 @@ mod tests {
             world.step(dt);
         }
         let expected_vz = world.gravity.z * t;
-        let car_after = world.car.expect("car should still be present");
+        let car_after = *world.cars.first().expect("car should still be present");
         assert!(
             (car_after.linear_velocity.z - expected_vz).abs() < 1.0,
             "expected vz ~= {expected_vz}, got {}",
@@ -309,7 +336,7 @@ mod tests {
         for _ in 0..(6.0 / dt) as u32 {
             world.step(dt);
         }
-        let car_after = world.car.expect("car should still be present");
+        let car_after = *world.cars.first().expect("car should still be present");
         assert!(
             (car_after.position.z - 18.0).abs() < 0.5,
             "expected the car to settle resting on its 18-unit half-height, got z={}",
@@ -376,7 +403,7 @@ mod tests {
             world.step(dt);
         }
 
-        let car_after = world.car.expect("car should still be present");
+        let car_after = *world.cars.first().expect("car should still be present");
         let contact_surface_x = car_after.position.x - car_half_extents.x - ball_radius;
         assert!(
             world.ball.position.x < contact_surface_x + 1.0,
@@ -389,6 +416,79 @@ mod tests {
             world.ball.linear_velocity.x < 0.0,
             "expected the ball to bounce back, got vx={}",
             world.ball.linear_velocity.x
+        );
+    }
+
+    fn some_car(position: Vec3) -> RigidBody {
+        RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, position)
+    }
+
+    #[test]
+    fn with_car_called_twice_builds_a_two_car_scene() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(some_car(Vec3::new(0.0, 0.0, 18.0)))
+            .with_car(some_car(Vec3::new(500.0, 0.0, 18.0)));
+        assert_eq!(world.cars.len(), 2);
+    }
+
+    #[test]
+    fn frame_assigns_sequential_player_ids_across_multiple_cars() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(some_car(Vec3::new(0.0, 0.0, 18.0)))
+            .with_car(some_car(Vec3::new(500.0, 0.0, 18.0)))
+            .with_car(some_car(Vec3::new(1000.0, 0.0, 18.0)));
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 3);
+        let ids: Vec<u32> = frame.cars.iter().map(|c| c.player_id).collect();
+        assert_eq!(ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn cars_bounce_off_each_other_instead_of_passing_through() {
+        // The real end-to-end proof of multi-car support: two cars,
+        // floating well clear of the ground with gravity zeroed (isolating
+        // the car-vs-car collision this test checks), closing head-on.
+        // Before multi-car PhysicsWorld support, box_vs_box had no live
+        // caller at all — this exercises it for real for the first time.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+
+        let mut car_a = some_car(Vec3::new(-100.0, 0.0, 500.0));
+        car_a.restitution = 0.5;
+        car_a.linear_velocity = Vec3::new(200.0, 0.0, 0.0);
+
+        let mut car_b = some_car(Vec3::new(100.0, 0.0, 500.0));
+        car_b.restitution = 0.5;
+        car_b.linear_velocity = Vec3::new(-200.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car_a)
+            .with_car(car_b);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let a_after = world.cars[0];
+        let b_after = world.cars[1];
+        assert!(
+            a_after.position.x < b_after.position.x,
+            "expected car a to stay left of car b (no tunnelling), a.x={}, b.x={}",
+            a_after.position.x,
+            b_after.position.x
+        );
+        assert!(
+            a_after.linear_velocity.x < 0.0,
+            "expected car a to bounce back (negative x velocity), got {}",
+            a_after.linear_velocity.x
+        );
+        assert!(
+            b_after.linear_velocity.x > 0.0,
+            "expected car b to bounce back (positive x velocity), got {}",
+            b_after.linear_velocity.x
         );
     }
 }

@@ -6,6 +6,35 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Multi-car PhysicsWorld support
+**2026-08-29** · pending PR
+
+- **Changed (breaking):** `PhysicsWorld.car: Option<RigidBody>` is
+  replaced by `cars: Vec<RigidBody>`. `with_car` now appends, so calling
+  it repeatedly builds a scene with any number of cars —
+  `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` is a two-car
+  scene. No cap is imposed by this crate (Rocket League's real 8-car limit
+  is a gameplay rule, not a physics-core one).
+- **Changed:** `PhysicsWorld::step` now resolves every car's ground
+  contact, every ball-vs-car pair, and every car-vs-car pair each step —
+  `collision::box_vs_box` (added in the previous release but with no live
+  caller) now runs for real in a live scene, one pair at a time, not just
+  under a unit test. `frame()` assigns each car's `player_id` as its index
+  in `cars`.
+- **Not implemented** (explicitly, not silently dropped): a combined
+  multi-body solve — each pair is still resolved independently, its own
+  full solver pass, rather than one simultaneous solve across every
+  contact touching in the same step. This is a real approximation once 3+
+  bodies are mutually touching at once (e.g. a car pinned between the ball
+  and another car); driven car input also remains not implemented.
+- 3 new unit tests in `rb_physics_bullet` (65 total): `with_car` called
+  twice builds a two-car scene, `frame()` assigns sequential `player_id`s
+  across multiple cars, and — the real end-to-end proof — two cars shot
+  head-on at each other in a live `PhysicsWorld::step` loop actually
+  bounce off each other instead of tunnelling through.
+
+---
+
 ## Car-vs-car collision detection
 **2026-08-29** · [#19](https://github.com/baileyrd/rusty_bullet/pull/19) · `2eddfe7`
 
