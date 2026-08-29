@@ -6,6 +6,43 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Car-vs-car collision detection
+**2026-08-29** · pending PR
+
+- **Added:** `collision::box_vs_box`, a general separating-axis test
+  (SAT) between two oriented boxes (`RB-PHYSICS-001-FR-006`) — 3+3 face
+  axes plus 9 edge-pair cross-product axes, the same overall structure as
+  `btBoxBoxDetector::dBoxBox`. When every axis shows overlap, the
+  minimum-penetration axis becomes the contact normal; a face axis
+  produces a clipped face manifold (0-4 points, via a box-specific closed
+  form of incident-face-vs-reference-face clipping), an edge axis a
+  single edge-edge point (via a standard closest-point-between-segments
+  construction).
+- **Changed:** `collision::contact_between` is renamed `contacts_between`
+  and now returns `Vec<Contact>` uniformly (previously `Option<Contact>`)
+  — needed since box-vs-box can return a manifold where sphere-vs-box
+  always returned at most one point. `solver::resolve_contact_between` is
+  similarly generalized to `resolve_contacts_between`, resolving an entire
+  manifold between two dynamic bodies (mirroring `resolve_contacts`'
+  existing multi-contact structure for one body vs. a static plane) rather
+  than a single contact.
+- **Not wired up** (explicitly, not silently dropped): `PhysicsWorld`
+  still models exactly one ball and one optional car, so `box_vs_box` has
+  no live caller in a real simulated scene — a second car colliding with
+  the first never actually happens yet. Wiring it in needs multi-car
+  `PhysicsWorld` support, a distinct, larger scope decision tracked as
+  separate follow-up work, not this change's scope.
+- 4 new unit tests in `rb_physics_bullet` (62 total): no contact for
+  far-apart boxes, a 4-point manifold with correct depth/normal for a
+  symmetric flat overlap, argument-order antisymmetry (matching the
+  sphere-vs-box convention), a partial manifold for a non-flat rotated
+  overlap, and (in `solver`) a generalized `resolve_contacts_between`
+  settling two colliding boxes' face-to-face manifold without spurious net
+  rotation — the same property already verified for the one-body
+  ground-manifold case.
+
+---
+
 ## Ball-vs-car collision
 **2026-08-28** · [#17](https://github.com/baileyrd/rusty_bullet/pull/17) · `2f12c8f`
 

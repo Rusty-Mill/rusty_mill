@@ -57,6 +57,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   sequential-impulse solver path (`solver::resolve_contact_between`).
   `rb_domain::Quat` gains `conjugate`. Box-vs-box collision and driven car
   input remain not implemented.
+- `rb_physics_bullet`: car-vs-car collision *detection*
+  (`RB-PHYSICS-001-FR-006`) — `collision::box_vs_box`, a 15-axis
+  separating-axis test between two oriented boxes, producing a clipped
+  face manifold (0-4 points) or a single edge-edge point. Not wired into
+  `PhysicsWorld`: this scope has exactly one car, so the collision has no
+  live caller yet — multi-car `PhysicsWorld` support remains not
+  implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
@@ -69,6 +76,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   contact → integrate every body's transform) instead of stepping each
   body fully in isolation, so ball-vs-car contact resolution sees the same
   pre-integration state ground contacts do.
+- `rb_physics_bullet::collision::contact_between` is renamed
+  `contacts_between` and now returns `Vec<Contact>` (was
+  `Option<Contact>`), and `solver::resolve_contact_between` is renamed
+  `resolve_contacts_between` and now takes a manifold slice (was a single
+  `&Contact`) — needed to support box-vs-box's up-to-4-point case
+  uniformly with sphere-vs-box's single point.
 ### Fixed
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —

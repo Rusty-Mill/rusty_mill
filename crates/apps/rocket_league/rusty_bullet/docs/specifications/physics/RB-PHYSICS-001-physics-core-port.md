@@ -1,11 +1,12 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.4.0
-- Status: In Progress (sphere-vs-plane, box-vs-plane, and sphere-vs-box
-  (ball-vs-car) all implemented and tested, with a general 3x3 inertia
-  tensor and a two-dynamic-body solver path; box-vs-box collision, driven
-  car input, split impulse, warm-starting, and constant calibration are
-  open follow-up work)
+- Version: 0.5.0
+- Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
+  (ball-vs-car), and box-vs-box (car-vs-car) collision detection all
+  implemented and tested, with a general 3x3 inertia tensor and a
+  two-dynamic-body manifold solver path; multi-car `PhysicsWorld` support,
+  driven car input, split impulse, warm-starting, and constant calibration
+  are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -25,19 +26,26 @@ ground) and against each other. Gravity, damping, semi-implicit Euler
 velocity integration, exponential-map orientation integration, analytic
 sphere-vs-plane and box-vs-plane contact detection (the latter generating
 a 1-4 point manifold depending on the box's orientation), analytic
-sphere-vs-box contact detection (always exactly one point), and a
-sequential-impulse solver with restitution and Coulomb friction (two
-tangent directions) — resolving an entire ground-contact manifold together
-(`resolve_contacts`) or a single ball-vs-car contact between two dynamic
-bodies (`resolve_contact_between`) — using a general 3x3 inverse inertia
-tensor (`RigidBody`/`Mat3`, see Architecture) shared by both shapes.
+sphere-vs-box contact detection (always exactly one point), a
+separating-axis box-vs-box contact test (0 to 4 points — a clipped face
+manifold or a single edge-edge point), and a sequential-impulse solver
+with restitution and Coulomb friction (two tangent directions) —
+resolving an entire ground-contact manifold together (`resolve_contacts`)
+or an entire two-dynamic-body manifold (`resolve_contacts_between`) —
+using a general 3x3 inverse inertia tensor (`RigidBody`/`Mat3`, see
+Architecture) shared by both shapes. `box_vs_box` is unit-tested directly
+but has no live caller through `PhysicsWorld` yet — see Non-goals.
 
 ## Non-goals (this increment)
 
-- **Box-vs-box collision.** Two cars colliding with each other. This
-  scope has exactly one car, so the pairing never arises; adding it for
-  real would need a general convex narrow-phase algorithm (SAT or
-  GJK/EPA), not a small extension of `collision::sphere_vs_box`.
+- **Multi-car `PhysicsWorld` support.** `PhysicsWorld` still carries
+  exactly one ball and one optional car, so `collision::box_vs_box` (two
+  boxes colliding) has no real scene to run in yet — a second car
+  colliding with the first never actually happens. Wiring this in is a
+  distinct, larger decision (how many cars, per-car ground/ball contacts,
+  team structure eventually) than "add the collision algorithm," so it's
+  deliberately left as its own follow-up rather than folded into this
+  increment.
 - **Driven car input.** A car body here is a free rigid box — nothing
   couples throttle/steer/boost input into forces or torques on it yet.
   That needs a recorded input sequence to drive (`RB-VERIFY-002`) and is a
@@ -92,15 +100,25 @@ tensor (`RigidBody`/`Mat3`, see Architecture) shared by both shapes.
   sphere-vs-box contact generation (`collision::sphere_vs_box`, a
   closed-form closest-point-on-box query handling both the ordinary
   exterior case and a deep-penetration interior case), and a
-  two-dynamic-body solver path (`solver::resolve_contact_between`) that
-  carries both bodies' mass/inertia contributions instead of assuming one
-  side is a static plane. `PhysicsWorld::step` now detects and resolves a
-  ball-vs-car contact every step a car is present. **Not** delivered:
-  box-vs-box collision — see Non-goals.
+  two-dynamic-body manifold solver path (`solver::resolve_contacts_between`)
+  that carries both bodies' mass/inertia contributions instead of assuming
+  one side is a static plane. `PhysicsWorld::step` now detects and resolves
+  a ball-vs-car contact every step a car is present.
 - `RB-PHYSICS-001-FR-005` (open): Calibrate gravity/restitution/friction
   constants against real recorded ground truth once `RB-VERIFY-001`/
   `RB-VERIFY-002` produce real data, rather than relying on the current
   placeholder defaults.
+- `RB-PHYSICS-001-FR-006` (car-vs-car collision, implemented — detection
+  only, see Non-goals): A general separating-axis test between two
+  oriented boxes (`collision::box_vs_box`), producing either a clipped
+  face manifold (0-4 points) or a single edge-edge point, reusing the
+  two-body solver path FR-004 introduced (`resolve_contacts_between` was
+  generalized from a single contact to a manifold for this). Delivered as
+  a real, unit-tested capability with no live caller yet: `PhysicsWorld`
+  still models exactly one car, so this pairing never occurs in an actual
+  simulated scene. Wiring it in (multi-car `PhysicsWorld` support) is
+  tracked as separate, larger follow-up work — see Non-goals and Open
+  questions.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -120,13 +138,14 @@ tensor (`RigidBody`/`Mat3`, see Architecture) shared by both shapes.
   integration — pure functions over `RigidBody`, shape-agnostic.
 - `collision`: `contacts_vs_plane` — analytic body-vs-ground contact
   generation, dispatching to a sphere- or box-specific test and returning
-  a manifold (`Vec<Contact>`, 0 to 4 points); `contact_between` — analytic
-  sphere-vs-box contact generation for the one two-dynamic-body pairing
-  this scope needs (ball vs. car), always 0 or 1 points.
+  a manifold (`Vec<Contact>`, 0 to 4 points); `contacts_between` —
+  dispatches to `sphere_vs_box` (0 or 1 points) or the separating-axis
+  `box_vs_box` (0 to 4 points), covering every two-dynamic-body shape
+  pairing this crate has.
 - `solver`: `resolve_contacts` — sequential-impulse contact + friction
   resolution over an entire ground-contact manifold (one dynamic body vs.
-  a static plane); `resolve_contact_between` — the same sequential-impulse
-  math generalized to two dynamic bodies' single shared contact point.
+  a static plane); `resolve_contacts_between` — the same sequential-impulse
+  math generalized to two dynamic bodies' shared contact manifold.
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
@@ -192,8 +211,15 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   (the car) barely moving from a much lighter body's (the ball's) impact;
   an end-to-end `PhysicsWorld::step` test confirms a ball shot at a
   stationary car actually bounces off it rather than tunnelling through.
-  All covered by `rb_physics_bullet`'s unit tests (58 tests as of this
-  version).
+- FR-006 (met, detection only): `box_vs_box` correctly reports no contact
+  for far-apart boxes, a 4-point manifold with correct depth and normal
+  for a symmetric flat overlap, a normal/depth pair antisymmetric in
+  argument order (matching the sphere-vs-box case), and a partial
+  (fewer-than-4-point) manifold for a non-flat rotated overlap; the
+  generalized `resolve_contacts_between` settles two colliding boxes'
+  face-to-face manifold without spurious net rotation, the same property
+  already verified for the one-body ground-manifold case. All covered by
+  `rb_physics_bullet`'s unit tests (62 tests as of this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -203,11 +229,14 @@ scoring against real replay/BakkesMod ball *and car* trajectories once
 `RB-VERIFY-001`/`RB-VERIFY-002` exist — that comparison is what actually
 validates (or invalidates) the placeholder constants and this port's
 fidelity to Rocket League's real ball/car behavior, not the unit tests
-alone. In particular, no real data has yet exercised the box/multi-contact
-or ball-vs-car collision paths at all — the unit tests confirm internal
-physical consistency (a level box stays level, an anisotropic inertia
-tensor behaves correctly, a collision conserves momentum), not fidelity to
-a real car's actual resting/tumbling/hitting behavior.
+alone. In particular, no real data has yet exercised the box/multi-contact,
+ball-vs-car, or box-vs-box collision paths at all — the unit tests confirm
+internal physical consistency (a level box stays level, an anisotropic
+inertia tensor behaves correctly, a collision conserves momentum), not
+fidelity to a real car's actual resting/tumbling/hitting behavior.
+`box_vs_box` specifically has no live caller through `PhysicsWorld` at
+all yet (see Non-goals), so even that internal-consistency bar is only
+met at the unit-test level, not through the composition root.
 
 ## Traceability
 
@@ -215,9 +244,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Open questions
 
-- Box-vs-box collision — needs a real convex narrow-phase algorithm (SAT
-  or GJK/EPA); not started, and not needed until a second car exists in
-  scope (see Non-goals).
+- Multi-car `PhysicsWorld` support — needed to give `box_vs_box` (FR-006)
+  a real caller; a distinct scope decision (how many cars, whether/how
+  cars also collide with the ball independently, eventual team structure)
+  from "the collision algorithm exists," not started.
 - Driven car input (throttle/steer/boost coupling into forces/torques) —
   needs `RB-VERIFY-002` capture data to validate against; not started.
 - FR-005 above.
@@ -225,14 +255,37 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   averages; Bullet's actual default is `max` for both) — revisit once real
   data exists to calibrate against.
 - No-split-impulse and no-warm-starting/sleeping are documented, deliberate
-  gaps (see Non-goals). Now that a ball-vs-car collision is real (not just
-  ground contact), these matter more than they did before — worth
-  revisiting once real recorded ball/car-hit behavior exists to compare
-  against, rather than only the unit tests' internal-consistency checks
-  (momentum conservation, no residual closing speed).
+  gaps (see Non-goals). Now that ball-vs-car (and, once wired, car-vs-car)
+  collision is real (not just ground contact), these matter more than they
+  did before — worth revisiting once real recorded ball/car-hit behavior
+  exists to compare against, rather than only the unit tests'
+  internal-consistency checks (momentum conservation, no residual closing
+  speed).
+- `box_vs_box`'s edge-edge contact point uses the midpoint of the two
+  closest points on the involved edges, and its face-contact clipping
+  falls back to a single clamped-center point if clipping ever yields zero
+  points (a defensive branch not exercised by real recorded data yet) —
+  both are reasonable, tested choices, but neither has been validated
+  against Bullet's own `dBoxBox` output or real car-vs-car contact
+  behavior.
 
 ## Change history
 
+- 0.5.0 (2026-08-29): FR-006 added and implemented (detection only) —
+  `collision::box_vs_box`, a 15-axis separating-axis test (3+3 face axes,
+  9 edge-pair axes) between two oriented boxes, producing a clipped face
+  manifold (`face_contact`, 0-4 points) or a single edge-edge point
+  (`edge_contact`, via a standard closest-point-between-segments
+  construction). `collision::contact_between` is generalized to
+  `contacts_between` (returning `Vec<Contact>` uniformly, since box-vs-box
+  can now return a manifold where sphere-vs-box always returned at most
+  one point), and `solver::resolve_contact_between` is generalized to
+  `resolve_contacts_between` (a manifold, mirroring `resolve_contacts`'
+  existing multi-contact structure) to match. `box_vs_box` has no live
+  caller through `PhysicsWorld` yet — this scope still has exactly one
+  car, so multi-car wiring is deliberate, tracked follow-up work, not this
+  change's scope (see Non-goals). 4 new unit tests in `rb_physics_bullet`
+  (62 total).
 - 0.4.0 (2026-08-28): FR-004 completed — sphere-vs-box (ball-vs-car)
   contact generation (`collision::sphere_vs_box`/`contact_between`,
   handling both the ordinary exterior case and a deep-penetration interior

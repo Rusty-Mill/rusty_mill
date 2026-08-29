@@ -14,9 +14,16 @@
 //! anisotropic inertia tensor (a sphere's isotropic inertia never actually
 //! needed one, but shares the same code path — see `body.rs`).
 //!
+//! `collision::box_vs_box` (car-vs-car) is implemented and unit-tested, but
+//! has no live caller through `PhysicsWorld` yet — this scope has exactly
+//! one car, so two cars colliding never actually happens in a real
+//! simulated scene. Wiring it in needs `PhysicsWorld` to carry multiple
+//! cars, a distinct, larger piece of still-open follow-up work (see
+//! `RB-PHYSICS-001`'s open questions), not something done or skipped
+//! silently.
+//!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
-//! box-vs-box collision (two cars against each other — this scope has
-//! exactly one car, so it never arises); split impulse;
+//! multi-car `PhysicsWorld` support (see above); split impulse;
 //! warm-starting/sleeping; and consuming a recorded input sequence — a car
 //! body here is a free rigid box, not a driven vehicle, so `simulate`
 //! simulates the scene in isolation from its own initial state.

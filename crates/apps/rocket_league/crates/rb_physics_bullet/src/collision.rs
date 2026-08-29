@@ -1,15 +1,15 @@
-//! Narrow-phase collision detection: body-vs-static-plane (ground contact)
-//! and sphere-vs-box (ball-vs-car). Bullet's real algorithms for these
-//! (`btSphereBoxCollisionAlgorithm`, the generic convex-vs-plane path) are
-//! more general than this needs to be — for an infinite plane, and for a
-//! sphere against an axis-aligned-in-its-own-frame box, both reduce to
-//! exact analytic/closed-form tests, which is what's ported here as the
-//! direct equivalent, not a simplification of Bullet's result.
+//! Narrow-phase collision detection: body-vs-static-plane (ground contact),
+//! sphere-vs-box (ball-vs-car), and box-vs-box (car-vs-car). The plane and
+//! sphere-vs-box tests are closed-form (see their own doc comments);
+//! box-vs-box needs a real separating-axis test (`box_vs_box`), since two
+//! arbitrarily-oriented boxes have no such shortcut.
 //!
-//! Not implemented: box-vs-box collision (two cars against each other) —
-//! this scope has exactly one car, so the pairing never arises. Adding it
-//! for real would need a general convex narrow-phase algorithm (SAT or
-//! GJK/EPA), not a small extension of `sphere_vs_box` below.
+//! `PhysicsWorld` has exactly one car in this scope, so `box_vs_box` has no
+//! live caller yet through `contacts_between` — it's unit-tested directly
+//! below. Wiring it into a real two-or-more-car scene needs `PhysicsWorld`
+//! to support multiple cars, which is a distinct, larger, still-open piece
+//! of follow-up work (see `RB-PHYSICS-001`'s open questions), not something
+//! this change does silently or skips silently.
 
 use crate::body::{RigidBody, Shape};
 use rb_domain::{Quat, Vec3};
@@ -194,32 +194,467 @@ fn sphere_vs_box(
     })
 }
 
-/// Dispatches a contact test between two dynamic bodies, for the one pair
-/// this scope needs: a sphere (the ball) against a box (a car). `normal`
-/// always points from `b` toward `a` (matching `contacts_vs_plane`'s
+fn get_axis(v: Vec3, index: usize) -> f32 {
+    match index {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+fn set_axis(mut v: Vec3, index: usize, value: f32) -> Vec3 {
+    match index {
+        0 => v.x = value,
+        1 => v.y = value,
+        _ => v.z = value,
+    }
+    v
+}
+
+/// The two axis indices other than `axis_index`, in ascending order — the
+/// two directions tangent to a box face perpendicular to `axis_index`.
+fn tangent_indices(axis_index: usize) -> [usize; 2] {
+    match axis_index {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
+    }
+}
+
+/// A box's three local axes, in world space, matching `box_vs_plane`'s and
+/// `sphere_vs_box`'s convention of `half_extents.x/y/z` along the box's own
+/// local X/Y/Z.
+fn box_axes(orientation: &Quat) -> [Vec3; 3] {
+    [
+        orientation.rotate(&Vec3::new(1.0, 0.0, 0.0)),
+        orientation.rotate(&Vec3::new(0.0, 1.0, 0.0)),
+        orientation.rotate(&Vec3::new(0.0, 0.0, 1.0)),
+    ]
+}
+
+/// The overlap of both boxes' projections onto `axis` (assumed normalized):
+/// positive means they overlap by that much along this axis, negative means
+/// `axis` is a genuine separating axis (the boxes don't collide). Port of
+/// the per-axis test in `btBoxBoxDetector::dBoxBox`'s (ODE-derived)
+/// separating-axis loop.
+#[allow(clippy::too_many_arguments)]
+fn axis_overlap(
+    axis: &Vec3,
+    axes_a: &[Vec3; 3],
+    half_a: Vec3,
+    axes_b: &[Vec3; 3],
+    half_b: Vec3,
+    center_diff: &Vec3,
+) -> f32 {
+    let dist = center_diff.dot(axis).abs();
+    let radius_a: f32 = (0..3)
+        .map(|k| (axes_a[k].dot(axis) * get_axis(half_a, k)).abs())
+        .sum();
+    let radius_b: f32 = (0..3)
+        .map(|k| (axes_b[k].dot(axis) * get_axis(half_b, k)).abs())
+        .sum();
+    radius_a + radius_b - dist
+}
+
+/// Closest points between two line segments `p1`-`q1` and `p2`-`q2` — the
+/// standard closest-point-between-segments construction (e.g. Ericson,
+/// *Real-Time Collision Detection*, section 5.1.9), needed for an
+/// edge-edge box contact's single point.
+fn closest_points_on_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
+    let d1 = q1 - p1;
+    let d2 = q2 - p2;
+    let r = p1 - p2;
+    let a = d1.dot(&d1);
+    let e = d2.dot(&d2);
+    let f = d2.dot(&r);
+
+    if a <= 1e-8 && e <= 1e-8 {
+        return (p1, p2);
+    }
+
+    let (s, t);
+    if a <= 1e-8 {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.dot(&r);
+        if e <= 1e-8 {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = d1.dot(&d2);
+            let denom = a * e - b * b;
+            let mut s2 = if denom.abs() > 1e-8 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut t2 = (b * s2 + f) / e;
+            if t2 < 0.0 {
+                t2 = 0.0;
+                s2 = (-c / a).clamp(0.0, 1.0);
+            } else if t2 > 1.0 {
+                t2 = 1.0;
+                s2 = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            s = s2;
+            t = t2;
+        }
+    }
+    (p1 + d1 * s, p2 + d2 * t)
+}
+
+/// A face contact between two boxes: `ref_*` is the reference box (whose
+/// face normal is the chosen separating axis) and `inc_*` the incident box.
+/// Clips the incident box's face nearest to facing into the reference
+/// box's face (found by whichever of its 6 face normals is most
+/// anti-parallel to the reference face's) against the reference face's own
+/// extent — a box-specific closed form of the general polygon clipping
+/// `btBoxBoxDetector::dBoxBox` runs, since both faces are always
+/// axis-aligned rectangles in their own box's local frame.
+#[allow(clippy::too_many_arguments)]
+fn face_contact(
+    ref_pos: Vec3,
+    ref_orient: Quat,
+    ref_half: Vec3,
+    ref_axis_index: usize,
+    ref_sign: f32,
+    inc_pos: Vec3,
+    inc_orient: Quat,
+    inc_half: Vec3,
+    normal: Vec3,
+    depth_hint: f32,
+) -> Vec<Contact> {
+    let ref_axes = box_axes(&ref_orient);
+    let ref_face_normal_world = ref_axes[ref_axis_index] * ref_sign;
+    let ref_tangents = tangent_indices(ref_axis_index);
+
+    let inc_axes = box_axes(&inc_orient);
+    let mut inc_axis_index = 0;
+    let mut inc_sign = 1.0f32;
+    let mut most_antiparallel = f32::INFINITY;
+    for (k, &axis) in inc_axes.iter().enumerate() {
+        for &s in &[1.0f32, -1.0] {
+            let dot = (axis * s).dot(&ref_face_normal_world);
+            if dot < most_antiparallel {
+                most_antiparallel = dot;
+                inc_axis_index = k;
+                inc_sign = s;
+            }
+        }
+    }
+    let inc_tangents = tangent_indices(inc_axis_index);
+
+    let mut corners = [Vec3::ZERO; 4];
+    let mut n = 0;
+    for &ta in &[-1.0f32, 1.0] {
+        for &tb in &[-1.0f32, 1.0] {
+            let mut local = Vec3::ZERO;
+            local = set_axis(
+                local,
+                inc_axis_index,
+                inc_sign * get_axis(inc_half, inc_axis_index),
+            );
+            local = set_axis(
+                local,
+                inc_tangents[0],
+                ta * get_axis(inc_half, inc_tangents[0]),
+            );
+            local = set_axis(
+                local,
+                inc_tangents[1],
+                tb * get_axis(inc_half, inc_tangents[1]),
+            );
+            corners[n] = inc_pos + inc_orient.rotate(&local);
+            n += 1;
+        }
+    }
+
+    let mut contacts = Vec::with_capacity(4);
+    for corner in corners {
+        let local = ref_orient.conjugate().rotate(&(corner - ref_pos));
+        let t0 = get_axis(local, ref_tangents[0]);
+        let t1 = get_axis(local, ref_tangents[1]);
+        let limit0 = get_axis(ref_half, ref_tangents[0]) + CONTACT_PROCESSING_THRESHOLD;
+        let limit1 = get_axis(ref_half, ref_tangents[1]) + CONTACT_PROCESSING_THRESHOLD;
+        if t0.abs() > limit0 || t1.abs() > limit1 {
+            continue;
+        }
+        let face_coord = get_axis(local, ref_axis_index) * ref_sign;
+        let depth = get_axis(ref_half, ref_axis_index) - face_coord;
+        if depth < -CONTACT_PROCESSING_THRESHOLD {
+            continue;
+        }
+        let projected = set_axis(
+            local,
+            ref_axis_index,
+            ref_sign * get_axis(ref_half, ref_axis_index),
+        );
+        contacts.push(Contact {
+            normal,
+            point: ref_pos + ref_orient.rotate(&projected),
+            penetration_depth: depth.max(0.0),
+        });
+    }
+
+    if contacts.is_empty() {
+        // Safety net: SAT confirmed real overlap along this axis, but every
+        // incident corner clipped outside the reference face's extent (a
+        // grazing/marginal configuration) — report one contact at the
+        // incident box's center, clamped onto the reference face, rather
+        // than silently dropping a genuine collision.
+        let local_center = ref_orient.conjugate().rotate(&(inc_pos - ref_pos));
+        let mut clamped = local_center;
+        for &k in &ref_tangents {
+            clamped = set_axis(
+                clamped,
+                k,
+                get_axis(local_center, k).clamp(-get_axis(ref_half, k), get_axis(ref_half, k)),
+            );
+        }
+        clamped = set_axis(
+            clamped,
+            ref_axis_index,
+            ref_sign * get_axis(ref_half, ref_axis_index),
+        );
+        contacts.push(Contact {
+            normal,
+            point: ref_pos + ref_orient.rotate(&clamped),
+            penetration_depth: depth_hint.max(0.0),
+        });
+    }
+
+    contacts
+}
+
+/// An edge-edge contact between two boxes: offsets each box's centerline
+/// along axis `i`/`j` to the specific one of its 4 parallel edges nearest
+/// the other box (by choosing the other two local axes' sign to move
+/// toward it), then finds the closest points between the resulting finite
+/// segments.
+#[allow(clippy::too_many_arguments)]
+fn edge_contact(
+    pos_a: Vec3,
+    axes_a: &[Vec3; 3],
+    half_a: Vec3,
+    i: usize,
+    pos_b: Vec3,
+    axes_b: &[Vec3; 3],
+    half_b: Vec3,
+    j: usize,
+    normal: Vec3,
+    depth: f32,
+) -> Contact {
+    let d = pos_b - pos_a;
+
+    let mut edge_a_center = pos_a;
+    for &k in &tangent_indices(i) {
+        let sign = if axes_a[k].dot(&d) >= 0.0 { 1.0 } else { -1.0 };
+        edge_a_center += axes_a[k] * (sign * get_axis(half_a, k));
+    }
+    let mut edge_b_center = pos_b;
+    for &k in &tangent_indices(j) {
+        let sign = if axes_b[k].dot(&d) <= 0.0 { 1.0 } else { -1.0 };
+        edge_b_center += axes_b[k] * (sign * get_axis(half_b, k));
+    }
+
+    let (pa, pb) = closest_points_on_segments(
+        edge_a_center - axes_a[i] * get_axis(half_a, i),
+        edge_a_center + axes_a[i] * get_axis(half_a, i),
+        edge_b_center - axes_b[j] * get_axis(half_b, j),
+        edge_b_center + axes_b[j] * get_axis(half_b, j),
+    );
+
+    Contact {
+        normal,
+        point: (pa + pb) * 0.5,
+        penetration_depth: depth.max(0.0),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SatFeature {
+    FaceA(usize),
+    FaceB(usize),
+    Edge(usize, usize),
+}
+
+/// Separating-axis test between two oriented boxes, the same overall
+/// structure as `btBoxBoxDetector::dBoxBox` (itself derived from ODE's
+/// `dBoxBox`, which Bullet's implementation credits): test all 3 of A's
+/// face axes, all 3 of B's, and all 9 `Ai × Bj` edge-pair axes; if every
+/// one shows overlap, the minimum-overlap axis is the collision normal,
+/// and its *kind* (face or edge) decides whether the contact is a clipped
+/// face manifold (up to 4 points) or a single edge-edge point.
+fn box_vs_box(
+    pos_a: Vec3,
+    orient_a: Quat,
+    half_a: Vec3,
+    pos_b: Vec3,
+    orient_b: Quat,
+    half_b: Vec3,
+) -> Vec<Contact> {
+    let axes_a = box_axes(&orient_a);
+    let axes_b = box_axes(&orient_b);
+    let d = pos_b - pos_a;
+
+    let mut best_overlap = f32::INFINITY;
+    let mut best_axis = Vec3::ZERO;
+    let mut best_feature = SatFeature::FaceA(0);
+
+    for i in 0..3 {
+        let overlap = axis_overlap(&axes_a[i], &axes_a, half_a, &axes_b, half_b, &d);
+        if overlap < 0.0 {
+            return Vec::new();
+        }
+        if overlap < best_overlap {
+            best_overlap = overlap;
+            best_axis = axes_a[i];
+            best_feature = SatFeature::FaceA(i);
+        }
+    }
+    for j in 0..3 {
+        let overlap = axis_overlap(&axes_b[j], &axes_a, half_a, &axes_b, half_b, &d);
+        if overlap < 0.0 {
+            return Vec::new();
+        }
+        if overlap < best_overlap {
+            best_overlap = overlap;
+            best_axis = axes_b[j];
+            best_feature = SatFeature::FaceB(j);
+        }
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            let raw = axes_a[i].cross(&axes_b[j]);
+            let len = raw.length();
+            if len < 1e-6 {
+                // Near-parallel edges: this axis is numerically unstable
+                // and, for two boxes, never the *only* separating axis
+                // (a face axis always covers this configuration too), so
+                // skipping it costs no correctness.
+                continue;
+            }
+            let axis = raw * (1.0 / len);
+            let overlap = axis_overlap(&axis, &axes_a, half_a, &axes_b, half_b, &d);
+            if overlap < 0.0 {
+                return Vec::new();
+            }
+            // Edge axes are noisier than face axes (a near-parallel pair
+            // just barely above the skip threshold can slightly
+            // under-report separation), so an edge axis only overrides a
+            // face axis when it's a genuinely tighter fit, not by noise —
+            // the same face-biased tie-break `dBoxBox`-style detectors use.
+            if overlap < best_overlap - 1e-4 {
+                best_overlap = overlap;
+                best_axis = axis;
+                best_feature = SatFeature::Edge(i, j);
+            }
+        }
+    }
+
+    // Sign-fix so `normal` points from B toward A, matching
+    // `contacts_between`'s convention.
+    let normal = if best_axis.dot(&d) > 0.0 {
+        -best_axis
+    } else {
+        best_axis
+    };
+
+    match best_feature {
+        SatFeature::FaceA(i) => {
+            let sign = if axes_a[i].dot(&d) >= 0.0 { 1.0 } else { -1.0 };
+            face_contact(
+                pos_a,
+                orient_a,
+                half_a,
+                i,
+                sign,
+                pos_b,
+                orient_b,
+                half_b,
+                normal,
+                best_overlap,
+            )
+        }
+        SatFeature::FaceB(j) => {
+            let sign = if axes_b[j].dot(&(-d)) >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+            face_contact(
+                pos_b,
+                orient_b,
+                half_b,
+                j,
+                sign,
+                pos_a,
+                orient_a,
+                half_a,
+                normal,
+                best_overlap,
+            )
+        }
+        SatFeature::Edge(i, j) => vec![edge_contact(
+            pos_a,
+            &axes_a,
+            half_a,
+            i,
+            pos_b,
+            &axes_b,
+            half_b,
+            j,
+            normal,
+            best_overlap,
+        )],
+    }
+}
+
+/// Dispatches a contact test between two dynamic bodies, covering every
+/// shape pairing this crate has: sphere-vs-box (the ball-vs-car case,
+/// always 0 or 1 points) and box-vs-box (the car-vs-car case, 0 to 4 points
+/// for a face contact or 1 for an edge contact — see `box_vs_box`).
+/// `normal` always points from `b` toward `a` (matching `contacts_vs_plane`'s
 /// convention with `b` playing the plane's "reference" role), so the
 /// two-body solver can apply `+impulse` to `a` and `-impulse` to `b` along
-/// it without needing to know which argument was the sphere.
+/// it without needing to know which argument was which shape.
 ///
-/// Sphere-vs-sphere and box-vs-box return `None`: this scope has exactly
-/// one ball and one car, so neither pairing ever actually occurs — not a
-/// simplification of a real case, just one this codebase has no caller for.
-pub fn contact_between(a: &RigidBody, b: &RigidBody) -> Option<Contact> {
+/// Sphere-vs-sphere returns empty: this scope has exactly one ball, so two
+/// balls colliding never actually occurs — not a simplification of a real
+/// case, just one this codebase has no caller for.
+pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
     match (a.shape, b.shape) {
         (Shape::Sphere { radius }, Shape::Box { half_extents }) => {
             sphere_vs_box(a.position, radius, b.position, b.orientation, half_extents)
+                .into_iter()
+                .collect()
         }
         (Shape::Box { half_extents }, Shape::Sphere { radius }) => {
-            sphere_vs_box(b.position, radius, a.position, a.orientation, half_extents).map(|c| {
-                Contact {
+            sphere_vs_box(b.position, radius, a.position, a.orientation, half_extents)
+                .map(|c| Contact {
                     normal: -c.normal,
                     ..c
-                }
-            })
+                })
+                .into_iter()
+                .collect()
         }
-        (Shape::Sphere { .. }, Shape::Sphere { .. }) | (Shape::Box { .. }, Shape::Box { .. }) => {
-            None
-        }
+        (Shape::Sphere { .. }, Shape::Sphere { .. }) => Vec::new(),
+        (
+            Shape::Box {
+                half_extents: half_a,
+            },
+            Shape::Box {
+                half_extents: half_b,
+            },
+        ) => box_vs_box(
+            a.position,
+            a.orientation,
+            half_a,
+            b.position,
+            b.orientation,
+            half_b,
+        ),
     }
 }
 
@@ -317,23 +752,24 @@ mod tests {
     #[test]
     fn ball_far_from_car_has_no_contact() {
         let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(1000.0, 0.0, 0.0));
-        assert!(contact_between(&ball, &stationary_car()).is_none());
+        assert!(contacts_between(&ball, &stationary_car()).is_empty());
     }
 
     #[test]
     fn ball_touching_car_face_has_zero_penetration() {
         // The ball's surface exactly meets the car's +X face.
         let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 92.75, 0.0, 0.0));
-        let contact = contact_between(&ball, &stationary_car()).unwrap();
-        assert!(contact.penetration_depth.abs() < 1e-4);
-        assert!((contact.normal - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+        let contacts = contacts_between(&ball, &stationary_car());
+        assert_eq!(contacts.len(), 1);
+        assert!(contacts[0].penetration_depth.abs() < 1e-4);
+        assert!((contacts[0].normal - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
     }
 
     #[test]
     fn ball_overlapping_car_face_has_positive_penetration() {
         let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
-        let contact = contact_between(&ball, &stationary_car()).unwrap();
-        assert!((contact.penetration_depth - (92.75 - 50.0)).abs() < 1e-4);
+        let contacts = contacts_between(&ball, &stationary_car());
+        assert!((contacts[0].penetration_depth - (92.75 - 50.0)).abs() < 1e-4);
     }
 
     #[test]
@@ -342,32 +778,98 @@ mod tests {
         // face (margin 2.0) rather than +X (margin 40.0) or +Y (margin
         // 10.0) — the deep-penetration branch must pick +Z.
         let ball = RigidBody::sphere(5.0, 1.0, Vec3::new(20.0, 20.0, 16.0));
-        let contact = contact_between(&ball, &stationary_car()).unwrap();
-        assert!((contact.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
-        assert!(contact.penetration_depth > 0.0);
+        let contacts = contacts_between(&ball, &stationary_car());
+        assert!((contacts[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        assert!(contacts[0].penetration_depth > 0.0);
     }
 
     #[test]
-    fn contact_between_is_antisymmetric_in_argument_order() {
+    fn sphere_vs_box_contact_is_antisymmetric_in_argument_order() {
         let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
         let car = stationary_car();
-        let ball_car = contact_between(&ball, &car).unwrap();
-        let car_ball = contact_between(&car, &ball).unwrap();
+        let ball_car = &contacts_between(&ball, &car)[0];
+        let car_ball = &contacts_between(&car, &ball)[0];
         assert!((ball_car.normal + car_ball.normal).length() < 1e-5);
         assert!((ball_car.penetration_depth - car_ball.penetration_depth).abs() < 1e-4);
     }
 
     #[test]
-    fn contact_between_two_spheres_is_none() {
+    fn contacts_between_two_spheres_is_empty() {
         let a = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let b = RigidBody::sphere(1.0, 1.0, Vec3::new(0.5, 0.0, 0.0));
-        assert!(contact_between(&a, &b).is_none());
+        assert!(contacts_between(&a, &b).is_empty());
     }
 
     #[test]
-    fn contact_between_two_boxes_is_none() {
+    fn boxes_far_apart_have_no_contact() {
         let a = stationary_car();
-        let b = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(0.5, 0.0, 0.0));
-        assert!(contact_between(&a, &b).is_none());
+        let b = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(1000.0, 0.0, 0.0));
+        assert!(contacts_between(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn boxes_overlapping_face_to_face_have_a_four_point_manifold() {
+        // Two boxes overlapping symmetrically along X: A's +X face pushes
+        // into B's -X face, both large enough that the full overlap
+        // rectangle survives clipping — the classic 4-point flat contact.
+        let a = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::ZERO);
+        let b = RigidBody::car_box(
+            Vec3::new(10.0, 10.0, 10.0),
+            1.0,
+            Vec3::new(15.0, 0.0, 0.0), // 5 units of overlap along X
+        );
+        let contacts = contacts_between(&a, &b);
+        assert_eq!(contacts.len(), 4);
+        for c in &contacts {
+            assert!((c.penetration_depth - 5.0).abs() < 1e-3);
+            // Normal points from b toward a, i.e. -X here.
+            assert!((c.normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn box_vs_box_contact_is_antisymmetric_in_argument_order() {
+        let a = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::ZERO);
+        let b = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::new(15.0, 0.0, 0.0));
+        let ab = contacts_between(&a, &b);
+        let ba = contacts_between(&b, &a);
+        assert_eq!(ab.len(), ba.len());
+        assert!((ab[0].normal + ba[0].normal).length() < 1e-5);
+        assert!((ab[0].penetration_depth - ba[0].penetration_depth).abs() < 1e-3);
+    }
+
+    #[test]
+    fn box_rotated_forty_five_degrees_pokes_into_a_face_with_fewer_than_four_contacts() {
+        // B (a diamond in cross-section, rotated 45 degrees about Z) pokes
+        // into A's +X region along an edge or corner rather than flat
+        // face-to-face — depending on which axis SAT picks (a face axis or
+        // one of the edge-edge axes), clipping degenerates to fewer than
+        // the flat case's 4 points. Not pinning an exact axis or count
+        // here (the rotated geometry's minimum-penetration axis isn't
+        // obvious by hand) — just that a real, positive-depth,
+        // unit-normal, B-to-A-pointing contact comes out, and it's not the
+        // full flat manifold.
+        let a = RigidBody::car_box(Vec3::new(50.0, 50.0, 50.0), 1.0, Vec3::ZERO);
+        let half = std::f32::consts::FRAC_PI_8;
+        let mut b = RigidBody::car_box(
+            Vec3::new(10.0, 10.0, 10.0),
+            1.0,
+            Vec3::new(50.0 + 10.0, 0.0, 0.0),
+        );
+        b.orientation = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let contacts = contacts_between(&a, &b);
+        assert!(
+            !contacts.is_empty() && contacts.len() < 4,
+            "expected a partial (non-flat) manifold, got {contacts:?}"
+        );
+        for c in &contacts {
+            assert!(c.penetration_depth > 0.0);
+            assert!((c.normal.length() - 1.0).abs() < 1e-4);
+            assert!(
+                c.normal.x < 0.0,
+                "expected the normal to point from b toward a, i.e. roughly -X here, got {:?}",
+                c.normal
+            );
+        }
     }
 }

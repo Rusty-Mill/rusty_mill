@@ -4,13 +4,13 @@
 //! - `resolve_contacts`: one dynamic body (sphere or box, via `RigidBody`'s
 //!   general 3x3 inverse inertia tensor — see `body.rs`) against one static
 //!   plane's contact manifold (1 to 4 points depending on shape/orientation).
-//! - `resolve_contact_between`: two dynamic bodies against each other's
-//!   single contact point (the ball-vs-car case — `sphere_vs_box` never
-//!   produces more than one). This is the generic two-body path Bullet's
-//!   real solver always runs (every constraint row carries both bodies'
-//!   mass/inertia contributions); `resolve_contacts` only got away with a
-//!   one-body-only version because a static plane's side of that math is
-//!   always zero.
+//! - `resolve_contacts_between`: two dynamic bodies against each other's
+//!   contact manifold (1 point for sphere-vs-box or an edge-edge box
+//!   contact, up to 4 for a box-vs-box face contact — see `collision`).
+//!   This is the generic two-body path Bullet's real solver always runs
+//!   (every constraint row carries both bodies' mass/inertia
+//!   contributions); `resolve_contacts` only got away with a one-body-only
+//!   version because a static plane's side of that math is always zero.
 //!
 //! Deliberate, documented deviations from Bullet's actual solver (tracked
 //! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
@@ -417,7 +417,7 @@ fn setup_two_body_rows(
 /// Two-body version of `resolve_row`: the relative-velocity term along a
 /// row's direction is body A's contribution minus body B's, and a solved
 /// impulse pushes A along `+direction` and B along `-direction` (Newton's
-/// third law) — matching `contact_between`'s normal convention (points
+/// third law) — matching `contacts_between`'s normal convention (points
 /// from B toward A).
 fn resolve_two_body_row(
     row: &mut TwoBodyRow,
@@ -450,32 +450,48 @@ fn resolve_two_body_row(
     delta.angular_b -= row.angular_component_b * delta_impulse;
 }
 
-/// Resolves one contact point between two dynamic bodies (`a`, `b`) —
-/// `contact` must have come from `collision::contact_between(a, b)` (its
-/// `normal` convention and `rel_pos` derivation both assume that argument
-/// order). Only ever called with exactly one contact (unlike
-/// `resolve_contacts`'s manifold): `sphere_vs_box`, the only two-dynamic-
-/// body pairing in this scope, always produces at most one point.
-pub fn resolve_contact_between(a: &mut RigidBody, b: &mut RigidBody, contact: &Contact, dt: f32) {
+/// Resolves an entire contact manifold (1 to 4 points — a box-vs-box face
+/// contact can produce up to 4, an edge-edge or sphere-vs-box contact
+/// exactly 1) between two dynamic bodies (`a`, `b`) — every `Contact` must
+/// have come from `collision::contacts_between(a, b)` (its `normal`
+/// convention and `rel_pos` derivation both assume that argument order).
+/// Mirrors `resolve_contacts`' shared-delta multi-iteration structure
+/// (see its doc comment), generalized to two dynamic bodies instead of one
+/// dynamic body against a static plane.
+pub fn resolve_contacts_between(
+    a: &mut RigidBody,
+    b: &mut RigidBody,
+    contacts: &[Contact],
+    dt: f32,
+) {
+    if contacts.is_empty() {
+        return;
+    }
+
     let combined_restitution = combine_restitution(a.restitution, b.restitution);
     let combined_friction = combine_friction(a.friction, b.friction);
 
-    let mut rows = setup_two_body_rows(a, b, contact, combined_restitution, dt);
+    let mut manifold: Vec<[TwoBodyRow; 3]> = contacts
+        .iter()
+        .map(|c| setup_two_body_rows(a, b, c, combined_restitution, dt))
+        .collect();
     let mut delta = TwoBodyDelta::zero();
     let inv_mass_a = a.inv_mass();
     let inv_mass_b = b.inv_mass();
 
     for _ in 0..SOLVER_ITERATIONS {
-        resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, &mut delta);
+        for rows in &mut manifold {
+            resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, &mut delta);
 
-        let friction_limit = combined_friction * rows[0].applied_impulse;
-        rows[1].lower_limit = -friction_limit;
-        rows[1].upper_limit = friction_limit;
-        rows[2].lower_limit = -friction_limit;
-        rows[2].upper_limit = friction_limit;
+            let friction_limit = combined_friction * rows[0].applied_impulse;
+            rows[1].lower_limit = -friction_limit;
+            rows[1].upper_limit = friction_limit;
+            rows[2].lower_limit = -friction_limit;
+            rows[2].upper_limit = friction_limit;
 
-        resolve_two_body_row(&mut rows[1], inv_mass_a, inv_mass_b, &mut delta);
-        resolve_two_body_row(&mut rows[2], inv_mass_a, inv_mass_b, &mut delta);
+            resolve_two_body_row(&mut rows[1], inv_mass_a, inv_mass_b, &mut delta);
+            resolve_two_body_row(&mut rows[2], inv_mass_a, inv_mass_b, &mut delta);
+        }
     }
 
     a.linear_velocity += delta.linear_a;
@@ -488,7 +504,7 @@ pub fn resolve_contact_between(a: &mut RigidBody, b: &mut RigidBody, contact: &C
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::collision::{contact_between, contacts_vs_plane};
+    use crate::collision::{contacts_between, contacts_vs_plane};
 
     fn ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
@@ -639,9 +655,9 @@ mod tests {
         ball.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
         let mut car = car_at_origin();
         car.restitution = 0.0;
-        let contact = contact_between(&ball, &car).unwrap();
-        resolve_contact_between(&mut ball, &mut car, &contact, 1.0 / 60.0);
-        let rel_vel = contact
+        let contacts = contacts_between(&ball, &car);
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
+        let rel_vel = contacts[0]
             .normal
             .dot(&(ball.linear_velocity - car.linear_velocity));
         assert!(
@@ -659,8 +675,8 @@ mod tests {
         car.restitution = 0.8;
         car.linear_velocity = Vec3::new(50.0, 0.0, 0.0);
         let before = ball.linear_velocity * ball.mass() + car.linear_velocity * car.mass();
-        let contact = contact_between(&ball, &car).unwrap();
-        resolve_contact_between(&mut ball, &mut car, &contact, 1.0 / 60.0);
+        let contacts = contacts_between(&ball, &car);
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
         let after = ball.linear_velocity * ball.mass() + car.linear_velocity * car.mass();
         assert!(
             (before - after).length() < 1.0,
@@ -678,8 +694,8 @@ mod tests {
         ball.linear_velocity = Vec3::new(-500.0, 0.0, 0.0);
         let mut car = car_at_origin();
         car.restitution = 0.6;
-        let contact = contact_between(&ball, &car).unwrap();
-        resolve_contact_between(&mut ball, &mut car, &contact, 1.0 / 60.0);
+        let contacts = contacts_between(&ball, &car);
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
         assert!(
             ball.linear_velocity.x > 0.0,
             "expected the light ball to bounce back, got {}",
@@ -689,6 +705,37 @@ mod tests {
             car.linear_velocity.x.abs() < 10.0,
             "expected the much heavier car to barely move, got {}",
             car.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn boxes_colliding_face_to_face_settle_without_net_rotation() {
+        // Two identical boxes closing head-on, face-to-face: a box-vs-box
+        // manifold (4 symmetric contacts, unlike sphere-vs-box's single
+        // point) resolved between two dynamic bodies should cancel out to
+        // zero net spin by symmetry, the same property
+        // `resting_box_with_symmetric_contacts_settles_without_net_rotation`
+        // checks for the one-body ground-manifold case.
+        let mut a = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::ZERO);
+        a.restitution = 0.0;
+        a.linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+        let mut b = RigidBody::car_box(Vec3::new(10.0, 10.0, 10.0), 1.0, Vec3::new(15.0, 0.0, 0.0));
+        b.restitution = 0.0;
+        b.linear_velocity = Vec3::new(-1.0, 0.0, 0.0);
+
+        let contacts = contacts_between(&a, &b);
+        assert_eq!(contacts.len(), 4);
+        resolve_contacts_between(&mut a, &mut b, &contacts, 1.0 / 60.0);
+
+        assert!(
+            a.angular_velocity.length() < 1e-3,
+            "expected no net spin on a, got {:?}",
+            a.angular_velocity
+        );
+        assert!(
+            b.angular_velocity.length() < 1e-3,
+            "expected no net spin on b, got {:?}",
+            b.angular_velocity
         );
     }
 }
