@@ -1,0 +1,29 @@
+[package]
+name = "rusty_sqlite"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management."
+repository = "https://github.com/baileyrd/rusty_sqlite"
+authors = ["rusty_sqlite contributors"]
+readme = "README.md"
+
+[dependencies]
+# Bumped from 0.31 (-> libsqlite3-sys ^0.28.0): in this workspace, the
+# unactivated `sqlite` feature of rusty_acp's `sqlx` optional dependency
+# still requires Cargo to resolve a version for `sqlx-sqlite` (-> `libsqlite3-sys
+# ^0.30.1`), since Cargo.lock's `links` uniqueness check considers every
+# declared optional dependency reachable in the graph, not just the ones
+# actually activated for a given build -- so two different `libsqlite3-sys`
+# majors both wanting to `links = "sqlite3"` is a hard resolve failure
+# regardless of features. 0.32.1 is the lowest rusqlite pulling the same
+# libsqlite3-sys ^0.30.1 sqlx-sqlite already needs, unifying the two.
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+
+[features]
+default = []
+pool = []
+
+[dev-dependencies]
+tempfile = "3"
