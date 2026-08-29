@@ -1,6 +1,6 @@
 # Project Status
 
-- Last verified main commit: `40e70cd` (merge of [#25](https://github.com/baileyrd/rusty_bullet/pull/25))
+- Last verified main commit: `56f9cb4` (merge of [#27](https://github.com/baileyrd/rusty_bullet/pull/27))
 - Verified at: 2026-08-29
 - Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, ground-driving car input (throttle/steering), boost, and handbrake all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; jump/air-control and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
