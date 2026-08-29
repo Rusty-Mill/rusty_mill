@@ -15,14 +15,18 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
 /// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
-/// `ControllerInput::default()` — neutral — until set) and a boost
-/// resource (`car_boost`, set via `set_car_boost`, starting full) driving
-/// it via `drive::apply_driven_forces`.
+/// `ControllerInput::default()` — neutral — until set), a boost resource
+/// (`car_boost`, set via `set_car_boost`, starting full), and a remembered
+/// base friction (`car_base_friction`, snapshotted from the car's own
+/// `RigidBody.friction` when added) that `drive::apply_driven_forces` uses
+/// to restore grip after a handbrake-induced reduction — all driving the
+/// car via `drive::apply_driven_forces`.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
     car_inputs: Vec<ControllerInput>,
     car_boost: Vec<f32>,
+    car_base_friction: Vec<f32>,
     pub ground: StaticPlane,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -44,6 +48,7 @@ impl PhysicsWorld {
             cars: Vec::new(),
             car_inputs: Vec::new(),
             car_boost: Vec::new(),
+            car_base_friction: Vec::new(),
             ground,
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
@@ -53,12 +58,15 @@ impl PhysicsWorld {
     /// Adds one car-shaped body to the scene, with a neutral
     /// (`ControllerInput::default()`) input and a full boost tank
     /// (`drive::MAX_BOOST`) — set a real input afterward with
-    /// `set_car_input` if the car should actually drive. Callable more
-    /// than once — `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)`
-    /// builds a two-car scene — since a car's `player_id` in `frame()` is
-    /// just its index in `cars`, added cars are always appended, never
-    /// inserted.
+    /// `set_car_input` if the car should actually drive. `car`'s current
+    /// `friction` is snapshotted as its base friction, so handbrake input
+    /// (which temporarily lowers `RigidBody.friction`) has a value to
+    /// restore to once released. Callable more than once —
+    /// `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` builds a
+    /// two-car scene — since a car's `player_id` in `frame()` is just its
+    /// index in `cars`, added cars are always appended, never inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
+        self.car_base_friction.push(car.friction);
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
         self.car_boost.push(drive::MAX_BOOST);
@@ -93,22 +101,25 @@ impl PhysicsWorld {
     }
 
     /// Like `apply_forces_and_integrate_velocities`, but for a car: also
-    /// applies `drive::apply_driven_forces` (throttle/steer gated on
-    /// `on_ground`, computed from the car's position at the start of this
-    /// step, before anything moves; boost not gated on it, but draining
-    /// `boost_amount`) alongside gravity, so `input`'s forces are part of
-    /// the same velocity-prediction phase.
+    /// applies `drive::apply_driven_forces` (throttle/steer/handbrake
+    /// gated on `on_ground`, computed from the car's position at the start
+    /// of this step, before anything moves; boost not gated on it, but
+    /// draining `boost_amount`; handbrake temporarily lowering
+    /// `car.friction` below `base_friction`) alongside gravity, so
+    /// `input`'s forces (and friction adjustment) are part of the same
+    /// velocity-prediction phase.
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
         on_ground: bool,
         boost_amount: &mut f32,
+        base_friction: f32,
         gravity: Vec3,
         dt: f32,
     ) {
         car.clear_forces();
         integrate::apply_gravity(car, gravity);
-        drive::apply_driven_forces(car, input, on_ground, boost_amount, dt);
+        drive::apply_driven_forces(car, input, on_ground, boost_amount, base_friction, dt);
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
     }
@@ -182,14 +193,23 @@ impl PhysicsWorld {
             .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for (((car, input), on_ground), boost) in self
+        for ((((car, input), on_ground), boost), base_friction) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
             .zip(car_on_ground.iter())
             .zip(self.car_boost.iter_mut())
+            .zip(self.car_base_friction.iter())
         {
-            Self::drive_and_integrate_velocities(car, input, *on_ground, boost, self.gravity, dt);
+            Self::drive_and_integrate_velocities(
+                car,
+                input,
+                *on_ground,
+                boost,
+                *base_friction,
+                self.gravity,
+                dt,
+            );
         }
 
         Self::resolve_ground_contact(&mut self.ball, &self.ground, dt);
@@ -663,5 +683,98 @@ mod tests {
         let car = some_car(Vec3::new(0.0, 0.0, 18.0));
         let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
         assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
+    }
+
+    #[test]
+    fn handbrake_restores_a_cars_own_base_friction_not_a_hardcoded_default() {
+        // with_car snapshots whatever friction the car was constructed with
+        // as its base — releasing handbrake must restore that value, not
+        // some crate-wide default, even when it differs from one. Both
+        // restitutions are zeroed so the car stays in continuous ground
+        // contact frame-to-frame (a bouncy resting contact never fully
+        // settles under this port's solver — see `resting_ball_stays_at_rest`
+        // — which would otherwise flicker `on_ground` off for a step).
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        car.friction = 0.9;
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        let dt = 1.0 / 60.0;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                handbrake: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        assert!(
+            world.cars[0].friction < 0.9,
+            "expected handbrake to reduce friction below the car's own 0.9 base, got {}",
+            world.cars[0].friction
+        );
+
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.step(dt);
+        assert!(
+            (world.cars[0].friction - 0.9).abs() < 1e-6,
+            "expected releasing handbrake to restore the car's own 0.9 base friction, got {}",
+            world.cars[0].friction
+        );
+    }
+
+    #[test]
+    fn a_handbraking_car_retains_more_sideways_slide_than_a_gripping_car() {
+        // The real end-to-end proof: ground friction decelerates a body's
+        // tangential (sliding) velocity — the same mechanism
+        // `solver::tests::sliding_sphere_decelerates_due_to_friction`
+        // already proves works for the ball. A car already sliding
+        // sideways (as if mid-drift) should keep more of that sideways
+        // speed under handbrake's reduced friction than it would under
+        // normal grip — this is the actual mechanism `drive.rs` implements
+        // handbrake with, exercised here through a live `PhysicsWorld`
+        // rather than in isolation.
+        let run = |handbrake: bool| -> f32 {
+            let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+            let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+            car.linear_velocity = Vec3::new(0.0, 1000.0, 0.0);
+            // Zeroed so the car stays in continuous ground contact frame to
+            // frame — a bouncy resting contact (this port's known
+            // no-warm-starting limitation, see `resting_ball_stays_at_rest`)
+            // would otherwise flicker `on_ground` off for a step, silently
+            // skipping that step's handbrake input entirely.
+            car.restitution = 0.0;
+            let ground = StaticPlane {
+                restitution: 0.0,
+                ..flat_ground()
+            };
+            let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+            world.set_car_input(
+                0,
+                rb_domain::ControllerInput {
+                    handbrake,
+                    ..Default::default()
+                },
+            );
+            let dt = 1.0 / 120.0;
+            for _ in 0..(0.5 / dt) as u32 {
+                world.step(dt);
+            }
+            world.cars[0].linear_velocity.y.abs()
+        };
+
+        let gripping_remaining_slide = run(false);
+        let handbraking_remaining_slide = run(true);
+        assert!(
+            handbraking_remaining_slide > gripping_remaining_slide,
+            "expected handbrake's reduced friction to decelerate a sideways slide less than \
+             normal grip, gripping={gripping_remaining_slide}, \
+             handbrake={handbraking_remaining_slide}"
+        );
     }
 }
