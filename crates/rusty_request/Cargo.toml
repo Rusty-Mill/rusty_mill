@@ -1,0 +1,85 @@
+[package]
+name = "rusty_request"
+version = "0.1.0"
+edition = "2021"
+description = "An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http."
+license = "MIT"
+
+[dependencies]
+# rusty_tokio, rusty_tls, and rusty_http are now siblings in this same
+# workspace -- plain path dependencies. All three used to be pinned `git`
+# revs that had to move together (Cargo treats two different revs of the
+# same git dependency as two unrelated crates, so `rusty_tls::AsyncTlsStream`
+# and `rusty_http::async_tokio::AsyncTransport`'s `AsyncRead`/`AsyncWrite`
+# generics over rusty_tokio's own traits wouldn't have matched at
+# different revs) -- a workspace `path` dependency resolves that same
+# concern by construction: there's only ever one `rusty_tokio` in the
+# build graph.
+rusty_tokio = { path = "../rusty_tokio" }
+rusty_tls = { path = "../rusty_tls", features = [
+    "rusty-tokio",
+] }
+rusty_http = { path = "../rusty_http", features = [
+    "rusty-tokio",
+    "cookies",
+] }
+# Only for `TrustPolicy::PinnedAnchors`'s `CertificateDer` type -- so a
+# caller pinning a private CA never needs their own direct dependency on
+# `rustls` itself. This is the same type `rusty_tls::TrustPolicy` already
+# requires (re-exported from `rustls::pki_types`, per that crate's own
+# Cargo.toml); depending on the small, no-crypto `rustls-pki-types` crate
+# directly (rather than all of `rustls`) keeps this to a types-only
+# dependency, already present in the build graph at a compatible version
+# via `rusty_tls`/the `rustls` dev-dependency below.
+rustls-pki-types = "1"
+# Optional (see the `tokio` feature below): drives the connector over
+# real crates.io `tokio`'s `AsyncRead`/`AsyncWrite` instead of
+# `rusty_tokio`'s, for a consumer (e.g. `rusty_search`) already running
+# inside its own real tokio runtime -- see `src/tokio_compat.rs` for how
+# the two trait sets meet without ever starting a second reactor.
+# `default-features = false` + exactly what's used: `net` (`TcpStream::
+# connect`), `time` (the request timeout and retry backoff sleeps), `rt`
+# (`spawn_blocking` for DNS resolution), `io-util`
+# (`AsyncRead`/`AsyncWrite`/their `*Ext` convenience methods).
+tokio = { version = "1", default-features = false, features = [
+    "net",
+    "time",
+    "rt",
+    "io-util",
+], optional = true }
+
+[features]
+# Off by default so an existing `rusty_tokio`-based consumer sees no
+# change. See `src/tokio_compat.rs`'s module docs for the full picture:
+# `rusty_tls`/`rusty_http` haven't grown a real-tokio adapter of their
+# own yet (unlike `rusty_http`'s own `rusty-tokio`/`tokio` split), so
+# this feature reaches their existing `rusty-tokio`-based adapters
+# through a small compat shim instead of a parallel adapter module --
+# real tokio still does every bit of actual I/O; `rusty_tokio` never
+# runs.
+tokio = ["dep:tokio"]
+
+[dev-dependencies]
+# Test-only: builds a local TLS server (via a self-signed cert) to
+# exercise the https:// connector and CONNECT-tunnel proxying against,
+# without real network access. Never a dependency of the shipped
+# library -- rusty_tls (a client) is what the library itself uses.
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "tls12",
+    "ring",
+] }
+rcgen = "0.13"
+# Same crate as the optional `tokio` dependency above, unified by Cargo's
+# normal feature resolution -- but with `macros` (`#[tokio::test]`) and
+# `rt` (the current-thread runtime that macro spins up) added on top, the
+# same way `rusty_http`'s own `tokio` dev-dependency does it, so
+# `tests/tokio_feature.rs` (which only runs under `--features tokio`) can
+# use them without the shipped library itself asking for them.
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "rt",
+    "net",
+    "time",
+    "io-util",
+] }
