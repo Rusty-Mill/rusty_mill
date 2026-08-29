@@ -44,6 +44,7 @@ members = [
     "crates/rustils_async/crates/coreutils-async",
     "crates/rusty_wire",
     "crates/rusty_std",
+    "crates/rusty_request",
     "crates/rusty_sqlite",
     "crates/rusty_time",
     "crates/rusty_uuid",
