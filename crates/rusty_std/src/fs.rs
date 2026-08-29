@@ -30,8 +30,11 @@ fn map_win32(op: &str, err: rusty_win32::Win32Error) -> Error {
 
 #[cfg(target_os = "linux")]
 fn path_to_cstring(path: &Path) -> Result<CString> {
-    CString::new(path.as_str())
-        .map_err(|_| Error::InvalidArgument(alloc::string::String::from("path contains an interior NUL byte")))
+    CString::new(path.as_str()).map_err(|_| {
+        Error::InvalidArgument(alloc::string::String::from(
+            "path contains an interior NUL byte",
+        ))
+    })
 }
 
 impl File {
@@ -58,7 +61,9 @@ impl File {
         #[cfg(not(any(target_os = "linux", windows, target_arch = "wasm32")))]
         {
             let _ = path;
-            Err(Error::NotFound(alloc::string::String::from("Unsupported OS")))
+            Err(Error::NotFound(alloc::string::String::from(
+                "Unsupported OS",
+            )))
         }
     }
 
@@ -68,15 +73,17 @@ impl File {
         #[cfg(target_os = "linux")]
         {
             let c_path = path_to_cstring(path)?;
-            let flags = rusty_libc::fd::O_WRONLY | rusty_libc::fd::O_CREAT | rusty_libc::fd::O_TRUNC;
-            let fd = rusty_libc::fd::open(&c_path, flags, 0o644)
-                .map_err(|e| map_errno("create", e))?;
+            let flags =
+                rusty_libc::fd::O_WRONLY | rusty_libc::fd::O_CREAT | rusty_libc::fd::O_TRUNC;
+            let fd =
+                rusty_libc::fd::open(&c_path, flags, 0o644).map_err(|e| map_errno("create", e))?;
             Ok(Self { fd })
         }
         #[cfg(windows)]
         {
-            let handle = rusty_win32::fs::create_file(path.as_str(), rusty_win32::fs::GENERIC_WRITE)
-                .map_err(|e| map_win32("create", e))?;
+            let handle =
+                rusty_win32::fs::create_file(path.as_str(), rusty_win32::fs::GENERIC_WRITE)
+                    .map_err(|e| map_win32("create", e))?;
             Ok(Self { handle })
         }
         #[cfg(target_arch = "wasm32")]
@@ -87,7 +94,9 @@ impl File {
         #[cfg(not(any(target_os = "linux", windows, target_arch = "wasm32")))]
         {
             let _ = path;
-            Err(Error::NotFound(alloc::string::String::from("Unsupported OS")))
+            Err(Error::NotFound(alloc::string::String::from(
+                "Unsupported OS",
+            )))
         }
     }
 }
@@ -103,7 +112,8 @@ impl Read for File {
             // SAFETY: `self.handle` was opened by `File::open`/`File::create`
             // and is only ever closed once, in `Drop`, after which this
             // `File` (and any `&mut` borrow of it) can no longer be used.
-            unsafe { rusty_win32::fs::read_file(self.handle, buf) }.map_err(|e| map_win32("read", e))
+            unsafe { rusty_win32::fs::read_file(self.handle, buf) }
+                .map_err(|e| map_win32("read", e))
         }
         #[cfg(any(target_arch = "wasm32", not(any(target_os = "linux", windows))))]
         {
@@ -124,7 +134,8 @@ impl Write for File {
             // SAFETY: `self.handle` was opened by `File::open`/`File::create`
             // and is only ever closed once, in `Drop`, after which this
             // `File` (and any `&mut` borrow of it) can no longer be used.
-            unsafe { rusty_win32::fs::write_file(self.handle, buf) }.map_err(|e| map_win32("write", e))
+            unsafe { rusty_win32::fs::write_file(self.handle, buf) }
+                .map_err(|e| map_win32("write", e))
         }
         #[cfg(any(target_arch = "wasm32", not(any(target_os = "linux", windows))))]
         {
@@ -175,7 +186,11 @@ mod tests {
     // hit the OS (rusty_libc on Linux, rusty_win32 on Windows) rather than
     // being the no-op stubs this module started as.
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(alloc::format!("rusty_std_fs_test_{}_{}", std::process::id(), name))
+        std::env::temp_dir().join(alloc::format!(
+            "rusty_std_fs_test_{}_{}",
+            std::process::id(),
+            name
+        ))
     }
 
     #[test]

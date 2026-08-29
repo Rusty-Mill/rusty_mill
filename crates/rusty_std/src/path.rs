@@ -12,12 +12,9 @@ pub struct PathBuf {
 impl PathBuf {
     /// Creates an empty PathBuf.
     pub fn new() -> Self {
-        Self { inner: String::new() }
-    }
-
-    /// Creates a PathBuf from a string slice.
-    pub fn from_str(s: &str) -> Self {
-        Self { inner: String::from(s) }
+        Self {
+            inner: String::new(),
+        }
     }
 
     /// Borrows this PathBuf as a Path reference.
@@ -37,6 +34,14 @@ impl PathBuf {
 impl Default for PathBuf {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<&str> for PathBuf {
+    fn from(s: &str) -> Self {
+        Self {
+            inner: String::from(s),
+        }
     }
 }
 

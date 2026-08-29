@@ -5,6 +5,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Command builder for spawning processes.
+// `status` below is a stub that doesn't spawn anything yet (unwired to
+// rusty_libc/rusty_win32's own process APIs) -- `program` is stored for
+// that future implementation but genuinely unread today.
+#[allow(dead_code)]
 pub struct Command {
     program: String,
     args: Vec<String>,

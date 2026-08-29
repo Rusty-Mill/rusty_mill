@@ -38,7 +38,12 @@ pub trait Write {
     fn write_all(&mut self, mut buf: &[u8]) -> Result<()> {
         while !buf.is_empty() {
             match self.write(buf) {
-                Ok(0) => return Err(crate::error::Error::Io(0, alloc::string::String::from("Zero byte write"))),
+                Ok(0) => {
+                    return Err(crate::error::Error::Io(
+                        0,
+                        alloc::string::String::from("Zero byte write"),
+                    ));
+                }
                 Ok(n) => buf = &buf[n..],
                 Err(e) => return Err(e),
             }

@@ -9,14 +9,14 @@
 
 extern crate alloc;
 
+pub mod env;
 pub mod error;
-pub mod io;
 pub mod fs;
+pub mod io;
 pub mod net;
 pub mod path;
+pub mod process;
 pub mod sync;
 pub mod time;
-pub mod env;
-pub mod process;
 
 pub use error::{Error, Result};

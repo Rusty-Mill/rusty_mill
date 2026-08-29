@@ -13,10 +13,10 @@ pub fn args() -> Vec<String> {
 pub fn temp_dir() -> PathBuf {
     #[cfg(windows)]
     {
-        PathBuf::from_str("C:\\Temp")
+        PathBuf::from("C:\\Temp")
     }
     #[cfg(not(windows))]
     {
-        PathBuf::from_str("/tmp")
+        PathBuf::from("/tmp")
     }
 }
