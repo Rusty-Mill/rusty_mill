@@ -76,6 +76,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `set_car_input` (a car's current, persistent input) and `frame()` now
   reports it. Boost, jump, air control, and handbrake remain not
   implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-008`) — boost: a flat
+  forward force (not speed-tapered like throttle), not gated on ground
+  contact (works identically airborne). `PhysicsWorld` gains a depletable
+  `car_boost: Vec<f32>` resource and `set_car_boost`; holding boost drains
+  it over time, even once the force stops applying at `MAX_CAR_SPEED`;
+  `frame()` now reports each car's actual `boost_amount`. Jump, air
+  control, and handbrake remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

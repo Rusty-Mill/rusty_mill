@@ -6,6 +6,50 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Boost input
+**2026-08-29** · PR pending · commit pending
+
+- **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a boost
+  force (`RB-PHYSICS-001-FR-008`) — a flat forward force
+  (`BOOST_ACCELERATION * mass`, not speed-tapered like throttle, capped at
+  the same `MAX_CAR_SPEED` ceiling) applied whenever
+  `ControllerInput.boost` is set and the car has boost remaining. Unlike
+  throttle and steering, boost is **not** gated on ground contact — it's
+  modeled as a rocket, not an engine, so it works identically airborne,
+  matching real Rocket League.
+- **Added:** `PhysicsWorld::set_car_boost`, setting a car's current boost
+  amount directly. `PhysicsWorld` gains a parallel `car_boost: Vec<f32>`
+  (kept in lockstep with `cars` by `with_car`, starting at a full tank —
+  `drive::MAX_BOOST`). Holding boost input drains the tank at
+  `BOOST_CONSUMPTION_RATE` per second whenever held, even once the forward
+  force itself stops applying at `MAX_CAR_SPEED` — matching real Rocket
+  League's "holding boost drains fuel regardless of whether it's still
+  accelerating you" — clamping at zero (no effect once empty).
+- **Changed:** `frame()` now reports each car's actual live `boost_amount`
+  instead of a hardcoded `0.0`.
+- **Constants, honestly labeled:** `MAX_CAR_SPEED`, `MAX_BOOST` (100, a
+  full tank), and `BOOST_ACCELERATION` (~991.667 uu/s^2) are commonly-cited
+  community numbers (the same body of public research `PhysicsWorld`'s
+  gravity constant comes from); `BOOST_CONSUMPTION_RATE` is this project's
+  own simplified constant approximating "a full tank lasts roughly 3
+  seconds" rather than Rocket League's real drain curve. Reusing
+  `MAX_CAR_SPEED` as boost's speed cap too (real Rocket League doesn't
+  share one ceiling between throttle and boost) is a documented
+  simplification — see the spec's Open questions.
+- **Not implemented** (explicitly, not silently dropped): jump, air
+  control (pitch/yaw/roll torque while airborne), and handbrake/drift —
+  each a distinct real mechanic, tracked as separate follow-up work.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (81
+  total): boost accelerates a car regardless of ground contact, drains the
+  tank over time and clamps at zero, has no effect once the tank is empty,
+  and still drains the tank even once the car is at `MAX_CAR_SPEED` and the
+  forward force stops applying, plus — the real end-to-end proof — a car
+  given full boost input with gravity zeroed in a live `PhysicsWorld::step`
+  loop actually drives forward while airborne, and a regression test
+  confirming a new car starts with a full boost tank.
+
+---
+
 ## Driven car input (ground throttle and steering)
 **2026-08-29** · [#23](https://github.com/baileyrd/rusty_bullet/pull/23) · `f1a0381`
 
