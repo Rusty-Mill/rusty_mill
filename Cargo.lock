@@ -5406,6 +5406,15 @@ name = "rusty_wire"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_wiremock"
+version = "0.1.0"
+dependencies = [
+ "rusty_http",
+ "rusty_json",
+ "rusty_std",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
