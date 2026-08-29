@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Car-vs-car collision detection
-**2026-08-29** · pending PR
+**2026-08-29** · [#19](https://github.com/baileyrd/rusty_bullet/pull/19) · `2eddfe7`
 
 - **Added:** `collision::box_vs_box`, a general separating-axis test
   (SAT) between two oriented boxes (`RB-PHYSICS-001-FR-006`) — 3+3 face
