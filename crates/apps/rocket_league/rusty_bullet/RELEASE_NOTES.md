@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Jump input
+**2026-08-29** · PR pending · commit pending
+
+- **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a
+  single ground jump (`RB-PHYSICS-001-FR-010`) — a fixed `JUMP_SPEED`
+  instantaneous upward velocity change (via `RigidBody::apply_impulse`,
+  not a continuous force) fired on the *rising edge* of
+  `ControllerInput.jump` while the car is grounded — a fresh press, not
+  merely held.
+- **Edge detection:** holding jump through the resulting airborne period
+  doesn't re-fire it, and releasing then re-pressing while still airborne
+  doesn't fire it either (this increment has no double jump to grant).
+  `PhysicsWorld` gains a parallel `car_jump_held: Vec<bool>` (starting
+  `false`, kept in lockstep with `cars` by `with_car`) carrying "was jump
+  held as of the previous step" across calls — the same pattern
+  `boost_amount` already uses for cross-call resource state.
+- **Constants, honestly labeled:** `JUMP_SPEED` (292 uu/s) is a
+  commonly-cited community number, applied as a flat velocity change
+  regardless of the car's mass (matching how the real jump impulse
+  doesn't scale with mass either).
+- **Not implemented** (explicitly, not silently dropped): double
+  jump/dodge (a second airborne jump, usually paired with a directional
+  impulse/torque), variable jump height (real Rocket League adds extra
+  upward accel for as long as jump is held, up to a cap — this port
+  always applies the same fixed impulse), wall jump (needs arena walls,
+  out of scope), and air control (pitch/yaw/roll torque while airborne) —
+  each a distinct real mechanic, tracked as separate follow-up work.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (92
+  total): jump gives a grounded car upward velocity, has no effect while
+  airborne, doesn't re-fire on a second call while still held, and fires
+  again after a release-then-re-press, plus — the real end-to-end proof —
+  a car with jump input in a live `PhysicsWorld::step` loop actually
+  leaves the ground, and a regression test confirming that holding jump
+  for a car's entire flight (never released) lets it land and settle
+  instead of being relaunched on touchdown.
+
+---
+
 ## Handbrake input
 **2026-08-29** · [#27](https://github.com/baileyrd/rusty_bullet/pull/27) · `56f9cb4`
 

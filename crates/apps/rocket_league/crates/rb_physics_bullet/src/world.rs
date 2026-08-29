@@ -16,17 +16,20 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
 /// `ControllerInput::default()` — neutral — until set), a boost resource
-/// (`car_boost`, set via `set_car_boost`, starting full), and a remembered
-/// base friction (`car_base_friction`, snapshotted from the car's own
+/// (`car_boost`, set via `set_car_boost`, starting full), a remembered base
+/// friction (`car_base_friction`, snapshotted from the car's own
 /// `RigidBody.friction` when added) that `drive::apply_driven_forces` uses
-/// to restore grip after a handbrake-induced reduction — all driving the
-/// car via `drive::apply_driven_forces`.
+/// to restore grip after a handbrake-induced reduction, and a remembered
+/// jump-held state (`car_jump_held`, starting `false`) that
+/// `drive::apply_driven_forces` uses to fire jump only on a fresh press —
+/// all driving the car via `drive::apply_driven_forces`.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
     car_inputs: Vec<ControllerInput>,
     car_boost: Vec<f32>,
     car_base_friction: Vec<f32>,
+    car_jump_held: Vec<bool>,
     pub ground: StaticPlane,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -49,6 +52,7 @@ impl PhysicsWorld {
             car_inputs: Vec::new(),
             car_boost: Vec::new(),
             car_base_friction: Vec::new(),
+            car_jump_held: Vec::new(),
             ground,
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
@@ -61,7 +65,9 @@ impl PhysicsWorld {
     /// `set_car_input` if the car should actually drive. `car`'s current
     /// `friction` is snapshotted as its base friction, so handbrake input
     /// (which temporarily lowers `RigidBody.friction`) has a value to
-    /// restore to once released. Callable more than once —
+    /// restore to once released; its jump-held state starts `false`, so an
+    /// already-`jump: true` initial input still counts as a fresh press.
+    /// Callable more than once —
     /// `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` builds a
     /// two-car scene — since a car's `player_id` in `frame()` is just its
     /// index in `cars`, added cars are always appended, never inserted.
@@ -70,6 +76,7 @@ impl PhysicsWorld {
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
         self.car_boost.push(drive::MAX_BOOST);
+        self.car_jump_held.push(false);
         self
     }
 
@@ -101,25 +108,36 @@ impl PhysicsWorld {
     }
 
     /// Like `apply_forces_and_integrate_velocities`, but for a car: also
-    /// applies `drive::apply_driven_forces` (throttle/steer/handbrake
+    /// applies `drive::apply_driven_forces` (throttle/steer/handbrake/jump
     /// gated on `on_ground`, computed from the car's position at the start
     /// of this step, before anything moves; boost not gated on it, but
     /// draining `boost_amount`; handbrake temporarily lowering
-    /// `car.friction` below `base_friction`) alongside gravity, so
-    /// `input`'s forces (and friction adjustment) are part of the same
-    /// velocity-prediction phase.
+    /// `car.friction` below `base_friction`; jump firing an instantaneous
+    /// upward velocity change on a fresh press, tracked via `jump_held`)
+    /// alongside gravity, so `input`'s forces/impulses (and friction
+    /// adjustment) are part of the same velocity-prediction phase.
+    #[allow(clippy::too_many_arguments)]
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
         on_ground: bool,
         boost_amount: &mut f32,
+        jump_held: &mut bool,
         base_friction: f32,
         gravity: Vec3,
         dt: f32,
     ) {
         car.clear_forces();
         integrate::apply_gravity(car, gravity);
-        drive::apply_driven_forces(car, input, on_ground, boost_amount, base_friction, dt);
+        drive::apply_driven_forces(
+            car,
+            input,
+            on_ground,
+            boost_amount,
+            jump_held,
+            base_friction,
+            dt,
+        );
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
     }
@@ -193,19 +211,21 @@ impl PhysicsWorld {
             .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for ((((car, input), on_ground), boost), base_friction) in self
+        for (((((car, input), on_ground), boost), base_friction), jump_held) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
             .zip(car_on_ground.iter())
             .zip(self.car_boost.iter_mut())
             .zip(self.car_base_friction.iter())
+            .zip(self.car_jump_held.iter_mut())
         {
             Self::drive_and_integrate_velocities(
                 car,
                 input,
                 *on_ground,
                 boost,
+                jump_held,
                 *base_friction,
                 self.gravity,
                 dt,
@@ -775,6 +795,82 @@ mod tests {
             "expected handbrake's reduced friction to decelerate a sideways slide less than \
              normal grip, gripping={gripping_remaining_slide}, \
              handbrake={handbraking_remaining_slide}"
+        );
+    }
+
+    #[test]
+    fn a_car_with_jump_input_leaves_the_ground() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+
+        let start_z = world.cars[0].position.z;
+        let dt = 1.0 / 120.0;
+        for _ in 0..12 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.z > start_z + 1.0,
+            "expected jump input to lift the car off the ground, start={start_z}, end={}",
+            world.cars[0].position.z
+        );
+    }
+
+    #[test]
+    fn holding_jump_does_not_repeatedly_relaunch_the_car() {
+        // The real end-to-end proof that PhysicsWorld's car_jump_held
+        // wiring actually prevents re-firing: hold jump for the whole
+        // flight (never released), let the car arc up and land again, and
+        // confirm it settles instead of being relaunched every time it
+        // touches back down.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+
+        // A single JUMP_SPEED impulse under this world's gravity returns to
+        // the ground in ~2*JUMP_SPEED/650 ≈ 0.9s; run well past that with
+        // jump still held the entire time.
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.5 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let settled = world.cars[0];
+        assert!(
+            (settled.position.z - 18.0).abs() < 1.0,
+            "expected the car to land and settle near its resting height instead of being \
+             relaunched, got z={}",
+            settled.position.z
+        );
+        assert!(
+            settled.linear_velocity.length() < 5.0,
+            "expected the car to have settled, got velocity {:?}",
+            settled.linear_velocity
         );
     }
 }

@@ -89,6 +89,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `PhysicsWorld` gains `car_base_friction: Vec<f32>`, snapshotted per car
   by `with_car`, so release restores each car's own base friction. Jump
   and air control remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-010`) — a single ground
+  jump: a fixed instantaneous upward velocity change fired on the rising
+  edge of `ControllerInput.jump` while grounded, gated so holding or a
+  release-then-re-press mid-air doesn't re-fire it. `PhysicsWorld` gains
+  `car_jump_held: Vec<bool>` to track the rising-edge state per car.
+  Double jump/dodge, variable jump height, wall jump, and air control
+  remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
