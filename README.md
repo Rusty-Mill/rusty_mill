@@ -59,6 +59,7 @@ have landed so far.
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
+| [`rusty_request`](crates/rusty_request) | `crates/rusty_request` | Async HTTP client (a Rust take on Python's `requests`), built on `rusty_tokio`/`rusty_tls`/`rusty_http` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -298,6 +299,23 @@ the current `rusty_win32` (both toolchains, plus a Windows
 cross-compile check) rather than assuming compatibility from the
 mechanical rev-to-path pattern the other swaps in this series follow.
 
+`rusty_request` retires three forward pins at once — `rusty_tokio`,
+`rusty_tls`, `rusty_http` — all previously pinned to specific `git` revs
+that had to move together by construction (Cargo treats two different
+revs of the same git dependency as two unrelated crates, and
+`rusty_tls::AsyncTlsStream`/`rusty_http::async_tokio::AsyncTransport` are
+both generic over `rusty_tokio`'s `AsyncRead`/`AsyncWrite` traits — a
+`path` dependency resolves that concern by construction, since there's
+only ever one `rusty_tokio` in the build graph now). All three pins were
+substantially behind this workspace's current `main` (tens of thousands
+of lines of diff across all three, more than any prior swap in this
+series) — verified safe not by diff-reading but by running
+`rusty_request`'s own extensive integration suite against the swapped
+path deps: 43 unit tests plus 54 client tests and 5 HTTPS/TLS/pinned-CA
+tests (`tests/client.rs`/`tests/https.rs`, which exercise the default
+`rusty_tokio` backend directly and are `cfg`'d out under the crate's own
+optional `tokio` feature) all pass unmodified.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -337,5 +355,7 @@ The second wave, merging in the same way, adds:
 at a time, so the Crates table above only lists the ones already landed.
 
 A third wave continues the same way, starting with
-[`rusty_wire`](https://github.com/baileyrd/rusty_wire) — merged one at a
-time, same process.
+[`rusty_wire`](https://github.com/baileyrd/rusty_wire),
+[`rusty_std`](https://github.com/baileyrd/rusty_std), and now
+[`rusty_request`](https://github.com/baileyrd/rusty_request) — merged one
+at a time, same process.
