@@ -61,6 +61,7 @@ have landed so far.
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
 | [`rusty_err`](crates/rusty_err) | `crates/rusty_err` | `no_std` + `alloc` sovereign error trait, context extension, and proc-macro error derive library, built on `rusty_std` |
 | [`rusty_err_derive`](crates/rusty_err/derive) | `crates/rusty_err/derive` | `rusty_err`'s `#[derive(Error)]` proc-macro |
+| [`rusty_uuid`](crates/rusty_uuid) | `crates/rusty_uuid` | Minimal, dependency-free UUID v4 generation |
 | [`rusty_wiremock`](crates/rusty_wiremock) | `crates/rusty_wiremock` | `no_std` + `alloc` sovereign HTTP mock server and request matcher for Rusty Mill test suites, built on `rusty_http`/`rusty_json`/`rusty_std` |
 
 Each crate's own README, docs, and issue history describe its design in
@@ -312,6 +313,9 @@ member, `derive`) — de-inherited the same way `rustils_async` was: the
 nested `[workspace]` table removed, `derive` added directly to this
 workspace's `members` alongside `rusty_err` itself.
 
+`rusty_uuid` has zero dependencies of any kind, so nothing needed
+swapping — its own merge is just the subtree add plus workspace wiring.
+
 `rusty_wiremock` needed no pin retirement at all: its three dependencies
 (`rusty_http`, `rusty_json`, `rusty_std`) were already `path` dependencies
 in the standalone repo's own `Cargo.toml`, anticipating this exact
@@ -361,6 +365,7 @@ at a time, so the Crates table above only lists the ones already landed.
 A third wave continues the same way, starting with
 [`rusty_wire`](https://github.com/baileyrd/rusty_wire) and
 [`rusty_std`](https://github.com/baileyrd/rusty_std), and now
-[`rusty_err`](https://github.com/baileyrd/rusty_err) and
+[`rusty_err`](https://github.com/baileyrd/rusty_err),
+[`rusty_uuid`](https://github.com/baileyrd/rusty_uuid), and
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock) — merged
 one at a time, same process.
