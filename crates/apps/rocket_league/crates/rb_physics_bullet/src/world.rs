@@ -106,8 +106,9 @@ impl PhysicsWorld {
         }
 
         if let Some(car) = &mut self.car {
-            if let Some(contact) = collision::contact_between(&self.ball, car) {
-                solver::resolve_contact_between(&mut self.ball, car, &contact, dt);
+            let contacts = collision::contacts_between(&self.ball, car);
+            if !contacts.is_empty() {
+                solver::resolve_contacts_between(&mut self.ball, car, &contacts, dt);
             }
         }
 

@@ -2,7 +2,7 @@
 
 - Last verified main commit: `2f12c8f` (merge of [#17](https://github.com/baileyrd/rusty_bullet/pull/17))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, and ball-vs-car collision all implemented in `rb_physics_bullet`; box-vs-box collision, driven car input, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, and car-vs-car collision *detection* all implemented in `rb_physics_bullet`; multi-car `PhysicsWorld` wiring, driven car input, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -116,6 +116,21 @@
   including an end-to-end `PhysicsWorld::step` test confirming a ball shot
   at a stationary car actually bounces off it instead of tunnelling
   through.
+- `RB-PHYSICS-001-FR-006` (car-vs-car collision *detection*) —
+  `rb_physics_bullet` gains `collision::box_vs_box`, a 15-axis
+  separating-axis test between two oriented boxes (3+3 face axes, 9
+  edge-pair axes), producing a clipped face manifold (0-4 points) or a
+  single edge-edge point (via a standard closest-point-between-segments
+  construction). `collision::contact_between` is generalized to
+  `contacts_between` (returning `Vec<Contact>` uniformly) and
+  `solver::resolve_contact_between` to `resolve_contacts_between` (a
+  manifold, mirroring the existing ground-contact solver's structure) so
+  box-vs-box's up-to-4-point case fits the same two-body solver path
+  ball-vs-car already uses. **Not** wired up: `PhysicsWorld` still models
+  exactly one car, so `box_vs_box` has no live caller in a real simulated
+  scene — multi-car `PhysicsWorld` support is separate, larger,
+  explicitly open follow-up work (see Blocked/Next), not silently done or
+  silently skipped. 4 new unit tests in `rb_physics_bullet` (62 total).
 
 ## In progress
 
@@ -154,27 +169,30 @@
   inputs and produce a comparable trajectory (`rb_physics_bullet` now has
   a car body and ball-vs-car collision, but nothing yet connects it to
   recorded controller input or to `rb_verify_cli`).
-- `RB-PHYSICS-001`'s box-vs-box collision (two cars against each other)
-  and driven car input — both real, not-yet-started follow-up work (see
-  the spec's Non-goals/Open questions); box-vs-box doesn't block this
-  scope (only one car exists), but driven input is needed before a car in
-  this physics core can do anything beyond free-fall, resting on the
-  ground, and passively bouncing off the ball.
+- `RB-PHYSICS-001`'s multi-car `PhysicsWorld` support (needed to give the
+  new `box_vs_box` car-vs-car collision detection a real caller) and
+  driven car input — both real, not-yet-started follow-up work (see the
+  spec's Non-goals/Open questions); multi-car support doesn't block the
+  current scope (only one car exists in any real simulated scene today),
+  but driven input is needed before a car in this physics core can do
+  anything beyond free-fall, resting on the ground, and passively bouncing
+  off the ball.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. Driven car input — real follow-up work for `rb_physics_bullet` now that
-   box bodies and ball-vs-car collision both exist; `RB-PHYSICS-001-FR-005`
-   (constant calibration) needs `PHASE-0-EXIT` real data regardless.
+2. Driven car input, and/or multi-car `PhysicsWorld` support (to give
+   `box_vs_box` a real caller) — both real follow-up work for
+   `rb_physics_bullet`; `RB-PHYSICS-001-FR-005` (constant calibration)
+   needs `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (108 tests: 23 in `rb_domain`, 58 in
+- `cargo test --workspace`: pass (112 tests: 23 in `rb_domain`, 62 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
