@@ -15,12 +15,14 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
 /// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
-/// `ControllerInput::default()` — neutral — until set) driving it via
-/// `drive::apply_driven_forces`.
+/// `ControllerInput::default()` — neutral — until set) and a boost
+/// resource (`car_boost`, set via `set_car_boost`, starting full) driving
+/// it via `drive::apply_driven_forces`.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
     car_inputs: Vec<ControllerInput>,
+    car_boost: Vec<f32>,
     pub ground: StaticPlane,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -41,6 +43,7 @@ impl PhysicsWorld {
             ball,
             cars: Vec::new(),
             car_inputs: Vec::new(),
+            car_boost: Vec::new(),
             ground,
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
@@ -48,15 +51,17 @@ impl PhysicsWorld {
     }
 
     /// Adds one car-shaped body to the scene, with a neutral
-    /// (`ControllerInput::default()`) input — set a real one afterward
-    /// with `set_car_input` if the car should actually drive. Callable
-    /// more than once — `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)`
+    /// (`ControllerInput::default()`) input and a full boost tank
+    /// (`drive::MAX_BOOST`) — set a real input afterward with
+    /// `set_car_input` if the car should actually drive. Callable more
+    /// than once — `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)`
     /// builds a two-car scene — since a car's `player_id` in `frame()` is
     /// just its index in `cars`, added cars are always appended, never
     /// inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
+        self.car_boost.push(drive::MAX_BOOST);
         self
     }
 
@@ -67,6 +72,13 @@ impl PhysicsWorld {
     /// condition (see the crate's "trust internal callers" convention).
     pub fn set_car_input(&mut self, index: usize, input: ControllerInput) {
         self.car_inputs[index] = input;
+    }
+
+    /// Sets car `index`'s current boost amount, clamped to
+    /// `[0, drive::MAX_BOOST]`. Panics if `index` is out of bounds (see
+    /// `set_car_input`).
+    pub fn set_car_boost(&mut self, index: usize, amount: f32) {
+        self.car_boost[index] = amount.clamp(0.0, drive::MAX_BOOST);
     }
 
     /// Applies forces and integrates velocities for one body — the first
@@ -81,20 +93,22 @@ impl PhysicsWorld {
     }
 
     /// Like `apply_forces_and_integrate_velocities`, but for a car: also
-    /// applies `drive::apply_driven_forces` (gated on `on_ground`,
-    /// computed from the car's position at the start of this step, before
-    /// anything moves) alongside gravity, so `input`'s throttle/steer
-    /// forces are part of the same velocity-prediction phase.
+    /// applies `drive::apply_driven_forces` (throttle/steer gated on
+    /// `on_ground`, computed from the car's position at the start of this
+    /// step, before anything moves; boost not gated on it, but draining
+    /// `boost_amount`) alongside gravity, so `input`'s forces are part of
+    /// the same velocity-prediction phase.
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
         on_ground: bool,
+        boost_amount: &mut f32,
         gravity: Vec3,
         dt: f32,
     ) {
         car.clear_forces();
         integrate::apply_gravity(car, gravity);
-        drive::apply_driven_forces(car, input, on_ground);
+        drive::apply_driven_forces(car, input, on_ground, boost_amount, dt);
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
     }
@@ -168,13 +182,14 @@ impl PhysicsWorld {
             .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for ((car, input), on_ground) in self
+        for (((car, input), on_ground), boost) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
             .zip(car_on_ground.iter())
+            .zip(self.car_boost.iter_mut())
         {
-            Self::drive_and_integrate_velocities(car, input, *on_ground, self.gravity, dt);
+            Self::drive_and_integrate_velocities(car, input, *on_ground, boost, self.gravity, dt);
         }
 
         Self::resolve_ground_contact(&mut self.ball, &self.ground, dt);
@@ -206,20 +221,21 @@ impl PhysicsWorld {
     /// `self.cars`, `player_id` set to each car's index, `input` set to
     /// that car's current `ControllerInput` (the one actually driving it
     /// — not "recovered" the way `rb_replay_ingest`/`rb_capture_ingest`
-    /// use the field, but the same data).
+    /// use the field, but the same data), `boost_amount` its current fuel.
     pub fn frame(&self) -> PhysicsFrame {
         let cars = self
             .cars
             .iter()
             .zip(self.car_inputs.iter())
+            .zip(self.car_boost.iter())
             .enumerate()
-            .map(|(i, (car, input))| CarState {
+            .map(|(i, ((car, input), boost))| CarState {
                 player_id: i as u32,
                 position: car.position,
                 rotation: car.orientation,
                 velocity: car.linear_velocity,
                 angular_velocity: car.angular_velocity,
-                boost_amount: 0.0,
+                boost_amount: *boost,
                 input: Some(*input),
             })
             .collect();
@@ -604,5 +620,48 @@ mod tests {
         let settled = world.cars[0];
         assert!((settled.position.z - 18.0).abs() < 0.5);
         assert!(settled.linear_velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn a_car_with_boost_input_drives_forward_while_airborne() {
+        // Unlike throttle, boost must work with no ground contact at all
+        // — this is the real end-to-end proof that PhysicsWorld actually
+        // threads a car's boost resource through drive::apply_driven_forces.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the boost force from gravity's fall
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                boost: true,
+                ..Default::default()
+            },
+        );
+
+        let start_x = world.cars[0].position.x;
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.x > start_x + 1.0,
+            "expected boost to drive the airborne car forward, start={start_x}, end={}",
+            world.cars[0].position.x
+        );
+        let boost_after = world.frame().cars[0].boost_amount;
+        assert!(
+            boost_after < crate::drive::MAX_BOOST,
+            "expected a held boost to have drained some fuel, got {boost_after}"
+        );
+    }
+
+    #[test]
+    fn a_new_car_starts_with_a_full_boost_tank() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
     }
 }

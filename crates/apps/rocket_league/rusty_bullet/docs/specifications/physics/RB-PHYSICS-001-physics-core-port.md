@@ -1,10 +1,10 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.7.0
+- Version: 0.8.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), and box-vs-box (car-vs-car) collision all implemented,
   tested, and wired into a real N-body `PhysicsWorld` scene; ground-driving
-  car input (throttle, steering) implemented; boost, jump, air control,
+  car input (throttle, steering) and boost implemented; jump, air control,
   handbrake, split impulse, warm-starting, a combined multi-body solve, and
   constant calibration are open follow-up work)
 - Owners: baileyrd
@@ -39,7 +39,9 @@ ball-vs-car and car-vs-car pair each step, so `box_vs_box` now runs for
 real in a live scene, not just in isolation under a unit test. Each car
 also has a current `ControllerInput` (`PhysicsWorld::set_car_input`)
 driving ground throttle and steering forces/torques on it (`drive`
-module) — see FR-007.
+module) — see FR-007 — plus a depletable boost resource
+(`PhysicsWorld::set_car_boost`) giving it a flat forward force usable in
+the air, unlike throttle — see FR-008.
 
 ## Non-goals (this increment)
 
@@ -57,13 +59,13 @@ module) — see FR-007.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **Boost, jump, air control, and handbrake.** `drive::apply_driven_forces`
-  (FR-007) covers ground throttle and steering only. Boost (a flat forward
-  force, usable in the air unlike throttle), jump (a vertical impulse plus
-  Rocket League's "double jump"/dodge mechanics), air control (pitch/yaw/roll
-  torque while airborne), and handbrake/drift (a distinct lateral-friction
-  mode) are each their own real mechanic, not a small extension of
-  ground-driving — left as separate, explicitly tracked follow-up work.
+- **Jump, air control, and handbrake.** `drive::apply_driven_forces` now
+  covers ground throttle and steering (FR-007) and boost (FR-008). Jump (a
+  vertical impulse plus Rocket League's "double jump"/dodge mechanics), air
+  control (pitch/yaw/roll torque while airborne), and handbrake/drift (a
+  distinct lateral-friction mode) are each their own real mechanic, not a
+  small extension of ground-driving or boost — left as separate, explicitly
+  tracked follow-up work.
 - **Consuming a recorded input sequence.** `PhysicsWorld::set_car_input`
   sets a car's *current* input, persisting until changed — a caller can
   drive a car through a whole `simulate()` run, or update it every step,
@@ -137,8 +139,8 @@ module) — see FR-007.
   pair each step, so this pairing runs for real in a live scene — not just
   under a unit test, as it did before multi-car `PhysicsWorld` support
   landed.
-- `RB-PHYSICS-001-FR-007` (driven car input, implemented — ground throttle
-  and steering only, see Non-goals): `drive::apply_driven_forces` couples
+- `RB-PHYSICS-001-FR-007` (driven car input, ground throttle and steering,
+  implemented): `drive::apply_driven_forces` couples
   `rb_domain::ControllerInput` into forces/torques on a car: throttle
   (accelerate/reverse along the car's local forward axis, capped at
   `MAX_CAR_SPEED`) and steering (yaw torque about the car's local up axis,
@@ -149,6 +151,22 @@ module) — see FR-007.
   `None`. A car with no input set behaves exactly as before this
   requirement existed (neutral `ControllerInput::default()` applies zero
   force/torque).
+- `RB-PHYSICS-001-FR-008` (boost, implemented): `drive::apply_driven_forces`
+  also applies a flat forward force (`BOOST_ACCELERATION * mass`, not
+  speed-tapered like throttle) along the car's local forward axis whenever
+  `ControllerInput.boost` is set and the car has boost remaining, capped at
+  the same `MAX_CAR_SPEED` ceiling as throttle. Unlike throttle and
+  steering, boost is *not* gated on ground contact — it's modeled as a
+  rocket, not an engine, so it works identically airborne. Boost is a
+  depletable resource: `PhysicsWorld` gains a parallel `car_boost: Vec<f32>`
+  (initialized to a full tank, `drive::MAX_BOOST`, by `with_car`) and
+  `set_car_boost` to set it directly; holding boost input drains the tank
+  at `BOOST_CONSUMPTION_RATE` per second whenever held, even if the forward
+  force itself doesn't apply because the car is already at `MAX_CAR_SPEED`
+  (matching real Rocket League's "holding boost drains fuel regardless of
+  whether it's still accelerating you"), and the tank clamps at zero
+  (no effect once empty). `frame()` now reports each car's actual
+  `boost_amount` instead of a hardcoded `0.0`.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -177,11 +195,11 @@ module) — see FR-007.
   a static plane); `resolve_contacts_between` — the same sequential-impulse
   math generalized to two dynamic bodies' shared contact manifold.
 - `drive`: `apply_driven_forces` — couples a car's `ControllerInput` into
-  ground throttle/steering forces and torques (not a Bullet3 port — this
-  project's own model of Rocket League's driving mechanics, since the real
-  numbers aren't public; see the module's own doc comment for which
-  constants are commonly-cited community estimates vs. uncalibrated
-  placeholders).
+  ground throttle/steering forces and torques, plus a boost force/resource
+  drain (not a Bullet3 port — this project's own model of Rocket League's
+  driving mechanics, since the real numbers aren't public; see the
+  module's own doc comment for which constants are commonly-cited
+  community estimates vs. uncalibrated placeholders).
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
@@ -190,9 +208,10 @@ module) — see FR-007.
   car-vs-car pair — then integrate every body's transform). `PhysicsWorld`
   carries one ball (`RigidBody`, always present) and `cars: Vec<RigidBody>`
   (any number, via repeated `with_car` calls) with a parallel
-  `car_inputs: Vec<ControllerInput>` set via `set_car_input`; `frame()`
-  assigns each car's `player_id` as its index in `cars` and reports its
-  current input.
+  `car_inputs: Vec<ControllerInput>` set via `set_car_input` and a parallel
+  `car_boost: Vec<f32>` set via `set_car_boost`; `frame()` assigns each
+  car's `player_id` as its index in `cars` and reports its current input
+  and boost amount.
 
 No `PhysicsStateSource`-style trait exists yet for "the physics engine"
 specifically — `rb_verify_cli` calls `rb_physics_bullet::simulate`
@@ -263,7 +282,7 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   sequential `player_id`, and — the real end-to-end proof — two cars shot
   head-on at each other in a live `PhysicsWorld::step` loop actually
   bounce off each other instead of tunnelling through.
-- FR-007 (met, ground throttle/steering only): a neutral input applies no
+- FR-007 (met, ground throttle/steering): a neutral input applies no
   force or torque (so a car with no input set is unaffected); throttle
   accelerates a grounded car forward, has no effect while airborne, stops
   accelerating at `MAX_CAR_SPEED`, and reverse throttle accelerates
@@ -271,8 +290,17 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   one, in the opposite direction for opposite `steer` sign; an end-to-end
   `PhysicsWorld::step` loop with `set_car_input` set to full throttle
   drives a car forward across the ground, and `frame()` reports that same
-  input back. All covered by `rb_physics_bullet`'s unit tests (75 tests as
-  of this version).
+  input back.
+- FR-008 (met, boost): boost accelerates a car regardless of ground
+  contact (an end-to-end `PhysicsWorld::step` loop with gravity zeroed and
+  full boost input drives a car forward while airborne); the boost tank
+  drains over time while held and clamps at zero; boost has no effect once
+  the tank is empty; boost still drains the tank even once the car is at
+  `MAX_CAR_SPEED` and the forward force stops applying; a new car starts
+  with a full tank (`MAX_BOOST`), and `frame()` reports the live
+  `boost_amount` instead of a hardcoded `0.0`. All FR-007/FR-008 behavior
+  covered by `rb_physics_bullet`'s unit tests (81 tests as of this
+  version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -290,12 +318,14 @@ fidelity to a real car's actual resting/tumbling/hitting behavior, or to
 how many real cars are ever mutually touching at once (this port's
 one-pair-at-a-time solve, see Non-goals, is untested against that).
 `drive::apply_driven_forces`'s constants are even further from validated:
-`MAX_CAR_SPEED` is a commonly-cited community number, but
-`THROTTLE_ACCELERATION` and `STEER_TORQUE` are this project's own
-simplification and an uncalibrated placeholder respectively — the unit
-tests confirm the *shape* of the response (accelerates, caps at max speed,
-yaws when moving, not when parked), not that a real car's throttle/steer
-response actually matches these curves.
+`MAX_CAR_SPEED`, `MAX_BOOST`, and `BOOST_ACCELERATION` are commonly-cited
+community numbers, but `THROTTLE_ACCELERATION`, `BOOST_CONSUMPTION_RATE`,
+and `STEER_TORQUE` are this project's own simplifications (or, for
+`STEER_TORQUE`, an uncalibrated placeholder) — the unit tests confirm the
+*shape* of the response (accelerates, caps at max speed, yaws when moving
+not when parked, boosts regardless of ground contact, drains the tank at a
+constant rate even once the force itself stops applying), not that a real
+car's throttle/steer/boost response actually matches these curves.
 
 ## Traceability
 
@@ -307,13 +337,19 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- Boost, jump, air control, and handbrake (see Non-goals) — each a
-  distinct real mechanic; not started.
+- Jump, air control, and handbrake (see Non-goals) — each a distinct real
+  mechanic; not started.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
-  and re-checking `MAX_CAR_SPEED`) against real recorded driving data —
-  needs `RB-VERIFY-002` capture data; not started. `STEER_TORQUE` in
-  particular has no public reference at all (unlike gravity or max speed),
-  so it may be off by a large factor, not just imprecise.
+  `BOOST_CONSUMPTION_RATE`, and re-checking `MAX_CAR_SPEED`/`MAX_BOOST`/
+  `BOOST_ACCELERATION`) against real recorded driving data — needs
+  `RB-VERIFY-002` capture data; not started. `STEER_TORQUE` in particular
+  has no public reference at all (unlike gravity, max speed, or the boost
+  constants), so it may be off by a large factor, not just imprecise.
+- Real Rocket League doesn't share one speed ceiling between throttle and
+  boost (a boosting car can exceed unboosted top speed); this port reuses
+  `MAX_CAR_SPEED` as boost's cap too, a documented simplification — worth
+  splitting into a separate boost speed cap once real recorded top-speed
+  data exists to calibrate one.
 - FR-005 above.
 - Restitution/friction combine mode (`rb_physics_bullet::solver` currently
   averages; Bullet's actual default is `max` for both) — revisit once real
@@ -335,6 +371,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.8.0 (2026-08-29): FR-008 added and implemented (boost) —
+  `drive::apply_driven_forces` gains a boost force: a flat forward force
+  (`BOOST_ACCELERATION * mass`, not speed-tapered like throttle) along the
+  car's local forward axis, applied whenever `ControllerInput.boost` is set
+  and the car has boost remaining, capped at `MAX_CAR_SPEED`. Unlike
+  throttle and steering, boost is *not* gated on ground contact — it works
+  identically airborne, matching real Rocket League's rocket-based (not
+  wheel-based) boost. `PhysicsWorld` gains a parallel `car_boost: Vec<f32>`
+  (kept in lockstep with `cars` by `with_car`, initialized to a full tank —
+  `drive::MAX_BOOST`) and `set_car_boost` to set it directly; holding boost
+  drains the tank at `BOOST_CONSUMPTION_RATE` per second whenever held,
+  even once the forward force itself stops applying at `MAX_CAR_SPEED`
+  (matching real Rocket League's "holding boost drains fuel regardless");
+  the tank clamps at zero. `frame()` now reports each car's live
+  `boost_amount` instead of a hardcoded `0.0`. Jump, air control, and
+  handbrake remain explicitly not implemented — see Non-goals. 6 new unit
+  tests across `drive.rs` and `world.rs` in `rb_physics_bullet` (81 total),
+  including an end-to-end test confirming a car with boost input actually
+  drives forward while airborne (gravity zeroed) in a live
+  `PhysicsWorld::step` loop, and a regression test confirming a new car
+  starts with a full boost tank.
 - 0.7.0 (2026-08-29): FR-007 added and implemented (ground throttle and
   steering only) — new `drive` module, `apply_driven_forces` couples
   `rb_domain::ControllerInput` into a throttle force (along the car's
