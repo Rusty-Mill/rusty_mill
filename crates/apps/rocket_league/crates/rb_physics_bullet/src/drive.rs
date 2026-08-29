@@ -1,11 +1,14 @@
 //! Driven car input: couples `rb_domain::ControllerInput` into forces and
 //! torques on a car `RigidBody`. Ground-driving (throttle, steering),
-//! boost, handbrake/drift, and a single ground jump in this increment.
-//! Throttle, steering, handbrake, and jump are gated on the car actually
-//! touching the ground (a free-floating box has no wheels to grip, lock,
-//! or push off of, so airborne input does nothing for any of them here);
-//! boost is not — it's a rocket, not an engine, so it works identically
-//! grounded or airborne, the same way it does in real Rocket League.
+//! boost, handbrake/drift, a single ground jump, and air control in this
+//! increment. Throttle, steering, handbrake, and jump are gated on the car
+//! actually touching the ground (a free-floating box has no wheels to
+//! grip, lock, or push off of, so airborne input does nothing for any of
+//! them here); boost is not — it's a rocket, not an engine, so it works
+//! identically grounded or airborne, the same way it does in real Rocket
+//! League. Air control is the mirror image: gated on the car *not*
+//! touching the ground (real air control needs no wheels at all — it's
+//! pure torque, so it would be redundant with steering while grounded).
 //!
 //! Handbrake is modeled as a temporary ground-friction reduction rather
 //! than a separate lateral-slip system: this port has no per-wheel tire
@@ -29,14 +32,24 @@
 //! passed in as `jump_held`, the same pattern `boost_amount` already uses
 //! for a resource that must persist across calls.
 //!
+//! Pitch, yaw, and roll each apply torque about one of the car's three
+//! local axes (right, up, forward respectively), scaled directly by the
+//! analog `Option<f32>` value — `None` (an input source that can't recover
+//! an analog value, e.g. replay-derived input, see `rb_domain`) is treated
+//! as zero, same as a centered stick. Unlike ground steering, air control
+//! isn't speed-scaled: a car can spin freely from a standing start in the
+//! air, since there's no wheel grip to require momentum for. All three
+//! axes share one `AIR_CONTROL_TORQUE` constant — a real simplification,
+//! since Rocket League's actual pitch/yaw/roll rates differ from each
+//! other; this port doesn't model that difference.
+//!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
 //! dropped): double jump/dodge (a second airborne jump, usually paired
 //! with a directional impulse/torque), variable jump height (real Rocket
 //! League adds extra upward accel for as long as jump is held, up to a
 //! cap — this port always applies the same fixed impulse regardless of
-//! how long the button is held), wall jump (needs arena walls, which don't
-//! exist in this scope), and air control (pitch/yaw/roll torque while
-//! airborne). A car with no input set (or all-neutral
+//! how long the button is held), and wall jump (needs arena walls, which
+//! don't exist in this scope). A car with no input set (or all-neutral
 //! `ControllerInput::default()`) behaves exactly as a free rigid box
 //! always has — this module only ever adds force/torque/impulse or
 //! adjusts the existing friction property, never removes physics outright.
@@ -49,11 +62,11 @@
 //! research `PhysicsWorld::new`'s gravity constant comes from);
 //! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
 //! constants standing in for Rocket League's real speed-dependent throttle
-//! curve and boost-drain behavior; `STEER_TORQUE` and
-//! `HANDBRAKE_FRICTION_MULTIPLIER` are uncalibrated placeholders chosen
-//! only to produce a visibly responsive turn/slide for this car's
-//! mass/inertia in tests. None of these are independently confirmed by
-//! this project — see `RB-PHYSICS-001-FR-005`.
+//! curve and boost-drain behavior; `STEER_TORQUE`,
+//! `HANDBRAKE_FRICTION_MULTIPLIER`, and `AIR_CONTROL_TORQUE` are
+//! uncalibrated placeholders chosen only to produce a visibly responsive
+//! turn/slide/spin for this car's mass/inertia in tests. None of these are
+//! independently confirmed by this project — see `RB-PHYSICS-001-FR-005`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -110,6 +123,15 @@ const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 /// matching how the real jump impulse doesn't scale with car mass either.
 const JUMP_SPEED: f32 = 292.0;
 
+/// Uncalibrated placeholder air-control torque magnitude, shared by pitch,
+/// yaw, and roll (about the car's local right, up, and forward axes
+/// respectively) at full analog input — chosen only so a full-stick
+/// rotation is visibly responsive for this car's mass/inertia in tests,
+/// not derived from any measured or documented Rocket League value. Real
+/// Rocket League's pitch/yaw/roll rates differ from each other; this port
+/// doesn't model that difference.
+const AIR_CONTROL_TORQUE: f32 = 1_000_000.0;
+
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
 }
@@ -118,10 +140,19 @@ fn up_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0))
 }
 
-/// Applies throttle, steering, boost, handbrake, and jump as
+/// The car's local "right" axis (local +Y) — completes the right-handed
+/// (forward, right, up) basis `up_axis × forward_axis` gives. Used only for
+/// pitch torque (nose up/down about this axis); throttle/steer/boost/
+/// handbrake/jump never need it.
+fn right_axis(car: &RigidBody) -> Vec3 {
+    car.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0))
+}
+
+/// Applies throttle, steering, boost, handbrake, jump, and air control as
 /// forces/torques/impulses (or, for handbrake, a temporary friction
 /// adjustment) on `car`. Throttle, steering, handbrake, and jump are a
-/// no-op unless `on_ground`; boost isn't gated on ground contact, but is a
+/// no-op unless `on_ground`; air control is the reverse — a no-op unless
+/// *not* `on_ground`; boost isn't gated on ground contact at all, but is a
 /// no-op once `*boost_amount` reaches zero. `base_friction` is the car's
 /// own nominal (non-handbraking) friction — handbrake temporarily reduces
 /// `car.friction` below it while held and grounded, and restores it
@@ -175,6 +206,25 @@ pub fn apply_driven_forces(
             // car.mass() here cancels that out and yields a flat
             // JUMP_SPEED velocity change regardless of the car's mass.
             car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+        }
+    } else {
+        // Air control: pitch/yaw/roll torque about the car's local
+        // right/up/forward axes. Unlike ground steering, not scaled by
+        // speed — a car can spin from a standing start in the air, since
+        // there's no wheel grip to require momentum for.
+        let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
+        if pitch != 0.0 {
+            car.apply_torque(right_axis(car) * (pitch * AIR_CONTROL_TORQUE));
+        }
+
+        let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
+        if yaw != 0.0 {
+            car.apply_torque(up_axis(car) * (yaw * AIR_CONTROL_TORQUE));
+        }
+
+        let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
+        if roll != 0.0 {
+            car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE));
         }
     }
 
@@ -266,6 +316,27 @@ mod tests {
     fn full_jump() -> ControllerInput {
         ControllerInput {
             jump: true,
+            ..Default::default()
+        }
+    }
+
+    fn full_pitch() -> ControllerInput {
+        ControllerInput {
+            pitch: Some(1.0),
+            ..Default::default()
+        }
+    }
+
+    fn full_yaw() -> ControllerInput {
+        ControllerInput {
+            yaw: Some(1.0),
+            ..Default::default()
+        }
+    }
+
+    fn full_roll() -> ControllerInput {
+        ControllerInput {
+            roll: Some(1.0),
             ..Default::default()
         }
     }
@@ -581,5 +652,88 @@ mod tests {
              velocity after first press={velocity_after_first_press}, after second press={}",
             c.linear_velocity.z
         );
+    }
+
+    #[test]
+    fn air_control_has_no_effect_while_grounded() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let input = ControllerInput {
+            pitch: Some(1.0),
+            yaw: Some(1.0),
+            roll: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input(&mut c, &input, true, &mut boost, 1.0 / 60.0);
+        assert_eq!(
+            c.angular_velocity,
+            Vec3::ZERO,
+            "grounded air control shouldn't spin the car — steering already owns yaw on the ground"
+        );
+    }
+
+    #[test]
+    fn a_stationary_airborne_car_can_pitch_yaw_and_roll() {
+        // Unlike ground steering, air control isn't speed-scaled — a car
+        // with zero velocity should still spin freely.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(&mut c, &full_pitch(), false, &mut boost, 1.0 / 60.0);
+        assert!(
+            c.angular_velocity.y.abs() > 0.0,
+            "expected pitch to produce angular velocity about the local right (Y) axis, got {:?}",
+            c.angular_velocity
+        );
+
+        let mut c = car();
+        step_with_input(&mut c, &full_yaw(), false, &mut boost, 1.0 / 60.0);
+        assert!(
+            c.angular_velocity.z.abs() > 0.0,
+            "expected yaw to produce angular velocity about the local up (Z) axis, got {:?}",
+            c.angular_velocity
+        );
+
+        let mut c = car();
+        step_with_input(&mut c, &full_roll(), false, &mut boost, 1.0 / 60.0);
+        assert!(
+            c.angular_velocity.x.abs() > 0.0,
+            "expected roll to produce angular velocity about the local forward (X) axis, got {:?}",
+            c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn no_analog_value_is_treated_as_neutral_air_control() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            &mut boost,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.angular_velocity,
+            Vec3::ZERO,
+            "pitch/yaw/roll all None (e.g. replay-derived input) should behave like neutral input"
+        );
+    }
+
+    #[test]
+    fn opposite_yaw_spins_the_opposite_way_in_the_air() {
+        let mut left = car();
+        let mut left_boost = MAX_BOOST;
+        step_with_input(&mut left, &full_yaw(), false, &mut left_boost, 1.0 / 60.0);
+
+        let mut right = car();
+        let mut right_boost = MAX_BOOST;
+        let opposite = ControllerInput {
+            yaw: Some(-1.0),
+            ..Default::default()
+        };
+        step_with_input(&mut right, &opposite, false, &mut right_boost, 1.0 / 60.0);
+
+        assert!(left.angular_velocity.z * right.angular_velocity.z < 0.0);
     }
 }
