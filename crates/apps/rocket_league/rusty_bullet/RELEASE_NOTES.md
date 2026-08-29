@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Air control input
+**2026-08-29** · PR pending · commit pending
+
+- **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains air
+  control (`RB-PHYSICS-001-FR-011`) — torque about the car's local right,
+  up, and forward axes, scaled directly by `ControllerInput.pitch`/`yaw`/
+  `roll` (each an `Option<f32>`, `None` treated as zero) times one shared
+  `AIR_CONTROL_TORQUE` constant, applied whenever the car is *not*
+  touching the ground — the mirror image of throttle/steering/handbrake/
+  jump's ground-only gating, so it never competes with ground steering for
+  the yaw axis.
+- **Design note:** unlike ground steering, air control isn't speed-scaled
+  — a car can spin from a standing start in the air, since there's no
+  wheel grip to require momentum for. A new `right_axis` helper completes
+  the local (forward, right, up) basis alongside the existing
+  `forward_axis`/`up_axis`.
+- **Constants, honestly labeled:** `AIR_CONTROL_TORQUE` is an uncalibrated
+  placeholder with no public reference at all (like `STEER_TORQUE` and
+  `HANDBRAKE_FRICTION_MULTIPLIER`), shared uniformly across pitch, yaw,
+  and roll — a documented simplification, since real Rocket League's
+  three rates differ from each other (roll fastest).
+- **Not implemented** (explicitly, not silently dropped): double
+  jump/dodge, variable jump height (holding jump for a higher jump), and
+  wall jump — each a distinct real mechanic, tracked as separate
+  follow-up work. Also out of scope: per-axis torque calibration, an "air
+  roll only" input mode, camera-relative stick mapping, and any
+  auto-orientation assistance on landing.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (98
+  total): pitch/yaw/roll each produce angular velocity about the correct
+  local axis for a stationary airborne car, air control has no effect
+  while grounded, a `None` analog value behaves like neutral input, and
+  opposite-sign yaw spins the opposite way, plus — the real end-to-end
+  proof — a car with yaw input in a live `PhysicsWorld::step` loop
+  (gravity zeroed) actually reorients itself mid-air, and a regression
+  test confirming a grounded car stays level despite stray pitch/yaw/roll
+  input.
+
+---
+
 ## Jump input
 **2026-08-29** · [#29](https://github.com/baileyrd/rusty_bullet/pull/29) · `689b006`
 

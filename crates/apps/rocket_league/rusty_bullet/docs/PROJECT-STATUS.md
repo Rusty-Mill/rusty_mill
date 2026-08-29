@@ -2,7 +2,7 @@
 
 - Last verified main commit: `689b006` (merge of [#29](https://github.com/baileyrd/rusty_bullet/pull/29))
 - Verified at: 2026-08-29
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, ground-driving car input (throttle/steering), boost, handbrake, and a single ground jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; double jump/dodge/variable jump height/wall jump/air-control and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, ground-driving car input (throttle/steering), boost, handbrake, a single ground jump, and air control all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; double jump/dodge/variable jump height/wall jump and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -217,14 +217,33 @@
   (starting `false`, kept in lockstep with `cars` by `with_car`) carrying
   the rising-edge state across steps, the same pattern `boost_amount`
   already uses. `JUMP_SPEED` (292 uu/s) is a commonly-cited community
-  number. **Not** implemented: double jump/dodge, variable jump height
-  (holding for a higher jump), wall jump, and air control — each a
-  distinct real mechanic, tracked as separate follow-up. 6 new unit tests
-  across `drive.rs`/`world.rs` in `rb_physics_bullet` (92 total), including
-  an end-to-end test confirming a car with jump input actually leaves the
-  ground in a live `PhysicsWorld::step` loop, and a regression test
-  confirming that holding jump for a car's entire flight (never released)
-  lets it land and settle instead of being relaunched on touchdown.
+  number. **Not** (at the time) implemented: double jump/dodge, variable
+  jump height (holding for a higher jump), wall jump, and air control —
+  each a distinct real mechanic, tracked as separate follow-up. 6 new unit
+  tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (92 total),
+  including an end-to-end test confirming a car with jump input actually
+  leaves the ground in a live `PhysicsWorld::step` loop, and a regression
+  test confirming that holding jump for a car's entire flight (never
+  released) lets it land and settle instead of being relaunched on
+  touchdown.
+- `RB-PHYSICS-001-FR-011` (air control) — `drive::apply_driven_forces`
+  applies torque about the car's local right/up/forward axes, scaled by
+  `ControllerInput.pitch`/`yaw`/`roll` (each an `Option<f32>`, `None`
+  treated as zero) times one shared `AIR_CONTROL_TORQUE` constant, gated
+  on the car *not* touching the ground — the mirror image of
+  throttle/steering/handbrake/jump's ground-only gating, so it never
+  competes with ground steering for the yaw axis. Unlike ground steering,
+  not speed-scaled: a car can spin from a standing start in the air, since
+  there's no wheel grip to require momentum for. `AIR_CONTROL_TORQUE` is
+  an uncalibrated placeholder shared across all three axes — a documented
+  simplification, since real Rocket League's pitch/yaw/roll rates differ
+  from each other. **Not** implemented: double jump/dodge, variable jump
+  height, and wall jump — each a distinct real mechanic, tracked as
+  separate follow-up. 6 new unit tests across `drive.rs`/`world.rs` in
+  `rb_physics_bullet` (98 total), including an end-to-end test confirming
+  a car with yaw input actually reorients itself mid-air (gravity zeroed)
+  in a live `PhysicsWorld::step` loop, and a regression test confirming a
+  grounded car stays level despite stray pitch/yaw/roll input.
 
 ## In progress
 
@@ -266,28 +285,28 @@
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
   approximation once 3+ bodies mutually touch in the same step) and
-  double jump/dodge, variable jump height, wall jump, and air control —
-  all real, not-yet-started follow-up work (see the spec's Non-goals/Open
+  double jump/dodge, variable jump height, and wall jump — all real,
+  not-yet-started follow-up work (see the spec's Non-goals/Open
   questions); a car can now drive, steer, boost (on the ground or in the
-  air), handbrake/drift, and take one ground jump, and bounces off the
-  ball/other cars, but can't yet double-jump/dodge, vary its jump height,
-  jump off a wall, or control itself in the air.
+  air), handbrake/drift, take one ground jump, and control itself in the
+  air (pitch/yaw/roll), and bounces off the ball/other cars, but can't yet
+  double-jump/dodge, vary its jump height, or jump off a wall.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. Double jump/dodge, variable jump height, wall jump, and/or air control —
-   real follow-up work for `rb_physics_bullet::drive`;
-   `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s own
-   uncalibrated constants) needs `PHASE-0-EXIT` real data regardless.
+2. Double jump/dodge, variable jump height, and/or wall jump — real
+   follow-up work for `rb_physics_bullet::drive`; `RB-PHYSICS-001-FR-005`
+   (constant calibration, including `drive`'s own uncalibrated constants)
+   needs `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (142 tests: 23 in `rb_domain`, 92 in
+- `cargo test --workspace`: pass (148 tests: 23 in `rb_domain`, 98 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

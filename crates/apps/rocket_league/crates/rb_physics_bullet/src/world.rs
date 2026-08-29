@@ -873,4 +873,65 @@ mod tests {
             settled.linear_velocity
         );
     }
+
+    #[test]
+    fn a_car_with_air_control_input_reorients_itself_midair() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate air control from falling
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                yaw: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            world.step(dt);
+        }
+
+        let forward_after = world.cars[0].orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            (forward_after - Vec3::new(1.0, 0.0, 0.0)).length() > 0.1,
+            "expected air control yaw input to visibly reorient the car mid-air, forward={forward_after:?}"
+        );
+    }
+
+    #[test]
+    fn air_control_does_not_reorient_a_grounded_car() {
+        // Regression guard: on the ground, steering already owns yaw —
+        // air control must stay a no-op there, or a car resting with
+        // stray pitch/yaw/roll input would spuriously spin in place.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                pitch: Some(1.0),
+                yaw: Some(1.0),
+                roll: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let up_after = world.cars[0].orientation.rotate(&Vec3::new(0.0, 0.0, 1.0));
+        assert!(
+            (up_after - Vec3::new(0.0, 0.0, 1.0)).length() < 0.1,
+            "expected a grounded car to stay level despite air control input, up={up_after:?}"
+        );
+    }
 }

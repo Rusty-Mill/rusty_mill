@@ -96,6 +96,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `car_jump_held: Vec<bool>` to track the rising-edge state per car.
   Double jump/dodge, variable jump height, wall jump, and air control
   remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-011`) — air control:
+  torque about the car's local right/up/forward axes from
+  `ControllerInput.pitch`/`yaw`/`roll`, gated on the car *not* touching
+  the ground, not speed-scaled (unlike ground steering). Double
+  jump/dodge, variable jump height, and wall jump remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

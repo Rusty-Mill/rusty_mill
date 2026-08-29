@@ -1,13 +1,14 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.10.0
+- Version: 0.11.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), and box-vs-box (car-vs-car) collision all implemented,
   tested, and wired into a real N-body `PhysicsWorld` scene; ground-driving
-  car input (throttle, steering), boost, handbrake, and a single ground
-  jump implemented; double jump/dodge, variable jump height, wall jump,
-  air control, split impulse, warm-starting, a combined multi-body solve,
-  and constant calibration are open follow-up work)
+  car input (throttle, steering), boost, handbrake, a single ground jump,
+  and air control (pitch/yaw/roll) implemented; double jump/dodge,
+  variable jump height, wall jump, split impulse, warm-starting, a
+  combined multi-body solve, and constant calibration are open follow-up
+  work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -44,8 +45,10 @@ module) — see FR-007 — plus a depletable boost resource
 (`PhysicsWorld::set_car_boost`) giving it a flat forward force usable in
 the air, unlike throttle — see FR-008 — a handbrake that temporarily
 reduces its ground friction while held, letting it slide instead of
-gripping cleanly through a turn — see FR-009 — and a single fixed-height
-ground jump, fired once per fresh press — see FR-010.
+gripping cleanly through a turn — see FR-009 — a single fixed-height
+ground jump, fired once per fresh press — see FR-010 — and air control
+(pitch/yaw/roll torque about its own local axes while airborne) — see
+FR-011.
 
 ## Non-goals (this increment)
 
@@ -63,20 +66,27 @@ ground jump, fired once per fresh press — see FR-010.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **Double jump/dodge, variable jump height, wall jump, and air control.**
+- **Double jump/dodge, variable jump height, and wall jump.**
   `drive::apply_driven_forces` now covers ground throttle and steering
-  (FR-007), boost (FR-008), handbrake/drift (FR-009), and a single
-  fixed-height ground jump (FR-010). Real Rocket League's jump is richer
-  than that single impulse: holding jump adds extra upward acceleration
-  for a short window (variable height, not modeled — this port always
-  applies the same fixed `JUMP_SPEED`), a second airborne jump usually
-  paired with a directional dodge impulse/torque exists (double jump/dodge,
-  not modeled — this port's jump is grounded-only), and jumping off an
-  arena wall exists in real play (not modeled — this scope has no arena
-  walls at all). Air control (pitch/yaw/roll torque while airborne) is a
-  further, separate mechanic. Each is its own real feature, not a small
-  extension of the ground jump — left as separate, explicitly tracked
-  follow-up work.
+  (FR-007), boost (FR-008), handbrake/drift (FR-009), a single
+  fixed-height ground jump (FR-010), and air control (FR-011). Real Rocket
+  League's jump is richer than that single impulse: holding jump adds
+  extra upward acceleration for a short window (variable height, not
+  modeled — this port always applies the same fixed `JUMP_SPEED`), a
+  second airborne jump usually paired with a directional dodge
+  impulse/torque exists (double jump/dodge, not modeled — this port's jump
+  is grounded-only), and jumping off an arena wall exists in real play
+  (not modeled — this scope has no arena walls at all). Each is its own
+  real feature, not a small extension of the ground jump or of air control
+  — left as separate, explicitly tracked follow-up work.
+- **Per-axis air-control torque, and any assisted/auto-rotation
+  behavior.** FR-011's `AIR_CONTROL_TORQUE` is one shared constant for
+  pitch, yaw, and roll; real Rocket League's actual per-axis rates differ
+  from each other (roll fastest, pitch and yaw slower), which this port
+  doesn't model. Real Rocket League also has an "air roll only" input mode
+  and camera-relative stick mapping subtleties, and some auto-orientation
+  assistance on landing — none of that is modeled here; this increment is
+  a direct, camera-independent pitch/yaw/roll torque, nothing more.
 - **A per-wheel tire/slip model.** Handbrake (FR-009) is modeled as a
   uniform, temporary reduction of the car's single `RigidBody.friction`
   value, not a distinct front/rear grip split or a slip-angle-driven tire
@@ -213,6 +223,19 @@ ground jump, fired once per fresh press — see FR-010.
   pattern `boost_amount` already uses for cross-call state. Variable jump
   height (holding for a higher jump), double jump/dodge, and wall jump are
   explicitly out of scope for this requirement — see Non-goals.
+- `RB-PHYSICS-001-FR-011` (air control, implemented):
+  `drive::apply_driven_forces` applies torque about the car's local right,
+  up, and forward axes, scaled directly by `ControllerInput.pitch`/`yaw`/
+  `roll` (each an `Option<f32>`, `None` treated as zero) times one shared
+  `AIR_CONTROL_TORQUE` constant, gated on the car *not* touching the
+  ground — the mirror image of throttle/steering/handbrake/jump's
+  ground-only gating, so it never competes with ground steering for the
+  yaw axis. Unlike ground steering, air control is not speed-scaled: a
+  car can spin from a standing start in the air, since there's no wheel
+  grip requiring momentum. `AIR_CONTROL_TORQUE` is an uncalibrated
+  placeholder shared by all three axes — a documented simplification,
+  since real Rocket League's pitch/yaw/roll rates differ from each other
+  — see Non-goals.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -242,12 +265,12 @@ ground jump, fired once per fresh press — see FR-010.
   math generalized to two dynamic bodies' shared contact manifold.
 - `drive`: `apply_driven_forces` — couples a car's `ControllerInput` into
   ground throttle/steering forces and torques, a boost force/resource
-  drain, a handbrake-driven temporary friction adjustment, and a
-  rising-edge-triggered ground jump impulse (not a Bullet3 port — this
-  project's own model of Rocket League's driving mechanics, since the real
-  numbers aren't public; see the module's own doc comment for which
-  constants are commonly-cited community estimates vs. uncalibrated
-  placeholders).
+  drain, a handbrake-driven temporary friction adjustment, a
+  rising-edge-triggered ground jump impulse, and airborne pitch/yaw/roll
+  torque (not a Bullet3 port — this project's own model of Rocket League's
+  driving mechanics, since the real numbers aren't public; see the
+  module's own doc comment for which constants are commonly-cited
+  community estimates vs. uncalibrated placeholders).
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
@@ -363,8 +386,16 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   end-to-end `PhysicsWorld::step` loop confirms a car with jump input
   actually leaves the ground, and — holding jump for the car's entire
   flight, never released — confirms it lands and settles instead of being
-  relaunched every time it touches back down. All FR-007/FR-008/FR-009/
-  FR-010 behavior covered by `rb_physics_bullet`'s unit tests (92 tests as
+  relaunched every time it touches back down.
+- FR-011 (met, air control): pitch/yaw/roll each produce angular velocity
+  about the correct local axis for a stationary airborne car (no speed
+  requirement, unlike ground steering); air control has no effect while
+  grounded; a `None` analog value behaves like neutral input; opposite-sign
+  yaw spins the opposite way. An end-to-end `PhysicsWorld::step` loop
+  (gravity zeroed) confirms a car with yaw input actually reorients itself
+  mid-air, and a regression test confirms a grounded car stays level
+  despite stray pitch/yaw/roll input. All FR-007/FR-008/FR-009/FR-010/
+  FR-011 behavior covered by `rb_physics_bullet`'s unit tests (98 tests as
   of this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
@@ -385,16 +416,20 @@ one-pair-at-a-time solve, see Non-goals, is untested against that).
 `drive::apply_driven_forces`'s constants are even further from validated:
 `MAX_CAR_SPEED`, `MAX_BOOST`, `BOOST_ACCELERATION`, and `JUMP_SPEED` are
 commonly-cited community numbers, but `THROTTLE_ACCELERATION`,
-`BOOST_CONSUMPTION_RATE`, `STEER_TORQUE`, and
-`HANDBRAKE_FRICTION_MULTIPLIER` are this project's own simplifications
-(or, for `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`, uncalibrated
-placeholders with no public reference at all) — the unit tests confirm
-the *shape* of the response (accelerates, caps at max speed, yaws when
-moving not when parked, boosts regardless of ground contact, drains the
-tank at a constant rate even once the force itself stops applying, slides
-more under reduced handbrake friction than under normal grip, jumps once
-per fresh press), not that a real car's throttle/steer/boost/
-handbrake/jump response actually matches these curves.
+`BOOST_CONSUMPTION_RATE`, `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+and `AIR_CONTROL_TORQUE` are this project's own simplifications (or, for
+`STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/`AIR_CONTROL_TORQUE`,
+uncalibrated placeholders with no public reference at all) — the unit
+tests confirm the *shape* of the response (accelerates, caps at max speed,
+yaws when moving not when parked, boosts regardless of ground contact,
+drains the tank at a constant rate even once the force itself stops
+applying, slides more under reduced handbrake friction than under normal
+grip, jumps once per fresh press, spins about the correct axis from a
+standing start in the air), not that a real car's throttle/steer/boost/
+handbrake/jump/air-control response actually matches these curves.
+`AIR_CONTROL_TORQUE` is additionally a per-axis simplification: real
+Rocket League's pitch/yaw/roll rates differ from each other, and this port
+shares one constant across all three.
 
 ## Traceability
 
@@ -406,16 +441,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- Double jump/dodge, variable jump height, wall jump, and air control (see
-  Non-goals) — each a distinct real mechanic; not started.
+- Double jump/dodge, variable jump height, and wall jump (see Non-goals) —
+  each a distinct real mechanic; not started.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
-  `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`, and
-  re-checking `MAX_CAR_SPEED`/`MAX_BOOST`/`BOOST_ACCELERATION`/
-  `JUMP_SPEED`) against real recorded driving data — needs `RB-VERIFY-002`
-  capture data; not started. `STEER_TORQUE` and
-  `HANDBRAKE_FRICTION_MULTIPLIER` in particular have no public reference
-  at all (unlike gravity, max speed, the boost constants, or `JUMP_SPEED`),
-  so either may be off by a large factor, not just imprecise.
+  `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  `AIR_CONTROL_TORQUE`, and re-checking `MAX_CAR_SPEED`/`MAX_BOOST`/
+  `BOOST_ACCELERATION`/`JUMP_SPEED`) against real recorded driving data —
+  needs `RB-VERIFY-002` capture data; not started. `STEER_TORQUE`,
+  `HANDBRAKE_FRICTION_MULTIPLIER`, and `AIR_CONTROL_TORQUE` in particular
+  have no public reference at all (unlike gravity, max speed, the boost
+  constants, or `JUMP_SPEED`), so any of them may be off by a large
+  factor, not just imprecise.
+- Splitting `AIR_CONTROL_TORQUE` into distinct per-axis constants (pitch,
+  yaw, roll) once real recorded air-control data exists to calibrate them
+  separately — real Rocket League's three rates genuinely differ (roll
+  fastest); sharing one constant is a documented simplification, not a
+  claim they're actually equal.
 - Handbrake's real mechanic (reduced rear-wheel grip enabling a
   steering-assisted drift) doesn't map cleanly onto this port's one-box,
   uniform-friction car model (see Non-goals) — worth revisiting whether a
@@ -449,6 +490,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.11.0 (2026-08-29): FR-011 added and implemented (air control) —
+  `drive::apply_driven_forces` applies torque about the car's local
+  right/up/forward axes, scaled by `ControllerInput.pitch`/`yaw`/`roll`
+  (each an `Option<f32>`, `None` treated as zero) times one shared
+  `AIR_CONTROL_TORQUE` constant, gated on the car *not* touching the
+  ground — the mirror image of throttle/steering/handbrake/jump's
+  ground-only gating. Unlike ground steering, not speed-scaled: a car can
+  spin from a standing start in the air. New `right_axis` helper completes
+  the local (forward, right, up) basis `forward_axis`/`up_axis` already
+  provided. `AIR_CONTROL_TORQUE` is a shared, uncalibrated placeholder
+  across all three axes — a documented simplification, since real Rocket
+  League's pitch/yaw/roll rates differ from each other. Double jump/dodge,
+  variable jump height, and wall jump remain explicitly not implemented —
+  see Non-goals. 6 new unit tests across `drive.rs` and `world.rs` in
+  `rb_physics_bullet` (98 total), including an end-to-end test confirming
+  a car with yaw input actually reorients itself mid-air (gravity zeroed)
+  in a live `PhysicsWorld::step` loop, and a regression test confirming a
+  grounded car stays level despite stray pitch/yaw/roll input.
 - 0.10.0 (2026-08-29): FR-010 added and implemented (single ground jump) —
   `drive::apply_driven_forces` applies a fixed `JUMP_SPEED` instantaneous
   upward velocity change (via `RigidBody::apply_impulse`) on the rising
