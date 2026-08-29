@@ -60,6 +60,7 @@ have landed so far.
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
 | [`rusty_uuid`](crates/rusty_uuid) | `crates/rusty_uuid` | Minimal, dependency-free UUID v4 generation |
+| [`rusty_wiremock`](crates/rusty_wiremock) | `crates/rusty_wiremock` | `no_std` + `alloc` sovereign HTTP mock server and request matcher for Rusty Mill test suites, built on `rusty_http`/`rusty_json`/`rusty_std` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -302,6 +303,14 @@ mechanical rev-to-path pattern the other swaps in this series follow.
 `rusty_uuid` has zero dependencies of any kind, so nothing needed
 swapping — its own merge is just the subtree add plus workspace wiring.
 
+`rusty_wiremock` needed no pin retirement at all: its three dependencies
+(`rusty_http`, `rusty_json`, `rusty_std`) were already `path` dependencies
+in the standalone repo's own `Cargo.toml`, anticipating this exact
+workspace layout — all three were already merged siblings by the time
+`rusty_wiremock` joined, so the subtree merge just needed wiring into
+`members`. Its own crate has no platform-specific code, so no Windows
+cross-compile check applies.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -341,7 +350,8 @@ The second wave, merging in the same way, adds:
 at a time, so the Crates table above only lists the ones already landed.
 
 A third wave continues the same way, starting with
-[`rusty_wire`](https://github.com/baileyrd/rusty_wire),
+[`rusty_wire`](https://github.com/baileyrd/rusty_wire) and
 [`rusty_std`](https://github.com/baileyrd/rusty_std), and now
-[`rusty_uuid`](https://github.com/baileyrd/rusty_uuid) — merged one at a
-time, same process.
+[`rusty_uuid`](https://github.com/baileyrd/rusty_uuid) and
+[`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock) — merged
+one at a time, same process.
