@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Boost input
-**2026-08-29** · PR pending · commit pending
+**2026-08-29** · [#25](https://github.com/baileyrd/rusty_bullet/pull/25) · `40e70cd`
 
 - **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a boost
   force (`RB-PHYSICS-001-FR-008`) — a flat forward force
