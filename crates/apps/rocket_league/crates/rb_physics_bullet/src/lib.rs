@@ -15,18 +15,23 @@
 //! anisotropic inertia tensor (a sphere's isotropic inertia never actually
 //! needed one, but shares the same code path — see `body.rs`).
 //!
+//! `drive` couples `rb_domain::ControllerInput` into ground-driving forces
+//! (throttle, steering) on a car — see its own module doc for what's
+//! deliberately still out of scope (boost, jump, air control, handbrake).
+//!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`
 //! resolves each ball-vs-car and car-vs-car pair independently, one full
 //! solver pass at a time, which is an approximation once 3+ bodies are
 //! mutually touching in the same step (see `world`'s doc comment); split
-//! impulse; warm-starting/sleeping; and consuming a recorded input
-//! sequence — a car body here is a free rigid box, not a driven vehicle,
-//! so `simulate` simulates the scene in isolation from its own initial
-//! state.
+//! impulse; warm-starting/sleeping; and consuming a *recorded* input
+//! sequence — `PhysicsWorld::set_car_input` sets a car's current input
+//! (persisting until changed), but nothing yet drives that from real
+//! `RB-VERIFY-002` capture data frame-by-frame.
 
 pub mod body;
 pub mod collision;
+pub mod drive;
 pub mod integrate;
 pub mod mat3;
 pub mod solver;

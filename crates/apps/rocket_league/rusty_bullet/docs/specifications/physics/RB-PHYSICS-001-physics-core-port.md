@@ -1,10 +1,11 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.6.0
+- Version: 0.7.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), and box-vs-box (car-vs-car) collision all implemented,
-  tested, and wired into a real N-body `PhysicsWorld` scene; driven car
-  input, split impulse, warm-starting, a combined multi-body solve, and
+  tested, and wired into a real N-body `PhysicsWorld` scene; ground-driving
+  car input (throttle, steering) implemented; boost, jump, air control,
+  handbrake, split impulse, warm-starting, a combined multi-body solve, and
   constant calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
@@ -35,7 +36,10 @@ tangent directions) — resolving an entire ground-contact manifold together
 (`RigidBody`/`Mat3`, see Architecture) shared by both shapes.
 `PhysicsWorld` carries `cars: Vec<RigidBody>` and resolves every
 ball-vs-car and car-vs-car pair each step, so `box_vs_box` now runs for
-real in a live scene, not just in isolation under a unit test.
+real in a live scene, not just in isolation under a unit test. Each car
+also has a current `ControllerInput` (`PhysicsWorld::set_car_input`)
+driving ground throttle and steering forces/torques on it (`drive`
+module) — see FR-007.
 
 ## Non-goals (this increment)
 
@@ -53,11 +57,19 @@ real in a live scene, not just in isolation under a unit test.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **Driven car input.** A car body here is a free rigid box — nothing
-  couples throttle/steer/boost input into forces or torques on it yet.
-  That needs a recorded input sequence to drive (`RB-VERIFY-002`) and is a
-  distinct, larger "car driving physics" concern from box-shaped rigid-body
-  mechanics alone.
+- **Boost, jump, air control, and handbrake.** `drive::apply_driven_forces`
+  (FR-007) covers ground throttle and steering only. Boost (a flat forward
+  force, usable in the air unlike throttle), jump (a vertical impulse plus
+  Rocket League's "double jump"/dodge mechanics), air control (pitch/yaw/roll
+  torque while airborne), and handbrake/drift (a distinct lateral-friction
+  mode) are each their own real mechanic, not a small extension of
+  ground-driving — left as separate, explicitly tracked follow-up work.
+- **Consuming a recorded input sequence.** `PhysicsWorld::set_car_input`
+  sets a car's *current* input, persisting until changed — a caller can
+  drive a car through a whole `simulate()` run, or update it every step,
+  but nothing here yet reads a real `RB-VERIFY-002` capture file
+  frame-by-frame to do that automatically; that's `rb_verify_cli`'s
+  concern once real capture data exists.
 - **Split impulse.** This port always takes Bullet's non-split contact-resolution
   branch (position and velocity correction combined into one `rhs`). See
   `rb_physics_bullet::solver`'s module doc for what this trades away.
@@ -125,6 +137,18 @@ real in a live scene, not just in isolation under a unit test.
   pair each step, so this pairing runs for real in a live scene — not just
   under a unit test, as it did before multi-car `PhysicsWorld` support
   landed.
+- `RB-PHYSICS-001-FR-007` (driven car input, implemented — ground throttle
+  and steering only, see Non-goals): `drive::apply_driven_forces` couples
+  `rb_domain::ControllerInput` into forces/torques on a car: throttle
+  (accelerate/reverse along the car's local forward axis, capped at
+  `MAX_CAR_SPEED`) and steering (yaw torque about the car's local up axis,
+  scaled by current speed so a stationary car can't turn in place), both
+  gated on the car actually touching the ground. `PhysicsWorld` gains
+  `set_car_input` (persists a car's current input across steps) and
+  `frame()` now reports each car's actual driving input instead of
+  `None`. A car with no input set behaves exactly as before this
+  requirement existed (neutral `ControllerInput::default()` applies zero
+  force/torque).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -152,14 +176,23 @@ real in a live scene, not just in isolation under a unit test.
   resolution over an entire ground-contact manifold (one dynamic body vs.
   a static plane); `resolve_contacts_between` — the same sequential-impulse
   math generalized to two dynamic bodies' shared contact manifold.
+- `drive`: `apply_driven_forces` — couples a car's `ControllerInput` into
+  ground throttle/steering forces and torques (not a Bullet3 port — this
+  project's own model of Rocket League's driving mechanics, since the real
+  numbers aren't public; see the module's own doc comment for which
+  constants are commonly-cited community estimates vs. uncalibrated
+  placeholders).
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
-  velocity, then resolve every contact — ground, every ball-vs-car pair,
-  then every car-vs-car pair — then integrate every body's transform).
-  `PhysicsWorld` carries one ball (`RigidBody`, always present) and
-  `cars: Vec<RigidBody>` (any number, via repeated `with_car` calls);
-  `frame()` assigns each car's `player_id` as its index in `cars`.
+  velocity — for cars, including `drive::apply_driven_forces` — then
+  resolve every contact — ground, every ball-vs-car pair, then every
+  car-vs-car pair — then integrate every body's transform). `PhysicsWorld`
+  carries one ball (`RigidBody`, always present) and `cars: Vec<RigidBody>`
+  (any number, via repeated `with_car` calls) with a parallel
+  `car_inputs: Vec<ControllerInput>` set via `set_car_input`; `frame()`
+  assigns each car's `player_id` as its index in `cars` and reports its
+  current input.
 
 No `PhysicsStateSource`-style trait exists yet for "the physics engine"
 specifically — `rb_verify_cli` calls `rb_physics_bullet::simulate`
@@ -229,8 +262,17 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   multi-car scene from repeated `with_car` calls, assigns each car a
   sequential `player_id`, and — the real end-to-end proof — two cars shot
   head-on at each other in a live `PhysicsWorld::step` loop actually
-  bounce off each other instead of tunnelling through. All covered by
-  `rb_physics_bullet`'s unit tests (65 tests as of this version).
+  bounce off each other instead of tunnelling through.
+- FR-007 (met, ground throttle/steering only): a neutral input applies no
+  force or torque (so a car with no input set is unaffected); throttle
+  accelerates a grounded car forward, has no effect while airborne, stops
+  accelerating at `MAX_CAR_SPEED`, and reverse throttle accelerates
+  backward; steering has no effect on a stationary car but yaws a moving
+  one, in the opposite direction for opposite `steer` sign; an end-to-end
+  `PhysicsWorld::step` loop with `set_car_input` set to full throttle
+  drives a car forward across the ground, and `frame()` reports that same
+  input back. All covered by `rb_physics_bullet`'s unit tests (75 tests as
+  of this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -247,6 +289,13 @@ inertia tensor behaves correctly, a collision conserves momentum), not
 fidelity to a real car's actual resting/tumbling/hitting behavior, or to
 how many real cars are ever mutually touching at once (this port's
 one-pair-at-a-time solve, see Non-goals, is untested against that).
+`drive::apply_driven_forces`'s constants are even further from validated:
+`MAX_CAR_SPEED` is a commonly-cited community number, but
+`THROTTLE_ACCELERATION` and `STEER_TORQUE` are this project's own
+simplification and an uncalibrated placeholder respectively — the unit
+tests confirm the *shape* of the response (accelerates, caps at max speed,
+yaws when moving, not when parked), not that a real car's throttle/steer
+response actually matches these curves.
 
 ## Traceability
 
@@ -258,8 +307,13 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- Driven car input (throttle/steer/boost coupling into forces/torques) —
-  needs `RB-VERIFY-002` capture data to validate against; not started.
+- Boost, jump, air control, and handbrake (see Non-goals) — each a
+  distinct real mechanic; not started.
+- Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
+  and re-checking `MAX_CAR_SPEED`) against real recorded driving data —
+  needs `RB-VERIFY-002` capture data; not started. `STEER_TORQUE` in
+  particular has no public reference at all (unlike gravity or max speed),
+  so it may be off by a large factor, not just imprecise.
 - FR-005 above.
 - Restitution/friction combine mode (`rb_physics_bullet::solver` currently
   averages; Bullet's actual default is `max` for both) — revisit once real
@@ -281,6 +335,23 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.7.0 (2026-08-29): FR-007 added and implemented (ground throttle and
+  steering only) — new `drive` module, `apply_driven_forces` couples
+  `rb_domain::ControllerInput` into a throttle force (along the car's
+  local forward axis, capped at `MAX_CAR_SPEED`) and a steering torque
+  (about the car's local up axis, scaled by current speed), both gated on
+  ground contact. `PhysicsWorld` gains `car_inputs: Vec<ControllerInput>`
+  (kept in lockstep with `cars` by `with_car`, defaulting to neutral) and
+  `set_car_input` to update a car's persistent input; `step` computes each
+  car's ground-contact state up front and applies its driven forces
+  alongside gravity, before integrating velocities; `frame()` now reports
+  each car's actual input instead of always `None`. Boost, jump, air
+  control, and handbrake remain explicitly not implemented — see
+  Non-goals. 10 new unit tests in `rb_physics_bullet` (75 total),
+  including an end-to-end test confirming a car with throttle input
+  actually drives forward across the ground in a live `PhysicsWorld::step`
+  loop, and a regression test confirming a car with no input set behaves
+  exactly as before this requirement existed.
 - 0.6.0 (2026-08-29): Multi-car `PhysicsWorld` support — `car:
   Option<RigidBody>` is replaced by `cars: Vec<RigidBody>` (a breaking
   field rename); `with_car` now appends, so it's callable any number of

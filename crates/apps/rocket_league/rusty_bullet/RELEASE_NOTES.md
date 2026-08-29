@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Driven car input (ground throttle and steering)
+**2026-08-29** · pending PR
+
+- **Added:** `rb_physics_bullet::drive`, coupling `rb_domain::ControllerInput`
+  into a throttle force (along the car's local forward axis, capped at
+  `MAX_CAR_SPEED`) and a steering torque (about the car's local up axis,
+  scaled by current speed so a stationary car can't turn in place) —
+  `RB-PHYSICS-001-FR-007`. Both are gated on the car actually touching the
+  ground; a free-floating car has no wheels to grip, so airborne input
+  does nothing yet.
+- **Added:** `PhysicsWorld::set_car_input`, setting a car's current
+  `ControllerInput`, which persists across steps until changed again
+  (matching how a real controller's state holds between frames).
+  `PhysicsWorld::step` computes each car's ground-contact state up front
+  and applies its driven forces alongside gravity, before integrating
+  velocities.
+- **Changed:** `frame()` now reports each car's actual driving input
+  (`Some(input)`) instead of always `None`.
+- **Constants, honestly labeled:** `MAX_CAR_SPEED` (2300 uu/s) is a
+  commonly-cited community number (the same body of public research
+  `PhysicsWorld`'s gravity constant comes from); `THROTTLE_ACCELERATION`
+  is this project's own simplified constant standing in for Rocket
+  League's real speed-dependent throttle curve; `STEER_TORQUE` is an
+  uncalibrated placeholder with no public reference at all, chosen only to
+  produce a visibly responsive turn in tests.
+- **Not implemented** (explicitly, not silently dropped): boost, jump, air
+  control (pitch/yaw/roll torque while airborne), and handbrake/drift —
+  each a distinct real mechanic, tracked as separate follow-up work. A car
+  with no input set behaves exactly as a free rigid box always has.
+- 10 new unit tests in `rb_physics_bullet` (75 total): a neutral input is
+  a no-op, throttle accelerates/caps-at-max-speed/reverses/is
+  grounded-only, steering is speed-gated (a parked car can't turn) and
+  sign-correct, and — the real end-to-end proof — a car given throttle
+  input in a live `PhysicsWorld::step` loop actually drives forward across
+  the ground, plus a regression test confirming a car with no input set is
+  unaffected.
+
+---
+
 ## Multi-car PhysicsWorld support
 **2026-08-29** · [#21](https://github.com/baileyrd/rusty_bullet/pull/21) · `28b8d4c`
 
