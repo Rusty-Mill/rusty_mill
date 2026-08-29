@@ -1,0 +1,16 @@
+[package]
+name = "rusty_time"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_time"
+keywords = ["time", "datetime", "date", "iso8601", "no-std"]
+categories = ["date-and-time", "no-std"]
+
+[dependencies]
+rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
+
+[features]
+default = []
