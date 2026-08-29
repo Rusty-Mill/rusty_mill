@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Driven car input (ground throttle and steering)
-**2026-08-29** · pending PR
+**2026-08-29** · [#23](https://github.com/baileyrd/rusty_bullet/pull/23) · `f1a0381`
 
 - **Added:** `rb_physics_bullet::drive`, coupling `rb_domain::ControllerInput`
   into a throttle force (along the car's local forward axis, capped at
