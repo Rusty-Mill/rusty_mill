@@ -1,0 +1,24 @@
+[workspace]
+members = ["derive"]
+
+[package]
+name = "rusty_err"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_err"
+keywords = ["error", "context", "derive", "no-std"]
+categories = ["rust-patterns", "no-std"]
+
+[dependencies]
+# Pinned git dep, not a path dep: a `git = "..."` dependency on this crate
+# clones only this one repository, so a sibling `../rusty_std` checkout
+# doesn't exist for CI or any external consumer (matches rusty_std's own
+# rationale for pinning rusty_libc/rusty_win32 the same way).
+rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
+rusty_err_derive = { path = "derive", version = "0.1.0" }
+
+[features]
+default = []
