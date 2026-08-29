@@ -112,6 +112,14 @@ fn serve_one_https_response(listener: TcpListener, body: &'static [u8]) -> Vec<u
 
 #[tokio::test]
 async fn https_request_completes_on_a_real_tokio_runtime() {
+    // In this workspace, `cargo test --workspace` unifies rustls's crypto-provider
+    // features across every crate that depends on it -- this crate's own `ring`
+    // (matching `rusty_tls`) alongside `aws-lc-rs` (pulled in by `reqwest` elsewhere
+    // in the workspace, via its `rustls` feature). With both compiled in, rustls's
+    // implicit single-provider auto-detection is ambiguous and `ServerConfig::builder()`
+    // below panics unless a provider is installed explicitly first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
     let addr: SocketAddr = listener.local_addr().unwrap();
     let ca_der = serve_one_https_response(listener, b"hello over tls, over real tokio");
