@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Multi-car PhysicsWorld support
-**2026-08-29** · pending PR
+**2026-08-29** · [#21](https://github.com/baileyrd/rusty_bullet/pull/21) · `28b8d4c`
 
 - **Changed (breaking):** `PhysicsWorld.car: Option<RigidBody>` is
   replaced by `cars: Vec<RigidBody>`. `with_car` now appends, so calling
