@@ -10,12 +10,10 @@ keywords = ["gui", "window", "event", "clipboard", "no-std"]
 categories = ["gui", "no-std"]
 
 [dependencies]
-# rusty_wire is now a sibling in this same workspace -- plain path
-# dependency. rusty_std remains a pinned git dep (a `git = "..."`
-# dependency clones only that one repository, so a sibling checkout
-# doesn't exist for any external consumer) until it's merged in too.
+# rusty_wire/rusty_std are now siblings in this same workspace -- plain
+# path dependencies.
 rusty_wire = { path = "../rusty_wire" }
-rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
+rusty_std = { path = "../rusty_std" }
 
 [target.'cfg(windows)'.dependencies]
 rusty_win32 = { path = "../rusty_win32", version = "0.1.0" }

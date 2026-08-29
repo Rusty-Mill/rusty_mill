@@ -9,10 +9,11 @@ repository = "https://github.com/baileyrd/rusty_tokio"
 [dependencies]
 # See "Why a separate crate" in rusty_tokio-macros' own docs.
 rusty_tokio-macros = { path = "rusty_tokio-macros", version = "0.1.0" }
-# Pinned git dep, not a path dep: a `git = "..."` Cargo dependency on
-# this crate clones only this one repository, so a sibling `../rusty_std`
-# checkout doesn't exist for any external consumer -- see #254.
-rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "3ab2361e4b8bc873ecd8404178cac7288fbff2b7" }
+# rusty_std is now a sibling in this same workspace -- plain path
+# dependency. (Was pinned to rev 3ab2361e, content-identical to the
+# merge commit that landed it on rusty_std's own main -- no behavior
+# change from this swap.)
+rusty_std = { path = "../rusty_std" }
 libc = "0.2"
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/
