@@ -5348,6 +5348,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_time"
+version = "0.1.0"
+dependencies = [
+ "rusty_std",
+]
+
+[[package]]
 name = "rusty_tls"
 version = "0.10.1"
 dependencies = [
@@ -5396,6 +5403,10 @@ version = "0.1.0"
 dependencies = [
  "idna",
 ]
+
+[[package]]
+name = "rusty_uuid"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_win32"
