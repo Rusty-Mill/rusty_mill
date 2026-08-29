@@ -59,6 +59,7 @@ have landed so far.
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
+| [`rusty_uuid`](crates/rusty_uuid) | `crates/rusty_uuid` | Minimal, dependency-free UUID v4 generation |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -298,6 +299,9 @@ the current `rusty_win32` (both toolchains, plus a Windows
 cross-compile check) rather than assuming compatibility from the
 mechanical rev-to-path pattern the other swaps in this series follow.
 
+`rusty_uuid` has zero dependencies of any kind, so nothing needed
+swapping — its own merge is just the subtree add plus workspace wiring.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -337,5 +341,7 @@ The second wave, merging in the same way, adds:
 at a time, so the Crates table above only lists the ones already landed.
 
 A third wave continues the same way, starting with
-[`rusty_wire`](https://github.com/baileyrd/rusty_wire) — merged one at a
+[`rusty_wire`](https://github.com/baileyrd/rusty_wire),
+[`rusty_std`](https://github.com/baileyrd/rusty_std), and now
+[`rusty_uuid`](https://github.com/baileyrd/rusty_uuid) — merged one at a
 time, same process.
