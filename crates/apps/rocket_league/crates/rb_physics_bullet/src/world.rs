@@ -5,18 +5,22 @@
 
 use crate::body::{RigidBody, StaticPlane};
 use crate::collision;
-use crate::{integrate, solver};
-use rb_domain::{BallState, CarState, PhysicsFrame, Vec3};
+use crate::{drive, integrate, solver};
+use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 
 /// The whole simulated scene: one ball-like sphere, zero or more car-like
 /// boxes, and one ground plane. Every body collides with the ground; every
 /// car also collides with the ball and with every other car
 /// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
-/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped.
+/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Each car also has a
+/// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
+/// `ControllerInput::default()` — neutral — until set) driving it via
+/// `drive::apply_driven_forces`.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
+    car_inputs: Vec<ControllerInput>,
     pub ground: StaticPlane,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -36,19 +40,33 @@ impl PhysicsWorld {
         PhysicsWorld {
             ball,
             cars: Vec::new(),
+            car_inputs: Vec::new(),
             ground,
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
     }
 
-    /// Adds one car-shaped body to the scene. Callable more than once —
-    /// `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` builds a
-    /// two-car scene — since a car's `player_id` in `frame()` is just its
-    /// index in `cars`, added cars are always appended, never inserted.
+    /// Adds one car-shaped body to the scene, with a neutral
+    /// (`ControllerInput::default()`) input — set a real one afterward
+    /// with `set_car_input` if the car should actually drive. Callable
+    /// more than once — `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)`
+    /// builds a two-car scene — since a car's `player_id` in `frame()` is
+    /// just its index in `cars`, added cars are always appended, never
+    /// inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
         self.cars.push(car);
+        self.car_inputs.push(ControllerInput::default());
         self
+    }
+
+    /// Sets car `index`'s current controller input, which persists across
+    /// steps until changed again (matching how a real controller's state
+    /// holds between frames). Panics if `index` is out of bounds — an
+    /// invalid index is a programming error, not a recoverable runtime
+    /// condition (see the crate's "trust internal callers" convention).
+    pub fn set_car_input(&mut self, index: usize, input: ControllerInput) {
+        self.car_inputs[index] = input;
     }
 
     /// Applies forces and integrates velocities for one body — the first
@@ -60,6 +78,25 @@ impl PhysicsWorld {
         integrate::apply_gravity(body, gravity);
         integrate::apply_damping(body, dt);
         integrate::integrate_velocities(body, dt);
+    }
+
+    /// Like `apply_forces_and_integrate_velocities`, but for a car: also
+    /// applies `drive::apply_driven_forces` (gated on `on_ground`,
+    /// computed from the car's position at the start of this step, before
+    /// anything moves) alongside gravity, so `input`'s throttle/steer
+    /// forces are part of the same velocity-prediction phase.
+    fn drive_and_integrate_velocities(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        on_ground: bool,
+        gravity: Vec3,
+        dt: f32,
+    ) {
+        car.clear_forces();
+        integrate::apply_gravity(car, gravity);
+        drive::apply_driven_forces(car, input, on_ground);
+        integrate::apply_damping(car, dt);
+        integrate::integrate_velocities(car, dt);
     }
 
     /// Detects and resolves `body`'s ground contact (a manifold of 1 to 4
@@ -102,11 +139,13 @@ impl PhysicsWorld {
 
     /// Advances the whole scene by `dt` seconds, matching
     /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
-    /// every body's unconstrained velocity, then detect and resolve every
-    /// contact (ground contacts for every body, then every ball-vs-car
-    /// pair, then every car-vs-car pair), then integrate every body's
-    /// transform — never resolving one body's transform before another
-    /// body's contacts have had a chance to affect it.
+    /// every body's unconstrained velocity (for cars, including
+    /// `drive::apply_driven_forces` from that car's current input), then
+    /// detect and resolve every contact (ground contacts for every body,
+    /// then every ball-vs-car pair, then every car-vs-car pair), then
+    /// integrate every body's transform — never resolving one body's
+    /// transform before another body's contacts have had a chance to
+    /// affect it.
     ///
     /// Car-vs-car and ball-vs-car pairs are resolved one pair at a time
     /// (each running its own full `SOLVER_ITERATIONS` pass), not as one
@@ -116,9 +155,26 @@ impl PhysicsWorld {
     /// same step (e.g. a car pinned between the ball and another car),
     /// tracked as open follow-up in `RB-PHYSICS-001`, not hidden.
     pub fn step(&mut self, dt: f32) {
+        // Ground contact for driving purposes is checked up front, against
+        // each car's position at the start of this step (before gravity or
+        // driven forces move anything) — `resolve_ground_contact` below
+        // re-derives the same contacts for the actual solve; the small
+        // duplicated `contacts_vs_plane` call is simpler than threading
+        // the manifold through, and cheap (a handful of corner checks).
+        let car_on_ground: Vec<bool> = self
+            .cars
+            .iter()
+            .map(|car| !collision::contacts_vs_plane(car, &self.ground).is_empty())
+            .collect();
+
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for car in &mut self.cars {
-            Self::apply_forces_and_integrate_velocities(car, self.gravity, dt);
+        for ((car, input), on_ground) in self
+            .cars
+            .iter_mut()
+            .zip(self.car_inputs.iter())
+            .zip(car_on_ground.iter())
+        {
+            Self::drive_and_integrate_velocities(car, input, *on_ground, self.gravity, dt);
         }
 
         Self::resolve_ground_contact(&mut self.ball, &self.ground, dt);
@@ -147,21 +203,24 @@ impl PhysicsWorld {
 
     /// The scene's current state as a `PhysicsFrame`, for consumption by
     /// `RB-VERIFY-003`'s divergence scorer. One `CarState` per car in
-    /// `self.cars`, `player_id` set to each car's index (no recovered
-    /// input — there's no input source in this scope).
+    /// `self.cars`, `player_id` set to each car's index, `input` set to
+    /// that car's current `ControllerInput` (the one actually driving it
+    /// — not "recovered" the way `rb_replay_ingest`/`rb_capture_ingest`
+    /// use the field, but the same data).
     pub fn frame(&self) -> PhysicsFrame {
         let cars = self
             .cars
             .iter()
+            .zip(self.car_inputs.iter())
             .enumerate()
-            .map(|(i, car)| CarState {
+            .map(|(i, (car, input))| CarState {
                 player_id: i as u32,
                 position: car.position,
                 rotation: car.orientation,
                 velocity: car.linear_velocity,
                 angular_velocity: car.angular_velocity,
                 boost_amount: 0.0,
-                input: None,
+                input: Some(*input),
             })
             .collect();
         PhysicsFrame {
@@ -490,5 +549,60 @@ mod tests {
             "expected car b to bounce back (positive x velocity), got {}",
             b_after.linear_velocity.x
         );
+    }
+
+    #[test]
+    fn a_car_with_throttle_input_drives_forward_across_the_ground() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                throttle: 1.0,
+                ..Default::default()
+            },
+        );
+
+        let start_x = world.cars[0].position.x;
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.x > start_x + 1.0,
+            "expected the car to drive forward under throttle, start={start_x}, end={}",
+            world.cars[0].position.x
+        );
+        assert_eq!(
+            world.frame().cars[0].input,
+            Some(rb_domain::ControllerInput {
+                throttle: 1.0,
+                ..Default::default()
+            }),
+            "expected frame() to report the car's actual driving input"
+        );
+    }
+
+    #[test]
+    fn a_car_with_no_input_set_drives_exactly_like_before_driven_input_existed() {
+        // Regression guard: with_car's default (neutral) input must not
+        // change any existing free-rigid-box behavior.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 100.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..(6.0 / dt) as u32 {
+            world.step(dt);
+        }
+        let settled = world.cars[0];
+        assert!((settled.position.z - 18.0).abs() < 0.5);
+        assert!(settled.linear_velocity.length() < 1.0);
     }
 }

@@ -70,6 +70,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (running `box_vs_box` for real in a live scene for the first time), one
   pair at a time. A combined multi-body solve across 3+ simultaneously
   touching bodies and driven car input remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-007`) — couples
+  `rb_domain::ControllerInput` into ground-driving throttle force and
+  steering torque on a car, gated on ground contact. `PhysicsWorld` gains
+  `set_car_input` (a car's current, persistent input) and `frame()` now
+  reports it. Boost, jump, air control, and handbrake remain not
+  implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
@@ -92,6 +98,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `cars: Vec<RigidBody>` (breaking); `with_car` now appends instead of
   replacing, so it's callable any number of times to build a multi-car
   scene.
+- `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
+  current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —

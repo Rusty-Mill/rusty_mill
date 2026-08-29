@@ -2,7 +2,7 @@
 
 - Last verified main commit: `28b8d4c` (merge of [#21](https://github.com/baileyrd/rusty_bullet/pull/21))
 - Verified at: 2026-08-28
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, and car-vs-car collision all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; driven car input and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, and ground-driving car input (throttle/steering) all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; boost/jump/air-control/handbrake and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -137,13 +137,31 @@
   ball-vs-car pair, and every car-vs-car pair (via `collision::box_vs_box`,
   now running for real in a live scene instead of only under a unit test)
   each step, one pair at a time; `frame()` assigns each car's `player_id`
-  as its index in `cars`. **Not** implemented: a combined multi-body solve
-  for 3+ simultaneously-touching bodies (each pair still gets its own
-  independent solver pass — a real approximation, tracked as open
-  follow-up) and driven car input. 3 new unit tests in `rb_physics_bullet`
-  (65 total), including an end-to-end test confirming two cars shot
-  head-on at each other in a live `PhysicsWorld` actually bounce off
-  instead of tunnelling through.
+  as its index in `cars`. **Not** implemented (at the time): a combined
+  multi-body solve for 3+ simultaneously-touching bodies and driven car
+  input. 3 new unit tests in `rb_physics_bullet` (65 total), including an
+  end-to-end test confirming two cars shot head-on at each other in a live
+  `PhysicsWorld` actually bounce off instead of tunnelling through.
+- `RB-PHYSICS-001-FR-007` (driven car input — ground throttle and steering
+  only) — new `drive` module: `apply_driven_forces` couples
+  `rb_domain::ControllerInput` into a throttle force (along the car's
+  local forward axis, capped at `MAX_CAR_SPEED`, a commonly-cited
+  community number) and a steering torque (about the car's local up axis,
+  scaled by current speed so a stationary car can't turn in place), both
+  gated on the car actually touching the ground. `THROTTLE_ACCELERATION`
+  is a simplified constant (real Rocket League throttle tapers
+  nonlinearly with speed); `STEER_TORQUE` is an uncalibrated placeholder
+  with no public reference at all. `PhysicsWorld` gains
+  `set_car_input` (persists a car's current input across steps) and
+  `frame()` now reports each car's actual input instead of always `None`.
+  A car with no input set behaves exactly as before this requirement
+  existed. **Not** implemented: boost, jump, air control (pitch/yaw/roll
+  torque while airborne), and handbrake/drift — each a distinct real
+  mechanic, tracked as separate follow-up. 10 new unit tests in
+  `rb_physics_bullet` (75 total), including an end-to-end test confirming
+  a car with throttle input actually drives forward across the ground in
+  a live `PhysicsWorld::step` loop, and a regression test confirming a car
+  with no input set is unaffected.
 
 ## In progress
 
@@ -184,26 +202,27 @@
   recorded controller input or to `rb_verify_cli`).
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step) and driven
-  car input — both real, not-yet-started follow-up work (see the spec's
-  Non-goals/Open questions); driven input is needed before a car in this
-  physics core can do anything beyond free-fall, resting on the ground,
-  and passively bouncing off the ball or other cars.
+  approximation once 3+ bodies mutually touch in the same step) and
+  boost/jump/air-control/handbrake — all real, not-yet-started follow-up
+  work (see the spec's Non-goals/Open questions); a car can now drive and
+  steer on the ground and bounce off the ball/other cars, but can't yet
+  boost, jump, control itself in the air, or drift.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. Driven car input — real follow-up work for `rb_physics_bullet`;
-   `RB-PHYSICS-001-FR-005` (constant calibration) needs `PHASE-0-EXIT`
-   real data regardless.
+2. Boost, jump, air control, and/or handbrake — real follow-up work for
+   `rb_physics_bullet::drive`; `RB-PHYSICS-001-FR-005` (constant
+   calibration, including `drive`'s own uncalibrated constants) needs
+   `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (115 tests: 23 in `rb_domain`, 65 in
+- `cargo test --workspace`: pass (125 tests: 23 in `rb_domain`, 75 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
