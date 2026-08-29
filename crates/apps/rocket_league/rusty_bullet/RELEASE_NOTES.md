@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Handbrake input
-**2026-08-29** · PR pending · commit pending
+**2026-08-29** · [#27](https://github.com/baileyrd/rusty_bullet/pull/27) · `56f9cb4`
 
 - **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a
   handbrake mechanic (`RB-PHYSICS-001-FR-009`) — while
