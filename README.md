@@ -59,6 +59,8 @@ have landed so far.
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
+| [`rusty_err`](crates/rusty_err) | `crates/rusty_err` | `no_std` + `alloc` sovereign error trait, context extension, and proc-macro error derive library, built on `rusty_std` |
+| [`rusty_err_derive`](crates/rusty_err/derive) | `crates/rusty_err/derive` | `rusty_err`'s `#[derive(Error)]` proc-macro |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -298,6 +300,17 @@ the current `rusty_win32` (both toolchains, plus a Windows
 cross-compile check) rather than assuming compatibility from the
 mechanical rev-to-path pattern the other swaps in this series follow.
 
+`rusty_err` retires its one forward pin, `rusty_std`, the same way —
+swapped to a `path` dependency on the now-merged `crates/rusty_std`.
+Unusually, nothing in `rusty_err`'s own source actually references
+`rusty_std` (verified via a source grep); the dependency line exists in
+`Cargo.toml` but is otherwise unused, so the swap carries no compatibility
+risk regardless of how far the pinned rev had drifted. `rusty_err` was
+also its own tiny nested Cargo workspace (a `[workspace]` table with one
+member, `derive`) — de-inherited the same way `rustils_async` was: the
+nested `[workspace]` table removed, `derive` added directly to this
+workspace's `members` alongside `rusty_err` itself.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -337,5 +350,7 @@ The second wave, merging in the same way, adds:
 at a time, so the Crates table above only lists the ones already landed.
 
 A third wave continues the same way, starting with
-[`rusty_wire`](https://github.com/baileyrd/rusty_wire) — merged one at a
+[`rusty_wire`](https://github.com/baileyrd/rusty_wire),
+[`rusty_std`](https://github.com/baileyrd/rusty_std), and now
+[`rusty_err`](https://github.com/baileyrd/rusty_err) — merged one at a
 time, same process.

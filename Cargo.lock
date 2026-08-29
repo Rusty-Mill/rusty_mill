@@ -5137,6 +5137,23 @@ name = "rusty_diff"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_err"
+version = "0.1.0"
+dependencies = [
+ "rusty_err_derive",
+ "rusty_std",
+]
+
+[[package]]
+name = "rusty_err_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "rusty_font"
 version = "0.1.0"
 dependencies = [
