@@ -1,0 +1,101 @@
+[package]
+name = "rusty_request"
+version = "0.1.0"
+edition = "2021"
+description = "An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http."
+license = "MIT"
+
+[dependencies]
+# Our own hand-rolled async runtime (scheduler, reactor, timers) -- no
+# tokio, no mio. Pinned to the same rev as `rusty_tls`/`rusty_http` below
+# (bumped from fbeda3b9) -- required, not just tidy: `rusty_tls::AsyncTlsStream`
+# and `rusty_http::async_tokio::AsyncTransport` are both generic over this
+# crate's own `AsyncRead`/`AsyncWrite` traits, and Cargo treats two
+# different revs of the same git dependency as two unrelated crates, so
+# their trait/type identities wouldn't match at a different rev even
+# though the source is otherwise compatible.
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8" }
+# The ecosystem's one shared TLS implementation and trust policy (see its
+# own README/ARCHITECTURE.md) -- this crate is the design's first named
+# consumer. `rusty-tokio` feature enables its async adapter, which is
+# what this crate's connector needs. Pinned to a specific rev, same
+# convention as `rusty_tokio` above -- and see that dependency's comment
+# for why both pins have to move together. Bumped from 415d8e0d to pick
+# up ALPN protocol negotiation (`AsyncTlsStream::new_with_alpn`/
+# `negotiated_alpn_protocol`) -- this rev's own `rusty_tokio` pin is
+# unchanged (still `ac598c93`), so no matching bump is needed there.
+rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "233598faf2ffc76c38cd901019f466c1ab0e2267", features = [
+    "rusty-tokio",
+] }
+# The ecosystem's one shared HTTP/1.1 message layer + Url type (see its
+# own README/ARCHITECTURE.md) -- this crate is its first migrated
+# consumer, retiring its own hand-rolled http1.rs/url.rs/cookie.rs/
+# header.rs/method.rs/status.rs in favor of it. `rusty-tokio` enables the
+# async transport adapter this crate's connector needs; `cookies` enables
+# the RFC 6265 jar `Client`'s cookie store already depended on. Pinned to
+# a specific rev, same convention (and same reasoning) as `rusty_tokio`
+# above.
+rusty_http = { git = "https://github.com/baileyrd/rusty_http", rev = "7ddc011628c55330ec8dab33524b290cae927426", features = [
+    "rusty-tokio",
+    "cookies",
+] }
+# Only for `TrustPolicy::PinnedAnchors`'s `CertificateDer` type -- so a
+# caller pinning a private CA never needs their own direct dependency on
+# `rustls` itself. This is the same type `rusty_tls::TrustPolicy` already
+# requires (re-exported from `rustls::pki_types`, per that crate's own
+# Cargo.toml); depending on the small, no-crypto `rustls-pki-types` crate
+# directly (rather than all of `rustls`) keeps this to a types-only
+# dependency, already present in the build graph at a compatible version
+# via `rusty_tls`/the `rustls` dev-dependency below.
+rustls-pki-types = "1"
+# Optional (see the `tokio` feature below): drives the connector over
+# real crates.io `tokio`'s `AsyncRead`/`AsyncWrite` instead of
+# `rusty_tokio`'s, for a consumer (e.g. `rusty_search`) already running
+# inside its own real tokio runtime -- see `src/tokio_compat.rs` for how
+# the two trait sets meet without ever starting a second reactor.
+# `default-features = false` + exactly what's used: `net` (`TcpStream::
+# connect`), `time` (the request timeout and retry backoff sleeps), `rt`
+# (`spawn_blocking` for DNS resolution), `io-util`
+# (`AsyncRead`/`AsyncWrite`/their `*Ext` convenience methods).
+tokio = { version = "1", default-features = false, features = [
+    "net",
+    "time",
+    "rt",
+    "io-util",
+], optional = true }
+
+[features]
+# Off by default so an existing `rusty_tokio`-based consumer sees no
+# change. See `src/tokio_compat.rs`'s module docs for the full picture:
+# `rusty_tls`/`rusty_http` haven't grown a real-tokio adapter of their
+# own yet (unlike `rusty_http`'s own `rusty-tokio`/`tokio` split), so
+# this feature reaches their existing `rusty-tokio`-based adapters
+# through a small compat shim instead of a parallel adapter module --
+# real tokio still does every bit of actual I/O; `rusty_tokio` never
+# runs.
+tokio = ["dep:tokio"]
+
+[dev-dependencies]
+# Test-only: builds a local TLS server (via a self-signed cert) to
+# exercise the https:// connector and CONNECT-tunnel proxying against,
+# without real network access. Never a dependency of the shipped
+# library -- rusty_tls (a client) is what the library itself uses.
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "tls12",
+    "ring",
+] }
+rcgen = "0.13"
+# Same crate as the optional `tokio` dependency above, unified by Cargo's
+# normal feature resolution -- but with `macros` (`#[tokio::test]`) and
+# `rt` (the current-thread runtime that macro spins up) added on top, the
+# same way `rusty_http`'s own `tokio` dev-dependency does it, so
+# `tests/tokio_feature.rs` (which only runs under `--features tokio`) can
+# use them without the shipped library itself asking for them.
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "rt",
+    "net",
+    "time",
+    "io-util",
+] }
