@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Air control input
-**2026-08-29** · PR pending · commit pending
+**2026-08-29** · [#31](https://github.com/baileyrd/rusty_bullet/pull/31) · `431ff56`
 
 - **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains air
   control (`RB-PHYSICS-001-FR-011`) — torque about the car's local right,
