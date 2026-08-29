@@ -59,6 +59,7 @@ have landed so far.
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
+| [`rusty_sqlite`](crates/rusty_sqlite) | `crates/rusty_sqlite` | A thin, ergonomic wrapper over `rusqlite`: bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management |
 | [`rusty_time`](crates/rusty_time) | `crates/rusty_time` | `no_std` + `alloc` sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate, built on `rusty_std` |
 | [`rusty_uuid`](crates/rusty_uuid) | `crates/rusty_uuid` | Minimal, dependency-free UUID v4 generation |
 | [`rusty_wiremock`](crates/rusty_wiremock) | `crates/rusty_wiremock` | `no_std` + `alloc` sovereign HTTP mock server and request matcher for Rusty Mill test suites, built on `rusty_http`/`rusty_json`/`rusty_std` |
@@ -301,6 +302,23 @@ the current `rusty_win32` (both toolchains, plus a Windows
 cross-compile check) rather than assuming compatibility from the
 mechanical rev-to-path pattern the other swaps in this series follow.
 
+`rusty_sqlite` wraps real crates.io `rusqlite` (bundled SQLite) — no
+relationship to `rusty_rusqlite` (a from-scratch reimplementation aiming
+for `rusqlite` API parity); the two are independent, distinctly-purposed
+crates that happen to share a naming root. Merging it surfaced a real
+Cargo constraint rather than an actual code bug: `rusty_acp`'s optional
+`sqlx` dependency declares (but doesn't activate) `sqlx-sqlite`, an
+optional dependency of its own requiring `libsqlite3-sys ^0.30.1`.
+Cargo's `links` uniqueness check considers every optional dependency
+*declared* in the graph, not just the ones actually activated for a given
+build — so `rusty_sqlite`'s original `rusqlite = "0.31"` (pulling
+`libsqlite3-sys ^0.28.0`) was a hard resolve failure the moment both
+crates shared a workspace, regardless of features. Bumped to
+`rusqlite = "0.32.1"`, the lowest version pulling the same
+`libsqlite3-sys ^0.30.1` `sqlx-sqlite` already needs, unifying the two;
+the crate's full test suite (17 tests, 2 doc-tests) passes unmodified
+against the bump.
+
 `rusty_time` retires its one forward pin, `rusty_std`, the same way —
 swapped to a `path` dependency on the now-merged `crates/rusty_std`.
 
@@ -356,6 +374,7 @@ at a time, so the Crates table above only lists the ones already landed.
 A third wave continues the same way, starting with
 [`rusty_wire`](https://github.com/baileyrd/rusty_wire) and
 [`rusty_std`](https://github.com/baileyrd/rusty_std), and now
+[`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite),
 [`rusty_time`](https://github.com/baileyrd/rusty_time),
 [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid), and
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock) — merged
