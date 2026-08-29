@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Double jump input
+**2026-08-29** · PR pending · commit pending
+
+- **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a
+  double jump (`RB-PHYSICS-001-FR-012`) — one more, identical `JUMP_SPEED`
+  instantaneous upward velocity change fired on a fresh (rising-edge)
+  press of `ControllerInput.jump` while the car is airborne, reusing the
+  ground jump's own edge detection rather than a second edge-detector.
+- **Availability, not ground contact:** gated on a new per-car
+  `double_jump_available` flag instead of `on_ground` — touching the
+  ground (landing, or simply resting) unconditionally restores it to
+  `true`, and a fresh airborne press that fires the double jump sets it to
+  `false` until the next landing, so it fires at most once per airborne
+  period no matter how many more times jump is released and re-pressed
+  before then. `PhysicsWorld` gains a parallel
+  `car_double_jump_available: Vec<bool>` (starting `true`, kept in
+  lockstep with `cars` by `with_car`).
+- **Constants:** reuses `JUMP_SPEED` (now `pub`) rather than a
+  separately-calibrated double-jump speed — this port has no public
+  reference for a distinct number either.
+- **Not implemented** (explicitly, not silently dropped): the directional
+  "dodge" impulse/torque a real double jump pairs with (a sideways/forward
+  flip from the stick direction at the moment of the second press),
+  variable jump height, and wall jump — each a distinct real mechanic,
+  tracked as separate follow-up work.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet`,
+  minus one pre-existing `drive.rs` test (`jump_has_no_effect_while_airborne`)
+  removed because this feature deliberately supersedes its premise (103
+  total): a fresh airborne jump press gives upward velocity when the
+  double jump is available, has no effect when it isn't, is consumed
+  after firing once, and touching the ground restores availability, plus
+  — the real end-to-end proof — a double jump fired after a ground jump
+  in a live `PhysicsWorld::step` loop (gravity zeroed) adds a second
+  `JUMP_SPEED` kick on top of the first, and a regression test confirming
+  a spent double jump doesn't refire mid-air no matter how many more
+  times jump is released and re-pressed before landing.
+
+---
+
 ## Air control input
 **2026-08-29** · [#31](https://github.com/baileyrd/rusty_bullet/pull/31) · `431ff56`
 
