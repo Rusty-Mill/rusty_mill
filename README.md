@@ -59,6 +59,7 @@ have landed so far.
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
+| [`rusty_time`](crates/rusty_time) | `crates/rusty_time` | `no_std` + `alloc` sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate, built on `rusty_std` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -298,6 +299,9 @@ the current `rusty_win32` (both toolchains, plus a Windows
 cross-compile check) rather than assuming compatibility from the
 mechanical rev-to-path pattern the other swaps in this series follow.
 
+`rusty_time` retires its one forward pin, `rusty_std`, the same way —
+swapped to a `path` dependency on the now-merged `crates/rusty_std`.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -337,5 +341,7 @@ The second wave, merging in the same way, adds:
 at a time, so the Crates table above only lists the ones already landed.
 
 A third wave continues the same way, starting with
-[`rusty_wire`](https://github.com/baileyrd/rusty_wire) — merged one at a
+[`rusty_wire`](https://github.com/baileyrd/rusty_wire),
+[`rusty_std`](https://github.com/baileyrd/rusty_std), and now
+[`rusty_time`](https://github.com/baileyrd/rusty_time) — merged one at a
 time, same process.
