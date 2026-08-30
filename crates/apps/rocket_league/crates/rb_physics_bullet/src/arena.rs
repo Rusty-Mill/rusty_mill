@@ -6,28 +6,31 @@
 //! are each just another flat `StaticPlane`, the same as the ground or a
 //! side wall.
 //!
-//! `standard_curves` (`RB-PHYSICS-001-FR-020`/`FR-021`) adds curved
-//! wall-to-floor/wall-to-ceiling fillets for all 9 walls — the 4 cardinal
-//! (axis-aligned) walls and, since FR-021, the 4 diagonal corner walls too
-//! — built from `body::StaticQuarterPipe::between_planes` — still no new
-//! collision code of its own here, just composing the same flat planes
-//! `standard_walls` already builds. A vertical wall is always perpendicular
-//! to the floor/ceiling regardless of its own horizontal rotation, so
-//! `between_planes` needs no generalization to cover a diagonal corner
-//! wall's floor/ceiling seam — only `axis_direction` (computed via a cross
-//! product here, rather than hand-picked, since a corner wall's own
-//! "along the wall" direction isn't a coordinate axis) differs from the
-//! cardinal-wall case.
+//! `standard_curves` (`RB-PHYSICS-001-FR-020`/`FR-021`/`FR-022`) adds curved
+//! fillets throughout the arena's vertical boundary — wall-to-floor/
+//! wall-to-ceiling seams for all 9 walls (the 4 cardinal walls and, since
+//! FR-021, the 4 diagonal corner walls too), and, since FR-022, a fillet at
+//! each of the 8 vertical edges where a corner wall meets its neighboring
+//! side/back wall — all built from `body::StaticQuarterPipe::between_planes`
+//! — still no new collision code of its own here, just composing the same
+//! flat planes `standard_walls` already builds. `between_planes` itself
+//! generalized (as part of FR-022) to handle any two non-parallel planes,
+//! not just perpendicular ones, so this module never needed its own
+//! geometry code for the corner walls' shallower (135-degree) vertical
+//! edges — only which two planes to bridge, and a plain `(0, 0, 1)` axis
+//! direction (the edge itself is vertical), differ from the floor/
+//! ceiling-seam case.
 //!
-//! **Still not modeled**: a curved fillet at the vertical edges themselves
-//! — where a corner wall meets its neighboring side/back wall at other than
-//! 90 degrees — which is a materially different problem (`between_planes`
-//! only handles two *perpendicular* planes, and two arena walls meeting at
-//! a corner aren't); the goal structures themselves (no back-net cutout —
-//! the back walls here are solid, flat planes spanning the full width); and
-//! any geometry finer than a single flat plane or single-radius fillet per
-//! boundary segment (the real field mesh's corners and transitions are more
-//! complex than this). See `RB-PHYSICS-001`'s Non-goals.
+//! **Still not modeled**: the goal structures themselves (no back-net
+//! cutout — the back walls here are solid, flat planes spanning the full
+//! width); a car (box) actually being deflected by any of these fillets
+//! (`collision::contacts_vs_quarter_pipe` always returns no contact for a
+//! box); and any geometry finer than a single flat plane or single-radius
+//! fillet per boundary segment (the real field mesh's corners and
+//! transitions are more complex than this, and this port doesn't attempt
+//! the compound corner where a vertical-edge fillet meets a floor- or
+//! ceiling-seam fillet near a wall's own endpoint). See `RB-PHYSICS-001`'s
+//! Non-goals.
 
 use crate::body::{StaticPlane, StaticQuarterPipe};
 use rb_domain::Vec3;
@@ -123,21 +126,30 @@ pub fn standard_walls() -> Vec<StaticPlane> {
     walls
 }
 
-/// Curved wall-to-floor/wall-to-ceiling fillets for all 9 walls — the 4
-/// cardinal walls (`RB-PHYSICS-001-FR-020`) and, since `FR-021`, the 4
-/// diagonal corner walls too — 16 `StaticQuarterPipe`s total (one
-/// floor-side and one ceiling-side fillet per wall), each built by
-/// `StaticQuarterPipe::between_planes` from the same flat planes
-/// `standard_walls` uses. A corner wall's own "along the wall" direction
-/// isn't a coordinate axis, unlike a cardinal wall's, so its
-/// `axis_direction` is computed via a cross product (`floor.normal.cross(
-/// &wall.normal)`) rather than hand-picked — `between_planes` itself needs
-/// no generalization, since a vertical wall's normal is perpendicular to
-/// the floor/ceiling's regardless of the wall's own horizontal rotation.
+/// Curved fillets for the standard arena: wall-to-floor/wall-to-ceiling
+/// transitions for all 9 walls — the 4 cardinal walls
+/// (`RB-PHYSICS-001-FR-020`) and, since `FR-021`, the 4 diagonal corner
+/// walls too — plus, since `RB-PHYSICS-001-FR-022`, a fillet at each of the
+/// 8 vertical edges where a corner wall meets its neighboring side or back
+/// wall. 24 `StaticQuarterPipe`s total (16 floor/ceiling-seam fillets, one
+/// per wall per seam, and 8 vertical-edge fillets, one per corner-wall
+/// endpoint), each built by `StaticQuarterPipe::between_planes` from the
+/// same flat planes `standard_walls` uses. A corner wall's own "along the
+/// wall" direction isn't a coordinate axis, unlike a cardinal wall's, so its
+/// floor/ceiling-seam `axis_direction` is computed via a cross product
+/// (`floor.normal.cross(&wall.normal)`) rather than hand-picked — this
+/// works because a vertical wall's normal is always perpendicular to the
+/// floor/ceiling's regardless of the wall's own horizontal rotation. The
+/// vertical-edge fillets, by contrast, bridge two planes that *aren't*
+/// perpendicular (a corner wall meets its neighboring side/back wall at 135
+/// degrees, not 90), which `between_planes` now handles directly (see its
+/// own doc comment) — no separate construction path needed, and their own
+/// `axis_direction` is simply `(0, 0, 1)`, since the edge itself is
+/// vertical.
 pub fn standard_curves() -> Vec<StaticQuarterPipe> {
     let floor = standard_ground();
     let ceiling = ceiling_plane();
-    let mut curves = Vec::with_capacity(16);
+    let mut curves = Vec::with_capacity(24);
 
     for &sign in &[1.0f32, -1.0] {
         let wall = side_wall_plane(sign);
@@ -193,6 +205,33 @@ pub fn standard_curves() -> Vec<StaticQuarterPipe> {
             &wall,
             FILLET_RADIUS,
             ceiling_axis_direction,
+        ));
+    }
+
+    // The 8 vertical-edge fillets (`RB-PHYSICS-001-FR-022`), one per corner
+    // wall's two endpoints, where it meets its neighboring side or back
+    // wall. Both bridged planes are vertical, so the edge itself -- and
+    // therefore this fillet's axis -- runs along Z; `between_planes` derives
+    // whatever sector angle actually results (a shallow ~45 degrees here,
+    // not the 90 the floor/ceiling-seam fillets get, since these two planes
+    // meet at 135 degrees rather than a right angle) with no help needed
+    // from this call site beyond passing the two planes.
+    let vertical = Vec3::new(0.0, 0.0, 1.0);
+    for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        let side = side_wall_plane(sx);
+        let back = back_wall_plane(sy);
+        let corner = corner_wall_plane(sx, sy);
+        curves.push(StaticQuarterPipe::between_planes(
+            &side,
+            &corner,
+            FILLET_RADIUS,
+            vertical,
+        ));
+        curves.push(StaticQuarterPipe::between_planes(
+            &corner,
+            &back,
+            FILLET_RADIUS,
+            vertical,
         ));
     }
 
@@ -272,22 +311,46 @@ mod tests {
     }
 
     #[test]
-    fn standard_curves_has_sixteen_fillets() {
-        assert_eq!(standard_curves().len(), 16);
+    fn standard_curves_has_twenty_four_fillets() {
+        assert_eq!(standard_curves().len(), 24);
     }
 
     #[test]
-    fn every_standard_curve_bridges_a_wall_to_the_floor_or_ceiling() {
-        // Every fillet's axis should sit exactly FILLET_RADIUS above the
-        // floor (a floor-side fillet) or FILLET_RADIUS below the ceiling (a
-        // ceiling-side fillet) -- never anywhere else.
-        for curve in standard_curves() {
+    fn every_floor_or_ceiling_seam_curve_bridges_a_wall_to_the_floor_or_ceiling() {
+        // Every floor/ceiling-seam fillet's axis should sit exactly
+        // FILLET_RADIUS above the floor (a floor-side fillet) or
+        // FILLET_RADIUS below the ceiling (a ceiling-side fillet) -- never
+        // anywhere else. Only the first 16 of standard_curves()'s 24
+        // entries are floor/ceiling-seam fillets (see its own doc comment
+        // for the construction order); the last 8 are vertical-edge
+        // fillets (RB-PHYSICS-001-FR-022), which don't bridge to the floor
+        // or ceiling at all -- see
+        // `every_corner_edge_curve_runs_vertically`.
+        for curve in &standard_curves()[0..16] {
             let near_floor = (curve.axis_point.z - FILLET_RADIUS).abs() < 1e-3;
             let near_ceiling = (curve.axis_point.z - (CEILING_Z - FILLET_RADIUS)).abs() < 1e-3;
             assert!(
                 near_floor || near_ceiling,
-                "expected every curve's axis to sit radius-in from the floor or ceiling, got z={}",
+                "expected every floor/ceiling-seam curve's axis to sit radius-in from the floor \
+                 or ceiling, got z={}",
                 curve.axis_point.z
+            );
+        }
+    }
+
+    #[test]
+    fn every_corner_edge_curve_runs_vertically() {
+        // The 8 vertical-edge fillets (RB-PHYSICS-001-FR-022, the last 8 of
+        // standard_curves()'s 24 entries) bridge two vertical walls, so
+        // their own axis -- unlike a floor/ceiling-seam fillet's -- runs
+        // straight up Z, not along some horizontal direction.
+        for curve in &standard_curves()[16..24] {
+            assert!(
+                (curve.axis_direction.x.abs() < 1e-4)
+                    && (curve.axis_direction.y.abs() < 1e-4)
+                    && (curve.axis_direction.z.abs() - 1.0).abs() < 1e-4,
+                "expected a vertical-edge curve's axis to run along Z, got {:?}",
+                curve.axis_direction
             );
         }
     }
@@ -338,6 +401,43 @@ mod tests {
         assert!((pipe.sector_start.length() - 1.0).abs() < 1e-4);
         assert!((pipe.sector_end.length() - 1.0).abs() < 1e-4);
         assert!(pipe.sector_start.dot(&pipe.sector_end).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_corner_edge_fillets_axis_sits_radius_in_from_both_the_side_wall_and_the_corner_wall() {
+        let side = side_wall_plane(1.0);
+        let corner = corner_wall_plane(1.0, 1.0);
+        let pipe = StaticQuarterPipe::between_planes(
+            &side,
+            &corner,
+            FILLET_RADIUS,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+        assert!((side.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
+        assert!((corner.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_corner_edge_fillets_sector_spans_a_shallower_angle_than_a_floor_seam_fillets() {
+        // The corner wall meets its neighboring side wall at 135 degrees
+        // (not the floor/ceiling seam's 90), so this fillet's own sector --
+        // the angle between sector_start and sector_end -- should come out
+        // noticeably smaller than 90 degrees (see
+        // RB-PHYSICS-001-FR-022's own doc comment for the exact 45-degree
+        // figure this specific arena geometry produces).
+        let side = side_wall_plane(1.0);
+        let corner = corner_wall_plane(1.0, 1.0);
+        let pipe = StaticQuarterPipe::between_planes(
+            &side,
+            &corner,
+            FILLET_RADIUS,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+        let angle = pipe.sector_start.dot(&pipe.sector_end).acos();
+        assert!(
+            (angle - std::f32::consts::FRAC_PI_4).abs() < 1e-3,
+            "expected a 45-degree sector, got {angle} radians"
+        );
     }
 
     #[test]

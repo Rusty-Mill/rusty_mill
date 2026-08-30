@@ -240,38 +240,47 @@ impl StaticPlane {
     }
 }
 
-/// An immovable partial-cylinder fillet connecting two perpendicular flat
-/// planes (a wall and the floor, or a wall and the ceiling) —
-/// `RB-PHYSICS-001-FR-020`, Rocket League's real curved wall-to-floor and
-/// wall-to-ceiling transitions. Like `StaticPlane`, infinite along its own
-/// axis (`axis_direction`) — this crate doesn't model a finite wall length
-/// any more for the curve than it already does for the flat walls
-/// themselves.
+/// An immovable partial-cylinder fillet connecting two flat planes (a wall
+/// and the floor, a wall and the ceiling, or — since
+/// `RB-PHYSICS-001-FR-022` — two walls meeting at a corner that isn't a
+/// right angle) — `RB-PHYSICS-001-FR-020`, Rocket League's real curved
+/// wall-to-floor and wall-to-ceiling transitions. Like `StaticPlane`,
+/// infinite along its own axis (`axis_direction`) — this crate doesn't
+/// model a finite wall length any more for the curve than it already does
+/// for the flat walls themselves.
 ///
 /// The playable side is the *inside* of the partial cylinder (like riding
 /// the concave face of a skateboard quarter-pipe, which is exactly what
-/// this shape is named after) — a point is only governed by this fillet at
-/// all when its direction from `axis_point` (projected perpendicular to
-/// `axis_direction`) falls within the 90-degree sector from `sector_start`
-/// to `sector_end`; outside that sector, whichever flat plane the fillet
-/// bridges takes over instead (this shape doesn't know or care about that —
-/// see `PhysicsWorld::step`, which resolves the flat planes and this fillet
-/// as independent, additive contact sources, same as it already does for
-/// the ground and every wall).
+/// this shape is named after, even though — since FR-022 — its own sector
+/// isn't always literally a quarter-circle) — a point is only governed by
+/// this fillet at all when its direction from `axis_point` (projected
+/// perpendicular to `axis_direction`) falls within the sector from
+/// `sector_start` to `sector_end` (whatever angle, always at most 180
+/// degrees, those two vectors happen to subtend — see `between_planes`);
+/// outside that sector, whichever flat plane the fillet bridges takes over
+/// instead (this shape doesn't know or care about that — see
+/// `PhysicsWorld::step`, which resolves the flat planes and this fillet as
+/// independent, additive contact sources, same as it already does for the
+/// ground and every wall).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StaticQuarterPipe {
     pub axis_point: Vec3,
-    /// Unit vector; the fillet is infinite along this direction.
+    /// Unit vector; the fillet is infinite along this direction. Its sign
+    /// matters (see `sector_start`/`sector_end`), not just its line: this
+    /// is a genuine 3D direction, not merely "the axis's orientation."
     pub axis_direction: Vec3,
     pub radius: f32,
     /// Unit vector, perpendicular to `axis_direction`: the direction from
     /// `axis_point` toward the fillet's tangent point on the first flat
     /// plane it bridges.
     pub sector_start: Vec3,
-    /// Unit vector, perpendicular to `axis_direction` and to
-    /// `sector_start` (a 90-degree sector): the direction from
+    /// Unit vector, perpendicular to `axis_direction`: the direction from
     /// `axis_point` toward the fillet's tangent point on the second flat
-    /// plane it bridges.
+    /// plane it bridges. Together with `sector_start` and `axis_direction`,
+    /// defines the sector: sweeping from `sector_start` toward `sector_end`
+    /// via a *positive* (right-hand-rule) rotation about `axis_direction`
+    /// must cover the fillet's own (at most 180-degree) angle — see
+    /// `between_planes`, which guarantees this by construction.
     pub sector_end: Vec3,
     pub restitution: f32,
     pub friction: f32,
@@ -296,41 +305,70 @@ impl StaticQuarterPipe {
         }
     }
 
-    /// Derives a fillet of the given `radius` connecting two perpendicular
-    /// `StaticPlane`s — e.g. the floor and a side wall, or the ceiling and
-    /// a side wall — given a direction along which the fillet should run
-    /// (`axis_direction`, which must be perpendicular to both planes'
-    /// normals; for an axis-aligned arena wall, this is simply "along the
-    /// wall," e.g. `(0, 1, 0)` for a wall running along Y).
+    /// Derives a fillet of the given `radius` connecting two flat
+    /// `StaticPlane`s meeting along a line — e.g. the floor and a side
+    /// wall, or (since `RB-PHYSICS-001-FR-022`) a diagonal corner wall and
+    /// its neighboring side wall, which meet at a shallower angle than a
+    /// right angle — given a direction along that shared line
+    /// (`axis_direction`, perpendicular to both planes' normals; for an
+    /// axis-aligned arena wall meeting the floor/ceiling, this is simply
+    /// "along the wall," e.g. `(0, 1, 0)` for a wall running along Y).
     ///
-    /// Only exact for two *perpendicular* planes (`plane_a.normal` and
-    /// `plane_b.normal` themselves perpendicular, and both perpendicular to
-    /// `axis_direction`) — true for every cardinal (axis-aligned) arena
-    /// wall's own floor/ceiling seam, not for a diagonal corner wall's (see
-    /// `RB-PHYSICS-001-FR-020`'s Non-goals; this port doesn't attempt a
-    /// fillet there yet).
+    /// Works for *any* two non-parallel planes, not just perpendicular
+    /// ones: the fillet's own sector angle always comes out to exactly the
+    /// angle between `plane_a.normal` and `plane_b.normal` (which is always
+    /// in `[0, 180]` degrees by construction, so there's never an ambiguous
+    /// "long way around" to worry about) — a right angle for two
+    /// perpendicular planes (every cardinal or diagonal-corner wall's own
+    /// floor/ceiling seam, `RB-PHYSICS-001-FR-020`/`FR-021`), or some other
+    /// angle for two walls meeting at an actual corner (`FR-022`).
+    /// `axis_direction`'s own sign doesn't matter — either of the two
+    /// opposite directions along the shared line works — this constructor
+    /// detects and corrects it internally so `sector_start`/`sector_end`
+    /// always sweep the fillet's own short arc, never the reflex one.
     ///
     /// The axis point sits `radius` units inward from *both* planes along
     /// their own normals (so the fillet's surface is tangent to each plane
     /// exactly `radius` units from where they'd otherwise meet at a sharp
-    /// edge); `sector_start`/`sector_end` are simply the negation of each
-    /// plane's own normal (the direction from the axis back toward that
-    /// plane's tangent point).
+    /// edge) — found by solving two equations, `dot(plane_a.normal, axis)`
+    /// equals `plane_a.offset` plus `radius`, and likewise for `plane_b`,
+    /// as a 2x2 linear system, expressing `axis` in the (generally
+    /// non-orthogonal) basis formed by the two normals themselves. This
+    /// reduces to the simpler "just add the two scaled normals together"
+    /// shortcut exactly when the normals are perpendicular, but that
+    /// shortcut silently gives the wrong point otherwise, which is why this
+    /// solves the system directly instead of assuming orthogonality.
+    /// `sector_start`/`sector_end` are simply the negation of each plane's
+    /// own normal (the direction from the axis back toward that plane's
+    /// tangent point) — true regardless of the angle between the planes.
     pub fn between_planes(
         plane_a: &StaticPlane,
         plane_b: &StaticPlane,
         radius: f32,
         axis_direction: Vec3,
     ) -> StaticQuarterPipe {
-        let axis_point =
-            plane_a.normal * (plane_a.offset + radius) + plane_b.normal * (plane_b.offset + radius);
-        StaticQuarterPipe::new(
-            axis_point,
-            axis_direction,
-            radius,
-            -plane_a.normal,
-            -plane_b.normal,
-        )
+        let target_a = plane_a.offset + radius;
+        let target_b = plane_b.offset + radius;
+        let cos_angle = plane_a.normal.dot(&plane_b.normal);
+        let denom = 1.0 - cos_angle * cos_angle;
+        let coeff_a = (target_a - target_b * cos_angle) / denom;
+        let coeff_b = (target_b - target_a * cos_angle) / denom;
+        let axis_point = plane_a.normal * coeff_a + plane_b.normal * coeff_b;
+
+        let sector_start = -plane_a.normal;
+        let sector_end = -plane_b.normal;
+        // Ensure sector_start -> sector_end sweeps the short arc in the
+        // *positive* (right-hand-rule) sense about axis_direction, flipping
+        // it if the caller happened to pass the opposite of the two
+        // directions along the shared line — see the struct's own doc
+        // comment on why axis_direction's sign matters for this.
+        let axis_direction = if sector_start.cross(&sector_end).dot(&axis_direction) < 0.0 {
+            -axis_direction
+        } else {
+            axis_direction
+        };
+
+        StaticQuarterPipe::new(axis_point, axis_direction, radius, sector_start, sector_end)
     }
 }
 
@@ -478,5 +516,111 @@ mod tests {
         assert!((pipe.sector_start.length() - 1.0).abs() < 1e-5);
         assert!((pipe.sector_end.length() - 1.0).abs() < 1e-5);
         assert!(pipe.sector_start.dot(&pipe.sector_end).abs() < 1e-5);
+    }
+
+    /// A wall at `x = 0` meeting a second wall through the origin at 45
+    /// degrees -- a *non-perpendicular* pair (unlike `floor_and_side_wall`),
+    /// the same angle a diagonal corner wall's own vertical edge meets its
+    /// neighboring side/back wall at (`RB-PHYSICS-001-FR-022`). Used to
+    /// check `between_planes`' generalization to any two non-parallel
+    /// planes, not just perpendicular ones.
+    fn non_perpendicular_walls() -> (StaticPlane, StaticPlane) {
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), 0.0);
+        let diagonal = StaticPlane::new(
+            Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        (wall, diagonal)
+    }
+
+    #[test]
+    fn between_non_perpendicular_planes_still_sits_the_axis_radius_in_from_both() {
+        let (wall, diagonal) = non_perpendicular_walls();
+        let radius = 20.0;
+        let pipe =
+            StaticQuarterPipe::between_planes(&wall, &diagonal, radius, Vec3::new(0.0, 0.0, 1.0));
+        assert!((wall.signed_distance(&pipe.axis_point) - radius).abs() < 1e-3);
+        assert!((diagonal.signed_distance(&pipe.axis_point) - radius).abs() < 1e-3);
+    }
+
+    #[test]
+    fn between_non_perpendicular_planes_tangent_points_lie_exactly_on_each_plane() {
+        let (wall, diagonal) = non_perpendicular_walls();
+        let radius = 20.0;
+        let pipe =
+            StaticQuarterPipe::between_planes(&wall, &diagonal, radius, Vec3::new(0.0, 0.0, 1.0));
+        let wall_tangent = pipe.axis_point + pipe.sector_start * radius;
+        let diagonal_tangent = pipe.axis_point + pipe.sector_end * radius;
+        assert!(wall.signed_distance(&wall_tangent).abs() < 1e-3);
+        assert!(diagonal.signed_distance(&diagonal_tangent).abs() < 1e-3);
+    }
+
+    #[test]
+    fn between_non_perpendicular_planes_sector_angle_matches_the_angle_between_normals() {
+        // Not literally a "quarter" pipe here: the two planes meet at 45
+        // degrees (not 90), so the fillet's own sector -- the angle between
+        // sector_start and sector_end -- comes out to 45 degrees too, not
+        // 90. This is the real proof `between_planes` derives whatever
+        // sector angle actually results, rather than assuming a right angle.
+        let (wall, diagonal) = non_perpendicular_walls();
+        let pipe =
+            StaticQuarterPipe::between_planes(&wall, &diagonal, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        let angle = pipe.sector_start.dot(&pipe.sector_end).acos();
+        assert!(
+            (angle - std::f32::consts::FRAC_PI_4).abs() < 1e-3,
+            "expected a 45-degree sector, got {} radians",
+            angle
+        );
+    }
+
+    #[test]
+    fn between_non_perpendicular_planes_sector_faces_the_sharp_corner_it_replaces() {
+        // The real proof the generalized sector orientation is correct: the
+        // sharp corner this fillet rounds off (where the two flat planes
+        // would otherwise meet exactly, both passing through the origin
+        // here) must sit outside the fillet's own radius (the fillet cuts
+        // the corner off, not past it) and within its sector (the fillet
+        // actually faces the missing material it's replacing, not away from
+        // it) -- using the same containment test `collision::
+        // sphere_vs_quarter_pipe` uses.
+        let (wall, diagonal) = non_perpendicular_walls();
+        let radius = 1.0;
+        let pipe =
+            StaticQuarterPipe::between_planes(&wall, &diagonal, radius, Vec3::new(0.0, 0.0, 1.0));
+
+        let corner = Vec3::ZERO;
+        let rel = corner - pipe.axis_point;
+        let dist = rel.length();
+        let dir = rel * (1.0 / dist);
+
+        assert!(
+            dist > radius,
+            "expected the sharp corner to sit outside the fillet's own radius, got dist={dist}"
+        );
+        assert!(
+            pipe.sector_start.cross(&dir).dot(&pipe.axis_direction) >= 0.0
+                && dir.cross(&pipe.sector_end).dot(&pipe.axis_direction) >= 0.0,
+            "expected the fillet's sector to face the sharp corner it replaces"
+        );
+    }
+
+    #[test]
+    fn between_planes_self_corrects_a_backwards_axis_direction() {
+        // Regardless of which of the two opposite directions along the
+        // shared edge line the caller passes in, sector_start -> sector_end
+        // must sweep the short arc in the *positive* sense around the
+        // resulting axis_direction -- between_planes flips a backwards input
+        // internally to guarantee this (see its own doc comment).
+        let (wall, diagonal) = non_perpendicular_walls();
+        let forward =
+            StaticQuarterPipe::between_planes(&wall, &diagonal, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        let backward =
+            StaticQuarterPipe::between_planes(&wall, &diagonal, 1.0, Vec3::new(0.0, 0.0, -1.0));
+        for pipe in [forward, backward] {
+            assert!(
+                pipe.sector_start.cross(&pipe.sector_end).dot(&pipe.axis_direction) >= 0.0,
+                "expected sector_start -> sector_end to sweep the positive way around axis_direction, got {pipe:?}"
+            );
+        }
     }
 }

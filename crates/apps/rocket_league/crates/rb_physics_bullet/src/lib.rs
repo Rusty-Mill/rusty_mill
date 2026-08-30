@@ -26,15 +26,16 @@
 //! warm-starting, a combined multi-body solve, and constant calibration).
 //! `PhysicsWorld` gains arena walls (`with_wall`) as generic flat
 //! `StaticPlane` geometry every body collides with, the same way it already
-//! collides with the ground, and curved wall-to-floor/wall-to-ceiling
-//! fillets (`with_curve`, a `StaticQuarterPipe` each — deflects only the
-//! ball, not a car; see `body`'s own doc comment); `arena` builds Rocket
-//! League's actual standard-arena octagonal footprint, a ceiling, and all 16
-//! floor/ceiling-seam fillets (the 4 cardinal walls and, since
-//! `RB-PHYSICS-001-FR-021`, the 4 diagonal corner walls too) from that same
-//! machinery (`PhysicsWorld::standard_arena`) — still without goal cutouts
-//! or a fillet at the corner walls' own vertical edges (where a corner wall
-//! meets its neighboring side/back wall).
+//! collides with the ground, and curved fillets (`with_curve`, a
+//! `StaticQuarterPipe` each — deflects only the ball, not a car; see
+//! `body`'s own doc comment); `arena` builds Rocket League's actual
+//! standard-arena octagonal footprint, a ceiling, and all 24 fillets
+//! throughout its vertical boundary from that same machinery
+//! (`PhysicsWorld::standard_arena`) — 16 floor/ceiling-seam fillets (the 4
+//! cardinal walls and, since `RB-PHYSICS-001-FR-021`, the 4 diagonal corner
+//! walls too) plus, since `RB-PHYSICS-001-FR-022`, 8 vertical-edge fillets
+//! (one per corner wall endpoint, where it meets its neighboring side/back
+//! wall) — still without goal cutouts.
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`

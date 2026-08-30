@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.21.0
+- Version: 0.22.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -10,13 +10,13 @@
   (itself dodgeable), air control (pitch/yaw/roll), a gentle landing
   auto-orientation assist, a modeled arena footprint
   (`PhysicsWorld::standard_arena`'s octagonal boundary plus a ceiling), and
-  curved wall-to-floor/wall-to-ceiling transitions for the ball at all 9
-  walls — the 4 cardinal walls and, since FR-021, the 4 diagonal corner
-  walls too — implemented; a car (box) actually being deflected by a curve,
-  fillets at the corner walls' own vertical edges (where a corner wall meets
-  its neighboring side/back wall), goal cutouts, split impulse,
-  warm-starting, a combined multi-body solve, and constant calibration are
-  open follow-up work)
+  curved fillets throughout the arena's vertical boundary — wall-to-floor/
+  wall-to-ceiling seams for all 9 walls (the 4 cardinal walls and, since
+  FR-021, the 4 diagonal corner walls too) plus, since FR-022, all 8 of the
+  corner walls' own vertical edges where they meet their neighboring
+  side/back walls — implemented; a car (box) actually being deflected by a
+  curve, goal cutouts, split impulse, warm-starting, a combined multi-body
+  solve, and constant calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -75,11 +75,14 @@ mid-jump-press — see FR-018 — a modeled arena footprint,
 `PhysicsWorld::standard_arena` building Rocket League's real octagonal
 boundary and a ceiling from the same generic `StaticPlane`/`with_wall`
 machinery FR-013 introduced, rather than a caller assembling ad-hoc walls
-itself — see FR-019 — and curved wall-to-floor/wall-to-ceiling
-transitions at all 9 walls — the 4 cardinal walls (FR-020) and, since
-FR-021, the 4 diagonal corner walls too — a `StaticQuarterPipe` fillet each
-deflecting the ball (not yet a car) away from the sharp corner a flat
-wall and the floor or ceiling would otherwise meet at — see FR-020/FR-021.
+itself — see FR-019 — and curved fillets throughout the arena's vertical
+boundary: wall-to-floor/wall-to-ceiling transitions at all 9 walls (the 4
+cardinal walls, FR-020, and, since FR-021, the 4 diagonal corner walls
+too), plus, since FR-022, all 8 of the corner walls' own vertical edges
+where they meet their neighboring side/back walls — a `StaticQuarterPipe`
+fillet each deflecting the ball (not yet a car) away from the sharp edge a
+flat wall and the floor/ceiling, or two flat walls, would otherwise meet at
+— see FR-020/FR-021/FR-022.
 
 ## Non-goals (this increment)
 
@@ -97,24 +100,20 @@ wall and the floor or ceiling would otherwise meet at — see FR-020/FR-021.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **A car (box) actually being deflected by a curved fillet, fillets at the
-  corner walls' own vertical edges, goal cutouts, and any geometry finer
-  than a flat plane or single-radius fillet per boundary segment.**
-  `arena::standard_curves` builds 16 `StaticQuarterPipe` fillets — one
-  floor-side and one ceiling-side per wall, for all 9 walls including the 4
-  diagonal corner walls since FR-021 — deflecting only the ball;
-  `collision::contacts_vs_quarter_pipe` returns no contact at all for a box,
-  so a car drives straight through a curve's footprint completely
-  unaffected, exactly as if the curve weren't there (see FR-020's own
-  Non-goals note). What's still not modeled is a fillet at a corner wall's
-  own *vertical* edges — where it meets its neighboring side/back wall at
-  other than 90 degrees (`StaticQuarterPipe::between_planes`' construction
-  only works for two *perpendicular* planes, and two arena walls meeting at
-  a corner aren't) — a materially different problem from the
-  floor/ceiling-seam fillets FR-021 adds; see FR-021 and Open questions. The
-  back walls have no goal-shaped cutout either. `FR-019`'s corner-cut inset
-  distance (`arena::CORNER_LENGTH`) and `FR-020`'s fillet radius
-  (`arena::FILLET_RADIUS`) are both this project's own uncalibrated
+- **A car (box) actually being deflected by a curved fillet, goal cutouts,
+  and any geometry finer than a flat plane or single-radius fillet per
+  boundary segment.** `arena::standard_curves` builds 24 `StaticQuarterPipe`
+  fillets — 16 floor/ceiling-seam fillets (one floor-side and one
+  ceiling-side per wall, for all 9 walls including the 4 diagonal corner
+  walls since FR-021) plus, since FR-022, 8 vertical-edge fillets (one per
+  corner wall endpoint, where it meets its neighboring side/back wall) —
+  deflecting only the ball; `collision::contacts_vs_quarter_pipe` returns no
+  contact at all for a box, so a car drives straight through any curve's
+  footprint completely unaffected, exactly as if the curve weren't there
+  (see FR-020's own Non-goals note). The back walls have no goal-shaped
+  cutout. `FR-019`'s corner-cut inset distance (`arena::CORNER_LENGTH`) and
+  `FR-020`'s fillet radius (`arena::FILLET_RADIUS`, also reused by FR-021
+  and FR-022) are both this project's own uncalibrated
   placeholders, not measured against real field mesh data — only
   `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z` are commonly-cited, sourced
   dimensions.
@@ -574,12 +573,56 @@ wall and the floor or ceiling would otherwise meet at — see FR-020/FR-021.
   it, rather than duplicating the corner-wall plane math. `PhysicsWorld::
   standard_arena` picks up the extra 8 curves automatically, since it
   already loops over every curve `arena::standard_curves()` returns. Still
-  not modeled: a car actually being deflected by any fillet (unchanged from
-  FR-020), a fillet at a corner wall's own *vertical* edges (where it meets
-  its neighboring side/back wall at other than 90 degrees — a materially
-  different problem, since `between_planes` only handles two perpendicular
-  planes and two arena walls meeting at a corner generally aren't), and goal
+  not modeled at the time this requirement shipped: a car actually being
+  deflected by any fillet (unchanged from FR-020), a fillet at a corner
+  wall's own *vertical* edges (now implemented, see FR-022), and goal
   cutouts (see Non-goals).
+- `RB-PHYSICS-001-FR-022` (curved corner-wall vertical-edge fillets,
+  implemented): rounds off the last sharp edges the standard arena's
+  octagonal footprint has — the 8 vertical edges where each of the 4
+  diagonal corner walls meets its neighboring side or back wall.
+  `arena::standard_curves` now builds 24 `StaticQuarterPipe`s total (the 16
+  floor/ceiling-seam fillets FR-020/FR-021 already built, plus 8
+  vertical-edge fillets, one per corner-wall endpoint). Unlike every prior
+  fillet in this port, the two planes a vertical-edge fillet bridges
+  *aren't* perpendicular: a corner wall meets its neighboring side/back wall
+  at 135 degrees (given `standard_walls`' 45-degree corner cut), not 90.
+  This exposed a real gap in `StaticQuarterPipe::between_planes`, which
+  previously only worked correctly for perpendicular planes (silently
+  computing the wrong axis point otherwise, via a shortcut formula — adding
+  the two scaled normals together — that only happens to equal the correct
+  answer when the normals are orthogonal). `between_planes` is now fully
+  general: it solves the axis point via the actual 2x2 linear system in the
+  (possibly non-orthogonal) basis the two normals form, and its own sector
+  angle comes out to exactly `arccos(dot(plane_a.normal, plane_b.normal))`
+  — a right angle for perpendicular planes as before, or (for this
+  requirement's own corner-wall geometry) a shallow 45 degrees, the
+  supplement of the 135-degree dihedral angle the two flat walls actually
+  meet at. `sphere_vs_quarter_pipe`'s sector-membership test is likewise
+  generalized: the old two-dot-products check only worked because a
+  90-degree sector's two edges are perpendicular; the new test uses signed
+  cross products against `axis_direction` instead (`dir` is in-sector iff
+  sweeping from `sector_start` toward it, and from it toward `sector_end`,
+  both go the positive way around `axis_direction`), which is exact for any
+  sector up to 180 degrees, the widest a sensible fillet-replacing-a-corner
+  can ever be. Since a general (non-orthogonal) sector's own containment
+  test depends on `axis_direction`'s sign/handedness — unlike the old
+  perpendicular-only test, which never used `axis_direction` at all —
+  `between_planes` now also self-corrects a "backwards" `axis_direction`
+  internally (flipping it if `cross(sector_start, sector_end)` doesn't
+  already point the same way), so a caller can pass either of the two
+  opposite directions along the shared edge line without needing to reason
+  about which one is "correct." New `arena::corner_wall_plane` reuse aside,
+  the vertical-edge fillets' own `axis_direction` is simply `(0, 0, 1)` (the
+  edge itself is vertical) — no cross product needed here, unlike the
+  corner-wall floor/ceiling-seam case FR-021 introduced. `FILLET_RADIUS` is
+  reused as-is once again, rather than a separate, smaller radius for these
+  visibly shallower edges. Still not modeled: a car actually being
+  deflected by any fillet, and goal cutouts (see Non-goals) — the
+  compound corner where a vertical-edge fillet meets a floor- or
+  ceiling-seam fillet, near a wall's own endpoint, also remains unaddressed
+  (this port doesn't attempt a blended 3D corner fillet, only independent,
+  additive per-edge ones — see Non-goals).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -677,13 +720,18 @@ wall and the floor or ceiling would otherwise meet at — see FR-020/FR-021.
 - `arena`: `standard_ground`/`standard_walls` — Rocket League's real
   standard-arena field dimensions and a 9-`StaticPlane` octagonal boundary
   plus ceiling, built from `body::StaticPlane` alone (no new collision
-  code); `standard_curves` (since FR-020, extended to all 9 walls by
-  FR-021) — 16 `StaticQuarterPipe` fillets (floor-side and ceiling-side, for
-  each of the 4 cardinal walls and, since FR-021, the 4 diagonal corner
-  walls too), built via `StaticQuarterPipe::between_planes` from those same
-  flat planes — a corner wall's own `axis_direction` is computed via a
+  code); `standard_curves` (since FR-020, extended to all 9 walls'
+  floor/ceiling seams by FR-021, and to the 8 corner-wall vertical edges by
+  FR-022) — 24 `StaticQuarterPipe` fillets total: 16 floor-side/
+  ceiling-side fillets (one pair per wall, all 9 walls including the 4
+  diagonal corner walls since FR-021) plus 8 vertical-edge fillets (one per
+  corner-wall endpoint, since FR-022), all built via
+  `StaticQuarterPipe::between_planes` from those same flat planes — a
+  corner wall's own floor/ceiling-seam `axis_direction` is computed via a
   cross product rather than hand-picked, since (unlike a cardinal wall's)
-  it isn't a coordinate axis; `PhysicsWorld::standard_arena` (in `world`)
+  it isn't a coordinate axis, while a vertical-edge fillet's own
+  `axis_direction` is simply `(0, 0, 1)` (the edge itself is vertical);
+  `PhysicsWorld::standard_arena` (in `world`)
   wires all three into a new `PhysicsWorld` in one call, an alternative to
   `PhysicsWorld::new` plus manual `with_wall`/`with_curve` calls for a
   caller that wants the real field rather than a custom test arena.
@@ -965,6 +1013,39 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   now for one whose normal isn't a coordinate axis. All
   FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020/FR-021
   behavior covered by `rb_physics_bullet`'s unit tests (172 tests as of
+  the 0.21.0 version).
+- FR-022 (met, curved corner-wall vertical-edge fillets): `standard_curves`
+  returns exactly 24 fillets instead of 16; every fillet's axis (all 24,
+  floor/ceiling-seam and vertical-edge alike) sits exactly `FILLET_RADIUS`
+  in from some vertical wall; every vertical-edge fillet's own
+  `axis_direction` runs purely along Z, unlike a floor/ceiling-seam
+  fillet's horizontal one; a corner wall's own derived vertical-edge fillet
+  axis sits exactly `FILLET_RADIUS` in from both the corner wall and its
+  neighboring side wall, with a sector spanning exactly the 45-degree angle
+  between their two normals (not the floor-seam fillets' 90 degrees).
+  `between_planes`'s generalization is independently verified with a
+  synthetic non-perpendicular fixture (a wall meeting a second wall at 45
+  degrees, unrelated to the arena's own geometry): the derived axis still
+  sits exactly `radius` in from both planes with tangent points exactly on
+  each; the derived sector angle matches the angle between the two planes'
+  normals exactly; the sharp corner the fillet replaces sits outside its
+  own radius but within its sector (the real proof the generalized sector
+  orientation actually faces the missing material, not away from it); and
+  passing either of the two opposite directions as `axis_direction`
+  produces the same correctly-oriented sector either way, confirming the
+  self-correction is real and not an artifact of a particular input sign.
+  An end-to-end `PhysicsWorld` test confirms a ball embedded past a
+  vertical-edge fillet's own radius (deep in what would otherwise be the
+  sharp corner sliver, at a wall-to-wall angle that isn't a right angle)
+  gets pushed meaningfully back toward the axis — not a claim that it
+  settles and stays at the exact resting distance, since (like every other
+  fillet in this port) its contact stops firing once the overlap resolves,
+  after which nothing cancels whatever residual velocity the correction
+  left the ball with; `RB-PHYSICS-001-FR-020`'s and `FR-021`'s own
+  equivalent tests make the same "moved meaningfully," not
+  "settled-and-stayed," claim for exactly this reason. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020/FR-021/FR-022
+  behavior covered by `rb_physics_bullet`'s unit tests (181 tests as of
   this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
@@ -1062,19 +1143,28 @@ questions). FR-020's `arena::FILLET_RADIUS` has exactly the same status as
 `CORNER_LENGTH` — this port's own invention, no public reference, and only
 governs the ball (see FR-020's own Non-goals: a car isn't deflected by a
 curve at all yet, so there's nothing to validate there either). FR-021's
-corner-wall fillets reuse this same `FILLET_RADIUS` constant rather than
-introducing a second one — a documented simplification, since this port
-has no reason to believe the real game's corner-wall transition radius
-(if it even uses one uniform radius, which the actual field mesh's curved
-corners likely don't) matches its cardinal-wall radius. The unit
+and FR-022's own fillets reuse this same `FILLET_RADIUS` constant rather
+than introducing a second one each — a documented simplification, since
+this port has no reason to believe the real game's corner-wall transition
+radius (if it even uses one uniform radius, which the actual field mesh's
+curved corners likely don't) matches its cardinal-wall radius, and even
+less reason to believe a vertical-edge fillet's own radius should match
+either — FR-022's own edges are visibly shallower (45 degrees) than a
+floor/ceiling seam's (90), yet share the same radius regardless. The unit
 tests confirm the fillet's *shape* of response (pushes back toward the
 axis once the sphere's surface crosses the fillet's own radius from
-inside, respects its 90-degree sector, leaves a box untouched — all
-unchanged by FR-021, since `between_planes`/`sphere_vs_quarter_pipe`
-themselves needed no code changes to support a diagonal wall), not that a
-real ball's actual wall-to-floor/wall-to-ceiling transition behavior
-matches this radius or trigger condition, at a cardinal or a corner wall
-alike.
+inside, respects its own sector — 90 degrees for a floor/ceiling seam, 45
+for a corner wall's own vertical edge — leaves a box untouched), not that a
+real ball's actual wall-to-floor/wall-to-ceiling or wall-to-wall transition
+behavior matches this radius or trigger condition, at a cardinal wall, a
+corner wall's floor/ceiling seam, or a corner wall's own vertical edge
+alike. `StaticQuarterPipe::between_planes`'s own generalization (FR-022) —
+solving the axis point as a real 2x2 linear system, and testing sector
+membership via signed cross products rather than the old
+perpendicular-only two-dot-products shortcut — is itself unit-tested
+directly against a synthetic non-perpendicular fixture, independent of the
+arena's own geometry, so its correctness doesn't rest solely on the
+corner-wall numbers happening to work out.
 
 ## Traceability
 
@@ -1102,19 +1192,20 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   Non-goals) — needs real support-mapping/SAT-style collision machinery
   against curved geometry this port doesn't have; a car currently drives
   straight through a curve's footprint unaffected. Not started.
-- A fillet at a corner wall's own *vertical* edges — where it meets its
-  neighboring side/back wall at other than 90 degrees — and goal cutouts in
-  the back walls (see FR-019/FR-021's Non-goals). This is a materially
-  different problem from FR-021's floor/ceiling-seam fillets:
-  `StaticQuarterPipe::between_planes` only handles two mutually
-  *perpendicular* planes, and two arena walls meeting at a corner generally
-  aren't (a corner wall meets its neighboring side/back wall at 135
-  degrees, given `standard_walls`' 45-degree cut), so extending fillets
-  there needs either a more general fillet construction (a non-90-degree
-  sector) or a different approach entirely. A concrete reason to model
-  either (e.g. real recorded corner-touching or goal-area behavior that
-  diverges specifically because of the sharp vertical edges/solid back
-  walls) would justify the added complexity. Not started.
+- The compound corner where a vertical-edge fillet (FR-022) meets a
+  floor-seam or ceiling-seam fillet (FR-020/FR-021), near a corner wall's
+  own top/bottom endpoint — this port models each fillet as an independent,
+  additive contact source (per `RB-PHYSICS-001`'s "single flat plane or
+  single-radius fillet per boundary segment" Non-goal), with no blended 3D
+  corner-sphere treatment where three surfaces would ideally meet smoothly.
+  A concrete reason to model this (e.g. real recorded behavior specifically
+  at these compound corners that diverges from the independent-fillets
+  approximation) would justify the added complexity. Not started.
+- Goal cutouts in the back walls (see FR-019's Non-goals) — the back walls
+  are solid, flat planes spanning the full width; a concrete reason to
+  model the cutout (e.g. real recorded goal-area behavior that diverges
+  specifically because of it) would justify the added complexity. Not
+  started.
 - Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
@@ -1123,15 +1214,17 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   case reachable in the standard arena for the first time; still not
   exercised by any test here. Not started.
 - Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS` against real
-  field mesh data (see FR-019/FR-020/FR-021) — this port has no reference
-  for either at all, unlike `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z`; even a
-  sourced value would only approximate the real corner/transition, which
-  isn't a single flat plane or single-radius fillet in the actual game.
-  `FILLET_RADIUS` now also governs the 4 corner walls' fillets (FR-021),
-  reusing the same cardinal-wall value rather than a second, independently
-  chosen one — whether the real game even uses one uniform transition
-  radius at all (as opposed to a genuinely different corner-specific
-  curve) is itself unconfirmed.
+  field mesh data (see FR-019/FR-020/FR-021/FR-022) — this port has no
+  reference for either at all, unlike `SIDE_WALL_X`/`BACK_WALL_Y`/
+  `CEILING_Z`; even a sourced value would only approximate the real
+  corner/transition, which isn't a single flat plane or single-radius
+  fillet in the actual game. `FILLET_RADIUS` now also governs the 4 corner
+  walls' floor/ceiling-seam fillets (FR-021) and all 8 vertical-edge
+  fillets (FR-022), reusing the same cardinal-wall value rather than a
+  separately chosen one for each — whether the real game even uses one
+  uniform transition radius at all (as opposed to a genuinely different
+  corner-specific curve, and a third, differently-shaped curve again at the
+  vertical edges) is itself unconfirmed.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
@@ -1184,6 +1277,62 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.22.0 (2026-08-30): FR-022 added and implemented (curved corner-wall
+  vertical-edge fillets) — rounds off the arena's last remaining sharp
+  edges: the 8 vertical edges where each of the 4 diagonal corner walls
+  meets its neighboring side or back wall. `arena::standard_curves` now
+  builds 24 `StaticQuarterPipe`s (the 16 floor/ceiling-seam fillets
+  FR-020/FR-021 already built, plus 8 vertical-edge fillets). Unlike every
+  prior fillet, the two planes a vertical-edge fillet bridges aren't
+  perpendicular — a corner wall meets its neighbor at 135 degrees (given
+  `standard_walls`' 45-degree corner cut), not 90 — which exposed a real
+  gap in `StaticQuarterPipe::between_planes`: it previously only computed
+  the correct axis point for perpendicular planes, via a shortcut (summing
+  the two scaled normals) that silently gives the wrong point for any other
+  angle. `between_planes` is now fully general: it solves the axis point as
+  an actual 2x2 linear system in the (possibly non-orthogonal) basis the
+  two normals form, and its own sector angle comes out to exactly
+  `arccos(dot(plane_a.normal, plane_b.normal))` — a right angle for
+  perpendicular planes as before, or (for this requirement's own geometry)
+  a shallow 45 degrees, the supplement of the walls' 135-degree dihedral
+  angle. `sphere_vs_quarter_pipe`'s sector-membership test is likewise
+  generalized from the old two-dot-products check (only correct for a
+  90-degree sector, since its two edges happen to be perpendicular) to a
+  signed-cross-product test against `axis_direction`, exact for any sector
+  up to 180 degrees. Since the general test depends on `axis_direction`'s
+  own sign/handedness — unlike the old test, which never used
+  `axis_direction` at all — `between_planes` now self-corrects a
+  "backwards" `axis_direction` internally, so a caller can pass either of
+  the two opposite directions along the shared edge line without reasoning
+  about which is correct. The vertical-edge fillets' own `axis_direction`
+  is simply `(0, 0, 1)` (the edge itself is vertical) — no cross product
+  needed, unlike the corner-wall floor/ceiling-seam case. `FILLET_RADIUS` is
+  reused as-is once again rather than a separate, smaller radius for these
+  visibly shallower edges. Still not modeled: a car actually being
+  deflected by any fillet, the compound corner where a vertical-edge
+  fillet meets a floor- or ceiling-seam fillet, and goal cutouts (see
+  Non-goals). 9 new unit tests across `body.rs`/`arena.rs`/`world.rs` in
+  `rb_physics_bullet` (181 total): 5 in `body.rs`, using a synthetic
+  non-perpendicular fixture independent of the arena's own geometry — the
+  axis still sits exactly `radius` in from both planes with tangent points
+  exactly on each; the derived sector angle matches the angle between the
+  two planes' normals (45 degrees for this fixture); the sharp corner the
+  fillet replaces sits outside its own radius but within its sector (the
+  real proof the generalized sector orientation actually faces the missing
+  material); and passing either of the two opposite `axis_direction`
+  choices produces the same correctly-oriented sector; 3 in `arena.rs` —
+  `standard_curves` returns exactly 24 fillets, every vertical-edge
+  fillet's `axis_direction` runs purely along Z, and a corner wall's own
+  vertical-edge fillet sits radius-in from both the corner wall and its
+  neighboring side wall with a 45-degree sector; 1 in `world.rs` — the real
+  end-to-end proof, a ball embedded past a vertical-edge fillet's own
+  radius (at a wall-to-wall angle that isn't a right angle) gets pushed
+  meaningfully back toward the axis (not a claim that it settles and stays
+  at the exact resting distance — like every other fillet here, its
+  contact stops firing once the overlap resolves, so nothing cancels
+  whatever residual velocity the correction left the ball with, the same
+  reason FR-020's and FR-021's own equivalent tests make the same weaker,
+  "moved meaningfully" claim rather than an exact-settling one).
 - 0.21.0 (2026-08-30): FR-021 added and implemented (curved
   corner-wall-to-floor/wall-to-ceiling transitions) — extends FR-020's
   fillet treatment to the 4 diagonal corner walls `FR-019` introduced.

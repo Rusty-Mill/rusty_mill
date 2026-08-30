@@ -1788,10 +1788,10 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_sixteen_curved_transitions() {
+    fn standard_arena_has_twenty_four_curved_transitions() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.curves.len(), 16);
+        assert_eq!(world.curves.len(), 24);
     }
 
     #[test]
@@ -1919,6 +1919,77 @@ mod tests {
             world.ball.position.z > ball_radius + 10.0,
             "expected the diagonal wall's curve to push the ball up off flat-floor height, got z={}",
             world.ball.position.z
+        );
+    }
+
+    #[test]
+    fn a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-022: two vertical
+        // walls meeting at a shallow (non-perpendicular, 45-degree-normal)
+        // angle, exactly like a diagonal corner wall's own vertical edge
+        // where it meets its neighboring side/back wall -- a ball embedded
+        // past the fillet's own radius (deep in what would otherwise be the
+        // sharp, unrounded corner sliver) should be pushed back toward the
+        // axis, the same live-physics proof already given for the
+        // floor/wall and diagonal-wall fillets, now for a wall-to-wall
+        // corner whose two planes aren't perpendicular. Checks the ball
+        // actually moved a clear distance toward the axis, not that it
+        // settles and stays at the exact resting distance: once the
+        // correction resolves the overlap, this fillet's own contact stops
+        // firing (same as any other single, non-repeating contact source
+        // here), so nothing cancels whatever residual velocity the
+        // correction left the ball with, and it coasts onward rather than
+        // stopping there -- the same reason `RB-PHYSICS-001-FR-020`'s and
+        // `FR-021`'s own equivalent tests only check the ball moved
+        // meaningfully in the right direction, not that it settled exactly.
+        let wall_a = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), 0.0);
+        let wall_b = StaticPlane::new(
+            Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        let radius = 292.0;
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &wall_a,
+            &wall_b,
+            radius,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+
+        let ball_radius = 92.75;
+        let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
+            .normalize()
+            .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the axis than the resting distance, toward the sharp corner the
+        // fillet replaces), well clear of the ground so gravity/floor
+        // contact can't interfere.
+        let embedded_distance = curve.radius - ball_radius + 10.0;
+        let embedded_position =
+            curve.axis_point + bisector * embedded_distance + Vec3::new(0.0, 0.0, 500.0);
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall_a)
+            .with_wall(wall_b)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_horizontal_rel = Vec3::new(
+            world.ball.position.x - curve.axis_point.x,
+            world.ball.position.y - curve.axis_point.y,
+            0.0,
+        );
+        let final_dist = final_horizontal_rel.length();
+        assert!(
+            final_dist < embedded_distance - 10.0,
+            "expected the corner-edge fillet to push the ball meaningfully toward the axis, \
+             started {embedded_distance} units out, got {final_dist}"
         );
     }
 
