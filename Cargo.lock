@@ -5734,6 +5734,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_h2"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_http"
 version = "0.1.0"
 dependencies = [
