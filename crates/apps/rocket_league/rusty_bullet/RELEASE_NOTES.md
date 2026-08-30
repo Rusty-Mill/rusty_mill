@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Curved corner-wall vertical-edge fillets
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#53](https://github.com/baileyrd/rusty_bullet/pull/53) · `d466ae2`
 
 - **Rounds off the standard arena's last remaining sharp edges** — the 8
   vertical edges where each of the 4 diagonal corner walls meets its
