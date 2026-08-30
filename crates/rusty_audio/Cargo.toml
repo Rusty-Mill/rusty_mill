@@ -1,0 +1,22 @@
+[package]
+name = "rusty_audio"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign PCM audio capture and playback device driver library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_audio"
+keywords = ["audio", "pcm", "wasapi", "alsa", "no-std"]
+categories = ["multimedia", "no-std"]
+
+[dependencies]
+rusty_std = { path = "../rusty_std" }
+
+[target.'cfg(windows)'.dependencies]
+rusty_win32 = { path = "../rusty_win32" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusty_libc = { path = "../rusty_libc" }
+
+[features]
+default = []
