@@ -6,6 +6,75 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Curved corner-wall vertical-edge fillets
+**2026-08-30** · PR pending · commit pending
+
+- **Rounds off the standard arena's last remaining sharp edges** — the 8
+  vertical edges where each of the 4 diagonal corner walls meets its
+  neighboring side or back wall. `arena::standard_curves` now returns 24
+  `StaticQuarterPipe`s (the 16 floor/ceiling-seam fillets `FR-020`/`FR-021`
+  already built, plus 8 vertical-edge fillets, one per corner-wall
+  endpoint).
+- **Generalized `StaticQuarterPipe::between_planes` to any two non-parallel
+  planes, not just perpendicular ones.** Unlike every prior fillet in this
+  port, the two planes a vertical-edge fillet bridges *aren't*
+  perpendicular — a corner wall meets its neighboring side/back wall at 135
+  degrees (given `standard_walls`' 45-degree corner cut), not 90. This
+  exposed a real gap: `between_planes` previously only computed the correct
+  axis point for perpendicular planes, via a shortcut (summing the two
+  scaled normals) that silently gives the *wrong* point at any other angle.
+  It now solves the axis point as an actual 2x2 linear system in the
+  (possibly non-orthogonal) basis the two normals form, and its own sector
+  angle comes out to exactly the angle between the two planes' normals — a
+  right angle for perpendicular planes as before, or (for these
+  vertical-edge fillets) a shallow 45 degrees, the supplement of the walls'
+  135-degree dihedral angle.
+- **Generalized `sphere_vs_quarter_pipe`'s sector-membership test** from the
+  old two-dot-products check (only correct for a 90-degree sector, since
+  its two edges happen to be perpendicular) to a signed-cross-product test
+  against `axis_direction`, exact for any sector up to 180 degrees — the
+  widest a sensible fillet-replacing-a-corner can ever be.
+- **`between_planes` self-corrects a "backwards" `axis_direction`
+  internally**, since the general sector test (unlike the old
+  perpendicular-only one) depends on `axis_direction`'s own sign/handedness:
+  it flips the input if `cross(sector_start, sector_end)` doesn't already
+  point the right way, so a caller can pass either of the two opposite
+  directions along the shared edge line without reasoning about which one
+  is correct.
+- **The vertical-edge fillets' own `axis_direction` is simply `(0, 0, 1)`**
+  — the edge itself is vertical — no cross product needed, unlike the
+  corner-wall floor/ceiling-seam case `FR-021` introduced.
+  **`FILLET_RADIUS` is reused as-is** once again, rather than a separate,
+  smaller radius for these visibly shallower edges.
+- **Still not modeled:** a car (box) actually being deflected by any
+  fillet, the compound corner where a vertical-edge fillet meets a floor-
+  or ceiling-seam fillet (near a corner wall's own top/bottom endpoint —
+  this port models each fillet as an independent, additive contact source,
+  not a blended 3D corner), and goal cutouts in the back walls.
+- 9 new unit tests across `body.rs`/`arena.rs`/`world.rs` in
+  `rb_physics_bullet` (181 total): 5 in `body.rs`, using a synthetic
+  non-perpendicular fixture independent of the arena's own geometry — the
+  axis still sits exactly `radius` in from both planes with tangent points
+  exactly on each; the derived sector angle matches the angle between the
+  two planes' normals (45 degrees for this fixture); the sharp corner the
+  fillet replaces sits outside its own radius but within its sector (the
+  real proof the generalized sector orientation actually faces the missing
+  material, not away from it); and passing either of the two opposite
+  `axis_direction` choices produces the same correctly-oriented sector; 3
+  in `arena.rs` — `standard_curves` returns exactly 24 fillets, every
+  vertical-edge fillet's `axis_direction` runs purely along Z, and a corner
+  wall's own vertical-edge fillet sits radius-in from both the corner wall
+  and its neighboring side wall with a 45-degree sector; 1 in `world.rs` —
+  the real end-to-end proof, a ball embedded past a vertical-edge fillet's
+  own radius (at a wall-to-wall angle that isn't a right angle) gets pushed
+  meaningfully back toward the axis (not a claim that it settles and stays
+  at the exact resting distance — its contact stops firing once the
+  overlap resolves, so nothing cancels whatever residual velocity the
+  correction left the ball with, the same reason `FR-020`'s and `FR-021`'s
+  own equivalent tests make the same weaker, "moved meaningfully" claim).
+
+---
+
 ## Curved corner-wall-to-floor/wall-to-ceiling transitions
 **2026-08-30** · [#51](https://github.com/baileyrd/rusty_bullet/pull/51) · `d746d08`
 

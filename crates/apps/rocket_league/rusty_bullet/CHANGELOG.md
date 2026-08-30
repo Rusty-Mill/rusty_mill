@@ -228,8 +228,29 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (`floor.normal.cross(&wall.normal)`, already unit length by construction)
   rather than hand-picked, since it isn't a coordinate axis the way a
   cardinal wall's is. A car actually being deflected by any fillet, a
-  fillet at a corner wall's own vertical edges (where it meets its
-  neighboring side/back wall), and goal cutouts remain not modeled.
+  fillet at a corner wall's own vertical edges (now implemented, see
+  FR-022), and goal cutouts remain not modeled.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-022`) —
+  curved corner-wall vertical-edge fillets: rounds off the 8 remaining
+  sharp edges in the standard arena's octagonal footprint, where each of
+  the 4 diagonal corner walls meets its neighboring side or back wall.
+  `arena::standard_curves` now returns 24 `StaticQuarterPipe`s (the 16
+  floor/ceiling-seam fillets already built, plus 8 vertical-edge fillets).
+  Unlike every prior fillet, the two planes a vertical-edge fillet bridges
+  aren't perpendicular (a corner wall meets its neighbor at 135 degrees,
+  not 90) — `StaticQuarterPipe::between_planes` is now fully general to
+  handle this: it solves the axis point as a real 2x2 linear system rather
+  than assuming orthogonal normals, its own sector angle comes out to
+  exactly the angle between the two planes' normals (45 degrees here, 90
+  for a floor/ceiling seam), and it self-corrects a "backwards"
+  `axis_direction` internally so a caller can pass either of the two
+  opposite directions along the shared edge line. `sphere_vs_quarter_pipe`'s
+  sector-membership test is likewise generalized from a two-dot-products
+  shortcut (only correct for a 90-degree sector) to a signed-cross-product
+  test valid for any sector up to 180 degrees. `FILLET_RADIUS` is reused
+  as-is once again. A car actually being deflected by any fillet, the
+  compound corner where a vertical-edge fillet meets a floor/ceiling-seam
+  fillet, and goal cutouts remain not modeled.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

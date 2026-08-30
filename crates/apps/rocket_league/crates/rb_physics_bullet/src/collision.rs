@@ -131,10 +131,21 @@ fn sphere_vs_quarter_pipe(
     }
     let dir = perp * (1.0 / dist);
 
-    // Only this fillet's own 90-degree sector is governed by it — outside
-    // that range, whichever flat plane it bridges takes over instead (see
-    // the struct's own doc comment).
-    if dir.dot(&pipe.sector_start) < 0.0 || dir.dot(&pipe.sector_end) < 0.0 {
+    // Only this fillet's own sector is governed by it — outside that
+    // range, whichever flat plane it bridges takes over instead (see the
+    // struct's own doc comment). `sector_start`/`sector_end` can subtend
+    // any angle up to 180 degrees (not just 90 — see
+    // `StaticQuarterPipe::between_planes`, `RB-PHYSICS-001-FR-022`), so
+    // membership needs a general "is dir within the wedge" test rather
+    // than the old two-dot-products shortcut (which only happened to work
+    // because a 90-degree sector's two edges are perpendicular): `dir` is
+    // in the sector iff sweeping from `sector_start` toward it, and from it
+    // toward `sector_end`, both go the *positive* way around
+    // `axis_direction` (by at most a half turn) — exactly what these two
+    // signed cross products, both non-negative, mean.
+    if pipe.sector_start.cross(&dir).dot(&pipe.axis_direction) < 0.0
+        || dir.cross(&pipe.sector_end).dot(&pipe.axis_direction) < 0.0
+    {
         return None;
     }
 
