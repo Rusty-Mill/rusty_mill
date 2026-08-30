@@ -125,9 +125,14 @@ pub struct QueueFamilyProperties {
     pub queue_count: u32,
     /// Number of bits of timestamp value that are meaningful.
     pub timestamp_valid_bits: u32,
+    // Never constructed off Windows (see `PhysicalDevice::queue_families`),
+    // so keeping the field itself Windows-only avoids a dead-code warning
+    // rather than papering over it with an `#[allow]`.
+    #[cfg(windows)]
     raw_flags: u32,
 }
 
+#[cfg(windows)]
 impl QueueFamilyProperties {
     /// Whether this family supports graphics operations.
     pub fn supports_graphics(&self) -> bool {
@@ -147,19 +152,36 @@ impl QueueFamilyProperties {
     }
 }
 
+// Off Windows this crate has no real driver binding at all (see "Known
+// gaps" above), so `raw_flags` is never populated with meaningful bits --
+// every capability query honestly reports `false` rather than
+// masking against a fake all-zero flag set.
+#[cfg(not(windows))]
+impl QueueFamilyProperties {
+    /// Whether this family supports graphics operations.
+    pub fn supports_graphics(&self) -> bool {
+        false
+    }
+    /// Whether this family supports compute operations.
+    pub fn supports_compute(&self) -> bool {
+        false
+    }
+    /// Whether this family supports transfer (copy) operations.
+    pub fn supports_transfer(&self) -> bool {
+        false
+    }
+    /// Whether this family supports sparse memory binding operations.
+    pub fn supports_sparse_binding(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(windows)]
 mod ffi_consts {
     pub const GRAPHICS: u32 = crate::ffi::VK_QUEUE_GRAPHICS_BIT;
     pub const COMPUTE: u32 = crate::ffi::VK_QUEUE_COMPUTE_BIT;
     pub const TRANSFER: u32 = crate::ffi::VK_QUEUE_TRANSFER_BIT;
     pub const SPARSE_BINDING: u32 = crate::ffi::VK_QUEUE_SPARSE_BINDING_BIT;
-}
-#[cfg(not(windows))]
-mod ffi_consts {
-    pub const GRAPHICS: u32 = 0;
-    pub const COMPUTE: u32 = 0;
-    pub const TRANSFER: u32 = 0;
-    pub const SPARSE_BINDING: u32 = 0;
 }
 
 /// A real Vulkan instance: the loaded driver plus a live `VkInstance`
@@ -252,7 +274,11 @@ mod tests {
     fn creating_an_instance_succeeds_when_a_driver_is_present() {
         match Instance::new() {
             Ok(_instance) => {}
-            Err(VulkanError::LoaderNotFound) => {
+            // Both variants mean "no usable Vulkan on this machine" -- the
+            // former on Windows without a driver installed, the latter on
+            // any platform this crate doesn't bind to at all (e.g. the
+            // ubuntu-latest/macos-latest CI runners).
+            Err(VulkanError::LoaderNotFound | VulkanError::UnsupportedPlatform) => {
                 eprintln!("skipping: no Vulkan loader installed on this machine");
             }
             Err(e) => panic!("unexpected error creating instance: {e}"),

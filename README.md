@@ -78,6 +78,7 @@ have landed so far.
 | [`rusty-search-azure-search`](crates/rusty_search/crates/rusty-search-azure-search) | `crates/rusty_search/crates/rusty-search-azure-search` | Azure AI Search-backed `SearchBackend` implementation: a hosted search-as-a-service on Azure |
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
+| [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -408,6 +409,25 @@ in practice; verified by grepping its source for every symbol that moved
 before swapping, not just building green after. Full test suite (196
 tests across the twelve crates, 3 doc-tests) passes unmodified.
 
+`rusty_vulkan` needed no pin retirement: its one dependency, `rusty_win32`,
+was already a `path` dependency in the standalone repo's own `Cargo.toml`.
+The standalone repo had no CI, so two real bugs reached this merge
+undetected: `QueueFamilyProperties`'s capability-flag accessors
+(`supports_graphics`/`_compute`/`_transfer`/`_sparse_binding`) masked
+against a stub `ffi_consts` module that hardcoded every flag constant to
+`0` on non-Windows targets — `raw_flags & 0 != 0` is always `false`
+regardless of the real flags, which is exactly what `clippy`'s
+`bad_bit_mask` lint (`-D warnings` in this workspace's CI) exists to catch.
+Fixed by splitting the impl per `cfg(windows)`, with the non-Windows arm
+honestly returning `false` from each accessor instead of laundering the
+same answer through a fake all-zero mask; `raw_flags` itself is now
+`cfg(windows)`-only too, since `QueueFamilyProperties` is never
+constructed off Windows. Separately, `creating_an_instance_succeeds_when_a_driver_is_present`'s
+driver-absent skip logic matched only `VulkanError::LoaderNotFound`, not
+the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
+non-Windows target (including this workspace's own `ubuntu-latest` CI
+runner) — a real panic, not a flake, now fixed to skip on either variant.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -454,6 +474,8 @@ A third wave continues the same way, starting with
 [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite),
 [`rusty_time`](https://github.com/baileyrd/rusty_time),
 [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid),
-[`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock), and
+[`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
-behind one nested workspace) — merged one at a time, same process.
+behind one nested workspace), and
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan) — merged one
+at a time, same process.
