@@ -5750,6 +5750,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_jinja"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_regx",
+ "rusty_std",
+]
+
+[[package]]
 name = "rusty_json"
 version = "0.1.0"
 dependencies = [

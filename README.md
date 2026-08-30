@@ -84,6 +84,7 @@ have landed so far.
 | [`rusty_crypto_key`](crates/rusty_crypto_key) | `crates/rusty_crypto_key` | A zeroize-on-drop key storage and file persistence micro-crate (`0600` permissions on Unix) |
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
+| [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -462,6 +463,11 @@ chars instead of a `[char; 2]` pattern) — both fixed, no behavior change.
 `rusty_config` has zero dependencies of any kind, so nothing needed
 swapping — its merge is just the subtree add plus workspace wiring.
 
+`rusty_jinja` depends on `rusty_regx`, `rusty_json`, and `rusty_std` via
+relative `path` dependencies, all already merged as siblings under this
+workspace's `crates/` — no dependency swap needed, just the subtree add
+plus workspace wiring.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -515,6 +521,7 @@ behind one nested workspace),
 [`rusty_sync`](https://github.com/baileyrd/rusty_sync),
 [`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_crypto_key`](https://github.com/baileyrd/rusty_crypto_key),
-[`rusty_ansi`](https://github.com/baileyrd/rusty_ansi), and
-[`rusty_config`](https://github.com/baileyrd/rusty_config) — merged one
+[`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
+[`rusty_config`](https://github.com/baileyrd/rusty_config), and
+[`rusty_jinja`](https://github.com/baileyrd/rusty_jinja) — merged one
 at a time, same process.
