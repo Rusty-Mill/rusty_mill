@@ -56,10 +56,16 @@ pub enum VulkanError {
 impl fmt::Display for VulkanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VulkanError::UnsupportedPlatform => write!(f, "no Vulkan loader binding for this platform"),
+            VulkanError::UnsupportedPlatform => {
+                write!(f, "no Vulkan loader binding for this platform")
+            }
             VulkanError::LoaderNotFound => write!(f, "could not load the Vulkan loader library"),
-            VulkanError::MissingEntryPoint(name) => write!(f, "Vulkan loader is missing entry point {name}"),
-            VulkanError::CreateInstanceFailed(code) => write!(f, "vkCreateInstance failed: VkResult {code}"),
+            VulkanError::MissingEntryPoint(name) => {
+                write!(f, "Vulkan loader is missing entry point {name}")
+            }
+            VulkanError::CreateInstanceFailed(code) => {
+                write!(f, "vkCreateInstance failed: VkResult {code}")
+            }
             VulkanError::EnumeratePhysicalDevicesFailed(code) => {
                 write!(f, "vkEnumeratePhysicalDevices failed: VkResult {code}")
             }
@@ -204,7 +210,9 @@ impl Instance {
     pub fn new() -> Result<Self, VulkanError> {
         #[cfg(windows)]
         {
-            Ok(Instance { inner: platform::InstanceInner::new()? })
+            Ok(Instance {
+                inner: platform::InstanceInner::new()?,
+            })
         }
         #[cfg(not(windows))]
         {
@@ -307,7 +315,10 @@ mod tests {
             return;
         };
         let props = device.properties();
-        assert!(!props.device_name.is_empty(), "device name should be non-empty");
+        assert!(
+            !props.device_name.is_empty(),
+            "device name should be non-empty"
+        );
         assert!(
             !matches!(props.device_type, DeviceType::Unknown(_)),
             "device type should be a recognized VkPhysicalDeviceType, got {:?}",

@@ -4,7 +4,9 @@
 
 fn main() {
     let instance = rusty_vulkan::Instance::new().expect("failed to create Vulkan instance");
-    let devices = instance.enumerate_physical_devices().expect("failed to enumerate physical devices");
+    let devices = instance
+        .enumerate_physical_devices()
+        .expect("failed to enumerate physical devices");
 
     println!("{} physical device(s):", devices.len());
     for device in &devices {

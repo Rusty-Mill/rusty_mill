@@ -129,7 +129,8 @@ pub type PfnCreateInstance = unsafe extern "system" fn(
     allocator: *const c_void,
     instance: *mut VkInstance,
 ) -> VkResult;
-pub type PfnDestroyInstance = unsafe extern "system" fn(instance: VkInstance, allocator: *const c_void);
+pub type PfnDestroyInstance =
+    unsafe extern "system" fn(instance: VkInstance, allocator: *const c_void);
 pub type PfnEnumeratePhysicalDevices = unsafe extern "system" fn(
     instance: VkInstance,
     count: *mut u32,

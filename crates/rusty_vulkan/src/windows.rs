@@ -12,9 +12,10 @@ use rusty_win32::RawHandle;
 use rusty_win32::dynlib::{free_library, get_proc_address, load_library};
 
 use crate::ffi::{
-    self, PfnCreateInstance, PfnDestroyInstance, PfnEnumeratePhysicalDevices, PfnGetInstanceProcAddr,
-    PfnGetPhysicalDeviceProperties, PfnGetPhysicalDeviceQueueFamilyProperties, VkApplicationInfo,
-    VkInstance, VkInstanceCreateInfo, VkPhysicalDevice, VkQueueFamilyProperties, VK_SUCCESS,
+    self, PfnCreateInstance, PfnDestroyInstance, PfnEnumeratePhysicalDevices,
+    PfnGetInstanceProcAddr, PfnGetPhysicalDeviceProperties,
+    PfnGetPhysicalDeviceQueueFamilyProperties, VK_SUCCESS, VkApplicationInfo, VkInstance,
+    VkInstanceCreateInfo, VkPhysicalDevice, VkQueueFamilyProperties,
 };
 use crate::{DeviceType, PhysicalDeviceProperties, QueueFamilyProperties, VulkanError};
 
@@ -40,7 +41,7 @@ unsafe fn resolve<T: Copy>(
         VulkanError::MissingEntryPoint(
             // SAFETY: every name this function is called with below is a
             // 'static byte-string literal.
-            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) }
+            unsafe { core::str::from_utf8_unchecked(name.to_bytes()) },
         )
     })?;
     // SAFETY: caller guarantees `T` matches `name`'s real Vulkan ABI (a
@@ -76,10 +77,13 @@ impl InstanceInner {
 
         // SAFETY: `module` was just loaded above and is freed only in
         // `Drop`, after every use of `get_instance_proc_addr`/`fns`.
-        let get_instance_proc_addr_raw = unsafe { get_proc_address(module, "vkGetInstanceProcAddr") };
+        let get_instance_proc_addr_raw =
+            unsafe { get_proc_address(module, "vkGetInstanceProcAddr") };
         let Some(get_instance_proc_addr_raw) = get_instance_proc_addr_raw else {
             // SAFETY: `module` isn't used again after this.
-            unsafe { let _ = free_library(module); }
+            unsafe {
+                let _ = free_library(module);
+            }
             return Err(VulkanError::MissingEntryPoint("vkGetInstanceProcAddr"));
         };
         // SAFETY: `vkGetInstanceProcAddr` has this exact signature per the
@@ -88,13 +92,14 @@ impl InstanceInner {
         let get_instance_proc_addr: PfnGetInstanceProcAddr =
             unsafe { transmute(get_instance_proc_addr_raw) };
 
-        let create_instance_result: Result<PfnCreateInstance, VulkanError> = unsafe {
-            resolve(get_instance_proc_addr, null_mut(), c"vkCreateInstance")
-        };
+        let create_instance_result: Result<PfnCreateInstance, VulkanError> =
+            unsafe { resolve(get_instance_proc_addr, null_mut(), c"vkCreateInstance") };
         let create_instance = match create_instance_result {
             Ok(f) => f,
             Err(e) => {
-                unsafe { let _ = free_library(module); }
+                unsafe {
+                    let _ = free_library(module);
+                }
                 return Err(e);
             }
         };
@@ -107,19 +112,27 @@ impl InstanceInner {
         // call; `instance` is a valid out-pointer.
         let result = unsafe { create_instance(&create_info, core::ptr::null(), &mut instance) };
         if result != VK_SUCCESS {
-            unsafe { let _ = free_library(module); }
+            unsafe {
+                let _ = free_library(module);
+            }
             return Err(VulkanError::CreateInstanceFailed(result));
         }
 
         let fns = match Self::resolve_instance_fns(get_instance_proc_addr, instance) {
             Ok(fns) => fns,
             Err(e) => {
-                unsafe { let _ = free_library(module); }
+                unsafe {
+                    let _ = free_library(module);
+                }
                 return Err(e);
             }
         };
 
-        Ok(InstanceInner { module, instance, fns })
+        Ok(InstanceInner {
+            module,
+            instance,
+            fns,
+        })
     }
 
     fn resolve_instance_fns(
@@ -156,7 +169,8 @@ impl InstanceInner {
         // SAFETY: `self.instance` is live; passing a null device buffer
         // with a valid `count` out-pointer is the documented two-call
         // Vulkan enumeration idiom.
-        let result = unsafe { (self.fns.enumerate_physical_devices)(self.instance, &mut count, null_mut()) };
+        let result =
+            unsafe { (self.fns.enumerate_physical_devices)(self.instance, &mut count, null_mut()) };
         if result != VK_SUCCESS {
             return Err(VulkanError::EnumeratePhysicalDevicesFailed(result));
         }
@@ -166,7 +180,11 @@ impl InstanceInner {
             // SAFETY: `devices` has exactly `count` elements, matching
             // what was just reported.
             let result = unsafe {
-                (self.fns.enumerate_physical_devices)(self.instance, &mut count, devices.as_mut_ptr())
+                (self.fns.enumerate_physical_devices)(
+                    self.instance,
+                    &mut count,
+                    devices.as_mut_ptr(),
+                )
             };
             if result != VK_SUCCESS {
                 return Err(VulkanError::EnumeratePhysicalDevicesFailed(result));
@@ -179,7 +197,9 @@ impl InstanceInner {
                 inner: PhysicalDeviceInner {
                     handle,
                     get_properties: self.fns.get_physical_device_properties,
-                    get_queue_family_properties: self.fns.get_physical_device_queue_family_properties,
+                    get_queue_family_properties: self
+                        .fns
+                        .get_physical_device_queue_family_properties,
                 },
             })
             .collect())
@@ -234,7 +254,10 @@ impl PhysicalDeviceInner {
         let name_bytes = unsafe {
             core::slice::from_raw_parts(base.add(off::DEVICE_NAME), off::DEVICE_NAME_LEN)
         };
-        let nul = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
+        let nul = name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_bytes.len());
         let device_name = String::from_utf8_lossy(&name_bytes[..nul]).into_owned();
 
         PhysicalDeviceProperties {
@@ -253,11 +276,14 @@ impl PhysicalDeviceInner {
         // valid `count` out-pointer is the documented two-call idiom.
         unsafe { (self.get_queue_family_properties)(self.handle, &mut count, null_mut()) };
 
-        let mut raw: Vec<VkQueueFamilyProperties> = alloc::vec![VkQueueFamilyProperties::default(); count as usize];
+        let mut raw: Vec<VkQueueFamilyProperties> =
+            alloc::vec![VkQueueFamilyProperties::default(); count as usize];
         if count > 0 {
             // SAFETY: `raw` has exactly `count` elements, matching what
             // was just reported.
-            unsafe { (self.get_queue_family_properties)(self.handle, &mut count, raw.as_mut_ptr()) };
+            unsafe {
+                (self.get_queue_family_properties)(self.handle, &mut count, raw.as_mut_ptr())
+            };
         }
 
         raw.into_iter()
