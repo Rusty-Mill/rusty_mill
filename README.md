@@ -80,6 +80,7 @@ have landed so far.
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
 | [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
+| [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -433,6 +434,9 @@ runner) — a real panic, not a flake, now fixed to skip on either variant.
 plus `rusty_win32` on Windows and `rusty_libc` on Linux) were already
 `path` dependencies pointing at sibling directories under `crates/`.
 
+`rusty_config` has zero dependencies of any kind, so nothing needed
+swapping — its merge is just the subtree add plus workspace wiring.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -482,6 +486,7 @@ A third wave continues the same way, starting with
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
 behind one nested workspace),
-[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan), and
-[`rusty_audio`](https://github.com/baileyrd/rusty_audio) — merged one
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
+[`rusty_audio`](https://github.com/baileyrd/rusty_audio), and
+[`rusty_config`](https://github.com/baileyrd/rusty_config) — merged one
 at a time, same process.

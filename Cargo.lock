@@ -5665,6 +5665,10 @@ name = "rusty_compress"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_config"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_diff"
 version = "0.1.0"
 
