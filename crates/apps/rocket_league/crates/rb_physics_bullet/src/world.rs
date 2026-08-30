@@ -1625,9 +1625,16 @@ mod tests {
         );
         world.step(dt);
 
-        assert_eq!(
-            world.cars[0].angular_velocity, angular_velocity_after_plain_double_jump,
-            "expected no spurious flip-cancel after an unrelated plain double jump, got {:?}",
+        // A tolerance rather than exact equality: the landing
+        // auto-orientation assist (RB-PHYSICS-001-FR-018) now applies a
+        // tiny continuous corrective torque on the neutral release step in
+        // between, which a real spurious flip-cancel (zeroing the whole
+        // angular velocity) would dwarf.
+        assert!(
+            (world.cars[0].angular_velocity - angular_velocity_after_plain_double_jump).length()
+                < 0.01,
+            "expected no spurious flip-cancel after an unrelated plain double jump, before \
+             release/re-press={angular_velocity_after_plain_double_jump:?}, after={:?}",
             world.cars[0].angular_velocity
         );
     }
@@ -1676,6 +1683,38 @@ mod tests {
             Vec3::ZERO,
             "expected the second jump press to cancel the wall-jump dodge's spin outright, got {:?}",
             world.cars[0].angular_velocity
+        );
+    }
+
+    #[test]
+    fn an_airborne_car_gradually_rights_itself_with_no_input_in_a_live_world() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 1000.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 1000.0));
+        // Tilted 90 degrees about its local forward axis, as if fresh out
+        // of an uncanceled dodge, with no stick input to right itself.
+        car.orientation = rb_domain::Quat::new(
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+        );
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the assist from falling
+
+        let world_up = Vec3::new(0.0, 0.0, 1.0);
+        let alignment_before = world.cars[0].orientation.rotate(&world_up).dot(&world_up);
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+
+        let alignment_after = world.cars[0].orientation.rotate(&world_up).dot(&world_up);
+        assert!(
+            alignment_after > alignment_before,
+            "expected the landing-orientation assist to trend the car back toward level over \
+             time, alignment before={alignment_before}, after={alignment_after}"
         );
     }
 }

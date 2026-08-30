@@ -148,9 +148,26 @@
 //! an earlier dodge (long since landed from) can't make a *later*,
 //! unrelated plain double jump's next press incorrectly fire a flip-cancel.
 //!
-//! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): any auto-orientation assistance on landing after a dodge. A
-//! car with no input set (or all-neutral `ControllerInput::default()`)
+//! **Landing auto-orientation assistance**: while airborne, with no active
+//! `pitch`/`roll` air control input this step and no fresh jump press this
+//! step (so the assist never fights the player's own stick input, and
+//! never interacts within one `apply_driven_forces` call with a
+//! dodge/wall-jump-dodge/double-jump/flip-cancel's own direct velocity or
+//! angular-velocity change), a gentle restoring torque nudges the car's
+//! local up axis toward world up: `up_axis(car).cross(&world_up)` gives
+//! both the correction axis and, since both are unit vectors, a magnitude
+//! already proportional to the sine of the tilt angle — a level car earns
+//! no correction, a heavily tilted one earns a stronger nudge. Real Rocket
+//! League likely gates this on actual proximity to the ground; this port
+//! has no raycast/distance-to-ground query to do that, so it applies
+//! continuously whenever airborne and the player isn't actively
+//! air-controlling instead — a documented simplification. A car resting
+//! *exactly* upside-down (`up` antiparallel to world up) is a singularity
+//! this simple scheme doesn't resolve (the cross product is exactly zero,
+//! any perpendicular axis would do, but none is chosen) — an unlikely
+//! exact case, not addressed here.
+//!
+//! A car with no input set (or all-neutral `ControllerInput::default()`)
 //! behaves exactly as a free rigid box always has — this module only ever
 //! adds force/torque/impulse or adjusts the existing friction property,
 //! never removes physics outright.
@@ -293,6 +310,19 @@ const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
 /// taller held jump than a tapped one for this car's mass in tests, not
 /// derived from any measured or documented Rocket League value.
 const JUMP_HOLD_ACCELERATION: f32 = 1400.0;
+
+/// Uncalibrated placeholder landing-auto-orientation restoring-torque
+/// magnitude — applied while airborne with no active `pitch`/`roll` air
+/// control input, scaled by `up_axis(car).cross(&world_up)` (already
+/// proportional to the sine of the car's tilt off level, since both
+/// vectors are unit length, so a bigger tilt earns a stronger nudge and an
+/// already-level car earns none). Chosen only to be a visibly gentler
+/// correction than full active air control (`AIR_CONTROL_TORQUE`) for this
+/// car's mass/inertia in tests — a full order of magnitude smaller — not
+/// derived from any measured or documented Rocket League value; this port
+/// has no public reference for the real assist's actual strength or
+/// trigger condition either (see the module doc comment).
+const LANDING_AUTO_UPRIGHT_TORQUE: f32 = 100_000.0;
 
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
@@ -453,6 +483,29 @@ pub fn apply_driven_forces(
         let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
         if roll != 0.0 {
             car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE));
+        }
+
+        // Landing auto-orientation assistance: with no active pitch/roll
+        // air control this step (so the assist never fights the player's
+        // own input) and no fresh jump press this step (so it never
+        // interacts, within the same integrate_velocities call, with a
+        // dodge/wall-jump-dodge/double-jump/flip-cancel's own direct
+        // velocity or angular-velocity change — those already dominate the
+        // car's rotation for that instant anyway), gently nudge the car's
+        // local up axis toward world up. `up.cross(&world_up)` gives both
+        // the correction axis and, since both are unit vectors, a
+        // magnitude already proportional to the sine of the tilt angle —
+        // a level car (or one resting exactly upside-down, an unlikely
+        // singularity this simple scheme doesn't resolve) gets no
+        // correction, a heavily tilted one gets a stronger nudge. See the
+        // module doc comment for why this applies continuously whenever
+        // airborne rather than only near the ground.
+        if pitch == 0.0 && roll == 0.0 && !jump_pressed {
+            let world_up = Vec3::new(0.0, 0.0, 1.0);
+            let correction_axis = up_axis(car).cross(&world_up);
+            if correction_axis.length() > 0.0 {
+                car.apply_torque(correction_axis * LANDING_AUTO_UPRIGHT_TORQUE);
+            }
         }
 
         if jump_pressed {
@@ -2449,6 +2502,118 @@ mod tests {
         assert!(
             dodge_flip_active,
             "expected the wall jump to leave the cancelable flip flag untouched"
+        );
+    }
+
+    /// A car tilted 90 degrees about its local forward axis — up_axis
+    /// becomes (0, -1, 0) instead of world up (0, 0, 1). Drive.rs's test
+    /// helpers only call `integrate::integrate_velocities`, never
+    /// `integrate::integrate_transform`, so a car's `orientation` never
+    /// actually changes step to step here — the only way to exercise the
+    /// landing-assistance torque's dependence on orientation in isolation
+    /// is to set it directly like this.
+    fn tilted_car() -> RigidBody {
+        let mut c = car();
+        c.orientation = rb_domain::Quat::new(
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+        );
+        c.update_inertia_tensor();
+        c
+    }
+
+    #[test]
+    fn a_tilted_airborne_car_gets_a_corrective_torque_from_landing_assistance() {
+        let mut c = tilted_car();
+        let mut boost = MAX_BOOST;
+        step_with_input(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            &mut boost,
+            1.0 / 60.0,
+        );
+        assert!(
+            c.angular_velocity.length() > 0.0,
+            "expected a tilted airborne car with neutral input to gain a corrective angular \
+             velocity from landing-orientation assistance, got {:?}",
+            c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn an_already_upright_airborne_car_gets_no_corrective_torque() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        step_with_input(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            &mut boost,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.angular_velocity,
+            Vec3::ZERO,
+            "expected an already-level car to get no correction, got {:?}",
+            c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn landing_assistance_does_not_apply_while_grounded() {
+        let mut c = tilted_car();
+        let mut boost = MAX_BOOST;
+        step_with_input(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            &mut boost,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.angular_velocity,
+            Vec3::ZERO,
+            "expected no landing-orientation assistance while grounded, got {:?}",
+            c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn landing_assistance_does_not_apply_while_actively_air_controlling() {
+        let mut without_input = tilted_car();
+        let mut without_input_boost = MAX_BOOST;
+        step_with_input(
+            &mut without_input,
+            &ControllerInput::default(),
+            false,
+            &mut without_input_boost,
+            1.0 / 60.0,
+        );
+        let assisted_angular_velocity = without_input.angular_velocity;
+        assert!(assisted_angular_velocity.length() > 0.0);
+
+        let mut with_pitch = tilted_car();
+        let mut with_pitch_boost = MAX_BOOST;
+        step_with_input(
+            &mut with_pitch,
+            &full_pitch(),
+            false,
+            &mut with_pitch_boost,
+            1.0 / 60.0,
+        );
+        // Full pitch input drives its own AIR_CONTROL_TORQUE-scale
+        // rotation about the right axis (y); the landing assist's own
+        // much smaller contribution must not additionally appear (it
+        // would only ever add to x/z here, since the assist's correction
+        // axis for this tilt is purely along x — see tilted_car).
+        assert_eq!(
+            with_pitch.angular_velocity.x, 0.0,
+            "expected active pitch input to suppress landing-orientation assistance entirely, \
+             got {:?}",
+            with_pitch.angular_velocity
         );
     }
 }
