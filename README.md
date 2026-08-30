@@ -79,6 +79,7 @@ have landed so far.
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty-db-core`](crates/rusty_db/crates/rusty-db-core) | `crates/rusty_db/crates/rusty-db-core` | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of `rusty_db`) |
 | [`rusty-db-derive`](crates/rusty_db/crates/rusty-db-derive) | `crates/rusty_db/crates/rusty-db-derive` | `#[derive(Mapped)]` macro for `rusty_db`: maps a struct to a table |
 | [`rusty-db-sqlite`](crates/rusty_db/crates/rusty-db-sqlite) | `crates/rusty_db/crates/rusty-db-sqlite` | SQLite driver for `rusty_db`, built on `sqlx` |
@@ -436,6 +437,9 @@ the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
 non-Windows target (including this workspace's own `ubuntu-latest` CI
 runner) — a real panic, not a flake, now fixed to skip on either variant.
 
+`rusty_h2` has zero dependencies of any kind, so nothing needed
+swapping — its own merge is just the subtree add plus workspace wiring.
+
 `rusty_db` was its own nested Cargo workspace (six crates: `rusty-db-core`,
 `rusty-db-derive`, `rusty-db-sqlite`, `rusty-db-postgres`, `rusty-db-mysql`,
 and the `rusty-db` facade), de-inherited the same way as `rusty_search`
@@ -515,6 +519,7 @@ A third wave continues the same way, starting with
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
 behind one nested workspace),
 [`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
+[`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_db`](https://github.com/baileyrd/rusty_db) (six crates behind a
 second nested workspace),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi), and
