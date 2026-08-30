@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Curved wall-to-floor/wall-to-ceiling transitions
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#49](https://github.com/baileyrd/rusty_bullet/pull/49) · `8053a71`
 
 - **Added:** a new `body::StaticQuarterPipe` shape — an immovable
   partial-cylinder fillet connecting two perpendicular flat planes,
