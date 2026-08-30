@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Curved corner-wall-to-floor/wall-to-ceiling transitions
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#51](https://github.com/baileyrd/rusty_bullet/pull/51) · `d746d08`
 
 - **Extends `RB-PHYSICS-001-FR-020`'s fillet treatment to the 4 diagonal
   corner walls** `RB-PHYSICS-001-FR-019` introduced — `arena::standard_curves`
