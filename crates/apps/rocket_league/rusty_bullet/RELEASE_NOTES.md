@@ -6,6 +6,73 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Compound-corner fillets
+**2026-08-30** · PR pending · commit pending
+
+- **Rounds off the last 16 sharp vertices in the standard arena's vertical
+  boundary** — the compound corners where a corner wall's own vertical-edge
+  fillet (`FR-022`) meets a floor- or ceiling-seam fillet (`FR-020`/`FR-021`),
+  near that corner wall's own top or bottom endpoint.
+- **New static shape `body::StaticCornerFillet`.** A compound corner is
+  where *three* planes meet at once, which no existing cylindrical
+  `StaticQuarterPipe` can blend, so this requirement introduces a genuinely
+  different shape: an immovable sphere riding the concave inside of the
+  vertex, the same "ride the inside" convention every prior fillet already
+  uses, generalized from a cylinder to a sphere.
+- **`between_three_planes` derives the center as three planes' common
+  intersection, not solved from scratch.** It reuses the same "radius-in
+  from every bridged plane" invariant `StaticQuarterPipe::between_planes`
+  already established: since the fillet's center must sit exactly `radius`
+  in from all three planes, it's also exactly `radius` in from each *pair*
+  of them — meaning it already lies on all three of that vertex's own
+  pairwise `between_planes` axis lines simultaneously. So the center is
+  nothing more than those three lines' common intersection point, solved
+  directly via the classic three-plane-intersection cross-product form of
+  Cramer's rule.
+- **Containment generalizes a 2-sided sector test to a "spherical
+  triangle."** New `collision::sphere_vs_corner_fillet`: a direction from
+  the center is inside the fillet iff its dot product with each of 3
+  `bounds` is non-negative. Each bound is the raw (deliberately
+  non-normalized — only its sign is used) cross product of a pair of the
+  three normals, sign-corrected via `signed_pair_axis` (checking the third,
+  non-pair plane's own normal against it) to always point toward the sharp
+  corner this fillet replaces — provably correct because that dot product
+  is exactly the derivative of the third plane's own signed distance along
+  a candidate direction. No `.normalize()`/`.unwrap()` is needed or used
+  anywhere in this new production code, the same discipline
+  `between_planes`'s own `FR-022` self-correction established.
+- **`arena::standard_corner_fillets` builds all 16** (4 per corner wall —
+  floor+side, floor+back, ceiling+side, ceiling+back — times the 4 corner
+  walls) directly from the same three flat planes `standard_walls` already
+  builds, reusing `FILLET_RADIUS` once again rather than a fourth radius
+  constant.
+- **`PhysicsWorld` gains `corner_fillets`/`with_corner_fillet`/
+  `resolve_corner_fillet_contact`**, mirroring `curves`/`with_curve`/
+  `resolve_curve_contact` exactly — a no-op for a car, the same documented
+  deferred case as every other fillet here. `PhysicsWorld::standard_arena`
+  wires in all 16 automatically.
+- **Still not modeled:** a car (box) actually being deflected by any
+  fillet, and goal cutouts in the back walls.
+- 13 new unit tests across `body.rs`/`collision.rs`/`arena.rs`/`world.rs`
+  in `rb_physics_bullet` (194 total): 4 in `body.rs`, using a synthetic
+  fixture combining a perpendicular floor with the same 45-degree
+  non-perpendicular wall pair `between_planes`'s own `FR-022` fixture
+  uses — the center sits radius-in from all three planes with tangent
+  points exactly on each, and the derived `bounds` correctly include the
+  direction toward the sharp corner and exclude the direction pointing
+  away from it; 5 in `collision.rs`, mirroring `sphere_vs_quarter_pipe`'s
+  own test shapes (deep-inside no contact, touching zero penetration,
+  pushed-past positive penetration toward the center, outside-bounds no
+  contact, box always empty); 2 in `arena.rs` — `standard_corner_fillets`
+  returns exactly 16 fillets, and every fillet's center sits radius-in
+  from a floor/ceiling plane, a side/back wall, and a corner wall
+  simultaneously; 2 in `world.rs` — `standard_arena` carries exactly 16
+  corner fillets, plus the real end-to-end proof, a ball embedded past a
+  compound-corner fillet's own radius gets pushed meaningfully back toward
+  the center.
+
+---
+
 ## Curved corner-wall vertical-edge fillets
 **2026-08-30** · [#53](https://github.com/baileyrd/rusty_bullet/pull/53) · `d466ae2`
 

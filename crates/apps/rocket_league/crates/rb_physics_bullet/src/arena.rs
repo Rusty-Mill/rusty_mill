@@ -21,18 +21,24 @@
 //! direction (the edge itself is vertical), differ from the floor/
 //! ceiling-seam case.
 //!
+//! `standard_corner_fillets` (`RB-PHYSICS-001-FR-023`) adds a small
+//! spherical patch at each of the 16 compound-corner vertices where a
+//! vertical-edge fillet meets a floor- or ceiling-seam fillet, near a
+//! corner wall's own top/bottom endpoint — built from
+//! `body::StaticCornerFillet::between_three_planes` on the same three flat
+//! planes (floor/ceiling, side/back wall, corner wall) that meet there,
+//! rather than the two `standard_curves`' own fillets each bridge.
+//!
 //! **Still not modeled**: the goal structures themselves (no back-net
 //! cutout — the back walls here are solid, flat planes spanning the full
 //! width); a car (box) actually being deflected by any of these fillets
-//! (`collision::contacts_vs_quarter_pipe` always returns no contact for a
-//! box); and any geometry finer than a single flat plane or single-radius
-//! fillet per boundary segment (the real field mesh's corners and
-//! transitions are more complex than this, and this port doesn't attempt
-//! the compound corner where a vertical-edge fillet meets a floor- or
-//! ceiling-seam fillet near a wall's own endpoint). See `RB-PHYSICS-001`'s
-//! Non-goals.
+//! (`collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` always
+//! return no contact for a box); and any geometry finer than a single flat
+//! plane, single-radius edge fillet, or single-radius corner fillet per
+//! boundary segment (the real field mesh's corners and transitions are more
+//! complex than this). See `RB-PHYSICS-001`'s Non-goals.
 
-use crate::body::{StaticPlane, StaticQuarterPipe};
+use crate::body::{StaticCornerFillet, StaticPlane, StaticQuarterPipe};
 use rb_domain::Vec3;
 
 /// Side wall position (the field's half-width along X) — a commonly-cited
@@ -236,6 +242,57 @@ pub fn standard_curves() -> Vec<StaticQuarterPipe> {
     }
 
     curves
+}
+
+/// Compound-corner fillets for the standard arena (`RB-PHYSICS-001-FR-023`):
+/// a small spherical patch at each of the 16 vertices where a corner wall's
+/// own vertical-edge fillet (`standard_curves`) would otherwise meet a
+/// floor- or ceiling-seam fillet at a single sharp point — 4 per corner wall
+/// (floor+side, floor+back, ceiling+side, ceiling+back) times 4 corner
+/// walls (one per quadrant). Each is built by
+/// `StaticCornerFillet::between_three_planes` directly from the same three
+/// flat planes `standard_walls` already builds (floor or ceiling, the
+/// neighboring side or back wall, and the corner wall itself) — not from
+/// the two fillets `standard_curves` builds at that vertex, since a
+/// corner-fillet's center is already exactly their common axis
+/// intersection (see `StaticCornerFillet::between_three_planes`'s own doc
+/// comment).
+pub fn standard_corner_fillets() -> Vec<StaticCornerFillet> {
+    let floor = standard_ground();
+    let ceiling = ceiling_plane();
+    let mut fillets = Vec::with_capacity(16);
+
+    for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        let side = side_wall_plane(sx);
+        let back = back_wall_plane(sy);
+        let corner = corner_wall_plane(sx, sy);
+        fillets.push(StaticCornerFillet::between_three_planes(
+            &floor,
+            &side,
+            &corner,
+            FILLET_RADIUS,
+        ));
+        fillets.push(StaticCornerFillet::between_three_planes(
+            &floor,
+            &corner,
+            &back,
+            FILLET_RADIUS,
+        ));
+        fillets.push(StaticCornerFillet::between_three_planes(
+            &ceiling,
+            &side,
+            &corner,
+            FILLET_RADIUS,
+        ));
+        fillets.push(StaticCornerFillet::between_three_planes(
+            &ceiling,
+            &corner,
+            &back,
+            FILLET_RADIUS,
+        ));
+    }
+
+    fillets
 }
 
 #[cfg(test)]
@@ -453,6 +510,51 @@ mod tests {
             assert!(
                 (axis_direction.length() - 1.0).abs() < 1e-4,
                 "cross product for quadrant ({sx}, {sy}) was not unit length: {axis_direction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_corner_fillets_has_sixteen_fillets() {
+        assert_eq!(standard_corner_fillets().len(), 16);
+    }
+
+    #[test]
+    fn every_standard_corner_fillets_center_sits_radius_in_from_a_floor_or_ceiling_a_side_or_back_wall_and_a_corner_wall(
+    ) {
+        // Each of the 16 fillets should sit exactly FILLET_RADIUS from
+        // *some* floor/ceiling plane, *some* side/back wall, and *some*
+        // corner wall -- proving `between_three_planes` actually solved
+        // for the real triple intersection this arena's geometry produces,
+        // not just some arbitrary point.
+        let floor_and_ceiling = [standard_ground(), ceiling_plane()];
+        let side_and_back_walls: Vec<StaticPlane> = [1.0f32, -1.0]
+            .iter()
+            .flat_map(|&s| [side_wall_plane(s), back_wall_plane(s)])
+            .collect();
+        let corner_walls: Vec<StaticPlane> = [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)]
+            .iter()
+            .map(|&(sx, sy)| corner_wall_plane(sx, sy))
+            .collect();
+
+        for fillet in standard_corner_fillets() {
+            let sits_radius_in = |plane: &StaticPlane| {
+                (plane.signed_distance(&fillet.center) - FILLET_RADIUS).abs() < 1e-2
+            };
+            assert!(
+                floor_and_ceiling.iter().any(sits_radius_in),
+                "expected {:?} to sit radius-in from the floor or ceiling",
+                fillet.center
+            );
+            assert!(
+                side_and_back_walls.iter().any(sits_radius_in),
+                "expected {:?} to sit radius-in from a side or back wall",
+                fillet.center
+            );
+            assert!(
+                corner_walls.iter().any(sits_radius_in),
+                "expected {:?} to sit radius-in from a corner wall",
+                fillet.center
             );
         }
     }

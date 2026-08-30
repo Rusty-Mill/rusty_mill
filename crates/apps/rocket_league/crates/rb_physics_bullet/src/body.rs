@@ -372,6 +372,128 @@ impl StaticQuarterPipe {
     }
 }
 
+/// An immovable sphere fillet blending three flat planes at a single
+/// vertex — `RB-PHYSICS-001-FR-023` — the compound corner left over where
+/// two `StaticQuarterPipe` edge fillets meet (e.g. a corner wall's own
+/// floor-seam fillet and its vertical-edge fillet, both converging at the
+/// point where the corner wall, its neighboring side wall, and the floor
+/// all meet). A single `StaticQuarterPipe` can only round one edge (two
+/// planes, infinite along a shared line); rounding all three edges meeting
+/// at a shared vertex the same way this port already rounds each edge
+/// individually needs a genuinely different shape — a sphere, not another
+/// partial cylinder — for exactly the same reason a real rounded box has
+/// spherical corners where its rounded edges meet, not sharp cylinder
+/// intersections.
+///
+/// Like `StaticQuarterPipe`, the playable side is the *inside* of the
+/// sphere (a direct 3D generalization of "ride the concave face"): a point
+/// is only governed by this fillet when its direction from `center` falls
+/// within the spherical triangle bounded by `bounds` — outside that
+/// region, whichever edge fillet or flat plane actually borders that
+/// direction takes over instead (again, this shape doesn't know or care
+/// about that; see `PhysicsWorld::step`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticCornerFillet {
+    pub center: Vec3,
+    pub radius: f32,
+    /// Three vectors (not necessarily unit length — only their *sign* in a
+    /// dot product matters, see `sphere_vs_corner_fillet`), each defining
+    /// one of the three half-space conditions bounding this fillet's own
+    /// spherical triangle: a direction `dir` from `center` is inside the
+    /// triangle exactly when `dir.dot(b) >= 0.0` for every `b` in `bounds`.
+    /// See `between_three_planes` for how each one is derived.
+    pub bounds: [Vec3; 3],
+    pub restitution: f32,
+    pub friction: f32,
+}
+
+impl StaticCornerFillet {
+    pub fn new(center: Vec3, radius: f32, bounds: [Vec3; 3]) -> StaticCornerFillet {
+        StaticCornerFillet {
+            center,
+            radius,
+            bounds,
+            restitution: 0.5,
+            friction: 0.5,
+        }
+    }
+
+    /// Derives a corner fillet of the given `radius` blending three flat
+    /// `StaticPlane`s that meet at a single vertex (e.g. a floor, a side
+    /// wall, and a diagonal corner wall, all three mutually non-parallel —
+    /// the only real requirement, exactly like `StaticQuarterPipe::
+    /// between_planes`' own "not parallel" requirement generalized to a
+    /// third plane).
+    ///
+    /// `center` sits `radius` units inward from *all three* planes along
+    /// their own normals — the unique point solving `dot(plane.normal,
+    /// center) = plane.offset + radius` for each of the three planes at
+    /// once, found via the standard three-plane-intersection formula
+    /// (Cramer's rule expressed with cross products: each plane's target
+    /// value scales the cross product of the *other two* planes' normals,
+    /// summed and divided by the scalar triple product of all three
+    /// normals). This point is exactly the common intersection of all
+    /// three pairwise edge fillets' own axis lines: `between_planes(plane_a,
+    /// plane_b, radius, _).axis_point` already satisfies the `plane_a`/
+    /// `plane_b` conditions for any position along its axis, and `center`
+    /// here is simply the specific point along that same line where the
+    /// third plane's condition is *also* satisfied — so this fillet always
+    /// meets its three adjoining edge fillets exactly where their axes
+    /// cross, with no gap or overlap.
+    ///
+    /// Each of `bounds`' three vectors corresponds to one of the three
+    /// *pairs* of planes (`plane_a`/`plane_b`, `plane_a`/`plane_d`,
+    /// `plane_b`/`plane_d`) — the raw (unnormalized — sign is all that
+    /// matters here) cross product of that pair's normals, i.e. the same
+    /// direction that pair's own `between_planes` fillet would use as its
+    /// `axis_direction`. Its sign is chosen so that moving away from
+    /// `center` in that direction moves *toward* the third plane (the one
+    /// not in the pair) — checked via that plane's own normal dotted
+    /// against the raw cross product, without needing to actually move
+    /// and re-measure: the derivative of the third plane's signed distance
+    /// along the candidate direction is exactly that dot product, so its
+    /// sign alone says which way distance to the third plane shrinks.
+    pub fn between_three_planes(
+        plane_a: &StaticPlane,
+        plane_b: &StaticPlane,
+        plane_d: &StaticPlane,
+        radius: f32,
+    ) -> StaticCornerFillet {
+        let target_a = plane_a.offset + radius;
+        let target_b = plane_b.offset + radius;
+        let target_d = plane_d.offset + radius;
+
+        let cross_bd = plane_b.normal.cross(&plane_d.normal);
+        let cross_da = plane_d.normal.cross(&plane_a.normal);
+        let cross_ab = plane_a.normal.cross(&plane_b.normal);
+
+        let det = plane_a.normal.dot(&cross_bd);
+        let center =
+            (cross_bd * target_a + cross_da * target_b + cross_ab * target_d) * (1.0 / det);
+
+        let bounds = [
+            signed_pair_axis(cross_ab, plane_d.normal),
+            signed_pair_axis(cross_da, plane_b.normal),
+            signed_pair_axis(cross_bd, plane_a.normal),
+        ];
+
+        StaticCornerFillet::new(center, radius, bounds)
+    }
+}
+
+/// Picks the sign of `raw_axis` (the cross product of one pair of planes'
+/// normals) so that it points toward decreasing signed distance from the
+/// third plane's own normal `third_normal` — see `between_three_planes`'
+/// own doc comment for why this is exactly the right condition, and why
+/// only the sign (not the magnitude) of `raw_axis` matters afterward.
+fn signed_pair_axis(raw_axis: Vec3, third_normal: Vec3) -> Vec3 {
+    if third_normal.dot(&raw_axis) < 0.0 {
+        raw_axis
+    } else {
+        -raw_axis
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +744,92 @@ mod tests {
                 "expected sector_start -> sector_end to sweep the positive way around axis_direction, got {pipe:?}"
             );
         }
+    }
+
+    /// A floor meeting the same two walls `non_perpendicular_walls` uses,
+    /// all three passing through the origin -- the compound corner where a
+    /// `RB-PHYSICS-001-FR-022` vertical-edge fillet (between `wall` and
+    /// `diagonal`) would meet two `FR-020`/`FR-021` floor-seam fillets
+    /// (floor-vs-`wall`, floor-vs-`diagonal`), exactly like a real corner
+    /// wall's own floor-level vertex: two perpendicular pairs
+    /// (floor/`wall`, floor/`diagonal`) and one non-perpendicular pair
+    /// (`wall`/`diagonal`, 45 degrees).
+    fn non_perpendicular_corner() -> (StaticPlane, StaticPlane, StaticPlane) {
+        let (wall, diagonal) = non_perpendicular_walls();
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        (floor, wall, diagonal)
+    }
+
+    #[test]
+    fn between_three_planes_sits_the_center_radius_in_from_all_three_planes() {
+        let (floor, wall, diagonal) = non_perpendicular_corner();
+        let radius = 20.0;
+        let fillet = StaticCornerFillet::between_three_planes(&floor, &wall, &diagonal, radius);
+        assert!((floor.signed_distance(&fillet.center) - radius).abs() < 1e-3);
+        assert!((wall.signed_distance(&fillet.center) - radius).abs() < 1e-3);
+        assert!((diagonal.signed_distance(&fillet.center) - radius).abs() < 1e-3);
+    }
+
+    #[test]
+    fn between_three_planes_tangent_points_lie_exactly_on_each_plane() {
+        let (floor, wall, diagonal) = non_perpendicular_corner();
+        let radius = 20.0;
+        let fillet = StaticCornerFillet::between_three_planes(&floor, &wall, &diagonal, radius);
+        let floor_tangent = fillet.center + (-floor.normal) * radius;
+        let wall_tangent = fillet.center + (-wall.normal) * radius;
+        let diagonal_tangent = fillet.center + (-diagonal.normal) * radius;
+        assert!(floor.signed_distance(&floor_tangent).abs() < 1e-3);
+        assert!(wall.signed_distance(&wall_tangent).abs() < 1e-3);
+        assert!(diagonal.signed_distance(&diagonal_tangent).abs() < 1e-3);
+    }
+
+    #[test]
+    fn between_three_planes_faces_the_sharp_corner_it_replaces() {
+        // The real proof the generalized 3D containment region is correct:
+        // the sharp corner this fillet rounds off (where all three flat
+        // planes would otherwise meet exactly, all passing through the
+        // origin here) must sit outside the fillet's own radius (it cuts
+        // the corner off, not past it) and within all three of its
+        // bounds (it actually faces the missing material it's replacing).
+        let (floor, wall, diagonal) = non_perpendicular_corner();
+        let radius = 1.0;
+        let fillet = StaticCornerFillet::between_three_planes(&floor, &wall, &diagonal, radius);
+
+        let corner = Vec3::ZERO;
+        let rel = corner - fillet.center;
+        let dist = rel.length();
+        let dir = rel * (1.0 / dist);
+
+        assert!(
+            dist > radius,
+            "expected the sharp corner to sit outside the fillet's own radius, got dist={dist}"
+        );
+        assert!(
+            fillet.bounds.iter().all(|b| dir.dot(b) >= 0.0),
+            "expected the fillet to face the sharp corner it replaces, dir={dir:?} bounds={:?}",
+            fillet.bounds
+        );
+    }
+
+    #[test]
+    fn between_three_planes_excludes_the_direction_opposite_the_sharp_corner() {
+        // Confirms the bounds are actually load-bearing, not vacuously
+        // satisfied by everything: the direction deep in open space, away
+        // from this vertex entirely (the exact opposite of the direction
+        // toward the sharp corner this fillet replaces), must fail at
+        // least one bound.
+        let (floor, wall, diagonal) = non_perpendicular_corner();
+        let radius = 1.0;
+        let fillet = StaticCornerFillet::between_three_planes(&floor, &wall, &diagonal, radius);
+
+        let corner = Vec3::ZERO;
+        let rel = corner - fillet.center;
+        let toward_corner = rel * (1.0 / rel.length());
+        let away_from_corner = -toward_corner;
+
+        assert!(
+            fillet.bounds.iter().any(|b| away_from_corner.dot(b) < 0.0),
+            "expected the direction opposite the sharp corner to fail at least one bound"
+        );
     }
 }
