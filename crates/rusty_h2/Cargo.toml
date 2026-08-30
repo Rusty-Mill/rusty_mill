@@ -1,0 +1,10 @@
+[package]
+name = "rusty_h2"
+version = "0.1.0"
+edition = "2021"
+description = "A from-scratch HTTP/2 (RFC 9113) implementation in Rust"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
