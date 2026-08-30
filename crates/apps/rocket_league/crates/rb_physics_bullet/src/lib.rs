@@ -17,12 +17,12 @@
 //!
 //! `drive` couples `rb_domain::ControllerInput` into ground-driving forces
 //! (throttle, steering), boost, handbrake, a variable-height ground jump, a
-//! double jump (plain or a directional dodge, depending on stick input), a
-//! wall jump, and airborne pitch/yaw/roll (air control) on a car — see its
-//! own module doc for what's deliberately still out of scope (a dodge
-//! variant of the wall jump). `PhysicsWorld` gains arena walls (`with_wall`)
-//! as generic flat `StaticPlane` geometry every body collides with, the
-//! same way it already collides with the ground.
+//! double jump (plain or a directional, flip-cancelable dodge, depending on
+//! stick input), a wall jump, and airborne pitch/yaw/roll (air control) on
+//! a car — see its own module doc for what's deliberately still out of
+//! scope (a dodge variant of the wall jump). `PhysicsWorld` gains arena
+//! walls (`with_wall`) as generic flat `StaticPlane` geometry every body
+//! collides with, the same way it already collides with the ground.
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`

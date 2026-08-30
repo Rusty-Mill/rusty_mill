@@ -144,6 +144,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   ground jump alone — the double jump, a dodge, and the wall jump remain
   fixed-impulse. `PhysicsWorld` gains `car_jump_hold_time_remaining:
   Vec<f32>`.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-016`) — flip-cancel: a
+  dodge's spin can now be canceled early — a further fresh
+  `ControllerInput.jump` press while airborne, not touching a wall, with
+  the double jump already spent, zeroes `RigidBody.angular_velocity`
+  outright. A new `dodge_flip_active` flag tracks this: the dodge branch
+  sets it, the plain-double-jump branch explicitly clears it (preventing a
+  stale flag from an earlier dodge from leaking into a later unrelated
+  double jump). Doesn't touch linear velocity or `double_jump_available`;
+  wall jump keeps priority, unchanged. `PhysicsWorld` gains
+  `car_dodge_flip_active: Vec<bool>`.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

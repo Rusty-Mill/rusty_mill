@@ -1,13 +1,14 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.15.0
+- Version: 0.16.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), and body-vs-arena-wall collision
   all implemented, tested, and wired into a real N-body `PhysicsWorld`
   scene; ground-driving car input (throttle, steering), boost, handbrake, a
   variable-height ground jump, a double jump (plain or a directional
-  dodge), a wall jump, and air control (pitch/yaw/roll) implemented; a
-  dodge variant of the wall jump, a full arena footprint, split impulse,
+  dodge, itself flip-cancelable), a wall jump, and air control
+  (pitch/yaw/roll) implemented; a dodge variant of the wall jump, landing
+  auto-orientation assistance, a full arena footprint, split impulse,
   warm-starting, a combined multi-body solve, and constant calibration are
   open follow-up work)
 - Owners: baileyrd
@@ -56,9 +57,10 @@ landing — see FR-012 — a wall jump, an outward-plus-upward impulse fired
 while touching an arena wall, which also restores the double jump the same
 way landing does — see FR-013 — a dodge, a directional variant of the
 double jump fired when the stick is held in a direction at the moment of
-the press — see FR-014 — and variable height on that ground jump, adding
+the press — see FR-014 — variable height on that ground jump, adding
 extra upward acceleration for as long as jump stays held, up to a cap —
-see FR-015.
+see FR-015 — and flip-cancel, letting a further jump press stop a dodge's
+spin early instead of always completing it — see FR-016.
 
 ## Non-goals (this increment)
 
@@ -76,25 +78,23 @@ see FR-015.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **A dodge variant of the wall jump, flip-cancel, and landing
-  auto-upright.** `drive::apply_driven_forces` now covers ground throttle
-  and steering (FR-007), boost (FR-008), handbrake/drift (FR-009), a
-  variable-height ground jump (FR-010/FR-015), air control (FR-011), a
-  double jump — plain or a directional dodge (FR-012/FR-014) — and a wall
-  jump (FR-013). Real Rocket League's jump system is still richer than
+- **A dodge variant of the wall jump, and landing auto-upright.**
+  `drive::apply_driven_forces` now covers ground throttle and steering
+  (FR-007), boost (FR-008), handbrake/drift (FR-009), a variable-height
+  ground jump (FR-010/FR-015), air control (FR-011), a double jump — plain
+  or a directional, flip-cancelable dodge (FR-012/FR-014/FR-016) — and a
+  wall jump (FR-013). Real Rocket League's jump system is still richer than
   that: a wall jump can itself be dodged off of (not modeled — this port's
   wall jump always fires the same fixed outward-plus-upward impulse,
-  checking `wall_normal` before ever consulting `pitch`/`roll`); a dodge's
-  rotation can be canceled early by pressing jump again mid-flip (not
-  modeled — this port's dodge always completes its fixed
-  `DODGE_ANGULAR_SPEED` spin); and Rocket League also auto-corrects a car's
-  orientation somewhat on landing after a dodge (not modeled — no landing
-  assistance of any kind exists here). Each is its own real feature, not a
-  small extension of the jump variants already implemented — left as
-  separate, explicitly tracked follow-up work. (Variable jump height itself
-  is no longer in this list — see FR-015; matching real Rocket League, it's
-  scoped to the ground jump alone, so the double jump, a dodge, and the
-  wall jump staying fixed-impulse isn't a divergence to track here.)
+  checking `wall_normal` before ever consulting `pitch`/`roll`); and Rocket
+  League also auto-corrects a car's orientation somewhat on landing after a
+  dodge (not modeled — no landing assistance of any kind exists here). Each
+  is its own real feature, not a small extension of the jump variants
+  already implemented — left as separate, explicitly tracked follow-up
+  work. (Variable jump height and flip-cancel are no longer in this list —
+  see FR-015/FR-016; matching real Rocket League, variable height is
+  scoped to the ground jump alone and flip-cancel to a dodge's own spin, so
+  neither is a divergence to track here anymore.)
 - **A full arena footprint, or any Rocket-League-specific wall geometry.**
   FR-013's `PhysicsWorld.walls` is a flat list of generic `StaticPlane`s a
   caller places wherever it wants (typically with a horizontal normal);
@@ -351,6 +351,30 @@ see FR-015.
   `JUMP_HOLD_ACCELERATION` are both uncalibrated placeholders — this port
   has no public reference for real Rocket League's actual hold-window
   length or acceleration the way `JUMP_SPEED` does.
+- `RB-PHYSICS-001-FR-016` (flip-cancel, implemented): a dodge's spin
+  (FR-014) can be canceled early — a further fresh `ControllerInput.jump`
+  press while airborne, not touching a wall, with `double_jump_available`
+  already spent by that dodge, zeroes `RigidBody.angular_velocity` outright
+  instead of leaving the flip to spin indefinitely. A new per-car
+  `dodge_flip_active: bool` (`PhysicsWorld`'s parallel
+  `car_dodge_flip_active: Vec<bool>`, starting `false`) tracks whether the
+  most recent double-jump-or-dodge press was a dodge whose spin hasn't been
+  canceled or superseded yet: the directional-dodge branch sets it `true`;
+  the plain-double-jump branch explicitly sets it `false` rather than
+  leaving it alone, so a stale `true` left over from an earlier,
+  already-landed-from dodge can't leak into spuriously canceling a later,
+  unrelated plain double jump's non-existent flip. Flip-cancel doesn't
+  touch linear velocity (the dodge's own translation is unaffected) and
+  doesn't consume or restore `double_jump_available` (already spent by the
+  dodge that set the flag). Wall jump keeps its existing priority — checked
+  first in the airborne branch, unchanged — so a fresh press while touching
+  a wall always wall-jumps, never flip-cancels. This port has no timed
+  flip animation to interrupt (a dodge is one instantaneous
+  angular-velocity kick, not a sustained torque over a fixed duration —
+  see FR-014), so "mid-flip" here means "any time before landing or a wall
+  touch re-arms the double jump," a documented simplification of real
+  Rocket League's actual flip-duration window. No new physics constants —
+  this is a state-flag-gated zeroing action, not a magnitude to calibrate.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -392,14 +416,17 @@ see FR-015.
   `pitch`/`roll` exceed `DODGE_DEADZONE` at the moment of the press, a
   directional dodge: a horizontal `DODGE_SPEED` impulse plus an
   instantaneous `DODGE_ANGULAR_SPEED` spin written directly to
-  `RigidBody.angular_velocity`), and a third jump variant fired instead of
-  the double-jump-or-dodge branch when a `wall_normal` (the outward normal
-  of a touched wall, if any) is present — an outward-plus-upward impulse
-  that restores rather than consumes `double_jump_available`, and never
-  dodges regardless of stick input (not a Bullet3 port — this project's own
-  model of Rocket League's driving mechanics, since the real numbers aren't
-  public; see the module's own doc comment for which constants are
-  commonly-cited community estimates vs. uncalibrated placeholders).
+  `RigidBody.angular_velocity`, also arming a `dodge_flip_active` flag a
+  further fresh press can spend to flip-cancel — zero the spin outright —
+  before landing or a wall touch re-arms the double jump), and a third jump
+  variant fired instead of the double-jump-or-dodge branch when a
+  `wall_normal` (the outward normal of a touched wall, if any) is present —
+  an outward-plus-upward impulse that restores rather than consumes
+  `double_jump_available`, and never dodges regardless of stick input (not
+  a Bullet3 port — this project's own model of Rocket League's driving
+  mechanics, since the real numbers aren't public; see the module's own doc
+  comment for which constants are commonly-cited community estimates vs.
+  uncalibrated placeholders).
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
@@ -417,12 +444,14 @@ see FR-015.
   `car_jump_held: Vec<bool>` (jump's rising-edge state, starting `false`),
   a parallel `car_double_jump_available: Vec<bool>` (starting `true`,
   restored on landing or wall contact, consumed by an airborne double
-  jump), and a parallel `car_jump_hold_time_remaining: Vec<f32>` (starting
-  `0.0`, the ground jump's variable-height hold window); each car's current
-  wall contact (if any), like its ground contact, is computed fresh at the
-  start of every `step` from its position at the time. `frame()` assigns
-  each car's `player_id` as its index in `cars` and reports its current
-  input and boost amount.
+  jump), a parallel `car_jump_hold_time_remaining: Vec<f32>` (starting
+  `0.0`, the ground jump's variable-height hold window), and a parallel
+  `car_dodge_flip_active: Vec<bool>` (starting `false`, whether the most
+  recent double-jump-or-dodge press left a cancelable flip active); each
+  car's current wall contact (if any), like its ground contact, is computed
+  fresh at the start of every `step` from its position at the time.
+  `frame()` assigns each car's `player_id` as its index in `cars` and
+  reports its current input and boost amount.
 
 No `PhysicsStateSource`-style trait exists yet for "the physics engine"
 specifically — `rb_verify_cli` calls `rb_physics_bullet::simulate`
@@ -585,8 +614,26 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   confirms holding jump for a car's entire flight lands and settles it
   instead of relaunching it every touchdown. All
   FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015 behavior
-  covered by `rb_physics_bullet`'s unit tests (126 tests as of this
+  covered by `rb_physics_bullet`'s unit tests (126 tests as of the 0.15.0
   version).
+- FR-016 (met, flip-cancel): a dodge leaves the car spinning and sets a
+  cancelable-flip flag; a further fresh jump press while airborne, not
+  touching a wall, with the double jump already spent, zeroes the spin
+  outright and spends the flag; flip-cancel touches neither the dodge's own
+  linear velocity nor `double_jump_available`; a plain double jump (no
+  stick input) explicitly clears any stale cancelable-flip flag left over
+  from an earlier, already-landed-from dodge, so a later unrelated press
+  can't spuriously flip-cancel nothing; a wall jump still takes priority
+  over flip-cancel on a fresh press while touching a wall. An end-to-end
+  `PhysicsWorld::step` test confirms a second jump press cancels a dodge's
+  spin in a live scene; a regression test confirms landing and a later
+  plain double jump clear a stale cancelable-flip flag there too, not just
+  in `drive.rs` isolation — verified by confirming both the `drive.rs` and
+  `world.rs` versions of that regression actually fail without the
+  explicit-clear fix, not just that they pass with it. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016
+  behavior covered by `rb_physics_bullet`'s unit tests (132 tests as of
+  this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -622,10 +669,15 @@ grip, jumps once per fresh press, spins about the correct axis from a
 standing start in the air, can spend exactly one extra airborne jump per
 airborne period, pushes outward from a touched wall with no such limit,
 dodges in the stick's direction with a visible flip when that jump is
-spent with pitch or roll held, and climbs higher the longer the ground
-jump button stays held, up to a cap), not that a real car's throttle/steer/
-boost/handbrake/jump/double-jump/wall-jump/dodge/air-control/hold-height
-response actually matches these curves. The double jump reuses `JUMP_SPEED` rather than
+spent with pitch or roll held, climbs higher the longer the ground jump
+button stays held up to a cap, and stops a dodge's spin outright on a
+further press before landing or a wall touch), not that a real car's
+throttle/steer/boost/handbrake/jump/double-jump/wall-jump/dodge/
+air-control/hold-height/flip-cancel response actually matches these
+curves. Flip-cancel itself introduces no new constant to calibrate — it's
+a state-flag-gated zeroing action, not a magnitude, so it inherits no
+validation burden beyond `DODGE_SPEED`/`DODGE_ANGULAR_SPEED`'s own (the
+spin it cancels). The double jump reuses `JUMP_SPEED` rather than
 introducing a second speed constant, so it inherits that constant's
 validation status as-is; the wall jump reuses `JUMP_SPEED` for its
 vertical component but introduces `WALL_JUMP_HORIZONTAL_SPEED` for its
@@ -655,12 +707,12 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- A dodge variant of the wall jump, canceling a dodge's rotation early
-  (flip-cancel), and landing auto-orientation assistance (see Non-goals) —
-  each a distinct real mechanic; not started. (The double jump's own
-  dodge — a directional flip off the ground/air, no wall involved — is now
-  implemented as FR-014; variable jump height for the ground jump is now
-  implemented as FR-015.)
+- A dodge variant of the wall jump, and landing auto-orientation assistance
+  (see Non-goals) — each a distinct real mechanic; not started. (The double
+  jump's own dodge — a directional flip off the ground/air, no wall
+  involved — is now implemented as FR-014; variable jump height for the
+  ground jump is now implemented as FR-015; canceling a dodge's rotation
+  early — flip-cancel — is now implemented as FR-016.)
 - A modeled arena footprint (Rocket League's actual octagonal shape,
   curved wall-to-floor/wall-to-ceiling transitions, a ceiling) and
   disambiguating a car touching two walls at once (a corner) — see
@@ -719,6 +771,43 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.16.0 (2026-08-30): FR-016 added and implemented (flip-cancel) — a
+  dodge's spin (FR-014) can now be canceled early: a further fresh
+  `ControllerInput.jump` press while airborne, not touching a wall, with
+  `double_jump_available` already spent by that dodge, zeroes
+  `RigidBody.angular_velocity` outright instead of leaving the flip to spin
+  indefinitely. A new per-car `dodge_flip_active: bool`
+  (`PhysicsWorld`'s parallel `car_dodge_flip_active: Vec<bool>`, starting
+  `false`) tracks this: the directional-dodge branch sets it `true`; the
+  plain-double-jump branch explicitly sets it `false` rather than leaving
+  it alone, closing off a real staleness bug this port's own regression
+  tests were written to catch and did catch (verified by temporarily
+  removing the fix and confirming both the `drive.rs` and `world.rs`
+  regression tests fail without it) — without that explicit clear, a
+  much-later, completely unrelated plain double jump (after landing from
+  the dodge and taking off again) would leave the flag `true`, letting a
+  further press spuriously flip-cancel a flip that no longer exists.
+  Flip-cancel touches neither the dodge's own linear velocity nor
+  `double_jump_available` (already spent by the dodge that set the flag).
+  Wall jump keeps its existing priority — checked first in the airborne
+  branch, unchanged. This port has no timed flip animation to interrupt (a
+  dodge is one instantaneous angular-velocity kick, not a sustained torque
+  over a fixed duration), so "mid-flip" here means "any time before
+  landing or a wall touch re-arms the double jump," a documented
+  simplification of real Rocket League's actual flip-duration window. No
+  new physics constants — this is a state-flag-gated zeroing action, not a
+  magnitude to calibrate. 6 new unit tests across `drive.rs`/`world.rs` in
+  `rb_physics_bullet` (132 total): a second jump press cancels a dodge's
+  spin outright and spends the flag; flip-cancel leaves the dodge's own
+  translation and `double_jump_available` untouched; a plain double jump
+  clears a stale `dodge_flip_active` left over from an earlier dodge so a
+  later press can't spuriously cancel nothing; a wall jump still takes
+  priority over flip-cancel when touching a wall; an end-to-end test
+  confirms a second jump press cancels a dodge's spin in a live
+  `PhysicsWorld::step` loop; a second end-to-end regression test confirms
+  landing and a later plain double jump clear a stale flag there too, not
+  just in `drive.rs` isolation. Deliberately excludes a dodge variant of
+  the wall jump and landing auto-orientation assistance — see Non-goals.
 - 0.15.0 (2026-08-30): FR-015 added and implemented (variable jump
   height) — the ground jump (FR-010) gains a hold window: continuing to
   hold `ControllerInput.jump` after the fresh press that fires it adds a

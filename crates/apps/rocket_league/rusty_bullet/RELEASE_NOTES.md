@@ -6,6 +6,49 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Flip-cancel
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** a dodge's spin (`RB-PHYSICS-001-FR-014`) can now be canceled
+  early (`RB-PHYSICS-001-FR-016`) — a further fresh `ControllerInput.jump`
+  press while airborne, not touching a wall, with the double jump already
+  spent by that dodge, zeroes `RigidBody.angular_velocity` outright instead
+  of leaving the flip to spin indefinitely.
+- **A new per-car `dodge_flip_active: bool`** (`PhysicsWorld`'s parallel
+  `car_dodge_flip_active: Vec<bool>`, starting `false`) tracks whether the
+  most recent double-jump-or-dodge press left a cancelable flip: the
+  directional-dodge branch sets it `true`; the plain-double-jump branch
+  explicitly sets it `false` rather than leaving it alone.
+- **Closes a real staleness bug this port's own tests were written to
+  catch:** without that explicit clear, a much-later, completely unrelated
+  plain double jump (after landing from the dodge and taking off again)
+  would leave the flag `true`, letting a further press spuriously
+  flip-cancel a flip that no longer exists. Verified by temporarily
+  removing the fix and confirming both the `drive.rs` and `world.rs`
+  regression tests actually fail without it.
+- **Scoped narrowly:** flip-cancel touches neither the dodge's own linear
+  velocity nor `double_jump_available` (already spent by the dodge that set
+  the flag); wall jump keeps its existing priority, checked first in the
+  airborne branch, unchanged. This port has no timed flip animation to
+  interrupt (a dodge is one instantaneous angular-velocity kick, not a
+  sustained torque over a fixed duration), so "mid-flip" here means "any
+  time before landing or a wall touch re-arms the double jump" — a
+  documented simplification of real Rocket League's actual flip-duration
+  window. No new physics constants — a state-flag-gated zeroing action, not
+  a magnitude to calibrate.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (132
+  total): a second jump press cancels a dodge's spin outright and spends
+  the flag; flip-cancel leaves the dodge's own translation and
+  `double_jump_available` untouched; a plain double jump clears a stale
+  `dodge_flip_active` left over from an earlier dodge; a wall jump still
+  takes priority over flip-cancel when touching a wall, plus — the real
+  end-to-end proof — a second jump press canceling a dodge's spin in a live
+  `PhysicsWorld::step` loop, and a regression test confirming landing and a
+  later plain double jump clear a stale flag there too, not just in
+  `drive.rs` isolation.
+
+---
+
 ## Variable jump height input
 **2026-08-30** · [#39](https://github.com/baileyrd/rusty_bullet/pull/39) · `9266c6c`
 
