@@ -80,6 +80,7 @@ have landed so far.
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
 | [`rusty_simd`](crates/rusty_simd) | `crates/rusty_simd` | Zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference |
+| [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 
@@ -434,6 +435,9 @@ runner) — a real panic, not a flake, now fixed to skip on either variant.
 `rusty_simd` has zero dependencies of any kind, so nothing needed
 swapping — its own merge is just the subtree add plus workspace wiring.
 
+`rusty_h2` has zero dependencies of any kind, so nothing needed
+swapping — its own merge is just the subtree add plus workspace wiring.
+
 `rusty_ansi` needed no pin retirement: its one dependency, `unicode-width`,
 is an ordinary crates.io crate, not a sibling `baileyrd` repo. The
 standalone repo's README carried a CI badge but had no `.github/workflows`
@@ -497,6 +501,7 @@ A third wave continues the same way, starting with
 behind one nested workspace),
 [`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
 [`rusty_simd`](https://github.com/baileyrd/rusty_simd),
+[`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi), and
 [`rusty_config`](https://github.com/baileyrd/rusty_config) — merged one
 at a time, same process.
