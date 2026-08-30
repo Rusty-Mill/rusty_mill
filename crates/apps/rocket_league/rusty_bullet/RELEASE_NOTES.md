@@ -6,6 +6,81 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Goal cutouts
+**2026-08-30** · PR pending · commit pending
+
+- **Opens an actual goal-mouth window in each back wall**, where every
+  prior increment had a single solid, flat plane spanning the full width.
+- **New static shape `body::StaticGoalWall`.** A `StaticPlane` plus a
+  rectangular window in the plane's own local `u_axis`/`v_axis` frame
+  (`window_center`, `half_width`, `half_height`) — the same "derive an
+  axis/window in the plane's own local frame rather than assuming a world
+  axis" discipline `StaticQuarterPipe::between_planes`'s `axis_direction`
+  generalization (`FR-022`) established. `contains_in_window` tests a
+  point's projection onto `u_axis`/`v_axis` alone, independent of the
+  point's own depth from the plane along `plane.normal`.
+- **`collision::sphere_vs_goal_wall`/`contacts_vs_goal_wall` dispatch by
+  shape.** A sphere (the ball) gets no contact at all when its center
+  falls inside the window, letting it pass straight through; a box (car)
+  falls straight through to the ordinary `contacts_vs_plane` against the
+  wrapped plane, deliberately ignoring the window entirely — a
+  zero-regression choice, since a car now sees literally the same
+  contact-generation call it always did against a back wall.
+- **`arena::standard_walls` drops the 2 back-wall `StaticPlane`s it used
+  to return** (now 7 planes instead of 9); new `arena::standard_goal_walls`
+  returns them instead as 2 `StaticGoalWall`s, windowed at new
+  commonly-cited constants `GOAL_HALF_WIDTH`/`GOAL_HEIGHT` (same sourcing
+  caveat as `SIDE_WALL_X`), each centered on its own wall at half the
+  goal's own height.
+- **New `arena::standard_goal_cutout_fillets` rounds each window's 3
+  edges** (two vertical posts, one horizontal crossbar, times 2 goals — 6
+  `StaticQuarterPipe`s, added to the same `curves` list `standard_curves`'s
+  24 already populate). Each is derived via the existing
+  `StaticQuarterPipe::between_planes` from the real back-wall plane and a
+  second, purely-geometric plane (`goal_post_plane`/`goal_crossbar_plane`)
+  representing the post's or crossbar's own inward-/downward-facing
+  surface — positioned at exactly the window's own edge, so the fillet's
+  tangent point lands exactly on the window boundary with no gap or
+  overlap. Unlike a real wall, these post/crossbar planes are never
+  themselves added as collision geometry: an infinite plane facing
+  straight along X (or capping Z) would incorrectly wall off the *entire*
+  rest of the field at that coordinate, unlike a diagonal corner wall's
+  own orientation, which stays non-binding everywhere except right at the
+  true corner.
+- **`PhysicsWorld` gains `goal_walls`/`with_goal_wall`/
+  `resolve_goal_wall_contact`**, resolved for the ball *and* every car
+  (unlike `curves`/`corner_fillets`'s ball-only resolution) — safe
+  precisely because the box path is a no-op change from the prior
+  plain-`StaticPlane` behavior. `PhysicsWorld::standard_arena` wires in
+  both the goal walls and the goal-cutout fillets automatically.
+- **Still not modeled:** a car (box) actually being deflected by any
+  fillet or driving into a goal, a modeled goal interior/net beyond the
+  cutout itself (the ball passes into open space, not a bounded volume),
+  and the goal's own two compound top corners where a post's fillet meets
+  the crossbar's (independent, additive fillets there, same "no blended
+  3D corner" approach the arena's corner-wall edges used before `FR-023`).
+- 17 new unit tests across `body.rs`/`collision.rs`/`arena.rs`/`world.rs`
+  in `rb_physics_bullet` (211 total): 4 in `body.rs` proving
+  `contains_in_window` is true at the window's own center and just inside
+  each of its four edges, false just outside them, and unaffected by a
+  point's distance from the plane; 4 in `collision.rs` — a sphere embedded
+  in the window has no contact, a sphere outside the window behaves
+  exactly like an ordinary plane contact both embedded and resting exactly
+  at the surface, and a box's contact through the windowed wall is
+  bit-for-bit identical to plain `contacts_vs_plane` against the same
+  wrapped plane; 5 in `arena.rs` — `standard_walls` returns exactly 7
+  planes, `standard_goal_walls` returns exactly 2 sharing one offset
+  magnitude with each window centered correctly, `standard_goal_cutout_fillets`
+  returns exactly 6 fillets each sitting radius-in from a real back wall
+  and a post/crossbar plane; 4 in `world.rs` — `standard_arena` carries
+  exactly 2 goal walls, a ball fired through a goal-mouth window's center
+  passes the back wall's own position while a car aimed at the same spot
+  is still stopped by it, and an end-to-end test proving a ball embedded
+  past a goal-post fillet's own radius gets pushed meaningfully back
+  toward the axis.
+
+---
+
 ## Compound-corner fillets
 **2026-08-30** · [#55](https://github.com/baileyrd/rusty_bullet/pull/55) · `5d2db86`
 

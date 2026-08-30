@@ -29,16 +29,36 @@
 //! planes (floor/ceiling, side/back wall, corner wall) that meet there,
 //! rather than the two `standard_curves`' own fillets each bridge.
 //!
-//! **Still not modeled**: the goal structures themselves (no back-net
-//! cutout — the back walls here are solid, flat planes spanning the full
-//! width); a car (box) actually being deflected by any of these fillets
-//! (`collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` always
-//! return no contact for a box); and any geometry finer than a single flat
-//! plane, single-radius edge fillet, or single-radius corner fillet per
-//! boundary segment (the real field mesh's corners and transitions are more
-//! complex than this). See `RB-PHYSICS-001`'s Non-goals.
+//! `standard_goal_walls`/`standard_goal_cutout_fillets`
+//! (`RB-PHYSICS-001-FR-024`) open an actual goal-mouth window in each back
+//! wall — until now, `standard_walls`' two back walls were solid, flat
+//! planes spanning the full width, with no opening at all. `standard_walls`
+//! itself now returns 7 planes instead of 9 (the back walls move out of
+//! it, replaced by `standard_goal_walls`' `StaticGoalWall`s), and
+//! `standard_goal_cutout_fillets` rounds the window's three edges (two
+//! posts and a crossbar) per goal — 6 `StaticQuarterPipe`s, built the same
+//! way every other fillet here is, from a pair of flat planes, one of them
+//! (the post's or crossbar's own inward-facing surface) a purely-geometric
+//! construction used only to derive the fillet, never added as a real wall
+//! itself (see `goal_post_plane`/`goal_crossbar_plane`'s own doc comments
+//! for why that would be wrong).
+//!
+//! **Still not modeled**: the goal's own interior/net structure beyond the
+//! cutout itself (the ball passes into open space, not a bounded net
+//! volume); the two compound corners per goal where a post's own fillet
+//! meets the crossbar's (independent, additive fillets here, same
+//! "no blended 3D corner" approach `standard_curves`' edge fillets used
+//! before `RB-PHYSICS-001-FR-023`); a car (box) actually being deflected by
+//! any of these fillets, or driving into the goal at all
+//! (`collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet`
+//! always return no contact for a box, and `contacts_vs_goal_wall`
+//! deliberately ignores the window for one — see its own doc comment); and
+//! any geometry finer than a single flat plane, single-radius edge fillet,
+//! or single-radius corner fillet per boundary segment (the real field
+//! mesh's corners and transitions are more complex than this). See
+//! `RB-PHYSICS-001`'s Non-goals.
 
-use crate::body::{StaticCornerFillet, StaticPlane, StaticQuarterPipe};
+use crate::body::{StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
 use rb_domain::Vec3;
 
 /// Side wall position (the field's half-width along X) — a commonly-cited
@@ -73,6 +93,16 @@ pub const CORNER_LENGTH: f32 = 1152.0;
 /// measured from real field mesh data.
 pub const FILLET_RADIUS: f32 = 292.0;
 
+/// Half-width of the goal-mouth window cut into each back wall — a
+/// commonly-cited community-measured Rocket League dimension (same
+/// sourcing caveat as `SIDE_WALL_X`), not independently confirmed by this
+/// project against real field mesh data.
+pub const GOAL_HALF_WIDTH: f32 = 892.755;
+
+/// Height of the goal-mouth window — same sourcing caveat as
+/// `GOAL_HALF_WIDTH`.
+pub const GOAL_HEIGHT: f32 = 642.775;
+
 /// The floor: a flat plane at `z = 0`, normal `+Z` (up) — identical to the
 /// `flat_ground()` helper this crate's tests have used since v0, just
 /// exposed here as part of the standard-arena constructor.
@@ -106,23 +136,29 @@ fn corner_wall_plane(sx: f32, sy: f32) -> StaticPlane {
     StaticPlane::new(normal, offset)
 }
 
-/// The arena's full vertical boundary: 2 side walls (`+-X`), 2 back walls
-/// (`+-Y`), a ceiling, and 4 diagonal corner walls (one per quadrant) —
-/// 9 `StaticPlane`s total, each with its normal pointing back into the
-/// playable volume (matching `StaticPlane`'s own convention — see its doc
-/// comment and `RB-PHYSICS-001-FR-013`'s existing wall examples). A corner
-/// wall's plane passes through the two points where it meets its
-/// neighboring side and back wall, `CORNER_LENGTH` in from the true
-/// rectangular corner along each axis; by symmetry all four corner walls
-/// share one offset magnitude, only their normal's sign differs per
-/// quadrant.
+/// The arena's flat vertical boundary, minus the two back walls: 2 side
+/// walls (`+-X`), a ceiling, and 4 diagonal corner walls (one per
+/// quadrant) — 7 `StaticPlane`s total, each with its normal pointing back
+/// into the playable volume (matching `StaticPlane`'s own convention —
+/// see its doc comment and `RB-PHYSICS-001-FR-013`'s existing wall
+/// examples). A corner wall's plane passes through the two points where
+/// it meets its neighboring side and back wall, `CORNER_LENGTH` in from
+/// the true rectangular corner along each axis; by symmetry all four
+/// corner walls share one offset magnitude, only their normal's sign
+/// differs per quadrant.
+///
+/// The back walls themselves moved out of this list as of
+/// `RB-PHYSICS-001-FR-024`: each now has a goal-mouth window cut into it,
+/// which a plain `StaticPlane` has no way to represent, so they live in
+/// `standard_goal_walls` (`StaticGoalWall`s) instead — `PhysicsWorld::
+/// standard_arena` wires both lists in together, and a car's own collision
+/// with a back wall is unaffected either way (see `collision::
+/// contacts_vs_goal_wall`'s own doc comment for why).
 pub fn standard_walls() -> Vec<StaticPlane> {
-    let mut walls = Vec::with_capacity(9);
+    let mut walls = Vec::with_capacity(7);
 
     walls.push(side_wall_plane(1.0));
     walls.push(side_wall_plane(-1.0));
-    walls.push(back_wall_plane(1.0));
-    walls.push(back_wall_plane(-1.0));
     walls.push(ceiling_plane());
 
     for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
@@ -130,6 +166,101 @@ pub fn standard_walls() -> Vec<StaticPlane> {
     }
 
     walls
+}
+
+/// The goal-mouth window's own vertical post plane on the `sign`d side
+/// (`1.0` for `+X`, `-1.0` for `-X`) — the post's flat, inward-facing
+/// surface, positioned `GOAL_HALF_WIDTH` in from center exactly like
+/// `side_wall_plane` positions a real side wall `SIDE_WALL_X` in from
+/// center (same formula, a narrower constant). Used only to derive a
+/// post's own rounding fillet via `StaticQuarterPipe::between_planes` in
+/// `standard_goal_cutout_fillets` — unlike `side_wall_plane`/
+/// `corner_wall_plane`, this is never added to `standard_walls` as a real
+/// collision wall itself: a real, infinite plane perpendicular to X at
+/// this position would incorrectly wall off the *entire* rest of the
+/// field at that X coordinate (a corner wall's own diagonal orientation
+/// keeps it non-binding everywhere except right at the true corner; a
+/// plane facing straight along X has no such saving grace).
+fn goal_post_plane(sign: f32) -> StaticPlane {
+    StaticPlane::new(Vec3::new(-sign, 0.0, 0.0), -GOAL_HALF_WIDTH)
+}
+
+/// The goal-mouth window's own crossbar plane — the crossbar's flat,
+/// downward-facing surface, positioned `GOAL_HEIGHT` up from the floor
+/// exactly like `ceiling_plane` positions the real ceiling `CEILING_Z` up
+/// (same formula, a lower constant). Same purely-geometric role as
+/// `goal_post_plane`: feeds `StaticQuarterPipe::between_planes` in
+/// `standard_goal_cutout_fillets`, never added to `standard_walls` itself
+/// (it would incorrectly cap the entire field's height at `GOAL_HEIGHT`
+/// rather than just the goal mouth's own opening).
+fn goal_crossbar_plane() -> StaticPlane {
+    StaticPlane::new(Vec3::new(0.0, 0.0, -1.0), -GOAL_HEIGHT)
+}
+
+/// The goal-mouth window cut into the back wall on the `sign`d side
+/// (`1.0` for `+Y`, `-1.0` for `-Y`) — centered on the wall at half the
+/// goal's own height, `GOAL_HALF_WIDTH` wide each way and `GOAL_HEIGHT`
+/// tall (from the floor up), wrapping the same `back_wall_plane` this
+/// wall used before it had a window at all.
+fn goal_wall(sign: f32) -> StaticGoalWall {
+    StaticGoalWall::new(
+        back_wall_plane(sign),
+        Vec3::new(0.0, sign * BACK_WALL_Y, GOAL_HEIGHT * 0.5),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        GOAL_HALF_WIDTH,
+        GOAL_HEIGHT * 0.5,
+    )
+}
+
+/// Both goals' windowed back walls (`RB-PHYSICS-001-FR-024`) — 2
+/// `StaticGoalWall`s, one per `+-Y` back wall, each with a `GOAL_HALF_WIDTH`
+/// by `GOAL_HEIGHT` window centered on it. Only the ball is actually let
+/// through the window; a car sees the exact same solid wall it always has
+/// (see `StaticGoalWall`'s and `collision::contacts_vs_goal_wall`'s own
+/// doc comments).
+pub fn standard_goal_walls() -> Vec<StaticGoalWall> {
+    vec![goal_wall(1.0), goal_wall(-1.0)]
+}
+
+/// Fillets rounding the three edges of each goal-mouth window
+/// (`RB-PHYSICS-001-FR-024`) — two vertical posts and a horizontal
+/// crossbar, per goal, 6 `StaticQuarterPipe`s total. Each is built by
+/// `StaticQuarterPipe::between_planes` from the real back-wall plane and a
+/// purely-geometric post/crossbar plane (`goal_post_plane`/
+/// `goal_crossbar_plane`) positioned at exactly the window's own edge, so
+/// the fillet's own tangent point lands exactly on the window boundary —
+/// the ball transitions smoothly from the flat wall, through the rounded
+/// edge, into the open window, with no gap or overlap between them, the
+/// same property every other fillet/window pairing in this crate already
+/// has (e.g. a corner wall's own edge fillet sitting exactly on the corner
+/// wall's real position). The two compound corners per goal where a post's
+/// fillet meets the crossbar's are deliberately not blended into a single
+/// smooth vertex — see this module's own doc comment.
+pub fn standard_goal_cutout_fillets() -> Vec<StaticQuarterPipe> {
+    let crossbar = goal_crossbar_plane();
+    let mut fillets = Vec::with_capacity(6);
+
+    for &back_sign in &[1.0f32, -1.0] {
+        let wall = back_wall_plane(back_sign);
+        for &post_sign in &[1.0f32, -1.0] {
+            let post = goal_post_plane(post_sign);
+            fillets.push(StaticQuarterPipe::between_planes(
+                &wall,
+                &post,
+                FILLET_RADIUS,
+                Vec3::new(0.0, 0.0, 1.0),
+            ));
+        }
+        fillets.push(StaticQuarterPipe::between_planes(
+            &wall,
+            &crossbar,
+            FILLET_RADIUS,
+            Vec3::new(1.0, 0.0, 0.0),
+        ));
+    }
+
+    fillets
 }
 
 /// Curved fillets for the standard arena: wall-to-floor/wall-to-ceiling
@@ -300,8 +431,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn standard_walls_has_nine_planes() {
-        assert_eq!(standard_walls().len(), 9);
+    fn standard_walls_has_seven_planes() {
+        assert_eq!(standard_walls().len(), 7);
     }
 
     #[test]
@@ -316,13 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn side_and_back_walls_are_symmetric() {
+    fn side_walls_are_symmetric() {
         let walls = standard_walls();
-        // The first four entries are +-X, +-Y in that order (see
-        // standard_walls); each opposing pair shares the same offset
-        // magnitude by construction.
+        // The first two entries are +-X (see standard_walls); the opposing
+        // pair shares the same offset magnitude by construction. (The back
+        // walls' own symmetry is checked in `both_goal_walls_share_one_
+        // offset_magnitude` -- they're `StaticGoalWall`s now, not part of
+        // this list, since RB-PHYSICS-001-FR-024.)
         assert_eq!(walls[0].offset, walls[1].offset);
-        assert_eq!(walls[2].offset, walls[3].offset);
     }
 
     #[test]
@@ -338,7 +470,7 @@ mod tests {
         let just_below_ceiling = Vec3::new(0.0, 0.0, CEILING_Z - 1.0);
         let just_above_ceiling = Vec3::new(0.0, 0.0, CEILING_Z + 1.0);
         let walls = standard_walls();
-        let ceiling = walls[4];
+        let ceiling = walls[2];
         assert!(ceiling.signed_distance(&just_below_ceiling) > 0.0);
         assert!(ceiling.signed_distance(&just_above_ceiling) < 0.0);
     }
@@ -351,7 +483,7 @@ mod tests {
         // walls that never bind.
         let true_corner = Vec3::new(SIDE_WALL_X, BACK_WALL_Y, 100.0);
         let walls = standard_walls();
-        let corner_wall_for_first_quadrant = walls[5]; // (sx, sy) = (1.0, 1.0)
+        let corner_wall_for_first_quadrant = walls[3]; // (sx, sy) = (1.0, 1.0)
         assert!(
             corner_wall_for_first_quadrant.signed_distance(&true_corner) < 0.0,
             "expected the true rectangular corner to be cut off by the corner wall"
@@ -361,7 +493,7 @@ mod tests {
     #[test]
     fn all_four_corner_walls_share_one_offset_magnitude() {
         let walls = standard_walls();
-        let corner_offsets: Vec<f32> = walls[5..9].iter().map(|w| w.offset).collect();
+        let corner_offsets: Vec<f32> = walls[3..7].iter().map(|w| w.offset).collect();
         for offset in &corner_offsets[1..] {
             assert!((offset - corner_offsets[0]).abs() < 1e-4);
         }
@@ -418,11 +550,17 @@ mod tests {
         // bridged plane (see `StaticQuarterPipe::between_planes`'s doc
         // comment), so every curve's axis must sit exactly `FILLET_RADIUS`
         // from some vertical wall -- a side wall, a back wall, or (since
-        // FR-021) a diagonal corner wall.
-        let vertical_walls: Vec<StaticPlane> = standard_walls()
+        // FR-021) a diagonal corner wall. The back walls aren't in
+        // `standard_walls()` itself since RB-PHYSICS-001-FR-024 (they're
+        // `StaticGoalWall`s now), so they're added to this test's own
+        // vertical-wall list by hand -- `standard_curves` still builds its
+        // fillets from the plain `back_wall_plane` underneath either way.
+        let mut vertical_walls: Vec<StaticPlane> = standard_walls()
             .into_iter()
             .filter(|w| w.normal.z == 0.0)
             .collect();
+        vertical_walls.push(back_wall_plane(1.0));
+        vertical_walls.push(back_wall_plane(-1.0));
         for curve in standard_curves() {
             let sits_radius_in_from_some_wall = vertical_walls
                 .iter()
@@ -555,6 +693,75 @@ mod tests {
                 corner_walls.iter().any(sits_radius_in),
                 "expected {:?} to sit radius-in from a corner wall",
                 fillet.center
+            );
+        }
+    }
+
+    #[test]
+    fn standard_goal_walls_has_two_walls() {
+        assert_eq!(standard_goal_walls().len(), 2);
+    }
+
+    #[test]
+    fn both_goal_walls_share_one_offset_magnitude() {
+        let walls = standard_goal_walls();
+        assert_eq!(walls[0].plane.offset, walls[1].plane.offset);
+    }
+
+    #[test]
+    fn each_goal_walls_window_is_centered_on_the_wall_at_half_the_goal_height() {
+        for wall in standard_goal_walls() {
+            assert!(
+                (wall.plane.signed_distance(&wall.window_center)).abs() < 1e-3,
+                "expected the window's own center to sit exactly on the wall, got {:?}",
+                wall.window_center
+            );
+            assert!((wall.window_center.x).abs() < 1e-6);
+            assert!((wall.window_center.z - GOAL_HEIGHT * 0.5).abs() < 1e-3);
+            assert_eq!(wall.half_width, GOAL_HALF_WIDTH);
+            assert_eq!(wall.half_height, GOAL_HEIGHT * 0.5);
+        }
+    }
+
+    #[test]
+    fn standard_goal_cutout_fillets_has_six_fillets() {
+        assert_eq!(standard_goal_cutout_fillets().len(), 6);
+    }
+
+    #[test]
+    fn every_goal_cutout_fillet_sits_radius_in_from_a_back_wall_and_a_post_or_crossbar_plane() {
+        // Same proof `every_standard_curve_sits_radius_in_from_a_vertical_wall`
+        // gives for the arena's other fillets: `between_planes` places its
+        // axis exactly `radius` in from *each* of the two planes it
+        // bridges, so every goal-cutout fillet's axis must sit exactly
+        // `FILLET_RADIUS` from some back wall, and also from some
+        // post/crossbar plane -- proof these fillets were actually derived
+        // from real geometry, not just built with plausible-looking
+        // numbers.
+        let back_walls = [back_wall_plane(1.0), back_wall_plane(-1.0)];
+        let post_and_crossbar_planes = [
+            goal_post_plane(1.0),
+            goal_post_plane(-1.0),
+            goal_crossbar_plane(),
+        ];
+        let sits_radius_in = |plane: &StaticPlane, point: &Vec3| {
+            (plane.signed_distance(point) - FILLET_RADIUS).abs() < 1e-2
+        };
+
+        for fillet in standard_goal_cutout_fillets() {
+            assert!(
+                back_walls
+                    .iter()
+                    .any(|p| sits_radius_in(p, &fillet.axis_point)),
+                "expected {:?} to sit radius-in from a back wall",
+                fillet.axis_point
+            );
+            assert!(
+                post_and_crossbar_planes
+                    .iter()
+                    .any(|p| sits_radius_in(p, &fillet.axis_point)),
+                "expected {:?} to sit radius-in from a post or crossbar plane",
+                fillet.axis_point
             );
         }
     }

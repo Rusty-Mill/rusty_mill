@@ -28,7 +28,7 @@ pub struct Contact {
 /// bodies don't jitter between "touching" and "not touching" every frame.
 const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
 
-use crate::body::{StaticCornerFillet, StaticPlane, StaticQuarterPipe};
+use crate::body::{StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
 
 /// Analytic sphere-vs-plane contact: the sphere's closest point to the
 /// plane is always `position - normal * radius`, so the general
@@ -101,6 +101,44 @@ pub fn contacts_vs_plane(body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> 
         Shape::Box { half_extents } => {
             box_vs_plane(body.position, body.orientation, half_extents, plane)
         }
+    }
+}
+
+/// Like `sphere_vs_plane`, but against a `StaticGoalWall`'s window
+/// (`RB-PHYSICS-001-FR-024`): a sphere whose *center* falls inside the
+/// window gets no contact at all, letting it pass straight through into
+/// the goal, rather than colliding with the wall material that isn't
+/// there. Checking only the center (not the sphere's full silhouette)
+/// is a documented simplification -- a ball can clip a few units of the
+/// window's own edge before this stops registering contact there, the
+/// same "check the flat contact point, not the full swept volume"
+/// approximation every other static shape in this crate already makes
+/// (see e.g. `sphere_vs_quarter_pipe`'s sector test, which has the same
+/// property at a sector boundary).
+fn sphere_vs_goal_wall(position: Vec3, radius: f32, wall: &StaticGoalWall) -> Option<Contact> {
+    if wall.contains_in_window(&position) {
+        return None;
+    }
+    sphere_vs_plane(position, radius, &wall.plane)
+}
+
+/// Dispatches a `StaticGoalWall`'s contact generation by shape
+/// (`RB-PHYSICS-001-FR-024`): a sphere (the ball) gets the windowed
+/// treatment (`sphere_vs_goal_wall`), while a box (a car) falls straight
+/// through to `contacts_vs_plane` against the wrapped `plane` --
+/// deliberately ignoring the window entirely, so a car collides with
+/// exactly the same solid, full-width wall it always has. A car actually
+/// being able to drive into the goal is a real, not-yet-implemented
+/// capability (the same deferred-for-cars pattern every fillet in this
+/// port already follows for `contacts_vs_quarter_pipe`/
+/// `contacts_vs_corner_fillet` -- see their own doc comments), not an
+/// oversight.
+pub fn contacts_vs_goal_wall(body: &RigidBody, wall: &StaticGoalWall) -> Vec<Contact> {
+    match body.shape {
+        Shape::Sphere { radius } => sphere_vs_goal_wall(body.position, radius, wall)
+            .into_iter()
+            .collect(),
+        Shape::Box { .. } => contacts_vs_plane(body, &wall.plane),
     }
 }
 
@@ -1168,5 +1206,60 @@ mod tests {
             deeply_overlapping_position,
         );
         assert!(contacts_vs_corner_fillet(&car, &fillet).is_empty());
+    }
+
+    /// A back wall at y=100 (normal (0,-1,0)), with a 20-wide, 30-tall
+    /// goal-mouth window centered at (0, 100, 30) -- the same fixture
+    /// `body::tests::goal_wall_with_window` uses.
+    fn goal_wall() -> StaticGoalWall {
+        let plane = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -100.0);
+        StaticGoalWall::new(
+            plane,
+            Vec3::new(0.0, 100.0, 30.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            20.0,
+            30.0,
+        )
+    }
+
+    #[test]
+    fn sphere_embedded_in_the_goal_window_has_no_contact() {
+        let wall = goal_wall();
+        let s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 100.5, 30.0));
+        assert!(contacts_vs_goal_wall(&s, &wall).is_empty());
+    }
+
+    #[test]
+    fn sphere_outside_the_goal_window_behaves_like_an_ordinary_plane() {
+        let wall = goal_wall();
+        let s = RigidBody::sphere(1.0, 1.0, Vec3::new(25.0, 99.5, 30.0));
+        let contacts = contacts_vs_goal_wall(&s, &wall);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - 0.5).abs() < 1e-5);
+        assert_eq!(contacts[0].normal, wall.plane.normal);
+    }
+
+    #[test]
+    fn sphere_resting_exactly_on_the_wall_outside_the_window_has_zero_penetration() {
+        let wall = goal_wall();
+        let s = RigidBody::sphere(1.0, 1.0, Vec3::new(25.0, 99.0, 30.0));
+        let contacts = contacts_vs_goal_wall(&s, &wall);
+        assert_eq!(contacts.len(), 1);
+        assert!(contacts[0].penetration_depth.abs() < 1e-6);
+    }
+
+    #[test]
+    fn box_vs_goal_wall_ignores_the_window_entirely() {
+        // A car straddling the window position still collides with the
+        // wall exactly as if the window weren't there -- see
+        // `contacts_vs_goal_wall`'s own doc comment for why this is a
+        // documented Non-goal, not an oversight.
+        let wall = goal_wall();
+        let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(0.0, 99.5, 30.0));
+        let windowed = contacts_vs_goal_wall(&car, &wall);
+        let unwindowed = contacts_vs_plane(&car, &wall.plane);
+        assert_eq!(windowed, unwindowed);
+        assert!(!windowed.is_empty());
     }
 }

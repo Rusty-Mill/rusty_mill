@@ -271,7 +271,31 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   already builds, reusing `FILLET_RADIUS` once again. `PhysicsWorld` gains
   `corner_fillets`/`with_corner_fillet`, resolved for the ball and every
   car exactly like `curves`. A car actually being deflected by any fillet
-  and goal cutouts remain not modeled.
+  and goal cutouts (now implemented, see FR-024) remain not modeled.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-024`) —
+  goal cutouts: opens an actual goal-mouth window in each back wall, where
+  every prior increment had a single solid, flat plane spanning the full
+  width. Introduces a new static shape, `body::StaticGoalWall` (a
+  `StaticPlane` plus a rectangular window in the plane's own local
+  `u_axis`/`v_axis` frame), with `contains_in_window` testing a point's
+  projection onto that frame directly. New
+  `collision::sphere_vs_goal_wall`/`contacts_vs_goal_wall`: a sphere (the
+  ball) gets no contact inside the window, letting it pass through; a box
+  (car) falls straight through to the ordinary `contacts_vs_plane` against
+  the wrapped plane, deliberately ignoring the window — a zero-regression
+  choice for a car. `arena::standard_walls` drops its 2 back-wall
+  `StaticPlane`s (now 7 planes instead of 9); new `arena::
+  standard_goal_walls` returns them instead as 2 `StaticGoalWall`s,
+  windowed at new constants `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`. New `arena::
+  standard_goal_cutout_fillets` rounds each window's 3 edges (two posts
+  and a crossbar per goal, 6 `StaticQuarterPipe`s total, added to the same
+  `curves` list), built via `StaticQuarterPipe::between_planes` from the
+  real back-wall plane and a purely-geometric post/crossbar plane never
+  itself added as a real collision wall. `PhysicsWorld` gains
+  `goal_walls`/`with_goal_wall`, resolved for the ball *and* every car
+  (unlike `curves`/`corner_fillets`). A car actually being deflected by
+  any fillet or driving into a goal, and a modeled goal interior/net
+  beyond the cutout, remain not modeled.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
