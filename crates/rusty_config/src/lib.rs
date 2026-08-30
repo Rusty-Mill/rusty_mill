@@ -9,12 +9,7 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    collections::BTreeMap,
-    string::String,
-    string::ToString,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, string::String, string::ToString, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
@@ -51,10 +46,7 @@ impl Config {
                     });
                 }
                 current_section = Some(section_name.to_string());
-                config
-                    .sections
-                    .entry(section_name.to_string())
-                    .or_default();
+                config.sections.entry(section_name.to_string()).or_default();
                 continue;
             }
 
@@ -72,11 +64,7 @@ impl Config {
                 .to_string();
 
                 if let Some(ref sec) = current_section {
-                    config
-                        .sections
-                        .get_mut(sec)
-                        .unwrap()
-                        .insert(key, val);
+                    config.sections.get_mut(sec).unwrap().insert(key, val);
                 } else {
                     config.global.insert(key, val);
                 }
@@ -123,7 +111,11 @@ pub struct ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "config parse error on line {}: {}", self.line, self.message)
+        write!(
+            f,
+            "config parse error on line {}: {}",
+            self.line, self.message
+        )
     }
 }
 
