@@ -65,6 +65,7 @@ members = [
     "crates/rusty_search/crates/rusty-search",
     "crates/rusty_vulkan",
     "crates/rusty_h2",
+    "crates/rusty_ansi",
     "crates/rusty_config",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
