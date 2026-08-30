@@ -2,7 +2,7 @@
 
 - Last verified main commit: `b5ed2cd` (merge of [#45](https://github.com/baileyrd/rusty_bullet/pull/45))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), and a gentle landing auto-orientation assist all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a modeled arena footprint and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, and a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`) all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; curved wall-to-floor/wall-to-ceiling transitions, goal cutouts, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -423,6 +423,36 @@
   toward level over 120 steps of a live `PhysicsWorld::step` loop (gravity
   zeroed). This closes out the last item tracked in `drive.rs`'s own
   module doc "Not implemented" list since the dodge (FR-014) increment.
+- `RB-PHYSICS-001-FR-019` (modeled arena footprint) — a new `arena` module
+  builds Rocket League's real standard-arena boundary entirely from
+  `RB-PHYSICS-001-FR-013`'s existing generic `StaticPlane`/`with_wall`
+  machinery: no new collision code, since a ceiling and a corner-cut wall
+  are each just another flat plane. `arena::standard_ground` is the flat
+  floor at `z = 0`; `arena::standard_walls` returns 9 `StaticPlane`s — 2
+  side walls (`x = ±SIDE_WALL_X`), 2 back walls (`y = ±BACK_WALL_Y`), a
+  ceiling (`z = CEILING_Z`), and 4 diagonal corner walls (one per quadrant)
+  cutting off the true rectangular corner, giving the field its real
+  octagonal footprint. `SIDE_WALL_X` (4096), `BACK_WALL_Y` (5120), and
+  `CEILING_Z` (2044) are commonly-cited community-measured field
+  dimensions; the corner walls' inset (`CORNER_LENGTH`, equal along both
+  axes) is this project's own uncalibrated placeholder — this port has no
+  verified reference for the real arena's actual corner geometry, which
+  isn't even a single flat plane in the real field mesh. New
+  `PhysicsWorld::standard_arena` convenience constructor wires both into a
+  `PhysicsWorld` in one call, alongside (not replacing) the existing
+  `PhysicsWorld::new`/`with_wall` ad-hoc-wall capability. Still not
+  modeled: curved wall-to-floor/wall-to-ceiling transitions, goal cutouts
+  in the back walls, and disambiguating or blending a car's simultaneous
+  contact with two walls at a corner for wall-jump purposes (physical
+  collision resolution already handles a car touching two walls at once
+  correctly regardless — only the wall-jump push-off direction picker
+  isn't). 10 new unit tests across `arena.rs`/`world.rs` in
+  `rb_physics_bullet` (153 total), including end-to-end tests confirming
+  `PhysicsWorld::standard_arena` carries exactly 9 walls and the standard
+  ground, a ball bounces off the standard arena's side wall rather than
+  escaping, and a ball fired at the true rectangular corner is stopped by
+  the diagonal corner wall well before its x or y individually reaches
+  either cardinal wall's own position.
 
 ## In progress
 
@@ -463,32 +493,37 @@
   recorded controller input or to `rb_verify_cli`).
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step) and a
-  modeled arena footprint beyond generic flat walls — both real,
-  not-yet-started follow-up work (see the spec's Non-goals/Open
-  questions); a car can now drive, steer, boost (on the ground or in the
-  air), handbrake/drift, take a ground jump (with variable height), a
-  double jump or a directional, flip-cancelable dodge, and a wall jump
-  (itself dodgeable and flip-cancelable the same way), control itself in
-  the air (pitch/yaw/roll), get a gentle nudge back toward level when
-  tumbling with no input, and bounces off the ball/other cars/arena walls,
-  but can't yet interact with a real Rocket League-shaped arena.
+  approximation once 3+ bodies mutually touch in the same step) and curved
+  wall-to-floor/wall-to-ceiling transitions plus goal cutouts beyond the
+  flat-plane octagon — both real, not-yet-started follow-up work (see the
+  spec's Non-goals/Open questions); a car can now drive, steer, boost (on
+  the ground or in the air), handbrake/drift, take a ground jump (with
+  variable height), a double jump or a directional, flip-cancelable dodge,
+  and a wall jump (itself dodgeable and flip-cancelable the same way),
+  control itself in the air (pitch/yaw/roll), get a gentle nudge back
+  toward level when tumbling with no input, bounces off the ball/other
+  cars/arena walls, and can now play inside a real Rocket League-shaped
+  octagonal arena (`PhysicsWorld::standard_arena`) — but that arena's edges
+  are still sharp, flat planes rather than the real field's curved
+  transitions, and its back walls have no goal cutout.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A modeled arena footprint — real follow-up work for
-   `rb_physics_bullet::drive`/`world`; `RB-PHYSICS-001-FR-005` (constant
-   calibration, including `drive`'s own uncalibrated constants) needs
-   `PHASE-0-EXIT` real data regardless.
+2. Curved wall-to-floor/wall-to-ceiling transitions and goal cutouts — real
+   follow-up work for `rb_physics_bullet::arena`/`collision`, needing
+   genuinely different (curved) collision geometry, not just a better
+   constant; `RB-PHYSICS-001-FR-005` (constant calibration, including
+   `drive`'s and `arena`'s own uncalibrated constants) needs `PHASE-0-EXIT`
+   real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (193 tests: 23 in `rb_domain`, 143 in
+- `cargo test --workspace`: pass (203 tests: 23 in `rb_domain`, 153 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

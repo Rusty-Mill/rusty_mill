@@ -180,6 +180,21 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `LANDING_AUTO_UPRIGHT_TORQUE` is an uncalibrated placeholder, one order
   of magnitude smaller than `AIR_CONTROL_TORQUE`. No new `PhysicsWorld`
   state.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-019`) — modeled arena
+  footprint: a new module builds Rocket League's real standard-arena
+  boundary from FR-013's existing `StaticPlane`/`with_wall` machinery (no
+  new collision code). `standard_ground` is the flat floor at `z = 0`;
+  `standard_walls` returns 9 planes — 2 side walls, 2 back walls, a
+  ceiling, and 4 diagonal corner walls cutting off the true rectangular
+  corner, giving the field its real octagonal footprint. `SIDE_WALL_X`
+  (4096), `BACK_WALL_Y` (5120), and `CEILING_Z` (2044) are commonly-cited
+  field dimensions; the corner inset (`CORNER_LENGTH`) is this project's
+  own uncalibrated placeholder with no real-mesh reference. New
+  `PhysicsWorld::standard_arena` convenience constructor wires both into a
+  scene in one call, alongside the existing `PhysicsWorld::new`/`with_wall`
+  ad-hoc-wall capability. Curved wall-to-floor/wall-to-ceiling transitions,
+  goal cutouts, and corner-touch disambiguation for wall-jump purposes
+  remain not modeled.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
