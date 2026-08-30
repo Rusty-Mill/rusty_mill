@@ -100,31 +100,31 @@ impl<'a> Iterator for AnsiParser<'a> {
 
             // Starts with ESC
             let rest = &self.input[1..];
-            if rest.starts_with('[') {
+            if let Some(csi_body) = rest.strip_prefix('[') {
                 // CSI sequence: ESC [ <params> <final_char>
-                let csi_body = &rest[1..];
-                if let Some(end_idx) = csi_body.find(|c: char| (0x40..=0x7E).contains(&(c as u32))) {
+                if let Some(end_idx) = csi_body.find(|c: char| (0x40..=0x7E).contains(&(c as u32)))
+                {
                     let params = &csi_body[..end_idx];
                     let action = csi_body[end_idx..].chars().next().unwrap();
                     let total_len = 1 + 1 + end_idx + action.len_utf8();
                     self.input = &self.input[total_len..];
                     return Some(AnsiToken::Csi { params, action });
                 }
-            } else if rest.starts_with(']') {
+            } else if let Some(osc_body) = rest.strip_prefix(']') {
                 // OSC sequence: ESC ] <code> ; <payload> (ST | BEL)
-                let osc_body = &rest[1..];
-                if let Some(term_idx) = osc_body.find(|c: char| c == '\x07' || c == '\x1B') {
+                if let Some(term_idx) = osc_body.find(['\x07', '\x1B']) {
                     let osc_str = &osc_body[..term_idx];
                     let terminator_len = if osc_body[term_idx..].starts_with("\x1B\\") {
                         2
                     } else {
                         1
                     };
-                    let (code, payload) = if let Some((code_str, payload_str)) = osc_str.split_once(';') {
-                        (code_str.parse::<u32>().unwrap_or(0), payload_str)
-                    } else {
-                        (osc_str.parse::<u32>().unwrap_or(0), "")
-                    };
+                    let (code, payload) =
+                        if let Some((code_str, payload_str)) = osc_str.split_once(';') {
+                            (code_str.parse::<u32>().unwrap_or(0), payload_str)
+                        } else {
+                            (osc_str.parse::<u32>().unwrap_or(0), "")
+                        };
 
                     self.input = &self.input[1 + 1 + term_idx + terminator_len..];
                     return Some(AnsiToken::Osc { code, payload });
@@ -139,7 +139,8 @@ impl<'a> Iterator for AnsiParser<'a> {
         // Check for non-ESC control characters
         let mut char_iter = self.input.char_indices();
         let (_first_idx, first_char) = char_iter.next().unwrap();
-        if first_char.is_control() && first_char != '\n' && first_char != '\r' && first_char != '\t' {
+        if first_char.is_control() && first_char != '\n' && first_char != '\r' && first_char != '\t'
+        {
             self.input = &self.input[first_char.len_utf8()..];
             return Some(AnsiToken::Control(first_char));
         }
