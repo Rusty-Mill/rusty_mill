@@ -67,6 +67,7 @@ members = [
     "crates/rusty_sync",
     "crates/rusty_codec",
     "crates/rusty_h2",
+    "crates/rusty_audio",
     "crates/rusty_ansi",
     "crates/rusty_config",
     "crates/rusty_jinja",
