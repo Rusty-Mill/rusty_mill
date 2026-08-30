@@ -79,6 +79,7 @@ have landed so far.
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty_sync`](crates/rusty_sync) | `crates/rusty_sync` | `no_std` + `alloc` sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate, built on `rusty_std` |
 | [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
@@ -431,6 +432,17 @@ driver-absent skip logic matched only `VulkanError::LoaderNotFound`, not
 the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
 non-Windows target (including this workspace's own `ubuntu-latest` CI
 runner) — a real panic, not a flake, now fixed to skip on either variant.
+CI surfaced a third gap in the same skip logic: GitHub's `windows-latest`
+runner ships `vulkan-1.dll` but has no real GPU driver registered behind
+it, so `vkCreateInstance` there returns `VK_ERROR_INCOMPATIBLE_DRIVER`
+rather than failing to find a loader at all — also now handled as a skip
+case, alongside the other two.
+
+`rusty_sync` needed no pin retirement either: its one dependency,
+`rusty_std`, was already a `path` dependency in the standalone repo's own
+`Cargo.toml`. Its existing concurrency test suite (spinlock mutual
+exclusion and channel send/recv, each also exercised under real OS
+threads, not just single-threaded) passes unmodified.
 
 `rusty_h2` has zero dependencies of any kind, so nothing needed
 swapping — its own merge is just the subtree add plus workspace wiring.
@@ -501,6 +513,7 @@ A third wave continues the same way, starting with
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
 behind one nested workspace),
 [`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
+[`rusty_sync`](https://github.com/baileyrd/rusty_sync),
 [`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_audio`](https://github.com/baileyrd/rusty_audio),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi), and
