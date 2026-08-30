@@ -86,6 +86,24 @@ impl PhysicsWorld {
         }
     }
 
+    /// Builds a scene bounded by Rocket League's real standard-arena
+    /// footprint (`RB-PHYSICS-001-FR-019`) instead of an empty `walls` list
+    /// a caller populates itself: the octagonal boundary plus a ceiling
+    /// from `arena::standard_walls`, and the same flat ground
+    /// (`arena::standard_ground`) every scene already used. Equivalent to
+    /// `PhysicsWorld::new(ball, arena::standard_ground())` followed by a
+    /// `with_wall` call for each of `arena::standard_walls()`'s 9 planes —
+    /// still without curved wall-to-floor/wall-to-ceiling transitions or
+    /// goal cutouts (see `arena`'s module doc). Cars are added afterward
+    /// with `with_car`, exactly as with `PhysicsWorld::new`.
+    pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for wall in crate::arena::standard_walls() {
+            world = world.with_wall(wall);
+        }
+        world
+    }
+
     /// Adds one arena wall to the scene — a flat `StaticPlane`, typically
     /// with a horizontal normal (e.g. `Vec3::new(1.0, 0.0, 0.0)`), though
     /// nothing here actually requires that. Callable more than once to
@@ -1715,6 +1733,84 @@ mod tests {
             alignment_after > alignment_before,
             "expected the landing-orientation assist to trend the car back toward level over \
              time, alignment before={alignment_before}, after={alignment_after}"
+        );
+    }
+
+    #[test]
+    fn standard_arena_has_nine_walls_and_the_standard_ground() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.walls.len(), 9);
+        assert_eq!(world.ground, crate::arena::standard_ground());
+    }
+
+    #[test]
+    fn a_ball_bounces_off_the_standard_arenas_side_wall_in_a_live_world() {
+        // The same physical proof as a_ball_bounces_off_a_wall_instead_of_
+        // passing_through, but against PhysicsWorld::standard_arena's real
+        // field-dimension side wall instead of a hand-placed test wall.
+        let ball_radius = 92.75;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.restitution = 0.5;
+        ball.linear_velocity = Vec3::new(2000.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(5.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let side_wall_surface_x = crate::arena::SIDE_WALL_X - ball_radius;
+        assert!(
+            world.ball.position.x < side_wall_surface_x + 1.0,
+            "expected the ball to stop at the standard arena's side wall rather than escape \
+             it, ball x={}, wall surface x={}",
+            world.ball.position.x,
+            side_wall_surface_x
+        );
+        assert!(
+            world.ball.linear_velocity.x <= 0.0,
+            "expected the ball to have bounced back off the side wall, got vx={}",
+            world.ball.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn a_ball_is_stopped_by_the_corner_wall_before_reaching_the_true_rectangular_corner() {
+        // Fired straight along the diagonal toward the arena's true
+        // (uncut) rectangular corner (SIDE_WALL_X, BACK_WALL_Y): if the
+        // octagon's corner wall is real physical geometry rather than
+        // decoration, the ball must be stopped well before its x or y
+        // individually reaches either the side or back wall's own
+        // position — proof it's the diagonal corner plane doing the work,
+        // not the two cardinal walls.
+        let ball_radius = 92.75;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.restitution = 0.5;
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        ball.linear_velocity = Vec3::new(3000.0 * diag, 3000.0 * diag, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(5.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.x < crate::arena::SIDE_WALL_X - 1.0,
+            "expected the corner wall to stop the ball before its x reached the side wall's \
+             own position, got x={}",
+            world.ball.position.x
+        );
+        assert!(
+            world.ball.position.y < crate::arena::BACK_WALL_Y - 1.0,
+            "expected the corner wall to stop the ball before its y reached the back wall's \
+             own position, got y={}",
+            world.ball.position.y
         );
     }
 }

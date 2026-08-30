@@ -22,11 +22,14 @@
 //! same way), airborne pitch/yaw/roll (air control), and a gentle landing
 //! auto-orientation assist nudging an airborne car back toward level when
 //! it isn't otherwise being steered — see `RB-PHYSICS-001` for what's
-//! deliberately still out of scope beyond `drive` itself (a modeled arena
-//! footprint, split impulse, warm-starting, a combined multi-body solve,
-//! and constant calibration). `PhysicsWorld` gains arena walls (`with_wall`)
-//! as generic flat `StaticPlane` geometry every body collides with, the
-//! same way it already collides with the ground.
+//! deliberately still out of scope beyond `drive` itself (split impulse,
+//! warm-starting, a combined multi-body solve, and constant calibration).
+//! `PhysicsWorld` gains arena walls (`with_wall`) as generic flat
+//! `StaticPlane` geometry every body collides with, the same way it already
+//! collides with the ground; `arena` builds Rocket League's actual
+//! standard-arena octagonal footprint plus a ceiling from that same
+//! machinery (`PhysicsWorld::standard_arena`) — still without curved
+//! wall-to-floor/wall-to-ceiling transitions or goal cutouts.
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`
@@ -38,6 +41,7 @@
 //! (persisting until changed), but nothing yet drives that from real
 //! `RB-VERIFY-002` capture data frame-by-frame.
 
+pub mod arena;
 pub mod body;
 pub mod collision;
 pub mod drive;

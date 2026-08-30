@@ -6,6 +6,60 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Modeled arena footprint
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** a new `arena` module builds Rocket League's real
+  standard-arena boundary entirely from `RB-PHYSICS-001-FR-013`'s existing
+  generic `StaticPlane`/`PhysicsWorld::with_wall` machinery
+  (`RB-PHYSICS-001-FR-019`) — no new collision code, since a ceiling and a
+  corner-cut wall are each just another flat plane.
+- **`arena::standard_ground`** is the flat floor at `z = 0`, identical to
+  the `flat_ground()` test helper this crate has used since v0.
+- **`arena::standard_walls`** returns 9 `StaticPlane`s: 2 side walls
+  (`x = ±SIDE_WALL_X`), 2 back walls (`y = ±BACK_WALL_Y`), a ceiling
+  (`z = CEILING_Z`), and 4 diagonal corner walls (one per quadrant) cutting
+  off the true rectangular corner where a side wall would otherwise meet a
+  back wall at 90 degrees — giving the field its real octagonal footprint
+  instead of a plain rectangle.
+- **Constant sourcing:** `SIDE_WALL_X` (4096), `BACK_WALL_Y` (5120), and
+  `CEILING_Z` (2044) are commonly-cited community-measured field
+  dimensions, the same sourcing convention `drive::MAX_CAR_SPEED`/
+  `JUMP_SPEED` already established. The corner walls' inset distance
+  (`CORNER_LENGTH`, equal along both axes, giving a 45-degree cut) is this
+  project's own uncalibrated placeholder — this port has no verified
+  reference for the real arena's actual corner-wall geometry, which isn't
+  even a single flat plane in the real field mesh (it's curved, and blends
+  into ramps this port doesn't model either).
+- **New `PhysicsWorld::standard_arena` convenience constructor** wires
+  both into a `PhysicsWorld` in one call — offered alongside, not
+  replacing, `PhysicsWorld::new`/`with_wall`'s existing ad-hoc-wall
+  capability, which this crate's own tests keep using for non-standard
+  scenes.
+- **Still not modeled:** curved wall-to-floor/wall-to-ceiling transitions,
+  goal cutouts in the back walls, and disambiguating or blending a car's
+  simultaneous contact with two walls at a corner for wall-jump purposes —
+  physical collision resolution already handles a car touching two walls
+  at once correctly regardless (each wall is resolved independently every
+  step), only the wall-jump push-off direction picker still isn't, and
+  the new corner walls make that case reachable in the standard arena for
+  the first time (still untested here).
+- 10 new unit tests across `arena.rs`/`world.rs` in `rb_physics_bullet`
+  (153 total): `standard_walls` returns exactly 9 planes; the arena's
+  center is on the playable side of every one of them; opposing side/back
+  walls share one offset magnitude by construction; a point just past a
+  side wall is no longer on the playable side; the ceiling bounds from
+  above; a corner wall actually cuts off the true rectangular corner; all
+  four corner walls share one offset magnitude, plus — the real end-to-end
+  proof — `PhysicsWorld::standard_arena` carries exactly 9 walls and the
+  standard ground, a ball shot at the standard arena's side wall bounces
+  off it rather than escaping, and a ball fired straight at the true
+  rectangular corner is stopped by the diagonal corner wall well before
+  its x or y individually reaches either the side or back wall's own
+  position.
+
+---
+
 ## Landing auto-orientation
 **2026-08-30** · [#45](https://github.com/baileyrd/rusty_bullet/pull/45) · `b5ed2cd`
 

@@ -1,16 +1,17 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.18.0
+- Version: 0.19.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), and body-vs-arena-wall collision
   all implemented, tested, and wired into a real N-body `PhysicsWorld`
   scene; ground-driving car input (throttle, steering), boost, handbrake, a
   variable-height ground jump, a double jump (plain or a directional
   dodge, itself flip-cancelable), a wall jump (itself dodgeable), air
-  control (pitch/yaw/roll), and a gentle landing auto-orientation assist
-  implemented; a full arena footprint, split impulse, warm-starting, a
-  combined multi-body solve, and constant calibration are open follow-up
-  work)
+  control (pitch/yaw/roll), a gentle landing auto-orientation assist, and a
+  modeled arena footprint (`PhysicsWorld::standard_arena`'s octagonal
+  boundary plus a ceiling) implemented; curved wall-to-floor/wall-to-ceiling
+  transitions, goal cutouts, split impulse, warm-starting, a combined
+  multi-body solve, and constant calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -62,10 +63,14 @@ extra upward acceleration for as long as jump stays held, up to a cap —
 see FR-015 — flip-cancel, letting a further jump press stop a dodge's
 spin early instead of always completing it — see FR-016 — a wall-jump
 dodge, the same directional-flip treatment applied to the wall jump's own
-fresh press — see FR-017 — and a landing auto-orientation assist, a
+fresh press — see FR-017 — a landing auto-orientation assist, a
 gentle continuous restoring torque nudging an airborne car's local up
 axis back toward world up whenever it isn't actively air-controlling or
-mid-jump-press — see FR-018.
+mid-jump-press — see FR-018 — and a modeled arena footprint,
+`PhysicsWorld::standard_arena` building Rocket League's real octagonal
+boundary and a ceiling from the same generic `StaticPlane`/`with_wall`
+machinery FR-013 introduced, rather than a caller assembling ad-hoc walls
+itself — see FR-019.
 
 ## Non-goals (this increment)
 
@@ -83,15 +88,28 @@ mid-jump-press — see FR-018.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **A full arena footprint, or any Rocket-League-specific wall geometry.**
-  FR-013's `PhysicsWorld.walls` is a flat list of generic `StaticPlane`s a
-  caller places wherever it wants (typically with a horizontal normal);
-  this crate doesn't model Rocket League's actual octagonal-footprint
-  arena, its curved/rounded wall-to-floor and wall-to-ceiling transitions,
-  or a ceiling at all. A car touching two walls at once (a corner) picks
-  whichever wall its position happens to match first in `PhysicsWorld.walls`
-  — not disambiguated or blended between the two normals, a documented
-  simplification for a case this port's test scenes don't exercise.
+- **Curved wall-to-floor/wall-to-ceiling transitions, goal cutouts, and any
+  geometry finer than a flat plane per boundary segment.** FR-019's `arena`
+  module builds Rocket League's real octagonal footprint (side walls, back
+  walls, four 45-degree corner-cut walls) and a ceiling, all still flat
+  `StaticPlane`s meeting at hard edges/corners — the real arena's edges are
+  rounded, and its back walls have goal-shaped cutouts, neither modeled
+  here. `FR-019`'s corner-cut inset distance is this project's own
+  uncalibrated placeholder (see `arena::CORNER_LENGTH`'s doc comment), not
+  measured against real field mesh data — only `SIDE_WALL_X`/`BACK_WALL_Y`/
+  `CEILING_Z` are commonly-cited, sourced dimensions.
+- **Disambiguating or blending a car's simultaneous contact with two walls
+  at a corner, for wall-jump purposes.** Physical collision resolution
+  already handles a car touching two walls at once correctly — `step`
+  resolves every wall independently, so both contacts are resolved on the
+  same step regardless of the arena's shape (see FR-013). What's still not
+  disambiguated is *which* wall's normal `drive::apply_driven_forces` uses
+  to decide a wall jump's push-off direction when a car is touching more
+  than one wall at a corner at once: it picks whichever wall comes first in
+  `PhysicsWorld.walls`, not a blend of the two normals — a documented
+  simplification for a case this port's test scenes don't exercise (FR-019's
+  new corner walls make this case reachable in the standard arena for the
+  first time, but still untested here).
 - **Per-axis air-control torque, and any assisted/auto-rotation
   behavior.** FR-011's `AIR_CONTROL_TORQUE` is one shared constant for
   pitch, yaw, and roll; real Rocket League's actual per-axis rates differ
@@ -429,6 +447,39 @@ mid-jump-press — see FR-018.
   correction is computed in that unlikely exact singularity. No new
   `PhysicsWorld` state — the assist is a pure function of the car's current
   orientation, input, and ground contact, all already in scope.
+- `RB-PHYSICS-001-FR-019` (modeled arena footprint, implemented): a new
+  `arena` module builds Rocket League's real standard-arena boundary
+  entirely from FR-013's existing generic `StaticPlane`/`with_wall`
+  machinery — no new collision code, since a ceiling and a corner-cut wall
+  are each just another flat plane. `arena::standard_ground` is the flat
+  floor at `z = 0` (identical to the `flat_ground()` test helper this crate
+  has used since v0); `arena::standard_walls` returns 9 `StaticPlane`s: 2
+  side walls (`x = ±SIDE_WALL_X`), 2 back walls (`y = ±BACK_WALL_Y`), a
+  ceiling (`z = CEILING_Z`), and 4 diagonal corner walls (one per
+  quadrant) that cut off the true rectangular corner where a side wall
+  would otherwise meet a back wall at 90 degrees — giving the field its
+  real octagonal footprint instead of a plain rectangle. `SIDE_WALL_X`
+  (4096), `BACK_WALL_Y` (5120), and `CEILING_Z` (2044) are commonly-cited
+  community-measured field dimensions (the same sourcing convention as
+  `drive::MAX_CAR_SPEED`/`JUMP_SPEED`); the corner walls' inset distance
+  (`CORNER_LENGTH`, equal along both axes, giving a 45-degree cut) is this
+  project's own uncalibrated placeholder — this port has no verified
+  reference for the real arena's actual corner-wall geometry, which isn't
+  even a single flat plane in the real field mesh (it's curved, and blends
+  into ramps this port doesn't model either). `PhysicsWorld::standard_arena`
+  is a new convenience constructor — `PhysicsWorld::new(ball,
+  arena::standard_ground())` followed by a `with_wall` call for each of
+  `standard_walls()`'s 9 planes — offered alongside, not replacing,
+  `PhysicsWorld::new`/`with_wall`'s existing ad-hoc-wall capability (a
+  caller building a non-standard test scene, as most of this crate's own
+  tests do, still uses those directly). Still not modeled: curved
+  wall-to-floor/wall-to-ceiling transitions, goal cutouts in the back
+  walls, and disambiguating or blending a car's simultaneous contact with
+  two walls at a corner for wall-jump purposes (see Non-goals) —
+  `resolve_plane_contact`'s own physical resolution of a car touching two
+  walls at once already works correctly regardless (each wall is resolved
+  independently every step), only the wall-jump push-off direction picker
+  still isn't.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -512,6 +563,13 @@ mid-jump-press — see FR-018.
   fresh at the start of every `step` from its position at the time.
   `frame()` assigns each car's `player_id` as its index in `cars` and
   reports its current input and boost amount.
+- `arena`: `standard_ground`/`standard_walls` — Rocket League's real
+  standard-arena field dimensions and a 9-`StaticPlane` octagonal boundary
+  plus ceiling, built from `body::StaticPlane` alone (no new collision
+  code); `PhysicsWorld::standard_arena` (in `world`) wires both into a new
+  `PhysicsWorld` in one call, an alternative to `PhysicsWorld::new` plus
+  manual `with_wall` calls for a caller that wants the real field rather
+  than a custom test arena.
 
 No `PhysicsStateSource`-style trait exists yet for "the physics engine"
 specifically — `rb_verify_cli` calls `rb_physics_bullet::simulate`
@@ -729,6 +787,25 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   dwarf the assist's own per-step contribution. All
   FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018
   behavior covered by `rb_physics_bullet`'s unit tests (143 tests as of
+  the 0.18.0 version).
+- FR-019 (met, modeled arena footprint): `standard_walls` returns exactly
+  9 planes; the arena's center is on the playable side of every one of
+  them; opposing side/back walls share one offset magnitude by
+  construction; a point just past a side wall is no longer on the
+  playable side; the ceiling bounds from above (playable below `CEILING_Z`,
+  not above); a corner wall actually cuts off the true rectangular corner
+  (that point is not on the playable side of its corresponding corner
+  wall); all four corner walls share one offset magnitude. An end-to-end
+  `PhysicsWorld::standard_arena` test confirms it carries exactly 9 walls
+  and the standard ground; a second confirms a ball shot at the standard
+  arena's side wall bounces off it rather than escaping (the same physical
+  proof FR-013 already gave for an ad-hoc test wall, now for the real field
+  dimension); a third confirms a ball fired straight at the true
+  rectangular corner is stopped by the diagonal corner wall well before its
+  x or y individually reaches either the side or back wall's own position —
+  proof the corner cut is real physical geometry, not decoration. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019
+  behavior covered by `rb_physics_bullet`'s unit tests (153 tests as of
   this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
@@ -811,7 +888,18 @@ full order of magnitude smaller), since this port has no public reference
 for real Rocket League's actual landing-assist strength or trigger
 condition either; unlike every other jump-family constant, this one also
 has no ground-proximity signal behind its trigger at all (see FR-018 and
-Open questions).
+Open questions). The modeled arena footprint's `SIDE_WALL_X`/`BACK_WALL_Y`/
+`CEILING_Z` are, like `MAX_CAR_SPEED`/`JUMP_SPEED`, commonly-cited
+community-measured field dimensions this project hasn't independently
+confirmed; `CORNER_LENGTH` (the octagon corner-cut inset) is this port's
+own uncalibrated invention with no public reference at all, and unlike
+every other constant in this crate, the real quantity it approximates
+(the field mesh's actual corner geometry) isn't even a single flat plane
+to begin with — so this one constant can't converge toward a "correct"
+value through calibration alone the way a scalar speed or torque could;
+matching the real corner shape would need genuinely different (curved)
+collision geometry, not just a better number (see FR-019 and Open
+questions).
 
 ## Traceability
 
@@ -835,13 +923,25 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   is now implemented as FR-016; a dodge variant of the wall jump is now
   implemented as FR-017; a gentle landing auto-orientation assist is now
   implemented as FR-018.)
-- A modeled arena footprint (Rocket League's actual octagonal shape,
-  curved wall-to-floor/wall-to-ceiling transitions, a ceiling) and
-  disambiguating a car touching two walls at once (a corner) — see
-  Non-goals; needs a concrete reason to model beyond FR-013's generic
-  flat-wall capability (e.g. real recorded corner-wall-jump or
-  ceiling-shot behavior to compare against) before it's worth the added
-  complexity; not started.
+- Curved wall-to-floor/wall-to-ceiling transitions and goal cutouts in the
+  back walls (see FR-019's Non-goals) — needs genuinely different (curved)
+  collision geometry, not a constant to calibrate; a concrete reason to
+  model beyond FR-019's flat-plane octagon (e.g. real recorded
+  ceiling-shot or corner-touching behavior that diverges specifically
+  because of the sharp edges) would justify the added complexity; not
+  started.
+- Disambiguating or blending a car's simultaneous contact with two walls
+  at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
+  collision resolution already handles this correctly regardless; only
+  the wall-jump push-off direction picker (`PhysicsWorld::step`'s
+  "first wall in `self.walls`" rule) isn't. FR-019's corner walls make this
+  case reachable in the standard arena for the first time; still not
+  exercised by any test here. Not started.
+- Sourcing or verifying `arena::CORNER_LENGTH` against real field mesh
+  data (see FR-019) — this port has no reference for it at all, unlike
+  `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z`; even a sourced value would only
+  approximate the real corner, which isn't a single flat 45-degree plane
+  in the actual game.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
@@ -894,6 +994,51 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.19.0 (2026-08-30): FR-019 added and implemented (modeled arena
+  footprint) — a new `arena` module builds Rocket League's real
+  standard-arena boundary entirely from FR-013's existing generic
+  `StaticPlane`/`with_wall` machinery: no new collision code, since a
+  ceiling and a corner-cut wall are each just another flat plane.
+  `arena::standard_ground` is the flat floor at `z = 0` (identical to the
+  `flat_ground()` test helper this crate has used since v0);
+  `arena::standard_walls` returns 9 `StaticPlane`s — 2 side walls
+  (`x = ±SIDE_WALL_X`), 2 back walls (`y = ±BACK_WALL_Y`), a ceiling
+  (`z = CEILING_Z`), and 4 diagonal corner walls (one per quadrant) cutting
+  off the true rectangular corner where a side wall would otherwise meet a
+  back wall at 90 degrees, giving the field its real octagonal footprint.
+  `SIDE_WALL_X` (4096), `BACK_WALL_Y` (5120), and `CEILING_Z` (2044) are
+  commonly-cited community-measured field dimensions, matching the sourcing
+  convention `drive::MAX_CAR_SPEED`/`JUMP_SPEED` already established; the
+  corner walls' inset distance (`CORNER_LENGTH`, equal along both axes,
+  giving a 45-degree cut) is this project's own uncalibrated
+  placeholder — this port has no verified reference for the real arena's
+  actual corner-wall geometry, which isn't even a single flat plane in the
+  real field mesh (it's curved, and blends into ramps this port doesn't
+  model either). New `PhysicsWorld::standard_arena` convenience
+  constructor wires both into a `PhysicsWorld` in one call — offered
+  alongside, not replacing, `PhysicsWorld::new`/`with_wall`'s existing
+  ad-hoc-wall capability, which this crate's own tests keep using for
+  non-standard scenes. Still not modeled: curved wall-to-floor/
+  wall-to-ceiling transitions, goal cutouts in the back walls, and
+  disambiguating or blending a car's simultaneous contact with two walls
+  at a corner for wall-jump purposes — physical collision resolution
+  already handles a car touching two walls at once correctly regardless
+  (each wall is resolved independently every step), only the wall-jump
+  push-off direction picker still isn't, and FR-019's corner walls make
+  that case reachable in the standard arena for the first time (still
+  untested here). 10 new unit tests across `arena.rs`/`world.rs` in
+  `rb_physics_bullet` (153 total): `standard_walls` returns exactly 9
+  planes; the arena's center is on the playable side of every one of them;
+  opposing side/back walls share one offset magnitude by construction; a
+  point just past a side wall is no longer on the playable side; the
+  ceiling bounds from above; a corner wall actually cuts off the true
+  rectangular corner; all four corner walls share one offset magnitude,
+  plus — the real end-to-end proof — `PhysicsWorld::standard_arena` carries
+  exactly 9 walls and the standard ground, a ball shot at the standard
+  arena's side wall bounces off it rather than escaping, and a ball fired
+  straight at the true rectangular corner is stopped by the diagonal
+  corner wall well before its x or y individually reaches either the side
+  or back wall's own position.
 - 0.18.0 (2026-08-30): FR-018 added and implemented (landing
   auto-orientation assist) — `drive::apply_driven_forces` gains a gentle
   continuous restoring torque, applied while airborne, nudging the car's
