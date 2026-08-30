@@ -69,7 +69,9 @@
 //! the plain vertical double jump fires exactly as before dodge existed.
 //! Either way, the press still spends the one `double_jump_available` per
 //! airborne period — a dodge and a plain double jump share the same
-//! resource, matching real Rocket League.
+//! resource, matching real Rocket League. A dodge also leaves a per-car
+//! `dodge_flip_active` flag set, spent by **flip-cancel** below; a plain
+//! double jump explicitly clears it instead (there's no flip to cancel).
 //!
 //! Wall jump is a *third* jump variant, alongside the ground jump and the
 //! double jump: a fresh press while airborne *and* touching an arena wall
@@ -108,16 +110,33 @@
 //! kind of caller-owned persisted state `jump_held`/`double_jump_available`
 //! already are.
 //!
+//! A dodge's spin can be canceled early — **flip-cancel** — by pressing
+//! jump again before landing or wall contact: a fresh press while airborne,
+//! not touching a wall, `double_jump_available` already spent (so this
+//! isn't a wall jump or another double jump/dodge), and `dodge_flip_active`
+//! still set, zeroes `RigidBody.angular_velocity` outright and clears
+//! `dodge_flip_active` — stopping the flip immediately, matching real
+//! Rocket League. It doesn't touch linear velocity (the dodge's own
+//! translation is unaffected) and doesn't consume or restore
+//! `double_jump_available` (already spent by the dodge that set the flag).
+//! This port has no timed flip animation to interrupt (a dodge is one
+//! instantaneous angular-velocity kick, not a sustained torque over a fixed
+//! duration — see above), so "mid-flip" here means "any time before
+//! landing or a wall touch re-arms the double jump," a documented
+//! simplification of real Rocket League's actual flip-duration window.
+//! Wall jump keeps priority over flip-cancel on a fresh press while
+//! touching a wall, unchanged. A plain double jump explicitly clears
+//! `dodge_flip_active` rather than leaving it alone, so a stale flag from
+//! an earlier dodge (long since landed from) can't make a *later*,
+//! unrelated plain double jump's next press incorrectly fire a flip-cancel.
+//!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): a dodge variant for the wall jump (see above), canceling a
-//! dodge's rotation early by pressing again mid-flip (real Rocket League
-//! lets a player do this; this port always completes the fixed
-//! `DODGE_ANGULAR_SPEED` spin), and any auto-orientation assistance on
-//! landing after a dodge. A car with no input set (or
-//! all-neutral `ControllerInput::default()`) behaves exactly as a free
-//! rigid box always has — this module only ever adds force/torque/impulse
-//! or adjusts the existing friction property, never removes physics
-//! outright.
+//! dropped): a dodge variant for the wall jump (see above), and any
+//! auto-orientation assistance on landing after a dodge. A car with no
+//! input set (or all-neutral `ControllerInput::default()`) behaves exactly
+//! as a free rigid box always has — this module only ever adds
+//! force/torque/impulse or adjusts the existing friction property, never
+//! removes physics outright.
 //!
 //! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
 //! — it's this project's own model of Rocket League's driving mechanics,
@@ -310,7 +329,15 @@ fn right_axis(car: &RigidBody) -> Vec3 {
 /// `JUMP_HOLD_MAX_DURATION` for subsequent calls to consume. Releasing
 /// `jump` immediately zeroes it (stopping the extra acceleration right
 /// away), and it's otherwise untouched by the double jump, a dodge, or the
-/// wall jump — see the module doc comment. Call once per step, before
+/// wall jump — see the module doc comment. `dodge_flip_active` is whether
+/// the car's most recent double-jump-or-dodge press was a dodge whose spin
+/// hasn't been canceled or superseded yet: the dodge branch sets it `true`,
+/// the plain-double-jump branch explicitly sets it `false` (so a stale
+/// `true` from an earlier, already-landed-from dodge can't leak into a
+/// later unrelated double jump), and a further fresh press while airborne,
+/// not touching a wall, with `double_jump_available` already spent and
+/// `dodge_flip_active` still `true` cancels the flip — see the module doc
+/// comment's flip-cancel paragraph. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
@@ -322,6 +349,7 @@ pub fn apply_driven_forces(
     jump_held: &mut bool,
     double_jump_available: &mut bool,
     jump_hold_time_remaining: &mut f32,
+    dodge_flip_active: &mut bool,
     base_friction: f32,
     dt: f32,
 ) {
@@ -454,14 +482,32 @@ pub fn apply_driven_forces(
                     // "angular impulse" helper (and none is warranted for
                     // this one call site).
                     car.angular_velocity += dodge_spin;
+                    // Leaves a cancelable flip behind for flip-cancel below
+                    // to spend on a later press.
+                    *dodge_flip_active = true;
                 } else {
                     // Same fixed-magnitude impulse as the ground jump — reusing
                     // JUMP_SPEED rather than a second, separately-calibrated
                     // constant, since this port has no public reference for a
                     // distinct double-jump speed either.
                     car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+                    // No flip to cancel — and explicitly clearing this
+                    // (rather than leaving it alone) prevents a stale `true`
+                    // from an earlier, already-landed-from dodge from
+                    // leaking into this unrelated plain double jump.
+                    *dodge_flip_active = false;
                 }
                 *double_jump_available = false;
+            } else if *dodge_flip_active {
+                // Flip-cancel: a further fresh press with no double jump
+                // left and an uncanceled dodge flip still active stops the
+                // spin outright, without touching the dodge's own
+                // translation or double_jump_available (already spent by
+                // the dodge that set this flag) — see the module doc
+                // comment for why "mid-flip" means "any time before landing
+                // or a wall touch" in this port.
+                car.angular_velocity = Vec3::ZERO;
+                *dodge_flip_active = false;
             }
         }
     }
@@ -580,6 +626,34 @@ mod tests {
         jump_hold_time_remaining: &mut f32,
         dt: f32,
     ) {
+        let mut dodge_flip_active = false;
+        step_with_input_and_dodge_flip(
+            car,
+            input,
+            on_ground,
+            wall_normal,
+            boost_amount,
+            jump_held,
+            double_jump_available,
+            jump_hold_time_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_input_and_dodge_flip(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        on_ground: bool,
+        wall_normal: Option<Vec3>,
+        boost_amount: &mut f32,
+        jump_held: &mut bool,
+        double_jump_available: &mut bool,
+        jump_hold_time_remaining: &mut f32,
+        dodge_flip_active: &mut bool,
+        dt: f32,
+    ) {
         car.clear_forces();
         apply_driven_forces(
             car,
@@ -590,6 +664,7 @@ mod tests {
             jump_held,
             double_jump_available,
             jump_hold_time_remaining,
+            dodge_flip_active,
             DEFAULT_TEST_FRICTION,
             dt,
         );
@@ -1760,6 +1835,321 @@ mod tests {
              variable-height boost left over from holding the ground jump, after held ground \
              jump={velocity_after_held_ground_jump}, after double jump={}",
             c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_second_jump_press_cancels_a_dodges_spin() {
+        let dt = 1.0 / 60.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+        let mut dodge_flip_active = false;
+
+        let dodge_input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &dodge_input,
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        assert!(
+            c.angular_velocity.length() > 0.0,
+            "expected the dodge to leave the car spinning, got {:?}",
+            c.angular_velocity
+        );
+        assert!(
+            dodge_flip_active,
+            "expected the dodge to leave a cancelable flip active"
+        );
+
+        // Release, then press again — no directional intent needed for a
+        // flip-cancel, unlike a fresh dodge.
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &full_jump(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+
+        assert_eq!(
+            c.angular_velocity,
+            Vec3::ZERO,
+            "expected the second jump press to cancel the dodge's spin outright"
+        );
+        assert!(
+            !dodge_flip_active,
+            "expected flip-cancel to spend the cancelable-flip flag"
+        );
+    }
+
+    #[test]
+    fn flip_cancel_does_not_touch_linear_velocity_or_the_double_jump_resource() {
+        let dt = 1.0 / 60.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+        let mut dodge_flip_active = false;
+
+        let dodge_input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &dodge_input,
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        let linear_velocity_after_dodge = c.linear_velocity;
+        assert!(
+            !double_jump_available,
+            "expected the dodge to have already spent the double jump"
+        );
+
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &full_jump(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+
+        assert_eq!(
+            c.linear_velocity, linear_velocity_after_dodge,
+            "expected flip-cancel to leave the dodge's own translation untouched"
+        );
+        assert!(
+            !double_jump_available,
+            "expected flip-cancel to neither consume nor restore the double jump"
+        );
+    }
+
+    #[test]
+    fn a_plain_double_jump_clears_a_stale_dodge_flip_flag_from_an_earlier_dodge() {
+        // Regression guard: a dodge sets dodge_flip_active, and if nothing
+        // ever explicitly cleared it, a much later, completely unrelated
+        // plain double jump (after landing from the dodge and taking off
+        // again) would incorrectly let a further press fire a flip-cancel
+        // that stops nothing real.
+        let dt = 1.0 / 60.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+        let mut dodge_flip_active = false;
+
+        let dodge_input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &dodge_input,
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        assert!(dodge_flip_active, "expected the dodge to set the flag");
+
+        // Land (restores double_jump_available), then take off again and
+        // fire a plain double jump (no stick input) — this must clear the
+        // stale flag from the earlier dodge.
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &full_jump(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        assert!(
+            !dodge_flip_active,
+            "expected a plain double jump to clear any stale dodge_flip_active"
+        );
+        let angular_velocity_after_plain_double_jump = c.angular_velocity;
+
+        // Release, then press again — must NOT fire a flip-cancel, since
+        // there's no real flip active anymore.
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &full_jump(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        assert_eq!(
+            c.angular_velocity, angular_velocity_after_plain_double_jump,
+            "expected no spurious flip-cancel after an unrelated plain double jump"
+        );
+    }
+
+    #[test]
+    fn wall_jump_still_takes_priority_over_flip_cancel_when_touching_a_wall() {
+        let dt = 1.0 / 60.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+        let mut dodge_flip_active = false;
+
+        let dodge_input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &dodge_input,
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        assert!(dodge_flip_active);
+
+        // Release, then press again while touching a wall — must fire a
+        // wall jump, not a flip-cancel.
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+        step_with_input_and_dodge_flip(
+            &mut c,
+            &full_jump(),
+            false,
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            &mut dodge_flip_active,
+            dt,
+        );
+
+        assert!(
+            c.linear_velocity.x > 0.0,
+            "expected the wall jump's outward push-off, got {:?}",
+            c.linear_velocity
+        );
+        assert!(
+            c.angular_velocity.length() > 0.0,
+            "expected the wall jump to leave the dodge's spin untouched (not flip-canceled), \
+             got {:?}",
+            c.angular_velocity
+        );
+        assert!(
+            dodge_flip_active,
+            "expected the wall jump to leave the cancelable flip flag untouched"
         );
     }
 }

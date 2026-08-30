@@ -2,7 +2,7 @@
 
 - Last verified main commit: `9266c6c` (merge of [#39](https://github.com/baileyrd/rusty_bullet/pull/39))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional dodge), and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a dodge variant of the wall jump, flip-cancel, landing auto-orientation assistance, a modeled arena footprint, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a dodge variant of the wall jump, landing auto-orientation assistance, a modeled arena footprint, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -343,6 +343,30 @@
   regression test confirming a double jump fired after holding the ground
   jump through its whole window still adds exactly one more `JUMP_SPEED`
   kick, not an extra variable-height boost.
+- `RB-PHYSICS-001-FR-016` (flip-cancel) — a dodge's spin can now be
+  canceled early: a further fresh `ControllerInput.jump` press while
+  airborne, not touching a wall, with the double jump already spent by
+  that dodge, zeroes `RigidBody.angular_velocity` outright instead of
+  leaving the flip to spin indefinitely. A new per-car
+  `dodge_flip_active: bool` (`PhysicsWorld`'s parallel
+  `car_dodge_flip_active: Vec<bool>`, starting `false`) tracks this: the
+  directional-dodge branch sets it `true`; the plain-double-jump branch
+  explicitly sets it `false` rather than leaving it alone — closing off a
+  real staleness bug this port's own regression tests were written to
+  catch and did catch (verified by temporarily removing the fix and
+  confirming both the `drive.rs` and `world.rs` regression tests fail
+  without it) — without that explicit clear, a much-later, completely
+  unrelated plain double jump would leave the flag `true`, letting a
+  further press spuriously cancel a flip that no longer exists.
+  Flip-cancel touches neither the dodge's own linear velocity nor
+  `double_jump_available`. Wall jump keeps its existing priority,
+  unchanged. No new physics constants — a state-flag-gated zeroing action,
+  not a magnitude to calibrate. 6 new unit tests across
+  `drive.rs`/`world.rs` in `rb_physics_bullet` (132 total), including an
+  end-to-end test confirming a second jump press cancels a dodge's spin in
+  a live `PhysicsWorld::step` loop, and a regression test confirming
+  landing and a later plain double jump clear a stale cancelable-flip flag
+  there too, not just in `drive.rs` isolation.
 
 ## In progress
 
@@ -384,24 +408,23 @@
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
   approximation once 3+ bodies mutually touch in the same step), a dodge
-  variant of the wall jump, flip-cancel, landing auto-orientation
-  assistance, and a modeled arena footprint beyond generic flat walls —
-  all real, not-yet-started follow-up work (see the spec's Non-goals/Open
+  variant of the wall jump, landing auto-orientation assistance, and a
+  modeled arena footprint beyond generic flat walls — all real,
+  not-yet-started follow-up work (see the spec's Non-goals/Open
   questions); a car can now drive, steer, boost (on the ground or in the
   air), handbrake/drift, take a ground jump (with variable height), a
-  double jump or a directional dodge, and a wall jump, and control itself
-  in the air (pitch/yaw/roll), and bounces off the ball/other cars/arena
-  walls, but can't yet dodge off a wall, cancel a dodge's flip early, get
-  any landing assistance, or interact with a real Rocket League-shaped
-  arena.
+  double jump or a directional, flip-cancelable dodge, and a wall jump,
+  and control itself in the air (pitch/yaw/roll), and bounces off the
+  ball/other cars/arena walls, but can't yet dodge off a wall, get any
+  landing assistance, or interact with a real Rocket League-shaped arena.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A dodge variant of the wall jump, flip-cancel, landing auto-orientation
-   assistance, and/or a modeled arena footprint — real follow-up work for
+2. A dodge variant of the wall jump, landing auto-orientation assistance,
+   and/or a modeled arena footprint — real follow-up work for
    `rb_physics_bullet::drive`/`world`; `RB-PHYSICS-001-FR-005` (constant
    calibration, including `drive`'s own uncalibrated constants) needs
    `PHASE-0-EXIT` real data regardless.
@@ -410,7 +433,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (176 tests: 23 in `rb_domain`, 126 in
+- `cargo test --workspace`: pass (182 tests: 23 in `rb_domain`, 132 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
