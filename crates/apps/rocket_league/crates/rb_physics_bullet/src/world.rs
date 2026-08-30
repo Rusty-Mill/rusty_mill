@@ -1331,11 +1331,12 @@ mod tests {
     }
 
     #[test]
-    fn wall_jump_still_fires_instead_of_a_dodge_when_touching_a_wall() {
-        // Regression guard: a car touching a wall with directional stick
-        // input still gets the fixed wall-jump push-off, not a dodge — the
-        // wall-normal branch is checked (and taken) before dodge/double
-        // jump is even considered.
+    fn a_wall_jump_dodges_outward_and_upward_with_a_flip_in_a_live_world() {
+        // Regression guard for the *reversed* premise: a wall jump used to
+        // always ignore stick input; now directional stick input at or
+        // above DODGE_DEADZONE fires a wall-jump dodge — the real
+        // end-to-end proof that it fires in a live `PhysicsWorld::step`
+        // loop, not just in `drive.rs` isolation.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
         let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
         let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
@@ -1355,15 +1356,22 @@ mod tests {
         world.step(1.0 / 60.0);
 
         assert!(
-            (world.cars[0].linear_velocity.x - crate::drive::WALL_JUMP_HORIZONTAL_SPEED).abs()
+            (world.cars[0].linear_velocity.x
+                - (crate::drive::WALL_JUMP_HORIZONTAL_SPEED + crate::drive::DODGE_SPEED))
+                .abs()
                 < 1.0,
-            "expected the wall jump's own push-off, not a dodge's larger DODGE_SPEED, got {}",
+            "expected the wall push-off plus the forward dodge component, got {}",
             world.cars[0].linear_velocity.x
         );
         assert!(
             (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
             "expected the wall jump's upward component, got {}",
             world.cars[0].linear_velocity.z
+        );
+        assert!(
+            world.cars[0].angular_velocity.length() > 0.0,
+            "expected the wall-jump dodge to give the car a visible flip, got {:?}",
+            world.cars[0].angular_velocity
         );
     }
 
@@ -1620,6 +1628,53 @@ mod tests {
         assert_eq!(
             world.cars[0].angular_velocity, angular_velocity_after_plain_double_jump,
             "expected no spurious flip-cancel after an unrelated plain double jump, got {:?}",
+            world.cars[0].angular_velocity
+        );
+    }
+
+    #[test]
+    fn a_wall_jump_dodges_spin_can_be_flip_cancelled_in_a_live_world() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO;
+        let dt = 1.0 / 120.0;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                pitch: Some(1.0),
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        assert!(
+            world.cars[0].angular_velocity.length() > 0.0,
+            "expected the wall-jump dodge to leave the car spinning, got {:?}",
+            world.cars[0].angular_velocity
+        );
+
+        // Release, then move off the wall and press again — flip-cancel.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.cars[0].position = Vec3::new(5000.0, 0.0, 1000.0);
+        world.step(dt);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        assert_eq!(
+            world.cars[0].angular_velocity,
+            Vec3::ZERO,
+            "expected the second jump press to cancel the wall-jump dodge's spin outright, got {:?}",
             world.cars[0].angular_velocity
         );
     }

@@ -154,6 +154,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   double jump). Doesn't touch linear velocity or `double_jump_available`;
   wall jump keeps priority, unchanged. `PhysicsWorld` gains
   `car_dodge_flip_active: Vec<bool>`.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-017`) — wall-jump dodge:
+  the wall jump's own fresh press now checks
+  `ControllerInput.pitch`/`roll` against `DODGE_DEADZONE`, same as the
+  ground double jump; at or above it, a wall-jump dodge fires (the wall
+  push-off combined with a `DODGE_SPEED` component and
+  `DODGE_ANGULAR_SPEED` spin, arming `dodge_flip_active`); below it, the
+  plain wall jump fires unchanged. Unlike the plain wall jump, the dodge
+  variant consumes `double_jump_available` — a documented simplification,
+  since gating it on that flag would be vacuous (wall touch always
+  restores it first). No new physics constants. Two pre-existing tests
+  asserting the old "wall jump always ignores stick input" premise were
+  repurposed to assert the new behavior.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

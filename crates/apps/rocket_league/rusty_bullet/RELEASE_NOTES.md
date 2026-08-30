@@ -6,6 +6,53 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Wall-jump dodge
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** the wall jump's own fresh press (`RB-PHYSICS-001-FR-013`) now
+  checks `ControllerInput.pitch`/`roll` against `DODGE_DEADZONE`
+  (`RB-PHYSICS-001-FR-017`), the same check the ground double jump's press
+  already uses (`RB-PHYSICS-001-FR-014`): at or above it on either axis, a
+  **wall-jump dodge** fires instead of the plain fixed push-off — the same
+  outward-plus-upward impulse combined with a horizontal `DODGE_SPEED`
+  component and `DODGE_ANGULAR_SPEED` spin (identical axis/sign conventions
+  to the ground dodge), also arming `dodge_flip_active` so its spin is
+  flip-cancelable exactly like a ground dodge's (`RB-PHYSICS-001-FR-016`).
+- **Below the deadzone:** the plain wall jump fires exactly as before this
+  requirement, still never touching `double_jump_available`.
+- **Unlike the plain wall jump, the dodge variant spends the double jump:**
+  a deliberate simplification — since touching a wall unconditionally
+  restores `double_jump_available` before this check ever runs, gating the
+  dodge variant on it would be vacuous (always true there); having it
+  consume the resource instead keeps flip-cancel's existing invariant
+  ("`dodge_flip_active` is only ever true while `double_jump_available` is
+  false") intact with zero changes to flip-cancel's own branch ordering or
+  any new landing/wall-touch-clearing logic. This port has no way to
+  separately account for "a wall touch refilled the double jump, then the
+  wall-jump dodge spent it" versus a genuinely independent wall-dash
+  resource, and real Rocket League's precise accounting here isn't public
+  to the precision this project would need to model that distinction.
+- **No new physics constants** — reuses
+  `DODGE_SPEED`/`DODGE_ANGULAR_SPEED`/`WALL_JUMP_HORIZONTAL_SPEED`/
+  `JUMP_SPEED` outright.
+- **Two pre-existing tests repurposed, not silently deleted:**
+  `drive::wall_jump_fires_instead_of_a_dodge_when_touching_a_wall` and
+  `world::wall_jump_still_fires_instead_of_a_dodge_when_touching_a_wall`
+  both asserted the *old* "wall jump always ignores stick input" premise
+  this requirement deliberately reverses — both now assert the new
+  wall-jump-dodge behavior instead, keeping the same scenario (touching a
+  wall with directional stick input) but updating the expected outcome.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (138
+  total): a wall-jump dodge consumes the double jump unlike a plain wall
+  jump; its spin can be flip-cancelled; a below-deadzone stick deflection
+  still gives a plain wall jump; opposite stick sign dodges the opposite
+  direction; a diagonal (pitch+roll) wall-jump dodge combines both axes,
+  plus — the real end-to-end proof — a wall-jump dodge firing in a live
+  `PhysicsWorld::step` loop, and a second end-to-end test confirming its
+  spin is flip-cancelable there too.
+
+---
+
 ## Flip-cancel
 **2026-08-30** · [#41](https://github.com/baileyrd/rusty_bullet/pull/41) · `14d986d`
 
