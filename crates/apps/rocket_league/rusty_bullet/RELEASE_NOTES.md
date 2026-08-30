@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Compound-corner fillets
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#55](https://github.com/baileyrd/rusty_bullet/pull/55) · `5d2db86`
 
 - **Rounds off the last 16 sharp vertices in the standard arena's vertical
   boundary** — the compound corners where a corner wall's own vertical-edge
