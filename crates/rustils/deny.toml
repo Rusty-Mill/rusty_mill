@@ -1,0 +1,37 @@
+# cargo-deny configuration — dependency policy enforcement (RFC v2 §4.2)
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unicode-DFS-2016", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+# ADR-004 (rush) / RFC v2 §5: the core is synchronous; no async runtime may enter the tree.
+deny = [
+    { name = "tokio" },
+    { name = "async-std" },
+]
+
+[advisories]
+yanked = "deny"
+
+[sources]
+# D-12: rusty_libc is a deliberate rev-pinned git dependency (the Track P
+# backend). Any other git source is a policy violation, not a warning.
+#
+# rusty_regx and rpath joined the list when coreutils' dependencies on
+# them moved from `path = "../../../…"` to rev-pinned git. Those path
+# deps resolved only on a machine with both repos checked out beside
+# the rustils clone, so a fresh clone — and every CI runner — failed at
+# `cargo metadata` before compiling anything, taking the whole
+# workspace down with it. Same treatment as rusty_libc: pin the rev,
+# bump deliberately, never track a branch.
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/baileyrd/rusty_libc",
+    # D-15: rusty_win32 is rusty_libc's Windows counterpart, admitted on
+    # the same terms — the Track W backend behind platform-windows's
+    # `track-w` feature, pinned by rev, bumped deliberately.
+    "https://github.com/baileyrd/rusty_win32",
+    "https://github.com/baileyrd/rusty_regx",
+    "https://github.com/baileyrd/rpath",
+]
