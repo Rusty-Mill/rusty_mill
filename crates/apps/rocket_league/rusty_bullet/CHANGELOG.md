@@ -110,6 +110,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `car_double_jump_available: Vec<bool>`. The dodge directional
   impulse/torque, variable jump height, and wall jump remain not
   implemented.
+- `rb_physics_bullet` (`RB-PHYSICS-001-FR-013`) — arena walls and wall
+  jump: `PhysicsWorld` gains `walls: Vec<StaticPlane>`/`with_wall`, and
+  every body now collides with every wall via the same
+  body-vs-static-plane machinery the ground already uses
+  (`resolve_ground_contact` renamed `resolve_plane_contact`).
+  `rb_physics_bullet::drive::apply_driven_forces` gains a wall jump — an
+  outward-plus-upward impulse fired on a fresh airborne jump press while
+  touching a wall, taking priority over the double jump on that press but
+  restoring (not consuming) `double_jump_available` on mere contact. The
+  dodge directional impulse/torque, variable jump height, and a modeled
+  arena footprint beyond generic flat walls remain not implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

@@ -56,16 +56,34 @@
 //! moment of the second press) — that's a distinct, still-unimplemented
 //! mechanic, not folded into this increment.
 //!
+//! Wall jump is a *third* jump variant, alongside the ground jump and the
+//! double jump: a fresh press while airborne *and* touching an arena wall
+//! (`wall_normal: Some(normal)`, computed by the caller the same way
+//! `on_ground` is — see `PhysicsWorld`) fires an impulse combining
+//! `WALL_JUMP_HORIZONTAL_SPEED` outward along the wall's normal with
+//! `JUMP_SPEED` upward (the same vertical speed the ground jump and double
+//! jump use). Touching a wall — whether or not jump is pressed that step —
+//! unconditionally restores `double_jump_available`, the same way landing
+//! does, matching real Rocket League's "any surface contact refills your
+//! second jump" rule; wall jump itself doesn't separately consume or
+//! restore it, since contact already did. On a fresh press, wall contact
+//! takes priority over consulting `double_jump_available` at all (checked
+//! first in the airborne branch), so a player can wall-jump and still have
+//! a double jump left afterward.
+//! Wall jump has no per-wall-contact limit of its own: touching a (new or
+//! the same) wall again always allows another wall jump, unlike the
+//! double jump's once-per-airborne-period limit.
+//!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
 //! dropped): the dodge directional impulse/torque a real double jump pairs
-//! with (see above), variable jump height (real Rocket League adds extra
-//! upward accel for as long as jump is held, up to a cap — this port
-//! always applies the same fixed impulse regardless of how long the
-//! button is held), and wall jump (needs arena walls, which don't exist in
-//! this scope). A car with no input set (or all-neutral
-//! `ControllerInput::default()`) behaves exactly as a free rigid box
-//! always has — this module only ever adds force/torque/impulse or
-//! adjusts the existing friction property, never removes physics outright.
+//! with (see above), and variable jump height (real Rocket League adds
+//! extra upward accel for as long as jump is held, up to a cap — this
+//! port always applies the same fixed impulse regardless of how long the
+//! button is held, for all three jump variants). A car with no input set
+//! (or all-neutral `ControllerInput::default()`) behaves exactly as a free
+//! rigid box always has — this module only ever adds force/torque/impulse
+//! or adjusts the existing friction property, never removes physics
+//! outright.
 //!
 //! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
 //! — it's this project's own model of Rocket League's driving mechanics,
@@ -76,10 +94,11 @@
 //! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
 //! constants standing in for Rocket League's real speed-dependent throttle
 //! curve and boost-drain behavior; `STEER_TORQUE`,
-//! `HANDBRAKE_FRICTION_MULTIPLIER`, and `AIR_CONTROL_TORQUE` are
-//! uncalibrated placeholders chosen only to produce a visibly responsive
-//! turn/slide/spin for this car's mass/inertia in tests. None of these are
-//! independently confirmed by this project — see `RB-PHYSICS-001-FR-005`.
+//! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`, and
+//! `WALL_JUMP_HORIZONTAL_SPEED` are uncalibrated placeholders chosen only
+//! to produce a visibly responsive turn/slide/spin/push-off for this car's
+//! mass/inertia in tests. None of these are independently confirmed by
+//! this project — see `RB-PHYSICS-001-FR-005`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -148,6 +167,15 @@ pub const JUMP_SPEED: f32 = 292.0;
 /// doesn't model that difference.
 const AIR_CONTROL_TORQUE: f32 = 1_000_000.0;
 
+/// Uncalibrated placeholder wall-jump horizontal push-off speed (uu/s),
+/// applied outward along the wall's normal as an instantaneous velocity
+/// change (like `JUMP_SPEED`, not a continuous force) on a fresh airborne
+/// jump press while touching a wall — chosen only to produce a visibly
+/// distinct push-off from the wall in tests, not derived from any measured
+/// or documented Rocket League value. Unlike `JUMP_SPEED`, this port has no
+/// public reference for a wall-jump-specific number to reuse.
+const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
+
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
 }
@@ -164,31 +192,39 @@ fn right_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0))
 }
 
-/// Applies throttle, steering, boost, handbrake, jump, double jump, and air
-/// control as forces/torques/impulses (or, for handbrake, a temporary
-/// friction adjustment) on `car`. Throttle, steering, handbrake, and jump
-/// are a no-op unless `on_ground`; air control and double jump are the
-/// reverse — a no-op unless *not* `on_ground`; boost isn't gated on ground
-/// contact at all, but is a no-op once `*boost_amount` reaches zero.
-/// `base_friction` is the car's own nominal (non-handbraking) friction —
-/// handbrake temporarily reduces `car.friction` below it while held and
-/// grounded, and restores it otherwise, so callers don't need a separate
-/// restore step. `jump_held` is the car's `input.jump` value as of the
-/// *previous* call — jump (ground or double) fires only on a rising edge
-/// (`input.jump && !*jump_held`), so a continued press doesn't re-fire
-/// every step; it's updated to `input.jump` on every call, including while
-/// airborne, so a fresh press is still required for a double jump even if
-/// the button was never released after the ground jump. `double_jump_available`
-/// is whether the car still has a double jump to spend this airborne
-/// period — landing (`on_ground`) unconditionally sets it back to `true`;
-/// a fresh airborne press that fires the double jump sets it to `false`
-/// until the next landing. Call once per step, before
+/// Applies throttle, steering, boost, handbrake, jump, double jump, wall
+/// jump, and air control as forces/torques/impulses (or, for handbrake, a
+/// temporary friction adjustment) on `car`. Throttle, steering, handbrake,
+/// and the ground jump are a no-op unless `on_ground`; air control, double
+/// jump, and wall jump are the reverse — a no-op unless *not* `on_ground`;
+/// boost isn't gated on ground contact at all, but is a no-op once
+/// `*boost_amount` reaches zero. `base_friction` is the car's own nominal
+/// (non-handbraking) friction — handbrake temporarily reduces
+/// `car.friction` below it while held and grounded, and restores it
+/// otherwise, so callers don't need a separate restore step. `jump_held` is
+/// the car's `input.jump` value as of the *previous* call — every jump
+/// variant fires only on a rising edge (`input.jump && !*jump_held`), so a
+/// continued press doesn't re-fire every step; it's updated to `input.jump`
+/// on every call, including while airborne, so a fresh press is still
+/// required for a double or wall jump even if the button was never
+/// released after the ground jump. `double_jump_available` is whether the
+/// car still has a double jump to spend this airborne period — landing
+/// (`on_ground`) or merely touching a wall (`wall_normal.is_some()`, no
+/// jump press required) both unconditionally set it back to `true`; only
+/// an airborne fresh press that fires the plain double jump (not a wall
+/// jump) sets it to `false`, until the next landing or wall touch.
+/// `wall_normal` is the outward normal of the wall the car is currently
+/// touching, if any (computed by the caller the same way `on_ground` is —
+/// see `PhysicsWorld`); a fresh press while airborne and
+/// `wall_normal.is_some()` fires a wall jump instead of consulting
+/// `double_jump_available` at all. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
     on_ground: bool,
+    wall_normal: Option<Vec3>,
     boost_amount: &mut f32,
     jump_held: &mut bool,
     double_jump_available: &mut bool,
@@ -234,6 +270,14 @@ pub fn apply_driven_forces(
             car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
         }
     } else {
+        if wall_normal.is_some() {
+            // Touching a wall restores the double jump unconditionally —
+            // the same "any surface contact refills your second jump"
+            // rule landing uses — regardless of whether jump is pressed
+            // this step.
+            *double_jump_available = true;
+        }
+
         // Air control: pitch/yaw/roll torque about the car's local
         // right/up/forward axes. Unlike ground steering, not scaled by
         // speed — a car can spin from a standing start in the air, since
@@ -253,13 +297,29 @@ pub fn apply_driven_forces(
             car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE));
         }
 
-        if jump_pressed && *double_jump_available {
-            // Same fixed-magnitude impulse as the ground jump — reusing
-            // JUMP_SPEED rather than a second, separately-calibrated
-            // constant, since this port has no public reference for a
-            // distinct double-jump speed either.
-            car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
-            *double_jump_available = false;
+        if jump_pressed {
+            if let Some(wall_normal) = wall_normal {
+                // Wall jump takes priority over the double jump on this
+                // press: push off outward along the wall's normal, plus
+                // the same upward JUMP_SPEED every jump variant uses.
+                // Doesn't consume double_jump_available (already restored
+                // unconditionally above, just from touching the wall) —
+                // matching real Rocket League's "any surface contact
+                // refills your second jump" rule, so a wall jump doesn't
+                // cost a player their double jump.
+                car.apply_impulse(
+                    (wall_normal * WALL_JUMP_HORIZONTAL_SPEED + Vec3::new(0.0, 0.0, JUMP_SPEED))
+                        * car.mass(),
+                    Vec3::ZERO,
+                );
+            } else if *double_jump_available {
+                // Same fixed-magnitude impulse as the ground jump — reusing
+                // JUMP_SPEED rather than a second, separately-calibrated
+                // constant, since this port has no public reference for a
+                // distinct double-jump speed either.
+                car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+                *double_jump_available = false;
+            }
         }
     }
 
@@ -319,11 +379,33 @@ mod tests {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn step_with_input_and_double_jump_state(
         car: &mut RigidBody,
         input: &ControllerInput,
         on_ground: bool,
+        boost_amount: &mut f32,
+        jump_held: &mut bool,
+        double_jump_available: &mut bool,
+        dt: f32,
+    ) {
+        step_with_input_and_wall(
+            car,
+            input,
+            on_ground,
+            None,
+            boost_amount,
+            jump_held,
+            double_jump_available,
+            dt,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_input_and_wall(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        on_ground: bool,
+        wall_normal: Option<Vec3>,
         boost_amount: &mut f32,
         jump_held: &mut bool,
         double_jump_available: &mut bool,
@@ -334,6 +416,7 @@ mod tests {
             car,
             input,
             on_ground,
+            wall_normal,
             boost_amount,
             jump_held,
             double_jump_available,
@@ -804,6 +887,113 @@ mod tests {
         assert!(
             double_jump_available,
             "expected touching the ground to restore the double jump"
+        );
+    }
+
+    #[test]
+    fn wall_jump_pushes_an_airborne_car_outward_and_upward() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let wall_normal = Vec3::new(1.0, 0.0, 0.0);
+        step_with_input_and_wall(
+            &mut c,
+            &full_jump(),
+            false,
+            Some(wall_normal),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.x - WALL_JUMP_HORIZONTAL_SPEED).abs() < 1.0,
+            "expected roughly WALL_JUMP_HORIZONTAL_SPEED outward velocity along the wall normal, \
+             got {}",
+            c.linear_velocity.x
+        );
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity, got {}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn wall_jump_has_no_effect_while_grounded() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        step_with_input_and_wall(
+            &mut c,
+            &full_jump(),
+            true,
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected the ordinary ground jump, not a wall-jump push-off, got {:?}",
+            c.linear_velocity
+        );
+        assert_eq!(
+            c.linear_velocity.x, 0.0,
+            "grounded jump shouldn't apply any wall push-off even if wall_normal is Some"
+        );
+    }
+
+    #[test]
+    fn wall_jump_takes_priority_over_double_jump_without_consuming_it() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        step_with_input_and_wall(
+            &mut c,
+            &full_jump(),
+            false,
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            c.linear_velocity.x > 0.0,
+            "expected a wall jump (outward velocity), not a plain double jump, got {:?}",
+            c.linear_velocity
+        );
+        assert!(
+            double_jump_available,
+            "expected a wall jump to leave the double jump available (not consume it)"
+        );
+    }
+
+    #[test]
+    fn wall_contact_restores_double_jump_availability() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = false;
+        step_with_input_and_wall(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            double_jump_available,
+            "expected touching a wall to restore the double jump, matching real Rocket \
+             League's any-surface-contact-refills-your-second-jump rule"
         );
     }
 

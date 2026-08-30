@@ -1,14 +1,14 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.12.0
+- Version: 0.13.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
-  (ball-vs-car), and box-vs-box (car-vs-car) collision all implemented,
-  tested, and wired into a real N-body `PhysicsWorld` scene; ground-driving
-  car input (throttle, steering), boost, handbrake, a ground jump, a double
-  jump, and air control (pitch/yaw/roll) implemented; the dodge directional
-  impulse/torque, variable jump height, wall jump, split impulse,
-  warm-starting, a combined multi-body solve, and constant calibration are
-  open follow-up work)
+  (ball-vs-car), box-vs-box (car-vs-car), and body-vs-arena-wall collision
+  all implemented, tested, and wired into a real N-body `PhysicsWorld`
+  scene; ground-driving car input (throttle, steering), boost, handbrake, a
+  ground jump, a double jump, a wall jump, and air control (pitch/yaw/roll)
+  implemented; the dodge directional impulse/torque, variable jump height,
+  a full arena footprint, split impulse, warm-starting, a combined
+  multi-body solve, and constant calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -24,7 +24,9 @@ integrated third-party engine and not an unguided from-scratch design.
 
 **Implemented scope** (in `crates/rb_physics_bullet`): a dynamic sphere
 (the ball) and zero or more dynamic boxes (cars), each against a static
-plane (the ground) and against every other dynamic body in the scene.
+plane (the ground), against zero or more arena walls (`PhysicsWorld.walls`
+— generic flat `StaticPlane`s, not a modeled Rocket League arena footprint),
+and against every other dynamic body in the scene.
 Gravity, damping, semi-implicit Euler velocity integration, exponential-map
 orientation integration, analytic sphere-vs-plane and box-vs-plane contact
 detection (the latter generating a 1-4 point manifold depending on the
@@ -48,8 +50,10 @@ reduces its ground friction while held, letting it slide instead of
 gripping cleanly through a turn — see FR-009 — a single fixed-height
 ground jump, fired once per fresh press — see FR-010 — air control
 (pitch/yaw/roll torque about its own local axes while airborne) — see
-FR-011 — and a double jump, an identical airborne impulse spendable once
-per airborne period and restored on landing — see FR-012.
+FR-011 — a double jump, an identical airborne impulse spendable once per
+airborne period and restored on landing — see FR-012 — and a wall jump, an
+outward-plus-upward impulse fired while touching an arena wall, which also
+restores the double jump the same way landing does — see FR-013.
 
 ## Non-goals (this increment)
 
@@ -67,21 +71,30 @@ per airborne period and restored on landing — see FR-012.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **The dodge directional impulse/torque, variable jump height, and wall
-  jump.** `drive::apply_driven_forces` now covers ground throttle and
-  steering (FR-007), boost (FR-008), handbrake/drift (FR-009), a ground
-  jump (FR-010), air control (FR-011), and a double jump (FR-012). Real
-  Rocket League's jump system is still richer than that: holding jump adds
-  extra upward acceleration for a short window (variable height, not
-  modeled — this port always applies the same fixed `JUMP_SPEED` for both
-  the ground jump and the double jump), a real double jump is usually
+- **The dodge directional impulse/torque and variable jump height.**
+  `drive::apply_driven_forces` now covers ground throttle and steering
+  (FR-007), boost (FR-008), handbrake/drift (FR-009), a ground jump
+  (FR-010), air control (FR-011), a double jump (FR-012), and a wall jump
+  (FR-013). Real Rocket League's jump system is still richer than that:
+  holding jump adds extra upward acceleration for a short window (variable
+  height, not modeled — this port always applies the same fixed
+  `JUMP_SPEED` for the ground jump, double jump, and wall jump alike), and
+  a real double jump (whether off the ground/air or off a wall) is usually
   paired with a directional "dodge" impulse and torque from the stick
-  direction at the moment of the second press (not modeled — FR-012's
-  double jump is a second identical vertical impulse only, no directional
-  component), and jumping off an arena wall exists in real play (not
-  modeled — this scope has no arena walls at all). Each is its own real
-  feature, not a small extension of the ground jump, double jump, or air
-  control — left as separate, explicitly tracked follow-up work.
+  direction at the moment of the second press (not modeled — this port's
+  double and wall jumps are a second identical vertical-plus-outward
+  impulse only, no directional component). Each is its own real feature,
+  not a small extension of the jump variants already implemented — left as
+  separate, explicitly tracked follow-up work.
+- **A full arena footprint, or any Rocket-League-specific wall geometry.**
+  FR-013's `PhysicsWorld.walls` is a flat list of generic `StaticPlane`s a
+  caller places wherever it wants (typically with a horizontal normal);
+  this crate doesn't model Rocket League's actual octagonal-footprint
+  arena, its curved/rounded wall-to-floor and wall-to-ceiling transitions,
+  or a ceiling at all. A car touching two walls at once (a corner) picks
+  whichever wall its position happens to match first in `PhysicsWorld.walls`
+  — not disambiguated or blended between the two normals, a documented
+  simplification for a case this port's test scenes don't exercise.
 - **Per-axis air-control torque, and any assisted/auto-rotation
   behavior.** FR-011's `AIR_CONTROL_TORQUE` is one shared constant for
   pitch, yaw, and roll; real Rocket League's actual per-axis rates differ
@@ -258,6 +271,29 @@ per airborne period and restored on landing — see FR-012.
   first step) threaded into `apply_driven_forces` alongside `jump_held`.
   Deliberately excludes the directional "dodge" impulse/torque a real
   double jump pairs with — see Non-goals.
+- `RB-PHYSICS-001-FR-013` (arena walls and wall jump, implemented):
+  `PhysicsWorld` gains `walls: Vec<StaticPlane>` (via a new `with_wall`
+  builder, mirroring `with_car`) — generic flat static-plane geometry every
+  body (ball and cars alike) now collides with via the same
+  body-vs-static-plane machinery the ground already uses
+  (`resolve_ground_contact` is renamed `resolve_plane_contact` and called
+  once per wall in addition to the ground, for both the ball and every
+  car). On top of that physical substrate, `drive::apply_driven_forces`
+  gains a wall jump: a fresh `jump_pressed` press while airborne and
+  touching a wall (`wall_normal: Some(normal)`, computed by `PhysicsWorld`
+  up front the same way `on_ground` is) fires an impulse combining a new
+  `WALL_JUMP_HORIZONTAL_SPEED` (uncalibrated placeholder) outward along the
+  wall's normal with `JUMP_SPEED` upward. Wall jump takes priority over the
+  double jump on that press but is otherwise independent of it: it doesn't
+  consume `double_jump_available`; merely touching a wall (whether or not
+  jump is pressed) unconditionally restores it, the same "any surface
+  contact refills your second jump" rule landing already uses — so a
+  player can wall-jump and still have a double jump left afterward, and
+  can wall-jump again off the same or a different wall with no
+  once-per-airborne-period limit of its own. Deliberately excludes the
+  directional "dodge" a real wall jump can pair with, variable jump
+  height, and any modeled arena footprint beyond generic flat walls — see
+  Non-goals.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -275,43 +311,52 @@ per airborne period and restored on landing — see FR-012.
   rather than a separate rigid-body type per shape.
 - `integrate`: force accumulation, velocity integration, transform
   integration — pure functions over `RigidBody`, shape-agnostic.
-- `collision`: `contacts_vs_plane` — analytic body-vs-ground contact
-  generation, dispatching to a sphere- or box-specific test and returning
-  a manifold (`Vec<Contact>`, 0 to 4 points); `contacts_between` —
-  dispatches to `sphere_vs_box` (0 or 1 points) or the separating-axis
-  `box_vs_box` (0 to 4 points), covering every two-dynamic-body shape
-  pairing this crate has.
+- `collision`: `contacts_vs_plane` — analytic body-vs-static-plane contact
+  generation (any plane, not just the ground — an arena wall is the exact
+  same test with a different normal), dispatching to a sphere- or
+  box-specific test and returning a manifold (`Vec<Contact>`, 0 to 4
+  points); `contacts_between` — dispatches to `sphere_vs_box` (0 or 1
+  points) or the separating-axis `box_vs_box` (0 to 4 points), covering
+  every two-dynamic-body shape pairing this crate has.
 - `solver`: `resolve_contacts` — sequential-impulse contact + friction
-  resolution over an entire ground-contact manifold (one dynamic body vs.
-  a static plane); `resolve_contacts_between` — the same sequential-impulse
-  math generalized to two dynamic bodies' shared contact manifold.
+  resolution over an entire body-vs-static-plane manifold (the ground or a
+  wall — no plane-orientation-specific logic); `resolve_contacts_between`
+  — the same sequential-impulse math generalized to two dynamic bodies'
+  shared contact manifold.
 - `drive`: `apply_driven_forces` — couples a car's `ControllerInput` into
   ground throttle/steering forces and torques, a boost force/resource
   drain, a handbrake-driven temporary friction adjustment, a
   rising-edge-triggered ground jump impulse, airborne pitch/yaw/roll
-  torque, and a second rising-edge-triggered airborne jump impulse (double
+  torque, a second rising-edge-triggered airborne jump impulse (double
   jump, gated on and consuming a `double_jump_available` flag rather than
-  ground contact) (not a Bullet3 port — this project's own model of Rocket
-  League's driving mechanics, since the real numbers aren't public; see the
-  module's own doc comment for which constants are commonly-cited
-  community estimates vs. uncalibrated placeholders).
+  ground contact), and a third jump variant fired instead of the double
+  jump when a `wall_normal` (the outward normal of a touched wall, if any)
+  is present — an outward-plus-upward impulse that restores rather than
+  consumes `double_jump_available` (not a Bullet3 port — this project's own
+  model of Rocket League's driving mechanics, since the real numbers aren't
+  public; see the module's own doc comment for which constants are
+  commonly-cited community estimates vs. uncalibrated placeholders).
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
   velocity — for cars, including `drive::apply_driven_forces` — then
-  resolve every contact — ground, every ball-vs-car pair, then every
-  car-vs-car pair — then integrate every body's transform). `PhysicsWorld`
-  carries one ball (`RigidBody`, always present) and `cars: Vec<RigidBody>`
-  (any number, via repeated `with_car` calls) with a parallel
+  resolve every contact — ground and every wall for every body, every
+  ball-vs-car pair, then every car-vs-car pair — then integrate every
+  body's transform). `PhysicsWorld` carries one ball (`RigidBody`, always
+  present), `walls: Vec<StaticPlane>` (any number, via repeated `with_wall`
+  calls, empty by default), and `cars: Vec<RigidBody>` (any number, via
+  repeated `with_car` calls) with a parallel
   `car_inputs: Vec<ControllerInput>` set via `set_car_input`, a parallel
   `car_boost: Vec<f32>` set via `set_car_boost`, a parallel
   `car_base_friction: Vec<f32>` snapshotted from each car's own friction by
   `with_car` (handbrake's restore target), a parallel
   `car_jump_held: Vec<bool>` (jump's rising-edge state, starting `false`),
   and a parallel `car_double_jump_available: Vec<bool>` (starting `true`,
-  restored on landing and consumed by an airborne double jump); `frame()`
-  assigns each car's `player_id` as its index in `cars` and reports its
-  current input and boost amount.
+  restored on landing or wall contact, consumed by an airborne double
+  jump); each car's current wall contact (if any), like its ground
+  contact, is computed fresh at the start of every `step` from its
+  position at the time. `frame()` assigns each car's `player_id` as its
+  index in `cars` and reports its current input and boost amount.
 
 No `PhysicsStateSource`-style trait exists yet for "the physics engine"
 specifically — `rb_verify_cli` calls `rb_physics_bullet::simulate`
@@ -429,9 +474,22 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   confirms a double jump fired after a ground jump adds a second
   `JUMP_SPEED` kick on top of the first, and a regression test confirms a
   spent double jump doesn't fire again mid-air no matter how many more
-  times jump is released and re-pressed before landing. All
-  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012 behavior covered by
-  `rb_physics_bullet`'s unit tests (103 tests as of this version).
+  times jump is released and re-pressed before landing.
+- FR-013 (met, arena walls and wall jump): a fresh jump press while
+  airborne and touching a wall pushes the car outward along the wall's
+  normal and upward; has no effect while grounded even if `wall_normal` is
+  `Some`; takes priority over the double jump without consuming it; and
+  merely touching a wall (no jump press needed) restores the double jump.
+  An end-to-end `PhysicsWorld::step` test confirms a car resting against a
+  wall wall-jumps outward and upward on a fresh press; a second end-to-end
+  test confirms a ball shot at a wall bounces off it instead of tunnelling
+  through — the same physical proof `ball_bounces_off_a_stationary_car_
+  instead_of_passing_through` already gives for cars, now for the generic
+  plane-collision machinery walls reuse; a regression test confirms a car
+  not actually touching an existing wall still gets a plain double jump,
+  not a wall jump. All FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013
+  behavior covered by `rb_physics_bullet`'s unit tests (110 tests as of
+  this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -452,24 +510,28 @@ one-pair-at-a-time solve, see Non-goals, is untested against that).
 `MAX_CAR_SPEED`, `MAX_BOOST`, `BOOST_ACCELERATION`, and `JUMP_SPEED` are
 commonly-cited community numbers, but `THROTTLE_ACCELERATION`,
 `BOOST_CONSUMPTION_RATE`, `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
-and `AIR_CONTROL_TORQUE` are this project's own simplifications (or, for
-`STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/`AIR_CONTROL_TORQUE`,
-uncalibrated placeholders with no public reference at all) — the unit
-tests confirm the *shape* of the response (accelerates, caps at max speed,
-yaws when moving not when parked, boosts regardless of ground contact,
-drains the tank at a constant rate even once the force itself stops
-applying, slides more under reduced handbrake friction than under normal
-grip, jumps once per fresh press, spins about the correct axis from a
-standing start in the air, and can spend exactly one extra airborne jump
-per airborne period), not that a real car's throttle/steer/boost/
-handbrake/jump/double-jump/air-control response actually matches these
-curves. The double jump reuses `JUMP_SPEED` rather than introducing a
-second speed constant, so it inherits that constant's validation status
-as-is — real Rocket League's actual double-jump impulse may differ from
-its ground-jump impulse, which this port doesn't model.
-`AIR_CONTROL_TORQUE` is additionally a per-axis simplification: real
-Rocket League's pitch/yaw/roll rates differ from each other, and this port
-shares one constant across all three.
+`AIR_CONTROL_TORQUE`, and `WALL_JUMP_HORIZONTAL_SPEED` are this project's
+own simplifications (or, for `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/
+`AIR_CONTROL_TORQUE`/`WALL_JUMP_HORIZONTAL_SPEED`, uncalibrated
+placeholders with no public reference at all) — the unit tests confirm the
+*shape* of the response (accelerates, caps at max speed, yaws when moving
+not when parked, boosts regardless of ground contact, drains the tank at a
+constant rate even once the force itself stops applying, slides more under
+reduced handbrake friction than under normal grip, jumps once per fresh
+press, spins about the correct axis from a standing start in the air, can
+spend exactly one extra airborne jump per airborne period, and pushes
+outward from a touched wall with no such limit), not that a real car's
+throttle/steer/boost/handbrake/jump/double-jump/wall-jump/air-control
+response actually matches these curves. The double jump reuses `JUMP_SPEED`
+rather than introducing a second speed constant, so it inherits that
+constant's validation status as-is; the wall jump reuses `JUMP_SPEED` for
+its vertical component but introduces `WALL_JUMP_HORIZONTAL_SPEED` for its
+horizontal one, since this port has no public reference for either a
+double-jump-specific or a wall-jump-specific speed to reuse instead —
+real Rocket League's actual impulses for these may differ from the ground
+jump's, which this port doesn't model. `AIR_CONTROL_TORQUE` is additionally
+a per-axis simplification: real Rocket League's pitch/yaw/roll rates differ
+from each other, and this port shares one constant across all three.
 
 ## Traceability
 
@@ -481,16 +543,25 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- The dodge directional impulse/torque, variable jump height, and wall jump
-  (see Non-goals) — each a distinct real mechanic; not started. (Double
-  jump itself — a plain second vertical impulse, no directional component
-  — is now implemented as FR-012.)
+- The dodge directional impulse/torque and variable jump height (see
+  Non-goals) — each a distinct real mechanic; not started. (Double jump
+  and wall jump themselves — a plain second vertical, or outward-plus-
+  vertical, impulse, no directional component — are now implemented as
+  FR-012/FR-013.)
+- A modeled arena footprint (Rocket League's actual octagonal shape,
+  curved wall-to-floor/wall-to-ceiling transitions, a ceiling) and
+  disambiguating a car touching two walls at once (a corner) — see
+  Non-goals; needs a concrete reason to model beyond FR-013's generic
+  flat-wall capability (e.g. real recorded corner-wall-jump or
+  ceiling-shot behavior to compare against) before it's worth the added
+  complexity; not started.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
-  `AIR_CONTROL_TORQUE`, and re-checking `MAX_CAR_SPEED`/`MAX_BOOST`/
-  `BOOST_ACCELERATION`/`JUMP_SPEED`) against real recorded driving data —
-  needs `RB-VERIFY-002` capture data; not started. `STEER_TORQUE`,
-  `HANDBRAKE_FRICTION_MULTIPLIER`, and `AIR_CONTROL_TORQUE` in particular
+  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, and re-checking
+  `MAX_CAR_SPEED`/`MAX_BOOST`/`BOOST_ACCELERATION`/`JUMP_SPEED`) against
+  real recorded driving data — needs `RB-VERIFY-002` capture data; not
+  started. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  `AIR_CONTROL_TORQUE`, and `WALL_JUMP_HORIZONTAL_SPEED` in particular
   have no public reference at all (unlike gravity, max speed, the boost
   constants, or `JUMP_SPEED`), so any of them may be off by a large
   factor, not just imprecise.
@@ -532,6 +603,40 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.13.0 (2026-08-30): FR-013 added and implemented (arena walls and wall
+  jump) — `PhysicsWorld` gains `walls: Vec<StaticPlane>` and a `with_wall`
+  builder (mirroring `with_car`); `resolve_ground_contact` is renamed
+  `resolve_plane_contact` (no behavior change — it already had no
+  ground-specific logic, only a ground-specific name) and is now called
+  once per wall in addition to the ground, for both the ball and every
+  car, so arena walls are real physical geometry every body collides with,
+  not just an input-detection hack. On top of that, `drive::apply_driven_
+  forces` gains a `wall_normal: Option<Vec3>` parameter (a per-step fact
+  computed by `PhysicsWorld` the same way `on_ground` is, not `&mut` state)
+  and a wall jump: a fresh airborne `jump_pressed` press while touching a
+  wall fires an impulse combining a new `WALL_JUMP_HORIZONTAL_SPEED`
+  (uncalibrated placeholder) outward along the wall's normal with
+  `JUMP_SPEED` upward, checked before the double jump so it takes priority
+  on that press. Wall contact — independent of whether jump is pressed —
+  unconditionally restores `double_jump_available`, the same "any surface
+  contact refills your second jump" rule landing already uses, so wall
+  jump doesn't cost a player their double jump and has no
+  once-per-airborne-period limit of its own (unlike the double jump).
+  Deliberately excludes the directional "dodge" a real wall jump can pair
+  with, variable jump height, and any modeled arena footprint beyond
+  generic flat walls (no octagonal shape, curved transitions, ceiling, or
+  multi-wall-corner disambiguation) — see Non-goals. 7 new unit tests
+  across `drive.rs` and `world.rs` in `rb_physics_bullet` (110 total):
+  wall jump gives outward-and-upward velocity when available, has no
+  effect while grounded, takes priority over the double jump without
+  consuming it, and mere wall contact restores double-jump availability;
+  an end-to-end test confirms a car resting against a wall wall-jumps
+  outward and upward in a live `PhysicsWorld::step` loop; a second
+  end-to-end test confirms a ball shot at a wall bounces off it instead of
+  tunnelling through — the same physical proof already given for
+  ball-vs-car, now for the generic plane-collision machinery walls reuse;
+  and a regression test confirms a car near, but not touching, an existing
+  wall still gets a plain double jump instead of a wall jump.
 - 0.12.0 (2026-08-29): FR-012 added and implemented (double jump) —
   `drive::apply_driven_forces` fires one more, identical `JUMP_SPEED`
   instantaneous upward velocity change on a fresh airborne press of

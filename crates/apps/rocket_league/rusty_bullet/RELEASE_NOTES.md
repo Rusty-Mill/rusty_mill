@@ -6,6 +6,48 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Wall jump input
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** `PhysicsWorld` gains arena walls (`RB-PHYSICS-001-FR-013`) —
+  `walls: Vec<StaticPlane>` and a `with_wall` builder (mirroring
+  `with_car`). Every body (ball and cars alike) now collides with every
+  wall the same way it already collides with the ground, reusing the same
+  body-vs-static-plane machinery (`resolve_ground_contact` is renamed
+  `resolve_plane_contact` — no behavior change, it never had ground-specific
+  logic, just a ground-specific name).
+- **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a wall
+  jump — a fresh airborne jump press while touching a wall
+  (`wall_normal: Some(normal)`, computed the same way `on_ground` is) fires
+  an impulse combining a new `WALL_JUMP_HORIZONTAL_SPEED` (uncalibrated
+  placeholder) outward along the wall's normal with `JUMP_SPEED` upward.
+- **Interaction with the double jump:** wall jump takes priority over the
+  double jump on a fresh press, but is otherwise independent of it —
+  merely touching a wall (whether or not jump is pressed) unconditionally
+  restores `double_jump_available`, the same "any surface contact refills
+  your second jump" rule landing already uses, so a wall jump doesn't cost
+  a player their double jump and has no once-per-airborne-period limit of
+  its own.
+- **Not implemented** (explicitly, not silently dropped): the directional
+  "dodge" a real wall jump can pair with, variable jump height, and any
+  modeled arena footprint beyond generic flat walls (Rocket League's actual
+  octagonal shape, curved wall-to-floor/ceiling transitions, a ceiling, or
+  disambiguating a car touching two walls at once) — each tracked as
+  separate follow-up work.
+- 7 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet`
+  (110 total): wall jump gives outward-and-upward velocity when available,
+  has no effect while grounded, takes priority over the double jump
+  without consuming it, and mere wall contact restores double-jump
+  availability, plus — the real end-to-end proof — a car resting against a
+  wall wall-jumps outward and upward in a live `PhysicsWorld::step` loop,
+  a ball shot at a wall bounces off it instead of tunnelling through (the
+  same physical proof ball-vs-car collision already has, now for the
+  generic plane-collision machinery walls reuse), and a regression test
+  confirming a car near but not touching an existing wall still gets a
+  plain double jump.
+
+---
+
 ## Double jump input
 **2026-08-30** · [#33](https://github.com/baileyrd/rusty_bullet/pull/33) · `7c9524a`
 
