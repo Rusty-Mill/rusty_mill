@@ -79,6 +79,7 @@ have landed so far.
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
@@ -437,6 +438,15 @@ the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
 non-Windows target (including this workspace's own `ubuntu-latest` CI
 runner) — a real panic, not a flake, now fixed to skip on either variant.
 
+`rusty_ansi` needed no pin retirement: its one dependency, `unicode-width`,
+is an ordinary crates.io crate, not a sibling `baileyrd` repo. The
+standalone repo's README carried a CI badge but had no `.github/workflows`
+directory, so this workspace's `-D warnings` clippy gate was the first
+time it actually ran: `manual_strip` (indexing a slice by hand after
+`starts_with` instead of `strip_prefix`, twice) and
+`manual_pattern_char_comparison` (an `||` closure comparing against two
+chars instead of a `[char; 2]` pattern) — both fixed, no behavior change.
+
 `rusty_config` has zero dependencies of any kind, so nothing needed
 swapping — its merge is just the subtree add plus workspace wiring.
 
@@ -508,6 +518,7 @@ A third wave continues the same way, starting with
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
 behind one nested workspace),
 [`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
+[`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
 [`rusty_config`](https://github.com/baileyrd/rusty_config), and
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
 nested workspace) — merged one at a time, same process.
