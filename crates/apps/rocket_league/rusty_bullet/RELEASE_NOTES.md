@@ -6,6 +6,61 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Landing auto-orientation
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** `drive::apply_driven_forces` gains a gentle continuous
+  restoring torque, applied while airborne, nudging the car's local up
+  axis back toward world up (`RB-PHYSICS-001-FR-018`). Real Rocket League
+  triggers this assist on approach to the ground; this port has no
+  raycast or distance query to replicate that condition, so the assist
+  instead applies continuously whenever airborne, gated on two conditions
+  so it never fights the player: no active `pitch`/`roll` air-control
+  input this step, and no fresh `ControllerInput.jump` press this step
+  (avoiding a same-step conflict between this torque's accumulation into
+  `total_torque` and a dodge's/wall-jump-dodge's/double-jump's/
+  flip-cancel's own direct `angular_velocity` mutation, both resolved by
+  the same `integrate_velocities` call).
+- **The correction:** `up_axis(car).cross(&world_up) *
+  LANDING_AUTO_UPRIGHT_TORQUE`. Since both vectors are unit length, the
+  cross product's magnitude is already proportional to the sine of the
+  car's tilt off level, so a level car earns no correction and a heavily
+  tilted one earns a proportionally stronger nudge, with no separate angle
+  computation needed.
+- **New constant `LANDING_AUTO_UPRIGHT_TORQUE`** is an uncalibrated
+  placeholder, deliberately one full order of magnitude smaller than
+  `AIR_CONTROL_TORQUE` so the assist reads as gentle assistance, not full
+  control — this port has no public reference for the real assist's
+  actual strength or trigger condition either.
+- **Known, accepted, unaddressed limitation:** a car resting exactly
+  upside-down gives an exactly antiparallel `up_axis`/`world_up` pair,
+  whose cross product is also zero, so no correction is computed in that
+  unlikely exact singularity.
+- **No new `PhysicsWorld` state** — the assist is a pure function of the
+  car's current orientation, input, and ground contact, all already in
+  scope.
+- Drive.rs's own test-helper chain never calls
+  `integrate::integrate_transform`, so a car's `orientation` never
+  actually changes step-to-step there; the new `drive.rs` tests instead
+  set a known tilted orientation directly (a new `tilted_car()` helper)
+  and check a single step's resulting torque.
+- A pre-existing regression test
+  (`world::tests::landing_and_a_new_double_jump_clears_a_stale_dodge_flip_
+  flag_in_a_live_world`) was loosened from an exact `assert_eq!` to a
+  small tolerance, since the assist now legitimately nudges angular
+  velocity by a tiny amount on the test's intervening neutral-input step.
+- 5 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (143
+  total): a tilted airborne car with no input gets a corrective torque; an
+  already-upright airborne car gets none; the assist has no effect while
+  grounded; it doesn't fire while pitch air control is actively held; and
+  — the real end-to-end proof — a car tilted 90 degrees with no input
+  trends back toward level over 120 steps of a live `PhysicsWorld::step`
+  loop (gravity zeroed). This closes out the last item tracked in
+  `drive.rs`'s own module doc "Not implemented" list since the dodge
+  (FR-014) increment — that list is now empty.
+
+---
+
 ## Wall-jump dodge
 **2026-08-30** · [#43](https://github.com/baileyrd/rusty_bullet/pull/43) · `3b08fdf`
 

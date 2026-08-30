@@ -1,14 +1,14 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.17.0
+- Version: 0.18.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), and body-vs-arena-wall collision
   all implemented, tested, and wired into a real N-body `PhysicsWorld`
   scene; ground-driving car input (throttle, steering), boost, handbrake, a
   variable-height ground jump, a double jump (plain or a directional
-  dodge, itself flip-cancelable), a wall jump (itself dodgeable), and air
-  control (pitch/yaw/roll) implemented; landing auto-orientation
-  assistance, a full arena footprint, split impulse, warm-starting, a
+  dodge, itself flip-cancelable), a wall jump (itself dodgeable), air
+  control (pitch/yaw/roll), and a gentle landing auto-orientation assist
+  implemented; a full arena footprint, split impulse, warm-starting, a
   combined multi-body solve, and constant calibration are open follow-up
   work)
 - Owners: baileyrd
@@ -60,9 +60,12 @@ double jump fired when the stick is held in a direction at the moment of
 the press — see FR-014 — variable height on that ground jump, adding
 extra upward acceleration for as long as jump stays held, up to a cap —
 see FR-015 — flip-cancel, letting a further jump press stop a dodge's
-spin early instead of always completing it — see FR-016 — and a wall-jump
+spin early instead of always completing it — see FR-016 — a wall-jump
 dodge, the same directional-flip treatment applied to the wall jump's own
-fresh press — see FR-017.
+fresh press — see FR-017 — and a landing auto-orientation assist, a
+gentle continuous restoring torque nudging an airborne car's local up
+axis back toward world up whenever it isn't actively air-controlling or
+mid-jump-press — see FR-018.
 
 ## Non-goals (this increment)
 
@@ -80,21 +83,6 @@ fresh press — see FR-017.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **Landing auto-upright.** `drive::apply_driven_forces` now covers ground
-  throttle and steering (FR-007), boost (FR-008), handbrake/drift (FR-009),
-  a variable-height ground jump (FR-010/FR-015), air control (FR-011), a
-  double jump — plain or a directional, flip-cancelable dodge
-  (FR-012/FR-014/FR-016) — and a wall jump that can itself be dodged off of
-  the same way (FR-013/FR-017). Real Rocket League's jump system is still
-  richer than that: it also auto-corrects a car's orientation somewhat on
-  landing after a dodge (not modeled — no landing assistance of any kind
-  exists here) — its own real feature, not a small extension of the jump
-  variants already implemented — left as separate, explicitly tracked
-  follow-up work. (Variable jump height, flip-cancel, and the wall-jump
-  dodge are no longer in this list — see FR-015/FR-016/FR-017; matching
-  real Rocket League, variable height is scoped to the ground jump alone
-  and flip-cancel applies equally to a wall-jump dodge's spin, so none of
-  the three is a divergence to track here anymore.)
 - **A full arena footprint, or any Rocket-League-specific wall geometry.**
   FR-013's `PhysicsWorld.walls` is a flat list of generic `StaticPlane`s a
   caller places wherever it wants (typically with a horizontal normal);
@@ -109,9 +97,12 @@ fresh press — see FR-017.
   pitch, yaw, and roll; real Rocket League's actual per-axis rates differ
   from each other (roll fastest, pitch and yaw slower), which this port
   doesn't model. Real Rocket League also has an "air roll only" input mode
-  and camera-relative stick mapping subtleties, and some auto-orientation
-  assistance on landing — none of that is modeled here; this increment is
-  a direct, camera-independent pitch/yaw/roll torque, nothing more.
+  and camera-relative stick mapping subtleties — none of that is modeled
+  here; this increment is a direct, camera-independent pitch/yaw/roll
+  torque, nothing more. (A landing auto-orientation assist is now
+  implemented, as a separate, deliberately gentler continuous
+  restoring torque rather than an extension of this per-axis input
+  torque — see FR-018.)
 - **A per-wheel tire/slip model.** Handbrake (FR-009) is modeled as a
   uniform, temporary reduction of the car's single `RigidBody.friction`
   value, not a distinct front/rear grip split or a slip-angle-driven tire
@@ -411,6 +402,33 @@ fresh press — see FR-017.
   repurposed (not silently deleted) to assert the new wall-jump-dodge
   behavior instead, keeping their scenario (touching a wall with
   directional stick input) but updating the expected outcome.
+- `RB-PHYSICS-001-FR-018` (landing auto-orientation assist, implemented):
+  `drive::apply_driven_forces` gains a gentle continuous restoring torque,
+  applied while airborne, that nudges the car's local up axis back toward
+  world up — real Rocket League auto-corrects a car's orientation somewhat
+  on approach to landing; this port has no ground-proximity raycast or
+  distance query to replicate that trigger condition, so instead the assist
+  applies continuously whenever airborne, gated on two conditions instead:
+  no active `pitch`/`roll` air-control input this step (`pitch == 0.0 &&
+  roll == 0.0`, so the assist never fights the player's own air control —
+  it only fills in when the stick is neutral) and no fresh
+  `ControllerInput.jump` press this step (so it never interacts, within the
+  same `integrate_velocities` call, with a dodge's, wall-jump-dodge's,
+  double-jump's, or flip-cancel's own same-step direct velocity/
+  angular-velocity change). The correction itself is `up_axis(car).cross(
+  &world_up) * LANDING_AUTO_UPRIGHT_TORQUE`: since both vectors are unit
+  length, the cross product's magnitude is already proportional to the
+  sine of the car's tilt off level, so a level car earns no correction and
+  a heavily tilted one earns a proportionally stronger nudge, with no
+  separate angle computation needed. `LANDING_AUTO_UPRIGHT_TORQUE` is a new
+  uncalibrated placeholder, deliberately one full order of magnitude
+  smaller than `AIR_CONTROL_TORQUE` so the assist reads as "gentle
+  assistance," not "full control." Known, accepted, unaddressed limitation:
+  a car resting exactly upside-down gives an exactly antiparallel
+  `up_axis`/`world_up` pair, whose cross product is also zero — no
+  correction is computed in that unlikely exact singularity. No new
+  `PhysicsWorld` state — the assist is a pure function of the car's current
+  orientation, input, and ground contact, all already in scope.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -462,9 +480,12 @@ fresh press — see FR-017.
   wall-jump dodge combining that same push-off with a `DODGE_SPEED`
   horizontal component and `DODGE_ANGULAR_SPEED` spin, which *does* consume
   `double_jump_available` and arms `dodge_flip_active` exactly like a
-  ground dodge (not a Bullet3 port — this project's own model of Rocket
-  League's driving mechanics, since the real numbers aren't public; see the
-  module's own doc comment for which constants are commonly-cited
+  ground dodge, and — whenever airborne with no active `pitch`/`roll` and
+  no fresh jump press this step — a gentle continuous `LANDING_AUTO_
+  UPRIGHT_TORQUE`-scaled restoring torque nudging the car's local up axis
+  back toward world up (not a Bullet3 port — this project's own model of
+  Rocket League's driving mechanics, since the real numbers aren't public;
+  see the module's own doc comment for which constants are commonly-cited
   community estimates vs. uncalibrated placeholders).
 - `world`: `PhysicsWorld::step`/`frame`, and `simulate()` — the
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
@@ -690,6 +711,24 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   new behavior. All
   FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017
   behavior covered by `rb_physics_bullet`'s unit tests (138 tests as of
+  the 0.17.0 version).
+- FR-018 (met, landing auto-orientation assist): a tilted airborne car with
+  no pitch/roll input gets a corrective torque; an already-upright airborne
+  car gets none; the assist has no effect while grounded; and it doesn't
+  fire while pitch or roll air control is actively held (checked via a
+  tilt whose own correction axis is orthogonal to full pitch's own torque
+  axis, so the two contributions can be cleanly told apart). An end-to-end
+  `PhysicsWorld::step` test (gravity zeroed) confirms a car tilted 90
+  degrees with no input trends back toward level over repeated steps rather
+  than staying tilted or drifting further away. A pre-existing regression
+  test (`landing_and_a_new_double_jump_clears_a_stale_dodge_flip_flag_in_a_
+  live_world`) was loosened from exact equality to a small tolerance, since
+  the assist now legitimately nudges angular velocity by a tiny amount on
+  the test's intervening neutral-input step — still tight enough to catch a
+  real regression (a spurious flip-cancel zeroing ~1.5 rad/s), which would
+  dwarf the assist's own per-step contribution. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018
+  behavior covered by `rb_physics_bullet`'s unit tests (143 tests as of
   this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
@@ -712,11 +751,13 @@ one-pair-at-a-time solve, see Non-goals, is untested against that).
 commonly-cited community numbers, but `THROTTLE_ACCELERATION`,
 `BOOST_CONSUMPTION_RATE`, `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
 `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`,
-`DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`, and
-`JUMP_HOLD_ACCELERATION` are this project's own simplifications (or, for
+`DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
+`JUMP_HOLD_ACCELERATION`, and `LANDING_AUTO_UPRIGHT_TORQUE` are this
+project's own simplifications (or, for
 `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/`AIR_CONTROL_TORQUE`/
 `WALL_JUMP_HORIZONTAL_SPEED`/`DODGE_SPEED`/`DODGE_ANGULAR_SPEED`/
-`JUMP_HOLD_MAX_DURATION`/`JUMP_HOLD_ACCELERATION`, uncalibrated
+`JUMP_HOLD_MAX_DURATION`/`JUMP_HOLD_ACCELERATION`/
+`LANDING_AUTO_UPRIGHT_TORQUE`, uncalibrated
 placeholders with no public reference at all) — the unit
 tests confirm the *shape* of the response (accelerates, caps at max speed,
 yaws when moving not when parked, boosts regardless of ground contact,
@@ -728,11 +769,13 @@ airborne period, pushes outward from a touched wall with no such limit,
 dodges in the stick's direction with a visible flip when that jump is
 spent with pitch or roll held (a wall jump included, when that press's
 stick input exceeds the same deadzone), climbs higher the longer the
-ground jump button stays held up to a cap, and stops a dodge's spin
+ground jump button stays held up to a cap, stops a dodge's spin
 outright — a wall-jump dodge's included — on a further press before
-landing or a wall touch), not that a real car's throttle/steer/boost/
-handbrake/jump/double-jump/wall-jump/wall-jump-dodge/dodge/air-control/
-hold-height/flip-cancel response actually matches these curves.
+landing or a wall touch, and gently nudges a tilted airborne car back
+toward level when the player isn't otherwise steering it), not that a real
+car's throttle/steer/boost/handbrake/jump/double-jump/wall-jump/
+wall-jump-dodge/dodge/air-control/hold-height/flip-cancel/landing-assist
+response actually matches these curves.
 Flip-cancel itself introduces no new constant to calibrate — it's
 a state-flag-gated zeroing action, not a magnitude, so it inherits no
 validation burden beyond `DODGE_SPEED`/`DODGE_ANGULAR_SPEED`'s own (the
@@ -761,7 +804,14 @@ constants' existing (unvalidated) status; its one behavioral choice this
 port made up rather than measured — that it consumes
 `double_jump_available` while the plain wall jump doesn't — is a structural
 simplification, not a magnitude, and is called out in FR-017 and the
-`drive` module doc comment.
+`drive` module doc comment. The landing auto-orientation assist introduces
+its own `LANDING_AUTO_UPRIGHT_TORQUE` — this port's own invention (chosen
+only to read as visibly gentler than `AIR_CONTROL_TORQUE` in tests, one
+full order of magnitude smaller), since this port has no public reference
+for real Rocket League's actual landing-assist strength or trigger
+condition either; unlike every other jump-family constant, this one also
+has no ground-proximity signal behind its trigger at all (see FR-018 and
+Open questions).
 
 ## Traceability
 
@@ -773,12 +823,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- Landing auto-orientation assistance (see Non-goals) — a distinct real
-  mechanic; not started. (The double jump's own dodge — a directional flip
-  off the ground/air, no wall involved — is now implemented as FR-014;
-  variable jump height for the ground jump is now implemented as FR-015;
-  canceling a dodge's rotation early — flip-cancel — is now implemented as
-  FR-016; a dodge variant of the wall jump is now implemented as FR-017.)
+- Replicating real Rocket League's actual landing-assist trigger condition
+  (proximity to the ground, via some raycast or distance query this port
+  doesn't have) instead of the current continuous-whenever-airborne
+  stand-in (see FR-018) — needs a concrete reason (e.g. real recorded
+  landing-assist behavior to compare against) before it's worth adding a
+  ground-distance query solely for this. (The double jump's own dodge — a
+  directional flip off the ground/air, no wall involved — is now
+  implemented as FR-014; variable jump height for the ground jump is now
+  implemented as FR-015; canceling a dodge's rotation early — flip-cancel —
+  is now implemented as FR-016; a dodge variant of the wall jump is now
+  implemented as FR-017; a gentle landing auto-orientation assist is now
+  implemented as FR-018.)
 - A modeled arena footprint (Rocket League's actual octagonal shape,
   curved wall-to-floor/wall-to-ceiling transitions, a ceiling) and
   disambiguating a car touching two walls at once (a corner) — see
@@ -790,13 +846,14 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
   `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
-  `JUMP_HOLD_ACCELERATION`, and re-checking
+  `JUMP_HOLD_ACCELERATION`, `LANDING_AUTO_UPRIGHT_TORQUE`, and re-checking
   `MAX_CAR_SPEED`/`MAX_BOOST`/`BOOST_ACCELERATION`/`JUMP_SPEED`) against
   real recorded driving data — needs `RB-VERIFY-002` capture data; not
   started. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
-  `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`, and
-  `JUMP_HOLD_ACCELERATION` in particular have no public reference at all
+  `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
+  `JUMP_HOLD_ACCELERATION`, and `LANDING_AUTO_UPRIGHT_TORQUE` in particular
+  have no public reference at all
   (unlike gravity, max speed, the boost constants, or `JUMP_SPEED`), so any
   of them may be off by a large factor, not just imprecise.
 - Splitting `AIR_CONTROL_TORQUE` into distinct per-axis constants (pitch,
@@ -837,6 +894,57 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.18.0 (2026-08-30): FR-018 added and implemented (landing
+  auto-orientation assist) — `drive::apply_driven_forces` gains a gentle
+  continuous restoring torque, applied while airborne, nudging the car's
+  local up axis back toward world up. Real Rocket League triggers this on
+  approach to the ground; this port has no raycast or distance query to
+  replicate that condition, so the assist instead applies continuously
+  whenever airborne, gated on two conditions so it never fights the player:
+  no active `pitch`/`roll` air-control input this step, and no fresh
+  `ControllerInput.jump` press this step (avoiding a same-step conflict
+  between this torque's accumulation into `total_torque` and a
+  dodge's/wall-jump-dodge's/double-jump's/flip-cancel's own direct
+  `angular_velocity` mutation, both resolved by the same
+  `integrate_velocities` call). The correction is
+  `up_axis(car).cross(&world_up) * LANDING_AUTO_UPRIGHT_TORQUE`: since both
+  vectors are unit length, the cross product's magnitude is already
+  proportional to the sine of the car's tilt off level, so a level car
+  earns no correction and a heavily tilted one earns a proportionally
+  stronger nudge, with no separate angle computation needed. New constant
+  `LANDING_AUTO_UPRIGHT_TORQUE` is an uncalibrated placeholder, deliberately
+  one full order of magnitude smaller than `AIR_CONTROL_TORQUE` so the
+  assist reads as gentle assistance, not full control; this port has no
+  public reference for the real assist's actual strength or trigger
+  condition either. Known, accepted, unaddressed limitation: a car resting
+  exactly upside-down gives an exactly antiparallel `up_axis`/`world_up`
+  pair, whose cross product is also zero, so no correction is computed in
+  that unlikely exact singularity. No new `PhysicsWorld` state — the assist
+  is a pure function of the car's current orientation, input, and ground
+  contact, all already in scope. Drive.rs's own test-helper chain never
+  calls `integrate::integrate_transform`, so a car's `orientation` never
+  actually changes step-to-step there; the new `drive.rs` tests instead set
+  a known tilted orientation directly (a new `tilted_car()` helper, calling
+  `RigidBody::update_inertia_tensor` afterward for consistency) and check a
+  single step's resulting torque, a pattern reusable for any future
+  orientation-dependent test there. A pre-existing regression test
+  (`world::tests::landing_and_a_new_double_jump_clears_a_stale_dodge_flip_
+  flag_in_a_live_world`) was loosened from an exact `assert_eq!` to a small
+  tolerance, since the assist now legitimately nudges angular velocity by a
+  tiny amount on the test's intervening neutral-input step — the tolerance
+  stays far tighter than a real spurious flip-cancel (which zeroes ~1.5
+  rad/s) would need to slip through undetected. 5 new unit tests across
+  `drive.rs`/`world.rs` in `rb_physics_bullet` (143 total): a tilted
+  airborne car with no input gets a corrective torque; an already-upright
+  airborne car gets none; the assist has no effect while grounded; it
+  doesn't fire while pitch air control is actively held (isolated via a
+  tilt whose own correction axis is orthogonal to full pitch's own torque
+  axis); and — the real end-to-end proof — a car tilted 90 degrees with no
+  input trends back toward level over 120 steps of a live
+  `PhysicsWorld::step` loop (gravity zeroed) rather than staying tilted or
+  drifting further away. This closes out the last item that had been
+  tracked in `drive.rs`'s own module doc "Not implemented" list since the
+  dodge (FR-014) increment — that list is now empty.
 - 0.17.0 (2026-08-30): FR-017 added and implemented (wall-jump dodge) —
   the wall jump's own fresh press (FR-013) now checks
   `ControllerInput.pitch`/`roll` against `DODGE_DEADZONE`, the same check

@@ -166,6 +166,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   restores it first). No new physics constants. Two pre-existing tests
   asserting the old "wall jump always ignores stick input" premise were
   repurposed to assert the new behavior.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-018`) — landing
+  auto-orientation assist: a gentle continuous restoring torque, applied
+  while airborne, nudging the car's local up axis back toward world up
+  (`up_axis(car).cross(&world_up) * LANDING_AUTO_UPRIGHT_TORQUE`, whose
+  magnitude is already proportional to the tilt angle's sine). Gated on no
+  active `pitch`/`roll` this step and no fresh `jump` press this step
+  (avoiding a same-step conflict with a dodge's/wall-jump-dodge's/
+  double-jump's/flip-cancel's own direct angular-velocity change). Applies
+  continuously whenever airborne rather than only near the ground — this
+  port has no raycast/distance query to replicate real Rocket League's
+  actual ground-proximity trigger. New constant
+  `LANDING_AUTO_UPRIGHT_TORQUE` is an uncalibrated placeholder, one order
+  of magnitude smaller than `AIR_CONTROL_TORQUE`. No new `PhysicsWorld`
+  state.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
