@@ -80,6 +80,7 @@ have landed so far.
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
 | [`rusty_sync`](crates/rusty_sync) | `crates/rusty_sync` | `no_std` + `alloc` sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate, built on `rusty_std` |
+| [`rusty_simd`](crates/rusty_simd) | `crates/rusty_simd` | Zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference |
 | [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
 | [`rusty-db-core`](crates/rusty_db/crates/rusty-db-core) | `crates/rusty_db/crates/rusty-db-core` | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of `rusty_db`) |
@@ -459,6 +460,9 @@ case, alongside the other two.
 exclusion and channel send/recv, each also exercised under real OS
 threads, not just single-threaded) passes unmodified.
 
+`rusty_simd` has zero dependencies of any kind, so nothing needed
+swapping — its own merge is just the subtree add plus workspace wiring.
+
 `rusty_h2` has zero dependencies of any kind, so nothing needed
 swapping — its own merge is just the subtree add plus workspace wiring.
 
@@ -569,6 +573,7 @@ A third wave continues the same way, starting with
 behind one nested workspace),
 [`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
 [`rusty_sync`](https://github.com/baileyrd/rusty_sync),
+[`rusty_simd`](https://github.com/baileyrd/rusty_simd),
 [`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_audio`](https://github.com/baileyrd/rusty_audio),
 [`rusty_db`](https://github.com/baileyrd/rusty_db) (six crates behind a
