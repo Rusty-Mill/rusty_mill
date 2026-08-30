@@ -56,7 +56,9 @@ pub struct Template {
 impl Template {
     /// Compiles `src` into a [`Template`].
     pub fn compile(src: &str) -> Result<Self, JinjaError> {
-        Ok(Template { nodes: template::compile(src)? })
+        Ok(Template {
+            nodes: template::compile(src)?,
+        })
     }
 
     /// Renders this template against `context` (typically a JSON object
@@ -79,7 +81,10 @@ pub struct ChatMessage {
 impl ChatMessage {
     /// Creates a new `ChatMessage`.
     pub fn new(role: &str, content: &str) -> Self {
-        Self { role: role.to_string(), content: content.to_string() }
+        Self {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
     }
 }
 
@@ -87,8 +92,7 @@ impl ChatMessage {
 /// model-specific template is supplied — a real Jinja source string
 /// rendered through this crate's own engine, not a hand-formatted string
 /// as the old placeholder implementation was.
-const DEFAULT_CHATML_TEMPLATE: &str =
-    "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
+const DEFAULT_CHATML_TEMPLATE: &str = "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
 
 /// A convenience wrapper over [`Template`] for the common "render a list of
 /// chat messages" case. For a model's *actual* embedded chat template
@@ -213,7 +217,7 @@ mod tests {
         );
     }
 
-/// Cross-validated against a real Jinja2 engine: this is the exact
+    /// Cross-validated against a real Jinja2 engine: this is the exact
     /// template, message content, and expected output from
     /// `rusty_llama::chat::tests::render_jinja_llama3_shaped_template`,
     /// which runs the same input through the real `minijinja` crate and
@@ -257,7 +261,10 @@ mod tests {
 
     #[test]
     fn is_defined_test_on_missing_context_variable() {
-        let template = Template::compile("{% if system_message is defined %}{{ system_message }}{% else %}none{% endif %}").unwrap();
+        let template = Template::compile(
+            "{% if system_message is defined %}{{ system_message }}{% else %}none{% endif %}",
+        )
+        .unwrap();
         let context = Value::Object(Map::new());
         assert_eq!(template.render(&context).unwrap(), "none");
     }

@@ -88,36 +88,68 @@ impl Parser {
         match self.peek().clone() {
             Token::Eq => {
                 self.advance();
-                Ok(Expr::BinOp(BinOp::Eq, Box::new(left), Box::new(self.parse_concat()?)))
+                Ok(Expr::BinOp(
+                    BinOp::Eq,
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                ))
             }
             Token::Ne => {
                 self.advance();
-                Ok(Expr::BinOp(BinOp::Ne, Box::new(left), Box::new(self.parse_concat()?)))
+                Ok(Expr::BinOp(
+                    BinOp::Ne,
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                ))
             }
             Token::Lt => {
                 self.advance();
-                Ok(Expr::BinOp(BinOp::Lt, Box::new(left), Box::new(self.parse_concat()?)))
+                Ok(Expr::BinOp(
+                    BinOp::Lt,
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                ))
             }
             Token::Le => {
                 self.advance();
-                Ok(Expr::BinOp(BinOp::Le, Box::new(left), Box::new(self.parse_concat()?)))
+                Ok(Expr::BinOp(
+                    BinOp::Le,
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                ))
             }
             Token::Gt => {
                 self.advance();
-                Ok(Expr::BinOp(BinOp::Gt, Box::new(left), Box::new(self.parse_concat()?)))
+                Ok(Expr::BinOp(
+                    BinOp::Gt,
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                ))
             }
             Token::Ge => {
                 self.advance();
-                Ok(Expr::BinOp(BinOp::Ge, Box::new(left), Box::new(self.parse_concat()?)))
+                Ok(Expr::BinOp(
+                    BinOp::Ge,
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                ))
             }
             Token::In => {
                 self.advance();
-                Ok(Expr::In(Box::new(left), Box::new(self.parse_concat()?), false))
+                Ok(Expr::In(
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                    false,
+                ))
             }
             Token::Not if self.tokens.get(self.pos + 1) == Some(&Token::In) => {
                 self.advance();
                 self.advance();
-                Ok(Expr::In(Box::new(left), Box::new(self.parse_concat()?), true))
+                Ok(Expr::In(
+                    Box::new(left),
+                    Box::new(self.parse_concat()?),
+                    true,
+                ))
             }
             Token::Is => {
                 self.advance();
@@ -193,7 +225,11 @@ impl Parser {
                         Token::Ident(n) => n,
                         _ => return Err("expected a filter name after '|'"),
                     };
-                    let args = if self.peek() == &Token::LParen { self.parse_call_args()? } else { Vec::new() };
+                    let args = if self.peek() == &Token::LParen {
+                        self.parse_call_args()?
+                    } else {
+                        Vec::new()
+                    };
                     expr = Expr::Filter(Box::new(expr), name, args);
                 }
                 _ => break,
@@ -226,7 +262,11 @@ impl Parser {
                 "none" => Ok(Expr::None),
                 _ => Ok(Expr::Var(name)),
             },
-            Token::Minus => Ok(Expr::BinOp(BinOp::Sub, Box::new(Expr::Num(0.0)), Box::new(self.parse_postfix()?))),
+            Token::Minus => Ok(Expr::BinOp(
+                BinOp::Sub,
+                Box::new(Expr::Num(0.0)),
+                Box::new(self.parse_postfix()?),
+            )),
             Token::LParen => {
                 let inner = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
@@ -243,19 +283,27 @@ mod tests {
     use crate::lexer::tokenize;
 
     fn parse(src: &str) -> Expr {
-        Parser::new(tokenize(src).unwrap()).parse_expr_to_eof().unwrap()
+        Parser::new(tokenize(src).unwrap())
+            .parse_expr_to_eof()
+            .unwrap()
     }
 
     #[test]
     fn parses_bracket_index_as_attr() {
         let e = parse("message['role']");
-        assert_eq!(e, Expr::Attr(Box::new(Expr::Var("message".into())), "role".into()));
+        assert_eq!(
+            e,
+            Expr::Attr(Box::new(Expr::Var("message".into())), "role".into())
+        );
     }
 
     #[test]
     fn parses_dotted_attr() {
         let e = parse("loop.last");
-        assert_eq!(e, Expr::Attr(Box::new(Expr::Var("loop".into())), "last".into()));
+        assert_eq!(
+            e,
+            Expr::Attr(Box::new(Expr::Var("loop".into())), "last".into())
+        );
     }
 
     #[test]
@@ -265,7 +313,10 @@ mod tests {
             e,
             Expr::Filter(
                 Box::new(Expr::Filter(
-                    Box::new(Expr::Attr(Box::new(Expr::Var("message".into())), "content".into())),
+                    Box::new(Expr::Attr(
+                        Box::new(Expr::Var("message".into())),
+                        "content".into()
+                    )),
                     "trim".into(),
                     alloc::vec::Vec::new(),
                 )),
@@ -281,7 +332,10 @@ mod tests {
         assert_eq!(
             e,
             Expr::Filter(
-                Box::new(Expr::Attr(Box::new(Expr::Var("message".into())), "content".into())),
+                Box::new(Expr::Attr(
+                    Box::new(Expr::Var("message".into())),
+                    "content".into()
+                )),
                 "strip".into(),
                 alloc::vec::Vec::new(),
             )
@@ -291,12 +345,26 @@ mod tests {
     #[test]
     fn parses_is_defined_test() {
         let e = parse("system_message is defined");
-        assert_eq!(e, Expr::Test(Box::new(Expr::Var("system_message".into())), "defined".into(), false));
+        assert_eq!(
+            e,
+            Expr::Test(
+                Box::new(Expr::Var("system_message".into())),
+                "defined".into(),
+                false
+            )
+        );
     }
 
     #[test]
     fn parses_is_not_defined_test() {
         let e = parse("system_message is not defined");
-        assert_eq!(e, Expr::Test(Box::new(Expr::Var("system_message".into())), "defined".into(), true));
+        assert_eq!(
+            e,
+            Expr::Test(
+                Box::new(Expr::Var("system_message".into())),
+                "defined".into(),
+                true
+            )
+        );
     }
 }

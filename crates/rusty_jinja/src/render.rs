@@ -22,16 +22,27 @@ pub fn render(nodes: &[Node], context: &Value) -> Result<String, JinjaError> {
     Ok(out)
 }
 
-fn render_nodes(nodes: &[Node], context: &Value, scopes: &mut Vec<Scope>, out: &mut String) -> Result<(), JinjaError> {
+fn render_nodes(
+    nodes: &[Node],
+    context: &Value,
+    scopes: &mut Vec<Scope>,
+    out: &mut String,
+) -> Result<(), JinjaError> {
     for node in nodes {
         match node {
             Node::Text(s) => out.push_str(s),
             Node::Output(expr) => out.push_str(&display(&eval(expr, context, scopes)?)),
             Node::Set { var, value } => {
                 let v = eval(value, context, scopes)?;
-                scopes.last_mut().expect("render always keeps at least one scope").insert(var.clone(), v);
+                scopes
+                    .last_mut()
+                    .expect("render always keeps at least one scope")
+                    .insert(var.clone(), v);
             }
-            Node::If { branches, else_branch } => {
+            Node::If {
+                branches,
+                else_branch,
+            } => {
                 let mut matched = false;
                 for (cond, body) in branches {
                     if truthy(&eval(cond, context, scopes)?) {
@@ -46,7 +57,11 @@ fn render_nodes(nodes: &[Node], context: &Value, scopes: &mut Vec<Scope>, out: &
                     }
                 }
             }
-            Node::For { var, iterable, body } => {
+            Node::For {
+                var,
+                iterable,
+                body,
+            } => {
                 let items = eval_iterable(iterable, context, scopes)?;
                 let len = items.len();
                 for (i, item) in items.into_iter().enumerate() {
@@ -90,7 +105,9 @@ fn lookup_var(name: &str, context: &Value, scopes: &[Scope]) -> Option<Value> {
 fn is_defined(expr: &Expr, context: &Value, scopes: &[Scope]) -> bool {
     match expr {
         Expr::Var(name) => lookup_var(name, context, scopes).is_some(),
-        Expr::Attr(base, name) => eval(base, context, scopes).map(|v| v.get(name).is_some()).unwrap_or(false),
+        Expr::Attr(base, name) => eval(base, context, scopes)
+            .map(|v| v.get(name).is_some())
+            .unwrap_or(false),
         _ => true,
     }
 }
@@ -113,7 +130,10 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
             if i < 0 {
                 return Ok(Value::Null);
             }
-            Ok(base_val.get_index(i as usize).cloned().unwrap_or(Value::Null))
+            Ok(base_val
+                .get_index(i as usize)
+                .cloned()
+                .unwrap_or(Value::Null))
         }
         Expr::Not(e) => Ok(Value::Bool(!truthy(&eval(e, context, scopes)?))),
         Expr::Concat(a, b) => {
@@ -124,8 +144,10 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
         Expr::BinOp(op, a, b) => eval_binop(op, a, b, context, scopes),
         Expr::Filter(base, name, args) => {
             let base_val = eval(base, context, scopes)?;
-            let arg_vals: Vec<Value> =
-                args.iter().map(|a| eval(a, context, scopes)).collect::<Result<_, _>>()?;
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|a| eval(a, context, scopes))
+                .collect::<Result<_, _>>()?;
             apply_filter(name, base_val, &arg_vals)
         }
         Expr::Test(base, name, negate) => {
@@ -148,7 +170,10 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
             let h = eval(haystack, context, scopes)?;
             let result = match &h {
                 Value::Array(items) => items.contains(&n),
-                Value::String(s) => n.as_str().map(|needle_s| s.contains(needle_s)).unwrap_or(false),
+                Value::String(s) => n
+                    .as_str()
+                    .map(|needle_s| s.contains(needle_s))
+                    .unwrap_or(false),
                 Value::Object(map) => n.as_str().map(|k| map.get(k).is_some()).unwrap_or(false),
                 _ => false,
             };
@@ -157,7 +182,13 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
     }
 }
 
-fn eval_binop(op: &BinOp, a: &Expr, b: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaError> {
+fn eval_binop(
+    op: &BinOp,
+    a: &Expr,
+    b: &Expr,
+    context: &Value,
+    scopes: &[Scope],
+) -> Result<Value, JinjaError> {
     if *op == BinOp::And {
         let av = eval(a, context, scopes)?;
         if !truthy(&av) {
@@ -205,7 +236,9 @@ fn compare(a: &Value, b: &Value) -> core::cmp::Ordering {
     if let (Some(x), Some(y)) = (a.as_str(), b.as_str()) {
         return x.cmp(y);
     }
-    num(a).partial_cmp(&num(b)).unwrap_or(core::cmp::Ordering::Equal)
+    num(a)
+        .partial_cmp(&num(b))
+        .unwrap_or(core::cmp::Ordering::Equal)
 }
 
 fn apply_filter(name: &str, value: Value, args: &[Value]) -> Result<Value, JinjaError> {
@@ -218,12 +251,20 @@ fn apply_filter(name: &str, value: Value, args: &[Value]) -> Result<Value, Jinja
         "length" | "count" => Ok(Value::Number(Number::from(value_length(&value) as i64))),
         "first" => Ok(match value {
             Value::Array(items) => items.into_iter().next().unwrap_or(Value::Null),
-            Value::String(s) => s.chars().next().map(|c| Value::String(c.to_string())).unwrap_or(Value::Null),
+            Value::String(s) => s
+                .chars()
+                .next()
+                .map(|c| Value::String(c.to_string()))
+                .unwrap_or(Value::Null),
             _ => Value::Null,
         }),
         "last" => Ok(match value {
             Value::Array(items) => items.into_iter().next_back().unwrap_or(Value::Null),
-            Value::String(s) => s.chars().next_back().map(|c| Value::String(c.to_string())).unwrap_or(Value::Null),
+            Value::String(s) => s
+                .chars()
+                .next_back()
+                .map(|c| Value::String(c.to_string()))
+                .unwrap_or(Value::Null),
             _ => Value::Null,
         }),
         "join" => {
@@ -271,7 +312,10 @@ fn value_length(value: &Value) -> usize {
 }
 
 fn num(value: &Value) -> f64 {
-    value.as_f64().or_else(|| value.as_i64().map(|n| n as f64)).unwrap_or(0.0)
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|n| n as f64))
+        .unwrap_or(0.0)
 }
 
 fn truthy(value: &Value) -> bool {
@@ -295,7 +339,10 @@ fn display(value: &Value) -> String {
         Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
         Value::String(s) => s.clone(),
         Value::Number(_) => num(value).to_string_trimmed(),
-        Value::Array(items) => format!("[{}]", items.iter().map(display).collect::<Vec<_>>().join(", ")),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(display).collect::<Vec<_>>().join(", ")
+        ),
         Value::Object(_) => "{...}".to_string(),
     }
 }

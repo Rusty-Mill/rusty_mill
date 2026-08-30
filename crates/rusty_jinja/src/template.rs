@@ -57,7 +57,10 @@ struct Scanner {
 
 impl Scanner {
     fn new(src: &str) -> Self {
-        Scanner { chars: src.chars().collect(), pos: 0 }
+        Scanner {
+            chars: src.chars().collect(),
+            pos: 0,
+        }
     }
 
     fn slice(&self, start: usize, end: usize) -> String {
@@ -66,7 +69,8 @@ impl Scanner {
 
     fn at(&self, s: &str) -> bool {
         let pat: Vec<char> = s.chars().collect();
-        self.pos + pat.len() <= self.chars.len() && self.chars[self.pos..self.pos + pat.len()] == pat[..]
+        self.pos + pat.len() <= self.chars.len()
+            && self.chars[self.pos..self.pos + pat.len()] == pat[..]
     }
 
     /// Reads a `{{ ... }}`/`{% ... %}` tag starting at the current
@@ -86,7 +90,9 @@ impl Scanner {
         let mut trim_right = false;
         let mut i = self.pos;
         while i < self.chars.len() {
-            if i + close_pat.len() <= self.chars.len() && self.chars[i..i + close_pat.len()] == close_pat[..] {
+            if i + close_pat.len() <= self.chars.len()
+                && self.chars[i..i + close_pat.len()] == close_pat[..]
+            {
                 end = Some(i);
                 break;
             }
@@ -149,7 +155,11 @@ fn classify_tag(inner: &str) -> Result<RawTag<'_>, JinjaError> {
 /// `endfor` for `For`). `initial_trim` seeds whether the *first* text node
 /// should have its leading whitespace trimmed — the trim-right flag of
 /// whichever tag opened this block (see the module doc).
-fn parse_block(scanner: &mut Scanner, kind: BlockKind, initial_trim: bool) -> Result<(Vec<Node>, Terminator), JinjaError> {
+fn parse_block(
+    scanner: &mut Scanner,
+    kind: BlockKind,
+    initial_trim: bool,
+) -> Result<(Vec<Node>, Terminator), JinjaError> {
     let mut nodes: Vec<Node> = Vec::new();
     let mut trim_next_text_start = initial_trim;
 
@@ -170,7 +180,9 @@ fn parse_block(scanner: &mut Scanner, kind: BlockKind, initial_trim: bool) -> Re
             return if kind == BlockKind::Top {
                 Ok((nodes, Terminator::Eof))
             } else {
-                Err(JinjaError::Syntax("unexpected end of template inside a block"))
+                Err(JinjaError::Syntax(
+                    "unexpected end of template inside a block",
+                ))
             };
         }
 
@@ -208,19 +220,32 @@ fn parse_block(scanner: &mut Scanner, kind: BlockKind, initial_trim: bool) -> Re
                 trim_next_text_start = tail_trim;
             }
             RawTag::Set(spec) => {
-                let (var, value_src) = spec.split_once('=').ok_or(JinjaError::Syntax("expected 'set x = y'"))?;
+                let (var, value_src) = spec
+                    .split_once('=')
+                    .ok_or(JinjaError::Syntax("expected 'set x = y'"))?;
                 let value = parse_expr_src(value_src.trim())?;
-                nodes.push(Node::Set { var: var.trim().into(), value });
+                nodes.push(Node::Set {
+                    var: var.trim().into(),
+                    value,
+                });
                 trim_next_text_start = trim_right;
             }
-            RawTag::Endif if kind == BlockKind::If => return Ok((nodes, Terminator::Endif(trim_right))),
-            RawTag::Else if kind == BlockKind::If => return Ok((nodes, Terminator::Else(trim_right))),
+            RawTag::Endif if kind == BlockKind::If => {
+                return Ok((nodes, Terminator::Endif(trim_right)));
+            }
+            RawTag::Else if kind == BlockKind::If => {
+                return Ok((nodes, Terminator::Else(trim_right)));
+            }
             RawTag::Elif(cond) if kind == BlockKind::If => {
                 return Ok((nodes, Terminator::Elif(cond.trim().into(), trim_right)));
             }
-            RawTag::Endfor if kind == BlockKind::For => return Ok((nodes, Terminator::Endfor(trim_right))),
+            RawTag::Endfor if kind == BlockKind::For => {
+                return Ok((nodes, Terminator::Endfor(trim_right)));
+            }
             RawTag::Endif | RawTag::Else | RawTag::Elif(_) | RawTag::Endfor => {
-                return Err(JinjaError::Syntax("closing tag doesn't match the enclosing block"));
+                return Err(JinjaError::Syntax(
+                    "closing tag doesn't match the enclosing block",
+                ));
             }
         }
     }
@@ -231,7 +256,11 @@ fn parse_block(scanner: &mut Scanner, kind: BlockKind, initial_trim: bool) -> Re
 /// source and its own trim-right flag (seeding the first branch's body).
 /// Returns the built node plus the closing `endif`'s trim-right flag, for
 /// the caller to seed whatever text follows.
-fn parse_if_chain(scanner: &mut Scanner, first_cond_src: &str, first_trim: bool) -> Result<(Node, bool), JinjaError> {
+fn parse_if_chain(
+    scanner: &mut Scanner,
+    first_cond_src: &str,
+    first_trim: bool,
+) -> Result<(Node, bool), JinjaError> {
     let mut branches = Vec::new();
     let mut cond_src: String = first_cond_src.trim().into();
     let mut body_trim = first_trim;
@@ -248,12 +277,26 @@ fn parse_if_chain(scanner: &mut Scanner, first_cond_src: &str, first_trim: bool)
                 let (else_body, terminator2) = parse_block(scanner, BlockKind::If, else_trim)?;
                 match terminator2 {
                     Terminator::Endif(tail_trim) => {
-                        return Ok((Node::If { branches, else_branch: Some(else_body) }, tail_trim));
+                        return Ok((
+                            Node::If {
+                                branches,
+                                else_branch: Some(else_body),
+                            },
+                            tail_trim,
+                        ));
                     }
                     _ => return Err(JinjaError::Syntax("expected 'endif' after 'else'")),
                 }
             }
-            Terminator::Endif(tail_trim) => return Ok((Node::If { branches, else_branch: None }, tail_trim)),
+            Terminator::Endif(tail_trim) => {
+                return Ok((
+                    Node::If {
+                        branches,
+                        else_branch: None,
+                    },
+                    tail_trim,
+                ));
+            }
             Terminator::Eof | Terminator::Endfor(_) => {
                 unreachable!("parse_block(BlockKind::If) only ever returns Elif/Else/Endif")
             }
@@ -264,12 +307,25 @@ fn parse_if_chain(scanner: &mut Scanner, first_cond_src: &str, first_trim: bool)
 /// Parses a `for` statement (`for ... in ...` → `endfor`), given the
 /// opening tag's spec text and trim-right flag. Returns the built node
 /// plus the closing `endfor`'s trim-right flag.
-fn parse_for_chain(scanner: &mut Scanner, spec: &str, first_trim: bool) -> Result<(Node, bool), JinjaError> {
-    let (var, iterable_src) = spec.split_once(" in ").ok_or(JinjaError::Syntax("expected 'for x in y'"))?;
+fn parse_for_chain(
+    scanner: &mut Scanner,
+    spec: &str,
+    first_trim: bool,
+) -> Result<(Node, bool), JinjaError> {
+    let (var, iterable_src) = spec
+        .split_once(" in ")
+        .ok_or(JinjaError::Syntax("expected 'for x in y'"))?;
     let iterable = parse_expr_src(iterable_src.trim())?;
     let (body, terminator) = parse_block(scanner, BlockKind::For, first_trim)?;
     match terminator {
-        Terminator::Endfor(tail_trim) => Ok((Node::For { var: var.trim().into(), iterable, body }, tail_trim)),
+        Terminator::Endfor(tail_trim) => Ok((
+            Node::For {
+                var: var.trim().into(),
+                iterable,
+                body,
+            },
+            tail_trim,
+        )),
         _ => Err(JinjaError::Syntax("expected 'endfor'")),
     }
 }
@@ -312,7 +368,10 @@ mod tests {
     fn if_else_endif() {
         let nodes = compile("{% if x %}A{% else %}B{% endif %}").unwrap();
         match &nodes[0] {
-            Node::If { branches, else_branch } => {
+            Node::If {
+                branches,
+                else_branch,
+            } => {
                 assert_eq!(branches.len(), 1);
                 assert_eq!(branches[0].1, alloc::vec![Node::Text("A".into())]);
                 assert_eq!(else_branch, &Some(alloc::vec![Node::Text("B".into())]));
@@ -325,7 +384,10 @@ mod tests {
     fn if_elif_else_endif() {
         let nodes = compile("{% if a %}A{% elif b %}B{% else %}C{% endif %}").unwrap();
         match &nodes[0] {
-            Node::If { branches, else_branch } => {
+            Node::If {
+                branches,
+                else_branch,
+            } => {
                 assert_eq!(branches.len(), 2);
                 assert_eq!(branches[0].1, alloc::vec![Node::Text("A".into())]);
                 assert_eq!(branches[1].1, alloc::vec![Node::Text("B".into())]);
@@ -339,7 +401,11 @@ mod tests {
     fn for_loop() {
         let nodes = compile("{% for x in items %}{{ x }}{% endfor %}").unwrap();
         match &nodes[0] {
-            Node::For { var, iterable, body } => {
+            Node::For {
+                var,
+                iterable,
+                body,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(*iterable, Expr::Var("items".into()));
                 assert_eq!(*body, alloc::vec![Node::Output(Expr::Var("x".into()))]);
@@ -355,7 +421,11 @@ mod tests {
             nodes,
             alloc::vec![Node::Set {
                 var: "x".into(),
-                value: Expr::BinOp(BinOp::Add, alloc::boxed::Box::new(Expr::Num(1.0)), alloc::boxed::Box::new(Expr::Num(2.0))),
+                value: Expr::BinOp(
+                    BinOp::Add,
+                    alloc::boxed::Box::new(Expr::Num(1.0)),
+                    alloc::boxed::Box::new(Expr::Num(2.0))
+                ),
             }]
         );
     }
