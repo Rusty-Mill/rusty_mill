@@ -83,6 +83,7 @@ have landed so far.
 | [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
+| [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
 | [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
@@ -466,6 +467,11 @@ chars instead of a `[char; 2]` pattern) — both fixed, no behavior change.
 `rusty_config` has zero dependencies of any kind, so nothing needed
 swapping — its merge is just the subtree add plus workspace wiring.
 
+`rusty_jinja` depends on `rusty_regx`, `rusty_json`, and `rusty_std` via
+relative `path` dependencies, all already merged as siblings under this
+workspace's `crates/` — no dependency swap needed, just the subtree add
+plus workspace wiring.
+
 `rustils` was its own nested Cargo workspace of eight crates (`platform`,
 `platform-mock`, `platform-parity`, `platform-linux`, `platform-windows`,
 `platform-bsd`, `winargv`, `coreutils`), de-inherited the same way as
@@ -537,6 +543,7 @@ behind one nested workspace),
 [`rusty_sync`](https://github.com/baileyrd/rusty_sync),
 [`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
-[`rusty_config`](https://github.com/baileyrd/rusty_config), and
+[`rusty_config`](https://github.com/baileyrd/rusty_config),
+[`rusty_jinja`](https://github.com/baileyrd/rusty_jinja), and
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
 nested workspace) — merged one at a time, same process.

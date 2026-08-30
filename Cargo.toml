@@ -68,6 +68,7 @@ members = [
     "crates/rusty_h2",
     "crates/rusty_ansi",
     "crates/rusty_config",
+    "crates/rusty_jinja",
     "crates/rustils/crates/platform",
     "crates/rustils/crates/platform-mock",
     "crates/rustils/crates/platform-parity",
