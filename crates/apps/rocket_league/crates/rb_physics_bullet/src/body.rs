@@ -494,6 +494,67 @@ fn signed_pair_axis(raw_axis: Vec3, third_normal: Vec3) -> Vec3 {
     }
 }
 
+/// An immovable flat `StaticPlane` with a rectangular window cut out of
+/// it (`RB-PHYSICS-001-FR-024`) — a back wall with the goal mouth actually
+/// open, rather than the solid full-width plane every prior increment
+/// used. Everywhere outside the window this behaves exactly like the
+/// `plane` it wraps; inside it, `collision::contacts_vs_goal_wall`
+/// generates no contact at all for a sphere (the ball), letting it pass
+/// straight through into the goal. A box (car) is deliberately unaffected
+/// by the window — see `contacts_vs_goal_wall`'s own doc comment — so
+/// this struct carries no separate `restitution`/`friction` of its own;
+/// `plane`'s already do the job for both the windowed (ball) and
+/// unwindowed (car) cases.
+///
+/// The window itself is defined in the plane's own local 2D coordinate
+/// system (`u_axis`/`v_axis`, both unit vectors perpendicular to `plane.
+/// normal` and to each other) rather than assuming any particular world
+/// axis — the same "derive, don't hardcode an axis" discipline
+/// `StaticQuarterPipe::between_planes`'s `axis_direction` generalization
+/// (`FR-022`) established, even though every arena wall this port builds
+/// today happens to be axis-aligned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticGoalWall {
+    pub plane: StaticPlane,
+    pub window_center: Vec3,
+    pub u_axis: Vec3,
+    pub v_axis: Vec3,
+    pub half_width: f32,
+    pub half_height: f32,
+}
+
+impl StaticGoalWall {
+    pub fn new(
+        plane: StaticPlane,
+        window_center: Vec3,
+        u_axis: Vec3,
+        v_axis: Vec3,
+        half_width: f32,
+        half_height: f32,
+    ) -> StaticGoalWall {
+        StaticGoalWall {
+            plane,
+            window_center,
+            u_axis,
+            v_axis,
+            half_width,
+            half_height,
+        }
+    }
+
+    /// Whether `point` falls within the window's rectangle, projected onto
+    /// the plane's own `u_axis`/`v_axis` — `point`'s own distance from the
+    /// plane along `plane.normal` is irrelevant here (`u_axis`/`v_axis` are
+    /// both perpendicular to it by construction), so this is exactly as
+    /// correct for a point sitting right on the plane as for one still
+    /// approaching it, without needing to project onto the plane first.
+    pub fn contains_in_window(&self, point: &Vec3) -> bool {
+        let rel = *point - self.window_center;
+        rel.dot(&self.u_axis).abs() <= self.half_width
+            && rel.dot(&self.v_axis).abs() <= self.half_height
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,5 +892,72 @@ mod tests {
             fillet.bounds.iter().any(|b| away_from_corner.dot(b) < 0.0),
             "expected the direction opposite the sharp corner to fail at least one bound"
         );
+    }
+
+    /// A back wall at y=100 (normal (0,-1,0), matching `StaticPlane::new`'s
+    /// convention), with a 20-wide, 30-tall goal-mouth window centered at
+    /// (0, 100, 30) -- vaguely proportioned like `arena`'s own real goal
+    /// window, just at a convenient round scale for these unit tests.
+    fn goal_wall_with_window() -> StaticGoalWall {
+        let plane = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -100.0);
+        StaticGoalWall::new(
+            plane,
+            Vec3::new(0.0, 100.0, 30.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            20.0,
+            30.0,
+        )
+    }
+
+    #[test]
+    fn contains_in_window_is_true_for_the_windows_own_center() {
+        let wall = goal_wall_with_window();
+        assert!(wall.contains_in_window(&wall.window_center));
+    }
+
+    #[test]
+    fn contains_in_window_is_true_just_inside_each_edge() {
+        let wall = goal_wall_with_window();
+        let just_inside = [
+            wall.window_center + Vec3::new(19.0, 0.0, 0.0),
+            wall.window_center + Vec3::new(-19.0, 0.0, 0.0),
+            wall.window_center + Vec3::new(0.0, 0.0, 29.0),
+            wall.window_center + Vec3::new(0.0, 0.0, -29.0),
+        ];
+        for point in just_inside {
+            assert!(
+                wall.contains_in_window(&point),
+                "expected {point:?} to be inside the window"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_in_window_is_false_just_outside_each_edge() {
+        let wall = goal_wall_with_window();
+        let just_outside = [
+            wall.window_center + Vec3::new(21.0, 0.0, 0.0),
+            wall.window_center + Vec3::new(-21.0, 0.0, 0.0),
+            wall.window_center + Vec3::new(0.0, 0.0, 31.0),
+            wall.window_center + Vec3::new(0.0, 0.0, -31.0),
+        ];
+        for point in just_outside {
+            assert!(
+                !wall.contains_in_window(&point),
+                "expected {point:?} to be outside the window"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_in_window_ignores_distance_from_the_plane_itself() {
+        // The window test only looks at the u/v projection, not how far
+        // the point is from the plane along its own normal -- a point far
+        // out in front of (or behind) the wall, but laterally/vertically
+        // within the window's footprint, still counts as "in the window".
+        let wall = goal_wall_with_window();
+        let far_in_front = wall.window_center + Vec3::new(0.0, -5000.0, 0.0);
+        assert!(wall.contains_in_window(&far_in_front));
     }
 }

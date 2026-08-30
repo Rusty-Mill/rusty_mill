@@ -3,7 +3,7 @@
 //! integrate) at fixed timestep — no substepping/interpolation yet, since
 //! nothing in this scope needs it (no CCD-worthy speeds).
 
-use crate::body::{RigidBody, StaticCornerFillet, StaticPlane, StaticQuarterPipe};
+use crate::body::{RigidBody, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
 use crate::collision;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
@@ -71,6 +71,15 @@ pub struct PhysicsWorld {
     /// contacts_vs_corner_fillet` returns nothing for a box/car), and empty
     /// by default.
     pub corner_fillets: Vec<StaticCornerFillet>,
+    /// Windowed back walls with an actual goal-mouth opening
+    /// (`RB-PHYSICS-001-FR-024`), added via `with_goal_wall` — empty by
+    /// default. Unlike `curves`/`corner_fillets`, both the ball *and* every
+    /// car are resolved against these (`collision::contacts_vs_goal_wall`'s
+    /// box path falls straight through to an ordinary, unwindowed plane
+    /// contact — see its own doc comment), so a car sees exactly the same
+    /// solid wall it always has; only the ball can actually pass through
+    /// the window into the goal.
+    pub goal_walls: Vec<StaticGoalWall>,
     pub gravity: Vec3,
     elapsed_secs: f32,
 }
@@ -100,6 +109,7 @@ impl PhysicsWorld {
             walls: Vec::new(),
             curves: Vec::new(),
             corner_fillets: Vec::new(),
+            goal_walls: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
@@ -107,19 +117,24 @@ impl PhysicsWorld {
 
     /// Builds a scene bounded by Rocket League's real standard-arena
     /// footprint (`RB-PHYSICS-001-FR-019`/`FR-020`) instead of an empty
-    /// `walls`/`curves`/`corner_fillets` list a caller populates itself: the
-    /// octagonal boundary plus a ceiling from `arena::standard_walls`, the
-    /// curved wall-to-floor/wall-to-ceiling and corner-wall vertical-edge
-    /// fillets from `arena::standard_curves`, the compound-corner fillets
-    /// from `arena::standard_corner_fillets`, and the same flat ground
-    /// (`arena::standard_ground`) every scene already used. Equivalent to
-    /// `PhysicsWorld::new(ball, arena::standard_ground())` followed by a
-    /// `with_wall` call for each of `arena::standard_walls()`'s 9 planes, a
-    /// `with_curve` call for each of `arena::standard_curves()`'s 24
-    /// fillets, and a `with_corner_fillet` call for each of
-    /// `arena::standard_corner_fillets()`'s 16 fillets — still without goal
-    /// cutouts (see `arena`'s module doc). Cars are added afterward with
-    /// `with_car`, exactly as with `PhysicsWorld::new`.
+    /// `walls`/`curves`/`corner_fillets`/`goal_walls` list a caller
+    /// populates itself: the octagonal boundary plus a ceiling from
+    /// `arena::standard_walls`, the curved wall-to-floor/wall-to-ceiling,
+    /// corner-wall vertical-edge, and goal-cutout-edge fillets from
+    /// `arena::standard_curves`/`standard_goal_cutout_fillets`, the
+    /// compound-corner fillets from `arena::standard_corner_fillets`, the
+    /// windowed goal walls from `arena::standard_goal_walls`, and the same
+    /// flat ground (`arena::standard_ground`) every scene already used.
+    /// Equivalent to `PhysicsWorld::new(ball, arena::standard_ground())`
+    /// followed by a `with_wall` call for each of `arena::standard_walls()`'s
+    /// 7 planes, a `with_curve` call for each of `arena::standard_curves()`'s
+    /// 24 fillets and `arena::standard_goal_cutout_fillets()`'s 6, a
+    /// `with_corner_fillet` call for each of
+    /// `arena::standard_corner_fillets()`'s 16 fillets, and a
+    /// `with_goal_wall` call for each of `arena::standard_goal_walls()`'s 2
+    /// windowed walls — still without a modeled goal interior/net beyond
+    /// the cutout itself (see `arena`'s module doc). Cars are added
+    /// afterward with `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
@@ -128,8 +143,14 @@ impl PhysicsWorld {
         for curve in crate::arena::standard_curves() {
             world = world.with_curve(curve);
         }
+        for curve in crate::arena::standard_goal_cutout_fillets() {
+            world = world.with_curve(curve);
+        }
         for corner_fillet in crate::arena::standard_corner_fillets() {
             world = world.with_corner_fillet(corner_fillet);
+        }
+        for goal_wall in crate::arena::standard_goal_walls() {
+            world = world.with_goal_wall(goal_wall);
         }
         world
     }
@@ -165,6 +186,17 @@ impl PhysicsWorld {
     /// `corner_fillets`' own doc comment.
     pub fn with_corner_fillet(mut self, corner_fillet: StaticCornerFillet) -> PhysicsWorld {
         self.corner_fillets.push(corner_fillet);
+        self
+    }
+
+    /// Adds one windowed back wall to the scene (`RB-PHYSICS-001-FR-024`) —
+    /// callable more than once, same pattern as `with_wall`; a scene with
+    /// no goal walls added (the default) behaves exactly as before they
+    /// existed. Unlike `with_curve`/`with_corner_fillet`, this affects
+    /// every car too, not just the ball — see `goal_walls`' own doc
+    /// comment for why that's not a regression.
+    pub fn with_goal_wall(mut self, goal_wall: StaticGoalWall) -> PhysicsWorld {
+        self.goal_walls.push(goal_wall);
         self
     }
 
@@ -308,6 +340,25 @@ impl PhysicsWorld {
         }
     }
 
+    /// Like `resolve_plane_contact`, but against a windowed back wall
+    /// (`RB-PHYSICS-001-FR-024`) — unlike `resolve_curve_contact`/
+    /// `resolve_corner_fillet_contact`, this is a real contact for a box
+    /// (car) too, since `collision::contacts_vs_goal_wall`'s box path
+    /// falls straight through to an ordinary plane contact, ignoring the
+    /// window entirely (see its own doc comment).
+    fn resolve_goal_wall_contact(body: &mut RigidBody, wall: &StaticGoalWall, dt: f32) {
+        let contacts = collision::contacts_vs_goal_wall(body, wall);
+        if !contacts.is_empty() {
+            solver::resolve_contacts(
+                body,
+                wall.plane.restitution,
+                wall.plane.friction,
+                &contacts,
+                dt,
+            );
+        }
+    }
+
     /// Integrates `body`'s transform from its (already-resolved) velocity,
     /// then refreshes its world-space inertia tensor for the new
     /// orientation — the last phase of `stepSimulation`
@@ -430,6 +481,9 @@ impl PhysicsWorld {
         for corner_fillet in &self.corner_fillets {
             Self::resolve_corner_fillet_contact(&mut self.ball, corner_fillet, dt);
         }
+        for goal_wall in &self.goal_walls {
+            Self::resolve_goal_wall_contact(&mut self.ball, goal_wall, dt);
+        }
         for car in &mut self.cars {
             Self::resolve_plane_contact(car, &self.ground, dt);
             for wall in &self.walls {
@@ -440,6 +494,9 @@ impl PhysicsWorld {
             }
             for corner_fillet in &self.corner_fillets {
                 Self::resolve_corner_fillet_contact(car, corner_fillet, dt);
+            }
+            for goal_wall in &self.goal_walls {
+                Self::resolve_goal_wall_contact(car, goal_wall, dt);
             }
         }
 
@@ -1821,18 +1878,31 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_nine_walls_and_the_standard_ground() {
+    fn standard_arena_has_seven_walls_and_the_standard_ground() {
+        // 7, not 9 -- the back walls moved out of `standard_walls` and into
+        // `goal_walls` as of RB-PHYSICS-001-FR-024 (see
+        // `standard_arena_has_two_goal_walls`).
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.walls.len(), 9);
+        assert_eq!(world.walls.len(), 7);
         assert_eq!(world.ground, crate::arena::standard_ground());
     }
 
     #[test]
-    fn standard_arena_has_twenty_four_curved_transitions() {
+    fn standard_arena_has_thirty_curved_transitions() {
+        // 24 floor/ceiling-seam and vertical-edge fillets
+        // (RB-PHYSICS-001-FR-020/021/022) plus 6 goal-cutout-edge fillets
+        // (RB-PHYSICS-001-FR-024), all sharing the same `curves` list.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.curves.len(), 24);
+        assert_eq!(world.curves.len(), 30);
+    }
+
+    #[test]
+    fn standard_arena_has_two_goal_walls() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.goal_walls.len(), 2);
     }
 
     #[test]
@@ -2160,6 +2230,124 @@ mod tests {
             "expected the corner wall to stop the ball before its y reached the back wall's \
              own position, got y={}",
             world.ball.position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-024: a ball fired
+        // straight through the center of the goal-mouth window, well clear
+        // of the window's own rounded edges, keeps going past the back
+        // wall's own y position instead of bouncing off it -- proof the
+        // cutout is a genuine opening, not decoration.
+        let ball_radius = 92.75;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(0.0, 0.0, crate::arena::GOAL_HEIGHT * 0.5),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.y > crate::arena::BACK_WALL_Y + 1.0,
+            "expected the ball to pass through the goal mouth rather than bounce off the back \
+             wall, got y={}",
+            world.ball.position.y
+        );
+    }
+
+    #[test]
+    fn a_car_is_still_stopped_by_the_standard_arenas_back_wall_at_the_goal_mouth() {
+        // Regression guard for the documented Non-goal: a car can't drive
+        // into the goal in this port (RB-PHYSICS-001-FR-024) -- a car aimed
+        // at the exact same goal-mouth position the test above fires the
+        // ball through should still be stopped by the wall, completely
+        // unaffected by the window (see `collision::contacts_vs_goal_wall`'s
+        // own doc comment for why).
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, -3000.0, 1000.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, crate::arena::GOAL_HEIGHT * 0.5));
+        car.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.y < crate::arena::BACK_WALL_Y - 1.0,
+            "expected the car to be stopped by the back wall despite aiming at the goal mouth, \
+             got y={}",
+            world.cars[0].position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_embedded_in_a_goal_posts_fillet_footprint_is_pushed_toward_the_axis() {
+        // The real end-to-end proof that a goal-cutout edge fillet
+        // (RB-PHYSICS-001-FR-024) is live physical geometry, not just a
+        // detection hack: a ball embedded past a post fillet's own radius
+        // (deep in what would otherwise be the sharp, unrounded corner
+        // between the flat back wall and the post's own inward-facing
+        // plane) gets pushed back toward the axis -- the same live-physics
+        // proof already given for every other fillet in this port. Same
+        // weaker "moved meaningfully," not "settled-and-stayed," assertion
+        // as `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
+        // for the same residual-velocity reason.
+        let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
+        let radius = 292.0;
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &wall,
+            &post,
+            radius,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+
+        let ball_radius = 92.75;
+        let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
+            .normalize()
+            .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the axis than the resting distance, toward the sharp corner the
+        // fillet replaces).
+        let embedded_distance = curve.radius - ball_radius + 10.0;
+        let embedded_position = curve.axis_point + bisector * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall)
+            .with_wall(post)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_horizontal_rel = Vec3::new(
+            world.ball.position.x - curve.axis_point.x,
+            world.ball.position.y - curve.axis_point.y,
+            0.0,
+        );
+        let final_dist = final_horizontal_rel.length();
+        assert!(
+            final_dist < embedded_distance - 10.0,
+            "expected the goal-post fillet to push the ball meaningfully toward the axis, \
+             started {embedded_distance} units out, got {final_dist}"
         );
     }
 }
