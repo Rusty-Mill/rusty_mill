@@ -18,8 +18,8 @@ rusty_serde = { workspace = true }
 serde_json = { workspace = true }
 tantivy = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
-rusty_time = { git = "https://github.com/baileyrd/rusty_time", rev = "21507244846586a37cb4bfb6700f746404efd3e8" }
-rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
+rusty_time = { path = "../../../rusty_time" }
+rusty_uuid = { path = "../../../rusty_uuid" }
 
 [dev-dependencies]
 tokio = { workspace = true }

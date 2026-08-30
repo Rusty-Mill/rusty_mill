@@ -19,9 +19,9 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 # builder in place of hand-assembled DDL strings. Re-exports rusqlite
 # itself (`rusty_sqlite::rusqlite`), so this is the crate's only sqlite
 # dependency line - see rusty_search#17.
-rusty_sqlite = { git = "https://github.com/baileyrd/rusty_sqlite", rev = "c0f671d8b98ab27ff31f64cfb0865da82893d9bb" }
-rusty_time = { git = "https://github.com/baileyrd/rusty_time", rev = "21507244846586a37cb4bfb6700f746404efd3e8" }
-rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
+rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_time = { path = "../../../rusty_time" }
+rusty_uuid = { path = "../../../rusty_uuid" }
 
 [dev-dependencies]
 tokio = { workspace = true }

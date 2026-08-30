@@ -16,9 +16,9 @@ rusty_serde = { workspace = true }
 # `.json()`/`resp.json()` convenience methods, so this stays alongside
 # rusty_serde rather than being replaced by it - see convert.rs.
 serde_json = { workspace = true }
-rusty_request = { git = "https://github.com/baileyrd/rusty_request", rev = "ebd1fed32dcd6958cab2c9c93ec8c04b3e7fd07a", features = ["tokio"] }
+rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
 tokio = { workspace = true, features = ["sync"] }
-rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
+rusty_uuid = { path = "../../../rusty_uuid" }
 
 [dev-dependencies]
 tokio = { workspace = true }

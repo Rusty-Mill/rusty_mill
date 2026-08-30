@@ -66,6 +66,18 @@ have landed so far.
 | [`rusty_time`](crates/rusty_time) | `crates/rusty_time` | `no_std` + `alloc` sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate, built on `rusty_std` |
 | [`rusty_uuid`](crates/rusty_uuid) | `crates/rusty_uuid` | Minimal, dependency-free UUID v4 generation |
 | [`rusty_wiremock`](crates/rusty_wiremock) | `crates/rusty_wiremock` | `no_std` + `alloc` sovereign HTTP mock server and request matcher for Rusty Mill test suites, built on `rusty_http`/`rusty_json`/`rusty_std` |
+| [`rusty-search-core`](crates/rusty_search/crates/rusty-search-core) | `crates/rusty_search/crates/rusty-search-core` | Backend-agnostic async search interface: documents, schema, query DSL, and the pluggable `SearchBackend` trait |
+| [`rusty-search-memory`](crates/rusty_search/crates/rusty-search-memory) | `crates/rusty_search/crates/rusty-search-memory` | In-memory `SearchBackend` implementation: no external engine required |
+| [`rusty-search-tantivy`](crates/rusty_search/crates/rusty-search-tantivy) | `crates/rusty_search/crates/rusty-search-tantivy` | Tantivy-backed `SearchBackend` implementation: embedded full-text search |
+| [`rusty-search-sqlite-fts5`](crates/rusty_search/crates/rusty-search-sqlite-fts5) | `crates/rusty_search/crates/rusty-search-sqlite-fts5` | SQLite FTS5-backed `SearchBackend` implementation: embedded full-text search via SQL virtual tables |
+| [`rusty-search-elasticsearch`](crates/rusty_search/crates/rusty-search-elasticsearch) | `crates/rusty_search/crates/rusty-search-elasticsearch` | Elasticsearch-backed `SearchBackend` implementation: a remote HTTP search cluster |
+| [`rusty-search-meilisearch`](crates/rusty_search/crates/rusty-search-meilisearch) | `crates/rusty_search/crates/rusty-search-meilisearch` | Meilisearch-backed `SearchBackend` implementation: a remote HTTP search engine |
+| [`rusty-search-opensearch`](crates/rusty_search/crates/rusty-search-opensearch) | `crates/rusty_search/crates/rusty-search-opensearch` | OpenSearch-backed `SearchBackend` implementation: a remote HTTP search cluster |
+| [`rusty-search-solr`](crates/rusty_search/crates/rusty-search-solr) | `crates/rusty_search/crates/rusty-search-solr` | Apache Solr-backed `SearchBackend` implementation: a remote HTTP search cluster |
+| [`rusty-search-algolia`](crates/rusty_search/crates/rusty-search-algolia) | `crates/rusty_search/crates/rusty-search-algolia` | Algolia-backed `SearchBackend` implementation: a hosted search SaaS |
+| [`rusty-search-azure-search`](crates/rusty_search/crates/rusty-search-azure-search) | `crates/rusty_search/crates/rusty-search-azure-search` | Azure AI Search-backed `SearchBackend` implementation: a hosted search-as-a-service on Azure |
+| [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
+| [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -364,6 +376,38 @@ workspace layout — all three were already merged siblings by the time
 `members`. Its own crate has no platform-specific code, so no Windows
 cross-compile check applies.
 
+`rusty_search` is twelve crates behind one nested workspace merged at
+once — `rusty-search-core` plus ten backend implementations
+(`rusty-search-memory`, `rusty-search-tantivy`, `rusty-search-sqlite-fts5`,
+`rusty-search-elasticsearch`, `rusty-search-meilisearch`,
+`rusty-search-opensearch`, `rusty-search-solr`, `rusty-search-algolia`,
+`rusty-search-azure-search`, `rusty-search-cloud`) plus the top-level
+`rusty-search` facade crate. Its own `Cargo.toml` was a full nested Cargo
+workspace with `[workspace.package]` and `[workspace.dependencies]` tables
+(not just a plain member list, unlike `rustils_async`/`rusty_err`) — the
+former de-inherited by hoisting both tables into this workspace's root
+`Cargo.toml` (scoped so only `rusty_search`'s own crates opt in via
+`field.workspace = true`; every other crate here keeps its own literal
+`[package]`/`[dependencies]` and is unaffected), the latter's internal
+crossrefs (`rusty-search-core = { workspace = true }` and friends)
+re-pathed to the crates' new nested location. Six pins across the
+workspace retired to `path` dependencies on now-merged siblings:
+`rusty_serde` (root `workspace.dependencies`), `rusty_err`
+(`rusty-search-core`), `rusty_request`/`rusty_uuid` (four HTTP-backed
+crates plus `rusty-search-opensearch`, which only pins `rusty_request`),
+`rusty_time` (`rusty-search-tantivy`/`rusty-search-sqlite-fts5`), and
+`rusty_sqlite` (`rusty-search-sqlite-fts5`). `rusty_serde` and `rusty_uuid`
+matched their pins exactly; `rusty_err`/`rusty_time`/`rusty_request`'s
+pins differed only in the same mechanical git-to-path edits already made
+to those crates' own `Cargo.toml`s. `rusty_sqlite`'s pin was genuinely
+stale — its `Pool`/`PooledConnection` type moved off `r2d2` onto a
+hand-rolled implementation, and `Error::Pool(r2d2::Error)` became
+`Error::PoolTimeout` — but `rusty-search-sqlite-fts5` never touches the
+`pool` feature or either type, so the swap carries no compatibility risk
+in practice; verified by grepping its source for every symbol that moved
+before swapping, not just building green after. Full test suite (196
+tests across the twelve crates, 3 doc-tests) passes unmodified.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -409,6 +453,7 @@ A third wave continues the same way, starting with
 [`rusty_request`](https://github.com/baileyrd/rusty_request),
 [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite),
 [`rusty_time`](https://github.com/baileyrd/rusty_time),
-[`rusty_uuid`](https://github.com/baileyrd/rusty_uuid), and
-[`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock) — merged
-one at a time, same process.
+[`rusty_uuid`](https://github.com/baileyrd/rusty_uuid),
+[`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock), and
+[`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
+behind one nested workspace) — merged one at a time, same process.
