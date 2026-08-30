@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Wall-jump dodge
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#43](https://github.com/baileyrd/rusty_bullet/pull/43) · `3b08fdf`
 
 - **Added:** the wall jump's own fresh press (`RB-PHYSICS-001-FR-013`) now
   checks `ControllerInput.pitch`/`roll` against `DODGE_DEADZONE`
