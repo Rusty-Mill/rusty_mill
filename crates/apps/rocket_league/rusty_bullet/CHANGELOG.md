@@ -250,7 +250,28 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   test valid for any sector up to 180 degrees. `FILLET_RADIUS` is reused
   as-is once again. A car actually being deflected by any fillet, the
   compound corner where a vertical-edge fillet meets a floor/ceiling-seam
-  fillet, and goal cutouts remain not modeled.
+  fillet (now implemented, see FR-023), and goal cutouts remain not
+  modeled.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-023`) —
+  compound-corner fillets: rounds off the last 16 sharp vertices in the
+  standard arena's vertical boundary, where a corner wall's own
+  vertical-edge fillet (FR-022) meets a floor- or ceiling-seam fillet
+  (FR-020/FR-021). Introduces a new static shape, `body::StaticCornerFillet`
+  (an immovable sphere blending three flat planes at a vertex, since no
+  cylindrical `StaticQuarterPipe` can blend three planes at once), with
+  constructor `between_three_planes` solving the center as the common
+  intersection of the three planes' pairwise `StaticQuarterPipe::
+  between_planes` axis lines via the cross-product form of Cramer's rule.
+  New `collision::sphere_vs_corner_fillet` generalizes a
+  `StaticQuarterPipe`'s 2-sided sector test to a 3-bound "spherical
+  triangle" containment test, each bound a sign-corrected, non-normalized
+  cross product of a pair of the three normals. New `arena::
+  standard_corner_fillets` builds all 16 (4 per corner wall, times the 4
+  corner walls) directly from the same three flat planes `standard_walls`
+  already builds, reusing `FILLET_RADIUS` once again. `PhysicsWorld` gains
+  `corner_fillets`/`with_corner_fillet`, resolved for the ball and every
+  car exactly like `curves`. A car actually being deflected by any fillet
+  and goal cutouts remain not modeled.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

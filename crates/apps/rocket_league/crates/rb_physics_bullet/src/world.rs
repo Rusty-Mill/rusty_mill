@@ -3,7 +3,7 @@
 //! integrate) at fixed timestep — no substepping/interpolation yet, since
 //! nothing in this scope needs it (no CCD-worthy speeds).
 
-use crate::body::{RigidBody, StaticPlane, StaticQuarterPipe};
+use crate::body::{RigidBody, StaticCornerFillet, StaticPlane, StaticQuarterPipe};
 use crate::collision;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
@@ -63,6 +63,14 @@ pub struct PhysicsWorld {
     /// doc comment); a car drives straight through a curve's footprint
     /// unaffected, exactly as if it weren't there.
     pub curves: Vec<StaticQuarterPipe>,
+    /// Compound-corner fillets (`RB-PHYSICS-001-FR-023`) — the small
+    /// spherical patches blending a vertical-edge fillet (`curves`) into a
+    /// floor- or ceiling-seam fillet (also `curves`) at each corner wall's
+    /// own top/bottom endpoint, added via `with_corner_fillet`. Same
+    /// ball-only deflection convention as `curves` (`collision::
+    /// contacts_vs_corner_fillet` returns nothing for a box/car), and empty
+    /// by default.
+    pub corner_fillets: Vec<StaticCornerFillet>,
     pub gravity: Vec3,
     elapsed_secs: f32,
 }
@@ -91,6 +99,7 @@ impl PhysicsWorld {
             ground,
             walls: Vec::new(),
             curves: Vec::new(),
+            corner_fillets: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
@@ -98,17 +107,19 @@ impl PhysicsWorld {
 
     /// Builds a scene bounded by Rocket League's real standard-arena
     /// footprint (`RB-PHYSICS-001-FR-019`/`FR-020`) instead of an empty
-    /// `walls`/`curves` list a caller populates itself: the octagonal
-    /// boundary plus a ceiling from `arena::standard_walls`, the curved
-    /// wall-to-floor/wall-to-ceiling fillets from `arena::standard_curves`,
-    /// and the same flat ground (`arena::standard_ground`) every scene
-    /// already used. Equivalent to `PhysicsWorld::new(ball,
-    /// arena::standard_ground())` followed by a `with_wall` call for each of
-    /// `arena::standard_walls()`'s 9 planes and a `with_curve` call for each
-    /// of `arena::standard_curves()`'s 8 fillets — still without goal
-    /// cutouts or fillets at the diagonal corner walls (see `arena`'s module
-    /// doc). Cars are added afterward with `with_car`, exactly as with
-    /// `PhysicsWorld::new`.
+    /// `walls`/`curves`/`corner_fillets` list a caller populates itself: the
+    /// octagonal boundary plus a ceiling from `arena::standard_walls`, the
+    /// curved wall-to-floor/wall-to-ceiling and corner-wall vertical-edge
+    /// fillets from `arena::standard_curves`, the compound-corner fillets
+    /// from `arena::standard_corner_fillets`, and the same flat ground
+    /// (`arena::standard_ground`) every scene already used. Equivalent to
+    /// `PhysicsWorld::new(ball, arena::standard_ground())` followed by a
+    /// `with_wall` call for each of `arena::standard_walls()`'s 9 planes, a
+    /// `with_curve` call for each of `arena::standard_curves()`'s 24
+    /// fillets, and a `with_corner_fillet` call for each of
+    /// `arena::standard_corner_fillets()`'s 16 fillets — still without goal
+    /// cutouts (see `arena`'s module doc). Cars are added afterward with
+    /// `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
@@ -116,6 +127,9 @@ impl PhysicsWorld {
         }
         for curve in crate::arena::standard_curves() {
             world = world.with_curve(curve);
+        }
+        for corner_fillet in crate::arena::standard_corner_fillets() {
+            world = world.with_corner_fillet(corner_fillet);
         }
         world
     }
@@ -141,6 +155,16 @@ impl PhysicsWorld {
     /// `curves`' own doc comment.
     pub fn with_curve(mut self, curve: StaticQuarterPipe) -> PhysicsWorld {
         self.curves.push(curve);
+        self
+    }
+
+    /// Adds one compound-corner fillet to the scene
+    /// (`RB-PHYSICS-001-FR-023`) — callable more than once, same pattern as
+    /// `with_curve`; a scene with no corner fillets added (the default)
+    /// behaves exactly as before they existed. Only deflects the ball — see
+    /// `corner_fillets`' own doc comment.
+    pub fn with_corner_fillet(mut self, corner_fillet: StaticCornerFillet) -> PhysicsWorld {
+        self.corner_fillets.push(corner_fillet);
         self
     }
 
@@ -273,6 +297,17 @@ impl PhysicsWorld {
         }
     }
 
+    /// Like `resolve_curve_contact`, but against a compound-corner fillet
+    /// (`RB-PHYSICS-001-FR-023`) instead of an edge fillet — a no-op for a
+    /// box (car), since `collision::contacts_vs_corner_fillet` never
+    /// generates a contact for one (see its own doc comment).
+    fn resolve_corner_fillet_contact(body: &mut RigidBody, fillet: &StaticCornerFillet, dt: f32) {
+        let contacts = collision::contacts_vs_corner_fillet(body, fillet);
+        if !contacts.is_empty() {
+            solver::resolve_contacts(body, fillet.restitution, fillet.friction, &contacts, dt);
+        }
+    }
+
     /// Integrates `body`'s transform from its (already-resolved) velocity,
     /// then refreshes its world-space inertia tensor for the new
     /// orientation — the last phase of `stepSimulation`
@@ -392,6 +427,9 @@ impl PhysicsWorld {
         for curve in &self.curves {
             Self::resolve_curve_contact(&mut self.ball, curve, dt);
         }
+        for corner_fillet in &self.corner_fillets {
+            Self::resolve_corner_fillet_contact(&mut self.ball, corner_fillet, dt);
+        }
         for car in &mut self.cars {
             Self::resolve_plane_contact(car, &self.ground, dt);
             for wall in &self.walls {
@@ -399,6 +437,9 @@ impl PhysicsWorld {
             }
             for curve in &self.curves {
                 Self::resolve_curve_contact(car, curve, dt);
+            }
+            for corner_fillet in &self.corner_fillets {
+                Self::resolve_corner_fillet_contact(car, corner_fillet, dt);
             }
         }
 
@@ -1990,6 +2031,65 @@ mod tests {
             final_dist < embedded_distance - 10.0,
             "expected the corner-edge fillet to push the ball meaningfully toward the axis, \
              started {embedded_distance} units out, got {final_dist}"
+        );
+    }
+
+    #[test]
+    fn standard_arena_has_sixteen_compound_corner_fillets() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.corner_fillets.len(), 16);
+    }
+
+    #[test]
+    fn a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-023: three planes
+        // meeting at a single vertex (here, a floor and two vertical walls
+        // meeting at 90 degrees each, like a corner wall's own floor-side
+        // endpoint) -- a ball embedded past the fillet's own radius (deep
+        // in what would otherwise be the sharp, unrounded corner) should be
+        // pushed back toward the fillet's center, the same live-physics
+        // proof already given for the edge fillets, now for a compound
+        // 3-plane corner. Same weaker "moved meaningfully" assertion as
+        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
+        // for the same residual-velocity reason (a single-fire contact
+        // stops firing once resolved, and nothing cancels whatever
+        // velocity it left the ball with).
+        let floor = flat_ground();
+        let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let radius = 292.0;
+        let fillet =
+            crate::body::StaticCornerFillet::between_three_planes(&floor, &wall_x, &wall_y, radius);
+
+        let ball_radius = 92.75;
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0)
+            .normalize()
+            .expect("(1, 1, -1) is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the center than the resting distance, toward the sharp corner
+        // the fillet replaces).
+        let embedded_distance = fillet.radius - ball_radius + 10.0;
+        let embedded_position = fillet.center + toward_corner * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall_x)
+            .with_wall(wall_y)
+            .with_corner_fillet(fillet);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_dist = (world.ball.position - fillet.center).length();
+        assert!(
+            final_dist < embedded_distance - 10.0,
+            "expected the compound-corner fillet to push the ball meaningfully toward the \
+             center, started {embedded_distance} units out, got {final_dist}"
         );
     }
 

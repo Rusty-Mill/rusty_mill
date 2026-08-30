@@ -2,7 +2,7 @@
 
 - Last verified main commit: `d466ae2` (merge of [#53](https://github.com/baileyrd/rusty_bullet/pull/53))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), and curved fillets throughout the arena's vertical boundary deflecting the ball — floor/ceiling seams for all 9 walls (cardinal and diagonal corner) and, since FR-022, all 8 of the corner walls' own vertical edges too — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by a curve, the compound corner where a vertical-edge fillet meets a floor/ceiling-seam fillet, goal cutouts, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), and curved fillets throughout the arena's vertical boundary deflecting the ball — floor/ceiling seams for all 9 walls (cardinal and diagonal corner), all 8 of the corner walls' own vertical edges (FR-022), and, since FR-023, all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by any fillet, goal cutouts, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -552,6 +552,56 @@
   45-degree sector; 1 in `world.rs` — the real end-to-end proof, a ball
   embedded past a vertical-edge fillet's own radius at a wall-to-wall angle
   that isn't a right angle gets pushed meaningfully back toward the axis.
+- `RB-PHYSICS-001-FR-023` (compound-corner fillets) — rounds off the last
+  16 sharp vertices in the standard arena's vertical boundary: the
+  compound corners where a corner wall's own vertical-edge fillet (FR-022)
+  meets a floor- or ceiling-seam fillet (FR-020/FR-021). A compound corner
+  is where three planes meet at once, which no existing cylindrical
+  `StaticQuarterPipe` can blend, so this requirement introduces a new
+  static shape, `body::StaticCornerFillet` — an immovable sphere riding the
+  concave inside of the vertex. Its `between_three_planes` constructor
+  reuses the same "radius-in from every bridged plane" invariant
+  `StaticQuarterPipe::between_planes` already relies on: since the
+  fillet's center must sit exactly `radius` in from all three planes, it's
+  also exactly `radius` in from each pair — meaning it already lies on all
+  three of that vertex's own pairwise `between_planes` axis lines
+  simultaneously, so the center is just those three lines' common
+  intersection, solved directly via the classic three-plane-intersection
+  cross-product form of Cramer's rule. Containment (new
+  `collision::sphere_vs_corner_fillet`) generalizes a `StaticQuarterPipe`'s
+  2-sided sector test to a "spherical triangle": inside iff a direction's
+  dot product with each of 3 `bounds` is non-negative, each bound the raw
+  (non-normalized — only its sign is used) cross product of a pair of
+  normals, sign-corrected against the third plane's own normal to always
+  point toward the sharp corner — provably correct since that dot product
+  is exactly the derivative of the third plane's signed distance along a
+  candidate direction. No `.normalize()`/`.unwrap()` needed anywhere in
+  this new production code, the same discipline `between_planes`'s own
+  FR-022 self-correction established. `arena::standard_corner_fillets`
+  builds all 16 (4 per corner wall, times the 4 corner walls) directly from
+  the same three flat planes `standard_walls` already builds, reusing
+  `FILLET_RADIUS` once again. `PhysicsWorld` gains a parallel
+  `corner_fillets: Vec<StaticCornerFillet>` field and a `with_corner_fillet`
+  builder, resolved for the ball and every car exactly like `curves` (a
+  no-op for a car, same deferred case as every other fillet).
+  `PhysicsWorld::standard_arena` wires in all 16 automatically. Still not
+  modeled: a car actually being deflected by any fillet, and goal cutouts.
+  13 new unit tests across `body.rs`/`collision.rs`/`arena.rs`/`world.rs`
+  in `rb_physics_bullet` (194 total): 4 in `body.rs` (using a synthetic
+  fixture combining a perpendicular floor with the same 45-degree
+  non-perpendicular wall pair `between_planes`'s own FR-022 fixture uses)
+  proving the center sits radius-in from all three planes with tangent
+  points exactly on each, and the derived `bounds` correctly include the
+  direction toward the sharp corner and exclude the direction pointing
+  away from it; 5 in `collision.rs` mirroring `sphere_vs_quarter_pipe`'s
+  own test shapes (deep-inside no contact, touching zero penetration,
+  pushed-past positive penetration toward the center, outside-bounds no
+  contact, box always empty); 2 in `arena.rs` — exactly 16 fillets, and
+  every fillet's center sits radius-in from a floor/ceiling plane, a
+  side/back wall, and a corner wall simultaneously; 2 in `world.rs` —
+  `standard_arena` carries exactly 16 corner fillets, plus the real
+  end-to-end proof, a ball embedded past a compound-corner fillet's own
+  radius gets pushed meaningfully back toward the center.
 
 ## In progress
 
@@ -593,10 +643,7 @@
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
   approximation once 3+ bodies mutually touch in the same step), a car
-  actually being deflected by a curved fillet, the compound corner where a
-  vertical-edge fillet meets a floor- or ceiling-seam fillet (near a corner
-  wall's own top/bottom endpoint — this port models each fillet as an
-  independent, additive contact source, not a blended 3D corner), and goal
+  actually being deflected by any fillet, and goal
   cutouts — all real, not-yet-started follow-up work (see the spec's
   Non-goals/Open questions); a car can now drive, steer, boost (on the
   ground or in the air), handbrake/drift, take a ground jump (with variable
@@ -607,9 +654,11 @@
   and can now play inside a real Rocket League-shaped octagonal arena
   (`PhysicsWorld::standard_arena`) whose entire vertical boundary the
   *ball* now smoothly transitions across — floor/ceiling seams at all 9
-  walls and every one of the 8 corner-wall vertical edges alike — instead
-  of hitting a sharp edge anywhere — but a car still drives straight
-  through every one of those same curves unaffected, and the back walls
+  walls, every one of the 8 corner-wall vertical edges, and every one of
+  the 16 compound corners where an edge fillet meets a seam fillet alike —
+  instead
+  of hitting a sharp edge or vertex anywhere — but a car still drives straight
+  through every one of those same fillets unaffected, and the back walls
   have no goal cutout.
 
 ## Next
@@ -617,8 +666,7 @@
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A car actually being deflected by a curved fillet, the compound corner
-   where a vertical-edge fillet meets a floor/ceiling-seam fillet, and goal
+2. A car actually being deflected by any fillet, and goal
    cutouts — real follow-up work for `rb_physics_bullet::arena`/`collision`;
    the car case needs real support-mapping/SAT-style collision machinery
    against curved geometry this port doesn't have yet. `RB-PHYSICS-001-FR-005`
@@ -629,7 +677,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (231 tests: 23 in `rb_domain`, 181 in
+- `cargo test --workspace`: pass (244 tests: 23 in `rb_domain`, 194 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

@@ -26,16 +26,20 @@
 //! warm-starting, a combined multi-body solve, and constant calibration).
 //! `PhysicsWorld` gains arena walls (`with_wall`) as generic flat
 //! `StaticPlane` geometry every body collides with, the same way it already
-//! collides with the ground, and curved fillets (`with_curve`, a
-//! `StaticQuarterPipe` each — deflects only the ball, not a car; see
+//! collides with the ground, curved edge fillets (`with_curve`, a
+//! `StaticQuarterPipe` each), and compound-corner fillets (`with_corner_fillet`,
+//! a `StaticCornerFillet` each) — both deflect only the ball, not a car; see
 //! `body`'s own doc comment); `arena` builds Rocket League's actual
-//! standard-arena octagonal footprint, a ceiling, and all 24 fillets
-//! throughout its vertical boundary from that same machinery
-//! (`PhysicsWorld::standard_arena`) — 16 floor/ceiling-seam fillets (the 4
-//! cardinal walls and, since `RB-PHYSICS-001-FR-021`, the 4 diagonal corner
-//! walls too) plus, since `RB-PHYSICS-001-FR-022`, 8 vertical-edge fillets
-//! (one per corner wall endpoint, where it meets its neighboring side/back
-//! wall) — still without goal cutouts.
+//! standard-arena octagonal footprint, a ceiling, and all 24 edge fillets
+//! plus 16 compound-corner fillets throughout its vertical boundary from
+//! that same machinery (`PhysicsWorld::standard_arena`) — 16 floor/
+//! ceiling-seam fillets (the 4 cardinal walls and, since
+//! `RB-PHYSICS-001-FR-021`, the 4 diagonal corner walls too), 8
+//! vertical-edge fillets (since `RB-PHYSICS-001-FR-022`, one per corner wall
+//! endpoint, where it meets its neighboring side/back wall), and, since
+//! `RB-PHYSICS-001-FR-023`, 16 compound-corner fillets (one per vertex where
+//! a vertical-edge fillet meets a floor- or ceiling-seam fillet) — still
+//! without goal cutouts.
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`
@@ -58,7 +62,7 @@ pub mod mat3;
 pub mod solver;
 pub mod world;
 
-pub use body::{RigidBody, Shape, StaticPlane, StaticQuarterPipe};
+pub use body::{RigidBody, Shape, StaticCornerFillet, StaticPlane, StaticQuarterPipe};
 pub use collision::Contact;
 pub use mat3::Mat3;
 pub use world::{simulate, PhysicsWorld};

@@ -28,7 +28,7 @@ pub struct Contact {
 /// bodies don't jitter between "touching" and "not touching" every frame.
 const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
 
-use crate::body::{StaticPlane, StaticQuarterPipe};
+use crate::body::{StaticCornerFillet, StaticPlane, StaticQuarterPipe};
 
 /// Analytic sphere-vs-plane contact: the sphere's closest point to the
 /// plane is always `position - normal * radius`, so the general
@@ -171,6 +171,62 @@ fn sphere_vs_quarter_pipe(
 pub fn contacts_vs_quarter_pipe(body: &RigidBody, pipe: &StaticQuarterPipe) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_quarter_pipe(body.position, radius, pipe)
+            .into_iter()
+            .collect(),
+        Shape::Box { .. } => Vec::new(),
+    }
+}
+
+/// Analytic sphere-vs-corner-fillet contact (`RB-PHYSICS-001-FR-023`): the
+/// same "ride the concave inside" convention as `sphere_vs_quarter_pipe`,
+/// generalized from a cylinder to a sphere — contact fires as the sphere's
+/// surface approaches or crosses `fillet.radius` from inside `fillet`'s
+/// own sphere, pushing back toward `fillet.center`.
+fn sphere_vs_corner_fillet(
+    position: Vec3,
+    radius: f32,
+    fillet: &StaticCornerFillet,
+) -> Option<Contact> {
+    let rel = position - fillet.center;
+    let dist = rel.length();
+
+    // The sphere center sitting exactly on the fillet's own center has no
+    // well-defined direction to push along -- the same unlikely exact
+    // singularity `sphere_vs_quarter_pipe` guards against.
+    if dist < 1e-6 {
+        return None;
+    }
+    let dir = rel * (1.0 / dist);
+
+    // Only this fillet's own spherical triangle is governed by it --
+    // outside that region, whichever edge fillet or flat plane actually
+    // borders that direction takes over instead (see the struct's own doc
+    // comment).
+    if fillet.bounds.iter().any(|b| dir.dot(b) < 0.0) {
+        return None;
+    }
+
+    let gap = (fillet.radius - radius) - dist;
+    if gap > CONTACT_PROCESSING_THRESHOLD {
+        return None;
+    }
+
+    let point = fillet.center + dir * fillet.radius;
+    Some(Contact {
+        normal: -dir,
+        point,
+        penetration_depth: -gap,
+    })
+}
+
+/// Dispatches a contact test against a corner fillet. Boxes (cars) return
+/// no contact, the same documented deferral as `contacts_vs_quarter_pipe`
+/// (`RB-PHYSICS-001-FR-020`'s Non-goals) — a car drives straight through a
+/// compound corner's footprint unaffected, exactly as it already does
+/// through an edge fillet's.
+pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) -> Vec<Contact> {
+    match body.shape {
+        Shape::Sphere { radius } => sphere_vs_corner_fillet(body.position, radius, fillet)
             .into_iter()
             .collect(),
         Shape::Box { .. } => Vec::new(),
@@ -1030,5 +1086,87 @@ mod tests {
             deeply_overlapping_position,
         );
         assert!(contacts_vs_quarter_pipe(&car, &pipe).is_empty());
+    }
+
+    /// A floor (z=0) meeting a +X side wall at x=100 and a +Y back wall at
+    /// y=100, fillet radius 20 -- the compound corner where all three
+    /// pairwise edge fillets (each built the way `floor_wall_pipe` builds
+    /// one of them) would otherwise meet at a single sharp point. The
+    /// center sits radius-in from all three planes, at (80, 80, 20).
+    fn floor_two_walls_corner() -> StaticCornerFillet {
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -100.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -100.0);
+        StaticCornerFillet::between_three_planes(&floor, &wall_x, &wall_y, 20.0)
+    }
+
+    #[test]
+    fn sphere_deep_inside_the_corner_fillet_has_no_contact() {
+        // Sitting right on the fillet's own center plus a tiny nudge
+        // (avoiding the exact-on-center singularity) is deep inside a
+        // 20-unit-radius fillet for a 1-unit sphere.
+        let fillet = floor_two_walls_corner();
+        let s = RigidBody::sphere(1.0, 1.0, fillet.center + Vec3::new(0.0, 0.0, 0.1));
+        assert!(contacts_vs_corner_fillet(&s, &fillet).is_empty());
+    }
+
+    #[test]
+    fn sphere_touching_the_corner_fillet_surface_has_zero_penetration() {
+        let fillet = floor_two_walls_corner();
+        let radius = 1.0;
+        // Exactly radius+sphere_radius from the center, toward the sharp
+        // corner (100, 100, 0) that this fillet replaces -- well inside
+        // the fillet's spherical-triangle bounds.
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
+        let position = fillet.center + toward_corner * (fillet.radius - radius);
+        let s = RigidBody::sphere(radius, 1.0, position);
+        let contacts = contacts_vs_corner_fillet(&s, &fillet);
+        assert_eq!(contacts.len(), 1);
+        assert!(contacts[0].penetration_depth.abs() < 1e-4);
+    }
+
+    #[test]
+    fn sphere_pushed_past_the_corner_fillet_surface_has_positive_penetration_pushing_toward_the_center(
+    ) {
+        let fillet = floor_two_walls_corner();
+        let radius = 1.0;
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
+        // 5 units further out than the resting distance -- overlapping the
+        // fillet's own material by 5 units.
+        let position = fillet.center + toward_corner * (fillet.radius - radius + 5.0);
+        let s = RigidBody::sphere(radius, 1.0, position);
+        let contacts = contacts_vs_corner_fillet(&s, &fillet);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - 5.0).abs() < 1e-4);
+        // Correction pushes back toward the center, i.e. opposite the
+        // corner-ward direction (unlike a flat plane, which always pushes
+        // away from the plane).
+        assert!((contacts[0].normal + toward_corner).length() < 1e-4);
+    }
+
+    #[test]
+    fn sphere_outside_the_corner_fillets_bounds_has_no_contact() {
+        // Directly away from the sharp corner this fillet replaces --
+        // outside the spherical-triangle bounds even though it might be
+        // close in absolute distance to the center.
+        let fillet = floor_two_walls_corner();
+        let away_from_corner = -Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
+        let s = RigidBody::sphere(1.0, 1.0, fillet.center + away_from_corner * fillet.radius);
+        assert!(contacts_vs_corner_fillet(&s, &fillet).is_empty());
+    }
+
+    #[test]
+    fn box_vs_corner_fillet_is_always_empty() {
+        // Box (car) collision against curved geometry is deliberately not
+        // implemented yet -- see RB-PHYSICS-001-FR-020's Non-goals.
+        let fillet = floor_two_walls_corner();
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
+        let deeply_overlapping_position = fillet.center + toward_corner * fillet.radius;
+        let car = RigidBody::car_box(
+            Vec3::new(60.0, 30.0, 18.0),
+            180.0,
+            deeply_overlapping_position,
+        );
+        assert!(contacts_vs_corner_fillet(&car, &fillet).is_empty());
     }
 }
