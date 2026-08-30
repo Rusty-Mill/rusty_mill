@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn dequantize_q4_0_roundtrips() {
         let block = BlockQ4_0 {
-            d: 0x3C00, // f16 = 1.0
+            d: 0x3C00,      // f16 = 1.0
             qs: [0x88; 16], // 8 -> x - 8 = 0
         };
         let mut out = [1.0f32; 32];

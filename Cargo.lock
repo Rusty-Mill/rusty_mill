@@ -5680,7 +5680,7 @@ dependencies = [
 name = "rusty_font"
 version = "0.1.0"
 dependencies = [
- "rusty_simd",
+ "rusty_simd 0.1.0 (git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264)",
  "rusty_std",
  "rusty_wire",
 ]
@@ -5701,7 +5701,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_font",
  "rusty_gui",
- "rusty_simd",
+ "rusty_simd 0.1.0 (git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264)",
  "rusty_std",
  "rusty_win32",
 ]
@@ -5820,6 +5820,10 @@ version = "0.1.0"
 
 [[package]]
 name = "rusty_sha1"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_simd"
 version = "0.1.0"
 
 [[package]]
