@@ -215,6 +215,21 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   now adds these alongside its 9 walls. A car (box) actually being
   deflected by a fillet, fillets at the 4 diagonal corner walls, and goal
   cutouts remain not modeled.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-021`) — curved
+  corner-wall-to-floor/wall-to-ceiling transitions, extending FR-020 to the
+  4 diagonal corner walls: `arena::standard_curves` now returns 16
+  `StaticQuarterPipe`s (one floor-side and one ceiling-side per wall, all 9
+  walls) instead of 8. `StaticQuarterPipe::between_planes` needed no code
+  changes — its real correctness requirement was never "axis-aligned
+  planes," only that the two bridged planes' normals are mutually
+  perpendicular, which holds for a corner wall meeting the floor/ceiling
+  regardless of the corner wall's own horizontal rotation. A corner wall's
+  fillet `axis_direction` is computed via a cross product
+  (`floor.normal.cross(&wall.normal)`, already unit length by construction)
+  rather than hand-picked, since it isn't a coordinate axis the way a
+  cardinal wall's is. A car actually being deflected by any fillet, a
+  fillet at a corner wall's own vertical edges (where it meets its
+  neighboring side/back wall), and goal cutouts remain not modeled.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

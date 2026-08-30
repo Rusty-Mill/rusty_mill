@@ -6,6 +6,59 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Curved corner-wall-to-floor/wall-to-ceiling transitions
+**2026-08-30** · PR pending · commit pending
+
+- **Extends `RB-PHYSICS-001-FR-020`'s fillet treatment to the 4 diagonal
+  corner walls** `RB-PHYSICS-001-FR-019` introduced — `arena::standard_curves`
+  now returns 16 `StaticQuarterPipe`s (still one floor-side and one
+  ceiling-side fillet per wall, now for all 9 walls) instead of 8.
+- **`StaticQuarterPipe::between_planes` needed no code changes.** Its real
+  correctness requirement was never "axis-aligned planes" (as FR-020's own
+  doc comment had incorrectly claimed) — only that the two bridged planes'
+  normals, plus `axis_direction`, form an orthonormal basis, which only
+  needs the two planes to be mutually *perpendicular*. A vertical wall's
+  normal always has zero Z component while the floor/ceiling's is always
+  purely Z, so this holds for a corner wall regardless of its own
+  horizontal rotation, not just for a cardinal wall.
+- **A corner wall's fillet `axis_direction` is computed via a cross
+  product** (`floor.normal.cross(&wall.normal)`, and the ceiling
+  equivalent) rather than hand-picked, since — unlike a cardinal wall's —
+  it isn't a coordinate axis. The cross product of two always-perpendicular
+  unit vectors is already exactly unit length by construction, so no
+  `.normalize()`/`.unwrap()` is needed (avoiding a `clippy::unwrap_used`
+  violation the workspace's lint config promotes to a hard CI error in
+  production code).
+- **A new `corner_wall_plane(sx, sy)` helper in `arena.rs`** factors out the
+  existing (behavior-unchanged) corner-wall plane construction
+  `standard_walls` already did inline, so `standard_curves` can reuse it
+  rather than duplicating the math. `PhysicsWorld::standard_arena` picks up
+  the extra 8 curves automatically, since it already loops over every curve
+  `arena::standard_curves()` returns.
+- **`FILLET_RADIUS` is reused as-is** for the corner-wall fillets rather
+  than introducing a second, independently chosen radius.
+- **Still not modeled:** a car (box) actually being deflected by any fillet
+  (unchanged from FR-020), a fillet at a corner wall's own *vertical* edges
+  — where it meets its neighboring side/back wall at other than 90 degrees,
+  a materially different problem since `between_planes` only handles two
+  perpendicular planes — and goal cutouts in the back walls.
+- 4 new unit tests across `arena.rs`/`world.rs` in `rb_physics_bullet` (172
+  total): `standard_curves` returns exactly 16 fillets; every fillet's axis
+  sits exactly `FILLET_RADIUS` in from some vertical wall, cardinal or
+  corner; a corner wall's own derived fillet axis sits exactly
+  `FILLET_RADIUS` in from both the corner wall and the floor, with
+  correctly perpendicular unit sector vectors; the cross product computing
+  each of the 4 corner walls' `axis_direction` is exactly unit length,
+  confirming the production code's `.normalize()`-free assumption actually
+  holds — plus, the real end-to-end proof, a new `PhysicsWorld` test built
+  around a wall with a diagonal (non-axis-aligned) normal, rather than
+  going through `arena::standard_curves` directly, confirms a ball resting
+  at ordinary flat-floor height within that diagonal wall's fillet
+  footprint gets pushed up off it, the same physical proof FR-020 gave for
+  a cardinal wall, now for one whose normal isn't a coordinate axis.
+
+---
+
 ## Curved wall-to-floor/wall-to-ceiling transitions
 **2026-08-30** · [#49](https://github.com/baileyrd/rusty_bullet/pull/49) · `8053a71`
 
