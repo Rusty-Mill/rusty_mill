@@ -6,6 +6,52 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Dodge input
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** the double jump's fresh press (`RB-PHYSICS-001-FR-014`) now
+  checks `ControllerInput.pitch`/`roll` at the moment it fires: at or above
+  a new `DODGE_DEADZONE` on either axis, it fires a directional dodge
+  instead of the plain vertical double jump — a purely horizontal
+  `DODGE_SPEED` impulse (along `forward_axis` for `pitch`, `right_axis`
+  for `roll`) plus an instantaneous `DODGE_ANGULAR_SPEED` spin written
+  directly to `RigidBody.angular_velocity` about the perpendicular axis.
+- **Reuses air control's own axis/sign conventions:** a forward dodge uses
+  the same `pitch`→`right_axis` mapping air control's pitch torque already
+  does (just fast and instantaneous instead of a continuous torque), and a
+  side dodge does the same with `roll`→`forward_axis`. Both axes can
+  contribute at once (a diagonal dodge), simply summed rather than
+  normalized — a documented simplification, since real Rocket League
+  normalizes the stick direction so a diagonal dodge isn't faster than an
+  axis-aligned one.
+- **Shares the double jump's resource:** below `DODGE_DEADZONE` on both
+  axes, the plain vertical double jump fires exactly as before; either way
+  the press spends the shared `double_jump_available` — a dodge and a
+  plain double jump aren't separate resources. Wall jump is untouched: it
+  never checks `pitch`/`roll` at all, so touching a wall always gets the
+  fixed wall-jump push-off, never a dodge.
+- **Constants:** `DODGE_SPEED` and `WALL_JUMP_HORIZONTAL_SPEED` are now
+  `pub` (mirroring `JUMP_SPEED`) so `world.rs`'s end-to-end tests can
+  assert against, and distinguish between, all three jump variants.
+- **Not implemented** (explicitly, not silently dropped): a dodge variant
+  of the wall jump, canceling a dodge's rotation early by pressing again
+  mid-flip (flip-cancel), any landing auto-orientation assistance, and
+  variable jump height — each tracked as separate follow-up work.
+- 10 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet`
+  (120 total): a forward (pitch) dodge and a lateral (roll) dodge each
+  give the expected horizontal velocity and spin, a below-deadzone
+  deflection still gives a plain double jump, a dodge spends
+  `double_jump_available` the same as a plain one, opposite pitch dodges
+  the opposite direction, a diagonal dodge combines both axes, dodge logic
+  has no effect while grounded, and a wall jump still fires its own
+  (smaller) push-off instead of a dodge when touching a wall, plus — the
+  real end-to-end proof — a car dodging forward with a visible flip after
+  a ground jump in a live `PhysicsWorld::step` loop, and a regression test
+  confirming a car touching a wall with directional stick input still
+  gets the wall jump, not a dodge.
+
+---
+
 ## Wall jump input
 **2026-08-30** · [#35](https://github.com/baileyrd/rusty_bullet/pull/35) · `b748b86`
 
