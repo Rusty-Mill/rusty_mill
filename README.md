@@ -79,6 +79,12 @@ have landed so far.
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty-db-core`](crates/rusty_db/crates/rusty-db-core) | `crates/rusty_db/crates/rusty-db-core` | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of `rusty_db`) |
+| [`rusty-db-derive`](crates/rusty_db/crates/rusty-db-derive) | `crates/rusty_db/crates/rusty-db-derive` | `#[derive(Mapped)]` macro for `rusty_db`: maps a struct to a table |
+| [`rusty-db-sqlite`](crates/rusty_db/crates/rusty-db-sqlite) | `crates/rusty_db/crates/rusty-db-sqlite` | SQLite driver for `rusty_db`, built on `sqlx` |
+| [`rusty-db-postgres`](crates/rusty_db/crates/rusty-db-postgres) | `crates/rusty_db/crates/rusty-db-postgres` | PostgreSQL driver for `rusty_db`, built on `sqlx` |
+| [`rusty-db-mysql`](crates/rusty_db/crates/rusty-db-mysql) | `crates/rusty_db/crates/rusty-db-mysql` | MySQL/MariaDB driver for `rusty_db`, built on `sqlx` |
+| [`rusty-db`](crates/rusty_db/rusty_db) | `crates/rusty_db/rusty_db` | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -428,6 +434,23 @@ the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
 non-Windows target (including this workspace's own `ubuntu-latest` CI
 runner) — a real panic, not a flake, now fixed to skip on either variant.
 
+`rusty_db` was its own nested Cargo workspace (six crates: `rusty-db-core`,
+`rusty-db-derive`, `rusty-db-sqlite`, `rusty-db-postgres`, `rusty-db-mysql`,
+and the `rusty-db` facade), de-inherited the same way as `rusty_search`
+before it — with one difference: `rusty_search`'s `[workspace.package]`
+(version/edition/license/repository) was hoisted directly into this
+workspace's own, since none of its fields collided. `rusty_db`'s did
+collide (`license = "MIT"` vs. `rusty_search`'s `"MIT OR Apache-2.0"`;
+a different `repository` URL), so its six crates were converted to
+literal `[package]` fields instead — only its *dependencies* were
+hoisted into `[workspace.dependencies]`, including a path swap for its
+already-merged siblings `rusty_tokio`/`rusty_wire`/`rusty_json`/`rusty_std`,
+and a widened `tokio` feature set (union of what `rusty_search` and
+`rusty_db` each need). Full test suite (108 test-result blocks, all
+passing) — the ~50 MySQL/PostgreSQL-backed test files gracefully skip
+without a reachable server, by the crate's own design (opt in via
+`MYSQL_TEST_URL`/a default local URL; connect-or-skip, never fail).
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -476,6 +499,7 @@ A third wave continues the same way, starting with
 [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid),
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
-behind one nested workspace), and
-[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan) — merged one
-at a time, same process.
+behind one nested workspace),
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan), and
+[`rusty_db`](https://github.com/baileyrd/rusty_db) (six crates behind a
+second nested workspace) — merged one at a time, same process.

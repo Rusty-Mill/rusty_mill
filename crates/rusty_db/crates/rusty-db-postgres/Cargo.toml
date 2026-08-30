@@ -1,9 +1,9 @@
 [package]
 name = "rusty-db-postgres"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/baileyrd/rusty_db"
 description = "PostgreSQL driver for rusty_db, built on sqlx"
 
 [dependencies]
