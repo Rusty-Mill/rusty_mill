@@ -79,6 +79,7 @@ have landed so far.
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty_sync`](crates/rusty_sync) | `crates/rusty_sync` | `no_std` + `alloc` sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate, built on `rusty_std` |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -427,6 +428,17 @@ driver-absent skip logic matched only `VulkanError::LoaderNotFound`, not
 the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
 non-Windows target (including this workspace's own `ubuntu-latest` CI
 runner) — a real panic, not a flake, now fixed to skip on either variant.
+CI surfaced a third gap in the same skip logic: GitHub's `windows-latest`
+runner ships `vulkan-1.dll` but has no real GPU driver registered behind
+it, so `vkCreateInstance` there returns `VK_ERROR_INCOMPATIBLE_DRIVER`
+rather than failing to find a loader at all — also now handled as a skip
+case, alongside the other two.
+
+`rusty_sync` needed no pin retirement either: its one dependency,
+`rusty_std`, was already a `path` dependency in the standalone repo's own
+`Cargo.toml`. Its existing concurrency test suite (spinlock mutual
+exclusion and channel send/recv, each also exercised under real OS
+threads, not just single-threaded) passes unmodified.
 
 ## History
 
@@ -476,6 +488,7 @@ A third wave continues the same way, starting with
 [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid),
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
-behind one nested workspace), and
-[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan) — merged one
+behind one nested workspace),
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan), and
+[`rusty_sync`](https://github.com/baileyrd/rusty_sync) — merged one
 at a time, same process.

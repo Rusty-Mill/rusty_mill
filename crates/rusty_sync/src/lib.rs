@@ -69,7 +69,9 @@ impl<'a, T> core::ops::DerefMut for SpinLockGuard<'a, T> {
 
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
-        self.lock.lock.store(false, core::sync::atomic::Ordering::Release);
+        self.lock
+            .lock
+            .store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -171,7 +173,9 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         receivers: AtomicUsize::new(1),
     });
     (
-        Sender { inner: inner.clone() },
+        Sender {
+            inner: inner.clone(),
+        },
         Receiver { inner },
     )
 }
@@ -191,7 +195,9 @@ impl<T> Sender<T> {
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.senders.fetch_add(1, Ordering::AcqRel);
-        Sender { inner: self.inner.clone() }
+        Sender {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -221,7 +227,9 @@ impl<T> Receiver<T> {
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         self.inner.receivers.fetch_add(1, Ordering::AcqRel);
-        Receiver { inner: self.inner.clone() }
+        Receiver {
+            inner: self.inner.clone(),
+        }
     }
 }
 
