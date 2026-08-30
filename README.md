@@ -85,6 +85,7 @@ have landed so far.
 | [`rusty-db-postgres`](crates/rusty_db/crates/rusty-db-postgres) | `crates/rusty_db/crates/rusty-db-postgres` | PostgreSQL driver for `rusty_db`, built on `sqlx` |
 | [`rusty-db-mysql`](crates/rusty_db/crates/rusty-db-mysql) | `crates/rusty_db/crates/rusty-db-mysql` | MySQL/MariaDB driver for `rusty_db`, built on `sqlx` |
 | [`rusty-db`](crates/rusty_db/rusty_db) | `crates/rusty_db/rusty_db` | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
+| [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -451,6 +452,9 @@ passing) — the ~50 MySQL/PostgreSQL-backed test files gracefully skip
 without a reachable server, by the crate's own design (opt in via
 `MYSQL_TEST_URL`/a default local URL; connect-or-skip, never fail).
 
+`rusty_config` has zero dependencies of any kind, so nothing needed
+swapping — its merge is just the subtree add plus workspace wiring.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -500,6 +504,8 @@ A third wave continues the same way, starting with
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
 behind one nested workspace),
-[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan), and
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
 [`rusty_db`](https://github.com/baileyrd/rusty_db) (six crates behind a
-second nested workspace) — merged one at a time, same process.
+second nested workspace), and
+[`rusty_config`](https://github.com/baileyrd/rusty_config) — merged one
+at a time, same process.
