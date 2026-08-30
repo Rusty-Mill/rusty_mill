@@ -187,17 +187,23 @@ mod tests {
 
     #[test]
     fn augmented_path_prepends_tool_directories_and_keeps_existing_path() {
+        // Forward slashes, not backslashes: `PathBuf::parent()` only
+        // recognizes `\` as a separator on Windows, so a `C:\fake\...`
+        // literal decomposes into a single opaque component on Unix and
+        // this assertion failed on every `ubuntu-latest` run, every time
+        // -- not a flake. `/` is accepted as a separator on both Windows
+        // and Unix, so `.parent()` returns `/fake` on both.
         let tools = vec![
-            PathBuf::from(r"C:\fake\rgit.exe"),
-            PathBuf::from(r"C:\fake\rgit.exe"),
+            PathBuf::from("/fake/rgit.exe"),
+            PathBuf::from("/fake/rgit.exe"),
         ];
         let joined = augmented_path(&tools);
         let joined_str = joined.to_string_lossy();
         assert!(
-            joined_str.starts_with(r"C:\fake"),
+            joined_str.starts_with("/fake"),
             "expected tool dir first, got: {joined_str}"
         );
         // The duplicate tool (same parent dir) must not appear twice.
-        assert_eq!(joined_str.matches(r"C:\fake").count(), 1);
+        assert_eq!(joined_str.matches("/fake").count(), 1);
     }
 }
