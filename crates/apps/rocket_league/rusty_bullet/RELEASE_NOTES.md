@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Variable jump height input
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#39](https://github.com/baileyrd/rusty_bullet/pull/39) · `9266c6c`
 
 - **Added:** the ground jump (`RB-PHYSICS-001-FR-010`) gains a hold window
   (`RB-PHYSICS-001-FR-015`) — continuing to hold `ControllerInput.jump`
