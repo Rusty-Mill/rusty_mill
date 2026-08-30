@@ -64,6 +64,7 @@ members = [
     "crates/rusty_search/crates/rusty-search-cloud",
     "crates/rusty_search/crates/rusty-search",
     "crates/rusty_vulkan",
+    "crates/rusty_sync",
     "crates/rusty_h2",
     "crates/rusty_ansi",
     "crates/rusty_config",
