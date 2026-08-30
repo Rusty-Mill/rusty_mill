@@ -85,6 +85,7 @@ have landed so far.
 | [`rusty-db-postgres`](crates/rusty_db/crates/rusty-db-postgres) | `crates/rusty_db/crates/rusty-db-postgres` | PostgreSQL driver for `rusty_db`, built on `sqlx` |
 | [`rusty-db-mysql`](crates/rusty_db/crates/rusty-db-mysql) | `crates/rusty_db/crates/rusty-db-mysql` | MySQL/MariaDB driver for `rusty_db`, built on `sqlx` |
 | [`rusty-db`](crates/rusty_db/rusty_db) | `crates/rusty_db/rusty_db` | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
+| [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 
 Each crate's own README, docs, and issue history describe its design in
@@ -452,6 +453,15 @@ passing) — the ~50 MySQL/PostgreSQL-backed test files gracefully skip
 without a reachable server, by the crate's own design (opt in via
 `MYSQL_TEST_URL`/a default local URL; connect-or-skip, never fail).
 
+`rusty_ansi` needed no pin retirement: its one dependency, `unicode-width`,
+is an ordinary crates.io crate, not a sibling `baileyrd` repo. The
+standalone repo's README carried a CI badge but had no `.github/workflows`
+directory, so this workspace's `-D warnings` clippy gate was the first
+time it actually ran: `manual_strip` (indexing a slice by hand after
+`starts_with` instead of `strip_prefix`, twice) and
+`manual_pattern_char_comparison` (an `||` closure comparing against two
+chars instead of a `[char; 2]` pattern) — both fixed, no behavior change.
+
 `rusty_config` has zero dependencies of any kind, so nothing needed
 swapping — its merge is just the subtree add plus workspace wiring.
 
@@ -506,6 +516,7 @@ A third wave continues the same way, starting with
 behind one nested workspace),
 [`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
 [`rusty_db`](https://github.com/baileyrd/rusty_db) (six crates behind a
-second nested workspace), and
+second nested workspace),
+[`rusty_ansi`](https://github.com/baileyrd/rusty_ansi), and
 [`rusty_config`](https://github.com/baileyrd/rusty_config) — merged one
 at a time, same process.

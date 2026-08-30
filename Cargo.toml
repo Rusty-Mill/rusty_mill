@@ -70,6 +70,7 @@ members = [
     "crates/rusty_db/crates/rusty-db-postgres",
     "crates/rusty_db/crates/rusty-db-mysql",
     "crates/rusty_db/rusty_db",
+    "crates/rusty_ansi",
     "crates/rusty_config",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
