@@ -12,8 +12,13 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 total += capture.read_samples().len();
             }
-            println!("Captured {total} samples (~{:.2}s at 16kHz)", total as f32 / 16000.0);
+            println!(
+                "Captured {total} samples (~{:.2}s at 16kHz)",
+                total as f32 / 16000.0
+            );
         }
-        Err(e) => println!("Failed to open the default capture device: {e:?} (no microphone available?)"),
+        Err(e) => {
+            println!("Failed to open the default capture device: {e:?} (no microphone available?)")
+        }
     }
 }

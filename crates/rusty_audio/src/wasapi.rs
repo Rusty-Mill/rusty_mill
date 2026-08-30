@@ -72,7 +72,10 @@ const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: Guid = Guid {
 
 impl PartialEq for Guid {
     fn eq(&self, other: &Self) -> bool {
-        self.data1 == other.data1 && self.data2 == other.data2 && self.data3 == other.data3 && self.data4 == other.data4
+        self.data1 == other.data1
+            && self.data2 == other.data2
+            && self.data3 == other.data3
+            && self.data4 == other.data4
     }
 }
 
@@ -114,7 +117,8 @@ struct WaveFormatExtensible {
 // `mmdeviceapi.h`/`audioclient.h`), `IUnknown`'s three slots first.
 #[repr(C)]
 struct IUnknownVtbl {
-    query_interface: unsafe extern "system" fn(RawIUnknown, *const Guid, *mut RawIUnknown) -> Hresult,
+    query_interface:
+        unsafe extern "system" fn(RawIUnknown, *const Guid, *mut RawIUnknown) -> Hresult,
     add_ref: unsafe extern "system" fn(RawIUnknown) -> u32,
     release: unsafe extern "system" fn(RawIUnknown) -> u32,
 }
@@ -122,17 +126,27 @@ struct IUnknownVtbl {
 #[repr(C)]
 struct IMmDeviceEnumeratorVtbl {
     base: IUnknownVtbl,
-    enum_audio_endpoints: unsafe extern "system" fn(RawIUnknown, u32, u32, *mut RawIUnknown) -> Hresult,
-    get_default_audio_endpoint: unsafe extern "system" fn(RawIUnknown, u32, u32, *mut RawIUnknown) -> Hresult,
+    enum_audio_endpoints:
+        unsafe extern "system" fn(RawIUnknown, u32, u32, *mut RawIUnknown) -> Hresult,
+    get_default_audio_endpoint:
+        unsafe extern "system" fn(RawIUnknown, u32, u32, *mut RawIUnknown) -> Hresult,
     get_device: unsafe extern "system" fn(RawIUnknown, *const u16, *mut RawIUnknown) -> Hresult,
-    register_endpoint_notification_callback: unsafe extern "system" fn(RawIUnknown, RawIUnknown) -> Hresult,
-    unregister_endpoint_notification_callback: unsafe extern "system" fn(RawIUnknown, RawIUnknown) -> Hresult,
+    register_endpoint_notification_callback:
+        unsafe extern "system" fn(RawIUnknown, RawIUnknown) -> Hresult,
+    unregister_endpoint_notification_callback:
+        unsafe extern "system" fn(RawIUnknown, RawIUnknown) -> Hresult,
 }
 
 #[repr(C)]
 struct IMmDeviceVtbl {
     base: IUnknownVtbl,
-    activate: unsafe extern "system" fn(RawIUnknown, *const Guid, u32, *const c_void, *mut RawIUnknown) -> Hresult,
+    activate: unsafe extern "system" fn(
+        RawIUnknown,
+        *const Guid,
+        u32,
+        *const c_void,
+        *mut RawIUnknown,
+    ) -> Hresult,
     open_property_store: unsafe extern "system" fn(RawIUnknown, u32, *mut RawIUnknown) -> Hresult,
     get_id: unsafe extern "system" fn(RawIUnknown, *mut *mut u16) -> Hresult,
     get_state: unsafe extern "system" fn(RawIUnknown, *mut u32) -> Hresult,
@@ -141,11 +155,24 @@ struct IMmDeviceVtbl {
 #[repr(C)]
 struct IAudioClientVtbl {
     base: IUnknownVtbl,
-    initialize: unsafe extern "system" fn(RawIUnknown, u32, u32, i64, i64, *const WaveFormatEx, *const Guid) -> Hresult,
+    initialize: unsafe extern "system" fn(
+        RawIUnknown,
+        u32,
+        u32,
+        i64,
+        i64,
+        *const WaveFormatEx,
+        *const Guid,
+    ) -> Hresult,
     get_buffer_size: unsafe extern "system" fn(RawIUnknown, *mut u32) -> Hresult,
     get_stream_latency: unsafe extern "system" fn(RawIUnknown, *mut i64) -> Hresult,
     get_current_padding: unsafe extern "system" fn(RawIUnknown, *mut u32) -> Hresult,
-    is_format_supported: unsafe extern "system" fn(RawIUnknown, u32, *const WaveFormatEx, *mut *mut WaveFormatEx) -> Hresult,
+    is_format_supported: unsafe extern "system" fn(
+        RawIUnknown,
+        u32,
+        *const WaveFormatEx,
+        *mut *mut WaveFormatEx,
+    ) -> Hresult,
     get_mix_format: unsafe extern "system" fn(RawIUnknown, *mut *mut WaveFormatEx) -> Hresult,
     get_device_period: unsafe extern "system" fn(RawIUnknown, *mut i64, *mut i64) -> Hresult,
     start: unsafe extern "system" fn(RawIUnknown) -> Hresult,
@@ -158,7 +185,14 @@ struct IAudioClientVtbl {
 #[repr(C)]
 struct IAudioCaptureClientVtbl {
     base: IUnknownVtbl,
-    get_buffer: unsafe extern "system" fn(RawIUnknown, *mut *mut u8, *mut u32, *mut u32, *mut u64, *mut u64) -> Hresult,
+    get_buffer: unsafe extern "system" fn(
+        RawIUnknown,
+        *mut *mut u8,
+        *mut u32,
+        *mut u32,
+        *mut u64,
+        *mut u64,
+    ) -> Hresult,
     release_buffer: unsafe extern "system" fn(RawIUnknown, u32) -> Hresult,
     get_next_packet_size: unsafe extern "system" fn(RawIUnknown, *mut u32) -> Hresult,
 }
@@ -167,7 +201,13 @@ struct IAudioCaptureClientVtbl {
 unsafe extern "system" {
     fn CoInitializeEx(reserved: *const c_void, co_init: u32) -> Hresult;
     fn CoUninitialize();
-    fn CoCreateInstance(rclsid: *const Guid, unk_outer: RawIUnknown, cls_context: u32, riid: *const Guid, out: *mut RawIUnknown) -> Hresult;
+    fn CoCreateInstance(
+        rclsid: *const Guid,
+        unk_outer: RawIUnknown,
+        cls_context: u32,
+        riid: *const Guid,
+        out: *mut RawIUnknown,
+    ) -> Hresult;
     fn CoTaskMemFree(ptr: *mut c_void);
 }
 
@@ -176,11 +216,7 @@ unsafe extern "system" {
 pub struct WasapiError(pub i32);
 
 fn check(hr: Hresult) -> Result<(), WasapiError> {
-    if hr < 0 {
-        Err(WasapiError(hr))
-    } else {
-        Ok(())
-    }
+    if hr < 0 { Err(WasapiError(hr)) } else { Ok(()) }
 }
 
 macro_rules! vcall {
@@ -238,7 +274,14 @@ impl WasapiCapture {
             })?;
 
             let mut device: RawIUnknown = ptr::null_mut();
-            let hr = vcall!(enumerator, IMmDeviceEnumeratorVtbl, get_default_audio_endpoint, E_CAPTURE, E_CONSOLE, &mut device);
+            let hr = vcall!(
+                enumerator,
+                IMmDeviceEnumeratorVtbl,
+                get_default_audio_endpoint,
+                E_CAPTURE,
+                E_CONSOLE,
+                &mut device
+            );
             if hr < 0 {
                 vcall!(enumerator, IUnknownVtbl, release);
                 if owns_com_init {
@@ -248,7 +291,15 @@ impl WasapiCapture {
             }
 
             let mut audio_client: RawIUnknown = ptr::null_mut();
-            let hr = vcall!(device, IMmDeviceVtbl, activate, &IID_IAUDIO_CLIENT, CLSCTX_ALL, ptr::null(), &mut audio_client);
+            let hr = vcall!(
+                device,
+                IMmDeviceVtbl,
+                activate,
+                &IID_IAUDIO_CLIENT,
+                CLSCTX_ALL,
+                ptr::null(),
+                &mut audio_client
+            );
             if hr < 0 {
                 vcall!(device, IUnknownVtbl, release);
                 vcall!(enumerator, IUnknownVtbl, release);
@@ -259,7 +310,12 @@ impl WasapiCapture {
             }
 
             let mut mix_format: *mut WaveFormatEx = ptr::null_mut();
-            let hr = vcall!(audio_client, IAudioClientVtbl, get_mix_format, &mut mix_format);
+            let hr = vcall!(
+                audio_client,
+                IAudioClientVtbl,
+                get_mix_format,
+                &mut mix_format
+            );
             if hr < 0 {
                 vcall!(audio_client, IUnknownVtbl, release);
                 vcall!(device, IUnknownVtbl, release);
@@ -296,7 +352,13 @@ impl WasapiCapture {
             }
 
             let mut capture_client: RawIUnknown = ptr::null_mut();
-            let hr = vcall!(audio_client, IAudioClientVtbl, get_service, &IID_IAUDIO_CAPTURE_CLIENT, &mut capture_client);
+            let hr = vcall!(
+                audio_client,
+                IAudioClientVtbl,
+                get_service,
+                &IID_IAUDIO_CAPTURE_CLIENT,
+                &mut capture_client
+            );
             if hr < 0 {
                 CoTaskMemFree(mix_format as *mut c_void);
                 vcall!(audio_client, IUnknownVtbl, release);
@@ -384,7 +446,9 @@ impl WasapiCapture {
             let format_tag = (*self.mix_format).format_tag;
             if format_tag == WAVE_FORMAT_IEEE_FLOAT {
                 true
-            } else if format_tag == WAVE_FORMAT_EXTENSIBLE && (*self.mix_format).cb_size as usize >= 22 {
+            } else if format_tag == WAVE_FORMAT_EXTENSIBLE
+                && (*self.mix_format).cb_size as usize >= 22
+            {
                 let ext = self.mix_format as *const WaveFormatExtensible;
                 let sub_format: Guid = ptr::addr_of!((*ext).sub_format).read_unaligned();
                 sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
@@ -405,7 +469,12 @@ impl WasapiCapture {
         unsafe {
             loop {
                 let mut packet_frames: u32 = 0;
-                check(vcall!(self.capture_client, IAudioCaptureClientVtbl, get_next_packet_size, &mut packet_frames))?;
+                check(vcall!(
+                    self.capture_client,
+                    IAudioCaptureClientVtbl,
+                    get_next_packet_size,
+                    &mut packet_frames
+                ))?;
                 if packet_frames == 0 {
                     break;
                 }
@@ -432,19 +501,31 @@ impl WasapiCapture {
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 || data.is_null() {
                     out.extend(core::iter::repeat_n(0.0f32, frames as usize * channels));
                 } else if is_float && bits == 32 {
-                    let samples = core::slice::from_raw_parts(data as *const f32, frames as usize * channels);
+                    let samples =
+                        core::slice::from_raw_parts(data as *const f32, frames as usize * channels);
                     out.extend_from_slice(samples);
                 } else if bits == 16 {
-                    let samples = core::slice::from_raw_parts(data as *const i16, frames as usize * channels);
+                    let samples =
+                        core::slice::from_raw_parts(data as *const i16, frames as usize * channels);
                     out.extend(samples.iter().map(|&s| s as f32 / i16::MAX as f32));
                 } else {
                     // Unsupported native sample format (e.g. 24-bit PCM) --
                     // a known gap rather than silently corrupting audio.
-                    vcall!(self.capture_client, IAudioCaptureClientVtbl, release_buffer, frames);
+                    vcall!(
+                        self.capture_client,
+                        IAudioCaptureClientVtbl,
+                        release_buffer,
+                        frames
+                    );
                     return Err(WasapiError(-1));
                 }
 
-                check(vcall!(self.capture_client, IAudioCaptureClientVtbl, release_buffer, frames))?;
+                check(vcall!(
+                    self.capture_client,
+                    IAudioCaptureClientVtbl,
+                    release_buffer,
+                    frames
+                ))?;
             }
         }
         Ok(out)

@@ -35,7 +35,10 @@ pub struct AudioSpec {
 impl AudioSpec {
     /// Creates a 16kHz mono audio specification suitable for Whisper.
     pub fn whisper_spec() -> Self {
-        Self { sample_rate: 16000, channels: 1 }
+        Self {
+            sample_rate: 16000,
+            channels: 1,
+        }
     }
 }
 
@@ -47,7 +50,10 @@ fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
         return samples.to_vec();
     }
-    samples.chunks(channels).map(|frame| frame.iter().sum::<f32>() / channels as f32).collect()
+    samples
+        .chunks(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
 }
 
 /// Resamples mono `samples` from `from_rate` to `to_rate` via linear
@@ -79,7 +85,12 @@ fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// Converts `samples` (interleaved, `from_channels` channels, at
 /// `from_rate` Hz) to the mono `to_rate` Hz format Whisper (and this
 /// crate's other consumers) expect.
-pub fn resample_to_mono(samples: &[f32], from_rate: u32, from_channels: usize, to_rate: u32) -> Vec<f32> {
+pub fn resample_to_mono(
+    samples: &[f32],
+    from_rate: u32,
+    from_channels: usize,
+    to_rate: u32,
+) -> Vec<f32> {
     let mono = downmix_to_mono(samples, from_channels);
     resample_linear(&mono, from_rate, to_rate)
 }
@@ -95,8 +106,8 @@ impl AudioCapture {
     /// Opens the default system PCM microphone input stream.
     #[cfg(windows)]
     pub fn open_default(spec: AudioSpec) -> Result<Self, &'static str> {
-        let inner =
-            wasapi::WasapiCapture::open_default().map_err(|_| "WASAPI: failed to open the default capture device")?;
+        let inner = wasapi::WasapiCapture::open_default()
+            .map_err(|_| "WASAPI: failed to open the default capture device")?;
         Ok(Self { inner, spec })
     }
 
@@ -116,7 +127,12 @@ impl AudioCapture {
     #[cfg(windows)]
     pub fn read_samples(&mut self) -> Vec<f32> {
         let native = self.inner.read_samples().unwrap_or_default();
-        resample_to_mono(&native, self.inner.native_sample_rate(), self.inner.native_channels() as usize, self.spec.sample_rate)
+        resample_to_mono(
+            &native,
+            self.inner.native_sample_rate(),
+            self.inner.native_channels() as usize,
+            self.spec.sample_rate,
+        )
     }
 
     /// Reads recorded samples from the stream buffer.
@@ -159,7 +175,10 @@ mod tests {
     #[test]
     fn resample_same_rate_is_a_no_op() {
         let samples = [1.0, 2.0, 3.0];
-        assert_eq!(resample_linear(&samples, 16000, 16000), alloc::vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            resample_linear(&samples, 16000, 16000),
+            alloc::vec![1.0, 2.0, 3.0]
+        );
     }
 
     #[test]

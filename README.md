@@ -79,6 +79,7 @@ have landed so far.
 | [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -428,6 +429,10 @@ the distinct `VulkanError::UnsupportedPlatform` this crate returns on any
 non-Windows target (including this workspace's own `ubuntu-latest` CI
 runner) — a real panic, not a flake, now fixed to skip on either variant.
 
+`rusty_audio` needed no pin retirement: its dependencies (`rusty_std`,
+plus `rusty_win32` on Windows and `rusty_libc` on Linux) were already
+`path` dependencies pointing at sibling directories under `crates/`.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -476,6 +481,7 @@ A third wave continues the same way, starting with
 [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid),
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
-behind one nested workspace), and
-[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan) — merged one
+behind one nested workspace),
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan), and
+[`rusty_audio`](https://github.com/baileyrd/rusty_audio) — merged one
 at a time, same process.
