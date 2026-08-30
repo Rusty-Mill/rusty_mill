@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Dodge input
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#37](https://github.com/baileyrd/rusty_bullet/pull/37) · `72150f5`
 
 - **Added:** the double jump's fresh press (`RB-PHYSICS-001-FR-014`) now
   checks `ControllerInput.pitch`/`roll` at the moment it fires: at or above
