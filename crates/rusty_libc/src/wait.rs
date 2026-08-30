@@ -366,8 +366,31 @@ mod tests {
 
     #[test]
     fn wnohang_no_child_is_einval_or_echild() {
-        // No children exist: waitpid(-1, WNOHANG) fails with ECHILD (10).
-        assert_eq!(waitpid(-1, WNOHANG), Err(Errno(10)));
+        use crate::process::{exit_group, fork};
+
+        // Asserting "no children" against the shared test-runner process
+        // races every other test in this binary that forks its own child
+        // (cargo test runs multiple tests concurrently by default) -- a
+        // freshly forked child never inherits its parent's children, so it
+        // has zero children of its own by construction, and running the
+        // assertion there instead is race-free regardless of what other
+        // tests are doing concurrently.
+        //
+        // SAFETY: single-threaded at the point of the fork; the child only
+        // issues raw syscalls before exiting (see `process::fork`'s safety
+        // note).
+        match unsafe { fork() }.expect("fork") {
+            0 => {
+                // No children exist: waitpid(-1, WNOHANG) fails with ECHILD (10).
+                let ok = waitpid(-1, WNOHANG) == Err(Errno(10));
+                exit_group(if ok { 0 } else { 1 });
+            }
+            pid => {
+                let (_, status) = waitpid(pid, 0).expect("reap child");
+                assert!(wifexited(status));
+                assert_eq!(wexitstatus(status), 0);
+            }
+        }
     }
 
     #[test]
@@ -399,7 +422,26 @@ mod tests {
 
     #[test]
     fn waitid_no_child_is_echild() {
-        assert_eq!(waitid(P_ALL, 0, WEXITED | WNOHANG), Err(Errno::ECHILD));
+        use crate::process::{exit_group, fork};
+
+        // Same race as `wnohang_no_child_is_einval_or_echild` above --
+        // assert this inside a freshly forked child instead of the
+        // shared, multi-threaded test-runner process.
+        //
+        // SAFETY: single-threaded at the point of the fork; the child only
+        // issues raw syscalls before exiting (see `process::fork`'s safety
+        // note).
+        match unsafe { fork() }.expect("fork") {
+            0 => {
+                let ok = waitid(P_ALL, 0, WEXITED | WNOHANG) == Err(Errno::ECHILD);
+                exit_group(if ok { 0 } else { 1 });
+            }
+            pid => {
+                let (_, status) = waitpid(pid, 0).expect("reap child");
+                assert!(wifexited(status));
+                assert_eq!(wexitstatus(status), 0);
+            }
+        }
     }
 
     #[test]
