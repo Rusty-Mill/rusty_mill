@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Landing auto-orientation
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#45](https://github.com/baileyrd/rusty_bullet/pull/45) · `b5ed2cd`
 
 - **Added:** `drive::apply_driven_forces` gains a gentle continuous
   restoring torque, applied while airborne, nudging the car's local up
