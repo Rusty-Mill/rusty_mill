@@ -240,6 +240,100 @@ impl StaticPlane {
     }
 }
 
+/// An immovable partial-cylinder fillet connecting two perpendicular flat
+/// planes (a wall and the floor, or a wall and the ceiling) —
+/// `RB-PHYSICS-001-FR-020`, Rocket League's real curved wall-to-floor and
+/// wall-to-ceiling transitions. Like `StaticPlane`, infinite along its own
+/// axis (`axis_direction`) — this crate doesn't model a finite wall length
+/// any more for the curve than it already does for the flat walls
+/// themselves.
+///
+/// The playable side is the *inside* of the partial cylinder (like riding
+/// the concave face of a skateboard quarter-pipe, which is exactly what
+/// this shape is named after) — a point is only governed by this fillet at
+/// all when its direction from `axis_point` (projected perpendicular to
+/// `axis_direction`) falls within the 90-degree sector from `sector_start`
+/// to `sector_end`; outside that sector, whichever flat plane the fillet
+/// bridges takes over instead (this shape doesn't know or care about that —
+/// see `PhysicsWorld::step`, which resolves the flat planes and this fillet
+/// as independent, additive contact sources, same as it already does for
+/// the ground and every wall).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticQuarterPipe {
+    pub axis_point: Vec3,
+    /// Unit vector; the fillet is infinite along this direction.
+    pub axis_direction: Vec3,
+    pub radius: f32,
+    /// Unit vector, perpendicular to `axis_direction`: the direction from
+    /// `axis_point` toward the fillet's tangent point on the first flat
+    /// plane it bridges.
+    pub sector_start: Vec3,
+    /// Unit vector, perpendicular to `axis_direction` and to
+    /// `sector_start` (a 90-degree sector): the direction from
+    /// `axis_point` toward the fillet's tangent point on the second flat
+    /// plane it bridges.
+    pub sector_end: Vec3,
+    pub restitution: f32,
+    pub friction: f32,
+}
+
+impl StaticQuarterPipe {
+    pub fn new(
+        axis_point: Vec3,
+        axis_direction: Vec3,
+        radius: f32,
+        sector_start: Vec3,
+        sector_end: Vec3,
+    ) -> StaticQuarterPipe {
+        StaticQuarterPipe {
+            axis_point,
+            axis_direction,
+            radius,
+            sector_start,
+            sector_end,
+            restitution: 0.5,
+            friction: 0.5,
+        }
+    }
+
+    /// Derives a fillet of the given `radius` connecting two perpendicular
+    /// `StaticPlane`s — e.g. the floor and a side wall, or the ceiling and
+    /// a side wall — given a direction along which the fillet should run
+    /// (`axis_direction`, which must be perpendicular to both planes'
+    /// normals; for an axis-aligned arena wall, this is simply "along the
+    /// wall," e.g. `(0, 1, 0)` for a wall running along Y).
+    ///
+    /// Only exact for two *perpendicular* planes (`plane_a.normal` and
+    /// `plane_b.normal` themselves perpendicular, and both perpendicular to
+    /// `axis_direction`) — true for every cardinal (axis-aligned) arena
+    /// wall's own floor/ceiling seam, not for a diagonal corner wall's (see
+    /// `RB-PHYSICS-001-FR-020`'s Non-goals; this port doesn't attempt a
+    /// fillet there yet).
+    ///
+    /// The axis point sits `radius` units inward from *both* planes along
+    /// their own normals (so the fillet's surface is tangent to each plane
+    /// exactly `radius` units from where they'd otherwise meet at a sharp
+    /// edge); `sector_start`/`sector_end` are simply the negation of each
+    /// plane's own normal (the direction from the axis back toward that
+    /// plane's tangent point).
+    pub fn between_planes(
+        plane_a: &StaticPlane,
+        plane_b: &StaticPlane,
+        radius: f32,
+        axis_direction: Vec3,
+    ) -> StaticQuarterPipe {
+        let axis_point =
+            plane_a.normal * (plane_a.offset + radius) + plane_b.normal * (plane_b.offset + radius);
+        StaticQuarterPipe::new(
+            axis_point,
+            axis_direction,
+            radius,
+            -plane_a.normal,
+            -plane_b.normal,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +427,56 @@ mod tests {
     fn plane_signed_distance_is_positive_above() {
         let ground = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
         assert_eq!(ground.signed_distance(&Vec3::new(0.0, 0.0, 4.0)), 4.0);
+    }
+
+    /// A floor (z=0) meeting a +X side wall at x=100, as if a wall-jump
+    /// test wall — used to check `between_planes`' derived geometry against
+    /// hand-computed expectations.
+    fn floor_and_side_wall() -> (StaticPlane, StaticPlane) {
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -100.0);
+        (floor, wall)
+    }
+
+    #[test]
+    fn quarter_pipe_axis_sits_radius_units_in_from_both_planes() {
+        let (floor, wall) = floor_and_side_wall();
+        let pipe = StaticQuarterPipe::between_planes(&floor, &wall, 20.0, Vec3::new(0.0, 1.0, 0.0));
+        // radius=20: axis at z=20 (in from the floor) and x=100-20=80 (in
+        // from the wall at x=100).
+        assert!((pipe.axis_point.x - 80.0).abs() < 1e-4);
+        assert!((pipe.axis_point.z - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quarter_pipe_sector_vectors_point_toward_each_planes_tangent_point() {
+        let (floor, wall) = floor_and_side_wall();
+        let pipe = StaticQuarterPipe::between_planes(&floor, &wall, 20.0, Vec3::new(0.0, 1.0, 0.0));
+        // sector_start (toward the floor's tangent point) should point
+        // down (-Z); sector_end (toward the wall's tangent point) should
+        // point toward the wall (+X).
+        assert!((pipe.sector_start - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5);
+        assert!((pipe.sector_end - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn quarter_pipe_tangent_points_lie_exactly_on_each_plane() {
+        let (floor, wall) = floor_and_side_wall();
+        let radius = 20.0;
+        let pipe =
+            StaticQuarterPipe::between_planes(&floor, &wall, radius, Vec3::new(0.0, 1.0, 0.0));
+        let floor_tangent = pipe.axis_point + pipe.sector_start * radius;
+        let wall_tangent = pipe.axis_point + pipe.sector_end * radius;
+        assert!(floor.signed_distance(&floor_tangent).abs() < 1e-4);
+        assert!(wall.signed_distance(&wall_tangent).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quarter_pipe_sector_vectors_are_perpendicular_unit_vectors() {
+        let (floor, wall) = floor_and_side_wall();
+        let pipe = StaticQuarterPipe::between_planes(&floor, &wall, 20.0, Vec3::new(0.0, 1.0, 0.0));
+        assert!((pipe.sector_start.length() - 1.0).abs() < 1e-5);
+        assert!((pipe.sector_end.length() - 1.0).abs() < 1e-5);
+        assert!(pipe.sector_start.dot(&pipe.sector_end).abs() < 1e-5);
     }
 }

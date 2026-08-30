@@ -3,7 +3,10 @@
 //! (zlib license — see `THIRD_PARTY_NOTICES.md`). Two paths:
 //! - `resolve_contacts`: one dynamic body (sphere or box, via `RigidBody`'s
 //!   general 3x3 inverse inertia tensor — see `body.rs`) against one static
-//!   plane's contact manifold (1 to 4 points depending on shape/orientation).
+//!   body's contact manifold (1 to 4 points depending on shape/orientation)
+//!   — the static body is identified only by its restitution/friction, so
+//!   this same path serves a `StaticPlane` and, since
+//!   `RB-PHYSICS-001-FR-020`, a `StaticQuarterPipe` fillet equally.
 //! - `resolve_contacts_between`: two dynamic bodies against each other's
 //!   contact manifold (1 point for sphere-vs-box or an edge-edge box
 //!   contact, up to 4 for a box-vs-box face contact — see `collision`).
@@ -42,7 +45,7 @@
 //!   ground behavior (`RB-VERIFY-001`/`RB-VERIFY-002` data). Tracked as an
 //!   open item in `RB-PHYSICS-001`, not asserted as settled.
 
-use crate::body::{RigidBody, StaticPlane};
+use crate::body::RigidBody;
 use crate::collision::Contact;
 use rb_domain::Vec3;
 
@@ -225,21 +228,33 @@ fn resolve_row(row: &mut ConstraintRow, inv_mass: f32, delta: &mut DeltaVelocity
 /// Resolves an entire contact manifold (1 to 4 points — a box resting flat
 /// generates up to 4, matching `RB-PHYSICS-001-FR-004`'s multi-contact
 /// requirement; a sphere always generates exactly 1) against one static
-/// plane. Runs `SOLVER_ITERATIONS` passes of the sequential impulse
-/// solver, each pass resolving every contact's normal row and then every
-/// contact's friction rows (limits re-derived from that same contact's
-/// current normal impulse — matching Bullet's per-iteration friction
-/// reclamping), sharing one accumulated `DeltaVelocity` across the whole
-/// manifold so an earlier contact's resolution already influences a later
-/// contact's `rhs` baseline within the same iteration — then applies the
-/// accumulated velocity change to `body` once.
-pub fn resolve_contacts(body: &mut RigidBody, plane: &StaticPlane, contacts: &[Contact], dt: f32) {
+/// body, identified only by its `restitution`/`friction` (its actual shape
+/// — a `StaticPlane` or, since `RB-PHYSICS-001-FR-020`, a
+/// `StaticQuarterPipe` — is irrelevant here: every `Contact`'s normal/point/
+/// depth is already fully resolved by the caller's own narrow-phase test,
+/// so this function never needs the static shape itself, only the two
+/// material properties it combines with `body`'s own). Runs
+/// `SOLVER_ITERATIONS` passes of the sequential impulse solver, each pass
+/// resolving every contact's normal row and then every contact's friction
+/// rows (limits re-derived from that same contact's current normal impulse
+/// — matching Bullet's per-iteration friction reclamping), sharing one
+/// accumulated `DeltaVelocity` across the whole manifold so an earlier
+/// contact's resolution already influences a later contact's `rhs`
+/// baseline within the same iteration — then applies the accumulated
+/// velocity change to `body` once.
+pub fn resolve_contacts(
+    body: &mut RigidBody,
+    static_restitution: f32,
+    static_friction: f32,
+    contacts: &[Contact],
+    dt: f32,
+) {
     if contacts.is_empty() {
         return;
     }
 
-    let combined_restitution = combine_restitution(body.restitution, plane.restitution);
-    let combined_friction = combine_friction(body.friction, plane.friction);
+    let combined_restitution = combine_restitution(body.restitution, static_restitution);
+    let combined_friction = combine_friction(body.friction, static_friction);
 
     let mut effective_body = *body;
     effective_body.restitution = combined_restitution;
@@ -504,6 +519,7 @@ pub fn resolve_contacts_between(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::body::StaticPlane;
     use crate::collision::{contacts_between, contacts_vs_plane};
 
     fn ground() -> StaticPlane {
@@ -519,7 +535,7 @@ mod tests {
 
     fn resolve_single(body: &mut RigidBody, plane: &StaticPlane, dt: f32) {
         let contacts = contacts_vs_plane(body, plane);
-        resolve_contacts(body, plane, &contacts, dt);
+        resolve_contacts(body, plane.restitution, plane.friction, &contacts, dt);
     }
 
     #[test]
@@ -590,7 +606,8 @@ mod tests {
     fn resolve_contacts_with_an_empty_manifold_is_a_no_op() {
         let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 10.0));
         let before = s.linear_velocity;
-        resolve_contacts(&mut s, &ground(), &[], 1.0 / 60.0);
+        let g = ground();
+        resolve_contacts(&mut s, g.restitution, g.friction, &[], 1.0 / 60.0);
         assert_eq!(s.linear_velocity, before);
     }
 
@@ -610,7 +627,13 @@ mod tests {
         };
         let contacts = contacts_vs_plane(&b, &ground);
         assert_eq!(contacts.len(), 4);
-        resolve_contacts(&mut b, &ground, &contacts, 1.0 / 60.0);
+        resolve_contacts(
+            &mut b,
+            ground.restitution,
+            ground.friction,
+            &contacts,
+            1.0 / 60.0,
+        );
         assert!(b.linear_velocity.z.abs() < 1e-3);
         assert!(
             b.angular_velocity.length() < 1e-3,
