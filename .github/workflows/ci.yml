@@ -63,6 +63,16 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc -y
 
+      # platform-linux's secret_service integration tests spawn a real
+      # dbus-daemon + gnome-keyring-daemon and exercise the Secret Service
+      # D-Bus API end to end -- rustils' own CI installed both the same way
+      # (they hard-fail rather than silently skip if the daemon binary is
+      # missing, matching this workspace's "no racy/skippable-by-accident
+      # test" convention).
+      - name: Install dbus and gnome-keyring (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y dbus gnome-keyring
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:

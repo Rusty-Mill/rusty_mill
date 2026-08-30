@@ -1185,6 +1185,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "coreutils"
+version = "0.1.0"
+dependencies = [
+ "platform 0.27.0",
+ "platform-linux 0.27.0",
+ "platform-mock 0.27.0",
+ "platform-windows 0.27.0",
+ "rpath",
+ "rusty_regx",
+]
+
+[[package]]
 name = "coreutils-async"
 version = "0.1.0"
 dependencies = [
@@ -4298,6 +4310,13 @@ dependencies = [
 [[package]]
 name = "platform"
 version = "0.27.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform"
+version = "0.27.0"
 source = "git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694#83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694"
 dependencies = [
  "thiserror 1.0.69",
@@ -4335,7 +4354,7 @@ version = "0.1.0"
 dependencies = [
  "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
  "platform-async",
- "platform-mock",
+ "platform-mock 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
 ]
 
 [[package]]
@@ -4345,6 +4364,16 @@ source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581
 dependencies = [
  "libc",
  "platform 0.22.1",
+]
+
+[[package]]
+name = "platform-bsd"
+version = "0.27.0"
+dependencies = [
+ "libc",
+ "platform 0.27.0",
+ "platform-mock 0.27.0",
+ "platform-parity",
 ]
 
 [[package]]
@@ -4363,6 +4392,17 @@ source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581
 dependencies = [
  "libc",
  "platform 0.22.1",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.27.0"
+dependencies = [
+ "libc",
+ "platform 0.27.0",
+ "platform-mock 0.27.0",
+ "platform-parity",
+ "rusty_libc",
 ]
 
 [[package]]
@@ -4386,9 +4426,24 @@ dependencies = [
 [[package]]
 name = "platform-mock"
 version = "0.27.0"
+dependencies = [
+ "platform 0.27.0",
+ "platform-parity",
+]
+
+[[package]]
+name = "platform-mock"
+version = "0.27.0"
 source = "git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694#83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694"
 dependencies = [
  "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
+]
+
+[[package]]
+name = "platform-parity"
+version = "0.27.0"
+dependencies = [
+ "platform 0.27.0",
 ]
 
 [[package]]
@@ -4398,6 +4453,18 @@ source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581
 dependencies = [
  "platform 0.22.1",
  "winargv 0.1.0 (git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d)",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "platform-windows"
+version = "0.27.0"
+dependencies = [
+ "platform 0.27.0",
+ "platform-mock 0.27.0",
+ "platform-parity",
+ "rusty_win32",
+ "winargv 0.1.0",
  "windows-sys 0.59.0",
 ]
 
@@ -5964,9 +6031,9 @@ dependencies = [
  "io-uring",
  "libc",
  "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
- "platform-bsd 0.27.0",
+ "platform-bsd 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
  "platform-linux 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
- "platform-windows 0.27.0",
+ "platform-windows 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
  "rusty_std",
  "rusty_tokio-macros",
  "tracing",
@@ -8105,6 +8172,13 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "winargv"
+version = "0.1.0"
+dependencies = [
+ "platform 0.27.0",
+]
 
 [[package]]
 name = "winargv"
