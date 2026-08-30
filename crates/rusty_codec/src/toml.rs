@@ -104,7 +104,10 @@ type PResult<T> = Result<T, &'static str>;
 
 impl Parser {
     fn new(input: &str) -> Self {
-        Parser { chars: input.chars().collect(), pos: 0 }
+        Parser {
+            chars: input.chars().collect(),
+            pos: 0,
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -207,7 +210,9 @@ impl Parser {
     fn ensure_table_path(root: &mut BTreeMap<String, TomlValue>, path: &[String]) -> PResult<()> {
         let mut table = root;
         for segment in path {
-            let entry = table.entry(segment.clone()).or_insert_with(|| TomlValue::Table(BTreeMap::new()));
+            let entry = table
+                .entry(segment.clone())
+                .or_insert_with(|| TomlValue::Table(BTreeMap::new()));
             match entry {
                 TomlValue::Table(inner) => table = inner,
                 _ => return Err("key already defined as a non-table value"),
@@ -216,13 +221,19 @@ impl Parser {
         Ok(())
     }
 
-    fn insert_at_path(root: &mut BTreeMap<String, TomlValue>, path: &[String], value: TomlValue) -> PResult<()> {
+    fn insert_at_path(
+        root: &mut BTreeMap<String, TomlValue>,
+        path: &[String],
+        value: TomlValue,
+    ) -> PResult<()> {
         match path.split_last() {
             None => Err("empty key"),
             Some((last, parents)) => {
                 let mut table = root;
                 for segment in parents {
-                    let entry = table.entry(segment.clone()).or_insert_with(|| TomlValue::Table(BTreeMap::new()));
+                    let entry = table
+                        .entry(segment.clone())
+                        .or_insert_with(|| TomlValue::Table(BTreeMap::new()));
                     match entry {
                         TomlValue::Table(inner) => table = inner,
                         _ => return Err("key already defined as a non-table value"),
@@ -257,7 +268,8 @@ impl Parser {
             Some('\'') => self.parse_literal_string(),
             _ => {
                 let mut s = String::new();
-                while matches!(self.peek(), Some(c) if c.is_alphanumeric() || c == '_' || c == '-') {
+                while matches!(self.peek(), Some(c) if c.is_alphanumeric() || c == '_' || c == '-')
+                {
                     s.push(self.advance().unwrap());
                 }
                 if s.is_empty() {
@@ -289,7 +301,9 @@ impl Parser {
     }
 
     fn matches_keyword(&self, kw: &str) -> bool {
-        kw.chars().enumerate().all(|(i, c)| self.peek_at(i) == Some(c))
+        kw.chars()
+            .enumerate()
+            .all(|(i, c)| self.peek_at(i) == Some(c))
     }
 
     fn advance_by(&mut self, n: usize) {
@@ -360,9 +374,13 @@ impl Parser {
             }
         }
         if seen_dot || seen_exp {
-            raw.parse::<f64>().map(TomlValue::Float).map_err(|_| "invalid float")
+            raw.parse::<f64>()
+                .map(TomlValue::Float)
+                .map_err(|_| "invalid float")
         } else {
-            raw.parse::<i64>().map(TomlValue::Integer).map_err(|_| "invalid integer")
+            raw.parse::<i64>()
+                .map(TomlValue::Integer)
+                .map_err(|_| "invalid integer")
         }
     }
 
@@ -469,30 +487,58 @@ mod tests {
         .unwrap();
         let package = doc.get("package").unwrap();
         assert_eq!(package.get("name").unwrap().as_str(), Some("rusty_codec"));
-        assert_eq!(package.get("metadata").unwrap().get("docs").unwrap().as_bool(), Some(true));
+        assert_eq!(
+            package
+                .get("metadata")
+                .unwrap()
+                .get("docs")
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
     }
 
     #[test]
     fn dotted_keys_build_nested_tables() {
         let doc = TomlValue::parse_str("a.b.c = 1\n").unwrap();
-        assert_eq!(doc.get("a").unwrap().get("b").unwrap().get("c").unwrap().as_i64(), Some(1));
+        assert_eq!(
+            doc.get("a")
+                .unwrap()
+                .get("b")
+                .unwrap()
+                .get("c")
+                .unwrap()
+                .as_i64(),
+            Some(1)
+        );
     }
 
     #[test]
     fn single_line_arrays() {
         let doc = TomlValue::parse_str(r#"xs = [1, 2, 3]"#).unwrap();
         let arr = doc.get("xs").unwrap().as_array().unwrap();
-        assert_eq!(arr, &[TomlValue::Integer(1), TomlValue::Integer(2), TomlValue::Integer(3)]);
+        assert_eq!(
+            arr,
+            &[
+                TomlValue::Integer(1),
+                TomlValue::Integer(2),
+                TomlValue::Integer(3)
+            ]
+        );
     }
 
     #[test]
     fn multi_line_arrays_with_trailing_comma_and_comments() {
-        let doc = TomlValue::parse_str(
-            "xs = [\n  1, # one\n  2,\n  3,\n]\n",
-        )
-        .unwrap();
+        let doc = TomlValue::parse_str("xs = [\n  1, # one\n  2,\n  3,\n]\n").unwrap();
         let arr = doc.get("xs").unwrap().as_array().unwrap();
-        assert_eq!(arr, &[TomlValue::Integer(1), TomlValue::Integer(2), TomlValue::Integer(3)]);
+        assert_eq!(
+            arr,
+            &[
+                TomlValue::Integer(1),
+                TomlValue::Integer(2),
+                TomlValue::Integer(3)
+            ]
+        );
     }
 
     #[test]
@@ -538,9 +584,19 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(doc.get("package").unwrap().get("version").unwrap().as_str(), Some("0.1.0"));
+        assert_eq!(
+            doc.get("package").unwrap().get("version").unwrap().as_str(),
+            Some("0.1.0")
+        );
         let deps = doc.get("dependencies").unwrap();
-        assert_eq!(deps.get("rusty_wire").unwrap().get("path").unwrap().as_str(), Some("../rusty_wire"));
+        assert_eq!(
+            deps.get("rusty_wire")
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .as_str(),
+            Some("../rusty_wire")
+        );
     }
 }
 
@@ -551,8 +607,12 @@ mod real_world_tests {
     #[test]
     fn parses_real_rusty_codec_cargo_toml() {
         let text = include_str!("../Cargo.toml");
-        let doc = TomlValue::parse_str(text).expect("should parse this crate's own real Cargo.toml");
-        assert_eq!(doc.get("package").unwrap().get("name").unwrap().as_str(), Some("rusty_codec"));
+        let doc =
+            TomlValue::parse_str(text).expect("should parse this crate's own real Cargo.toml");
+        assert_eq!(
+            doc.get("package").unwrap().get("name").unwrap().as_str(),
+            Some("rusty_codec")
+        );
         assert!(doc.get("dependencies").unwrap().get("rusty_wire").is_some());
     }
 
@@ -566,7 +626,10 @@ mod real_world_tests {
         let doc = TomlValue::parse_str(text).expect("should parse a real rustls dependency line");
         let rustls = doc.get("dependencies").unwrap().get("rustls").unwrap();
         assert_eq!(rustls.get("version").unwrap().as_str(), Some("0.23"));
-        assert_eq!(rustls.get("default-features").unwrap().as_bool(), Some(false));
+        assert_eq!(
+            rustls.get("default-features").unwrap().as_bool(),
+            Some(false)
+        );
         let features = rustls.get("features").unwrap().as_array().unwrap();
         assert_eq!(
             features,
