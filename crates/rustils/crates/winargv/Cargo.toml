@@ -1,0 +1,16 @@
+[package]
+name = "winargv"
+description = "Windows argv -> command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable). Standalone so handback consumers don't need to depend on platform-windows."
+# Independent of the PAL group's version — see docs/versioning.md §1
+# (winargv has its own handback lifecycle, D3) and CHANGELOG.md.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+platform.workspace = true
+
+[lints]
+workspace = true

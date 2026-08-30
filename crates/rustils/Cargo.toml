@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+exclude = ["fuzz"]
+members = [
+    "crates/platform",
+    "crates/platform-mock",
+    "crates/platform-parity",
+    "crates/platform-linux",
+    "crates/platform-windows",
+    "crates/platform-bsd",
+    "crates/winargv",
+    "crates/coreutils",
+]
+
+[workspace.package]
+# The PAL group's shared version (platform/platform-linux/
+# platform-windows/platform-mock/platform-bsd/platform-parity only —
+# winargv and
+# coreutils version independently, see docs/versioning.md §1). Bump
+# rule: docs/versioning.md §2 (any public API change bumps the middle
+# component; nothing else does). See CHANGELOG.md for what each bump
+# was.
+version = "0.27.0"
+edition = "2021"
+rust-version = "1.75"
+repository = "https://github.com/baileyrd/rustils"
+license = "MIT"
+# Not published to crates.io yet; flip deliberately when ready.
+publish = false
+
+[workspace.dependencies]
+platform = { path = "crates/platform" }
+platform-mock = { path = "crates/platform-mock" }
+platform-parity = { path = "crates/platform-parity" }
+platform-linux = { path = "crates/platform-linux" }
+platform-windows = { path = "crates/platform-windows" }
+platform-bsd = { path = "crates/platform-bsd" }
+winargv = { path = "crates/winargv" }
+thiserror = "1"
+libc = "0.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_Networking_WinSock",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"          # overridden to `forbid` in pure crates; sys/ffi opt in per-crate
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"

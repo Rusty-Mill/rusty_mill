@@ -1,0 +1,125 @@
+[package]
+name = "coreutils"
+description = "Modular pure-Rust implementation of core GNU/POSIX utilities"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+platform.workspace = true
+# Pinned git dependencies, matching the `rusty_libc` treatment in
+# `platform-linux/Cargo.toml`: one source of truth, not a vendored fork.
+# Bump the rev deliberately; never track a branch.
+#
+# These were `path = "../../../rusty_regx"` / `"../../../rpath"`, which
+# only resolve on a machine that happens to have those repos checked out
+# as siblings of the rustils clone. Nothing else does — a fresh clone,
+# and every CI runner, failed at `cargo metadata` before compiling a
+# single line, which took the whole workspace down with it (`test`,
+# `miri`, `deny` and `cross-compile-check` all run workspace-wide).
+#
+# For local co-development against a working tree, add a `[patch]` to
+# the *workspace root* manifest rather than reverting these lines —
+# e.g. `[patch."https://github.com/baileyrd/rusty_regx"]
+# rusty_regx = { path = "../rusty_regx" }` — so the checked-in build
+# stays reproducible for everyone who doesn't have that tree.
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "93c5541d6713750141476c87d6cd774629e1ae3a" }
+rpath = { git = "https://github.com/baileyrd/rpath", rev = "a54684f82efc2abed1a94ef9773ecfaa2dea65c3" }
+
+[dev-dependencies]
+platform-mock.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+platform-windows.workspace = true
+
+[[bin]]
+name = "rcat"
+path = "src/bin/rcat.rs"
+
+[[bin]]
+name = "rls"
+path = "src/bin/rls.rs"
+
+[[bin]]
+name = "rrun"
+path = "src/bin/rrun.rs"
+
+[[bin]]
+name = "rpar"
+path = "src/bin/rpar.rs"
+
+[[bin]]
+name = "rtee"
+path = "src/bin/rtee.rs"
+
+[[bin]]
+name = "rterm"
+path = "src/bin/rterm.rs"
+
+[[bin]]
+name = "rcp"
+path = "src/bin/rcp.rs"
+
+[[bin]]
+name = "rmv"
+path = "src/bin/rmv.rs"
+
+[[bin]]
+name = "rrm"
+path = "src/bin/rrm.rs"
+
+[[bin]]
+name = "rmkdir"
+path = "src/bin/rmkdir.rs"
+
+[[bin]]
+name = "rtouch"
+path = "src/bin/rtouch.rs"
+
+[[bin]]
+name = "rwc"
+path = "src/bin/rwc.rs"
+
+[[bin]]
+name = "rhead"
+path = "src/bin/rhead.rs"
+
+[[bin]]
+name = "rtail"
+path = "src/bin/rtail.rs"
+
+[[bin]]
+name = "rsort"
+path = "src/bin/rsort.rs"
+
+[[bin]]
+name = "runiq"
+path = "src/bin/runiq.rs"
+
+[[bin]]
+name = "rcut"
+path = "src/bin/rcut.rs"
+
+[[bin]]
+name = "rtr"
+path = "src/bin/rtr.rs"
+
+[[bin]]
+name = "rgrep"
+path = "src/bin/rgrep.rs"
+
+[[bin]]
+name = "rfind"
+path = "src/bin/rfind.rs"
+
+[[bin]]
+name = "rxargs"
+path = "src/bin/rxargs.rs"
+
+[lints]
+workspace = true
