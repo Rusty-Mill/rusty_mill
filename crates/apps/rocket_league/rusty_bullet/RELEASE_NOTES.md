@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Modeled arena footprint
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#47](https://github.com/baileyrd/rusty_bullet/pull/47) · `cc68213`
 
 - **Added:** a new `arena` module builds Rocket League's real
   standard-arena boundary entirely from `RB-PHYSICS-001-FR-013`'s existing
