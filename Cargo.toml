@@ -66,6 +66,7 @@ members = [
     "crates/rusty_vulkan",
     "crates/rusty_sync",
     "crates/rusty_h2",
+    "crates/rusty_audio",
     "crates/rusty_db/crates/rusty-db-core",
     "crates/rusty_db/crates/rusty-db-derive",
     "crates/rusty_db/crates/rusty-db-sqlite",
