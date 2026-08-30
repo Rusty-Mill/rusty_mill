@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Flip-cancel
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#41](https://github.com/baileyrd/rusty_bullet/pull/41) · `14d986d`
 
 - **Added:** a dodge's spin (`RB-PHYSICS-001-FR-014`) can now be canceled
   early (`RB-PHYSICS-001-FR-016`) — a further fresh `ControllerInput.jump`
