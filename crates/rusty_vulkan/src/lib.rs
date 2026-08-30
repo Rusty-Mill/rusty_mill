@@ -282,12 +282,20 @@ mod tests {
     fn creating_an_instance_succeeds_when_a_driver_is_present() {
         match Instance::new() {
             Ok(_instance) => {}
-            // Both variants mean "no usable Vulkan on this machine" -- the
-            // former on Windows without a driver installed, the latter on
-            // any platform this crate doesn't bind to at all (e.g. the
-            // ubuntu-latest/macos-latest CI runners).
+            // All three mean "no usable Vulkan on this machine": the first
+            // on Windows without any driver installed, the second on any
+            // platform this crate doesn't bind to at all (e.g. the
+            // ubuntu-latest/macos-latest CI runners), and the third on a
+            // Windows runner that ships `vulkan-1.dll` but has no real GPU
+            // driver registered behind it -- e.g. GitHub's windows-latest.
             Err(VulkanError::LoaderNotFound | VulkanError::UnsupportedPlatform) => {
                 eprintln!("skipping: no Vulkan loader installed on this machine");
+            }
+            // VK_ERROR_INCOMPATIBLE_DRIVER (-9); inlined rather than
+            // referencing `ffi::VK_ERROR_INCOMPATIBLE_DRIVER` since `ffi`
+            // is `cfg(windows)`-only and this test must compile everywhere.
+            Err(VulkanError::CreateInstanceFailed(-9)) => {
+                eprintln!("skipping: no Vulkan-compatible driver installed on this machine");
             }
             Err(e) => panic!("unexpected error creating instance: {e}"),
         }
