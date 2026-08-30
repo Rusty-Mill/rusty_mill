@@ -132,6 +132,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   are now `pub`. A dodge variant of the wall jump, flip-cancel, landing
   auto-orientation assistance, and variable jump height remain not
   implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-015`) — variable jump
+  height: the ground jump gains a hold window — continuing to hold
+  `ControllerInput.jump` after the fresh press that fires it adds a
+  continuous `JUMP_HOLD_ACCELERATION` upward force, for up to
+  `JUMP_HOLD_MAX_DURATION` seconds, on top of the fixed `JUMP_SPEED`
+  impulse; releasing `jump` (or the window running out) stops the extra
+  acceleration immediately. A new `jump_hold_time_remaining` is checked
+  and decremented before the ground jump's own fresh-press handling can
+  re-arm it, so a fresh press's own step is unaffected. Scoped to the
+  ground jump alone — the double jump, a dodge, and the wall jump remain
+  fixed-impulse. `PhysicsWorld` gains `car_jump_hold_time_remaining:
+  Vec<f32>`.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

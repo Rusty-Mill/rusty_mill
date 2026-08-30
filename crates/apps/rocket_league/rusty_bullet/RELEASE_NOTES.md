@@ -6,6 +6,53 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Variable jump height input
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** the ground jump (`RB-PHYSICS-001-FR-010`) gains a hold window
+  (`RB-PHYSICS-001-FR-015`) — continuing to hold `ControllerInput.jump`
+  after the fresh press that fires it adds a continuous
+  `JUMP_HOLD_ACCELERATION` upward force, for up to
+  `JUMP_HOLD_MAX_DURATION` seconds, on top of the press's own fixed
+  `JUMP_SPEED` impulse. Releasing `jump` (or the window simply running
+  out) stops the extra acceleration immediately, matching real Rocket
+  League's held-vs-tapped jump height difference.
+- **Ordering-sensitive by design:** a new per-car `jump_hold_time_remaining:
+  f32` (`PhysicsWorld`'s parallel `car_jump_hold_time_remaining: Vec<f32>`,
+  starting `0.0`) is checked and decremented against whatever value the
+  *previous* call left it at, before that same call's own
+  `on_ground`/`jump_pressed` handling can re-arm it to
+  `JUMP_HOLD_MAX_DURATION` — so a fresh ground-jump press's own step
+  always fires only the plain impulse; only continued holding into later
+  calls earns the extra height.
+- **Scoped to the ground jump alone:** the double jump, a dodge, and the
+  wall jump are all still a single fixed instantaneous impulse, unaffected
+  by how long jump is held — firing any of them requires releasing jump
+  first (a fresh press), which itself unconditionally zeroes the ground
+  jump's hold window before that press's own branch ever runs.
+- **Constants:** `JUMP_HOLD_MAX_DURATION` and `JUMP_HOLD_ACCELERATION` are
+  both uncalibrated placeholders — this port has no public reference for
+  real Rocket League's actual hold-window length or acceleration the way
+  `JUMP_SPEED` does.
+- **Regression fix:** the pre-existing
+  `holding_jump_does_not_repeatedly_relaunch_the_car` test's run duration
+  was extended (1.5s → 3.0s), since a continuously held jump now also
+  earns the variable-height bonus, climbing higher and taking longer to
+  land than a bare `JUMP_SPEED` impulse alone.
+- 6 new unit tests across `drive.rs`/`world.rs` in `rb_physics_bullet` (126
+  total): holding jump after a ground jump adds more upward velocity than
+  tapping it, releasing jump early stops the extra acceleration
+  immediately, the extra acceleration stops accruing once the hold window
+  has expired even if still held, and a double jump fired after holding
+  the ground jump through its whole window still adds exactly one more
+  `JUMP_SPEED` kick rather than an extra variable-height boost, plus — the
+  real end-to-end proof — a held ground jump reaching a greater peak
+  height than a tapped one in a live `PhysicsWorld::step` loop, and a
+  regression test confirming the double-jump-unaffected property holds
+  there too, not just in `drive.rs` isolation.
+
+---
+
 ## Dodge input
 **2026-08-30** · [#37](https://github.com/baileyrd/rusty_bullet/pull/37) · `72150f5`
 
