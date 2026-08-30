@@ -1,1 +1,6 @@
-/target
+# Not anchored to the workspace root: some subtree-merged crates (e.g.
+# rusty_config, see the "cleanup" PR that removed its already-tracked
+# target/) had a stray per-crate target/ committed upstream, from being
+# built standalone before this workspace existed. Matching it at every
+# depth stops that from silently recurring on a future import.
+target/
