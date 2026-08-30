@@ -2,7 +2,7 @@
 
 - Last verified main commit: `b748b86` (merge of [#35](https://github.com/baileyrd/rusty_bullet/pull/35))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a ground jump, air control, a double jump, and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; the dodge directional impulse/torque, variable jump height, a modeled arena footprint, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a ground jump, air control, a double jump (plain or a directional dodge), and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a dodge variant of the wall jump, flip-cancel, landing auto-orientation assistance, variable jump height, a modeled arena footprint, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -291,6 +291,31 @@
   ball-vs-car collision already has, now for walls), and a regression test
   confirming a car near but not touching an existing wall still gets a
   plain double jump.
+- `RB-PHYSICS-001-FR-014` (dodge) — the double jump's fresh press now
+  checks `ControllerInput.pitch`/`roll` at the moment it fires: at or
+  above a new `DODGE_DEADZONE` on either axis, it fires a directional
+  dodge instead of the plain vertical double jump — a purely horizontal
+  `DODGE_SPEED` impulse (along `forward_axis` for `pitch`, `right_axis`
+  for `roll`) plus an instantaneous `DODGE_ANGULAR_SPEED` spin written
+  directly to `RigidBody.angular_velocity` about the perpendicular axis,
+  reusing air control's own pitch/roll axis and sign conventions for
+  direction (though not its `AIR_CONTROL_TORQUE` magnitude). Both axes can
+  contribute at once (a diagonal dodge), simply summed rather than
+  normalized — a documented simplification. Below `DODGE_DEADZONE` on both
+  axes, the plain vertical double jump fires exactly as before; either way
+  the press spends the shared `double_jump_available` resource. Wall jump
+  is untouched — it never checks `pitch`/`roll`, so touching a wall always
+  gets the fixed wall-jump push-off, never a dodge. `DODGE_SPEED` and
+  `WALL_JUMP_HORIZONTAL_SPEED` are now `pub` (mirroring `JUMP_SPEED`) so
+  `world.rs`'s end-to-end tests can assert against, and distinguish
+  between, all three jump variants' distinct magnitudes. Deliberately
+  excludes a dodge variant of the wall jump, flip-cancel, landing
+  auto-orientation assistance, and variable jump height. 10 new unit tests
+  across `drive.rs`/`world.rs` in `rb_physics_bullet` (120 total),
+  including an end-to-end test confirming a car dodges forward with a
+  visible flip after a ground jump in a live `PhysicsWorld::step` loop,
+  and a regression test confirming a car touching a wall with directional
+  stick input still gets the wall jump, not a dodge.
 
 ## In progress
 
@@ -331,14 +356,16 @@
   recorded controller input or to `rb_verify_cli`).
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step), the
-  dodge directional impulse/torque, variable jump height, and a modeled
-  arena footprint beyond generic flat walls — all real, not-yet-started
-  follow-up work (see the spec's Non-goals/Open questions); a car can now
-  drive, steer, boost (on the ground or in the air), handbrake/drift, take
-  a ground jump, a double jump, and a wall jump, and control itself in the
+  approximation once 3+ bodies mutually touch in the same step), a dodge
+  variant of the wall jump, flip-cancel, landing auto-orientation
+  assistance, variable jump height, and a modeled arena footprint beyond
+  generic flat walls — all real, not-yet-started follow-up work (see the
+  spec's Non-goals/Open questions); a car can now drive, steer, boost (on
+  the ground or in the air), handbrake/drift, take a ground jump, a double
+  jump or a directional dodge, and a wall jump, and control itself in the
   air (pitch/yaw/roll), and bounces off the ball/other cars/arena walls,
-  but can't yet dodge, vary its jump height, or interact with a real
+  but can't yet dodge off a wall, cancel a dodge's flip early, get any
+  landing assistance, vary its jump height, or interact with a real
   Rocket League-shaped arena.
 
 ## Next
@@ -346,17 +373,17 @@
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. The dodge directional impulse/torque, variable jump height, and/or a
-   modeled arena footprint — real follow-up work for
-   `rb_physics_bullet::drive`/`world`; `RB-PHYSICS-001-FR-005` (constant
-   calibration, including `drive`'s own uncalibrated constants) needs
-   `PHASE-0-EXIT` real data regardless.
+2. A dodge variant of the wall jump, flip-cancel, landing auto-orientation
+   assistance, variable jump height, and/or a modeled arena footprint —
+   real follow-up work for `rb_physics_bullet::drive`/`world`;
+   `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s own
+   uncalibrated constants) needs `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (160 tests: 23 in `rb_domain`, 110 in
+- `cargo test --workspace`: pass (170 tests: 23 in `rb_domain`, 120 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

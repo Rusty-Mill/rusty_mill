@@ -121,6 +121,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   restoring (not consuming) `double_jump_available` on mere contact. The
   dodge directional impulse/torque, variable jump height, and a modeled
   arena footprint beyond generic flat walls remain not implemented.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-014`) — dodge: the double
+  jump's fresh press now checks `ControllerInput.pitch`/`roll`, firing a
+  directional dodge (a horizontal `DODGE_SPEED` impulse plus an
+  instantaneous `DODGE_ANGULAR_SPEED` spin) instead of the plain vertical
+  double jump whenever either exceeds a new `DODGE_DEADZONE`, reusing air
+  control's own pitch/roll axis and sign conventions. Shares the double
+  jump's `double_jump_available` resource; wall jump never dodges,
+  regardless of stick input. `DODGE_SPEED` and `WALL_JUMP_HORIZONTAL_SPEED`
+  are now `pub`. A dodge variant of the wall jump, flip-cancel, landing
+  auto-orientation assistance, and variable jump height remain not
+  implemented.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

@@ -1233,4 +1233,99 @@ mod tests {
             "expected no wall-jump horizontal push-off when not touching a wall"
         );
     }
+
+    #[test]
+    fn a_car_dodges_forward_after_a_ground_jump_when_pitched_in_the_air() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the jump/dodge impulses from falling back down
+        let dt = 1.0 / 120.0;
+
+        // Ground jump: a fresh press while grounded.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        // Release, then let the car actually leave the ground before
+        // dodging — a dodge, like the plain double jump, only fires while
+        // airborne.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        for _ in 0..12 {
+            world.step(dt);
+        }
+        assert!(
+            world.cars[0].position.z > 18.0 + 1.0,
+            "expected the car to have left the ground before dodging, got z={}",
+            world.cars[0].position.z
+        );
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                pitch: Some(1.0),
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        assert!(
+            (world.cars[0].linear_velocity.x - crate::drive::DODGE_SPEED).abs() < 1.0,
+            "expected the dodge to give ~DODGE_SPEED forward velocity, got {}",
+            world.cars[0].linear_velocity.x
+        );
+        assert!(
+            world.cars[0].angular_velocity.y.abs() > 0.0,
+            "expected the dodge to give the car a visible flip, got {:?}",
+            world.cars[0].angular_velocity
+        );
+    }
+
+    #[test]
+    fn wall_jump_still_fires_instead_of_a_dodge_when_touching_a_wall() {
+        // Regression guard: a car touching a wall with directional stick
+        // input still gets the fixed wall-jump push-off, not a dodge — the
+        // wall-normal branch is checked (and taken) before dodge/double
+        // jump is even considered.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                pitch: Some(1.0),
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        assert!(
+            (world.cars[0].linear_velocity.x - crate::drive::WALL_JUMP_HORIZONTAL_SPEED).abs()
+                < 1.0,
+            "expected the wall jump's own push-off, not a dodge's larger DODGE_SPEED, got {}",
+            world.cars[0].linear_velocity.x
+        );
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected the wall jump's upward component, got {}",
+            world.cars[0].linear_velocity.z
+        );
+    }
 }

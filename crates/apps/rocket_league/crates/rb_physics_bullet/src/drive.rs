@@ -45,16 +45,31 @@
 //!
 //! Double jump reuses the ground jump's own rising-edge detection
 //! (`jump_pressed`) rather than a second edge-detector: the same fresh
-//! press, while airborne, fires one more instantaneous `JUMP_SPEED`
-//! impulse — gated on a per-car `double_jump_available` flag instead of on
-//! `on_ground`. Landing (any step where `on_ground` is true) unconditionally
-//! restores availability; an airborne fresh press consumes it, so it can
-//! fire at most once per airborne period no matter how many times jump is
-//! released and re-pressed after that. This deliberately excludes the
-//! "dodge" directional flip real Rocket League pairs a double jump with (a
-//! sideways/forward impulse and torque from the stick direction at the
-//! moment of the second press) — that's a distinct, still-unimplemented
-//! mechanic, not folded into this increment.
+//! press, while airborne, fires one more instantaneous impulse — gated on a
+//! per-car `double_jump_available` flag instead of on `on_ground`. Landing
+//! (any step where `on_ground` is true) unconditionally restores
+//! availability; an airborne fresh press consumes it, so it can fire at
+//! most once per airborne period no matter how many times jump is released
+//! and re-pressed after that. That impulse is either a plain vertical
+//! `JUMP_SPEED` kick, or a directional **dodge**, depending on the car's
+//! `pitch`/`roll` stick input at the moment of the press: if either exceeds
+//! `DODGE_DEADZONE`, a dodge fires instead — a purely horizontal
+//! `DODGE_SPEED` impulse (along `forward_axis` for pitch, `right_axis` for
+//! roll) plus an instantaneous `DODGE_ANGULAR_SPEED` spin about the
+//! perpendicular axis (`right_axis` for pitch, `forward_axis` for roll) —
+//! the same axis/sign conventions air control's own pitch/roll torque
+//! already uses, so a forward dodge looks like a fast version of a forward
+//! air-control pitch. Both pitch and roll can contribute at once (a
+//! diagonal dodge), simply summed — a documented simplification, since real
+//! Rocket League normalizes the stick direction so a diagonal dodge isn't
+//! faster than an axis-aligned one, and this port doesn't. A dodge is
+//! purely horizontal (no vertical component, unlike the plain double
+//! jump) — real Rocket League's dodge impulse does have a small upward
+//! component too, not modeled here. Below `DODGE_DEADZONE` on both axes,
+//! the plain vertical double jump fires exactly as before dodge existed.
+//! Either way, the press still spends the one `double_jump_available` per
+//! airborne period — a dodge and a plain double jump share the same
+//! resource, matching real Rocket League.
 //!
 //! Wall jump is a *third* jump variant, alongside the ground jump and the
 //! double jump: a fresh press while airborne *and* touching an arena wall
@@ -72,15 +87,22 @@
 //! a double jump left afterward.
 //! Wall jump has no per-wall-contact limit of its own: touching a (new or
 //! the same) wall again always allows another wall jump, unlike the
-//! double jump's once-per-airborne-period limit.
+//! double jump's once-per-airborne-period limit. Wall jump doesn't check
+//! `pitch`/`roll` for a dodge — it always fires the fixed outward-plus-
+//! upward impulse, never a directional flip; real Rocket League's wall
+//! jump can itself be dodged off of, but that's deliberately out of scope
+//! here (see Not implemented).
 //!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): the dodge directional impulse/torque a real double jump pairs
-//! with (see above), and variable jump height (real Rocket League adds
-//! extra upward accel for as long as jump is held, up to a cap — this
+//! dropped): a dodge variant for the wall jump (see above), canceling a
+//! dodge's rotation early by pressing again mid-flip (real Rocket League
+//! lets a player do this; this port always completes the fixed
+//! `DODGE_ANGULAR_SPEED` spin), any auto-orientation assistance on
+//! landing after a dodge, and variable jump height (real Rocket League
+//! adds extra upward accel for as long as jump is held, up to a cap — this
 //! port always applies the same fixed impulse regardless of how long the
-//! button is held, for all three jump variants). A car with no input set
-//! (or all-neutral `ControllerInput::default()`) behaves exactly as a free
+//! button is held, for every jump variant). A car with no input set (or
+//! all-neutral `ControllerInput::default()`) behaves exactly as a free
 //! rigid box always has — this module only ever adds force/torque/impulse
 //! or adjusts the existing friction property, never removes physics
 //! outright.
@@ -94,11 +116,12 @@
 //! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
 //! constants standing in for Rocket League's real speed-dependent throttle
 //! curve and boost-drain behavior; `STEER_TORQUE`,
-//! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`, and
-//! `WALL_JUMP_HORIZONTAL_SPEED` are uncalibrated placeholders chosen only
-//! to produce a visibly responsive turn/slide/spin/push-off for this car's
-//! mass/inertia in tests. None of these are independently confirmed by
-//! this project — see `RB-PHYSICS-001-FR-005`.
+//! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
+//! `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, and `DODGE_ANGULAR_SPEED`
+//! are uncalibrated placeholders chosen only to produce a visibly
+//! responsive turn/slide/spin/push-off/flip for this car's mass/inertia in
+//! tests. None of these are independently confirmed by this project — see
+//! `RB-PHYSICS-001-FR-005`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -173,8 +196,38 @@ const AIR_CONTROL_TORQUE: f32 = 1_000_000.0;
 /// jump press while touching a wall — chosen only to produce a visibly
 /// distinct push-off from the wall in tests, not derived from any measured
 /// or documented Rocket League value. Unlike `JUMP_SPEED`, this port has no
-/// public reference for a wall-jump-specific number to reuse.
-const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
+/// public reference for a wall-jump-specific number to reuse. `pub` so
+/// `world.rs`'s end-to-end tests can assert against it directly (including
+/// distinguishing a wall jump from the differently-sized `DODGE_SPEED`),
+/// the same way `JUMP_SPEED` already is.
+pub const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
+
+/// Arbitrary deadzone for `pitch`/`roll` input at the moment of a double
+/// jump's fresh press: below this magnitude on both axes, the press is
+/// treated as "no directional intent" and fires a plain vertical double
+/// jump; at or above it on either axis, it fires a dodge instead. Not a
+/// physics constant and not derived from any Rocket League value — purely
+/// an input-processing threshold, chosen only to ignore tiny analog stick
+/// drift.
+const DODGE_DEADZONE: f32 = 0.1;
+
+/// Uncalibrated placeholder dodge horizontal impulse speed (uu/s), applied
+/// along `forward_axis` (scaled by `pitch`) and/or `right_axis` (scaled by
+/// `roll`) as an instantaneous velocity change (like `JUMP_SPEED`, not a
+/// continuous force) — chosen only to produce a visibly fast, distinct
+/// dodge in tests, not derived from any measured or documented Rocket
+/// League value. `pub` so `world.rs`'s end-to-end tests can assert against
+/// it directly, the same way `JUMP_SPEED` already is.
+pub const DODGE_SPEED: f32 = 1400.0;
+
+/// Uncalibrated placeholder dodge spin speed (rad/s), added directly to
+/// `RigidBody.angular_velocity` as an instantaneous change (mirroring how
+/// `apply_impulse` directly changes `linear_velocity`, rather than
+/// `apply_torque`'s continuous accumulation, since a dodge's flip is a
+/// single instantaneous kick, not a sustained torque) — chosen only to
+/// produce a visibly fast flip in tests, not derived from any measured or
+/// documented Rocket League value.
+const DODGE_ANGULAR_SPEED: f32 = 5.5;
 
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
@@ -208,16 +261,17 @@ fn right_axis(car: &RigidBody) -> Vec3 {
 /// on every call, including while airborne, so a fresh press is still
 /// required for a double or wall jump even if the button was never
 /// released after the ground jump. `double_jump_available` is whether the
-/// car still has a double jump to spend this airborne period — landing
-/// (`on_ground`) or merely touching a wall (`wall_normal.is_some()`, no
-/// jump press required) both unconditionally set it back to `true`; only
-/// an airborne fresh press that fires the plain double jump (not a wall
-/// jump) sets it to `false`, until the next landing or wall touch.
-/// `wall_normal` is the outward normal of the wall the car is currently
-/// touching, if any (computed by the caller the same way `on_ground` is —
-/// see `PhysicsWorld`); a fresh press while airborne and
-/// `wall_normal.is_some()` fires a wall jump instead of consulting
-/// `double_jump_available` at all. Call once per step, before
+/// car still has a double jump (plain or dodge) to spend this airborne
+/// period — landing (`on_ground`) or merely touching a wall
+/// (`wall_normal.is_some()`, no jump press required) both unconditionally
+/// set it back to `true`; only an airborne fresh press that fires the
+/// double jump or a dodge (not a wall jump) sets it to `false`, until the
+/// next landing or wall touch. `wall_normal` is the outward normal of the
+/// wall the car is currently touching, if any (computed by the caller the
+/// same way `on_ground` is — see `PhysicsWorld`); a fresh press while
+/// airborne and `wall_normal.is_some()` fires a wall jump instead of
+/// consulting `double_jump_available` at all — wall jump never dodges,
+/// regardless of `input.pitch`/`input.roll`. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
@@ -313,11 +367,41 @@ pub fn apply_driven_forces(
                     Vec3::ZERO,
                 );
             } else if *double_jump_available {
-                // Same fixed-magnitude impulse as the ground jump — reusing
-                // JUMP_SPEED rather than a second, separately-calibrated
-                // constant, since this port has no public reference for a
-                // distinct double-jump speed either.
-                car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+                let dodge_pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
+                let dodge_roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
+                if dodge_pitch.abs() > DODGE_DEADZONE || dodge_roll.abs() > DODGE_DEADZONE {
+                    // Dodge: a directional flip instead of a plain vertical
+                    // double jump, reusing the same axis/sign conventions
+                    // air control's own pitch/roll torque already uses —
+                    // forward/back from pitch (translate along
+                    // forward_axis, spin about right_axis), left/right
+                    // from roll (translate along right_axis, spin about
+                    // forward_axis). Purely horizontal, with no vertical
+                    // JUMP_SPEED component — see the module doc comment.
+                    let mut dodge_impulse = Vec3::ZERO;
+                    let mut dodge_spin = Vec3::ZERO;
+                    if dodge_pitch.abs() > DODGE_DEADZONE {
+                        dodge_impulse += forward * (dodge_pitch * DODGE_SPEED);
+                        dodge_spin += right_axis(car) * (dodge_pitch * DODGE_ANGULAR_SPEED);
+                    }
+                    if dodge_roll.abs() > DODGE_DEADZONE {
+                        dodge_impulse += right_axis(car) * (dodge_roll * DODGE_SPEED);
+                        dodge_spin += forward * (dodge_roll * DODGE_ANGULAR_SPEED);
+                    }
+                    car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
+                    // A single instantaneous spin kick, not a continuous
+                    // torque — mirrors how apply_impulse directly changes
+                    // linear_velocity, since RigidBody has no equivalent
+                    // "angular impulse" helper (and none is warranted for
+                    // this one call site).
+                    car.angular_velocity += dodge_spin;
+                } else {
+                    // Same fixed-magnitude impulse as the ground jump — reusing
+                    // JUMP_SPEED rather than a second, separately-calibrated
+                    // constant, since this port has no public reference for a
+                    // distinct double-jump speed either.
+                    car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+                }
                 *double_jump_available = false;
             }
         }
@@ -994,6 +1078,275 @@ mod tests {
             double_jump_available,
             "expected touching a wall to restore the double jump, matching real Rocket \
              League's any-surface-contact-refills-your-second-jump rule"
+        );
+    }
+
+    #[test]
+    fn dodge_gives_forward_velocity_and_spin_when_pitched_in_the_air() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.x - DODGE_SPEED).abs() < 1.0,
+            "expected roughly DODGE_SPEED forward velocity, got {}",
+            c.linear_velocity.x
+        );
+        // A small additional contribution from air control's own
+        // continuous pitch torque (applied unconditionally, same as
+        // ever) is expected and tolerated here.
+        assert!(
+            (c.angular_velocity.y - DODGE_ANGULAR_SPEED).abs() < 1.0,
+            "expected roughly DODGE_ANGULAR_SPEED spin about the right axis, got {}",
+            c.angular_velocity.y
+        );
+    }
+
+    #[test]
+    fn dodge_gives_lateral_velocity_and_spin_when_rolled_in_the_air() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            roll: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
+            "expected roughly DODGE_SPEED lateral velocity, got {}",
+            c.linear_velocity.y
+        );
+        assert!(
+            (c.angular_velocity.x - DODGE_ANGULAR_SPEED).abs() < 1.0,
+            "expected roughly DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
+            c.angular_velocity.x
+        );
+    }
+
+    #[test]
+    fn small_stick_deflection_below_deadzone_still_gives_a_plain_double_jump() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(0.05), // below DODGE_DEADZONE (0.1)
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.linear_velocity.x, 0.0,
+            "expected no dodge push-off from a below-deadzone stick deflection"
+        );
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected a plain double jump instead, got {}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn dodge_consumes_the_double_jump_same_as_a_plain_one() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            !double_jump_available,
+            "expected a dodge to spend the double jump, same as a plain one"
+        );
+    }
+
+    #[test]
+    fn opposite_pitch_dodges_the_opposite_direction() {
+        let mut left = car();
+        let mut left_boost = MAX_BOOST;
+        let mut left_jump_held = false;
+        let mut left_double_jump_available = true;
+        let forward_input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut left,
+            &forward_input,
+            false,
+            &mut left_boost,
+            &mut left_jump_held,
+            &mut left_double_jump_available,
+            1.0 / 60.0,
+        );
+
+        let mut right = car();
+        let mut right_boost = MAX_BOOST;
+        let mut right_jump_held = false;
+        let mut right_double_jump_available = true;
+        let backward_input = ControllerInput {
+            jump: true,
+            pitch: Some(-1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut right,
+            &backward_input,
+            false,
+            &mut right_boost,
+            &mut right_jump_held,
+            &mut right_double_jump_available,
+            1.0 / 60.0,
+        );
+
+        assert!(left.linear_velocity.x * right.linear_velocity.x < 0.0);
+        assert!(left.angular_velocity.y * right.angular_velocity.y < 0.0);
+    }
+
+    #[test]
+    fn a_diagonal_dodge_combines_pitch_and_roll() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            roll: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.x - DODGE_SPEED).abs() < 1.0,
+            "expected the forward component of a diagonal dodge, got {}",
+            c.linear_velocity.x
+        );
+        assert!(
+            (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
+            "expected the lateral component of a diagonal dodge, got {}",
+            c.linear_velocity.y
+        );
+    }
+
+    #[test]
+    fn dodge_has_no_effect_while_grounded() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            true,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.linear_velocity.x, 0.0,
+            "expected no dodge push-off from a grounded jump, regardless of stick input"
+        );
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected the ordinary ground jump instead, got {}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn wall_jump_fires_instead_of_a_dodge_when_touching_a_wall() {
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_wall(
+            &mut c,
+            &input,
+            false,
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        // A dodge would give ~DODGE_SPEED (1400) horizontal velocity and no
+        // vertical component; a wall jump gives ~WALL_JUMP_HORIZONTAL_SPEED
+        // (550) horizontal plus ~JUMP_SPEED vertical — distinct enough to
+        // tell the two apart.
+        assert!(
+            (c.linear_velocity.x - WALL_JUMP_HORIZONTAL_SPEED).abs() < 1.0,
+            "expected a wall jump's push-off, not a dodge's, got {}",
+            c.linear_velocity.x
+        );
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected the wall jump's upward component, got {}",
+            c.linear_velocity.z
         );
     }
 

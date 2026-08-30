@@ -1,14 +1,15 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.13.0
+- Version: 0.14.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), and body-vs-arena-wall collision
   all implemented, tested, and wired into a real N-body `PhysicsWorld`
   scene; ground-driving car input (throttle, steering), boost, handbrake, a
-  ground jump, a double jump, a wall jump, and air control (pitch/yaw/roll)
-  implemented; the dodge directional impulse/torque, variable jump height,
-  a full arena footprint, split impulse, warm-starting, a combined
-  multi-body solve, and constant calibration are open follow-up work)
+  ground jump, a double jump (plain or a directional dodge), a wall jump,
+  and air control (pitch/yaw/roll) implemented; a dodge variant of the wall
+  jump, variable jump height, a full arena footprint, split impulse,
+  warm-starting, a combined multi-body solve, and constant calibration are
+  open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -50,10 +51,12 @@ reduces its ground friction while held, letting it slide instead of
 gripping cleanly through a turn — see FR-009 — a single fixed-height
 ground jump, fired once per fresh press — see FR-010 — air control
 (pitch/yaw/roll torque about its own local axes while airborne) — see
-FR-011 — a double jump, an identical airborne impulse spendable once per
-airborne period and restored on landing — see FR-012 — and a wall jump, an
+FR-011 — a double jump, an airborne impulse spendable once per airborne
+period and restored on landing — see FR-012 — a wall jump, an
 outward-plus-upward impulse fired while touching an arena wall, which also
-restores the double jump the same way landing does — see FR-013.
+restores the double jump the same way landing does — see FR-013 — and a
+dodge, a directional variant of the double jump fired when the stick is
+held in a direction at the moment of the press — see FR-014.
 
 ## Non-goals (this increment)
 
@@ -71,21 +74,25 @@ restores the double jump the same way landing does — see FR-013.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **The dodge directional impulse/torque and variable jump height.**
-  `drive::apply_driven_forces` now covers ground throttle and steering
-  (FR-007), boost (FR-008), handbrake/drift (FR-009), a ground jump
-  (FR-010), air control (FR-011), a double jump (FR-012), and a wall jump
-  (FR-013). Real Rocket League's jump system is still richer than that:
+- **A dodge variant of the wall jump, flip-cancel, landing auto-upright,
+  and variable jump height.** `drive::apply_driven_forces` now covers
+  ground throttle and steering (FR-007), boost (FR-008), handbrake/drift
+  (FR-009), a ground jump (FR-010), air control (FR-011), a double jump —
+  plain or a directional dodge (FR-012/FR-014) — and a wall jump (FR-013).
+  Real Rocket League's jump system is still richer than that: a wall jump
+  can itself be dodged off of (not modeled — this port's wall jump always
+  fires the same fixed outward-plus-upward impulse, checking `wall_normal`
+  before ever consulting `pitch`/`roll`); a dodge's rotation can be
+  canceled early by pressing jump again mid-flip (not modeled — this port's
+  dodge always completes its fixed `DODGE_ANGULAR_SPEED` spin); Rocket
+  League also auto-corrects a car's orientation somewhat on landing after a
+  dodge (not modeled — no landing assistance of any kind exists here); and
   holding jump adds extra upward acceleration for a short window (variable
-  height, not modeled — this port always applies the same fixed
-  `JUMP_SPEED` for the ground jump, double jump, and wall jump alike), and
-  a real double jump (whether off the ground/air or off a wall) is usually
-  paired with a directional "dodge" impulse and torque from the stick
-  direction at the moment of the second press (not modeled — this port's
-  double and wall jumps are a second identical vertical-plus-outward
-  impulse only, no directional component). Each is its own real feature,
-  not a small extension of the jump variants already implemented — left as
-  separate, explicitly tracked follow-up work.
+  height, not modeled — this port always applies the same fixed impulse
+  magnitude for every jump variant regardless of how long the button is
+  held). Each is its own real feature, not a small extension of the jump
+  variants already implemented — left as separate, explicitly tracked
+  follow-up work.
 - **A full arena footprint, or any Rocket-League-specific wall geometry.**
   FR-013's `PhysicsWorld.walls` is a flat list of generic `StaticPlane`s a
   caller places wherever it wants (typically with a horizontal normal);
@@ -294,6 +301,29 @@ restores the double jump the same way landing does — see FR-013.
   directional "dodge" a real wall jump can pair with, variable jump
   height, and any modeled arena footprint beyond generic flat walls — see
   Non-goals.
+- `RB-PHYSICS-001-FR-014` (dodge, implemented): the double jump's fresh
+  press (see FR-012) now checks `ControllerInput.pitch`/`roll` at the
+  moment it fires: if either exceeds a new `DODGE_DEADZONE`, it fires a
+  directional dodge instead of the plain vertical double jump — a purely
+  horizontal `DODGE_SPEED` impulse (along `forward_axis`, scaled by
+  `pitch`, and/or `right_axis`, scaled by `roll`) plus an instantaneous
+  `DODGE_ANGULAR_SPEED` spin added directly to `RigidBody.angular_velocity`
+  about the perpendicular axis (`right_axis` for pitch, `forward_axis` for
+  roll) — reusing air control's own pitch/roll axis and sign conventions,
+  so a forward dodge looks like a fast version of a forward air-control
+  pitch. Both axes can contribute at once (a diagonal dodge), simply summed
+  rather than normalized — a documented simplification, since real Rocket
+  League normalizes the stick direction so a diagonal dodge isn't faster
+  than an axis-aligned one. A dodge has no vertical component (unlike the
+  plain double jump); below `DODGE_DEADZONE` on both axes, the plain
+  vertical double jump fires exactly as it did before this requirement.
+  Either way the press still spends the shared `double_jump_available`
+  resource — a dodge and a plain double jump aren't separate resources.
+  Wall jump is untouched: it never checks `pitch`/`roll` at all, so
+  touching a wall always gets the fixed wall-jump push-off, never a dodge
+  (see Non-goals). `DODGE_SPEED` is now `pub`, alongside the newly-`pub`
+  `WALL_JUMP_HORIZONTAL_SPEED`, so `world.rs`'s end-to-end tests can assert
+  against — and distinguish between — both.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -329,10 +359,15 @@ restores the double jump the same way landing does — see FR-013.
   rising-edge-triggered ground jump impulse, airborne pitch/yaw/roll
   torque, a second rising-edge-triggered airborne jump impulse (double
   jump, gated on and consuming a `double_jump_available` flag rather than
-  ground contact), and a third jump variant fired instead of the double
-  jump when a `wall_normal` (the outward normal of a touched wall, if any)
-  is present — an outward-plus-upward impulse that restores rather than
-  consumes `double_jump_available` (not a Bullet3 port — this project's own
+  ground contact — either a plain vertical `JUMP_SPEED` kick or, when
+  `pitch`/`roll` exceed `DODGE_DEADZONE` at the moment of the press, a
+  directional dodge: a horizontal `DODGE_SPEED` impulse plus an
+  instantaneous `DODGE_ANGULAR_SPEED` spin written directly to
+  `RigidBody.angular_velocity`), and a third jump variant fired instead of
+  the double-jump-or-dodge branch when a `wall_normal` (the outward normal
+  of a touched wall, if any) is present — an outward-plus-upward impulse
+  that restores rather than consumes `double_jump_available`, and never
+  dodges regardless of stick input (not a Bullet3 port — this project's own
   model of Rocket League's driving mechanics, since the real numbers aren't
   public; see the module's own doc comment for which constants are
   commonly-cited community estimates vs. uncalibrated placeholders).
@@ -487,9 +522,22 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   instead_of_passing_through` already gives for cars, now for the generic
   plane-collision machinery walls reuse; a regression test confirms a car
   not actually touching an existing wall still gets a plain double jump,
-  not a wall jump. All FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013
-  behavior covered by `rb_physics_bullet`'s unit tests (110 tests as of
-  this version).
+  not a wall jump.
+- FR-014 (met, dodge): a fresh double-jump press with `pitch` (forward) or
+  `roll` (sideways) held gives horizontal velocity along the matching axis
+  plus a visible spin, in the opposite direction for opposite stick sign; a
+  deflection below `DODGE_DEADZONE` still gives a plain double jump;
+  either way the press spends `double_jump_available`; a diagonal
+  (`pitch`+`roll`) press combines both axes; dodge logic never fires while
+  grounded (the ground jump owns that branch entirely) or while touching a
+  wall (the wall jump fires its own fixed push-off regardless of stick
+  input). An end-to-end `PhysicsWorld::step` test confirms a car dodges
+  forward with a visible flip after a ground jump, and a regression test
+  confirms a car touching a wall with directional stick input still gets
+  the wall jump's own (smaller, purely horizontal-plus-vertical) push-off
+  rather than the dodge's (larger, purely horizontal) one. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014 behavior covered
+  by `rb_physics_bullet`'s unit tests (120 tests as of this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -510,28 +558,35 @@ one-pair-at-a-time solve, see Non-goals, is untested against that).
 `MAX_CAR_SPEED`, `MAX_BOOST`, `BOOST_ACCELERATION`, and `JUMP_SPEED` are
 commonly-cited community numbers, but `THROTTLE_ACCELERATION`,
 `BOOST_CONSUMPTION_RATE`, `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
-`AIR_CONTROL_TORQUE`, and `WALL_JUMP_HORIZONTAL_SPEED` are this project's
-own simplifications (or, for `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/
-`AIR_CONTROL_TORQUE`/`WALL_JUMP_HORIZONTAL_SPEED`, uncalibrated
-placeholders with no public reference at all) — the unit tests confirm the
-*shape* of the response (accelerates, caps at max speed, yaws when moving
-not when parked, boosts regardless of ground contact, drains the tank at a
-constant rate even once the force itself stops applying, slides more under
-reduced handbrake friction than under normal grip, jumps once per fresh
-press, spins about the correct axis from a standing start in the air, can
-spend exactly one extra airborne jump per airborne period, and pushes
-outward from a touched wall with no such limit), not that a real car's
-throttle/steer/boost/handbrake/jump/double-jump/wall-jump/air-control
-response actually matches these curves. The double jump reuses `JUMP_SPEED`
-rather than introducing a second speed constant, so it inherits that
-constant's validation status as-is; the wall jump reuses `JUMP_SPEED` for
-its vertical component but introduces `WALL_JUMP_HORIZONTAL_SPEED` for its
-horizontal one, since this port has no public reference for either a
-double-jump-specific or a wall-jump-specific speed to reuse instead —
-real Rocket League's actual impulses for these may differ from the ground
-jump's, which this port doesn't model. `AIR_CONTROL_TORQUE` is additionally
-a per-axis simplification: real Rocket League's pitch/yaw/roll rates differ
-from each other, and this port shares one constant across all three.
+`AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, and
+`DODGE_ANGULAR_SPEED` are this project's own simplifications (or, for
+`STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/`AIR_CONTROL_TORQUE`/
+`WALL_JUMP_HORIZONTAL_SPEED`/`DODGE_SPEED`/`DODGE_ANGULAR_SPEED`,
+uncalibrated placeholders with no public reference at all) — the unit
+tests confirm the *shape* of the response (accelerates, caps at max speed,
+yaws when moving not when parked, boosts regardless of ground contact,
+drains the tank at a constant rate even once the force itself stops
+applying, slides more under reduced handbrake friction than under normal
+grip, jumps once per fresh press, spins about the correct axis from a
+standing start in the air, can spend exactly one extra airborne jump per
+airborne period, pushes outward from a touched wall with no such limit,
+and dodges in the stick's direction with a visible flip when that jump is
+spent with pitch or roll held), not that a real car's throttle/steer/boost/
+handbrake/jump/double-jump/wall-jump/dodge/air-control response actually
+matches these curves. The double jump reuses `JUMP_SPEED` rather than
+introducing a second speed constant, so it inherits that constant's
+validation status as-is; the wall jump reuses `JUMP_SPEED` for its
+vertical component but introduces `WALL_JUMP_HORIZONTAL_SPEED` for its
+horizontal one; the dodge introduces its own `DODGE_SPEED` (horizontal)
+and `DODGE_ANGULAR_SPEED` (spin) rather than reusing either — this port
+has no public reference for a double-jump-, wall-jump-, or dodge-specific
+number to reuse instead of inventing its own — real Rocket League's actual
+impulses for these may differ from the ground jump's and from each other,
+which this port doesn't model. `AIR_CONTROL_TORQUE` is additionally a
+per-axis simplification: real Rocket League's pitch/yaw/roll rates differ
+from each other, and this port shares one constant across all three; the
+dodge reuses those same axis/sign conventions for its own direction, but
+not `AIR_CONTROL_TORQUE`'s magnitude.
 
 ## Traceability
 
@@ -543,11 +598,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   one other body (see Non-goals) — needs real recorded multi-car contact
   data to know whether the current one-pair-at-a-time approximation
   actually matters for fidelity, or is fine in practice; not started.
-- The dodge directional impulse/torque and variable jump height (see
-  Non-goals) — each a distinct real mechanic; not started. (Double jump
-  and wall jump themselves — a plain second vertical, or outward-plus-
-  vertical, impulse, no directional component — are now implemented as
-  FR-012/FR-013.)
+- A dodge variant of the wall jump, canceling a dodge's rotation early
+  (flip-cancel), landing auto-orientation assistance, and variable jump
+  height (see Non-goals) — each a distinct real mechanic; not started.
+  (The double jump's own dodge — a directional flip off the ground/air,
+  no wall involved — is now implemented as FR-014.)
 - A modeled arena footprint (Rocket League's actual octagonal shape,
   curved wall-to-floor/wall-to-ceiling transitions, a ceiling) and
   disambiguating a car touching two walls at once (a corner) — see
@@ -557,14 +612,16 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   complexity; not started.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
-  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, and re-checking
+  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
+  `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, and re-checking
   `MAX_CAR_SPEED`/`MAX_BOOST`/`BOOST_ACCELERATION`/`JUMP_SPEED`) against
   real recorded driving data — needs `RB-VERIFY-002` capture data; not
   started. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
-  `AIR_CONTROL_TORQUE`, and `WALL_JUMP_HORIZONTAL_SPEED` in particular
-  have no public reference at all (unlike gravity, max speed, the boost
-  constants, or `JUMP_SPEED`), so any of them may be off by a large
-  factor, not just imprecise.
+  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
+  `DODGE_SPEED`, and `DODGE_ANGULAR_SPEED` in particular have no public
+  reference at all (unlike gravity, max speed, the boost constants, or
+  `JUMP_SPEED`), so any of them may be off by a large factor, not just
+  imprecise.
 - Splitting `AIR_CONTROL_TORQUE` into distinct per-axis constants (pitch,
   yaw, roll) once real recorded air-control data exists to calibrate them
   separately — real Rocket League's three rates genuinely differ (roll
@@ -603,6 +660,46 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.14.0 (2026-08-30): FR-014 added and implemented (dodge) — the double
+  jump's own fresh press (see FR-012) now checks `ControllerInput.pitch`/
+  `roll` at the moment it fires: at or above a new `DODGE_DEADZONE` on
+  either axis, it fires a directional dodge instead of the plain vertical
+  double jump — a purely horizontal `DODGE_SPEED` impulse (along
+  `forward_axis` for `pitch`, `right_axis` for `roll`) plus an
+  instantaneous `DODGE_ANGULAR_SPEED` spin added directly to
+  `RigidBody.angular_velocity` (mirroring how `apply_impulse` already
+  directly changes `linear_velocity`, rather than `apply_torque`'s
+  continuous accumulation, since `RigidBody` has no "angular impulse"
+  helper and none was warranted for this one call site) about the
+  perpendicular axis (`right_axis` for `pitch`, `forward_axis` for
+  `roll`) — reusing air control's own pitch/roll axis and sign
+  conventions for direction, though not its `AIR_CONTROL_TORQUE`
+  magnitude. Both axes can contribute at once (a diagonal dodge), simply
+  summed rather than normalized — a documented simplification, since real
+  Rocket League normalizes the stick direction so a diagonal dodge isn't
+  faster than an axis-aligned one. Below `DODGE_DEADZONE` on both axes, the
+  plain vertical double jump fires exactly as before this requirement;
+  either way the press still spends the shared `double_jump_available`
+  resource. Wall jump is untouched — it never checks `pitch`/`roll` at
+  all, so touching a wall always gets the fixed wall-jump push-off, never
+  a dodge. `DODGE_SPEED` and `WALL_JUMP_HORIZONTAL_SPEED` are now `pub`
+  (mirroring `JUMP_SPEED`) so `world.rs`'s end-to-end tests can assert
+  against, and distinguish between, all three jump variants' distinct
+  magnitudes. Deliberately excludes a dodge variant of the wall jump,
+  canceling a dodge's rotation early (flip-cancel), landing
+  auto-orientation assistance, and variable jump height — see Non-goals.
+  10 new unit tests across `drive.rs` and `world.rs` in `rb_physics_bullet`
+  (120 total): a forward (pitch) dodge and a lateral (roll) dodge each
+  give the expected horizontal velocity and spin, a below-deadzone
+  deflection still gives a plain double jump, a dodge spends
+  `double_jump_available` the same as a plain double jump, opposite pitch
+  dodges the opposite direction, a diagonal (pitch+roll) dodge combines
+  both axes, dodge logic has no effect while grounded, and a wall jump
+  still fires its own (smaller) push-off instead of a dodge when touching
+  a wall; an end-to-end test confirms a car dodges forward with a visible
+  flip after a ground jump in a live `PhysicsWorld::step` loop, and a
+  second end-to-end test confirms a car touching a wall with directional
+  stick input still gets the wall jump, not a dodge.
 - 0.13.0 (2026-08-30): FR-013 added and implemented (arena walls and wall
   jump) — `PhysicsWorld` gains `walls: Vec<StaticPlane>` and a `with_wall`
   builder (mirroring `with_car`); `resolve_ground_contact` is renamed
