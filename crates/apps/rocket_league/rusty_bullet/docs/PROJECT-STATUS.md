@@ -2,7 +2,7 @@
 
 - Last verified main commit: `14d986d` (merge of [#41](https://github.com/baileyrd/rusty_bullet/pull/41))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a dodge variant of the wall jump, landing auto-orientation assistance, a modeled arena footprint, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), and a wall jump (itself dodgeable and flip-cancelable the same way) all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; landing auto-orientation assistance, a modeled arena footprint, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -367,6 +367,34 @@
   a live `PhysicsWorld::step` loop, and a regression test confirming
   landing and a later plain double jump clear a stale cancelable-flip flag
   there too, not just in `drive.rs` isolation.
+- `RB-PHYSICS-001-FR-017` (wall-jump dodge) — the wall jump's own fresh
+  press now checks `ControllerInput.pitch`/`roll` against `DODGE_DEADZONE`,
+  the same check the ground double jump's press already uses: at or above
+  it on either axis, a wall-jump dodge fires instead of the plain fixed
+  push-off — the same outward-plus-upward impulse combined with a
+  horizontal `DODGE_SPEED` component and `DODGE_ANGULAR_SPEED` spin
+  (identical axis/sign conventions to the ground dodge), also arming
+  `dodge_flip_active` so its spin is flip-cancelable exactly like a ground
+  dodge's. Below the deadzone, the plain wall jump fires exactly as before,
+  still never touching `double_jump_available`. Unlike the plain wall
+  jump, the dodge variant *does* consume `double_jump_available` — a
+  deliberate simplification: since touching a wall unconditionally
+  restores `double_jump_available` before this check ever runs, gating the
+  dodge variant on it would be vacuous (always true there); having it
+  spend the resource instead keeps flip-cancel's existing invariant intact
+  with zero changes to its branch ordering. No new physics constants —
+  reuses `DODGE_SPEED`/`DODGE_ANGULAR_SPEED`/`WALL_JUMP_HORIZONTAL_SPEED`/
+  `JUMP_SPEED` outright. Two pre-existing tests whose entire premise this
+  requirement deliberately reverses ("wall jump always ignores stick
+  input") were repurposed in place — not silently deleted — to assert the
+  new behavior instead. 6 new unit tests across `drive.rs`/`world.rs` in
+  `rb_physics_bullet` (138 total): a wall-jump dodge consumes the double
+  jump unlike a plain wall jump; its spin can be flip-cancelled; a
+  below-deadzone stick deflection still gives a plain wall jump; opposite
+  stick sign dodges the opposite direction; a diagonal (pitch+roll)
+  wall-jump dodge combines both axes, plus — the real end-to-end proof — a
+  wall-jump dodge firing in a live `PhysicsWorld::step` loop, and a second
+  end-to-end test confirming its spin is flip-cancelable there too.
 
 ## In progress
 
@@ -407,33 +435,32 @@
   recorded controller input or to `rb_verify_cli`).
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step), a dodge
-  variant of the wall jump, landing auto-orientation assistance, and a
-  modeled arena footprint beyond generic flat walls — all real,
-  not-yet-started follow-up work (see the spec's Non-goals/Open
-  questions); a car can now drive, steer, boost (on the ground or in the
-  air), handbrake/drift, take a ground jump (with variable height), a
-  double jump or a directional, flip-cancelable dodge, and a wall jump,
-  and control itself in the air (pitch/yaw/roll), and bounces off the
-  ball/other cars/arena walls, but can't yet dodge off a wall, get any
-  landing assistance, or interact with a real Rocket League-shaped arena.
+  approximation once 3+ bodies mutually touch in the same step), landing
+  auto-orientation assistance, and a modeled arena footprint beyond generic
+  flat walls — all real, not-yet-started follow-up work (see the spec's
+  Non-goals/Open questions); a car can now drive, steer, boost (on the
+  ground or in the air), handbrake/drift, take a ground jump (with
+  variable height), a double jump or a directional, flip-cancelable dodge,
+  and a wall jump (itself dodgeable and flip-cancelable the same way), and
+  control itself in the air (pitch/yaw/roll), and bounces off the
+  ball/other cars/arena walls, but can't yet get any landing assistance or
+  interact with a real Rocket League-shaped arena.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A dodge variant of the wall jump, landing auto-orientation assistance,
-   and/or a modeled arena footprint — real follow-up work for
-   `rb_physics_bullet::drive`/`world`; `RB-PHYSICS-001-FR-005` (constant
-   calibration, including `drive`'s own uncalibrated constants) needs
-   `PHASE-0-EXIT` real data regardless.
+2. Landing auto-orientation assistance and/or a modeled arena footprint —
+   real follow-up work for `rb_physics_bullet::drive`/`world`;
+   `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s own
+   uncalibrated constants) needs `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (182 tests: 23 in `rb_domain`, 132 in
+- `cargo test --workspace`: pass (188 tests: 23 in `rb_domain`, 138 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
