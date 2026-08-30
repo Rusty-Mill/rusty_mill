@@ -28,7 +28,7 @@ pub struct Contact {
 /// bodies don't jitter between "touching" and "not touching" every frame.
 const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
 
-use crate::body::StaticPlane;
+use crate::body::{StaticPlane, StaticQuarterPipe};
 
 /// Analytic sphere-vs-plane contact: the sphere's closest point to the
 /// plane is always `position - normal * radius`, so the general
@@ -101,6 +101,68 @@ pub fn contacts_vs_plane(body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> 
         Shape::Box { half_extents } => {
             box_vs_plane(body.position, body.orientation, half_extents, plane)
         }
+    }
+}
+
+/// Analytic sphere-vs-quarter-pipe contact (`RB-PHYSICS-001-FR-020`): the
+/// sphere lives *inside* the partial cylinder's concave face (see
+/// `StaticQuarterPipe`'s own doc comment for why), so — unlike
+/// `sphere_vs_plane`, where the sphere's closest point is always
+/// `position - normal * radius` on the *outside* of a solid half-space —
+/// contact fires as the sphere's surface approaches or crosses the
+/// cylinder's own radius from the inside, and the correction pushes the
+/// sphere back *toward* the axis, not away from it.
+fn sphere_vs_quarter_pipe(
+    position: Vec3,
+    radius: f32,
+    pipe: &StaticQuarterPipe,
+) -> Option<Contact> {
+    let rel = position - pipe.axis_point;
+    let along_axis = rel.dot(&pipe.axis_direction);
+    let perp = rel - pipe.axis_direction * along_axis;
+    let dist = perp.length();
+
+    // The sphere center sitting exactly on the pipe's axis has no
+    // well-defined direction to push along — an unlikely exact
+    // singularity, the same category as the landing-auto-orientation
+    // assist's exactly-upside-down case (RB-PHYSICS-001-FR-018).
+    if dist < 1e-6 {
+        return None;
+    }
+    let dir = perp * (1.0 / dist);
+
+    // Only this fillet's own 90-degree sector is governed by it — outside
+    // that range, whichever flat plane it bridges takes over instead (see
+    // the struct's own doc comment).
+    if dir.dot(&pipe.sector_start) < 0.0 || dir.dot(&pipe.sector_end) < 0.0 {
+        return None;
+    }
+
+    let gap = (pipe.radius - radius) - dist;
+    if gap > CONTACT_PROCESSING_THRESHOLD {
+        return None;
+    }
+
+    let point = pipe.axis_point + pipe.axis_direction * along_axis + dir * pipe.radius;
+    Some(Contact {
+        normal: -dir,
+        point,
+        penetration_depth: -gap,
+    })
+}
+
+/// Dispatches a contact test against a quarter-pipe fillet. Boxes (cars)
+/// return no contact — colliding an oriented box against a curved surface
+/// needs real support-mapping/SAT-style machinery this port doesn't have
+/// yet, deliberately deferred (see `RB-PHYSICS-001-FR-020`'s Non-goals); a
+/// car can still drive straight through a curve's footprint without being
+/// deflected by it, exactly as if the curve weren't there.
+pub fn contacts_vs_quarter_pipe(body: &RigidBody, pipe: &StaticQuarterPipe) -> Vec<Contact> {
+    match body.shape {
+        Shape::Sphere { radius } => sphere_vs_quarter_pipe(body.position, radius, pipe)
+            .into_iter()
+            .collect(),
+        Shape::Box { .. } => Vec::new(),
     }
 }
 
@@ -866,5 +928,96 @@ mod tests {
                 c.normal
             );
         }
+    }
+
+    /// A floor (z=0) meeting a +X side wall at x=100, fillet radius 20 —
+    /// the axis sits at (80, y, 20), matching `body::tests::
+    /// quarter_pipe_axis_sits_radius_units_in_from_both_planes`.
+    fn floor_wall_pipe() -> StaticQuarterPipe {
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -100.0);
+        crate::body::StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            20.0,
+            Vec3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    #[test]
+    fn sphere_deep_inside_the_pipe_has_no_contact() {
+        // Sitting right on the axis's own perpendicular-plane origin plus
+        // a tiny nudge (avoiding the exact-on-axis singularity) is deep
+        // inside a 20-unit-radius pipe for a 1-unit sphere.
+        let pipe = floor_wall_pipe();
+        let s = RigidBody::sphere(1.0, 1.0, pipe.axis_point + Vec3::new(0.0, 0.0, 0.1));
+        assert!(contacts_vs_quarter_pipe(&s, &pipe).is_empty());
+    }
+
+    #[test]
+    fn sphere_touching_the_pipe_surface_has_zero_penetration() {
+        let pipe = floor_wall_pipe();
+        let radius = 1.0;
+        // Exactly radius+sphere_radius from the axis, along the sector
+        // bisector (halfway between sector_start and sector_end) — well
+        // inside the 90-degree sector.
+        let bisector = ((pipe.sector_start + pipe.sector_end) * 0.5)
+            .normalize()
+            .unwrap();
+        let position = pipe.axis_point + bisector * (pipe.radius - radius);
+        let s = RigidBody::sphere(radius, 1.0, position);
+        let contacts = contacts_vs_quarter_pipe(&s, &pipe);
+        assert_eq!(contacts.len(), 1);
+        assert!(contacts[0].penetration_depth.abs() < 1e-4);
+    }
+
+    #[test]
+    fn sphere_pushed_past_the_pipe_surface_has_positive_penetration_pushing_toward_the_axis() {
+        let pipe = floor_wall_pipe();
+        let radius = 1.0;
+        let bisector = ((pipe.sector_start + pipe.sector_end) * 0.5)
+            .normalize()
+            .unwrap();
+        // 5 units further out than the resting distance -- overlapping the
+        // fillet's own material by 5 units.
+        let position = pipe.axis_point + bisector * (pipe.radius - radius + 5.0);
+        let s = RigidBody::sphere(radius, 1.0, position);
+        let contacts = contacts_vs_quarter_pipe(&s, &pipe);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - 5.0).abs() < 1e-4);
+        // Correction pushes back toward the axis, i.e. opposite the
+        // bisector direction (unlike a flat plane, which always pushes
+        // away from the plane).
+        assert!((contacts[0].normal + bisector).length() < 1e-4);
+    }
+
+    #[test]
+    fn sphere_outside_the_pipes_sector_has_no_contact() {
+        // Directly "above" the axis, i.e. deep into the room along the
+        // diagonal away from the corner -- outside the 90-degree sector
+        // even though it might be close in absolute distance.
+        let pipe = floor_wall_pipe();
+        let away_from_corner = -((pipe.sector_start + pipe.sector_end) * 0.5)
+            .normalize()
+            .unwrap();
+        let s = RigidBody::sphere(1.0, 1.0, pipe.axis_point + away_from_corner * pipe.radius);
+        assert!(contacts_vs_quarter_pipe(&s, &pipe).is_empty());
+    }
+
+    #[test]
+    fn box_vs_quarter_pipe_is_always_empty() {
+        // Box (car) collision against curved geometry is deliberately not
+        // implemented yet -- see RB-PHYSICS-001-FR-020's Non-goals.
+        let pipe = floor_wall_pipe();
+        let bisector = ((pipe.sector_start + pipe.sector_end) * 0.5)
+            .normalize()
+            .unwrap();
+        let deeply_overlapping_position = pipe.axis_point + bisector * pipe.radius;
+        let car = RigidBody::car_box(
+            Vec3::new(60.0, 30.0, 18.0),
+            180.0,
+            deeply_overlapping_position,
+        );
+        assert!(contacts_vs_quarter_pipe(&car, &pipe).is_empty());
     }
 }

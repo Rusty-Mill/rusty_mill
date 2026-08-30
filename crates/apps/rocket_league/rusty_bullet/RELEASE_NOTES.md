@@ -6,6 +6,75 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Curved wall-to-floor/wall-to-ceiling transitions
+**2026-08-30** · PR pending · commit pending
+
+- **Added:** a new `body::StaticQuarterPipe` shape — an immovable
+  partial-cylinder fillet connecting two perpendicular flat planes,
+  infinite along its own axis like `StaticPlane` — and `collision::
+  contacts_vs_quarter_pipe`, a sphere-only narrow-phase test
+  (`RB-PHYSICS-001-FR-020`).
+- **The playable side is the *inside* of the fillet's concave face** — the
+  same geometry a skateboard quarter-pipe is named after and ridden on the
+  inside of. A point is governed by a fillet at all only when its
+  direction from `axis_point`, projected perpendicular to
+  `axis_direction`, falls within the 90-degree sector from `sector_start`
+  to `sector_end` (checked via `dot(dir, sector_start) >= 0 && dot(dir,
+  sector_end) >= 0`, exact for a 90-degree sector since the two vectors
+  are perpendicular); within that sector, contact fires as the sphere's
+  surface approaches or crosses the fillet's own radius *from inside*, and
+  the correction pushes the sphere back toward the axis — the opposite
+  direction convention from `sphere_vs_plane`'s always-away-from-the-plane
+  push.
+- **`StaticQuarterPipe::between_planes(plane_a, plane_b, radius,
+  axis_direction)`** derives a fillet's axis/sector automatically from the
+  two flat planes it bridges (offsetting each plane inward by `radius`
+  along its own normal, negating each plane's normal for the sector vector
+  pointing back to its own tangent point) — exact only when `plane_a`/
+  `plane_b`'s normals and `axis_direction` form an orthonormal basis (true
+  for every cardinal arena wall's own floor/ceiling seam, not a diagonal
+  corner wall's).
+- **`PhysicsWorld` gains `curves: Vec<StaticQuarterPipe>` and a
+  `with_curve` builder** (mirroring `walls`/`with_wall`), resolved via a
+  new `resolve_curve_contact` alongside `resolve_plane_contact` for the
+  ball and every car — a no-op for cars, since the box arm of
+  `contacts_vs_quarter_pipe` is always empty.
+- **`solver::resolve_contacts`'s second parameter changed from
+  `&StaticPlane` to plain `restitution: f32, friction: f32`** — the only
+  two fields it ever actually used — so this same solver path serves a
+  `StaticQuarterPipe` fillet exactly as it already served a `StaticPlane`,
+  with no new solver code needed.
+- **`arena::standard_curves`** builds the 8 fillets (floor-side and
+  ceiling-side, for each of the 4 cardinal walls) the standard arena needs,
+  via `between_planes`, using a new uncalibrated placeholder
+  `FILLET_RADIUS` — this port has no verified reference for the real
+  transition radius either, same status as `arena::CORNER_LENGTH`.
+  `PhysicsWorld::standard_arena` now adds these 8 curves alongside its
+  existing 9 walls.
+- **Still not modeled:** a car (box) actually being deflected by a fillet
+  (needs real support-mapping/SAT-style collision machinery against curved
+  geometry this port doesn't have yet), fillets at the 4 diagonal corner
+  walls (their non-axis-aligned normals don't satisfy `between_planes`'
+  orthonormal-basis assumption), and goal cutouts in the back walls.
+- 15 new unit tests across `body.rs`/`collision.rs`/`arena.rs`/`world.rs`
+  in `rb_physics_bullet` (168 total): the derived fillet geometry sits
+  exactly `radius` in from both bridged planes with correctly-directed,
+  perpendicular unit sector vectors and tangent points exactly on each
+  plane; a sphere deep inside a fillet has no contact, touching it has
+  zero penetration, pushed past it has positive penetration pushing back
+  toward the axis, and outside the 90-degree sector has no contact
+  regardless of absolute distance; a box against a fillet always returns
+  no contact; `standard_curves` returns exactly 8 fillets, each sitting
+  radius-in from the floor/ceiling and a cardinal wall; `PhysicsWorld::
+  standard_arena` carries exactly 8 curves, plus — the real end-to-end
+  proof — a ball resting at ordinary flat-floor height within a curve's
+  footprint (already overlapping the fillet's own material) gets pushed up
+  off that flat height instead of staying embedded, while a car in the
+  exact same position stays completely unaffected at its ordinary
+  flat-floor resting height.
+
+---
+
 ## Modeled arena footprint
 **2026-08-30** · [#47](https://github.com/baileyrd/rusty_bullet/pull/47) · `cc68213`
 

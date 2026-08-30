@@ -6,15 +6,22 @@
 //! are each just another flat `StaticPlane`, the same as the ground or a
 //! side wall.
 //!
-//! **Still not modeled**: curved wall-to-floor and wall-to-ceiling
-//! transitions (the real arena's edges are rounded, not sharp — this port's
-//! planes meet at hard corners/edges instead), the goal structures
-//! themselves (no back-net cutout — the back walls here are solid, flat
-//! planes spanning the full width), and any geometry finer than a single
-//! flat plane per boundary segment (the real field mesh's corners are more
-//! complex than one 45-degree cut). See `RB-PHYSICS-001`'s Non-goals.
+//! `standard_curves` (`RB-PHYSICS-001-FR-020`) adds curved
+//! wall-to-floor/wall-to-ceiling fillets for the 4 cardinal (axis-aligned)
+//! walls, built from `body::StaticQuarterPipe::between_planes` — still no
+//! new collision code of its own here, just composing the same flat planes
+//! `standard_walls` already builds.
+//!
+//! **Still not modeled**: fillets at the 4 diagonal corner walls (their
+//! normals aren't axis-aligned, so `between_planes`' orthonormal-basis
+//! assumption doesn't hold there — see `StaticQuarterPipe::between_planes`'s
+//! own doc comment), the goal structures themselves (no back-net cutout —
+//! the back walls here are solid, flat planes spanning the full width), and
+//! any geometry finer than a single flat plane or single-radius fillet per
+//! boundary segment (the real field mesh's corners and transitions are more
+//! complex than this). See `RB-PHYSICS-001`'s Non-goals.
 
-use crate::body::StaticPlane;
+use crate::body::{StaticPlane, StaticQuarterPipe};
 use rb_domain::Vec3;
 
 /// Side wall position (the field's half-width along X) — a commonly-cited
@@ -41,11 +48,33 @@ pub const CEILING_Z: f32 = 2044.0;
 /// field mesh data.
 pub const CORNER_LENGTH: f32 = 1152.0;
 
+/// Uncalibrated placeholder: the radius of the curved fillet connecting a
+/// cardinal wall to the floor or ceiling (`standard_curves`). This port has
+/// no verified reference for Rocket League's actual transition radius —
+/// chosen only to be small relative to the field's own dimensions (a
+/// visibly local rounding of the corner, not a wall-length-scale ramp), not
+/// measured from real field mesh data.
+pub const FILLET_RADIUS: f32 = 292.0;
+
 /// The floor: a flat plane at `z = 0`, normal `+Z` (up) — identical to the
 /// `flat_ground()` helper this crate's tests have used since v0, just
 /// exposed here as part of the standard-arena constructor.
 pub fn standard_ground() -> StaticPlane {
     StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
+}
+
+fn ceiling_plane() -> StaticPlane {
+    StaticPlane::new(Vec3::new(0.0, 0.0, -1.0), -CEILING_Z)
+}
+
+/// The side wall on the `sign`d side (`1.0` for `+X`, `-1.0` for `-X`).
+fn side_wall_plane(sign: f32) -> StaticPlane {
+    StaticPlane::new(Vec3::new(-sign, 0.0, 0.0), -SIDE_WALL_X)
+}
+
+/// The back wall on the `sign`d side (`1.0` for `+Y`, `-1.0` for `-Y`).
+fn back_wall_plane(sign: f32) -> StaticPlane {
+    StaticPlane::new(Vec3::new(0.0, -sign, 0.0), -BACK_WALL_Y)
 }
 
 /// The arena's full vertical boundary: 2 side walls (`+-X`), 2 back walls
@@ -61,11 +90,11 @@ pub fn standard_ground() -> StaticPlane {
 pub fn standard_walls() -> Vec<StaticPlane> {
     let mut walls = Vec::with_capacity(9);
 
-    walls.push(StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -SIDE_WALL_X));
-    walls.push(StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), -SIDE_WALL_X));
-    walls.push(StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -BACK_WALL_Y));
-    walls.push(StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), -BACK_WALL_Y));
-    walls.push(StaticPlane::new(Vec3::new(0.0, 0.0, -1.0), -CEILING_Z));
+    walls.push(side_wall_plane(1.0));
+    walls.push(side_wall_plane(-1.0));
+    walls.push(back_wall_plane(1.0));
+    walls.push(back_wall_plane(-1.0));
+    walls.push(ceiling_plane());
 
     // Corner offset: normal.dot(point_on_plane) for the point where the
     // corner wall meets its side wall, (SIDE_WALL_X - CORNER_LENGTH,
@@ -80,6 +109,55 @@ pub fn standard_walls() -> Vec<StaticPlane> {
     }
 
     walls
+}
+
+/// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`)
+/// for the 4 cardinal walls only — 8 `StaticQuarterPipe`s total (one
+/// floor-side and one ceiling-side fillet per cardinal wall), each built by
+/// `StaticQuarterPipe::between_planes` from the same flat planes
+/// `standard_walls` uses. The 4 diagonal corner walls get no fillet here —
+/// see the module doc for why (`between_planes`' orthonormal-basis
+/// assumption doesn't hold for a non-axis-aligned wall).
+pub fn standard_curves() -> Vec<StaticQuarterPipe> {
+    let floor = standard_ground();
+    let ceiling = ceiling_plane();
+    let mut curves = Vec::with_capacity(8);
+
+    for &sign in &[1.0f32, -1.0] {
+        let wall = side_wall_plane(sign);
+        let axis_direction = Vec3::new(0.0, 1.0, 0.0);
+        curves.push(StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            FILLET_RADIUS,
+            axis_direction,
+        ));
+        curves.push(StaticQuarterPipe::between_planes(
+            &ceiling,
+            &wall,
+            FILLET_RADIUS,
+            axis_direction,
+        ));
+    }
+
+    for &sign in &[1.0f32, -1.0] {
+        let wall = back_wall_plane(sign);
+        let axis_direction = Vec3::new(1.0, 0.0, 0.0);
+        curves.push(StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            FILLET_RADIUS,
+            axis_direction,
+        ));
+        curves.push(StaticQuarterPipe::between_planes(
+            &ceiling,
+            &wall,
+            FILLET_RADIUS,
+            axis_direction,
+        ));
+    }
+
+    curves
 }
 
 #[cfg(test)]
@@ -151,6 +229,44 @@ mod tests {
         let corner_offsets: Vec<f32> = walls[5..9].iter().map(|w| w.offset).collect();
         for offset in &corner_offsets[1..] {
             assert!((offset - corner_offsets[0]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn standard_curves_has_eight_fillets() {
+        assert_eq!(standard_curves().len(), 8);
+    }
+
+    #[test]
+    fn every_standard_curve_bridges_a_wall_to_the_floor_or_ceiling() {
+        // Every fillet's axis should sit exactly FILLET_RADIUS above the
+        // floor (a floor-side fillet) or FILLET_RADIUS below the ceiling (a
+        // ceiling-side fillet) -- never anywhere else.
+        for curve in standard_curves() {
+            let near_floor = (curve.axis_point.z - FILLET_RADIUS).abs() < 1e-3;
+            let near_ceiling = (curve.axis_point.z - (CEILING_Z - FILLET_RADIUS)).abs() < 1e-3;
+            assert!(
+                near_floor || near_ceiling,
+                "expected every curve's axis to sit radius-in from the floor or ceiling, got z={}",
+                curve.axis_point.z
+            );
+        }
+    }
+
+    #[test]
+    fn every_standard_curve_sits_radius_in_from_a_side_or_back_wall() {
+        for curve in standard_curves() {
+            let near_side_wall = (curve.axis_point.x.abs() - (SIDE_WALL_X - FILLET_RADIUS)).abs()
+                < 1e-3
+                && curve.axis_point.y == 0.0;
+            let near_back_wall = (curve.axis_point.y.abs() - (BACK_WALL_Y - FILLET_RADIUS)).abs()
+                < 1e-3
+                && curve.axis_point.x == 0.0;
+            assert!(
+                near_side_wall || near_back_wall,
+                "expected every curve's axis to sit radius-in from a cardinal wall, got {:?}",
+                curve.axis_point
+            );
         }
     }
 }

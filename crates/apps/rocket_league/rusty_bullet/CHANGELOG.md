@@ -195,6 +195,26 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   ad-hoc-wall capability. Curved wall-to-floor/wall-to-ceiling transitions,
   goal cutouts, and corner-touch disambiguation for wall-jump purposes
   remain not modeled.
+- `rb_physics_bullet::body`/`collision`/`world`/`arena`
+  (`RB-PHYSICS-001-FR-020`) — curved wall-to-floor/wall-to-ceiling
+  transitions: a new `StaticQuarterPipe` shape (an immovable
+  partial-cylinder fillet, infinite along its own axis) and
+  `contacts_vs_quarter_pipe` (sphere-only; a box always returns no
+  contact). The playable side is the *inside* of the fillet's concave face
+  (like a skateboard quarter-pipe): governed only within a 90-degree
+  sector, contact fires as the sphere's surface crosses the fillet's own
+  radius from inside, pushing back toward the axis (the opposite direction
+  from a flat plane's push). `StaticQuarterPipe::between_planes` derives a
+  fillet's geometry automatically from two perpendicular, axis-aligned
+  flat planes. `PhysicsWorld` gains `curves`/`with_curve`/
+  `resolve_curve_contact`; `solver::resolve_contacts`'s second parameter
+  changed from `&StaticPlane` to plain `restitution`/`friction` (the only
+  two fields it ever used) so the same solver path serves a fillet too.
+  `arena::standard_curves` builds the 8 cardinal-wall fillets (new
+  uncalibrated placeholder `FILLET_RADIUS`); `PhysicsWorld::standard_arena`
+  now adds these alongside its 9 walls. A car (box) actually being
+  deflected by a fillet, fillets at the 4 diagonal corner walls, and goal
+  cutouts remain not modeled.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

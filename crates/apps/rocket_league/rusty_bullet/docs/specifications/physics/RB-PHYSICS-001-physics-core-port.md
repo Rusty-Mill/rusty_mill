@@ -1,17 +1,20 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.19.0
+- Version: 0.20.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
-  (ball-vs-car), box-vs-box (car-vs-car), and body-vs-arena-wall collision
-  all implemented, tested, and wired into a real N-body `PhysicsWorld`
-  scene; ground-driving car input (throttle, steering), boost, handbrake, a
-  variable-height ground jump, a double jump (plain or a directional
-  dodge, itself flip-cancelable), a wall jump (itself dodgeable), air
-  control (pitch/yaw/roll), a gentle landing auto-orientation assist, and a
-  modeled arena footprint (`PhysicsWorld::standard_arena`'s octagonal
-  boundary plus a ceiling) implemented; curved wall-to-floor/wall-to-ceiling
-  transitions, goal cutouts, split impulse, warm-starting, a combined
-  multi-body solve, and constant calibration are open follow-up work)
+  (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
+  ball-vs-curved-fillet collision all implemented, tested, and wired into a
+  real N-body `PhysicsWorld` scene; ground-driving car input (throttle,
+  steering), boost, handbrake, a variable-height ground jump, a double jump
+  (plain or a directional dodge, itself flip-cancelable), a wall jump
+  (itself dodgeable), air control (pitch/yaw/roll), a gentle landing
+  auto-orientation assist, a modeled arena footprint
+  (`PhysicsWorld::standard_arena`'s octagonal boundary plus a ceiling), and
+  curved wall-to-floor/wall-to-ceiling transitions for the ball at the 4
+  cardinal walls implemented; a car (box) actually being deflected by a
+  curve, fillets at the diagonal corner walls, goal cutouts, split impulse,
+  warm-starting, a combined multi-body solve, and constant calibration are
+  open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -66,11 +69,14 @@ dodge, the same directional-flip treatment applied to the wall jump's own
 fresh press — see FR-017 — a landing auto-orientation assist, a
 gentle continuous restoring torque nudging an airborne car's local up
 axis back toward world up whenever it isn't actively air-controlling or
-mid-jump-press — see FR-018 — and a modeled arena footprint,
+mid-jump-press — see FR-018 — a modeled arena footprint,
 `PhysicsWorld::standard_arena` building Rocket League's real octagonal
 boundary and a ceiling from the same generic `StaticPlane`/`with_wall`
 machinery FR-013 introduced, rather than a caller assembling ad-hoc walls
-itself — see FR-019.
+itself — see FR-019 — and curved wall-to-floor/wall-to-ceiling
+transitions at the 4 cardinal walls, a `StaticQuarterPipe` fillet each
+deflecting the ball (not yet a car) away from the sharp corner a flat
+wall and the floor or ceiling would otherwise meet at — see FR-020.
 
 ## Non-goals (this increment)
 
@@ -88,16 +94,23 @@ itself — see FR-019.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **Curved wall-to-floor/wall-to-ceiling transitions, goal cutouts, and any
-  geometry finer than a flat plane per boundary segment.** FR-019's `arena`
-  module builds Rocket League's real octagonal footprint (side walls, back
-  walls, four 45-degree corner-cut walls) and a ceiling, all still flat
-  `StaticPlane`s meeting at hard edges/corners — the real arena's edges are
-  rounded, and its back walls have goal-shaped cutouts, neither modeled
-  here. `FR-019`'s corner-cut inset distance is this project's own
-  uncalibrated placeholder (see `arena::CORNER_LENGTH`'s doc comment), not
-  measured against real field mesh data — only `SIDE_WALL_X`/`BACK_WALL_Y`/
-  `CEILING_Z` are commonly-cited, sourced dimensions.
+- **A car (box) actually being deflected by a curved fillet, fillets at the
+  4 diagonal corner walls, goal cutouts, and any geometry finer than a flat
+  plane or single-radius fillet per boundary segment.** FR-020's `arena`
+  module builds 8 `StaticQuarterPipe` fillets — one floor-side and one
+  ceiling-side per cardinal wall — deflecting only the ball;
+  `collision::contacts_vs_quarter_pipe` returns no contact at all for a box,
+  so a car drives straight through a curve's footprint completely
+  unaffected, exactly as if the curve weren't there (see FR-020's own
+  Non-goals note). The 4 diagonal corner walls get no fillet at all —
+  `StaticQuarterPipe::between_planes`' construction only works for two
+  perpendicular, axis-aligned planes, which the corner walls (at 45 degrees)
+  aren't. The back walls have no goal-shaped cutout either. `FR-019`'s
+  corner-cut inset distance (`arena::CORNER_LENGTH`) and `FR-020`'s fillet
+  radius (`arena::FILLET_RADIUS`) are both this project's own uncalibrated
+  placeholders, not measured against real field mesh data — only
+  `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z` are commonly-cited, sourced
+  dimensions.
 - **Disambiguating or blending a car's simultaneous contact with two walls
   at a corner, for wall-jump purposes.** Physical collision resolution
   already handles a car touching two walls at once correctly — `step`
@@ -472,14 +485,55 @@ itself — see FR-019.
   `standard_walls()`'s 9 planes — offered alongside, not replacing,
   `PhysicsWorld::new`/`with_wall`'s existing ad-hoc-wall capability (a
   caller building a non-standard test scene, as most of this crate's own
-  tests do, still uses those directly). Still not modeled: curved
-  wall-to-floor/wall-to-ceiling transitions, goal cutouts in the back
-  walls, and disambiguating or blending a car's simultaneous contact with
-  two walls at a corner for wall-jump purposes (see Non-goals) —
-  `resolve_plane_contact`'s own physical resolution of a car touching two
-  walls at once already works correctly regardless (each wall is resolved
-  independently every step), only the wall-jump push-off direction picker
-  still isn't.
+  tests do, still uses those directly). Still not modeled at the time this
+  requirement shipped: curved wall-to-floor/wall-to-ceiling transitions
+  (now implemented for the ball at the 4 cardinal walls, see FR-020), goal
+  cutouts in the back walls, and disambiguating or blending a car's
+  simultaneous contact with two walls at a corner for wall-jump purposes
+  (see Non-goals) — `resolve_plane_contact`'s own physical resolution of a
+  car touching two walls at once already works correctly regardless (each
+  wall is resolved independently every step), only the wall-jump push-off
+  direction picker still isn't.
+- `RB-PHYSICS-001-FR-020` (curved wall-to-floor/wall-to-ceiling transitions,
+  implemented): a new `body::StaticQuarterPipe` shape — an immovable
+  partial-cylinder fillet connecting two perpendicular flat planes, infinite
+  along its own axis like `StaticPlane` — and `collision::
+  contacts_vs_quarter_pipe`, a sphere-only narrow-phase test (a box/car
+  always returns no contact — see FR-020's own Non-goals). The playable side
+  is the *inside* of the fillet's concave face (the same geometry a
+  skateboard quarter-pipe is named after and ridden on the inside of): a
+  point is governed by a fillet at all only when its direction from
+  `axis_point`, projected perpendicular to `axis_direction`, falls within
+  the 90-degree sector from `sector_start` to `sector_end` (checked via
+  `dot(dir, sector_start) >= 0 && dot(dir, sector_end) >= 0`, exact for a
+  90-degree sector since the two vectors are perpendicular); within that
+  sector, contact fires as the sphere's surface approaches or crosses the
+  fillet's own radius *from the inside*, and the correction pushes the
+  sphere back toward the axis — the opposite direction convention from
+  `sphere_vs_plane`'s always-away-from-the-plane push. `StaticQuarterPipe::
+  between_planes(plane_a, plane_b, radius, axis_direction)` derives a
+  fillet's axis/sector automatically from the two flat planes it bridges
+  (offsetting each plane inward by `radius` along its own normal, and
+  negating each plane's normal for the sector vector pointing back to its
+  own tangent point) — exact only when `plane_a`/`plane_b`'s normals and
+  `axis_direction` form an orthonormal basis (true for every cardinal
+  arena wall's own floor/ceiling seam, not for a diagonal corner wall's —
+  see Non-goals). `PhysicsWorld` gains `curves: Vec<StaticQuarterPipe>` and
+  a `with_curve` builder (mirroring `walls`/`with_wall`), resolved via a new
+  `resolve_curve_contact` alongside `resolve_plane_contact` for the ball and
+  every car (a no-op for cars, since the box arm of `contacts_vs_quarter_pipe`
+  is always empty). `solver::resolve_contacts`'s second parameter changed
+  from `&StaticPlane` to plain `restitution: f32, friction: f32` — the only
+  two fields it ever actually used — so this same solver path serves a
+  `StaticQuarterPipe` fillet exactly as it already served a `StaticPlane`,
+  with no new solver code needed. `arena::standard_curves` builds the 8
+  fillets (floor-side and ceiling-side, for each of the 4 cardinal walls)
+  the standard arena needs via `between_planes`, using a new uncalibrated
+  placeholder `FILLET_RADIUS` (this port has no verified reference for the
+  real transition radius either); `PhysicsWorld::standard_arena` now adds
+  these 8 curves alongside its existing 9 walls. Still not modeled: a car
+  actually being deflected by a fillet, fillets at the 4 diagonal corner
+  walls, and goal cutouts (see Non-goals).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -494,21 +548,29 @@ itself — see FR-019.
   picks the collision geometry and local inertia formula), `StaticPlane`
   (immovable). One `RigidBody` type serves both shapes, matching Bullet's
   own architecture (`btRigidBody` + a polymorphic `btCollisionShape`)
-  rather than a separate rigid-body type per shape.
+  rather than a separate rigid-body type per shape. `StaticQuarterPipe`
+  (also immovable, since `RB-PHYSICS-001-FR-020`) is a second static shape
+  alongside `StaticPlane` — a partial-cylinder fillet, with its own
+  `between_planes` constructor deriving its geometry from two flat planes.
 - `integrate`: force accumulation, velocity integration, transform
   integration — pure functions over `RigidBody`, shape-agnostic.
 - `collision`: `contacts_vs_plane` — analytic body-vs-static-plane contact
   generation (any plane, not just the ground — an arena wall is the exact
   same test with a different normal), dispatching to a sphere- or
   box-specific test and returning a manifold (`Vec<Contact>`, 0 to 4
-  points); `contacts_between` — dispatches to `sphere_vs_box` (0 or 1
-  points) or the separating-axis `box_vs_box` (0 to 4 points), covering
-  every two-dynamic-body shape pairing this crate has.
+  points); `contacts_vs_quarter_pipe` (since FR-020) — analytic
+  sphere-vs-fillet contact generation (always 0 or 1 points; a box always
+  returns none, see FR-020's Non-goals); `contacts_between` — dispatches to
+  `sphere_vs_box` (0 or 1 points) or the separating-axis `box_vs_box` (0 to
+  4 points), covering every two-dynamic-body shape pairing this crate has.
 - `solver`: `resolve_contacts` — sequential-impulse contact + friction
-  resolution over an entire body-vs-static-plane manifold (the ground or a
-  wall — no plane-orientation-specific logic); `resolve_contacts_between`
-  — the same sequential-impulse math generalized to two dynamic bodies'
-  shared contact manifold.
+  resolution over an entire manifold against one static body, identified
+  only by its `restitution`/`friction` (since FR-020, this serves a
+  `StaticQuarterPipe` fillet exactly as it already served a `StaticPlane` —
+  the static shape's actual geometry is irrelevant here, already baked into
+  the caller's own `Contact` list); `resolve_contacts_between` — the same
+  sequential-impulse math generalized to two dynamic bodies' shared contact
+  manifold.
 - `drive`: `apply_driven_forces` — couples a car's `ControllerInput` into
   ground throttle/steering forces and torques, a boost force/resource
   drain, a handbrake-driven temporary friction adjustment, a
@@ -542,12 +604,15 @@ itself — see FR-019.
   composition root Bullet's `btDiscreteDynamicsWorld::stepSimulation`
   corresponds to, run in the same staged order (integrate every body's
   velocity — for cars, including `drive::apply_driven_forces` — then
-  resolve every contact — ground and every wall for every body, every
-  ball-vs-car pair, then every car-vs-car pair — then integrate every
-  body's transform). `PhysicsWorld` carries one ball (`RigidBody`, always
-  present), `walls: Vec<StaticPlane>` (any number, via repeated `with_wall`
-  calls, empty by default), and `cars: Vec<RigidBody>` (any number, via
-  repeated `with_car` calls) with a parallel
+  resolve every contact — ground, every wall, and every curve for every
+  body, every ball-vs-car pair, then every car-vs-car pair — then integrate
+  every body's transform). `PhysicsWorld` carries one ball (`RigidBody`,
+  always present), `walls: Vec<StaticPlane>` (any number, via repeated
+  `with_wall` calls, empty by default), `curves: Vec<StaticQuarterPipe>`
+  (since FR-020; any number, via repeated `with_curve` calls, empty by
+  default — only ever deflects the ball, a no-op for every car), and
+  `cars: Vec<RigidBody>` (any number, via repeated `with_car` calls) with a
+  parallel
   `car_inputs: Vec<ControllerInput>` set via `set_car_input`, a parallel
   `car_boost: Vec<f32>` set via `set_car_boost`, a parallel
   `car_base_friction: Vec<f32>` snapshotted from each car's own friction by
@@ -566,10 +631,13 @@ itself — see FR-019.
 - `arena`: `standard_ground`/`standard_walls` — Rocket League's real
   standard-arena field dimensions and a 9-`StaticPlane` octagonal boundary
   plus ceiling, built from `body::StaticPlane` alone (no new collision
-  code); `PhysicsWorld::standard_arena` (in `world`) wires both into a new
+  code); `standard_curves` (since FR-020) — 8 `StaticQuarterPipe` fillets
+  (floor-side and ceiling-side, for each of the 4 cardinal walls), built via
+  `StaticQuarterPipe::between_planes` from those same flat planes;
+  `PhysicsWorld::standard_arena` (in `world`) wires all three into a new
   `PhysicsWorld` in one call, an alternative to `PhysicsWorld::new` plus
-  manual `with_wall` calls for a caller that wants the real field rather
-  than a custom test arena.
+  manual `with_wall`/`with_curve` calls for a caller that wants the real
+  field rather than a custom test arena.
 
 No `PhysicsStateSource`-style trait exists yet for "the physics engine"
 specifically — `rb_verify_cli` calls `rb_physics_bullet::simulate`
@@ -806,6 +874,28 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   proof the corner cut is real physical geometry, not decoration. All
   FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019
   behavior covered by `rb_physics_bullet`'s unit tests (153 tests as of
+  the 0.19.0 version).
+- FR-020 (met, curved wall-to-floor/wall-to-ceiling transitions):
+  `StaticQuarterPipe::between_planes` derives an axis sitting exactly
+  `radius` units in from both bridged planes, with `sector_start`/
+  `sector_end` pointing toward each plane's own tangent point (both unit
+  vectors, perpendicular to each other), and those tangent points lying
+  exactly on their respective planes. `sphere_vs_quarter_pipe`: a sphere
+  deep inside the pipe has no contact; a sphere touching the pipe's own
+  radius (from inside) has zero penetration; a sphere pushed past that
+  radius has positive penetration with the correction pointing back toward
+  the axis (not away from it, unlike a flat plane); a sphere outside the
+  fillet's 90-degree sector has no contact regardless of absolute distance;
+  a box always gets no contact (the documented deferred case). An
+  end-to-end `PhysicsWorld` test confirms a ball resting at ordinary
+  flat-floor height within a curve's footprint — already overlapping the
+  fillet's own material — gets pushed up off that flat height instead of
+  staying embedded, the real proof the curve is live physical geometry, not
+  a detection hack; a regression test confirms a car (box) sitting in the
+  exact same position is completely unaffected, staying at its ordinary
+  flat-floor resting height. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020
+  behavior covered by `rb_physics_bullet`'s unit tests (168 tests as of
   this version).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
@@ -899,7 +989,15 @@ to begin with — so this one constant can't converge toward a "correct"
 value through calibration alone the way a scalar speed or torque could;
 matching the real corner shape would need genuinely different (curved)
 collision geometry, not just a better number (see FR-019 and Open
-questions).
+questions). FR-020's `arena::FILLET_RADIUS` has exactly the same status as
+`CORNER_LENGTH` — this port's own invention, no public reference, and only
+governs the ball (see FR-020's own Non-goals: a car isn't deflected by a
+curve at all yet, so there's nothing to validate there either). The unit
+tests confirm the fillet's *shape* of response (pushes back toward the
+axis once the sphere's surface crosses the fillet's own radius from
+inside, respects its 90-degree sector, leaves a box untouched), not that a
+real ball's actual wall-to-floor/wall-to-ceiling transition behavior
+matches this radius or trigger condition.
 
 ## Traceability
 
@@ -923,13 +1021,19 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   is now implemented as FR-016; a dodge variant of the wall jump is now
   implemented as FR-017; a gentle landing auto-orientation assist is now
   implemented as FR-018.)
-- Curved wall-to-floor/wall-to-ceiling transitions and goal cutouts in the
-  back walls (see FR-019's Non-goals) — needs genuinely different (curved)
-  collision geometry, not a constant to calibrate; a concrete reason to
-  model beyond FR-019's flat-plane octagon (e.g. real recorded
-  ceiling-shot or corner-touching behavior that diverges specifically
-  because of the sharp edges) would justify the added complexity; not
-  started.
+- A car (box) actually being deflected by a curved fillet (see FR-020's
+  Non-goals) — needs real support-mapping/SAT-style collision machinery
+  against curved geometry this port doesn't have; a car currently drives
+  straight through a curve's footprint unaffected. Not started.
+- Fillets at the 4 diagonal corner walls, and goal cutouts in the back
+  walls (see FR-019/FR-020's Non-goals) — the corner walls' non-axis-aligned
+  normals don't satisfy `StaticQuarterPipe::between_planes`' orthonormal-
+  basis assumption, so extending fillets there needs either a more general
+  fillet construction or a different approach entirely; a concrete reason
+  to model either beyond FR-020's cardinal-wall fillets (e.g. real recorded
+  ceiling-shot, corner-touching, or goal-area behavior that diverges
+  specifically because of the sharp edges/solid back walls) would justify
+  the added complexity. Not started.
 - Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
@@ -937,11 +1041,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   "first wall in `self.walls`" rule) isn't. FR-019's corner walls make this
   case reachable in the standard arena for the first time; still not
   exercised by any test here. Not started.
-- Sourcing or verifying `arena::CORNER_LENGTH` against real field mesh
-  data (see FR-019) — this port has no reference for it at all, unlike
-  `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z`; even a sourced value would only
-  approximate the real corner, which isn't a single flat 45-degree plane
-  in the actual game.
+- Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS` against real
+  field mesh data (see FR-019/FR-020) — this port has no reference for
+  either at all, unlike `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z`; even a
+  sourced value would only approximate the real corner/transition, which
+  isn't a single flat plane or single-radius fillet in the actual game.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
@@ -994,6 +1098,54 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.20.0 (2026-08-30): FR-020 added and implemented (curved
+  wall-to-floor/wall-to-ceiling transitions) — a new `body::StaticQuarterPipe`
+  shape (an immovable partial-cylinder fillet, infinite along its own axis
+  like `StaticPlane`) and `collision::contacts_vs_quarter_pipe` (sphere-only
+  — a box always returns no contact, deliberately deferred). The playable
+  side is the *inside* of the fillet's concave face (the geometry a
+  skateboard quarter-pipe is named after and ridden on the inside of): a
+  point is governed by a fillet only within the 90-degree sector from
+  `sector_start` to `sector_end`, and contact fires as the sphere's surface
+  approaches or crosses the fillet's own radius from the inside, pushing
+  the sphere back toward the axis — the opposite direction convention from
+  `sphere_vs_plane`'s always-away-from-the-plane push.
+  `StaticQuarterPipe::between_planes(plane_a, plane_b, radius,
+  axis_direction)` derives a fillet's axis/sector automatically from the
+  two flat planes it bridges, exact only when both planes' normals and
+  `axis_direction` form an orthonormal basis (true for every cardinal
+  arena wall's own floor/ceiling seam, not for a diagonal corner wall's).
+  `PhysicsWorld` gains `curves: Vec<StaticQuarterPipe>` and a `with_curve`
+  builder (mirroring `walls`/`with_wall`), resolved via a new
+  `resolve_curve_contact` for the ball and every car (a no-op for cars).
+  `solver::resolve_contacts`'s second parameter changed from `&StaticPlane`
+  to plain `restitution: f32, friction: f32` — the only two fields it ever
+  used — so the same solver path serves a `StaticQuarterPipe` fillet
+  exactly as it already served a `StaticPlane`, with no new solver code.
+  `arena::standard_curves` builds the 8 fillets (floor-side and
+  ceiling-side, for each of the 4 cardinal walls) the standard arena needs,
+  using a new uncalibrated placeholder `FILLET_RADIUS` (this port has no
+  verified reference for the real transition radius, same status as
+  `arena::CORNER_LENGTH`); `PhysicsWorld::standard_arena` now adds these 8
+  curves alongside its existing 9 walls. Still not modeled: a car actually
+  being deflected by a fillet, fillets at the 4 diagonal corner walls
+  (their non-axis-aligned normals don't satisfy `between_planes`'
+  orthonormal-basis assumption), and goal cutouts. 15 new unit tests across
+  `body.rs`/`collision.rs`/`arena.rs`/`world.rs` in `rb_physics_bullet`
+  (168 total): the derived fillet geometry sits exactly `radius` in from
+  both bridged planes with correctly-directed, perpendicular unit sector
+  vectors and tangent points exactly on each plane; a sphere deep inside a
+  fillet has no contact, touching it has zero penetration, pushed past it
+  has positive penetration pushing back toward the axis, and outside the
+  90-degree sector has no contact regardless of absolute distance; a box
+  against a fillet always returns no contact; `standard_curves` returns
+  exactly 8 fillets, each sitting radius-in from the floor/ceiling and a
+  cardinal wall; `PhysicsWorld::standard_arena` carries exactly 8 curves,
+  plus — the real end-to-end proof — a ball resting at ordinary flat-floor
+  height within a curve's footprint (already overlapping the fillet's own
+  material) gets pushed up off that flat height instead of staying
+  embedded, while a car in the exact same position stays completely
+  unaffected at its ordinary flat-floor resting height.
 - 0.19.0 (2026-08-30): FR-019 added and implemented (modeled arena
   footprint) — a new `arena` module builds Rocket League's real
   standard-arena boundary entirely from FR-013's existing generic

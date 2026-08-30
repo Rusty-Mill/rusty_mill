@@ -3,18 +3,20 @@
 //! integrate) at fixed timestep — no substepping/interpolation yet, since
 //! nothing in this scope needs it (no CCD-worthy speeds).
 
-use crate::body::{RigidBody, StaticPlane};
+use crate::body::{RigidBody, StaticPlane, StaticQuarterPipe};
 use crate::collision;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 
 /// The whole simulated scene: one ball-like sphere, zero or more car-like
-/// boxes, one ground plane, and zero or more arena walls (`walls`, added via
+/// boxes, one ground plane, zero or more arena walls (`walls`, added via
 /// `with_wall` — a plain flat `StaticPlane` each, typically with a
-/// horizontal normal; this crate doesn't model a full arena footprint, just
-/// the generic capability). Every body collides with the ground and with
-/// every wall (`resolve_plane_contact`, the same body-vs-static-plane
-/// machinery for both — a wall is just a plane whose normal isn't "up");
+/// horizontal normal), and zero or more curved wall-to-floor/wall-to-ceiling
+/// fillets (`curves`, added via `with_curve` — see `RB-PHYSICS-001-FR-020`
+/// and `curves`' own doc comment for why only the ball is deflected by
+/// one). Every body collides with the ground and with every wall
+/// (`resolve_plane_contact`, the same body-vs-static-plane machinery for
+/// both — a wall is just a plane whose normal isn't "up");
 /// every car also collides with the ball and with every other car
 /// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
@@ -54,6 +56,13 @@ pub struct PhysicsWorld {
     car_dodge_flip_active: Vec<bool>,
     pub ground: StaticPlane,
     pub walls: Vec<StaticPlane>,
+    /// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`),
+    /// added via `with_curve` — empty by default, same as `walls`. Only the
+    /// ball is actually deflected by a curve (`collision::
+    /// contacts_vs_quarter_pipe` returns nothing for a box/car — see its own
+    /// doc comment); a car drives straight through a curve's footprint
+    /// unaffected, exactly as if it weren't there.
+    pub curves: Vec<StaticQuarterPipe>,
     pub gravity: Vec3,
     elapsed_secs: f32,
 }
@@ -81,25 +90,32 @@ impl PhysicsWorld {
             car_dodge_flip_active: Vec::new(),
             ground,
             walls: Vec::new(),
+            curves: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
     }
 
     /// Builds a scene bounded by Rocket League's real standard-arena
-    /// footprint (`RB-PHYSICS-001-FR-019`) instead of an empty `walls` list
-    /// a caller populates itself: the octagonal boundary plus a ceiling
-    /// from `arena::standard_walls`, and the same flat ground
-    /// (`arena::standard_ground`) every scene already used. Equivalent to
-    /// `PhysicsWorld::new(ball, arena::standard_ground())` followed by a
-    /// `with_wall` call for each of `arena::standard_walls()`'s 9 planes —
-    /// still without curved wall-to-floor/wall-to-ceiling transitions or
-    /// goal cutouts (see `arena`'s module doc). Cars are added afterward
-    /// with `with_car`, exactly as with `PhysicsWorld::new`.
+    /// footprint (`RB-PHYSICS-001-FR-019`/`FR-020`) instead of an empty
+    /// `walls`/`curves` list a caller populates itself: the octagonal
+    /// boundary plus a ceiling from `arena::standard_walls`, the curved
+    /// wall-to-floor/wall-to-ceiling fillets from `arena::standard_curves`,
+    /// and the same flat ground (`arena::standard_ground`) every scene
+    /// already used. Equivalent to `PhysicsWorld::new(ball,
+    /// arena::standard_ground())` followed by a `with_wall` call for each of
+    /// `arena::standard_walls()`'s 9 planes and a `with_curve` call for each
+    /// of `arena::standard_curves()`'s 8 fillets — still without goal
+    /// cutouts or fillets at the diagonal corner walls (see `arena`'s module
+    /// doc). Cars are added afterward with `with_car`, exactly as with
+    /// `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
             world = world.with_wall(wall);
+        }
+        for curve in crate::arena::standard_curves() {
+            world = world.with_curve(curve);
         }
         world
     }
@@ -115,6 +131,16 @@ impl PhysicsWorld {
     /// capability; see `RB-PHYSICS-001-FR-013`'s Non-goals.
     pub fn with_wall(mut self, wall: StaticPlane) -> PhysicsWorld {
         self.walls.push(wall);
+        self
+    }
+
+    /// Adds one curved wall-to-floor/wall-to-ceiling fillet to the scene
+    /// (`RB-PHYSICS-001-FR-020`) — callable more than once, same pattern as
+    /// `with_wall`; a scene with no curves added (the default) behaves
+    /// exactly as before curves existed. Only deflects the ball — see
+    /// `curves`' own doc comment.
+    pub fn with_curve(mut self, curve: StaticQuarterPipe) -> PhysicsWorld {
+        self.curves.push(curve);
         self
     }
 
@@ -232,7 +258,18 @@ impl PhysicsWorld {
     fn resolve_plane_contact(body: &mut RigidBody, plane: &StaticPlane, dt: f32) {
         let contacts = collision::contacts_vs_plane(body, plane);
         if !contacts.is_empty() {
-            solver::resolve_contacts(body, plane, &contacts, dt);
+            solver::resolve_contacts(body, plane.restitution, plane.friction, &contacts, dt);
+        }
+    }
+
+    /// Like `resolve_plane_contact`, but against a curved fillet
+    /// (`RB-PHYSICS-001-FR-020`) instead of a flat plane — a no-op for a
+    /// box (car), since `collision::contacts_vs_quarter_pipe` never
+    /// generates a contact for one (see its own doc comment).
+    fn resolve_curve_contact(body: &mut RigidBody, curve: &StaticQuarterPipe, dt: f32) {
+        let contacts = collision::contacts_vs_quarter_pipe(body, curve);
+        if !contacts.is_empty() {
+            solver::resolve_contacts(body, curve.restitution, curve.friction, &contacts, dt);
         }
     }
 
@@ -352,10 +389,16 @@ impl PhysicsWorld {
         for wall in &self.walls {
             Self::resolve_plane_contact(&mut self.ball, wall, dt);
         }
+        for curve in &self.curves {
+            Self::resolve_curve_contact(&mut self.ball, curve, dt);
+        }
         for car in &mut self.cars {
             Self::resolve_plane_contact(car, &self.ground, dt);
             for wall in &self.walls {
                 Self::resolve_plane_contact(car, wall, dt);
+            }
+            for curve in &self.curves {
+                Self::resolve_curve_contact(car, curve, dt);
             }
         }
 
@@ -1742,6 +1785,93 @@ mod tests {
         let world = PhysicsWorld::standard_arena(ball);
         assert_eq!(world.walls.len(), 9);
         assert_eq!(world.ground, crate::arena::standard_ground());
+    }
+
+    #[test]
+    fn standard_arena_has_eight_curved_transitions() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.curves.len(), 8);
+    }
+
+    #[test]
+    fn a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height()
+    {
+        // Wall at x=1000, fillet radius 292: resting at flat-floor height
+        // (z=ball_radius) at x=900 already overlaps the curve's own
+        // material (it's within the fillet's footprint, closer to the wall
+        // than the fillet's floor-side tangent point at x=708) -- the curve
+        // should push the ball up onto its own surface instead of leaving
+        // it embedded, the real end-to-end proof that
+        // RB-PHYSICS-001-FR-020's curved transition is real physical
+        // geometry, not just a detection hack.
+        let floor = flat_ground();
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            292.0,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+
+        let ball_radius = 92.75;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(900.0, 0.0, ball_radius));
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.z > ball_radius + 10.0,
+            "expected the curve to push the ball up off flat-floor height, got z={}",
+            world.ball.position.z
+        );
+    }
+
+    #[test]
+    fn a_car_is_not_deflected_by_a_curved_transition() {
+        // Regression guard for the documented Non-goal: box (car)
+        // collision against a curve isn't implemented yet
+        // (RB-PHYSICS-001-FR-020) -- a car sitting at the exact same
+        // overlapping position the ball test above uses should be
+        // completely unaffected by the curve (no upward push), only by
+        // the ordinary flat floor/wall contacts it would already have.
+        let floor = flat_ground();
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let curve = crate::body::StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            292.0,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+        let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let car = some_car(Vec3::new(900.0, 0.0, car_half_extents.z));
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_car(car)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            (world.cars[0].position.z - car_half_extents.z).abs() < 1.0,
+            "expected the car to stay at its ordinary flat-floor resting height, unaffected by \
+             the curve, got z={}",
+            world.cars[0].position.z
+        );
     }
 
     #[test]

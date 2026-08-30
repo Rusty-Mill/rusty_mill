@@ -26,19 +26,24 @@
 //! warm-starting, a combined multi-body solve, and constant calibration).
 //! `PhysicsWorld` gains arena walls (`with_wall`) as generic flat
 //! `StaticPlane` geometry every body collides with, the same way it already
-//! collides with the ground; `arena` builds Rocket League's actual
-//! standard-arena octagonal footprint plus a ceiling from that same
-//! machinery (`PhysicsWorld::standard_arena`) — still without curved
-//! wall-to-floor/wall-to-ceiling transitions or goal cutouts.
+//! collides with the ground, and curved wall-to-floor/wall-to-ceiling
+//! fillets (`with_curve`, a `StaticQuarterPipe` each — deflects only the
+//! ball, not a car; see `body`'s own doc comment); `arena` builds Rocket
+//! League's actual standard-arena octagonal footprint, a ceiling, and the 8
+//! cardinal-wall fillets from that same machinery
+//! (`PhysicsWorld::standard_arena`) — still without goal cutouts or
+//! fillets at the 4 diagonal corner walls.
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`
 //! resolves each ball-vs-car and car-vs-car pair independently, one full
 //! solver pass at a time, which is an approximation once 3+ bodies are
 //! mutually touching in the same step (see `world`'s doc comment); split
-//! impulse; warm-starting/sleeping; and consuming a *recorded* input
-//! sequence — `PhysicsWorld::set_car_input` sets a car's current input
-//! (persisting until changed), but nothing yet drives that from real
+//! impulse; warm-starting/sleeping; a car (box) actually being deflected by
+//! a curved fillet (needs real support-mapping/SAT-style machinery against
+//! curved geometry this port doesn't have); and consuming a *recorded*
+//! input sequence — `PhysicsWorld::set_car_input` sets a car's current
+//! input (persisting until changed), but nothing yet drives that from real
 //! `RB-VERIFY-002` capture data frame-by-frame.
 
 pub mod arena;
@@ -50,7 +55,7 @@ pub mod mat3;
 pub mod solver;
 pub mod world;
 
-pub use body::{RigidBody, Shape, StaticPlane};
+pub use body::{RigidBody, Shape, StaticPlane, StaticQuarterPipe};
 pub use collision::Contact;
 pub use mat3::Mat3;
 pub use world::{simulate, PhysicsWorld};
