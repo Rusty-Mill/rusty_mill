@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rusty-search-core",
+    "crates/rusty-search-memory",
+    "crates/rusty-search-tantivy",
+    "crates/rusty-search-sqlite-fts5",
+    "crates/rusty-search-elasticsearch",
+    "crates/rusty-search-meilisearch",
+    "crates/rusty-search-opensearch",
+    "crates/rusty-search-solr",
+    "crates/rusty-search-algolia",
+    "crates/rusty-search-azure-search",
+    "crates/rusty-search-cloud",
+    "crates/rusty-search",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_search"
+authors = ["rusty_search contributors"]
+
+[workspace.dependencies]
+rusty-search-core = { path = "crates/rusty-search-core", version = "0.1.0" }
+rusty-search-memory = { path = "crates/rusty-search-memory", version = "0.1.0" }
+rusty-search-tantivy = { path = "crates/rusty-search-tantivy", version = "0.1.0" }
+rusty-search-sqlite-fts5 = { path = "crates/rusty-search-sqlite-fts5", version = "0.1.0" }
+rusty-search-elasticsearch = { path = "crates/rusty-search-elasticsearch", version = "0.1.0" }
+rusty-search-meilisearch = { path = "crates/rusty-search-meilisearch", version = "0.1.0" }
+rusty-search-opensearch = { path = "crates/rusty-search-opensearch", version = "0.1.0" }
+rusty-search-solr = { path = "crates/rusty-search-solr", version = "0.1.0" }
+rusty-search-algolia = { path = "crates/rusty-search-algolia", version = "0.1.0" }
+rusty-search-azure-search = { path = "crates/rusty-search-azure-search", version = "0.1.0" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Internal replacement for serde/serde_json, adopted incrementally per
+# crate - see https://github.com/baileyrd/rusty_search/issues/19. Pinned to
+# a specific commit rather than a version since this isn't published to
+# crates.io.
+rusty_serde = { git = "https://github.com/baileyrd/rusty_serde", rev = "ed0a0bd0029e3bfa96e62c6064f296233e07fc35", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tantivy = "0.26"

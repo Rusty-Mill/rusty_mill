@@ -1,0 +1,26 @@
+[package]
+name = "rusty-search-tantivy"
+description = "Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rusty-search-core = { workspace = true }
+async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+# `tantivy::schema::document::TantivyDocument::from_json_object` hard-requires
+# real `serde_json::Map`/`Value` (tantivy itself depends on it) - kept
+# alongside `rusty_serde` for exactly that boundary; see convert.rs.
+serde_json = { workspace = true }
+tantivy = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+rusty_time = { git = "https://github.com/baileyrd/rusty_time", rev = "21507244846586a37cb4bfb6700f746404efd3e8" }
+rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

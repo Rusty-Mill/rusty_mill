@@ -1,0 +1,21 @@
+[package]
+name = "rusty-search-core"
+description = "Backend-agnostic async search interface: documents, schema, query DSL, and the pluggable SearchBackend trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+# The derive macro matches thiserror's #[error("...")]/#[from] shape;
+# BoxError (used by SearchError::Backend) is the anyhow::Error analog,
+# Send + Sync unconditionally so it satisfies async-trait's Send futures
+# - see rusty_search#25.
+rusty_err = { git = "https://github.com/baileyrd/rusty_err", rev = "992ede743fe16cefef789a85dad55891065d523a" }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,25 @@
+[package]
+name = "rusty-search-meilisearch"
+description = "Meilisearch-backed SearchBackend implementation for rusty_search: a remote HTTP search engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rusty-search-core = { workspace = true }
+async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+# meilisearch-sdk's document methods take/return real serde_json::Value,
+# so this stays alongside rusty_serde rather than being replaced by it -
+# see convert.rs.
+serde_json = { workspace = true }
+meilisearch-sdk = "0.33"
+tokio = { workspace = true, features = ["sync"] }
+rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = "0.6"

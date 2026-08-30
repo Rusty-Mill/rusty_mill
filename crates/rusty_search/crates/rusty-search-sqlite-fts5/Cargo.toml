@@ -1,0 +1,28 @@
+[package]
+name = "rusty-search-sqlite-fts5"
+description = "SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rusty-search-core = { workspace = true }
+async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+# Wraps the same rusqlite = "0.31" (bundled) this crate would otherwise
+# depend on directly, applying sane connection pragmas (WAL, foreign keys,
+# busy timeout) this crate didn't set on its own, plus a typed FTS5 table
+# builder in place of hand-assembled DDL strings. Re-exports rusqlite
+# itself (`rusty_sqlite::rusqlite`), so this is the crate's only sqlite
+# dependency line - see rusty_search#17.
+rusty_sqlite = { git = "https://github.com/baileyrd/rusty_sqlite", rev = "c0f671d8b98ab27ff31f64cfb0865da82893d9bb" }
+rusty_time = { git = "https://github.com/baileyrd/rusty_time", rev = "21507244846586a37cb4bfb6700f746404efd3e8" }
+rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
