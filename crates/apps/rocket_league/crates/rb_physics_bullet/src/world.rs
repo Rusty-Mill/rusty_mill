@@ -27,11 +27,16 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// to restore grip after a handbrake-induced reduction, a remembered
 /// jump-held state (`car_jump_held`, starting `false`) that
 /// `drive::apply_driven_forces` uses to fire jump only on a fresh press,
-/// and a remembered double-jump-available flag (`car_double_jump_available`,
+/// a remembered double-jump-available flag (`car_double_jump_available`,
 /// starting `true`) that `drive::apply_driven_forces` resets whenever the
 /// car touches the ground *or* a wall and consumes when an airborne fresh
-/// press spends it on a plain double jump (not a wall jump) — all driving
-/// the car via `drive::apply_driven_forces`.
+/// press spends it on a plain double jump (not a wall jump), and a
+/// remembered jump-hold-window (`car_jump_hold_time_remaining`, starting
+/// `0.0`) that `drive::apply_driven_forces` uses to give the ground jump
+/// variable height — armed to `drive::JUMP_HOLD_MAX_DURATION` by a fresh
+/// ground-jump press, counted down while `jump` stays held, and zeroed
+/// immediately on release — all driving the car via
+/// `drive::apply_driven_forces`.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
@@ -40,6 +45,7 @@ pub struct PhysicsWorld {
     car_base_friction: Vec<f32>,
     car_jump_held: Vec<bool>,
     car_double_jump_available: Vec<bool>,
+    car_jump_hold_time_remaining: Vec<f32>,
     pub ground: StaticPlane,
     pub walls: Vec<StaticPlane>,
     pub gravity: Vec3,
@@ -65,6 +71,7 @@ impl PhysicsWorld {
             car_base_friction: Vec::new(),
             car_jump_held: Vec::new(),
             car_double_jump_available: Vec::new(),
+            car_jump_hold_time_remaining: Vec::new(),
             ground,
             walls: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
@@ -95,7 +102,8 @@ impl PhysicsWorld {
     /// restore to once released; its jump-held state starts `false`, so an
     /// already-`jump: true` initial input still counts as a fresh press; its
     /// double jump starts available (`true`), matching a car that's
-    /// effectively "just landed" before its first step.
+    /// effectively "just landed" before its first step; its jump-hold
+    /// window starts at `0.0` (no ground jump in flight yet).
     /// Callable more than once —
     /// `PhysicsWorld::new(ball, ground).with_car(a).with_car(b)` builds a
     /// two-car scene — since a car's `player_id` in `frame()` is just its
@@ -107,6 +115,7 @@ impl PhysicsWorld {
         self.car_boost.push(drive::MAX_BOOST);
         self.car_jump_held.push(false);
         self.car_double_jump_available.push(true);
+        self.car_jump_hold_time_remaining.push(0.0);
         self
     }
 
@@ -148,9 +157,10 @@ impl PhysicsWorld {
     /// press, gated on and consuming `double_jump_available`, restored on
     /// landing; wall jump firing an outward-plus-upward impulse instead,
     /// gated on `wall_normal` — also computed up front from the car's
-    /// position at the start of this step, like `on_ground`) alongside
-    /// gravity, so `input`'s forces/impulses (and friction adjustment) are
-    /// part of the same velocity-prediction phase.
+    /// position at the start of this step, like `on_ground`; the ground
+    /// jump's variable height, driven by `jump_hold_time_remaining`)
+    /// alongside gravity, so `input`'s forces/impulses (and friction
+    /// adjustment) are part of the same velocity-prediction phase.
     #[allow(clippy::too_many_arguments)]
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
@@ -160,6 +170,7 @@ impl PhysicsWorld {
         boost_amount: &mut f32,
         jump_held: &mut bool,
         double_jump_available: &mut bool,
+        jump_hold_time_remaining: &mut f32,
         base_friction: f32,
         gravity: Vec3,
         dt: f32,
@@ -174,6 +185,7 @@ impl PhysicsWorld {
             boost_amount,
             jump_held,
             double_jump_available,
+            jump_hold_time_remaining,
             base_friction,
             dt,
         );
@@ -268,8 +280,11 @@ impl PhysicsWorld {
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
         for (
-            ((((((car, input), on_ground), wall_normal), boost), base_friction), jump_held),
-            double_jump_available,
+            (
+                ((((((car, input), on_ground), wall_normal), boost), base_friction), jump_held),
+                double_jump_available,
+            ),
+            jump_hold_time_remaining,
         ) in self
             .cars
             .iter_mut()
@@ -280,6 +295,7 @@ impl PhysicsWorld {
             .zip(self.car_base_friction.iter())
             .zip(self.car_jump_held.iter_mut())
             .zip(self.car_double_jump_available.iter_mut())
+            .zip(self.car_jump_hold_time_remaining.iter_mut())
         {
             Self::drive_and_integrate_velocities(
                 car,
@@ -289,6 +305,7 @@ impl PhysicsWorld {
                 boost,
                 jump_held,
                 double_jump_available,
+                jump_hold_time_remaining,
                 *base_friction,
                 self.gravity,
                 dt,
@@ -921,11 +938,14 @@ mod tests {
             },
         );
 
-        // A single JUMP_SPEED impulse under this world's gravity returns to
-        // the ground in ~2*JUMP_SPEED/650 ≈ 0.9s; run well past that with
-        // jump still held the entire time.
+        // Holding jump the whole time now also earns the ground jump's
+        // variable-height bonus (extra upward accel for
+        // drive::JUMP_HOLD_MAX_DURATION), so the car climbs higher and its
+        // round trip takes noticeably longer than a bare JUMP_SPEED
+        // impulse's ~2*JUMP_SPEED/650 ≈ 0.9s; run well past that with jump
+        // still held the entire time.
         let dt = 1.0 / 120.0;
-        for _ in 0..(1.5 / dt) as u32 {
+        for _ in 0..(3.0 / dt) as u32 {
             world.step(dt);
         }
 
@@ -1326,6 +1346,102 @@ mod tests {
             (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
             "expected the wall jump's upward component, got {}",
             world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_held_ground_jump_reaches_greater_height_than_a_tapped_one() {
+        let peak_height = |held: bool| -> f32 {
+            let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+            let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+            car.restitution = 0.0;
+            let ground = StaticPlane {
+                restitution: 0.0,
+                ..flat_ground()
+            };
+            let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+            world.set_car_input(
+                0,
+                rb_domain::ControllerInput {
+                    jump: true,
+                    ..Default::default()
+                },
+            );
+            let dt = 1.0 / 120.0;
+            world.step(dt); // fresh press: fires the base impulse
+            if !held {
+                world.set_car_input(0, rb_domain::ControllerInput::default());
+            }
+            let mut peak = world.cars[0].position.z;
+            for _ in 0..(2.0 / dt) as u32 {
+                world.step(dt);
+                peak = peak.max(world.cars[0].position.z);
+            }
+            peak
+        };
+
+        let tapped_peak = peak_height(false);
+        let held_peak = peak_height(true);
+        assert!(
+            held_peak > tapped_peak + 1.0,
+            "expected holding jump to reach a greater peak height than tapping it, \
+             tapped={tapped_peak}, held={held_peak}"
+        );
+    }
+
+    #[test]
+    fn double_jump_after_a_held_ground_jump_still_gives_exactly_one_more_jump_speed_kick() {
+        // Regression guard: holding the ground jump (earning extra height
+        // via the new variable-height hold window) must not leak any extra
+        // acceleration into a later double jump — variable height is
+        // scoped to the ground jump only.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        car.restitution = 0.0;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        world.gravity = Vec3::ZERO; // isolate the jump impulses from falling back down
+        let dt = 1.0 / 120.0;
+
+        // Ground jump, held well past drive::JUMP_HOLD_MAX_DURATION so the
+        // extra acceleration has fully accrued before releasing.
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        for _ in 0..24 {
+            world.step(dt);
+        }
+        let velocity_after_held_ground_jump = world.cars[0].linear_velocity.z;
+
+        // Release, then press again once airborne — a plain double jump.
+        world.set_car_input(0, rb_domain::ControllerInput::default());
+        world.step(dt);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+
+        let velocity_after_double_jump = world.cars[0].linear_velocity.z;
+        assert!(
+            (velocity_after_double_jump
+                - (velocity_after_held_ground_jump + crate::drive::JUMP_SPEED))
+                .abs()
+                < 1.0,
+            "expected the double jump to add exactly one more JUMP_SPEED kick on top of \
+             whatever the held ground jump had already accrued, not an extra variable-height \
+             boost, after held ground jump={velocity_after_held_ground_jump}, after double \
+             jump={velocity_after_double_jump}"
         );
     }
 }

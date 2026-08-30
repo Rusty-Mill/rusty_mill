@@ -2,7 +2,7 @@
 
 - Last verified main commit: `72150f5` (merge of [#37](https://github.com/baileyrd/rusty_bullet/pull/37))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a ground jump, air control, a double jump (plain or a directional dodge), and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a dodge variant of the wall jump, flip-cancel, landing auto-orientation assistance, variable jump height, a modeled arena footprint, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional dodge), and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a dodge variant of the wall jump, flip-cancel, landing auto-orientation assistance, a modeled arena footprint, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -316,6 +316,33 @@
   visible flip after a ground jump in a live `PhysicsWorld::step` loop,
   and a regression test confirming a car touching a wall with directional
   stick input still gets the wall jump, not a dodge.
+- `RB-PHYSICS-001-FR-015` (variable jump height) — the ground jump gains a
+  hold window: continuing to hold `ControllerInput.jump` after the fresh
+  press that fires it adds a continuous `JUMP_HOLD_ACCELERATION` upward
+  force, for up to `JUMP_HOLD_MAX_DURATION` seconds, on top of the fixed
+  `JUMP_SPEED` impulse. A new per-car `jump_hold_time_remaining: f32`
+  (`PhysicsWorld`'s parallel `car_jump_hold_time_remaining: Vec<f32>`,
+  starting `0.0`) is checked and decremented against the *previous* call's
+  value before that same call's own ground-jump-press handling can re-arm
+  it, so a fresh press's own step only ever fires the plain impulse — only
+  continued holding into later calls earns the extra height. Releasing
+  `jump` zeroes the window immediately, even with time left. Scoped to the
+  ground jump alone: the double jump, a dodge, and the wall jump all
+  require releasing jump first to fire, which itself unconditionally
+  zeroes the hold window, so none of the three can be boosted by a
+  leftover window. `JUMP_HOLD_MAX_DURATION` and `JUMP_HOLD_ACCELERATION`
+  are both uncalibrated placeholders — no public reference exists for real
+  Rocket League's actual hold-window length or acceleration the way
+  `JUMP_SPEED` does. The pre-existing
+  `holding_jump_does_not_repeatedly_relaunch_the_car` regression test's run
+  duration was extended (1.5s → 3.0s) since a continuously held jump now
+  climbs higher and takes longer to land. 6 new unit tests across
+  `drive.rs`/`world.rs` in `rb_physics_bullet` (126 total), including an
+  end-to-end test confirming a held ground jump reaches a greater peak
+  height than a tapped one in a live `PhysicsWorld::step` loop, and a
+  regression test confirming a double jump fired after holding the ground
+  jump through its whole window still adds exactly one more `JUMP_SPEED`
+  kick, not an extra variable-height boost.
 
 ## In progress
 
@@ -358,15 +385,15 @@
   pair resolves independently, one full solver pass at a time — a real
   approximation once 3+ bodies mutually touch in the same step), a dodge
   variant of the wall jump, flip-cancel, landing auto-orientation
-  assistance, variable jump height, and a modeled arena footprint beyond
-  generic flat walls — all real, not-yet-started follow-up work (see the
-  spec's Non-goals/Open questions); a car can now drive, steer, boost (on
-  the ground or in the air), handbrake/drift, take a ground jump, a double
-  jump or a directional dodge, and a wall jump, and control itself in the
-  air (pitch/yaw/roll), and bounces off the ball/other cars/arena walls,
-  but can't yet dodge off a wall, cancel a dodge's flip early, get any
-  landing assistance, vary its jump height, or interact with a real
-  Rocket League-shaped arena.
+  assistance, and a modeled arena footprint beyond generic flat walls —
+  all real, not-yet-started follow-up work (see the spec's Non-goals/Open
+  questions); a car can now drive, steer, boost (on the ground or in the
+  air), handbrake/drift, take a ground jump (with variable height), a
+  double jump or a directional dodge, and a wall jump, and control itself
+  in the air (pitch/yaw/roll), and bounces off the ball/other cars/arena
+  walls, but can't yet dodge off a wall, cancel a dodge's flip early, get
+  any landing assistance, or interact with a real Rocket League-shaped
+  arena.
 
 ## Next
 
@@ -374,16 +401,16 @@
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
 2. A dodge variant of the wall jump, flip-cancel, landing auto-orientation
-   assistance, variable jump height, and/or a modeled arena footprint —
-   real follow-up work for `rb_physics_bullet::drive`/`world`;
-   `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s own
-   uncalibrated constants) needs `PHASE-0-EXIT` real data regardless.
+   assistance, and/or a modeled arena footprint — real follow-up work for
+   `rb_physics_bullet::drive`/`world`; `RB-PHYSICS-001-FR-005` (constant
+   calibration, including `drive`'s own uncalibrated constants) needs
+   `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (170 tests: 23 in `rb_domain`, 120 in
+- `cargo test --workspace`: pass (176 tests: 23 in `rb_domain`, 126 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

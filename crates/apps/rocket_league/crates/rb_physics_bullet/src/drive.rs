@@ -93,15 +93,27 @@
 //! jump can itself be dodged off of, but that's deliberately out of scope
 //! here (see Not implemented).
 //!
+//! The ground jump has variable height: continuing to hold `jump` after the
+//! fresh press that fires it adds a continuous `JUMP_HOLD_ACCELERATION`
+//! upward force, for up to `JUMP_HOLD_MAX_DURATION` seconds, on top of the
+//! fixed `JUMP_SPEED` impulse — releasing early (or the window simply
+//! running out) stops the extra acceleration immediately, matching real
+//! Rocket League's held-vs-tapped jump height difference. This is scoped to
+//! the ground jump alone: the double jump, a dodge, and the wall jump are
+//! still each a single fixed instantaneous impulse, completely unaffected
+//! by how long jump is held, since firing any of them requires releasing
+//! jump first (a fresh press), which itself unconditionally ends the ground
+//! jump's hold window (see `apply_driven_forces`'s own doc comment for the
+//! exact ordering). Tracked per car via `jump_hold_time_remaining`, the same
+//! kind of caller-owned persisted state `jump_held`/`double_jump_available`
+//! already are.
+//!
 //! **Not implemented** (tracked in `RB-PHYSICS-001`, not silently
 //! dropped): a dodge variant for the wall jump (see above), canceling a
 //! dodge's rotation early by pressing again mid-flip (real Rocket League
 //! lets a player do this; this port always completes the fixed
-//! `DODGE_ANGULAR_SPEED` spin), any auto-orientation assistance on
-//! landing after a dodge, and variable jump height (real Rocket League
-//! adds extra upward accel for as long as jump is held, up to a cap — this
-//! port always applies the same fixed impulse regardless of how long the
-//! button is held, for every jump variant). A car with no input set (or
+//! `DODGE_ANGULAR_SPEED` spin), and any auto-orientation assistance on
+//! landing after a dodge. A car with no input set (or
 //! all-neutral `ControllerInput::default()`) behaves exactly as a free
 //! rigid box always has — this module only ever adds force/torque/impulse
 //! or adjusts the existing friction property, never removes physics
@@ -229,6 +241,23 @@ pub const DODGE_SPEED: f32 = 1400.0;
 /// documented Rocket League value.
 const DODGE_ANGULAR_SPEED: f32 = 5.5;
 
+/// Uncalibrated placeholder maximum duration (seconds) that continuing to
+/// hold `jump` after a fresh ground-jump press keeps adding extra upward
+/// acceleration (`JUMP_HOLD_ACCELERATION`) — this port has no public
+/// reference for real Rocket League's actual hold-window length the way
+/// `JUMP_SPEED` does, so this is chosen only to make a fully held jump
+/// visibly taller than a tapped one in tests, not derived from any
+/// measured or documented Rocket League value.
+const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
+
+/// Uncalibrated placeholder continuous upward acceleration (uu/s^2)
+/// applied every step `jump` is held and `JUMP_HOLD_MAX_DURATION` hasn't
+/// yet elapsed since the ground jump's own fresh press, on top of that
+/// press's fixed `JUMP_SPEED` impulse — chosen only to produce a clearly
+/// taller held jump than a tapped one for this car's mass in tests, not
+/// derived from any measured or documented Rocket League value.
+const JUMP_HOLD_ACCELERATION: f32 = 1400.0;
+
 fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
 }
@@ -271,7 +300,17 @@ fn right_axis(car: &RigidBody) -> Vec3 {
 /// same way `on_ground` is — see `PhysicsWorld`); a fresh press while
 /// airborne and `wall_normal.is_some()` fires a wall jump instead of
 /// consulting `double_jump_available` at all — wall jump never dodges,
-/// regardless of `input.pitch`/`input.roll`. Call once per step, before
+/// regardless of `input.pitch`/`input.roll`. `jump_hold_time_remaining` is
+/// how much longer, in seconds, continuing to hold `jump` should keep
+/// adding extra upward acceleration to a ground jump — checked and
+/// decremented *before* this call's own `on_ground`/`jump_pressed` handling
+/// below, using whatever value the *previous* call left it at, so a fresh
+/// ground-jump press's own step only ever fires the plain `JUMP_SPEED`
+/// impulse; that same press then re-arms `jump_hold_time_remaining` to
+/// `JUMP_HOLD_MAX_DURATION` for subsequent calls to consume. Releasing
+/// `jump` immediately zeroes it (stopping the extra acceleration right
+/// away), and it's otherwise untouched by the double jump, a dodge, or the
+/// wall jump — see the module doc comment. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
@@ -282,12 +321,26 @@ pub fn apply_driven_forces(
     boost_amount: &mut f32,
     jump_held: &mut bool,
     double_jump_available: &mut bool,
+    jump_hold_time_remaining: &mut f32,
     base_friction: f32,
     dt: f32,
 ) {
     let forward = forward_axis(car);
     let jump_pressed = input.jump && !*jump_held;
     *jump_held = input.jump;
+
+    // Variable jump height: apply the continuous hold acceleration using
+    // whatever jump_hold_time_remaining the *previous* call left behind,
+    // before this call's own on_ground/jump_pressed handling below can
+    // re-arm it — so a fresh ground-jump press's own step here never gets
+    // the extra force, only continued holding into later calls does.
+    // Releasing jump ends the window immediately, even if time was left.
+    if input.jump && *jump_hold_time_remaining > 0.0 {
+        car.apply_central_force(Vec3::new(0.0, 0.0, JUMP_HOLD_ACCELERATION * car.mass()));
+        *jump_hold_time_remaining = (*jump_hold_time_remaining - dt).max(0.0);
+    } else {
+        *jump_hold_time_remaining = 0.0;
+    }
 
     if on_ground {
         // Landing (or simply resting) always restores the double jump,
@@ -322,6 +375,12 @@ pub fn apply_driven_forces(
             // car.mass() here cancels that out and yields a flat
             // JUMP_SPEED velocity change regardless of the car's mass.
             car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+            // Arms the hold window for continued holding on subsequent
+            // calls — this call's own jump_hold_time_remaining check above
+            // already ran against the *previous* value (0, since no ground
+            // jump was in flight yet), so only the fixed impulse above
+            // fires this step.
+            *jump_hold_time_remaining = JUMP_HOLD_MAX_DURATION;
         }
     } else {
         if wall_normal.is_some() {
@@ -495,6 +554,32 @@ mod tests {
         double_jump_available: &mut bool,
         dt: f32,
     ) {
+        let mut jump_hold_time_remaining = 0.0;
+        step_with_input_and_hold(
+            car,
+            input,
+            on_ground,
+            wall_normal,
+            boost_amount,
+            jump_held,
+            double_jump_available,
+            &mut jump_hold_time_remaining,
+            dt,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_input_and_hold(
+        car: &mut RigidBody,
+        input: &ControllerInput,
+        on_ground: bool,
+        wall_normal: Option<Vec3>,
+        boost_amount: &mut f32,
+        jump_held: &mut bool,
+        double_jump_available: &mut bool,
+        jump_hold_time_remaining: &mut f32,
+        dt: f32,
+    ) {
         car.clear_forces();
         apply_driven_forces(
             car,
@@ -504,6 +589,7 @@ mod tests {
             boost_amount,
             jump_held,
             double_jump_available,
+            jump_hold_time_remaining,
             DEFAULT_TEST_FRICTION,
             dt,
         );
@@ -1431,5 +1517,249 @@ mod tests {
         step_with_input(&mut right, &opposite, false, &mut right_boost, 1.0 / 60.0);
 
         assert!(left.angular_velocity.z * right.angular_velocity.z < 0.0);
+    }
+
+    #[test]
+    fn holding_jump_after_a_ground_jump_adds_more_upward_velocity_than_a_tap() {
+        let dt = 1.0 / 120.0;
+
+        let mut tapped = car();
+        let mut tapped_boost = MAX_BOOST;
+        let mut tapped_jump_held = false;
+        let mut tapped_double_jump_available = true;
+        let mut tapped_hold_remaining = 0.0;
+        step_with_input_and_hold(
+            &mut tapped,
+            &full_jump(),
+            true,
+            None,
+            &mut tapped_boost,
+            &mut tapped_jump_held,
+            &mut tapped_double_jump_available,
+            &mut tapped_hold_remaining,
+            dt,
+        );
+        for _ in 0..12 {
+            step_with_input_and_hold(
+                &mut tapped,
+                &ControllerInput::default(),
+                true,
+                None,
+                &mut tapped_boost,
+                &mut tapped_jump_held,
+                &mut tapped_double_jump_available,
+                &mut tapped_hold_remaining,
+                dt,
+            );
+        }
+
+        let mut held = car();
+        let mut held_boost = MAX_BOOST;
+        let mut held_jump_held = false;
+        let mut held_double_jump_available = true;
+        let mut held_hold_remaining = 0.0;
+        for _ in 0..13 {
+            step_with_input_and_hold(
+                &mut held,
+                &full_jump(),
+                true,
+                None,
+                &mut held_boost,
+                &mut held_jump_held,
+                &mut held_double_jump_available,
+                &mut held_hold_remaining,
+                dt,
+            );
+        }
+
+        assert!(
+            held.linear_velocity.z > tapped.linear_velocity.z + 1.0,
+            "expected holding jump to accrue more upward velocity than tapping it, \
+             tapped={}, held={}",
+            tapped.linear_velocity.z,
+            held.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn releasing_jump_early_stops_the_extra_acceleration_from_a_held_ground_jump() {
+        let dt = 1.0 / 120.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+
+        // Press, hold for a few steps (well short of JUMP_HOLD_MAX_DURATION),
+        // then release.
+        for _ in 0..5 {
+            step_with_input_and_hold(
+                &mut c,
+                &full_jump(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        assert!(
+            hold_remaining > 0.0,
+            "expected the hold window to still have time left at this point"
+        );
+        step_with_input_and_hold(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+        assert_eq!(
+            hold_remaining, 0.0,
+            "expected releasing jump to immediately end the hold window"
+        );
+        let velocity_at_release = c.linear_velocity.z;
+
+        // Continue with jump released for several more steps — no further
+        // gain expected even though the hold window had time remaining.
+        for _ in 0..10 {
+            step_with_input_and_hold(
+                &mut c,
+                &ControllerInput::default(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        assert!(
+            (c.linear_velocity.z - velocity_at_release).abs() < 1e-3,
+            "expected no further upward velocity gain after releasing jump early, \
+             velocity at release={velocity_at_release}, after={}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn held_jump_stops_gaining_extra_velocity_once_the_hold_window_expires() {
+        let dt = 1.0 / 120.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+
+        // Press, then hold well past JUMP_HOLD_MAX_DURATION (0.2s = 24
+        // steps at this dt).
+        for _ in 0..30 {
+            step_with_input_and_hold(
+                &mut c,
+                &full_jump(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        let velocity_at_30_steps = c.linear_velocity.z;
+        assert_eq!(
+            hold_remaining, 0.0,
+            "expected the hold window to have fully expired by now"
+        );
+
+        // Continue holding for several more steps — no further gain
+        // expected, since the window has already run out.
+        for _ in 0..10 {
+            step_with_input_and_hold(
+                &mut c,
+                &full_jump(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        assert!(
+            (c.linear_velocity.z - velocity_at_30_steps).abs() < 1e-3,
+            "expected no further upward velocity gain once the hold window has expired, \
+             velocity at 30 steps={velocity_at_30_steps}, after 10 more={}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn double_jump_after_a_held_ground_jump_is_not_boosted_by_the_hold_window() {
+        // Regression guard: variable jump height is scoped to the ground
+        // jump alone — holding jump through the ground jump's whole hold
+        // window must not leak any extra acceleration into a later double
+        // jump.
+        let dt = 1.0 / 120.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+
+        for _ in 0..24 {
+            step_with_input_and_hold(
+                &mut c,
+                &full_jump(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        let velocity_after_held_ground_jump = c.linear_velocity.z;
+
+        // Release, then press again while airborne — a plain double jump.
+        step_with_input_and_hold(
+            &mut c,
+            &ControllerInput::default(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+        step_with_input_and_hold(
+            &mut c,
+            &full_jump(),
+            false,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+
+        assert!(
+            (c.linear_velocity.z - (velocity_after_held_ground_jump + JUMP_SPEED)).abs() < 1.0,
+            "expected the double jump to add exactly one more JUMP_SPEED kick, not an extra \
+             variable-height boost left over from holding the ground jump, after held ground \
+             jump={velocity_after_held_ground_jump}, after double jump={}",
+            c.linear_velocity.z
+        );
     }
 }
