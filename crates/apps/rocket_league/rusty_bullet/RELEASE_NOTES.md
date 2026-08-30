@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Double jump input
-**2026-08-29** · PR pending · commit pending
+**2026-08-30** · [#33](https://github.com/baileyrd/rusty_bullet/pull/33) · `7c9524a`
 
 - **Added:** `rb_physics_bullet::drive::apply_driven_forces` gains a
   double jump (`RB-PHYSICS-001-FR-012`) — one more, identical `JUMP_SPEED`
