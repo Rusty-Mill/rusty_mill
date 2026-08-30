@@ -75,6 +75,14 @@ members = [
     "crates/rusty_ansi",
     "crates/rusty_config",
     "crates/rusty_jinja",
+    "crates/rustils/crates/platform",
+    "crates/rustils/crates/platform-mock",
+    "crates/rustils/crates/platform-parity",
+    "crates/rustils/crates/platform-linux",
+    "crates/rustils/crates/platform-windows",
+    "crates/rustils/crates/platform-bsd",
+    "crates/rustils/crates/winargv",
+    "crates/rustils/crates/coreutils",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -92,6 +100,7 @@ exclude = [
     "crates/rusty_libc/bench",
     "crates/rusty_tls/fuzz",
     "crates/rusty_lsp/fuzz",
+    "crates/rustils/fuzz",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/
@@ -164,3 +173,48 @@ proc-macro-crate = "3"
 uuid = { version = "1", features = ["v4"] }
 bigdecimal = "0.4"
 chrono = "0.4"
+
+# Hoisted from rustils' own former `[workspace.package]`/
+# `[workspace.dependencies]` tables (it was its own nested Cargo workspace
+# before this merge, de-inherited the same way as rusty_search: its
+# `license = "MIT"` collides with rusty_search's `"MIT OR Apache-2.0"`
+# above, and its `version = "0.27.0"` collides with rusty_search's
+# `"0.1.0"`, so rustils' own eight crates keep literal `[package]` fields
+# instead of `field.workspace = true`. Only its *dependencies* are hoisted
+# here. `thiserror` is already hoisted above for rusty_db's own use.
+platform = { path = "crates/rustils/crates/platform" }
+platform-mock = { path = "crates/rustils/crates/platform-mock" }
+platform-parity = { path = "crates/rustils/crates/platform-parity" }
+platform-linux = { path = "crates/rustils/crates/platform-linux" }
+platform-windows = { path = "crates/rustils/crates/platform-windows" }
+platform-bsd = { path = "crates/rustils/crates/platform-bsd" }
+winargv = { path = "crates/rustils/crates/winargv" }
+libc = "0.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_Networking_WinSock",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+] }
+
+# rustils' own `[workspace.lints]`, hoisted the same way -- only its eight
+# crates opt in via `[lints] workspace = true`; every other crate in this
+# workspace is unaffected.
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
