@@ -156,7 +156,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("rusty_crypto_key_test_perms_{}.bin", std::process::id()));
+        let path = dir.join(format!(
+            "rusty_crypto_key_test_perms_{}.bin",
+            std::process::id()
+        ));
 
         let secret = SecretBytes::new(vec![1, 2, 3]);
         secret.save_to_file(&path).expect("save should succeed");
