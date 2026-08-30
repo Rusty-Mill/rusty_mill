@@ -2,7 +2,7 @@
 
 - Last verified main commit: `8053a71` (merge of [#49](https://github.com/baileyrd/rusty_bullet/pull/49))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), and curved wall-to-floor/wall-to-ceiling transitions deflecting the ball at the 4 cardinal walls all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by a curve, fillets at the diagonal corner walls, goal cutouts, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), and curved wall-to-floor/wall-to-ceiling transitions deflecting the ball at all 9 walls — the 4 cardinal walls and, since FR-021, the 4 diagonal corner walls too — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by a curve, a fillet at the corner walls' own vertical edges, goal cutouts, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -484,6 +484,38 @@
   overlapping the fillet's own material — gets pushed up off that height
   instead of staying embedded, and a regression test confirming a car in
   the exact same position is completely unaffected.
+- `RB-PHYSICS-001-FR-021` (curved corner-wall-to-floor/wall-to-ceiling
+  transitions) — extends FR-020's fillet treatment to the 4 diagonal corner
+  walls: `arena::standard_curves` now returns 16 `StaticQuarterPipe`s
+  (still one floor-side and one ceiling-side fillet per wall, now for all 9
+  walls) instead of 8. `StaticQuarterPipe::between_planes` needed no code
+  changes — its real correctness requirement was never "axis-aligned
+  planes" (FR-020's own doc comment had incorrectly claimed that), only
+  that the two bridged planes' normals are mutually perpendicular, which
+  holds for a corner wall meeting the floor/ceiling regardless of the
+  corner wall's own horizontal rotation. A corner wall's fillet
+  `axis_direction` is instead computed via a cross product
+  (`floor.normal.cross(&wall.normal)`, already unit length by construction,
+  so no `.normalize()`/`.unwrap()` is needed) rather than hand-picked,
+  since it isn't a coordinate axis the way a cardinal wall's is. New
+  `arena::corner_wall_plane` helper factors out the existing
+  (behavior-unchanged) corner-wall plane construction so `standard_curves`
+  can reuse it. `PhysicsWorld::standard_arena` picks up the extra 8 curves
+  automatically. `FILLET_RADIUS` is reused as-is rather than a second,
+  independently chosen radius. Still not modeled: a car actually being
+  deflected by any fillet, a fillet at a corner wall's own *vertical* edges
+  (where it meets its neighboring side/back wall), and goal cutouts. 4 new
+  unit tests across `arena.rs`/`world.rs` in `rb_physics_bullet` (172
+  total): `standard_curves` returns exactly 16 fillets; every fillet's axis
+  sits radius-in from some vertical wall, cardinal or corner; a corner
+  wall's own derived fillet axis sits radius-in from both the corner wall
+  and the floor with correctly perpendicular unit sector vectors; the
+  cross product computing each of the 4 corner walls' `axis_direction` is
+  exactly unit length, plus — the real end-to-end proof — a new
+  `PhysicsWorld` test built around a wall with a diagonal (non-axis-aligned)
+  normal confirms a ball resting within that diagonal wall's fillet
+  footprint gets pushed up off flat-floor height, the same physical proof
+  FR-020 gave for a cardinal wall.
 
 ## In progress
 
@@ -525,31 +557,37 @@
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
   approximation once 3+ bodies mutually touch in the same step), a car
-  actually being deflected by a curved fillet, fillets at the 4 diagonal
-  corner walls, and goal cutouts — all real, not-yet-started follow-up work
-  (see the spec's Non-goals/Open questions); a car can now drive, steer,
-  boost (on the ground or in the air), handbrake/drift, take a ground jump
-  (with variable height), a double jump or a directional, flip-cancelable
-  dodge, and a wall jump (itself dodgeable and flip-cancelable the same
-  way), control itself in the air (pitch/yaw/roll), get a gentle nudge back
-  toward level when tumbling with no input, bounces off the ball/other
-  cars/arena walls, and can now play inside a real Rocket League-shaped
-  octagonal arena (`PhysicsWorld::standard_arena`) whose wall-to-floor/
-  wall-to-ceiling seams the *ball* now smoothly transitions across instead
-  of hitting a sharp corner — but a car still drives straight through that
-  same curve unaffected, the 4 diagonal corner walls have no curved
-  transition at all, and the back walls have no goal cutout.
+  actually being deflected by a curved fillet, a fillet at the corner
+  walls' own vertical edges (where a corner wall meets its neighboring
+  side/back wall), and goal cutouts — all real, not-yet-started follow-up
+  work (see the spec's Non-goals/Open questions); a car can now drive,
+  steer, boost (on the ground or in the air), handbrake/drift, take a
+  ground jump (with variable height), a double jump or a directional,
+  flip-cancelable dodge, and a wall jump (itself dodgeable and
+  flip-cancelable the same way), control itself in the air (pitch/yaw/roll),
+  get a gentle nudge back toward level when tumbling with no input, bounces
+  off the ball/other cars/arena walls, and can now play inside a real
+  Rocket League-shaped octagonal arena (`PhysicsWorld::standard_arena`)
+  whose wall-to-floor/wall-to-ceiling seams the *ball* now smoothly
+  transitions across at all 9 walls (cardinal and diagonal corner alike)
+  instead of hitting a sharp corner — but a car still drives straight
+  through every one of those same curves unaffected, the corner walls' own
+  vertical edges have no curved transition at all, and the back walls have
+  no goal cutout.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A car actually being deflected by a curved fillet, fillets at the 4
-   diagonal corner walls, and goal cutouts — real follow-up work for
-   `rb_physics_bullet::arena`/`collision`; the car case needs real
+2. A car actually being deflected by a curved fillet, a fillet at the
+   corner walls' own vertical edges, and goal cutouts — real follow-up work
+   for `rb_physics_bullet::arena`/`collision`; the car case needs real
    support-mapping/SAT-style collision machinery against curved geometry
-   this port doesn't have yet. `RB-PHYSICS-001-FR-005` (constant
+   this port doesn't have yet, and the corner-vertical-edge case needs
+   either a more general fillet construction (a non-90-degree sector) or a
+   different approach entirely, since two arena walls meeting at a corner
+   generally aren't perpendicular. `RB-PHYSICS-001-FR-005` (constant
    calibration, including `drive`'s and `arena`'s own uncalibrated
    constants) needs `PHASE-0-EXIT` real data regardless.
 
@@ -557,7 +595,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (218 tests: 23 in `rb_domain`, 168 in
+- `cargo test --workspace`: pass (222 tests: 23 in `rb_domain`, 172 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

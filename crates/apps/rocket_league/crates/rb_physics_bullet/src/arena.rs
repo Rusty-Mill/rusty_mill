@@ -6,17 +6,25 @@
 //! are each just another flat `StaticPlane`, the same as the ground or a
 //! side wall.
 //!
-//! `standard_curves` (`RB-PHYSICS-001-FR-020`) adds curved
-//! wall-to-floor/wall-to-ceiling fillets for the 4 cardinal (axis-aligned)
-//! walls, built from `body::StaticQuarterPipe::between_planes` — still no
-//! new collision code of its own here, just composing the same flat planes
-//! `standard_walls` already builds.
+//! `standard_curves` (`RB-PHYSICS-001-FR-020`/`FR-021`) adds curved
+//! wall-to-floor/wall-to-ceiling fillets for all 9 walls — the 4 cardinal
+//! (axis-aligned) walls and, since FR-021, the 4 diagonal corner walls too
+//! — built from `body::StaticQuarterPipe::between_planes` — still no new
+//! collision code of its own here, just composing the same flat planes
+//! `standard_walls` already builds. A vertical wall is always perpendicular
+//! to the floor/ceiling regardless of its own horizontal rotation, so
+//! `between_planes` needs no generalization to cover a diagonal corner
+//! wall's floor/ceiling seam — only `axis_direction` (computed via a cross
+//! product here, rather than hand-picked, since a corner wall's own
+//! "along the wall" direction isn't a coordinate axis) differs from the
+//! cardinal-wall case.
 //!
-//! **Still not modeled**: fillets at the 4 diagonal corner walls (their
-//! normals aren't axis-aligned, so `between_planes`' orthonormal-basis
-//! assumption doesn't hold there — see `StaticQuarterPipe::between_planes`'s
-//! own doc comment), the goal structures themselves (no back-net cutout —
-//! the back walls here are solid, flat planes spanning the full width), and
+//! **Still not modeled**: a curved fillet at the vertical edges themselves
+//! — where a corner wall meets its neighboring side/back wall at other than
+//! 90 degrees — which is a materially different problem (`between_planes`
+//! only handles two *perpendicular* planes, and two arena walls meeting at
+//! a corner aren't); the goal structures themselves (no back-net cutout —
+//! the back walls here are solid, flat planes spanning the full width); and
 //! any geometry finer than a single flat plane or single-radius fillet per
 //! boundary segment (the real field mesh's corners and transitions are more
 //! complex than this). See `RB-PHYSICS-001`'s Non-goals.
@@ -77,6 +85,18 @@ fn back_wall_plane(sign: f32) -> StaticPlane {
     StaticPlane::new(Vec3::new(0.0, -sign, 0.0), -BACK_WALL_Y)
 }
 
+/// The diagonal corner wall in quadrant `(sx, sy)` (each `1.0` or `-1.0`).
+/// `offset` is `normal.dot(point_on_plane)` for the point where the corner
+/// wall meets its side wall, `(SIDE_WALL_X - CORNER_LENGTH, BACK_WALL_Y)`,
+/// with `normal = (-1, -1, 0) / sqrt(2)` — this magnitude is shared by all
+/// four quadrants since `SIDE_WALL_X`/`BACK_WALL_Y` are used with the same
+/// magnitude in every quadrant, only sign differs.
+fn corner_wall_plane(sx: f32, sy: f32) -> StaticPlane {
+    let normal = Vec3::new(-sx, -sy, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
+    let offset = -(SIDE_WALL_X - CORNER_LENGTH + BACK_WALL_Y) * std::f32::consts::FRAC_1_SQRT_2;
+    StaticPlane::new(normal, offset)
+}
+
 /// The arena's full vertical boundary: 2 side walls (`+-X`), 2 back walls
 /// (`+-Y`), a ceiling, and 4 diagonal corner walls (one per quadrant) —
 /// 9 `StaticPlane`s total, each with its normal pointing back into the
@@ -96,32 +116,28 @@ pub fn standard_walls() -> Vec<StaticPlane> {
     walls.push(back_wall_plane(-1.0));
     walls.push(ceiling_plane());
 
-    // Corner offset: normal.dot(point_on_plane) for the point where the
-    // corner wall meets its side wall, (SIDE_WALL_X - CORNER_LENGTH,
-    // BACK_WALL_Y), with normal (-1, -1, 0) / sqrt(2) — this magnitude is
-    // shared by all four quadrants since SIDE_WALL_X/BACK_WALL_Y are used
-    // with the same magnitude in every quadrant, only sign differs.
-    let corner_offset =
-        -(SIDE_WALL_X - CORNER_LENGTH + BACK_WALL_Y) * std::f32::consts::FRAC_1_SQRT_2;
     for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
-        let normal = Vec3::new(-sx, -sy, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
-        walls.push(StaticPlane::new(normal, corner_offset));
+        walls.push(corner_wall_plane(sx, sy));
     }
 
     walls
 }
 
-/// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`)
-/// for the 4 cardinal walls only — 8 `StaticQuarterPipe`s total (one
-/// floor-side and one ceiling-side fillet per cardinal wall), each built by
+/// Curved wall-to-floor/wall-to-ceiling fillets for all 9 walls — the 4
+/// cardinal walls (`RB-PHYSICS-001-FR-020`) and, since `FR-021`, the 4
+/// diagonal corner walls too — 16 `StaticQuarterPipe`s total (one
+/// floor-side and one ceiling-side fillet per wall), each built by
 /// `StaticQuarterPipe::between_planes` from the same flat planes
-/// `standard_walls` uses. The 4 diagonal corner walls get no fillet here —
-/// see the module doc for why (`between_planes`' orthonormal-basis
-/// assumption doesn't hold for a non-axis-aligned wall).
+/// `standard_walls` uses. A corner wall's own "along the wall" direction
+/// isn't a coordinate axis, unlike a cardinal wall's, so its
+/// `axis_direction` is computed via a cross product (`floor.normal.cross(
+/// &wall.normal)`) rather than hand-picked — `between_planes` itself needs
+/// no generalization, since a vertical wall's normal is perpendicular to
+/// the floor/ceiling's regardless of the wall's own horizontal rotation.
 pub fn standard_curves() -> Vec<StaticQuarterPipe> {
     let floor = standard_ground();
     let ceiling = ceiling_plane();
-    let mut curves = Vec::with_capacity(8);
+    let mut curves = Vec::with_capacity(16);
 
     for &sign in &[1.0f32, -1.0] {
         let wall = side_wall_plane(sign);
@@ -154,6 +170,29 @@ pub fn standard_curves() -> Vec<StaticQuarterPipe> {
             &wall,
             FILLET_RADIUS,
             axis_direction,
+        ));
+    }
+
+    for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        let wall = corner_wall_plane(sx, sy);
+        // A vertical wall's normal always has zero Z component while the
+        // floor/ceiling's is purely Z, so this cross product is already
+        // exactly unit length (the two normals are always perpendicular,
+        // regardless of the wall's own horizontal rotation) — no
+        // `.normalize()`/`.unwrap()` needed.
+        let floor_axis_direction = floor.normal.cross(&wall.normal);
+        curves.push(StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            FILLET_RADIUS,
+            floor_axis_direction,
+        ));
+        let ceiling_axis_direction = ceiling.normal.cross(&wall.normal);
+        curves.push(StaticQuarterPipe::between_planes(
+            &ceiling,
+            &wall,
+            FILLET_RADIUS,
+            ceiling_axis_direction,
         ));
     }
 
@@ -233,8 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn standard_curves_has_eight_fillets() {
-        assert_eq!(standard_curves().len(), 8);
+    fn standard_curves_has_sixteen_fillets() {
+        assert_eq!(standard_curves().len(), 16);
     }
 
     #[test]
@@ -254,18 +293,66 @@ mod tests {
     }
 
     #[test]
-    fn every_standard_curve_sits_radius_in_from_a_side_or_back_wall() {
+    fn every_standard_curve_sits_radius_in_from_a_vertical_wall() {
+        // `between_planes` places its axis exactly `radius` from *each*
+        // bridged plane (see `StaticQuarterPipe::between_planes`'s doc
+        // comment), so every curve's axis must sit exactly `FILLET_RADIUS`
+        // from some vertical wall -- a side wall, a back wall, or (since
+        // FR-021) a diagonal corner wall.
+        let vertical_walls: Vec<StaticPlane> = standard_walls()
+            .into_iter()
+            .filter(|w| w.normal.z == 0.0)
+            .collect();
         for curve in standard_curves() {
-            let near_side_wall = (curve.axis_point.x.abs() - (SIDE_WALL_X - FILLET_RADIUS)).abs()
-                < 1e-3
-                && curve.axis_point.y == 0.0;
-            let near_back_wall = (curve.axis_point.y.abs() - (BACK_WALL_Y - FILLET_RADIUS)).abs()
-                < 1e-3
-                && curve.axis_point.x == 0.0;
+            let sits_radius_in_from_some_wall = vertical_walls
+                .iter()
+                .any(|wall| (wall.signed_distance(&curve.axis_point) - FILLET_RADIUS).abs() < 1e-3);
             assert!(
-                near_side_wall || near_back_wall,
-                "expected every curve's axis to sit radius-in from a cardinal wall, got {:?}",
+                sits_radius_in_from_some_wall,
+                "expected every curve's axis to sit radius-in from some vertical wall, got {:?}",
                 curve.axis_point
+            );
+        }
+    }
+
+    #[test]
+    fn a_corner_wall_fillets_axis_sits_radius_in_from_both_the_corner_wall_and_the_floor() {
+        let wall = corner_wall_plane(1.0, 1.0);
+        let floor = standard_ground();
+        let pipe = StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            FILLET_RADIUS,
+            Vec3::new(1.0, -1.0, 0.0),
+        );
+        assert!((wall.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
+        assert!((floor.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_corner_wall_fillets_sector_vectors_are_perpendicular_unit_vectors() {
+        let wall = corner_wall_plane(1.0, 1.0);
+        let floor = standard_ground();
+        let axis_direction = floor.normal.cross(&wall.normal);
+        let pipe = StaticQuarterPipe::between_planes(&floor, &wall, FILLET_RADIUS, axis_direction);
+        assert!((pipe.sector_start.length() - 1.0).abs() < 1e-4);
+        assert!((pipe.sector_end.length() - 1.0).abs() < 1e-4);
+        assert!(pipe.sector_start.dot(&pipe.sector_end).abs() < 1e-4);
+    }
+
+    #[test]
+    fn every_corner_walls_cross_product_axis_direction_is_unit_length() {
+        // The invariant the production `.normalize()`-free code in
+        // `standard_curves` relies on: a vertical wall's normal is always
+        // exactly perpendicular to the floor/ceiling's, so the raw cross
+        // product is already unit length, for every quadrant.
+        let floor = standard_ground();
+        for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let wall = corner_wall_plane(sx, sy);
+            let axis_direction = floor.normal.cross(&wall.normal);
+            assert!(
+                (axis_direction.length() - 1.0).abs() < 1e-4,
+                "cross product for quadrant ({sx}, {sy}) was not unit length: {axis_direction:?}"
             );
         }
     }

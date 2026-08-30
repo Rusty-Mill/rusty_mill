@@ -29,10 +29,12 @@
 //! collides with the ground, and curved wall-to-floor/wall-to-ceiling
 //! fillets (`with_curve`, a `StaticQuarterPipe` each — deflects only the
 //! ball, not a car; see `body`'s own doc comment); `arena` builds Rocket
-//! League's actual standard-arena octagonal footprint, a ceiling, and the 8
-//! cardinal-wall fillets from that same machinery
-//! (`PhysicsWorld::standard_arena`) — still without goal cutouts or
-//! fillets at the 4 diagonal corner walls.
+//! League's actual standard-arena octagonal footprint, a ceiling, and all 16
+//! floor/ceiling-seam fillets (the 4 cardinal walls and, since
+//! `RB-PHYSICS-001-FR-021`, the 4 diagonal corner walls too) from that same
+//! machinery (`PhysicsWorld::standard_arena`) — still without goal cutouts
+//! or a fillet at the corner walls' own vertical edges (where a corner wall
+//! meets its neighboring side/back wall).
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`

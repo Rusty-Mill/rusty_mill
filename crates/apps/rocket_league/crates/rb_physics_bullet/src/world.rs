@@ -1788,10 +1788,10 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_eight_curved_transitions() {
+    fn standard_arena_has_sixteen_curved_transitions() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.curves.len(), 8);
+        assert_eq!(world.curves.len(), 16);
     }
 
     #[test]
@@ -1871,6 +1871,54 @@ mod tests {
             "expected the car to stay at its ordinary flat-floor resting height, unaffected by \
              the curve, got z={}",
             world.cars[0].position.z
+        );
+    }
+
+    #[test]
+    fn a_ball_resting_within_a_diagonal_walls_curved_transition_footprint_is_pushed_up() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-021: `between_planes`
+        // generalizes to a wall whose normal isn't a coordinate axis (like
+        // one of the standard arena's diagonal corner walls) as long as it's
+        // still perpendicular to the floor -- this test builds its own
+        // diagonal (non-axis-aligned) wall rather than going through
+        // `arena::standard_curves` so the fillet's own geometric correctness
+        // is checked directly, independent of the arena module's specific
+        // corner placement. Same structure as
+        // `a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`,
+        // just with a diagonal wall normal instead of an axis-aligned one.
+        let floor = flat_ground();
+        let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
+        let wall = StaticPlane::new(wall_normal, -1000.0);
+        let axis_direction = floor.normal.cross(&wall.normal);
+        let curve =
+            crate::body::StaticQuarterPipe::between_planes(&floor, &wall, 292.0, axis_direction);
+
+        let ball_radius = 92.75;
+        // 900 units from the origin toward the wall, along the wall's
+        // inward direction -- the diagonal analogue of the cardinal test's
+        // ball at x=900 for a wall at x=1000.
+        let toward_wall = -wall.normal;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            toward_wall * 900.0 + Vec3::new(0.0, 0.0, ball_radius),
+        );
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.z > ball_radius + 10.0,
+            "expected the diagonal wall's curve to push the ball up off flat-floor height, got z={}",
+            world.ball.position.z
         );
     }
 
