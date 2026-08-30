@@ -1,11 +1,11 @@
 [package]
 name = "platform-windows"
 description = "Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+version = "0.27.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
 platform.workspace = true
@@ -13,16 +13,18 @@ winargv.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
-# D-15: rusty_win32 is the Track W backend — a pinned git dependency (one
-# source of truth, not a vendored fork), replaced into sys/ call-by-call
-# behind `track-w`. Bump the rev deliberately; never track a branch.
+# D-15: rusty_win32 is the Track W backend, feature-gated behind
+# `track-w`. Previously a pinned git dependency; now a sibling crate in
+# this same workspace (rusty_mill), plain path dependency, matching the
+# pattern used for every other pin retired in this series.
 # rusty_win32's own MSRV is 1.88 (`impl Default for *mut T`, used by the
 # OVERLAPPED/handle-bearing structs), above this workspace's 1.75 floor —
-# the feature must stay off on the MSRV CI leg. Its manifest is edition
-# 2021 for that reason too: Cargo parses the manifest of every resolved
-# dependency, optional-and-disabled included, so an edition-2024 manifest
-# would have broken the MSRV leg on the dependency's mere presence.
-rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "b8eae6bd0f7788959cf0d8c4430984c97846eae5", optional = true }
+# the feature must stay off on any MSRV-pinned build. Its manifest is
+# edition 2021, same as before: Cargo parses the manifest of every
+# resolved dependency, optional-and-disabled included, so an edition-2024
+# manifest would break an MSRV-pinned build on the dependency's mere
+# presence.
+rusty_win32 = { path = "../../../rusty_win32", optional = true }
 
 [features]
 # RFC v2 §2 Track W: route curated call families through rusty_win32's

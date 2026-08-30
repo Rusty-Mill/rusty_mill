@@ -1,11 +1,11 @@
 [package]
 name = "platform"
 description = "Portable trait surface and types for rustils — the api layer. No I/O, no unsafe."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+version = "0.27.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
 thiserror.workspace = true

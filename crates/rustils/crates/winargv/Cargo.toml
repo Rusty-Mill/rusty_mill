@@ -4,10 +4,10 @@ description = "Windows argv -> command-line construction (MSVCRT + cmd-rules quo
 # Independent of the PAL group's version — see docs/versioning.md §1
 # (winargv has its own handback lifecycle, D3) and CHANGELOG.md.
 version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
 platform.workspace = true

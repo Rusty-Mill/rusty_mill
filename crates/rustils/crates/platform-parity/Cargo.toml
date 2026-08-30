@@ -1,11 +1,11 @@
 [package]
 name = "platform-parity"
 description = "Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+version = "0.27.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
 # The traits every assertion is written against. Nothing else: this crate

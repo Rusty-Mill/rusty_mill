@@ -2,31 +2,21 @@
 name = "coreutils"
 description = "Modular pure-Rust implementation of core GNU/POSIX utilities"
 version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
 platform.workspace = true
-# Pinned git dependencies, matching the `rusty_libc` treatment in
-# `platform-linux/Cargo.toml`: one source of truth, not a vendored fork.
-# Bump the rev deliberately; never track a branch.
-#
-# These were `path = "../../../rusty_regx"` / `"../../../rpath"`, which
-# only resolve on a machine that happens to have those repos checked out
-# as siblings of the rustils clone. Nothing else does — a fresh clone,
-# and every CI runner, failed at `cargo metadata` before compiling a
-# single line, which took the whole workspace down with it (`test`,
-# `miri`, `deny` and `cross-compile-check` all run workspace-wide).
-#
-# For local co-development against a working tree, add a `[patch]` to
-# the *workspace root* manifest rather than reverting these lines —
-# e.g. `[patch."https://github.com/baileyrd/rusty_regx"]
-# rusty_regx = { path = "../rusty_regx" }` — so the checked-in build
-# stays reproducible for everyone who doesn't have that tree.
-rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "93c5541d6713750141476c87d6cd774629e1ae3a" }
-rpath = { git = "https://github.com/baileyrd/rpath", rev = "a54684f82efc2abed1a94ef9773ecfaa2dea65c3" }
+# `rusty_regx` and `rpath` are now sibling crates in this same workspace
+# (rusty_mill) — plain path dependencies, matching the pattern used for
+# every other pin retired in this series. Previously pinned git
+# dependencies (before that, unresolvable local-only paths — see git
+# history), now real workspace siblings that build reproducibly for
+# every clone and CI runner without a patch table.
+rusty_regx = { path = "../../../rusty_regx" }
+rpath = { path = "../../../rpath" }
 
 [dev-dependencies]
 platform-mock.workspace = true

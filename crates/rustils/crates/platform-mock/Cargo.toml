@@ -1,11 +1,11 @@
 [package]
 name = "platform-mock"
 description = "In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1)."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
-license.workspace = true
+version = "0.27.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+license = "MIT"
 
 [dependencies]
 platform.workspace = true

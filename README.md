@@ -80,6 +80,14 @@ have landed so far.
 | [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
 | [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
+| [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
+| [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
+| [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
+| [`platform-linux`](crates/rustils/crates/platform-linux) | `crates/rustils/crates/platform-linux` | Linux backend for `platform`: libc floor, with a `rusty_libc`-backed raw-syscall track behind a feature flag |
+| [`platform-windows`](crates/rustils/crates/platform-windows) | `crates/rustils/crates/platform-windows` | Windows backend for `platform`: `windows-sys` floor, with a `rusty_win32`-backed track behind a feature flag |
+| [`platform-bsd`](crates/rustils/crates/platform-bsd) | `crates/rustils/crates/platform-bsd` | BSD backend for `platform` (net-only slice): macOS, FreeBSD, OpenBSD, NetBSD, DragonFly |
+| [`winargv`](crates/rustils/crates/winargv) | `crates/rustils/crates/winargv` | Windows argv → command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable) |
+| [`coreutils`](crates/rustils/crates/coreutils) | `crates/rustils/crates/coreutils` | Modular pure-Rust implementation of core GNU/POSIX utilities (`rcat`, `rls`, `rrun`, `rgrep`, and more) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -432,6 +440,24 @@ runner) — a real panic, not a flake, now fixed to skip on either variant.
 `rusty_config` has zero dependencies of any kind, so nothing needed
 swapping — its merge is just the subtree add plus workspace wiring.
 
+`rustils` was its own nested Cargo workspace of eight crates (`platform`,
+`platform-mock`, `platform-parity`, `platform-linux`, `platform-windows`,
+`platform-bsd`, `winargv`, `coreutils`), de-inherited the same way as
+`rusty_search` and `rusty_db` before it: its `license = "MIT"` and
+`version = "0.27.0"` collide with values already hoisted into this
+workspace's own `[workspace.package]`, so its eight crates keep literal
+`[package]` fields instead of inheriting, and only its dependencies and
+`[workspace.lints]` table were hoisted. `platform-linux` and
+`platform-windows` each carried an optional, feature-gated pinned git
+dependency on `rusty_libc`/`rusty_win32` respectively (their "Track P"/
+"Track W" raw-syscall paths) — both are already merged siblings here, so
+both pins retired to plain path dependencies, same as every other pin
+retired in this series. `coreutils` had the same treatment for its
+`rusty_regx`/`rpath` dependencies. `platform-linux`'s Secret Service
+integration tests spawn a real `dbus-daemon`/`gnome-keyring-daemon`, so
+this workspace's own CI now installs both on the Linux leg, matching
+`rustils`' own CI.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -481,6 +507,7 @@ A third wave continues the same way, starting with
 [`rusty_wiremock`](https://github.com/baileyrd/rusty_wiremock),
 [`rusty_search`](https://github.com/baileyrd/rusty_search) (twelve crates
 behind one nested workspace),
-[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan), and
-[`rusty_config`](https://github.com/baileyrd/rusty_config) — merged one
-at a time, same process.
+[`rusty_vulkan`](https://github.com/baileyrd/rusty_vulkan),
+[`rusty_config`](https://github.com/baileyrd/rusty_config), and
+[`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
+nested workspace) — merged one at a time, same process.
