@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Goal cutouts
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#57](https://github.com/baileyrd/rusty_bullet/pull/57) · `34234b6`
 
 - **Opens an actual goal-mouth window in each back wall**, where every
   prior increment had a single solid, flat plane spanning the full width.
