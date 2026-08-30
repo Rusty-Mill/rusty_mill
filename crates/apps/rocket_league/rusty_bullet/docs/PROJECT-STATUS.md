@@ -2,7 +2,7 @@
 
 - Last verified main commit: `7c9524a` (merge of [#33](https://github.com/baileyrd/rusty_bullet/pull/33))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, ground-driving car input (throttle/steering), boost, handbrake, a ground jump, air control, and a double jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; the dodge directional impulse/torque, variable jump height, wall jump, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a ground jump, air control, a double jump, and a wall jump all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; the dodge directional impulse/torque, variable jump height, a modeled arena footprint, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -266,6 +266,31 @@
   regression test confirming a spent double jump doesn't refire mid-air no
   matter how many more times jump is released and re-pressed before
   landing.
+- `RB-PHYSICS-001-FR-013` (arena walls and wall jump) — `PhysicsWorld`
+  gains `walls: Vec<StaticPlane>` and a `with_wall` builder; every body
+  (ball and cars) now collides with every wall the same way it already
+  collides with the ground (`resolve_ground_contact` renamed
+  `resolve_plane_contact`, no behavior change — it never had ground-specific
+  logic, just a ground-specific name). `drive::apply_driven_forces` gains a
+  wall jump: a fresh airborne jump press while touching a wall
+  (`wall_normal`, computed the same way `on_ground` is) fires an impulse
+  combining a new `WALL_JUMP_HORIZONTAL_SPEED` (uncalibrated placeholder)
+  outward along the wall's normal with `JUMP_SPEED` upward, taking priority
+  over the double jump on that press. Wall contact — whether or not jump is
+  pressed — unconditionally restores `double_jump_available`, the same
+  rule landing uses, so wall jump doesn't cost a player their double jump
+  and has no once-per-airborne-period limit of its own. Deliberately
+  excludes the directional "dodge" a real wall jump can pair with,
+  variable jump height, and any modeled arena footprint beyond generic
+  flat walls (octagonal shape, curved transitions, a ceiling,
+  multi-wall-corner disambiguation). 7 new unit tests across
+  `drive.rs`/`world.rs` in `rb_physics_bullet` (110 total), including an
+  end-to-end test confirming a car resting against a wall wall-jumps
+  outward and upward, a second end-to-end test confirming a ball shot at a
+  wall bounces off it instead of tunnelling through (the same proof
+  ball-vs-car collision already has, now for walls), and a regression test
+  confirming a car near but not touching an existing wall still gets a
+  plain double jump.
 
 ## In progress
 
@@ -306,30 +331,32 @@
   recorded controller input or to `rb_verify_cli`).
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step) and
-  the dodge directional impulse/torque, variable jump height, and wall
-  jump — all real, not-yet-started follow-up work (see the spec's
-  Non-goals/Open questions); a car can now drive, steer, boost (on the
-  ground or in the air), handbrake/drift, take a ground jump and a double
-  jump, and control itself in the air (pitch/yaw/roll), and bounces off
-  the ball/other cars, but can't yet dodge, vary its jump height, or jump
-  off a wall.
+  approximation once 3+ bodies mutually touch in the same step), the
+  dodge directional impulse/torque, variable jump height, and a modeled
+  arena footprint beyond generic flat walls — all real, not-yet-started
+  follow-up work (see the spec's Non-goals/Open questions); a car can now
+  drive, steer, boost (on the ground or in the air), handbrake/drift, take
+  a ground jump, a double jump, and a wall jump, and control itself in the
+  air (pitch/yaw/roll), and bounces off the ball/other cars/arena walls,
+  but can't yet dodge, vary its jump height, or interact with a real
+  Rocket League-shaped arena.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. The dodge directional impulse/torque, variable jump height, and/or wall
-   jump — real follow-up work for `rb_physics_bullet::drive`;
-   `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s own
-   uncalibrated constants) needs `PHASE-0-EXIT` real data regardless.
+2. The dodge directional impulse/torque, variable jump height, and/or a
+   modeled arena footprint — real follow-up work for
+   `rb_physics_bullet::drive`/`world`; `RB-PHYSICS-001-FR-005` (constant
+   calibration, including `drive`'s own uncalibrated constants) needs
+   `PHASE-0-EXIT` real data regardless.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (153 tests: 23 in `rb_domain`, 103 in
+- `cargo test --workspace`: pass (160 tests: 23 in `rb_domain`, 110 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

@@ -9,8 +9,13 @@ use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 
 /// The whole simulated scene: one ball-like sphere, zero or more car-like
-/// boxes, and one ground plane. Every body collides with the ground; every
-/// car also collides with the ball and with every other car
+/// boxes, one ground plane, and zero or more arena walls (`walls`, added via
+/// `with_wall` — a plain flat `StaticPlane` each, typically with a
+/// horizontal normal; this crate doesn't model a full arena footprint, just
+/// the generic capability). Every body collides with the ground and with
+/// every wall (`resolve_plane_contact`, the same body-vs-static-plane
+/// machinery for both — a wall is just a plane whose normal isn't "up");
+/// every car also collides with the ball and with every other car
 /// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
 /// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Each car also has a
@@ -24,8 +29,9 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// `drive::apply_driven_forces` uses to fire jump only on a fresh press,
 /// and a remembered double-jump-available flag (`car_double_jump_available`,
 /// starting `true`) that `drive::apply_driven_forces` resets whenever the
-/// car touches the ground and consumes when an airborne fresh press spends
-/// it — all driving the car via `drive::apply_driven_forces`.
+/// car touches the ground *or* a wall and consumes when an airborne fresh
+/// press spends it on a plain double jump (not a wall jump) — all driving
+/// the car via `drive::apply_driven_forces`.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
@@ -35,6 +41,7 @@ pub struct PhysicsWorld {
     car_jump_held: Vec<bool>,
     car_double_jump_available: Vec<bool>,
     pub ground: StaticPlane,
+    pub walls: Vec<StaticPlane>,
     pub gravity: Vec3,
     elapsed_secs: f32,
 }
@@ -59,9 +66,24 @@ impl PhysicsWorld {
             car_jump_held: Vec::new(),
             car_double_jump_available: Vec::new(),
             ground,
+            walls: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
+    }
+
+    /// Adds one arena wall to the scene — a flat `StaticPlane`, typically
+    /// with a horizontal normal (e.g. `Vec3::new(1.0, 0.0, 0.0)`), though
+    /// nothing here actually requires that. Callable more than once to
+    /// build a multi-wall arena; a scene with no walls added (the default)
+    /// behaves exactly as before walls existed — every body's ground
+    /// contact and driven-input behavior is unaffected by an empty
+    /// `walls`. Doesn't model a full arena footprint (corners, curvature,
+    /// a ceiling) — just the generic per-wall collision and wall-jump
+    /// capability; see `RB-PHYSICS-001-FR-013`'s Non-goals.
+    pub fn with_wall(mut self, wall: StaticPlane) -> PhysicsWorld {
+        self.walls.push(wall);
+        self
     }
 
     /// Adds one car-shaped body to the scene, with a neutral
@@ -124,13 +146,17 @@ impl PhysicsWorld {
     /// upward velocity change on a fresh press, tracked via `jump_held`;
     /// double jump firing the same kind of impulse on a fresh airborne
     /// press, gated on and consuming `double_jump_available`, restored on
-    /// landing) alongside gravity, so `input`'s forces/impulses (and
-    /// friction adjustment) are part of the same velocity-prediction phase.
+    /// landing; wall jump firing an outward-plus-upward impulse instead,
+    /// gated on `wall_normal` — also computed up front from the car's
+    /// position at the start of this step, like `on_ground`) alongside
+    /// gravity, so `input`'s forces/impulses (and friction adjustment) are
+    /// part of the same velocity-prediction phase.
     #[allow(clippy::too_many_arguments)]
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
         on_ground: bool,
+        wall_normal: Option<Vec3>,
         boost_amount: &mut f32,
         jump_held: &mut bool,
         double_jump_available: &mut bool,
@@ -144,6 +170,7 @@ impl PhysicsWorld {
             car,
             input,
             on_ground,
+            wall_normal,
             boost_amount,
             jump_held,
             double_jump_available,
@@ -154,13 +181,15 @@ impl PhysicsWorld {
         integrate::integrate_velocities(car, dt);
     }
 
-    /// Detects and resolves `body`'s ground contact (a manifold of 1 to 4
-    /// points depending on shape/orientation — see
-    /// `collision::contacts_vs_plane`), if any.
-    fn resolve_ground_contact(body: &mut RigidBody, ground: &StaticPlane, dt: f32) {
-        let contacts = collision::contacts_vs_plane(body, ground);
+    /// Detects and resolves `body`'s contact against a single static plane
+    /// (a manifold of 1 to 4 points depending on shape/orientation — see
+    /// `collision::contacts_vs_plane`), if any. Used for both the ground
+    /// and every arena wall — a wall is just a `StaticPlane` whose normal
+    /// isn't "up," and this function has no ground-specific logic at all.
+    fn resolve_plane_contact(body: &mut RigidBody, plane: &StaticPlane, dt: f32) {
+        let contacts = collision::contacts_vs_plane(body, plane);
         if !contacts.is_empty() {
-            solver::resolve_contacts(body, ground, &contacts, dt);
+            solver::resolve_contacts(body, plane, &contacts, dt);
         }
     }
 
@@ -196,11 +225,11 @@ impl PhysicsWorld {
     /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
     /// every body's unconstrained velocity (for cars, including
     /// `drive::apply_driven_forces` from that car's current input), then
-    /// detect and resolve every contact (ground contacts for every body,
-    /// then every ball-vs-car pair, then every car-vs-car pair), then
-    /// integrate every body's transform — never resolving one body's
-    /// transform before another body's contacts have had a chance to
-    /// affect it.
+    /// detect and resolve every contact (ground and wall contacts for
+    /// every body, then every ball-vs-car pair, then every car-vs-car
+    /// pair), then integrate every body's transform — never resolving one
+    /// body's transform before another body's contacts have had a chance
+    /// to affect it.
     ///
     /// Car-vs-car and ball-vs-car pairs are resolved one pair at a time
     /// (each running its own full `SOLVER_ITERATIONS` pass), not as one
@@ -212,7 +241,7 @@ impl PhysicsWorld {
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
-        // driven forces move anything) — `resolve_ground_contact` below
+        // driven forces move anything) — `resolve_plane_contact` below
         // re-derives the same contacts for the actual solve; the small
         // duplicated `contacts_vs_plane` call is simpler than threading
         // the manifold through, and cheap (a handful of corner checks).
@@ -221,16 +250,32 @@ impl PhysicsWorld {
             .iter()
             .map(|car| !collision::contacts_vs_plane(car, &self.ground).is_empty())
             .collect();
+        // Same idea as car_on_ground, but for walls: the first wall (if
+        // any) this car is touching, by its outward normal. A car touching
+        // two walls at once (a corner) picks whichever wall comes first in
+        // `self.walls` — not disambiguated, a documented simplification
+        // (see RB-PHYSICS-001-FR-013's Non-goals).
+        let car_wall_normal: Vec<Option<Vec3>> = self
+            .cars
+            .iter()
+            .map(|car| {
+                self.walls
+                    .iter()
+                    .find(|wall| !collision::contacts_vs_plane(car, wall).is_empty())
+                    .map(|wall| wall.normal)
+            })
+            .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
         for (
-            (((((car, input), on_ground), boost), base_friction), jump_held),
+            ((((((car, input), on_ground), wall_normal), boost), base_friction), jump_held),
             double_jump_available,
         ) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
             .zip(car_on_ground.iter())
+            .zip(car_wall_normal.iter())
             .zip(self.car_boost.iter_mut())
             .zip(self.car_base_friction.iter())
             .zip(self.car_jump_held.iter_mut())
@@ -240,6 +285,7 @@ impl PhysicsWorld {
                 car,
                 input,
                 *on_ground,
+                *wall_normal,
                 boost,
                 jump_held,
                 double_jump_available,
@@ -249,9 +295,15 @@ impl PhysicsWorld {
             );
         }
 
-        Self::resolve_ground_contact(&mut self.ball, &self.ground, dt);
+        Self::resolve_plane_contact(&mut self.ball, &self.ground, dt);
+        for wall in &self.walls {
+            Self::resolve_plane_contact(&mut self.ball, wall, dt);
+        }
         for car in &mut self.cars {
-            Self::resolve_ground_contact(car, &self.ground, dt);
+            Self::resolve_plane_contact(car, &self.ground, dt);
+            for wall in &self.walls {
+                Self::resolve_plane_contact(car, wall, dt);
+            }
         }
 
         for car in &mut self.cars {
@@ -1065,6 +1117,120 @@ mod tests {
             "expected a second airborne jump press to have no effect once the double jump is \
              spent, velocity after double jump={velocity_after_double_jump}, after third press={}",
             world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_car_touching_a_wall_wall_jumps_outward_and_upward() {
+        // Wall at x=100, normal (1,0,0): the same convention flat_ground()
+        // uses (normal points away from the solid side, into where dynamic
+        // bodies live) — free space is x>100, solid x<100.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        // 60-unit half-extent touching the wall with zero gap: car center
+        // at x=160 puts its -x face exactly on the wall's x=100 plane.
+        let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO; // isolate the wall jump from falling
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        assert!(
+            world.cars[0].linear_velocity.x > 0.0,
+            "expected the wall jump to push the car away from the wall (positive x), got {:?}",
+            world.cars[0].linear_velocity
+        );
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity from the wall jump, got {}",
+            world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_ball_bounces_off_a_wall_instead_of_passing_through() {
+        // The real end-to-end proof that arena walls are actual physical
+        // geometry, not just an input-detection hack: a ball shot at a
+        // wall should bounce off it the same way it already does off a
+        // car (`ball_bounces_off_a_stationary_car_instead_of_passing_through`),
+        // via the same generic resolve_plane_contact machinery the ground
+        // already uses.
+        let wall_x = 100.0;
+        let wall = StaticPlane {
+            restitution: 0.5,
+            ..StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), wall_x)
+        };
+        let ball_radius = 92.75;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(wall_x + ball_radius + 100.0, 0.0, 1000.0),
+        );
+        ball.restitution = 0.5;
+        ball.linear_velocity = Vec3::new(-300.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_wall(wall);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let contact_surface_x = wall_x + ball_radius;
+        assert!(
+            world.ball.position.x > contact_surface_x - 1.0,
+            "expected the ball to stop at the wall's surface rather than tunnel through, \
+             ball x={}, wall surface x={}",
+            world.ball.position.x,
+            contact_surface_x
+        );
+        assert!(
+            world.ball.linear_velocity.x > 0.0,
+            "expected the ball to bounce back, got vx={}",
+            world.ball.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn double_jump_still_fires_when_a_wall_exists_but_is_not_touched() {
+        // Regression guard: a wall existing in the scene must not affect a
+        // car that isn't actually touching it — car_wall_normal has to be
+        // gated on real contact, not just on `walls` being non-empty.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
+        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let car = some_car(Vec3::new(5000.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall);
+        world.gravity = Vec3::ZERO;
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected a plain double jump (not a wall jump) when not touching any wall, got {:?}",
+            world.cars[0].linear_velocity
+        );
+        assert_eq!(
+            world.cars[0].linear_velocity.x, 0.0,
+            "expected no wall-jump horizontal push-off when not touching a wall"
         );
     }
 }
