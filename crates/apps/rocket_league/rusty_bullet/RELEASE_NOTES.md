@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Wall jump input
-**2026-08-30** · PR pending · commit pending
+**2026-08-30** · [#35](https://github.com/baileyrd/rusty_bullet/pull/35) · `b748b86`
 
 - **Added:** `PhysicsWorld` gains arena walls (`RB-PHYSICS-001-FR-013`) —
   `walls: Vec<StaticPlane>` and a `with_wall` builder (mirroring
