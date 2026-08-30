@@ -1,10 +1,10 @@
 //! Integration tests: full stack verification across HPACK, frame codec, and connection driver.
 //! Exercises HPACK -> Frame encode/decode -> Frame enum roundtrip across the full pipeline.
 
+use rusty_h2::frame::header::{Flags, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN};
 use rusty_h2::frame::{
     DataFrame, Frame, FrameHeader, FrameType, HeadersFrame, PingFrame, SettingsFrame,
 };
-use rusty_h2::frame::header::{Flags, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_LEN};
 use rusty_h2::hpack::{Decoder, Encoder, HeaderField};
 
 /// Verify HPACK encoding roundtrip for a GET request.
@@ -82,7 +82,10 @@ fn headers_frame_with_hpack_roundtrip() {
 
     let mut wire = Vec::new();
     headers_frame.encode(&mut wire);
-    assert!(wire.len() >= FRAME_HEADER_LEN, "frame should have header at least");
+    assert!(
+        wire.len() >= FRAME_HEADER_LEN,
+        "frame should have header at least"
+    );
 
     let hdr = FrameHeader::decode(&wire).unwrap();
     assert_eq!(hdr.frame_type, FrameType::Headers);
@@ -97,7 +100,9 @@ fn headers_frame_with_hpack_roundtrip() {
     };
 
     let mut decoder = Decoder::new(4096);
-    let decoded = decoder.decode(&decoded_headers.header_block_fragment).unwrap();
+    let decoded = decoder
+        .decode(&decoded_headers.header_block_fragment)
+        .unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].name, b":method");
     assert_eq!(decoded[0].value, b"GET");
@@ -178,7 +183,10 @@ fn settings_frame_roundtrip() {
     let hdr = FrameHeader::decode(&wire).unwrap();
     assert_eq!(hdr.frame_type, FrameType::Settings);
     assert_eq!(hdr.stream_id, 0);
-    assert!((hdr.length as usize).is_multiple_of(6), "settings payload must be 6-byte multiples");
+    assert!(
+        (hdr.length as usize).is_multiple_of(6),
+        "settings payload must be 6-byte multiples"
+    );
 
     let decoded_frame = Frame::decode(&hdr, &wire[FRAME_HEADER_LEN..]).unwrap();
     match decoded_frame {
@@ -214,7 +222,11 @@ fn frame_enum_roundtrip_preserves_all_types() {
         original.encode(&mut wire);
         let hdr = FrameHeader::decode(&wire).unwrap();
         let decoded = Frame::decode(&hdr, &wire[FRAME_HEADER_LEN..]).unwrap();
-        assert_eq!(original, decoded, "roundtrip failed for {:?}", hdr.frame_type);
+        assert_eq!(
+            original, decoded,
+            "roundtrip failed for {:?}",
+            hdr.frame_type
+        );
     }
 }
 
@@ -275,7 +287,10 @@ fn hpack_sensitive_never_indexed() {
     let mut block = Vec::new();
     encoder.encode(&headers, &mut block);
 
-    assert!(block[0] & 0x10 != 0, "sensitive header should use literal never-indexed");
+    assert!(
+        block[0] & 0x10 != 0,
+        "sensitive header should use literal never-indexed"
+    );
 
     let mut decoder = Decoder::new(4096);
     let decoded = decoder.decode(&block).unwrap();
@@ -284,7 +299,10 @@ fn hpack_sensitive_never_indexed() {
     // Encode again - should still be literal (not indexed), because never-indexed does not grow dynamic table
     let mut block2 = Vec::new();
     encoder.encode(&headers, &mut block2);
-    assert!(block2[0] & 0x10 != 0, "second encoding should still be literal");
+    assert!(
+        block2[0] & 0x10 != 0,
+        "second encoding should still be literal"
+    );
     assert_ne!(block2[0], 0x81, "should not use indexed representation");
 }
 

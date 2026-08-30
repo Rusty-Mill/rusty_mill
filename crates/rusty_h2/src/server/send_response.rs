@@ -26,7 +26,10 @@ impl SendResponse {
     pub fn send_response(&mut self, status: u16) -> Result<(frame::Frame, SendStream)> {
         let mut encoder = hpack::Encoder::new(hpack::DEFAULT_HEADER_TABLE_SIZE);
         let mut header_block = Vec::new();
-        encoder.encode(&[hpack::HeaderField::new(":status", status.to_string())], &mut header_block);
+        encoder.encode(
+            &[hpack::HeaderField::new(":status", status.to_string())],
+            &mut header_block,
+        );
 
         let headers_frame = frame::HeadersFrame {
             stream_id: self.stream_id,
@@ -36,7 +39,10 @@ impl SendResponse {
             header_block_fragment: header_block,
         };
 
-        Ok((frame::Frame::Headers(headers_frame), self.send_stream.clone()))
+        Ok((
+            frame::Frame::Headers(headers_frame),
+            self.send_stream.clone(),
+        ))
     }
 
     /// Set the maximum frame size for this stream.
@@ -69,7 +75,10 @@ impl SendStream {
 
     /// Build an RST_STREAM frame resetting this stream with `code`.
     pub fn reset(&mut self, code: ErrorCode) -> frame::Frame {
-        frame::Frame::RstStream(frame::RstStreamFrame { stream_id: self.stream_id, error_code: code })
+        frame::Frame::RstStream(frame::RstStreamFrame {
+            stream_id: self.stream_id,
+            error_code: code,
+        })
     }
 }
 
@@ -81,7 +90,9 @@ mod tests {
     fn send_response_encodes_the_status_into_a_headers_frame() {
         let mut resp = SendResponse::new(1);
         let (frame, _stream) = resp.send_response(200).unwrap();
-        let frame::Frame::Headers(h) = &frame else { panic!("expected HEADERS, got {frame:?}") };
+        let frame::Frame::Headers(h) = &frame else {
+            panic!("expected HEADERS, got {frame:?}")
+        };
         assert!(!h.header_block_fragment.is_empty());
 
         let mut decoder = hpack::Decoder::new(hpack::DEFAULT_HEADER_TABLE_SIZE);
@@ -94,7 +105,12 @@ mod tests {
     fn send_stream_builds_data_and_rst_stream_frames() {
         let mut stream = SendStream::new(1);
         assert!(matches!(stream.send_data(b"hi".to_vec()), frame::Frame::Data(d) if !d.end_stream));
-        assert!(matches!(stream.send_data_eos(b"bye".to_vec()), frame::Frame::Data(d) if d.end_stream));
-        assert!(matches!(stream.reset(ErrorCode::Cancel), frame::Frame::RstStream(_)));
+        assert!(
+            matches!(stream.send_data_eos(b"bye".to_vec()), frame::Frame::Data(d) if d.end_stream)
+        );
+        assert!(matches!(
+            stream.reset(ErrorCode::Cancel),
+            frame::Frame::RstStream(_)
+        ));
     }
 }

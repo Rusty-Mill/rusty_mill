@@ -21,7 +21,10 @@ impl Connection {
     pub fn new(builder: Builder) -> Self {
         let settings = builder.to_settings();
         let inner = connect::Connection::new(settings, connect::PeerType::Client);
-        Connection { inner, requests: SendRequest::new(1) }
+        Connection {
+            inner,
+            requests: SendRequest::new(1),
+        }
     }
 
     /// Apply a received frame to the connection state machine.
@@ -37,7 +40,11 @@ impl Connection {
     /// Build a GOAWAY frame with the provided error code, for the caller's
     /// transport to write to the wire.
     pub fn send_goaway(&mut self, error_code: ErrorCode, debug_data: &[u8]) -> Frame {
-        Frame::GoAway(GoAwayFrame { last_stream_id: 0, error_code, debug_data: debug_data.to_vec() })
+        Frame::GoAway(GoAwayFrame {
+            last_stream_id: 0,
+            error_code,
+            debug_data: debug_data.to_vec(),
+        })
     }
 
     /// Encode `request` onto a freshly allocated stream, apply its frames
@@ -79,7 +86,10 @@ mod tests {
         let mut conn = Connection::new(Builder::new());
         let request = RequestBuilder::new("POST", "/x").body(b"hi".to_vec());
         let frames = conn.send_request(request).unwrap();
-        assert!(matches!(frames.as_slice(), [Frame::Headers(_), Frame::Data(_)]));
+        assert!(matches!(
+            frames.as_slice(),
+            [Frame::Headers(_), Frame::Data(_)]
+        ));
     }
 
     #[test]

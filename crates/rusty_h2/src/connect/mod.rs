@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 
 use crate::error::{ErrorCode, H2Error, Result};
 use crate::frame::header::DEFAULT_MAX_FRAME_SIZE;
-use crate::frame::{DataFrame, Frame, GoAwayFrame, RstStreamFrame, SettingsFrame, WindowUpdateFrame};
 use crate::frame::settings::{Setting, SettingId};
+use crate::frame::{
+    DataFrame, Frame, GoAwayFrame, RstStreamFrame, SettingsFrame, WindowUpdateFrame,
+};
 use crate::hpack::{Decoder, Encoder, HeaderField, DEFAULT_HEADER_TABLE_SIZE};
 use crate::stream::{Event, Stream};
 
@@ -58,7 +60,9 @@ impl ServerSettings {
             match setting.id {
                 SettingId::HeaderTableSize => self.header_table_size = setting.value,
                 SettingId::EnablePush => self.enable_push = setting.value != 0,
-                SettingId::MaxConcurrentStreams => self.max_concurrent_streams = Some(setting.value),
+                SettingId::MaxConcurrentStreams => {
+                    self.max_concurrent_streams = Some(setting.value)
+                }
                 SettingId::InitialWindowSize => self.initial_window_size = setting.value,
                 SettingId::MaxFrameSize => self.max_frame_size = setting.value,
                 SettingId::MaxHeaderListSize => self.max_header_list_size = Some(setting.value),
@@ -81,7 +85,10 @@ struct FlowControl {
 
 impl FlowControl {
     fn new(initial_window: u32) -> Self {
-        FlowControl { send_window: initial_window as i64, recv_window: initial_window as i64 }
+        FlowControl {
+            send_window: initial_window as i64,
+            recv_window: initial_window as i64,
+        }
     }
 
     fn apply_window_update(&mut self, increment: u32) -> Result<()> {
@@ -89,7 +96,10 @@ impl FlowControl {
             .send_window
             .checked_add(increment as i64)
             .filter(|&w| w <= i32::MAX as i64)
-            .ok_or(H2Error::Connection(ErrorCode::FlowControlError, "WINDOW_UPDATE overflowed the flow-control window"))?;
+            .ok_or(H2Error::Connection(
+                ErrorCode::FlowControlError,
+                "WINDOW_UPDATE overflowed the flow-control window",
+            ))?;
         Ok(())
     }
 
@@ -176,10 +186,12 @@ impl Connection {
     }
 
     fn stream_entry(&mut self, stream_id: u32) -> &mut StreamEntry {
-        self.streams.entry(stream_id).or_insert_with(|| StreamEntry {
-            stream: Stream::new(stream_id),
-            flow: FlowControl::new(self.remote_settings.initial_window_size),
-        })
+        self.streams
+            .entry(stream_id)
+            .or_insert_with(|| StreamEntry {
+                stream: Stream::new(stream_id),
+                flow: FlowControl::new(self.remote_settings.initial_window_size),
+            })
     }
 
     /// Encodes `headers` via this connection's HPACK encoder — the bridge
@@ -230,7 +242,10 @@ impl Connection {
         }
     }
 
-    fn handle_settings(&mut self, settings: crate::frame::settings::SettingsFrame) -> Result<Vec<Frame>> {
+    fn handle_settings(
+        &mut self,
+        settings: crate::frame::settings::SettingsFrame,
+    ) -> Result<Vec<Frame>> {
         if settings.ack {
             // Peer acknowledged settings we sent; nothing further to do.
             return Ok(vec![]);
@@ -241,26 +256,38 @@ impl Connection {
         // this driver doesn't retroactively rewrite existing streams'
         // windows on a mid-connection change -- a known, narrow gap
         // (new streams do pick up the new value, see `stream_entry`).
-        Ok(vec![Frame::Settings(SettingsFrame { ack: true, settings: vec![] })])
+        Ok(vec![Frame::Settings(SettingsFrame {
+            ack: true,
+            settings: vec![],
+        })])
     }
 
     fn handle_ping(&mut self, ping: crate::frame::ping::PingFrame) -> Vec<Frame> {
         if ping.ack {
             return vec![];
         }
-        vec![Frame::Ping(crate::frame::ping::PingFrame { ack: true, opaque_data: ping.opaque_data })]
+        vec![Frame::Ping(crate::frame::ping::PingFrame {
+            ack: true,
+            opaque_data: ping.opaque_data,
+        })]
     }
 
     fn handle_window_update(&mut self, wu: WindowUpdateFrame) -> Result<Vec<Frame>> {
         if wu.stream_id == 0 {
-            self.conn_flow.apply_window_update(wu.window_size_increment)?;
+            self.conn_flow
+                .apply_window_update(wu.window_size_increment)?;
         } else {
-            self.stream_entry(wu.stream_id).flow.apply_window_update(wu.window_size_increment)?;
+            self.stream_entry(wu.stream_id)
+                .flow
+                .apply_window_update(wu.window_size_increment)?;
         }
         Ok(vec![])
     }
 
-    fn handle_headers(&mut self, headers: crate::frame::headers::HeadersFrame) -> Result<Vec<Frame>> {
+    fn handle_headers(
+        &mut self,
+        headers: crate::frame::headers::HeadersFrame,
+    ) -> Result<Vec<Frame>> {
         // Decoding still runs (and must: HPACK is stateful, so even a
         // stream we otherwise reject needs its header block consumed to
         // keep the dynamic table in sync with the peer) before any
@@ -297,9 +324,15 @@ impl Connection {
         Ok(vec![])
     }
 
-    fn handle_push_promise(&mut self, pp: crate::frame::push_promise::PushPromiseFrame) -> Result<Vec<Frame>> {
+    fn handle_push_promise(
+        &mut self,
+        pp: crate::frame::push_promise::PushPromiseFrame,
+    ) -> Result<Vec<Frame>> {
         if !self.remote_settings.enable_push {
-            return Err(H2Error::Connection(ErrorCode::ProtocolError, "PUSH_PROMISE received with push disabled"));
+            return Err(H2Error::Connection(
+                ErrorCode::ProtocolError,
+                "PUSH_PROMISE received with push disabled",
+            ));
         }
         // Decode (dynamic-table state must stay in sync, same reasoning
         // as `handle_headers`) and reserve the promised stream via the
@@ -335,10 +368,19 @@ mod tests {
     fn settings_frame_is_acked_and_updates_remote_settings() {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
         let responses = conn
-            .apply_frame(settings_frame(false, vec![Setting { id: SettingId::InitialWindowSize, value: 100_000 }]))
+            .apply_frame(settings_frame(
+                false,
+                vec![Setting {
+                    id: SettingId::InitialWindowSize,
+                    value: 100_000,
+                }],
+            ))
             .unwrap();
         assert_eq!(conn.remote_settings.initial_window_size, 100_000);
-        assert!(matches!(responses.as_slice(), [Frame::Settings(SettingsFrame { ack: true, .. })]));
+        assert!(matches!(
+            responses.as_slice(),
+            [Frame::Settings(SettingsFrame { ack: true, .. })]
+        ));
     }
 
     #[test]
@@ -352,7 +394,10 @@ mod tests {
     fn ping_is_acked_with_the_same_opaque_data() {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
         let responses = conn
-            .apply_frame(Frame::Ping(crate::frame::ping::PingFrame { ack: false, opaque_data: *b"abcdefgh" }))
+            .apply_frame(Frame::Ping(crate::frame::ping::PingFrame {
+                ack: false,
+                opaque_data: *b"abcdefgh",
+            }))
             .unwrap();
         match responses.as_slice() {
             [Frame::Ping(p)] => {
@@ -367,7 +412,11 @@ mod tests {
     fn window_update_increases_the_connection_send_window() {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
         let before = conn.conn_flow.send_window;
-        conn.apply_frame(Frame::WindowUpdate(WindowUpdateFrame { stream_id: 0, window_size_increment: 1000 })).unwrap();
+        conn.apply_frame(Frame::WindowUpdate(WindowUpdateFrame {
+            stream_id: 0,
+            window_size_increment: 1000,
+        }))
+        .unwrap();
         assert_eq!(conn.conn_flow.send_window, before + 1000);
     }
 
@@ -376,7 +425,11 @@ mod tests {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
         conn.stream_entry(1);
         let conn_before = conn.conn_flow.send_window;
-        conn.apply_frame(Frame::WindowUpdate(WindowUpdateFrame { stream_id: 1, window_size_increment: 500 })).unwrap();
+        conn.apply_frame(Frame::WindowUpdate(WindowUpdateFrame {
+            stream_id: 1,
+            window_size_increment: 500,
+        }))
+        .unwrap();
         assert_eq!(conn.conn_flow.send_window, conn_before);
         assert_eq!(conn.streams[&1].flow.send_window, 65_535 + 500);
     }
@@ -424,7 +477,12 @@ mod tests {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
         conn.stream_entry(1);
         let before = conn.conn_flow.recv_window;
-        conn.apply_frame(Frame::Data(DataFrame { stream_id: 1, end_stream: false, data: vec![0u8; 100] })).unwrap();
+        conn.apply_frame(Frame::Data(DataFrame {
+            stream_id: 1,
+            end_stream: false,
+            data: vec![0u8; 100],
+        }))
+        .unwrap();
         assert_eq!(conn.conn_flow.recv_window, before - 100);
         assert_eq!(conn.streams[&1].flow.recv_window, 65_535 - 100);
     }
@@ -446,15 +504,23 @@ mod tests {
         }))
         .unwrap();
 
-        conn.apply_frame(Frame::RstStream(RstStreamFrame { stream_id: 1, error_code: ErrorCode::Cancel })).unwrap();
+        conn.apply_frame(Frame::RstStream(RstStreamFrame {
+            stream_id: 1,
+            error_code: ErrorCode::Cancel,
+        }))
+        .unwrap();
         assert_eq!(conn.streams[&1].stream.state, StreamState::Closed);
     }
 
     #[test]
     fn goaway_sets_a_close_reason_and_rejects_further_frames() {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
-        conn.apply_frame(Frame::GoAway(GoAwayFrame { last_stream_id: 0, error_code: ErrorCode::NoError, debug_data: vec![] }))
-            .unwrap();
+        conn.apply_frame(Frame::GoAway(GoAwayFrame {
+            last_stream_id: 0,
+            error_code: ErrorCode::NoError,
+            debug_data: vec![],
+        }))
+        .unwrap();
         let err = conn.apply_frame(settings_frame(true, vec![])).unwrap_err();
         assert!(matches!(err, H2Error::Connection(ErrorCode::NoError, _)));
     }
@@ -467,12 +533,14 @@ mod tests {
         let mut header_block = Vec::new();
         encoder.encode(&[HeaderField::new(":method", "GET")], &mut header_block);
 
-        conn.apply_frame(Frame::PushPromise(crate::frame::push_promise::PushPromiseFrame {
-            stream_id: 1,
-            end_headers: true,
-            promised_stream_id: 2,
-            header_block_fragment: header_block,
-        }))
+        conn.apply_frame(Frame::PushPromise(
+            crate::frame::push_promise::PushPromiseFrame {
+                stream_id: 1,
+                end_headers: true,
+                promised_stream_id: 2,
+                header_block_fragment: header_block,
+            },
+        ))
         .unwrap();
 
         assert_eq!(conn.streams[&2].stream.state, StreamState::ReservedRemote);
@@ -483,13 +551,18 @@ mod tests {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
         conn.remote_settings.enable_push = false;
         let err = conn
-            .apply_frame(Frame::PushPromise(crate::frame::push_promise::PushPromiseFrame {
-                stream_id: 1,
-                end_headers: true,
-                promised_stream_id: 2,
-                header_block_fragment: vec![],
-            }))
+            .apply_frame(Frame::PushPromise(
+                crate::frame::push_promise::PushPromiseFrame {
+                    stream_id: 1,
+                    end_headers: true,
+                    promised_stream_id: 2,
+                    header_block_fragment: vec![],
+                },
+            ))
             .unwrap_err();
-        assert!(matches!(err, H2Error::Connection(ErrorCode::ProtocolError, _)));
+        assert!(matches!(
+            err,
+            H2Error::Connection(ErrorCode::ProtocolError, _)
+        ));
     }
 }
