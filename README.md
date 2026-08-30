@@ -59,6 +59,8 @@ have landed so far.
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
+| [`rusty_err`](crates/rusty_err) | `crates/rusty_err` | `no_std` + `alloc` sovereign error trait, context extension, and proc-macro error derive library, built on `rusty_std` |
+| [`rusty_err_derive`](crates/rusty_err/derive) | `crates/rusty_err/derive` | `rusty_err`'s `#[derive(Error)]` proc-macro |
 | [`rusty_request`](crates/rusty_request) | `crates/rusty_request` | Async HTTP client (a Rust take on Python's `requests`), built on `rusty_tokio`/`rusty_tls`/`rusty_http` |
 | [`rusty_sqlite`](crates/rusty_sqlite) | `crates/rusty_sqlite` | A thin, ergonomic wrapper over `rusqlite`: bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management |
 | [`rusty_time`](crates/rusty_time) | `crates/rusty_time` | `no_std` + `alloc` sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate, built on `rusty_std` |
@@ -303,6 +305,17 @@ the current `rusty_win32` (both toolchains, plus a Windows
 cross-compile check) rather than assuming compatibility from the
 mechanical rev-to-path pattern the other swaps in this series follow.
 
+`rusty_err` retires its one forward pin, `rusty_std`, the same way —
+swapped to a `path` dependency on the now-merged `crates/rusty_std`.
+Unusually, nothing in `rusty_err`'s own source actually references
+`rusty_std` (verified via a source grep); the dependency line exists in
+`Cargo.toml` but is otherwise unused, so the swap carries no compatibility
+risk regardless of how far the pinned rev had drifted. `rusty_err` was
+also its own tiny nested Cargo workspace (a `[workspace]` table with one
+member, `derive`) — de-inherited the same way `rustils_async` was: the
+nested `[workspace]` table removed, `derive` added directly to this
+workspace's `members` alongside `rusty_err` itself.
+
 `rusty_request` retires three forward pins at once — `rusty_tokio`,
 `rusty_tls`, `rusty_http` — all previously pinned to specific `git` revs
 that had to move together by construction (Cargo treats two different
@@ -392,6 +405,7 @@ at a time, so the Crates table above only lists the ones already landed.
 A third wave continues the same way, starting with
 [`rusty_wire`](https://github.com/baileyrd/rusty_wire) and
 [`rusty_std`](https://github.com/baileyrd/rusty_std), and now
+[`rusty_err`](https://github.com/baileyrd/rusty_err),
 [`rusty_request`](https://github.com/baileyrd/rusty_request),
 [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite),
 [`rusty_time`](https://github.com/baileyrd/rusty_time),
