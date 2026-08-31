@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Combined multi-body solve
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #69](https://github.com/baileyrd/rusty_bullet/pull/69) · `dfbefb4`
 
 - **`PhysicsWorld::step` now resolves every ball-vs-car and car-vs-car
   contact manifold together as one combined multi-body solve**, instead of
