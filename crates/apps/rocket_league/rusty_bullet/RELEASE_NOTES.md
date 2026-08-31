@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Sandwiched-solve convergence
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #89](https://github.com/baileyrd/rusty_bullet/pull/89) · `4b0a133`
 
 - **Investigated whether anything short of real recorded data could narrow
   `RB-PHYSICS-001-FR-030`'s own documented extreme-mass-ratio "sandwiched"
