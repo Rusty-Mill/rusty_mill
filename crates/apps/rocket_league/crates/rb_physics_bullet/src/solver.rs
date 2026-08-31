@@ -21,15 +21,23 @@
 //!   `resolve_contacts_between` alone can't give a body touching two others
 //!   in the same step (see its own doc comment).
 //!
+//! Since `RB-PHYSICS-001-FR-034`, every contact's normal row also runs
+//! **split impulse** (Bullet's default, `m_splitImpulse = true`): a second,
+//! entirely separate "push" pseudo-velocity accumulator
+//! (`resolve_push_row`/`resolve_two_body_push_row`) is solved alongside the
+//! real one, fed only by the contact's own positional (penetration/ERP)
+//! error — never its velocity/restitution error, which stays on the real
+//! channel alone. After a manifold's `SOLVER_ITERATIONS` finish, the real
+//! delta is applied to the body's velocity exactly as before, and the push
+//! delta is applied directly to the body's position/orientation via
+//! `integrate::integrate_transform` (mirroring Bullet's own
+//! `btSolverBody::writebackVelocity`, which does the identical thing) —
+//! deep-penetration correction no longer adds spurious kinetic energy to
+//! the velocity restitution/friction actually see. See each function's own
+//! doc comment for exactly where this happens.
+//!
 //! Deliberate, documented deviations from Bullet's actual solver (tracked
 //! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
-//! - **No split impulse.** Bullet's default (`m_splitImpulse = true`) runs
-//!   a second pseudo-velocity pass so penetration correction doesn't add
-//!   energy to the real velocity used for restitution. This port always
-//!   takes Bullet's non-split branch (`m_rhs = penetrationImpulse +
-//!   velocityImpulse`), which is simpler and still stable at Rocket
-//!   League's real contact depths, but is a real behavioral difference at
-//!   high penetration.
 //! - **No SIMD.** Scalar translation of the SSE2/SSE4/FMA3 code paths —
 //!   this is a from-scratch Rust port, not a binding (see ADR-0004), and
 //!   correctness came before micro-optimization for v0.
@@ -53,6 +61,7 @@
 
 use crate::body::RigidBody;
 use crate::collision::Contact;
+use crate::integrate;
 use rb_domain::Vec3;
 
 /// `btContactSolverInfo`'s defaults this port fixes rather than exposes as
@@ -116,10 +125,19 @@ struct ConstraintRow {
     angular_component: Vec3,
     jac_diag_ab_inv: f32,
     rhs: f32,
+    /// `RB-PHYSICS-001-FR-034`'s split-impulse penetration term, solved
+    /// entirely separately from `rhs` (see `resolve_push_row`) — zero for a
+    /// friction row (Bullet's own split-impulse penetration resolve only
+    /// ever runs against a contact's normal row).
+    rhs_penetration: f32,
     cfm: f32,
     lower_limit: f32,
     upper_limit: f32,
     applied_impulse: f32,
+    /// Split impulse's own accumulated push impulse — entirely separate
+    /// scratch state from `applied_impulse`, the same way `rhs_penetration`
+    /// is separate from `rhs`.
+    applied_push_impulse: f32,
 }
 
 fn effective_mass_denom(body: &RigidBody, rel_pos: &Vec3, direction: &Vec3) -> (Vec3, Vec3, f32) {
@@ -175,11 +193,13 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
         torque_axis: normal_torque_axis,
         angular_component: normal_angular_component,
         jac_diag_ab_inv,
-        rhs: (positional_error + velocity_error) * jac_diag_ab_inv,
+        rhs: velocity_error * jac_diag_ab_inv,
+        rhs_penetration: positional_error * jac_diag_ab_inv,
         cfm: GLOBAL_CFM * jac_diag_ab_inv,
         lower_limit: 0.0,
         upper_limit: UPPER_LIMIT,
         applied_impulse: 0.0,
+        applied_push_impulse: 0.0,
     };
 
     let (t1, t2) = plane_space(&contact.normal);
@@ -197,10 +217,12 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
             angular_component,
             jac_diag_ab_inv,
             rhs: -rel_vel * jac_diag_ab_inv,
+            rhs_penetration: 0.0,
             cfm: 0.0,
             lower_limit: 0.0, // recomputed from the normal row's impulse each iteration
             upper_limit: 0.0,
             applied_impulse: 0.0,
+            applied_push_impulse: 0.0,
         }
     };
 
@@ -229,6 +251,64 @@ fn resolve_row(row: &mut ConstraintRow, inv_mass: f32, delta: &mut DeltaVelocity
 
     delta.linear += row.direction * (inv_mass * delta_impulse);
     delta.angular += row.angular_component * delta_impulse;
+}
+
+/// Split impulse's own push-velocity resolve (`RB-PHYSICS-001-FR-034`) —
+/// structurally identical to `resolve_row`, but reading/writing
+/// `rhs_penetration`/`applied_push_impulse` against a separate `push_delta`
+/// accumulator instead of `rhs`/`applied_impulse`/`delta`, and always
+/// clamped to `[0, UPPER_LIMIT]` regardless of `row.lower_limit`/
+/// `upper_limit` (those two are only ever narrowed for a friction row's
+/// *real* impulse, per-iteration, from that same contact's normal `applied_impulse`
+/// — a friction row's `rhs_penetration` is always `0.0`, so its push
+/// impulse converges to and stays at exactly `0.0` regardless of which
+/// limits this function would use, making the distinction moot in
+/// practice; hardcoding here is simply the clearest way to say that only a
+/// contact's own normal direction ever receives positional correction, the
+/// same restriction Bullet's own split-impulse resolve enforces).
+fn resolve_push_row(row: &mut ConstraintRow, inv_mass: f32, push_delta: &mut DeltaVelocity) {
+    let delta_vel_dot_n =
+        row.direction.dot(&push_delta.linear) + row.torque_axis.dot(&push_delta.angular);
+
+    let mut delta_impulse = row.rhs_penetration - row.applied_push_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+
+    let sum = row.applied_push_impulse + delta_impulse;
+    if sum < 0.0 {
+        delta_impulse = -row.applied_push_impulse;
+        row.applied_push_impulse = 0.0;
+    } else if sum > UPPER_LIMIT {
+        delta_impulse = UPPER_LIMIT - row.applied_push_impulse;
+        row.applied_push_impulse = UPPER_LIMIT;
+    } else {
+        row.applied_push_impulse = sum;
+    }
+
+    push_delta.linear += row.direction * (inv_mass * delta_impulse);
+    push_delta.angular += row.angular_component * delta_impulse;
+}
+
+/// Applies a split-impulse push delta directly to `body`'s position/
+/// orientation via `integrate::integrate_transform` — mirroring Bullet's
+/// own `btSolverBody::writebackVelocity`, which does the identical thing
+/// (a *second*, independent `integrateTransform` call using the push
+/// velocity instead of the real one) immediately after writing the real
+/// velocity delta back. A zero push delta (the overwhelmingly common case
+/// — every non-penetrating contact contributes nothing to it) is a correct
+/// no-op here, not a special case: `integrate_transform` with zero
+/// linear/angular velocity already returns `position`/`orientation`
+/// unchanged (see `integrate::tests::integrate_transform_with_zero_angular_velocity_keeps_orientation`).
+fn apply_push_delta(body: &mut RigidBody, push_delta: &DeltaVelocity, dt: f32) {
+    let (position, orientation) = integrate::integrate_transform(
+        body.position,
+        body.orientation,
+        push_delta.linear,
+        push_delta.angular,
+        dt,
+    );
+    body.position = position;
+    body.orientation = orientation;
+    body.update_inertia_tensor();
 }
 
 /// Resolves an entire contact manifold (1 to 4 points — a box resting flat
@@ -270,11 +350,13 @@ pub fn resolve_contacts(
         .map(|c| setup_rows(&effective_body, c, dt))
         .collect();
     let mut delta = DeltaVelocity::zero();
+    let mut push_delta = DeltaVelocity::zero();
     let inv_mass = body.inv_mass();
 
     for _ in 0..SOLVER_ITERATIONS {
         for rows in &mut manifold {
             resolve_row(&mut rows[0], inv_mass, &mut delta);
+            resolve_push_row(&mut rows[0], inv_mass, &mut push_delta);
 
             let friction_limit = combined_friction * rows[0].applied_impulse;
             rows[1].lower_limit = -friction_limit;
@@ -289,6 +371,7 @@ pub fn resolve_contacts(
 
     body.linear_velocity += delta.linear;
     body.angular_velocity += delta.angular;
+    apply_push_delta(body, &push_delta, dt);
 }
 
 /// Like `ConstraintRow`, but carrying both bodies' torque axis/angular
@@ -301,10 +384,16 @@ struct TwoBodyRow {
     angular_component_b: Vec3,
     jac_diag_ab_inv: f32,
     rhs: f32,
+    /// `RB-PHYSICS-001-FR-034`'s split-impulse penetration term — see
+    /// `ConstraintRow::rhs_penetration`, whose reasoning applies unchanged
+    /// here (zero for a friction row).
+    rhs_penetration: f32,
     cfm: f32,
     lower_limit: f32,
     upper_limit: f32,
     applied_impulse: f32,
+    /// See `ConstraintRow::applied_push_impulse`.
+    applied_push_impulse: f32,
 }
 
 /// Two-body version of `effective_mass_denom`: each body contributes its
@@ -384,11 +473,13 @@ fn setup_two_body_rows(
         torque_axis_b: normal_torque_axis_b,
         angular_component_b: normal_angular_component_b,
         jac_diag_ab_inv,
-        rhs: (positional_error + velocity_error) * jac_diag_ab_inv,
+        rhs: velocity_error * jac_diag_ab_inv,
+        rhs_penetration: positional_error * jac_diag_ab_inv,
         cfm: GLOBAL_CFM * jac_diag_ab_inv,
         lower_limit: 0.0,
         upper_limit: UPPER_LIMIT,
         applied_impulse: 0.0,
+        applied_push_impulse: 0.0,
     };
 
     let (t1, t2) = plane_space(&contact.normal);
@@ -405,10 +496,12 @@ fn setup_two_body_rows(
             angular_component_b,
             jac_diag_ab_inv,
             rhs: -rel_vel * jac_diag_ab_inv,
+            rhs_penetration: 0.0,
             cfm: 0.0,
             lower_limit: 0.0,
             upper_limit: 0.0,
             applied_impulse: 0.0,
+            applied_push_impulse: 0.0,
         }
     };
 
@@ -455,6 +548,42 @@ fn resolve_two_body_row(
     delta_b.angular -= row.angular_component_b * delta_impulse;
 }
 
+/// Two-body version of `resolve_push_row` — see that function's doc comment
+/// for why it's always clamped to `[0, UPPER_LIMIT]` regardless of
+/// `row.lower_limit`/`upper_limit`, and `resolve_two_body_row` for the
+/// A-gets-plus/B-gets-minus convention this mirrors for the push channel.
+fn resolve_two_body_push_row(
+    row: &mut TwoBodyRow,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    push_delta_a: &mut DeltaVelocity,
+    push_delta_b: &mut DeltaVelocity,
+) {
+    let delta_vel_dot_n = row.direction.dot(&push_delta_a.linear)
+        + row.torque_axis_a.dot(&push_delta_a.angular)
+        - row.direction.dot(&push_delta_b.linear)
+        - row.torque_axis_b.dot(&push_delta_b.angular);
+
+    let mut delta_impulse = row.rhs_penetration - row.applied_push_impulse * row.cfm;
+    delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+
+    let sum = row.applied_push_impulse + delta_impulse;
+    if sum < 0.0 {
+        delta_impulse = -row.applied_push_impulse;
+        row.applied_push_impulse = 0.0;
+    } else if sum > UPPER_LIMIT {
+        delta_impulse = UPPER_LIMIT - row.applied_push_impulse;
+        row.applied_push_impulse = UPPER_LIMIT;
+    } else {
+        row.applied_push_impulse = sum;
+    }
+
+    push_delta_a.linear += row.direction * (inv_mass_a * delta_impulse);
+    push_delta_a.angular += row.angular_component_a * delta_impulse;
+    push_delta_b.linear -= row.direction * (inv_mass_b * delta_impulse);
+    push_delta_b.angular -= row.angular_component_b * delta_impulse;
+}
+
 /// Resolves an entire contact manifold (1 to 4 points — a box-vs-box face
 /// contact can produce up to 4, an edge-edge or sphere-vs-box contact
 /// exactly 1) between two dynamic bodies (`a`, `b`) — every `Contact` must
@@ -482,6 +611,8 @@ pub fn resolve_contacts_between(
         .collect();
     let mut delta_a = DeltaVelocity::zero();
     let mut delta_b = DeltaVelocity::zero();
+    let mut push_delta_a = DeltaVelocity::zero();
+    let mut push_delta_b = DeltaVelocity::zero();
     let inv_mass_a = a.inv_mass();
     let inv_mass_b = b.inv_mass();
 
@@ -493,6 +624,13 @@ pub fn resolve_contacts_between(
                 inv_mass_b,
                 &mut delta_a,
                 &mut delta_b,
+            );
+            resolve_two_body_push_row(
+                &mut rows[0],
+                inv_mass_a,
+                inv_mass_b,
+                &mut push_delta_a,
+                &mut push_delta_b,
             );
 
             let friction_limit = combined_friction * rows[0].applied_impulse;
@@ -522,6 +660,8 @@ pub fn resolve_contacts_between(
     a.angular_velocity += delta_a.angular;
     b.linear_velocity += delta_b.linear;
     b.angular_velocity += delta_b.angular;
+    apply_push_delta(a, &push_delta_a, dt);
+    apply_push_delta(b, &push_delta_b, dt);
 }
 
 /// Index of each body taking part in a `resolve_dynamic_manifolds` pair,
@@ -564,8 +704,9 @@ fn delta_pair_mut(
 /// third body's contact genuinely participates in the same convergence as
 /// the other two, the way Bullet's real per-island solver does (see this
 /// module's own doc comment for what's still simplified relative to that:
-/// no split impulse, no warm-starting, average rather than max combine
-/// mode). `manifolds` is `(index_a, index_b, contacts)` triples indexing
+/// no warm-starting, average rather than max combine mode). Each body's
+/// split-impulse push accumulator (`push_deltas[i]`) is shared across
+/// manifolds the same way. `manifolds` is `(index_a, index_b, contacts)` triples indexing
 /// into `bodies`; omit a pair from `manifolds` entirely rather than passing
 /// it with an empty `contacts` (an empty manifold would still allocate a
 /// `DeltaVelocity`-touching no-op).
@@ -613,14 +754,24 @@ pub fn resolve_dynamic_manifolds(
 
     let inv_masses: Vec<f32> = bodies.iter().map(RigidBody::inv_mass).collect();
     let mut deltas: Vec<DeltaVelocity> = (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+    let mut push_deltas: Vec<DeltaVelocity> =
+        (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
 
     for _ in 0..SOLVER_ITERATIONS {
         for m in &mut solved {
             let inv_mass_a = inv_masses[m.a];
             let inv_mass_b = inv_masses[m.b];
             let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+            let (push_delta_a, push_delta_b) = delta_pair_mut(&mut push_deltas, m.a, m.b);
             for rows in &mut m.rows {
                 resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, delta_a, delta_b);
+                resolve_two_body_push_row(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    push_delta_a,
+                    push_delta_b,
+                );
 
                 let friction_limit = m.combined_friction * rows[0].applied_impulse;
                 rows[1].lower_limit = -friction_limit;
@@ -634,9 +785,11 @@ pub fn resolve_dynamic_manifolds(
         }
     }
 
-    for (body, delta) in bodies.iter_mut().zip(deltas.iter()) {
+    for ((body, delta), push_delta) in bodies.iter_mut().zip(deltas.iter()).zip(push_deltas.iter())
+    {
         body.linear_velocity += delta.linear;
         body.angular_velocity += delta.angular;
+        apply_push_delta(body, push_delta, dt);
     }
 }
 
@@ -959,6 +1112,74 @@ mod tests {
             b.angular_velocity.length() < 1e-3,
             "expected no net spin on b, got {:?}",
             b.angular_velocity
+        );
+    }
+
+    #[test]
+    fn split_impulse_corrects_deep_penetration_via_position_not_velocity() {
+        // The real point of `RB-PHYSICS-001-FR-034`: a body deeply embedded
+        // in a static surface, starting and staying at rest (restitution
+        // 0, zero incoming velocity), should be pushed back out of
+        // penetration by moving its *position*, not by picking up spurious
+        // velocity along the contact normal the way the old combined
+        // rhs/rhs_penetration term would have (a Baumgarte correction
+        // term folded into velocity looks, to every later reader of that
+        // velocity — restitution, friction, momentum — exactly like a real
+        // impact, which it isn't).
+        let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 0.5));
+        s.restitution = 0.0;
+        s.friction = 0.5;
+        let ground = StaticPlane {
+            restitution: 0.0,
+            ..ground()
+        };
+        let before_position_z = s.position.z;
+        resolve_single(&mut s, &ground, 1.0 / 60.0);
+
+        assert!(
+            s.linear_velocity.z.abs() < 1e-3,
+            "expected split impulse to leave the real velocity near zero (no bounce from \
+             resolving penetration alone), got {}",
+            s.linear_velocity.z
+        );
+        assert!(
+            s.position.z > before_position_z + 1e-3,
+            "expected split impulse to correct the penetration directly via position, \
+             before={before_position_z} after={}",
+            s.position.z
+        );
+    }
+
+    #[test]
+    fn split_impulse_corrects_deep_penetration_via_position_not_velocity_between_two_bodies() {
+        // Two-body analog of `split_impulse_corrects_deep_penetration_via_
+        // position_not_velocity`: `overlapping_ball()` starts deeply
+        // embedded in `car_at_origin()` (RB-PHYSICS-001-FR-034's other
+        // path, `resolve_contacts_between`); with both bodies at rest and
+        // zero restitution, the post-solve real relative velocity along
+        // the contact normal should stay near zero, while the two bodies'
+        // positions separate to relieve the overlap.
+        let mut ball = overlapping_ball();
+        ball.restitution = 0.0;
+        let mut car = car_at_origin();
+        car.restitution = 0.0;
+        let contacts = contacts_between(&ball, &car);
+        let before_separation = (ball.position - car.position).x;
+        resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
+
+        let rel_vel = contacts[0]
+            .normal
+            .dot(&(ball.linear_velocity - car.linear_velocity));
+        assert!(
+            rel_vel.abs() < 1e-2,
+            "expected no velocity injected purely from resolving penetration, got {rel_vel}"
+        );
+
+        let after_separation = (ball.position - car.position).x;
+        assert!(
+            after_separation > before_separation + 1.0,
+            "expected split impulse to separate the two bodies directly via position, \
+             before={before_separation} after={after_separation}"
         );
     }
 }

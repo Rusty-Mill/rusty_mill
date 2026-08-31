@@ -417,6 +417,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   a car's real backstop, since a car isn't tested against the net at all).
   `PhysicsWorld` gains `nets`/`with_net`. Every new constant is an
   uncalibrated placeholder.
+- `rb_physics_bullet::solver` (`RB-PHYSICS-001-FR-034`) — split impulse.
+  Every contact's normal row now also solves a second, entirely separate
+  "push" pseudo-velocity channel (`resolve_push_row`/
+  `resolve_two_body_push_row`), fed only by that contact's own positional
+  (penetration/ERP) error, never its velocity/restitution error.
+  `ConstraintRow`/`TwoBodyRow` gained `rhs_penetration`/
+  `applied_push_impulse` fields, splitting the old combined `rhs` term.
+  After each manifold's iterations, the real velocity delta is applied to
+  the body exactly as before, and the new push delta is applied directly
+  to the body's position/orientation via a new `apply_push_delta` (built
+  on the existing `integrate::integrate_transform`) — mirroring Bullet's
+  own `btSolverBody::writebackVelocity`. Wired into `resolve_contacts`,
+  `resolve_contacts_between`, and `resolve_dynamic_manifolds` with zero
+  call-site changes anywhere outside `solver.rs`.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
