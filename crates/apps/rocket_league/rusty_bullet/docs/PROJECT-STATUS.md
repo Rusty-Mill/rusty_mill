@@ -2,7 +2,7 @@
 
 - Last verified main commit: `9b69c0c` (merge of [#67](https://github.com/baileyrd/rusty_bullet/pull/67))
 - Verified at: 2026-08-31
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via a corner-testing approximation, not a full convex-vs-curved-surface narrow phase) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box, not a net mesh) so a ball or car passing through settles instead of flying forever — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a combined multi-body solve and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via a corner-testing approximation, not a full convex-vs-curved-surface narrow phase) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box, not a net mesh) so a ball or car passing through settles instead of flying forever, and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -837,6 +837,43 @@
   correctly, and 4 in `world.rs` (1 wiring-count check plus the 3 live
   end-to-end proofs described above, plus renaming the pre-existing
   wall-count test to account for the 2 new back-of-net planes).
+- `RB-PHYSICS-001-FR-030` (combined multi-body solve) — closes the "3+
+  bodies mutually touching in the same step" approximation tracked since
+  multi-car support first landed: `PhysicsWorld::step` now resolves every
+  ball-vs-car and car-vs-car contact manifold together, instead of
+  resolving each pair independently (its own full `SOLVER_ITERATIONS`
+  pass, fully applied) before the next pair's setup even reads a body's
+  velocity. New `solver::resolve_dynamic_manifolds` gives every body index
+  that takes part in at least one manifold its own `DeltaVelocity`
+  accumulator, shared across every manifold that body is in for the whole
+  solve — a real shared island solve. New helper `delta_pair_mut`
+  generalizes the `Vec::split_at_mut` disjoint-borrow trick the car-vs-car
+  loop already used (previously adjacent indices only) to arbitrary index
+  pairs. The old `TwoBodyDelta` struct is gone; `resolve_two_body_row` now
+  takes each body's `DeltaVelocity` separately, which is what makes
+  sharing one accumulator across manifolds possible. Static contacts
+  (ground, arena walls, curves, corner fillets, goal walls, bounded walls)
+  are deliberately unchanged — a body's contact with static geometry never
+  depends on another dynamic body, so resolving it independently loses no
+  information. Measured, not just assumed: a left-right symmetric "pinch"
+  (a ball exactly touching two identical, much heavier cars closing in
+  from opposite sides at equal speed, restitution zero) has a true
+  simultaneous-solve answer of all three bodies ending near zero velocity
+  (total momentum is exactly zero). Resolving each pair independently left
+  the ball at ~99% of a single car's own closing speed, as if the
+  first-resolved contact's effect was almost entirely discarded by the
+  second; the combined solve, at this crate's existing 10 solver
+  iterations, leaves the ball measurably slower (~89.5 vs. ~98.9 units/s)
+  but doesn't fully converge to zero that quickly — a known, common
+  Gauss-Seidel limitation for a light body sandwiched between two much
+  heavier ones (confirmed, not shipped, by checking that far more
+  iterations converge the combined solve much closer to zero, while the
+  independent-pairwise result never changes regardless of iteration
+  count — proof the old approach's error was structural, not an
+  iteration-count shortfall). 2 new tests
+  (`solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`,
+  `world::tests::a_ball_pinched_between_two_closing_cars_is_resolved_by_a_shared_multi_body_solve`),
+  244 total in `rb_physics_bullet` (+2 over FR-029's 242).
 
 ## In progress
 
@@ -875,44 +912,23 @@
   inputs and produce a comparable trajectory (`rb_physics_bullet` now has
   a car body and ball-vs-car collision, but nothing yet connects it to
   recorded controller input or to `rb_verify_cli`).
-- `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
-  pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step) — real,
-  not-yet-started follow-up work (see the spec's Non-goals/Open
-  questions); a car can now drive, steer, boost
-  (on the ground or in the air), handbrake/drift, take a ground jump (with
-  variable height), a double jump or a directional, flip-cancelable dodge,
-  and a wall jump (itself dodgeable and flip-cancelable the same way),
-  control itself in the air (pitch/yaw/roll), get a gentle nudge back
-  toward level when tumbling with no input, bounces off the ball/other
-  cars/arena walls, and can now play inside a real Rocket League-shaped
-  octagonal arena (`PhysicsWorld::standard_arena`) whose entire vertical
-  boundary both the ball and (since FR-027, via a corner-testing
-  approximation) a car now smoothly transition across — floor/ceiling
-  seams at all 9 walls, every one of the 8 corner-wall vertical edges, and
-  every one of the 20 compound corners where an edge fillet meets a seam
-  fillet alike — instead of hitting a sharp edge or vertex anywhere, and,
-  since FR-028, both the ball and a car can now pass straight through
-  either goal's own window (rounded at its own rim) into a bounded goal
-  box behind it (since FR-029) instead of open, unbounded space — though
-  that box models a solid boundary, not a genuine net mesh.
-
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A combined multi-body solve for 3+ simultaneously-touching bodies —
-   real follow-up work for `rb_physics_bullet::world`/`solver`.
-   `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s and
-   `arena`'s own uncalibrated constants) needs `PHASE-0-EXIT` real data
-   regardless.
+2. `RB-PHYSICS-001-FR-031`/`FR-032` — a scoped constant-calibration audit
+   (sourcing every uncalibrated placeholder against the best available
+   community reference, explicitly flagging any with none, without
+   misrepresenting it as closing `FR-005`'s real-data calibration, which
+   still needs `PHASE-0-EXIT`) and a genuine GJK/EPA narrow phase for car
+   vs. curved fillets (replacing FR-027's 8-corner-testing approximation).
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (292 tests: 23 in `rb_domain`, 242 in
+- `cargo test --workspace`: pass (294 tests: 23 in `rb_domain`, 244 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
