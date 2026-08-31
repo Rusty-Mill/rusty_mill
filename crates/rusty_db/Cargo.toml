@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rusty-db-core",
+    "crates/rusty-db-derive",
+    "crates/rusty-db-sqlite",
+    "crates/rusty-db-postgres",
+    "crates/rusty-db-mysql",
+    "rusty_db",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/baileyrd/rusty_db"
+
+[workspace.dependencies]
+rusty-db-core = { path = "crates/rusty-db-core", version = "0.1.0" }
+rusty-db-derive = { path = "crates/rusty-db-derive", version = "0.1.0" }
+rusty-db-sqlite = { path = "crates/rusty-db-sqlite", version = "0.1.0" }
+rusty-db-postgres = { path = "crates/rusty-db-postgres", version = "0.1.0" }
+rusty-db-mysql = { path = "crates/rusty-db-mysql", version = "0.1.0" }
+rusty_tokio = { path = "../rusty_tokio" }
+rusty_wire = { path = "../rusty_wire" }
+rusty_json = { path = "../rusty_json" }
+rusty_std = { path = "../rusty_std" }
+async-trait = "0.1"
+thiserror = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+async-stream = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"
+proc-macro-crate = "3"
+uuid = { version = "1", features = ["v4"] }
+bigdecimal = "0.4"
+serde_json = "1"
+chrono = "0.4"

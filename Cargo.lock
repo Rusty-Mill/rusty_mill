@@ -732,6 +732,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bigdecimal"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
+dependencies = [
+ "autocfg",
+ "libm",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -996,8 +1009,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -5662,6 +5677,87 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rusty-db-core",
+ "rusty-db-derive",
+ "rusty-db-mysql",
+ "rusty-db-postgres",
+ "rusty-db-sqlite",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rusty-db-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bigdecimal",
+ "chrono",
+ "futures-core",
+ "futures-util",
+ "heck",
+ "rusty_json",
+ "rusty_std",
+ "rusty_tokio",
+ "rusty_wire",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "rusty-db-derive"
+version = "0.1.0"
+dependencies = [
+ "heck",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rusty-db-mysql"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "rusty-db-core",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "rusty-db-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "rusty-db-core",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "rusty-db-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "rusty-db-core",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "rusty-mcp"
 version = "0.5.0"
 dependencies = [
@@ -6893,6 +6989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
  "base64 0.22.1",
+ "bigdecimal",
  "bytes",
  "chrono",
  "crc",
@@ -6970,6 +7067,7 @@ checksum = "aa003f0038df784eb8fecbbac13affe3da23b45194bd57dba231c8f48199c526"
 dependencies = [
  "atoi",
  "base64 0.22.1",
+ "bigdecimal",
  "bitflags 2.13.1",
  "byteorder",
  "bytes",
@@ -7014,6 +7112,7 @@ checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
  "base64 0.22.1",
+ "bigdecimal",
  "bitflags 2.13.1",
  "byteorder",
  "chrono",
@@ -7031,6 +7130,7 @@ dependencies = [
  "log",
  "md-5",
  "memchr",
+ "num-bigint",
  "once_cell",
  "rand 0.8.8",
  "serde",

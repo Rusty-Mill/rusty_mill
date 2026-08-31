@@ -70,6 +70,12 @@ members = [
     "crates/rusty_h2",
     "crates/rusty_audio",
     "crates/rusty_crypto_key",
+    "crates/rusty_db/crates/rusty-db-core",
+    "crates/rusty_db/crates/rusty-db-derive",
+    "crates/rusty_db/crates/rusty-db-sqlite",
+    "crates/rusty_db/crates/rusty-db-postgres",
+    "crates/rusty_db/crates/rusty-db-mysql",
+    "crates/rusty_db/rusty_db",
     "crates/rusty_ansi",
     "crates/rusty_config",
     "crates/rusty_jinja",
@@ -112,6 +118,15 @@ exclude = [
 # Only rusty_search's own 12 crates opt into these via `field.workspace =
 # true` -- every other crate in this workspace keeps its own literal
 # `[package]`/`[dependencies]` and is unaffected.
+#
+# rusty_db was a second nested workspace with its own `[workspace.package]`
+# (version/edition/license/repository) -- its license and repository
+# collided with rusty_search's own values above, so unlike rusty_search,
+# rusty_db's six crates were converted to literal `[package]` fields
+# instead of being hoisted into `[workspace.package]`. Only its
+# *dependencies* are hoisted below (their keys don't collide), reusing
+# rusty_search's `async-trait`/`serde_json` entries as-is and widening
+# `tokio`'s feature set to the union both crates need.
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -139,8 +154,34 @@ serde_json = "1"
 # dependency (previously a pinned git rev, matching the pattern used for
 # every other pin retired in this series).
 rusty_serde = { path = "crates/rusty_serde/rusty_serde", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tantivy = "0.26"
+
+# rusty_db's own five crates (path deps, mirroring rusty-search-* above).
+rusty-db-core = { path = "crates/rusty_db/crates/rusty-db-core", version = "0.1.0" }
+rusty-db-derive = { path = "crates/rusty_db/crates/rusty-db-derive", version = "0.1.0" }
+rusty-db-sqlite = { path = "crates/rusty_db/crates/rusty-db-sqlite", version = "0.1.0" }
+rusty-db-postgres = { path = "crates/rusty_db/crates/rusty-db-postgres", version = "0.1.0" }
+rusty-db-mysql = { path = "crates/rusty_db/crates/rusty-db-mysql", version = "0.1.0" }
+# Already-merged siblings rusty_db depends on -- plain path dependencies,
+# same pin-retirement pattern as everywhere else in this series.
+rusty_tokio = { path = "crates/rusty_tokio" }
+rusty_wire = { path = "crates/rusty_wire" }
+rusty_json = { path = "crates/rusty_json" }
+rusty_std = { path = "crates/rusty_std" }
+thiserror = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+async-stream = "0.3"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"
+proc-macro-crate = "3"
+uuid = { version = "1", features = ["v4"] }
+bigdecimal = "0.4"
+chrono = "0.4"
 
 # Hoisted from rustils' own former `[workspace.package]`/
 # `[workspace.dependencies]` tables (it was its own nested Cargo workspace
@@ -149,7 +190,7 @@ tantivy = "0.26"
 # above, and its `version = "0.27.0"` collides with rusty_search's
 # `"0.1.0"`, so rustils' own eight crates keep literal `[package]` fields
 # instead of `field.workspace = true`. Only its *dependencies* are hoisted
-# here.
+# here. `thiserror` is already hoisted above for rusty_db's own use.
 platform = { path = "crates/rustils/crates/platform" }
 platform-mock = { path = "crates/rustils/crates/platform-mock" }
 platform-parity = { path = "crates/rustils/crates/platform-parity" }
@@ -157,7 +198,6 @@ platform-linux = { path = "crates/rustils/crates/platform-linux" }
 platform-windows = { path = "crates/rustils/crates/platform-windows" }
 platform-bsd = { path = "crates/rustils/crates/platform-bsd" }
 winargv = { path = "crates/rustils/crates/winargv" }
-thiserror = "1"
 libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
