@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.30.0
+- Version: 0.31.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -40,8 +40,16 @@
   ball-vs-car and car-vs-car contact touching in the same step is now
   resolved by one shared, interleaved solve
   (`solver::resolve_dynamic_manifolds`) instead of a sequence of fully
-  independent pairwise solves — implemented; a genuine net mesh, split
-  impulse, warm-starting, and constant calibration are open follow-up
+  independent pairwise solves — implemented; and, since FR-031, a
+  constant-calibration audit against the RocketSim/RLUtilities/RLBot-wiki
+  community reverse-engineering effort corrected `JUMP_SPEED`,
+  `JUMP_HOLD_ACCELERATION`, and split `MAX_CAR_SPEED` into separate
+  boosted/unboosted caps (`UNBOOSTED_MAX_CAR_SPEED`), confirmed several
+  more constants already correct, and explicitly flagged the rest as
+  audited-but-still-uncalibrated rather than silently unresolved —
+  implemented, and explicitly does NOT close `FR-005`'s real-data
+  calibration, still blocked on `PHASE-0-EXIT`; a genuine net mesh, split
+  impulse, warm-starting, and that real-data calibration are open follow-up
   work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
@@ -1237,6 +1245,161 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     not overclaiming what a test actually proves. New tests: 1 in
     `solver.rs`, 1 in `world.rs` (net +2 tests over FR-029's 242, bringing
     the crate to 244).
+- `RB-PHYSICS-001-FR-031` (constant-calibration audit, implemented —
+  explicitly does NOT close `FR-005`): `FR-005`'s real calibration against
+  recorded ground truth stays blocked on `PHASE-0-EXIT` (no real BakkesMod
+  capture exists yet), so this requirement is narrower: source every
+  uncalibrated placeholder constant in `drive.rs`/`arena.rs`/`world.rs`
+  against the best available community reference, correct the ones with a
+  solid one, and explicitly flag the rest as still uncalibrated rather
+  than silently leaving their status ambiguous. Sources cross-checked
+  directly from source code (not blog paraphrases, which is where this
+  project's own earlier placeholder numbers came from): the **RocketSim**
+  project (`ZealanL/RocketSim`, `src/RLConst.h`/`Car.cpp`) and
+  **RLUtilities** (`samuelpmish/RLUtilities`,
+  `src/simulation/car.cc`/`ball.cc`, `src/mechanics/jump.cc`/`dodge.cc`) —
+  two independently-written reverse-engineering projects — plus the
+  **RLBot community wiki**'s "Useful Game Values" page. Agreement across
+  all three, independently, is treated as high-confidence; a single source
+  or a casual/older reference is treated as lower-confidence and flagged
+  as such below, not silently trusted.
+  - **Corrected, with code changes (all expressed in this port's own
+    linear-velocity/acceleration/time/distance units, which — unlike a
+    torque or an angular rate — don't depend on matching real Rocket
+    League's specific car mass/inertia tensor to port correctly):**
+    - `drive::JUMP_SPEED`: `292.0` → `875.0/3.0` (≈291.667 uu/s) —
+      RocketSim's `JUMP_IMMEDIATE_FORCE = 875.f/3.f` and RLUtilities'
+      `Jump::speed = 291.667f` agree exactly; both projects also confirm
+      the double jump reuses this same value unmodified, matching what
+      this port already did.
+    - `drive::JUMP_HOLD_ACCELERATION`: `1400.0` → `4375.0/3.0` (≈1458.33
+      uu/s²) — RocketSim's `JUMP_ACCEL = 4375.f/3.f` and RLUtilities'
+      `Jump::acceleration = 1458.3333f` agree exactly. Real Rocket League
+      also scales this down (0.62x) during the jump's first 0.025s
+      (RocketSim's `JUMP_MIN_TIME`) rather than applying it at full
+      strength immediately; that two-phase ramp is a further refinement
+      this port doesn't model, tracked as a documented simplification, not
+      silently dropped.
+    - `drive::JUMP_HOLD_MAX_DURATION` (`0.2`): audited, not changed — this
+      port's pre-existing value already matches RocketSim's
+      `JUMP_MAX_TIME = 0.2f` and RLUtilities' `Jump::max_duration = 0.2f`
+      exactly. Recorded here as *confirmed*, not just *unchanged*, so a
+      future reader doesn't have to re-derive that this one was already
+      right.
+    - New `drive::UNBOOSTED_MAX_CAR_SPEED = 1410.0`: a genuine behavioral
+      fix, not just a doc update. Before this audit, `drive::MAX_CAR_SPEED`
+      (2300, Rocket League's *boosted* top speed — confirmed correct by
+      all three sources) doubled as throttle's own speed cap too, letting
+      a car reach boosted top speed on throttle alone. RocketSim's
+      `DRIVE_SPEED_TORQUE_FACTOR_CURVE` drives available drive torque to
+      exactly zero at 1410 uu/s, and the RLBot wiki independently states
+      the same 1410 uu/s unboosted cap — so throttle now caps at this new,
+      separate constant instead, while `MAX_CAR_SPEED` keeps its
+      already-correct role as boost's own cap (and as the turning-torque
+      scale-up reference, an arbitrary normalization unaffected by this
+      change).
+    - `drive::BOOST_ACCELERATION` (`991.667`), `drive::MAX_BOOST` (`100`),
+      `world::PhysicsWorld::new`'s gravity (`-650`), and
+      `arena::GOAL_DEPTH` (`880`): all audited and confirmed correct
+      against the same three sources — no change needed, recorded here as
+      confirmed rather than merely unchanged.
+  - **Explicitly flagged, NOT changed (real reference numbers exist but
+    don't safely port, or no reference exists at all — recorded as
+    audited-and-still-uncalibrated, not silently left ambiguous):**
+    - `drive::DODGE_SPEED` (`1400.0`): real Rocket League's dodge impulse
+      is not a single flat magnitude — RocketSim/RLUtilities agree on a
+      base `500.0` uu/s scaled by direction (forward ×1.0, side ×1.9,
+      backward ×2.5-ish) and by current forward speed (reduced as speed
+      approaches `MAX_CAR_SPEED`). Adopting just the bare `500` would
+      collide with `WALL_JUMP_HORIZONTAL_SPEED` (`550`, currently used to
+      keep a wall jump distinguishable from a dodge in this port's own
+      tests) and would still misrepresent the real direction/speed-scaled
+      shape as a flat number — a real fix here is a mechanic redesign
+      (its own future FR), not a constant substitution, so the placeholder
+      stays as-is.
+    - `drive::DODGE_ANGULAR_SPEED` (`5.5` rad/s): real Rocket League
+      implements a flip's spin as an applied *torque* (RocketSim's
+      `FLIP_TORQUE_X=260`/`FLIP_TORQUE_Y=224` for 0.65s, min 0.41s;
+      RLUtilities matches exactly), not a flat angular-velocity kick —
+      the resulting spin rate depends on the real game's own specific
+      hitbox inertia tensor, which this port's placeholder car body
+      doesn't match, so there is no single rad/s number to safely port.
+    - `drive::WALL_JUMP_HORIZONTAL_SPEED` (`550.0`): real Rocket League has
+      no separate wall-jump speed constant at all — a wall jump just fires
+      the ordinary jump impulse (`JUMP_SPEED`) along the wall's contact
+      normal instead of straight up (confirmed in both RocketSim and
+      RLUtilities). This port's separate, faster constant is a deliberate
+      structural simplification (a distinguishable wall-jump feel for
+      tests), not an unconfirmed guess anymore, but still not what real
+      Rocket League does.
+    - `drive::STEER_TORQUE`, `drive::AIR_CONTROL_TORQUE`,
+      `drive::HANDBRAKE_FRICTION_MULTIPLIER`,
+      `drive::LANDING_AUTO_UPRIGHT_TORQUE`: real reference numbers exist
+      for some of these (air-control torque/damping coefficients — pitch
+      130, yaw 95, roll 400, capped at an overall 5.5 rad/s, confirmed
+      identically in RocketSim and RLUtilities; handbrake as a slip-ratio
+      friction *curve*, not a flat multiplier), but all of them are
+      calibrated against real Rocket League's own specific car mass and
+      inertia tensor, which this port's placeholder `RigidBody::car_box`
+      isn't independently confirmed to match — porting the raw numbers
+      into a different inertia scale would produce false-precision
+      angular accelerations, not a real fix. Remain uncalibrated
+      placeholders, now with their real-world analog documented instead of
+      simply absent.
+    - `arena::FILLET_RADIUS`/`arena::CORNER_ARCH_RADIUS`: audited with no
+      analytic single-number reference found anywhere in the serious
+      community sources — Rocket League's actual corner geometry is a
+      triangulated collision mesh (see `ZealanL/RLArenaCollisionDumper`,
+      a tool that extracts the raw mesh rather than a formula), not a
+      mathematical arc, and even the RLBot wiki explicitly notes "the
+      curvature at the intersections is ignored" in its own published
+      wall-length figures. Remain uncalibrated placeholders; closing this
+      one for real would mean ingesting an actual dumped mesh, not sourcing
+      a better number.
+  - **Open ambiguity surfaced by the audit, deliberately not acted on
+    without stronger confidence (recorded as a genuinely open question,
+    not resolved either way):**
+    - Ball radius: this port's `92.75` is an older, casually-cited figure;
+      RocketSim's `BALL_COLLISION_RADIUS_SOCCAR`, RLUtilities'
+      `Ball::soccar_radius`, and the current `wiki.rlbot.org/v4` rewrite
+      all instead converge on `91.25` as the actual simulation collision
+      radius (with the ball's *rest height* separately at `93.15`, larger
+      because of a mesh collision margin — a different number for a
+      different purpose, easy to conflate with the collision radius
+      itself). Not changed here: `92.75` is load-bearing across a large
+      fraction of this crate's existing tests as a magic number, and
+      medium-confidence evidence isn't enough justification to ripple a
+      change through all of them in an audit whose own scope is
+      "don't misrepresent this as full calibration." Tracked as an open
+      question for a future, deliberate change.
+    - `arena::CEILING_Z` (`2044.0`) vs. RocketSim's `ARENA_HEIGHT = 2048.f`:
+      a small (4 uu) discrepancy the audit surfaced but couldn't resolve
+      with confidence — it's unclear whether the two numbers describe the
+      same reference point (e.g. usable ceiling height vs. the raw mesh's
+      own extent) without deeper investigation this audit's scope doesn't
+      cover. Not changed; tracked as an open question.
+  - **Acceptance criteria.** Every named constant in `drive.rs`/`arena.rs`
+    this audit examined has an explicit, current disposition (corrected,
+    confirmed, or flagged-uncalibrated-with-reason) in this entry or in its
+    own doc comment — none left in the prior "not derived from any measured
+    or documented Rocket League value" state without this audit having
+    actually looked for one. No behavior change is claimed beyond the two
+    corrected constants and the new `UNBOOSTED_MAX_CAR_SPEED` split; every
+    other constant's runtime value is provably unchanged (see the diff).
+  - **Verification plan.** `drive.rs` gains
+    `throttle_stops_accelerating_at_unboosted_max_speed` (renamed from
+    `throttle_stops_accelerating_at_max_speed`, now asserting against
+    `UNBOOSTED_MAX_CAR_SPEED` instead of `MAX_CAR_SPEED`) and a new
+    `throttle_alone_cannot_reach_the_boosted_top_speed`, holding throttle
+    for 20 simulated seconds and confirming the car plateaus near
+    `UNBOOSTED_MAX_CAR_SPEED`, well short of the boosted `MAX_CAR_SPEED` —
+    the real bug this audit fixed, made concrete as a regression test
+    rather than left as a doc-comment-only claim. 1 net new test (245
+    total in `rb_physics_bullet`, +1 over FR-030's 244); the `JUMP_SPEED`/
+    `JUMP_HOLD_ACCELERATION` precision refinements needed no new tests —
+    every existing assertion involving either already used a tolerance
+    (`.abs() < 1.0` or looser) comfortably wider than the ~0.33 and ~58.33
+    uu/s²-scale differences from their prior placeholder values.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -2332,6 +2495,20 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Open questions
 
+- Two genuine ambiguities `RB-PHYSICS-001-FR-031`'s constant-calibration
+  audit surfaced but deliberately didn't act on, for lack of strong enough
+  confidence to justify the ripple effect of changing them: (1) this
+  port's ball radius (`92.75`) is an older, casually-cited figure, while
+  RocketSim, RLUtilities, and the current RLBot wiki all instead converge
+  on `91.25` as the real simulation collision radius — not changed since
+  `92.75` is load-bearing across a large fraction of this crate's existing
+  tests as a magic number, and medium-confidence evidence alone isn't
+  enough justification within an audit whose own scope explicitly
+  excludes wholesale recalibration; (2) `arena::CEILING_Z` (`2044.0`) vs.
+  RocketSim's `ARENA_HEIGHT = 2048.f` — unclear whether the two numbers
+  describe the same reference point without deeper investigation. Both
+  need a deliberate, scoped follow-up (or real `RB-VERIFY-002` data) before
+  acting, not a guess.
 - A combined multi-body solve for bodies simultaneously touching more than
   one other body is now implemented (see `RB-PHYSICS-001-FR-030`):
   `solver::resolve_dynamic_manifolds` shares one interleaved
@@ -2505,6 +2682,36 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.31.0 (2026-08-31): FR-031 added and implemented (constant-calibration
+  audit — does NOT close FR-005). Sourced every uncalibrated placeholder
+  constant in `drive.rs`/`arena.rs`/`world.rs` against the RocketSim
+  (`ZealanL/RocketSim`) and RLUtilities (`samuelpmish/RLUtilities`) source
+  code plus the RLBot community wiki's "Useful Game Values" page — three
+  independently-written reverse-engineering references, agreement across
+  all three treated as high confidence. Corrected with code changes:
+  `drive::JUMP_SPEED` (`292.0` → `875.0/3.0`, ≈291.667) and
+  `drive::JUMP_HOLD_ACCELERATION` (`1400.0` → `4375.0/3.0`, ≈1458.33) to
+  their precise real values; split `drive::MAX_CAR_SPEED` (2300, boost's
+  cap, confirmed correct) from a new `drive::UNBOOSTED_MAX_CAR_SPEED`
+  (1410, throttle's own cap) — a real behavioral fix, since throttle alone
+  previously could reach the boosted top speed. Confirmed correct with no
+  change: `drive::JUMP_HOLD_MAX_DURATION` (0.2), `drive::BOOST_ACCELERATION`
+  (991.667), `drive::MAX_BOOST` (100), gravity (-650), `arena::GOAL_DEPTH`
+  (880). Explicitly flagged as audited-but-still-uncalibrated (a real
+  reference exists but doesn't safely port into this port's own unit
+  system/mechanic shape, or no reference exists at all): `drive::DODGE_SPEED`,
+  `drive::DODGE_ANGULAR_SPEED`, `drive::WALL_JUMP_HORIZONTAL_SPEED`,
+  `drive::STEER_TORQUE`, `drive::AIR_CONTROL_TORQUE`,
+  `drive::HANDBRAKE_FRICTION_MULTIPLIER`,
+  `drive::LANDING_AUTO_UPRIGHT_TORQUE`, `arena::FILLET_RADIUS`,
+  `arena::CORNER_ARCH_RADIUS`. Surfaced two open ambiguities without acting
+  on them (ball radius 91.25 vs. this port's 92.75; `arena::CEILING_Z`
+  2044 vs. RocketSim's cited 2048) — recorded in Open questions rather
+  than guessed at. 1 new test (`drive::tests::throttle_alone_cannot_reach_the_boosted_top_speed`,
+  245 total in `rb_physics_bullet`, +1 over FR-030's 244); the `JUMP_SPEED`/
+  `JUMP_HOLD_ACCELERATION` precision refinements needed no new tests since
+  every existing assertion already used a tolerance wide enough to absorb
+  the small precision differences.
 - 0.30.0 (2026-08-31): FR-030 added and implemented (combined multi-body
   solve) — closes the "combined multi-body solve" Non-goal/Open question
   this spec carried since FR-004: every ball-vs-car and car-vs-car
