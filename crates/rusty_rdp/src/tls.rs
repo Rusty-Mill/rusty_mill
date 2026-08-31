@@ -34,7 +34,6 @@
 //! `TrustPolicy::PinnedAnchors`) and use the [`RdpTransport::new_enhanced`]
 //! path.
 
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -50,6 +49,21 @@ use crate::net::{EstablishConfig, RdpSession, RdpTransport};
 /// The TLS-wrapped stream type an established enhanced-security session runs
 /// over.
 pub type TlsStream = rusty_tls::TlsStream<TcpStream>;
+
+/// Fill `buf` from the OS's random source. Used by [`run_credssp`] and
+/// [`run_credssp_kerberos`] for their default (non-`platform`-feature)
+/// entropy source.
+///
+/// This used to be a direct `File::open("/dev/urandom")`, which only ever
+/// worked on Unix -- on Windows it failed every call with "the system cannot
+/// find the path specified" (there is no such path there). `getrandom` is the
+/// crate the wider ecosystem (`rand`, and `ring` itself, already pulled in
+/// unconditionally by this module's `tls` feature) leans on for exactly this;
+/// its own platform-specific calls are unsafe, but this crate's `forbid(unsafe_code)`
+/// only has to hold for the code written here, and its public API is safe.
+fn os_random(buf: &mut [u8]) -> io::Result<()> {
+    getrandom::getrandom(buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+}
 
 /// Connect to an RDP server over TLS and drive the enhanced-security bring-up.
 ///
@@ -188,11 +202,11 @@ fn run_credssp_with_seed(
 
 /// Run the CredSSP/NLA exchange over an established TLS stream, delegating the
 /// user's credentials so the RDP connection sequence can proceed. Gathers its
-/// nonce/challenge/key from `/dev/urandom`; [`run_credssp_with_csprng`] is the
-/// `platform`-feature alternative.
+/// nonce/challenge/key from the OS random source (see [`os_random`]);
+/// [`run_credssp_with_csprng`] is the `platform`-feature alternative.
 fn run_credssp(tls: &mut TlsStream, config: &EstablishConfig) -> io::Result<()> {
     let mut seed = [0u8; 56];
-    File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    os_random(&mut seed)?;
     run_credssp_with_seed(tls, config, seed)
 }
 
@@ -465,8 +479,8 @@ fn run_credssp_kerberos_with_seed(
 }
 
 /// Run the Kerberos CredSSP exchange over an established TLS stream. Gathers
-/// its nonce/confounders from `/dev/urandom`; [`run_credssp_kerberos_with_csprng`]
-/// is the `platform`-feature alternative.
+/// its nonce/confounders from the OS random source (see [`os_random`]);
+/// [`run_credssp_kerberos_with_csprng`] is the `platform`-feature alternative.
 fn run_credssp_kerberos(
     tls: &mut TlsStream,
     config: &EstablishConfig,
@@ -474,7 +488,7 @@ fn run_credssp_kerberos(
     session_key: AesKey,
 ) -> io::Result<()> {
     let mut seed = [0u8; 64];
-    File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    os_random(&mut seed)?;
     run_credssp_kerberos_with_seed(tls, config, ap_req, session_key, seed)
 }
 

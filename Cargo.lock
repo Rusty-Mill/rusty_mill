@@ -5917,6 +5917,7 @@ version = "0.1.0"
 name = "rusty_rdp"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "platform 0.27.0",
  "platform-linux 0.27.0",
  "platform-mock 0.27.0",

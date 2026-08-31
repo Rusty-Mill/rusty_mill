@@ -36,6 +36,14 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
     "ring",
 ], optional = true }
+# The default (non-`platform`-feature) CredSSP entropy source. Was a direct
+# `File::open("/dev/urandom")`, Unix-only and broken on Windows -- `getrandom`
+# is the ecosystem's answer to exactly this, and already in the build here
+# transitively via `ring` (`tls` above), so this costs nothing new to compile.
+# `std` is required for `getrandom::Error: std::error::Error` (folded into
+# `io::Error` via `io::Error::other`); its other non-default features (wasm
+# support, `custom`) go unused.
+getrandom = { version = "0.2", default-features = false, features = ["std"], optional = true }
 # The ecosystem's one shared TLS implementation and trust policy (see its
 # own README/ARCHITECTURE.md). Replaces this crate's own hand-built
 # `AcceptAnyServerCert` verifier on the client-side connectors with
@@ -73,7 +81,7 @@ platform-linux = { path = "../rustils/crates/platform-linux", optional = true }
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
 # stream to TLS with rustls before driving `establish_enhanced`. Off by
 # default; enabling it pulls in rustls and its transitive dependencies.
-tls = ["dep:rustls", "dep:rusty_tls"]
+tls = ["dep:rustls", "dep:rusty_tls", "dep:getrandom"]
 # Enables `platform_net::PlatformTcpStream`, a std::io::Read+Write adapter
 # over any `platform::net::TcpStream` (Linux, Windows, or the mock backend —
 # the caller picks). Off by default; enabling it pulls in `platform` itself
