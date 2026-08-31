@@ -478,6 +478,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   a new `input_is_active` helper finds the car's input genuinely active,
   before that input's own force has had a chance to move it. 8 new tests
   (5 in `body.rs`, 3 in `world.rs`); all pre-existing tests pass unchanged.
+- `rb_physics_bullet::world` (`RB-PHYSICS-001-FR-039`) — wall-jump corner
+  disambiguation, closing the "first wall in `self.walls`" simplification
+  documented since FR-013 and made reachable in the standard arena by
+  FR-019's diagonal corner walls. `PhysicsWorld::step`'s per-car
+  wall-normal computation now sums every wall a car is touching this step
+  and normalizes the result, instead of picking whichever wall comes
+  first — a car touching two walls at a corner now pushes off diagonally,
+  blending both, instead of firing along only one of them. A car touching
+  exactly one wall is unaffected. No new collision code needed. 1 new
+  `world.rs` test; all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
