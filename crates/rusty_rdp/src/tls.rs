@@ -667,8 +667,19 @@ mod tests {
 
         let cert = CertificateDer::from(TEST_TLS_CERT_DER.to_vec());
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(TEST_TLS_KEY_PKCS8_DER.to_vec()));
+        // `ServerConfig::builder()` falls back to rustls's ambient,
+        // process-level provider lookup, which only works when exactly one
+        // of rustls's `ring`/`aws-lc-rs` features is active across the
+        // *whole build* -- not just this crate's own Cargo.toml. In this
+        // workspace, `rusty-mcp`'s `reqwest` dependency also pulls in
+        // `aws-lc-rs`, making that lookup ambiguous. Naming the provider
+        // explicitly (same fix as `rusty_tls::provider::ring_provider`)
+        // sidesteps it regardless of what else shares the process.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
         Arc::new(
-            ServerConfig::builder()
+            ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("ring provider supports the safe default TLS protocol versions")
                 .with_no_client_auth()
                 .with_single_cert(vec![cert], key)
                 .expect("test cert/key should build a valid ServerConfig"),
