@@ -545,6 +545,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   placeholder coefficient. Corrected the wrong claim in the spec,
   `solver.rs`, and `body.rs`. 2 new tests pin the identity-preserving
   behavior directly; all pre-existing tests pass unchanged.
+- `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
+  (`RB-PHYSICS-001-FR-044`) — this spec's own top-level Non-goals section
+  still claimed split impulse wasn't implemented, contradicted by
+  `RB-PHYSICS-001-FR-034`'s own already-shipped implementation. Corrected
+  the stale bullet to a strikethrough-and-close note, matching the
+  convention this section already uses for two other resolved Non-goals
+  items. Zero production code changed; no new tests.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

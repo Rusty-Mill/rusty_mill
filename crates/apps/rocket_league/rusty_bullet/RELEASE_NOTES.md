@@ -6,6 +6,30 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Stale "split impulse" Non-goals correction
+**2026-08-31** · PR pending · commit pending
+
+- This project's own spec still carried a "Split impulse. This port always
+  takes Bullet's non-split contact-resolution branch" Non-goals bullet —
+  contradicted by `RB-PHYSICS-001-FR-034`'s own already-shipped
+  implementation from earlier in this project. FR-034's own Requirements
+  entry, the version 0.34.0 Change History entry, and
+  `rb_physics_bullet::solver`'s own module doc comment all already
+  correctly described split impulse as implemented; only this one
+  Non-goals bullet had never been updated to match.
+- Confirmed the implementation is genuinely present (not just documented
+  elsewhere) by locating `solver::resolve_push_row`/
+  `resolve_two_body_push_row`/`apply_push_delta` directly in `solver.rs`,
+  and confirmed via a repo-wide search that this was the only stale
+  occurrence anywhere in code or docs.
+- Corrected the bullet to a strikethrough-and-close note, matching the
+  same convention this spec's own Non-goals section already uses for two
+  other resolved items.
+- Zero production code changed. No new tests (documentation-only, no
+  value or behavior changed); all 275 pre-existing tests pass unchanged.
+
+---
+
 ## Restitution/friction combine-mode reference validation
 **2026-08-31** · [PR #93](https://github.com/baileyrd/rusty_bullet/pull/93) · `aa9938d`
 
