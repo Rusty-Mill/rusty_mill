@@ -1,6 +1,8 @@
 //! Narrow-phase collision detection: body-vs-static-plane (ground contact),
-//! sphere-vs-box (ball-vs-car), and box-vs-box (car-vs-car). The plane and
-//! sphere-vs-box tests are closed-form (see their own doc comments);
+//! sphere-vs-box (ball-vs-car), box-vs-box (car-vs-car), and, since
+//! `RB-PHYSICS-001-FR-033`, sphere-vs-sphere (the ball against a
+//! `net::NetMesh`'s free point masses). The plane, sphere-vs-box, and
+//! sphere-vs-sphere tests are all closed-form (see their own doc comments);
 //! box-vs-box needs a real separating-axis test (`box_vs_box`), since two
 //! arbitrarily-oriented boxes have no such shortcut. `PhysicsWorld` now
 //! calls `box_vs_box` (via `contacts_between`) for every pair of cars in
@@ -583,6 +585,44 @@ fn sphere_vs_box(
     })
 }
 
+/// Analytic sphere-vs-sphere contact — trivially closed-form, unlike either
+/// shape pairing above: the closest points are always along the line
+/// connecting the two centers, so this reduces to a single distance
+/// comparison exactly like `sphere_vs_plane` does. `point` sits on `b`'s own
+/// surface facing `a`, and `normal` points from `b` toward `a`, matching
+/// `contacts_between`'s general convention. Needed since
+/// `RB-PHYSICS-001-FR-033`, for the ball's contact against a `net::NetMesh`'s
+/// free point masses (each a tiny sphere `RigidBody` — see `net.rs`'s own
+/// doc comment for why a real net's mass-spring points reuse this crate's
+/// existing sphere shape and two-body solver path rather than a bespoke
+/// penalty-force system).
+fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> Option<Contact> {
+    let delta = pos_a - pos_b;
+    let dist = delta.length();
+    let gap = dist - radius_a - radius_b;
+
+    if gap > CONTACT_PROCESSING_THRESHOLD {
+        return None;
+    }
+
+    // Degenerate case (exactly coincident centers) picks an arbitrary
+    // separating direction rather than dividing by zero — vanishingly
+    // unlikely in practice (it would mean two sphere centers landed on
+    // literally the same point), but still a well-defined result rather
+    // than a NaN normal.
+    let normal = if dist > 1e-6 {
+        delta * (1.0 / dist)
+    } else {
+        Vec3::new(0.0, 0.0, 1.0)
+    };
+    let point = pos_b + normal * radius_b;
+    Some(Contact {
+        normal,
+        point,
+        penetration_depth: -gap,
+    })
+}
+
 fn get_axis(v: Vec3, index: usize) -> f32 {
     match index {
         0 => v.x,
@@ -1009,9 +1049,11 @@ fn box_vs_box(
 /// two-body solver can apply `+impulse` to `a` and `-impulse` to `b` along
 /// it without needing to know which argument was which shape.
 ///
-/// Sphere-vs-sphere returns empty: this scope has exactly one ball, so two
-/// balls colliding never actually occurs — not a simplification of a real
-/// case, just one this codebase has no caller for.
+/// Sphere-vs-sphere (`sphere_vs_sphere`, since `RB-PHYSICS-001-FR-033`) is
+/// implemented too — needed for the ball's contact against a
+/// `net::NetMesh`'s free point masses, each represented as a tiny sphere
+/// `RigidBody` rather than this scope's one real ball; two actual balls
+/// never collide in this port, but the shape pairing itself is real now.
 pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
     match (a.shape, b.shape) {
         (Shape::Sphere { radius }, Shape::Box { half_extents }) => {
@@ -1028,7 +1070,11 @@ pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
                 .into_iter()
                 .collect()
         }
-        (Shape::Sphere { .. }, Shape::Sphere { .. }) => Vec::new(),
+        (Shape::Sphere { radius: radius_a }, Shape::Sphere { radius: radius_b }) => {
+            sphere_vs_sphere(a.position, radius_a, b.position, radius_b)
+                .into_iter()
+                .collect()
+        }
         (
             Shape::Box {
                 half_extents: half_a,
@@ -1183,9 +1229,23 @@ mod tests {
     }
 
     #[test]
-    fn contacts_between_two_spheres_is_empty() {
+    fn overlapping_spheres_produce_a_contact_pointing_from_b_toward_a() {
+        // RB-PHYSICS-001-FR-033: sphere-vs-sphere is a real shape pairing
+        // now (needed for the ball's contact against a `net::NetMesh`'s own
+        // point masses), replacing the old "always empty" placeholder this
+        // codebase carried while it had no caller for it at all.
         let a = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let b = RigidBody::sphere(1.0, 1.0, Vec3::new(0.5, 0.0, 0.0));
+        let contacts = contacts_between(&a, &b);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((contacts[0].penetration_depth - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn far_apart_spheres_have_no_contact() {
+        let a = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let b = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 0.0));
         assert!(contacts_between(&a, &b).is_empty());
     }
 

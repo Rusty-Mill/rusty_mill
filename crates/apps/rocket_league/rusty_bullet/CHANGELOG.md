@@ -403,6 +403,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   entirely; corrected every doc comment across the crate and its spec
   that had inherited the unverified claim. No production-code change to
   the narrow phase itself.
+- `rb_physics_bullet::net` (`RB-PHYSICS-001-FR-033`) — a genuine
+  mass-spring net panel per goal, catching the ball. New `net::NetMesh`: a
+  rectangular grid of point masses (`RigidBody::sphere`, tiny and light)
+  with every perimeter point anchored to the rigid goal frame and every
+  interior point free, connected by structural/shear springs (Hooke's law
+  plus damping). Ball contact against a free point goes through a new
+  `collision::sphere_vs_sphere` (this crate's first real sphere-vs-sphere
+  test) plus the existing `solver::resolve_contacts_between` path — no new
+  solver code. New `arena::standard_nets` builds one panel per goal,
+  `NET_DEPTH` behind the real back wall and well in front of
+  `RB-PHYSICS-001-FR-029`'s own rigid back-of-net plane (unchanged, still
+  a car's real backstop, since a car isn't tested against the net at all).
+  `PhysicsWorld` gains `nets`/`with_net`. Every new constant is an
+  uncalibrated placeholder.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

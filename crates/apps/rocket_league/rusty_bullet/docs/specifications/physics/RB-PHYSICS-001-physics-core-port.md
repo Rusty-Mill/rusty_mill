@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.32.0
+- Version: 0.33.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -36,9 +36,12 @@
   the goal-mouth window exactly the same way `sphere_vs_goal_wall`
   already tests the ball's single center point — implemented, and, since
   FR-029, a modeled bounded interior behind each goal window too — a
-  solid bounding box (not a springy net mesh), stopping the ball or a car
+  solid bounding box, stopping the ball or a car
   that passes through the window instead of letting it sail into
-  unbounded open space — implemented; and, since FR-030, every
+  unbounded open space — implemented, and, since FR-033, a real mass-spring
+  net panel per goal catching the *ball* specifically (a car still passes
+  through the panel's own footprint untouched, stopped instead by that same
+  pre-existing solid bounding box) — implemented; and, since FR-030, every
   ball-vs-car and car-vs-car contact touching in the same step is now
   resolved by one shared, interleaved solve
   (`solver::resolve_dynamic_manifolds`) instead of a sequence of fully
@@ -50,9 +53,12 @@
   more constants already correct, and explicitly flagged the rest as
   audited-but-still-uncalibrated rather than silently unresolved —
   implemented, and explicitly does NOT close `FR-005`'s real-data
-  calibration, still blocked on `PHASE-0-EXIT`; a genuine net mesh, split
-  impulse, warm-starting, and that real-data calibration are open follow-up
-  work)
+  calibration, still blocked on `PHASE-0-EXIT`; and, since FR-033, each
+  goal gets a real mass-spring net panel catching the ball (`net::NetMesh`)
+  — implemented, scoped to the ball only (a car still passes through a net
+  panel's own footprint, stopped instead by FR-029's pre-existing solid
+  bounding box); split impulse, warm-starting, a car's own contact against
+  a net, and that real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -151,18 +157,21 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **A genuine net mesh, and any geometry finer than a flat
-  plane, single-radius edge fillet, or single-radius corner fillet per
-  boundary segment.** (A car actually being deflected by a curved fillet
+- **Any geometry finer than a flat plane, single-radius edge fillet, or
+  single-radius corner fillet per boundary segment.** (A car actually being
+  deflected by a curved fillet
   was this same bullet's other half through FR-026 — that half is now
   resolved, see `RB-PHYSICS-001-FR-027`. A car actually driving into a
   goal was this bullet's third half through FR-027 — that half is now
   resolved too, see `RB-PHYSICS-001-FR-028`. A modeled bounded interior
   volume behind the goal window was this bullet's fourth half through
-  FR-028 — that half is now resolved too, see `RB-PHYSICS-001-FR-029`; only
-  a genuine net *mesh* — cloth/soft-body simulation, visual net sag, or a
-  "ball tangles in netting" behavior — remains open, since FR-029's own
-  interior is a solid bounding box, not a springy/catching net.)
+  FR-028 — that half is now resolved too, see `RB-PHYSICS-001-FR-029`. A
+  genuine net *mesh* catching the ball — the "ball tangles in netting"
+  behavior — was this bullet's fifth half through FR-029; that half is now
+  resolved too, see `RB-PHYSICS-001-FR-033`'s `net::NetMesh` (a real
+  mass-spring grid, not FR-029's own solid bounding box), scoped to the
+  ball only — a car's own contact against a net, a full 3D "sock" shape,
+  and bending stiffness remain open, see FR-033's own Non-goals.)
   `arena::standard_curves`
   builds 24
   `StaticQuarterPipe` fillets — 16 floor/ceiling-seam fillets (one
@@ -194,10 +203,13 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   space through FR-028 — nothing behind it could stop the ball or a car
   that passed through; `RB-PHYSICS-001-FR-029` closes that gap with a
   modeled bounded interior volume (a solid bounding box: 2 back-of-net
-  planes, 4 side walls, 2 roofs), but deliberately stops there — it is
-  explicitly *not* a net mesh (no cloth/soft-body simulation, no visual net
-  sag, no "ball tangles in netting" behavior), just a solid volume standing
-  in for the net's functional role of stopping the ball or car. `FR-019`'s
+  planes, 4 side walls, 2 roofs) — a solid volume standing
+  in for the net's functional role of stopping the ball or car, at the time
+  deliberately not yet a genuine net mesh; `RB-PHYSICS-001-FR-033` closes
+  that gap for the ball specifically with a real mass-spring `net::NetMesh`
+  panel in front of that same solid back-of-net plane (a car still passes
+  through the panel's own footprint, stopped by the pre-existing solid
+  volume instead — see FR-033's own entry). `FR-019`'s
   corner-cut inset distance (`arena::CORNER_LENGTH`) and `FR-020`'s fillet
   radius (`arena::FILLET_RADIUS`, also reused by FR-022's vertical-edge
   fillets, FR-024's goal-cutout fillets, and FR-026's goal post-crossbar
@@ -1038,8 +1050,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   goal-mouth window: explicitly a solid bounding box, **not** a
   springy/catching net mesh — no cloth/soft-body simulation was added.
   This is a deliberate, honest scoping decision, not an oversight: a
-  genuine net mesh remains a real, separate, not-yet-implemented Non-goal
-  (see Non-goals). Three pieces, all in `crates/rb_physics_bullet`: (1) a
+  genuine net mesh was a real, separate, not-yet-implemented Non-goal at
+  the time (see Non-goals) — since resolved for the ball specifically by
+  `RB-PHYSICS-001-FR-033`'s `net::NetMesh`, sitting in front of this
+  requirement's own solid back-of-net plane (unaffected, still a car's real
+  backstop). Three pieces, all in `crates/rb_physics_bullet`: (1) a
   new constant `arena::GOAL_DEPTH: f32 = 880.0` — an uncalibrated
   placeholder, since this port has no verified reference for Rocket
   League's real net depth at all (unlike `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`),
@@ -1475,6 +1490,102 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the honest outcome of this investigation is a corrected doc comment,
     not new production code). 1 new test (246 total in `rb_physics_bullet`,
     +1 over FR-031's 245).
+- `RB-PHYSICS-001-FR-033` (genuine net mesh, implemented, ball only):
+  closes the "genuine net mesh" Non-goal `RB-PHYSICS-001-FR-029`'s own doc
+  comment left open — until now, `RB-PHYSICS-001-FR-029`'s solid bounding
+  box was the ball/car's *entire* interior boundary behind each goal
+  window, with no springy/catching netting anywhere. New module `net`
+  (`net::NetMesh`) is a rectangular mass-spring grid: `NetMesh::
+  rectangular_grid` builds a `cols` x `rows` grid of point masses (each a
+  real `RigidBody::sphere`, deliberately tiny and light — see the
+  module's own doc comment for why reusing this crate's existing
+  rigid-body/collision/solver machinery, rather than a bespoke
+  penalty-force system, was the design choice) spanning the goal-mouth
+  window's own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` footprint, anchoring
+  (fixing in place) every point on the grid's own perimeter — representing
+  the net's real attachment to the rigid goal frame (crossbar, both posts,
+  the ground/back line) — and leaving every interior point free, connected
+  by structural (horizontal/vertical) and shear (diagonal) springs
+  (Hooke's law plus velocity damping along each spring's own axis, the one
+  genuinely new piece of physics math this requirement adds — no
+  precedent for it exists anywhere else in this Bullet3-derived port,
+  since Bullet's own soft-body code was never part of this port's scope —
+  see ADR-0004). `NetMesh::step` advances the mesh's own internal physics
+  by the caller's `dt`, split into `net::NET_SUBSTEPS` smaller sub-steps
+  for numerical stability (a mass-spring system this stiff would go
+  unstable integrated with a single large Bullet-style step), and resolves
+  the ball's contact against every free point it currently overlaps via a
+  new `collision::sphere_vs_sphere` (this crate's first real sphere-vs-sphere
+  contact test — `contacts_between` previously returned empty for that
+  shape pairing since it had no caller at all) plus the *existing*
+  `solver::resolve_contacts_between` two-body path, mutating the ball's own
+  velocity progressively across sub-steps exactly the way any other
+  dynamic-vs-dynamic contact in this crate already does. New
+  `arena::standard_nets` builds one `net::NetMesh` per goal, `NET_DEPTH`
+  (an uncalibrated placeholder, less than `GOAL_DEPTH`) behind the real
+  back wall — well in front of `FR-029`'s own rigid back-of-net plane,
+  which stays completely unchanged as an always-there backstop.
+  `PhysicsWorld` gains `nets: Vec<net::NetMesh>` and `with_net`, resolved
+  after every other contact each step (`net.step(&mut self.ball, ...)`,
+  mutating the ball directly rather than through
+  `solver::resolve_dynamic_manifolds`' shared multi-body solve, since a
+  net's own points aren't part of that scene-wide body list at all).
+  - **Non-goals (this requirement).** A car's own contact against a net —
+    a car still passes straight through a `net::NetMesh`'s spatial
+    footprint untouched, exactly as it did before this module existed,
+    stopped instead by `FR-029`'s pre-existing rigid machinery. A full 3D
+    "sock" shape billowing backward from the goal mouth (this models a
+    single flat rest-shape panel, which still deforms backward dynamically
+    under a real ball impact via its own springs — just not a pre-shaped
+    pocket). Bending stiffness (only structural + shear springs; no
+    springs resisting the mesh folding along a diagonal). Manifold
+    richness beyond one contact per overlapping point. Every new constant
+    (`net::NET_POINT_MASS`, `NET_POINT_RADIUS`, `NET_SPRING_CONSTANT`,
+    `NET_SPRING_DAMPING`, `NET_LINEAR_DAMPING`, `NET_RESTITUTION`,
+    `NET_FRICTION`, `arena::NET_DEPTH`) is an uncalibrated placeholder —
+    real Rocket League's actual net material properties have never been
+    published, and this port's own point-mass/spring topology is already
+    a simplification of a real net's continuum cloth behavior, so a
+    "correct" numeric match isn't a coherent target yet either way.
+  - **Acceptance criteria.** A ball fired at a lone net panel loses a
+    large fraction of its speed compared to firing it through the same
+    empty space with no net present — the real "catching" behavior, not
+    just a geometric pass/fail contact test. An undisturbed net settles to
+    a low residual velocity instead of oscillating forever. Every anchored
+    point never moves under any force.
+  - **Verification plan.** `net.rs` unit tests, in isolation from
+    `PhysicsWorld`: perimeter points are anchored and interior points are
+    not; every spring starts at exactly zero stretch (proving
+    `rectangular_grid` measures `rest_length` from its own just-built flat
+    geometry, not a hardcoded value); anchored points never move under
+    120 steps of gravity alone; an undisturbed net's maximum free-point
+    speed settles below a low threshold after 600 steps (the mass-spring
+    analog of `world::tests::resting_ball_stays_at_rest`); and the real
+    catching proof — a ball fired at the net's own center loses over half
+    its speed within 1 simulated second (gravity zeroed to isolate the
+    net's own effect), verified by manually integrating the ball's own
+    transform between `NetMesh::step` calls in the test itself, since
+    `NetMesh::step` (matching `PhysicsWorld`'s own staged pipeline)
+    mutates only velocity, never a body's position. `collision.rs` gains
+    a direct `sphere_vs_sphere` proof (two overlapping spheres produce a
+    contact with the correct normal/penetration; two far-apart spheres
+    produce none), replacing the old
+    `contacts_between_two_spheres_is_empty` regression test whose entire
+    premise this requirement reverses. `arena.rs` proves `standard_nets`
+    returns exactly 2 nets, each sitting exactly `NET_DEPTH` behind the
+    real back wall and spanning exactly the goal mouth's own
+    `GOAL_HALF_WIDTH`/`GOAL_HEIGHT` footprint (not an arbitrary size).
+    `world.rs` adds a wiring-count test (`standard_arena` carries exactly
+    2 nets) plus the real live end-to-end proof: a ball fired at a lone
+    net panel (`PhysicsWorld::new` plus `with_net`, isolated from the full
+    `standard_arena` for the same full-arena-interference reason
+    `RB-PHYSICS-001-FR-029`'s own isolated proofs are isolated) loses at
+    least half its speed compared to the identical shot through the same
+    scene with no net added — the actual `PhysicsWorld`-integrated
+    "catching" proof, not just the isolated `net.rs`-level one. 10 net new
+    tests (5 in `net.rs`, 2 in `collision.rs` net of replacing 1, 2 in
+    `arena.rs`, 2 in `world.rs`, minus 1 test replaced), bringing the crate
+    to 256 total (+10 over FR-032's 246).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -2668,14 +2779,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   goal-cutout edge fillet's own boundary right at the window's rim, only
   the flat window itself, which is what FR-028 actually tests; the same
   is true of FR-029's `box_vs_bounded_wall`, for its own bounded walls.
-  Still genuinely open: a **net mesh** — cloth/soft-body simulation,
+  ~~Still genuinely open: a **net mesh** — cloth/soft-body simulation,
   visual net sag, or a "ball tangles in netting" behavior — which FR-029
   deliberately didn't attempt; its interior is a solid bounding box, not
-  a springy/catching net. A concrete reason to model a genuine net mesh
-  (e.g. real recorded goal-area or car-scoring behavior that diverges
-  specifically because of net physics, not just needing *something*
-  behind the window to stop the ball/car) would justify the added
-  complexity. Not started.
+  a springy/catching net.~~ Implemented for the ball, see
+  `RB-PHYSICS-001-FR-033`'s `net::NetMesh` (a real mass-spring grid, since
+  the concrete motivation this bullet asked for turned out not to be
+  needed to justify it — a "ball tangles in netting" behavior is itself
+  the kind of qualitative, visually-checkable fidelity gap worth closing
+  independent of a specific divergence-scoring signal). Still open: a
+  car's own contact against a net (scoped out of FR-033, see its own
+  Non-goals), and a full 3D "sock" shape/visual net sag/bending stiffness
+  beyond FR-033's flat structural-plus-shear-spring panel.
 - Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
@@ -2765,6 +2880,47 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.33.0 (2026-08-31): FR-033 added and implemented (genuine net mesh,
+  ball only) — closes the "genuine net mesh" Non-goal `FR-029`'s own doc
+  comment left open. New module `net` (`net::NetMesh`): a rectangular
+  mass-spring grid of point masses (each a real `RigidBody::sphere`, tiny
+  and light), every perimeter point anchored (fixed, representing
+  attachment to the rigid goal frame) and every interior point free,
+  connected by structural (horizontal/vertical) and shear (diagonal)
+  springs (Hooke's law plus velocity damping). `NetMesh::step` sub-steps
+  its own internal physics for stability and resolves the ball's contact
+  against every free point it overlaps via a new `collision::sphere_vs_sphere`
+  (this crate's first real sphere-vs-sphere contact — previously an
+  unimplemented, callerless placeholder) plus the *existing*
+  `solver::resolve_contacts_between` two-body path — no new solver code,
+  reusing the same machinery every other dynamic-vs-dynamic contact in
+  this crate already uses. New `arena::standard_nets` builds one
+  `net::NetMesh` per goal, `NET_DEPTH` behind the real back wall and well
+  in front of `FR-029`'s own rigid back-of-net plane (unchanged, still a
+  car's real backstop, since a car isn't tested against the net at all —
+  a documented Non-goal, not an oversight). `PhysicsWorld` gains
+  `nets`/`with_net`, resolved after every other contact each step. Every
+  new constant (`net::NET_POINT_MASS`/`NET_POINT_RADIUS`/
+  `NET_SPRING_CONSTANT`/`NET_SPRING_DAMPING`/`NET_LINEAR_DAMPING`/
+  `NET_RESTITUTION`/`NET_FRICTION`, `arena::NET_DEPTH`) is an uncalibrated
+  placeholder — real Rocket League net material properties have never
+  been published. 10 net new tests: 5 in `net.rs` (perimeter anchoring,
+  zero-stretch springs at rest, anchored points immovable under gravity,
+  an undisturbed net settling instead of oscillating forever, and the
+  real catching proof — a ball fired at the net's own center loses over
+  half its speed within 1 second compared to free flight); `collision.rs`
+  replaced the old `contacts_between_two_spheres_is_empty` regression test
+  (whose entire premise this requirement reverses) with 2 tests proving
+  `sphere_vs_sphere`'s own correctness (net +1); 2 in `arena.rs`
+  (`standard_nets` returns exactly 2 nets, each sitting `NET_DEPTH` behind
+  the real back wall and spanning exactly the goal mouth's own footprint);
+  2 in `world.rs` (a wiring-count test, plus the real live end-to-end
+  proof — a ball fired at a lone net panel in an isolated minimal scene
+  loses at least half its speed compared to the identical shot with no
+  net present). Bringing the crate to 256 tests total (+10 over FR-032's
+  246). Still not modeled: a car's own contact against a net, a full 3D
+  "sock" shape, bending stiffness, and everything else FR-024's own
+  Non-goals already cover.
 - 0.32.0 (2026-08-31): FR-032 added and resolved (genuine
   convex-vs-curved-surface narrow phase investigation — no change to the
   narrow phase itself). Set out to replace `box_vs_quarter_pipe`/
