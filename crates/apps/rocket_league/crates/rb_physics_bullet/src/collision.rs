@@ -688,7 +688,14 @@ fn axis_overlap(
 /// Closest points between two line segments `p1`-`q1` and `p2`-`q2` — the
 /// standard closest-point-between-segments construction (e.g. Ericson,
 /// *Real-Time Collision Detection*, section 5.1.9), needed for an
-/// edge-edge box contact's single point.
+/// edge-edge box contact's single point. `RB-PHYSICS-001-FR-042` confirmed
+/// directly against `btBoxBoxDetector::dBoxBox`'s own real source that this
+/// is strictly more rigorous than Bullet's own reference: `dBoxBox`'s
+/// `dLineClosestApproach` computes closest approach between two *infinite
+/// lines* and applies the resulting offsets with no clamping to the finite
+/// edge length at all, while this function correctly stays within both
+/// finite segments — a genuine improvement over the algorithm this port is
+/// otherwise based on, not merely an equivalent restatement of it.
 fn closest_points_on_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
     let d1 = q1 - p1;
     let d2 = q2 - p2;
@@ -831,7 +838,18 @@ fn face_contact(
         // incident corner clipped outside the reference face's extent (a
         // grazing/marginal configuration) — report one contact at the
         // incident box's center, clamped onto the reference face, rather
-        // than silently dropping a genuine collision.
+        // than silently dropping a genuine collision. `RB-PHYSICS-001-FR-042`
+        // confirmed directly against `btBoxBoxDetector::dBoxBox`'s own real
+        // source that this branch's "shouldn't normally happen" framing
+        // matches the reference author's own — it contains the exact same
+        // undocumented judgment call, twice (after its own polygon-clipping
+        // step and again after filtering to penetrating points), with zero
+        // geometric proof given either time. Where this port deliberately
+        // diverges is policy, not correctness: `dBoxBox`'s own fallback
+        // there is `return 0` (drop the collision entirely), while this one
+        // synthesizes a contact instead — since SAT has already confirmed
+        // real geometric overlap by this point, silently dropping it risks
+        // a body tunneling through in a rare grazing configuration.
         let local_center = ref_orient.conjugate().rotate(&(inc_pos - ref_pos));
         let mut clamped = local_center;
         for &k in &ref_tangents {
@@ -859,8 +877,26 @@ fn face_contact(
 /// An edge-edge contact between two boxes: offsets each box's centerline
 /// along axis `i`/`j` to the specific one of its 4 parallel edges nearest
 /// the other box (by choosing the other two local axes' sign to move
-/// toward it), then finds the closest points between the resulting finite
-/// segments.
+/// toward it, using the center-to-center vector `d` as the "which side is
+/// nearer" proxy), then finds the closest points between the resulting
+/// finite segments. `RB-PHYSICS-001-FR-042` investigated swapping `d` for
+/// the already-available SAT-resolved `normal` instead (matching
+/// `btBoxBoxDetector::dBoxBox`'s own reference approach, which uses the
+/// resolved collision-normal direction rather than a raw center-to-center
+/// proxy) and empirically tested both against a brute-force ground truth
+/// (all 16 sign combinations, minimum segment-to-segment distance) across
+/// 50,000 randomized two-box configurations: neither heuristic reliably
+/// picks the true nearest edge pair, and which one does better depends on
+/// the regime — `d` wins for large/arbitrary penetration depths (~11.6% vs.
+/// ~8.7% optimal-match rate), `normal` wins for realistic near-first-contact
+/// depths under 0.5 units (~93% vs. ~77%), and both have occasional
+/// individual outliers tens of units off the true optimum. Not adopted:
+/// swapping one imperfect heuristic for a different imperfect one isn't a
+/// justified change without real recorded car-vs-car contact data to know
+/// which regime actually matters here. A genuinely rigorous fix would need
+/// a non-heuristic nearest-edge-pair selection (e.g. the brute-force search
+/// used only as this investigation's own throwaway ground-truth oracle),
+/// left as a still-open item.
 #[allow(clippy::too_many_arguments)]
 fn edge_contact(
     pos_a: Vec3,

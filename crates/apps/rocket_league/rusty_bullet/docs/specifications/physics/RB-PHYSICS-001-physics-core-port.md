@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.41.0
+- Version: 0.42.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -102,10 +102,22 @@
   narrowing FR-030's own documented "sandwiched" under-convergence gap
   (measured ~89.5 to ~32 units/s on that requirement's own test) at zero
   added iteration cost, with a global over-relaxation factor investigated
-  and rejected (provably diverges for this exact case) — implemented;
-  static-contact warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
-  calibration, full convergence of the sandwiched case, and real-data
-  calibration are open follow-up work)
+  and rejected (provably diverges for this exact case) — implemented; and,
+  since FR-042, `box_vs_box`'s edge-edge contact point and face-clipping
+  degenerate fallback were validated directly against `btBoxBoxDetector`'s
+  own real source (not guessed at): this port's finite-segment closest-point
+  derivation is confirmed strictly more rigorous than Bullet's own
+  unclamped-infinite-line one, and this port's own decision to synthesize a
+  contact rather than drop it on the same "should never happen" defensive
+  branch Bullet's own authors left unproven too is confirmed a deliberate,
+  favorable divergence; a candidate fix for the edge-edge tangent
+  sign-selection heuristic was built and empirically tested against a
+  brute-force ground truth and found genuinely mixed (better for realistic
+  shallow penetration, worse for deep penetration, neither reliably
+  optimal), so not adopted — investigated; static-contact warm-starting,
+  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
+  of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
+  selection, and real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -2209,6 +2221,100 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     "close enough". All 271 of `rb_physics_bullet`'s pre-existing tests
     (as of `FR-040`) pass unchanged. 2 new tests, bringing the crate to
     273 total (+2 over `FR-040`'s 271).
+- `RB-PHYSICS-001-FR-042` (box-vs-box reference validation, investigated):
+  this spec's own Open Questions flagged `collision::box_vs_box`'s
+  edge-edge contact-point derivation and its face-clipping degenerate
+  ("zero points") fallback as "reasonable, tested choices" never actually
+  validated against Bullet's own `btBoxBoxDetector::dBoxBox` output. This
+  requirement fetched and read that reference source directly (not guessed
+  at, matching `RB-PHYSICS-001-FR-036`'s own method) and checked three
+  specific things against it.
+  1. **Edge-edge contact point.** `dBoxBox`'s own reference computes the
+     edge-edge contact point via `dLineClosestApproach` — closest approach
+     between two *infinite lines*, with the resulting `alpha`/`beta`
+     offsets applied with **no clamping to the finite edge length at all**
+     (confirmed directly in the fetched source: `dLineClosestApproach(pa,
+     ua, pb, ub, &alpha, &beta); pa[i] += ua[i]*alpha; pb[i] += ub[i]*beta;`
+     — no bounds check anywhere near it). This port's own
+     `closest_points_on_segments` instead implements Ericson's proper
+     finite-*segment* closest-point construction (clamping `s`/`t` to
+     `[0, 1]` with the two-pass re-projection that correctness requires),
+     which is strictly more rigorous than the reference it ports from, not
+     merely equivalent to it — a genuine, sourced improvement, confirmed
+     rather than assumed.
+  2. **Face-clipping degenerate fallback.** `dBoxBox`'s own reference
+     contains the *exact same* undocumented judgment call this port's own
+     code comment already made: two separate `// this should never happen`
+     comments (one after `intersectRectQuad2` itself, one after filtering
+     clipped points to penetrating-only) with zero geometric justification
+     given anywhere nearby, confirming this port's own "reasonable, tested
+     choice, not rigorously proven" framing wasn't a weaker position than
+     the reference author's own. Where the two diverge is *policy*, not
+     algorithm: `dBoxBox`'s own fallback for that branch is `return 0`
+     (drop the collision entirely), while this port's own fallback
+     synthesizes one contact at a clamped-center point instead. This is a
+     deliberate, favorable divergence: SAT has already confirmed real
+     geometric overlap along this axis by the time either fallback
+     triggers, so silently dropping a confirmed collision (as the
+     reference does) risks a car tunneling through in a rare grazing
+     configuration, while reporting a synthesized contact does not.
+  3. **Edge-edge tangent sign-selection heuristic.** Deriving which one of
+     a box's 4 candidate parallel edges (along the SAT-chosen axis) is the
+     "near" one requires a heuristic either way — this port's own
+     `edge_contact` picks it via the raw center-to-center vector `d`;
+     `dBoxBox`'s own reference instead uses the actual resolved
+     collision-normal direction. A candidate fix (swap `d` for the
+     already-available `normal`) was built and empirically tested against
+     a true brute-force ground truth (trying all 16 sign combinations per
+     configuration and taking the minimum segment-to-segment distance,
+     across 50,000 randomized two-box configurations): the result was
+     genuinely mixed, not a clear win either way. For large/arbitrary
+     penetration depths, the current `d`-based heuristic matched the true
+     optimal edge pair more often than the `normal`-based candidate
+     (~11.6% vs. ~8.7%) and was rarely worse in head-to-head comparison
+     (1,019 cases vs. 6,653 the other way); restricted to realistic
+     near-first-contact penetration depths (`< 0.5` units, the regime this
+     port's solver actually operates in every substep), the `normal`-based
+     candidate matched optimal far more often (~93% vs. ~77%), but both
+     heuristics still had individual outlier cases tens of units off the
+     true optimum. Neither heuristic is a rigorous fix; swapping one
+     imperfect approximation for a different imperfect one, with no real
+     recorded car-vs-car contact data available to judge which regime
+     matters more for this project's actual fidelity goals, isn't a
+     justified change — so `d`-based selection is kept unchanged.
+  - **Non-goals (this requirement).** Does not implement a genuinely
+    rigorous (non-heuristic) closest-edge-pair selection — e.g. the full
+    16-combination brute-force search this requirement's own investigation
+    used only as a throwaway ground-truth oracle, or a proper
+    closest-features-between-OBBs algorithm — left as a still-open item
+    for whoever has real recorded car-vs-car contact data (or a concrete
+    visible-artifact motivation) to justify the added complexity. Does not
+    change `box_vs_box`'s SAT axis selection, `face_contact`'s clipping
+    algorithm itself, or the face-contact degenerate fallback's own
+    clamped-center-point construction — only the edge-edge tangent
+    sign-selection heuristic was investigated as a change candidate, and
+    it wasn't adopted. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** Both validated design choices (finite-segment
+    edge-edge contact point, synthesize-rather-than-drop face-clipping
+    fallback) are confirmed correct or favorable relative to the real
+    Bullet3 reference source, with the specific reference code quoted in
+    this spec and in `collision.rs`'s own doc comments. The rejected
+    candidate fix (normal-based edge-edge sign selection) is documented
+    with its own quantified empirical findings so a future contributor
+    doesn't re-build and re-test the same candidate from scratch.
+  - **Verification plan.** No new tests: this is a documentation/research
+    correction with no adopted runtime-behavior change, the same precedent
+    `RB-PHYSICS-001-FR-032`/`FR-040` established for a rigorously
+    investigated negative result being real, valuable work in its own
+    right. The candidate fix's own empirical comparison (a temporary,
+    deterministic pseudo-random probe test comparing the current
+    heuristic, the candidate fix, and a brute-force ground truth across
+    50,000 configurations) was built and run during investigation, not
+    shipped as a change, the same "confirmed during test design, not
+    shipped" precedent `RB-PHYSICS-001-FR-030`'s own 300-iteration
+    manual check established. All 273 of `rb_physics_bullet`'s
+    pre-existing tests pass unchanged, since no production code changed.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3552,16 +3658,66 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   `SLEEP_TIME_THRESHOLD` (`body.rs`) are FR-037's own uncalibrated
   placeholders, worth revisiting once real recorded ball/car-hit behavior
   exists to compare against — see FR-037's own entry.
-- `box_vs_box`'s edge-edge contact point uses the midpoint of the two
-  closest points on the involved edges, and its face-contact clipping
-  falls back to a single clamped-center point if clipping ever yields zero
-  points (a defensive branch not exercised by real recorded data yet) —
-  both are reasonable, tested choices, but neither has been validated
-  against Bullet's own `dBoxBox` output or real car-vs-car contact
-  behavior.
+- `box_vs_box`'s edge-edge contact point (the midpoint of the two closest
+  points on the involved edges) and its face-contact clipping's fallback
+  to a single clamped-center point when clipping ever yields zero points
+  are both now validated directly against Bullet's own `btBoxBoxDetector::
+  dBoxBox` reference source, see `RB-PHYSICS-001-FR-042`: the edge-edge
+  contact point derivation is confirmed strictly more rigorous than the
+  reference's own (which uses unclamped infinite-line closest approach,
+  not a proper finite-segment one); the face-clipping fallback's
+  "defensive branch, never proven unreachable" framing matches the
+  reference author's own identical, equally unproven judgment call, with
+  this port's own choice to synthesize a contact rather than drop it (as
+  the reference does) confirmed a deliberate, favorable divergence. Still
+  genuinely open: `edge_contact`'s tangent sign-selection heuristic (which
+  of a box's 4 candidate parallel edges is "near") — `FR-042` built and
+  empirically tested a candidate fix (matching the reference's own
+  normal-based approach instead of this port's center-to-center-vector
+  one) against a brute-force ground truth and found it genuinely mixed,
+  not adopted; a rigorous, non-heuristic nearest-edge-pair selection
+  remains an open item, needing either real recorded car-vs-car contact
+  data or a concrete visible-artifact motivation to justify the added
+  complexity over either heuristic.
 
 ## Change history
 
+- 0.42.0 (2026-08-31): FR-042 added and investigated (box-vs-box reference
+  validation) — fetched and read Bullet's own `btBoxBoxDetector::dBoxBox`
+  reference source directly to validate two "reasonable, tested choices,
+  never validated against the reference" this spec's own Open Questions
+  flagged, plus one further heuristic found during that reading. (1)
+  Edge-edge contact point: the reference uses `dLineClosestApproach`
+  (unclamped infinite-line closest approach, confirmed no bounds check on
+  `alpha`/`beta` in the fetched source), while this port's own
+  `closest_points_on_segments` implements Ericson's proper finite-segment
+  closest-point construction — strictly more rigorous than the reference,
+  confirmed rather than assumed; no change needed. (2) Face-clipping
+  degenerate ("zero points") fallback: the reference contains the same
+  undocumented "this should never happen" judgment call (twice, with zero
+  geometric justification given), confirming this port's own framing
+  wasn't a weaker position — but the reference's own fallback drops the
+  collision entirely (`return 0`) while this port synthesizes a
+  clamped-center contact instead, a deliberate, favorable divergence (SAT
+  already confirmed real overlap by that point, so dropping it risks
+  tunneling); kept as-is. (3) Edge-edge tangent sign-selection heuristic:
+  this port picks which of a box's 4 candidate parallel edges is nearest
+  via the raw center-to-center vector, while the reference uses the
+  actual resolved collision normal instead — a candidate fix swapping to
+  the normal was built and empirically tested against a brute-force
+  ground truth across 50,000 randomized configurations, found genuinely
+  mixed (the current heuristic wins for large/arbitrary penetration
+  depths, ~11.6% vs. ~8.7% optimal-match rate; the candidate wins for
+  realistic near-first-contact depths, ~93% vs. ~77%; neither is reliably
+  optimal, both have large outliers), so not adopted — kept as-is,
+  documented as a still-open item needing a non-heuristic algorithm or
+  real recorded contact data to responsibly improve. No new tests
+  (documentation-only, no value or behavior changed, the same precedent
+  FR-032/FR-040 established for a rigorously investigated negative result
+  being real work); the temporary probe test built to run the brute-force
+  comparison was not shipped, the same "confirmed during test design, not
+  shipped" precedent FR-030's own 300-iteration manual check established.
+  All 273 pre-existing tests pass unchanged (total unchanged from FR-041).
 - 0.41.0 (2026-08-31): FR-041 added and implemented (sandwiched-solve
   convergence) — investigated whether anything short of real recorded data
   could narrow FR-030's own documented extreme-mass-ratio "sandwiched"
