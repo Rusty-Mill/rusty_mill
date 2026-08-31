@@ -8,6 +8,7 @@ use crate::body::{
     StaticQuarterPipe,
 };
 use crate::collision;
+use crate::net::NetMesh;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 
@@ -51,7 +52,10 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// (so a stale flag from an earlier dodge can't leak into a later,
 /// unrelated double jump), and spends on a further fresh press to
 /// flip-cancel the dodge's spin — all driving the car via
-/// `drive::apply_driven_forces`.
+/// `drive::apply_driven_forces`. Since `RB-PHYSICS-001-FR-033`, `nets`
+/// (added via `with_net`) gives the ball a real mass-spring net to be
+/// caught by, resolved after every other contact each step — see `nets`'
+/// own doc comment.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
@@ -96,6 +100,14 @@ pub struct PhysicsWorld {
     /// plane there would be wrong); resolved for the ball and every car,
     /// same as `goal_walls`.
     pub bounded_walls: Vec<StaticBoundedWall>,
+    /// Real mass-spring net panels (`RB-PHYSICS-001-FR-033`), added via
+    /// `with_net` — empty by default. Catches only the ball, not a car
+    /// (see `net::NetMesh`'s own doc comment for why); resolved after every
+    /// other contact this step, mutating `ball`'s velocity directly rather
+    /// than through `solver::resolve_dynamic_manifolds`' shared multi-body
+    /// solve (a net's own points aren't part of that scene-wide `bodies`
+    /// list at all).
+    pub nets: Vec<NetMesh>,
     pub gravity: Vec3,
     elapsed_secs: f32,
 }
@@ -127,6 +139,7 @@ impl PhysicsWorld {
             corner_fillets: Vec::new(),
             goal_walls: Vec::new(),
             bounded_walls: Vec::new(),
+            nets: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
@@ -156,7 +169,9 @@ impl PhysicsWorld {
     /// `arena::standard_goal_back_walls()`'s 2 plain back-of-net planes,
     /// and a `with_bounded_wall` call for each of
     /// `arena::standard_goal_side_walls()`'s 4 and
-    /// `arena::standard_goal_roofs()`'s 2 bounded side/roof walls. Cars are
+    /// `arena::standard_goal_roofs()`'s 2 bounded side/roof walls, and,
+    /// since `RB-PHYSICS-001-FR-033`, a `with_net` call for each of
+    /// `arena::standard_nets()`'s 2 goal net panels. Cars are
     /// added afterward with `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
@@ -186,6 +201,9 @@ impl PhysicsWorld {
         }
         for wall in crate::arena::standard_goal_roofs() {
             world = world.with_bounded_wall(wall);
+        }
+        for net in crate::arena::standard_nets() {
+            world = world.with_net(net);
         }
         world
     }
@@ -241,6 +259,15 @@ impl PhysicsWorld {
     /// `goal_walls`.
     pub fn with_bounded_wall(mut self, bounded_wall: StaticBoundedWall) -> PhysicsWorld {
         self.bounded_walls.push(bounded_wall);
+        self
+    }
+
+    /// Adds one net panel to the scene (`RB-PHYSICS-001-FR-033`) — callable
+    /// more than once, same pattern as `with_bounded_wall`; a scene with no
+    /// nets added (the default) behaves exactly as before nets existed.
+    /// Catches only the ball — see `nets`' own doc comment.
+    pub fn with_net(mut self, net: NetMesh) -> PhysicsWorld {
+        self.nets.push(net);
         self
     }
 
@@ -598,6 +625,17 @@ impl PhysicsWorld {
         self.ball = bodies[0];
         for (car, resolved) in self.cars.iter_mut().zip(bodies.iter().skip(1)) {
             *car = *resolved;
+        }
+
+        // Net panels (RB-PHYSICS-001-FR-033): each net's own internal
+        // physics (spring forces, its own sub-stepped integration) plus the
+        // ball's contact against it, resolved after every other contact
+        // this step so the ball's velocity going in already reflects
+        // gravity, driven forces, and every static/dynamic contact above —
+        // see `nets`' own doc comment for why this isn't part of
+        // `resolve_dynamic_manifolds`' shared solve.
+        for net in &mut self.nets {
+            net.step(&mut self.ball, self.gravity, dt);
         }
 
         Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
@@ -2070,6 +2108,14 @@ mod tests {
     }
 
     #[test]
+    fn standard_arena_has_two_nets() {
+        // One net panel per goal, since RB-PHYSICS-001-FR-033.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.nets.len(), 2);
+    }
+
+    #[test]
     fn a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height()
     {
         // Wall at x=1000, fillet radius 292: resting at flat-floor height
@@ -2764,6 +2810,41 @@ mod tests {
                 && world.ball.position.z < crate::arena::GOAL_HEIGHT + 5.0,
             "expected the ball to settle inside the goal box against its own roof, got z={}",
             world.ball.position.z
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-033's own net: a
+        // ball fired straight at a lone net panel loses most of its speed,
+        // unlike firing it through the exact same empty space with no net
+        // present at all. Isolated to just the one net (`PhysicsWorld::new`
+        // plus `with_net`, not `standard_arena`) for the same
+        // full-arena-interference reason FR-029's own isolated proofs above
+        // are isolated.
+        let net_y = crate::arena::BACK_WALL_Y + crate::arena::NET_DEPTH;
+
+        let run = |with_net: bool| -> f32 {
+            let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(0.0, net_y - 800.0, 300.0));
+            let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+            world.ball.linear_velocity = Vec3::new(0.0, 1500.0, 0.0);
+            world.gravity = Vec3::ZERO;
+            if with_net {
+                world = world.with_net(crate::arena::standard_nets().remove(0));
+            }
+            let dt = 1.0 / 120.0;
+            for _ in 0..(1.0 / dt) as u32 {
+                world.step(dt);
+            }
+            world.ball.linear_velocity.y
+        };
+
+        let caught_speed = run(true);
+        let free_flight_speed = run(false);
+        assert!(
+            caught_speed.abs() < free_flight_speed.abs() * 0.5,
+            "expected the net to catch the ball, losing at least half its speed compared to \
+             free flight, caught vy={caught_speed}, free-flight vy={free_flight_speed}"
         );
     }
 

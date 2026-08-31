@@ -101,17 +101,23 @@
 //! *entire* main field, the same problem those planes' own doc comments
 //! already documented for their original, purely-geometric role).
 //!
-//! **Still not modeled**: a genuine net *mesh* inside the goal box (this
-//! models a solid bounding volume, not springy/catching netting a ball
-//! could tangle in or a real net's own visual sag); and any geometry finer
-//! than a single flat plane, single-radius edge fillet, or single-radius
-//! corner fillet per boundary segment (the real field mesh's corners and
-//! transitions are more complex than this). See `RB-PHYSICS-001`'s
-//! Non-goals.
+//! Since `RB-PHYSICS-001-FR-033`, each goal also gets a real mass-spring net
+//! panel (`standard_nets`, a `net::NetMesh` each, `NET_DEPTH` behind the
+//! real back wall — well in front of `goal_back_wall_plane`'s own rigid
+//! backstop, unchanged) catching the *ball* — see `net::NetMesh`'s own doc
+//! comment for the design and for what's still explicitly out of scope
+//! (a car's own contact against the net, a full 3D "sock" shape, bending
+//! stiffness).
+//!
+//! **Still not modeled**: any geometry finer than a single flat plane,
+//! single-radius edge fillet, or single-radius corner fillet per boundary
+//! segment (the real field mesh's corners and transitions are more complex
+//! than this). See `RB-PHYSICS-001`'s Non-goals.
 
 use crate::body::{
     StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
 };
+use crate::net::NetMesh;
 use rb_domain::Vec3;
 
 /// Side wall position (the field's half-width along X) — a commonly-cited
@@ -186,6 +192,23 @@ pub const GOAL_HEIGHT: f32 = 642.775;
 /// interior volume (comparable in scale to the goal mouth's own
 /// dimensions), not measured from real field mesh data.
 pub const GOAL_DEPTH: f32 = 880.0;
+
+/// How far behind the real back wall a goal's `net::NetMesh` panel sits
+/// (`RB-PHYSICS-001-FR-033`) — deliberately less than `GOAL_DEPTH`, so a
+/// ball entering the goal always meets the springy net well before it could
+/// ever reach `goal_back_wall_plane`'s own rigid backstop (still there,
+/// completely unchanged, as a safety net *behind* the net for the
+/// vanishingly unlikely case the mesh's own solve lets the ball slip past
+/// it — see `net::NetMesh`'s own doc comment for what a car, which isn't
+/// tested against the mesh at all, still collides with instead). Another
+/// uncalibrated placeholder, same category as `GOAL_DEPTH` itself.
+pub const NET_DEPTH: f32 = GOAL_DEPTH * 0.5;
+
+/// Column count for `standard_nets`' own grid — see `net::NetMesh::
+/// rectangular_grid`'s own doc comment for what a "column" means here.
+pub const NET_COLS: usize = 7;
+/// Row count for `standard_nets`' own grid.
+pub const NET_ROWS: usize = 5;
 
 /// The floor: a flat plane at `z = 0`, normal `+Z` (up) — identical to the
 /// `flat_ground()` helper this crate's tests have used since v0, just
@@ -476,6 +499,35 @@ fn goal_roof(sign: f32) -> StaticBoundedWall {
 /// total, one per goal.
 pub fn standard_goal_roofs() -> Vec<StaticBoundedWall> {
     vec![goal_roof(1.0), goal_roof(-1.0)]
+}
+
+/// A goal box's own net panel, on goal `sign` (`1.0` for `+Y`, `-1.0` for
+/// `-Y`) (`RB-PHYSICS-001-FR-033`) — a `net::NetMesh::rectangular_grid`
+/// spanning the same `GOAL_HALF_WIDTH`/`GOAL_HEIGHT` footprint as the
+/// goal-mouth window itself (`standard_goal_walls`), so the net's own
+/// perimeter lines up with the window's rim rather than leaving a gap a
+/// ball could slip past unobstructed, positioned `NET_DEPTH` behind the
+/// real back wall (well short of `goal_back_wall_plane`'s own rigid
+/// backstop at the full `GOAL_DEPTH` — see `NET_DEPTH`'s own doc comment).
+/// Lies in the plane perpendicular to `+Y`, spanning `+X` (`width_axis`)
+/// and `+Z` (`height_axis`) — the same axes `standard_goal_walls`'s own
+/// `u_axis`/`v_axis` use for this wall's window.
+fn net_panel(sign: f32) -> NetMesh {
+    NetMesh::rectangular_grid(
+        Vec3::new(0.0, sign * (BACK_WALL_Y + NET_DEPTH), GOAL_HEIGHT * 0.5),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        GOAL_HALF_WIDTH,
+        GOAL_HEIGHT,
+        NET_COLS,
+        NET_ROWS,
+    )
+}
+
+/// Both goals' own net panels (`RB-PHYSICS-001-FR-033`) — 2 `net::NetMesh`s
+/// total, one per goal, added to `PhysicsWorld.nets` via `with_net`.
+pub fn standard_nets() -> Vec<NetMesh> {
+    vec![net_panel(1.0), net_panel(-1.0)]
 }
 
 /// Curved fillets for the standard arena: wall-to-floor/wall-to-ceiling
@@ -1149,6 +1201,44 @@ mod tests {
         for roof in standard_goal_roofs() {
             assert!((roof.half_u - GOAL_HALF_WIDTH).abs() < 1e-2);
             assert!((roof.bound_center.x).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn standard_nets_has_two_nets() {
+        assert_eq!(standard_nets().len(), 2);
+    }
+
+    #[test]
+    fn every_net_sits_net_depth_behind_the_real_back_wall_and_spans_the_goal_mouth() {
+        for net in standard_nets() {
+            // Every net point (anchored or free) starts on the flat grid at
+            // exactly y = +-(BACK_WALL_Y + NET_DEPTH) -- proving the panel's
+            // own depth, not just its existence.
+            let y_values: Vec<f32> = net.points.iter().map(|p| p.position.y).collect();
+            let target = y_values[0].abs();
+            assert!(
+                (target - (BACK_WALL_Y + NET_DEPTH)).abs() < 1e-2,
+                "expected every net point at |y|={}, got {target}",
+                BACK_WALL_Y + NET_DEPTH
+            );
+            for y in &y_values {
+                assert!((y.abs() - target).abs() < 1e-2);
+            }
+
+            // The grid's own corner points sit exactly at the goal mouth's
+            // own rim -- the same GOAL_HALF_WIDTH/GOAL_HEIGHT footprint
+            // `standard_goal_walls`' own window uses.
+            let xs: Vec<f32> = net.points.iter().map(|p| p.position.x).collect();
+            let zs: Vec<f32> = net.points.iter().map(|p| p.position.z).collect();
+            let min_x = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let min_z = zs.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_z = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            assert!((min_x - (-GOAL_HALF_WIDTH)).abs() < 1e-2);
+            assert!((max_x - GOAL_HALF_WIDTH).abs() < 1e-2);
+            assert!((min_z - 0.0).abs() < 1e-2);
+            assert!((max_z - GOAL_HEIGHT).abs() < 1e-2);
         }
     }
 }

@@ -2,7 +2,7 @@
 
 - Last verified main commit: `51e633a` (merge of [#73](https://github.com/baileyrd/rusty_bullet/pull/73))
 - Verified at: 2026-08-31
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via corner-testing, confirmed exact for this containment-style contact by FR-032) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box, not a net mesh) so a ball or car passing through settles instead of flying forever, and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones, and, since FR-031, uncalibrated placeholder constants have been individually audited against the community reverse-engineering effort (some corrected, some confirmed, the rest explicitly flagged), and, since FR-032, the once-suspected corner-testing under-detection gap for a car vs. a curved fillet was rigorously investigated and found not to exist (a genuine GJK-based replacement was built, found to regress two real tests, and reverted — the honest outcome is a corrected doc comment, not new production code) — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; real-data constant calibration (FR-005) still blocked on PHASE-0-EXIT) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via corner-testing, confirmed exact for this containment-style contact by FR-032) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box) so a ball or car passing through settles instead of flying forever, and, since FR-033, a real mass-spring net panel per goal catching the ball specifically (a car still passes through it, stopped by that same solid box instead), and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones, and, since FR-031, uncalibrated placeholder constants have been individually audited against the community reverse-engineering effort (some corrected, some confirmed, the rest explicitly flagged), and, since FR-032, the once-suspected corner-testing under-detection gap for a car vs. a curved fillet was rigorously investigated and found not to exist (a genuine GJK-based replacement was built, found to regress two real tests, and reverted — the honest outcome is a corrected doc comment, not new production code) — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; real-data constant calibration (FR-005) still blocked on PHASE-0-EXIT) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -927,6 +927,39 @@
   densely sampling all 6 faces of a car-sized box against the exact
   geometry the two broken tests used), 246 total in `rb_physics_bullet`
   (+1 over FR-031's 245).
+- `RB-PHYSICS-001-FR-033` (genuine net mesh, implemented, ball only) —
+  closes the "genuine net mesh" Non-goal `FR-029`'s own doc comment left
+  open. New module `net` (`net::NetMesh`): a rectangular mass-spring grid
+  of point masses (each a real `RigidBody::sphere`, tiny and light,
+  reusing this crate's existing rigid-body/collision/solver machinery
+  rather than a bespoke penalty-force system), every perimeter point
+  anchored (fixed, representing attachment to the rigid goal frame) and
+  every interior point free, connected by structural (horizontal/vertical)
+  and shear (diagonal) springs (Hooke's law plus velocity damping — the
+  one genuinely new piece of physics math this requirement adds).
+  `NetMesh::step` sub-steps its own internal physics for numerical
+  stability and resolves the ball's contact against every free point it
+  overlaps via a new `collision::sphere_vs_sphere` (this crate's first
+  real sphere-vs-sphere contact — previously an unimplemented, callerless
+  placeholder) plus the *existing* `solver::resolve_contacts_between`
+  two-body path. New `arena::standard_nets` builds one `net::NetMesh` per
+  goal, `NET_DEPTH` behind the real back wall and well in front of
+  `FR-029`'s own rigid back-of-net plane (unchanged, still a car's real
+  backstop — a car isn't tested against the net at all, a documented
+  Non-goal). `PhysicsWorld` gains `nets`/`with_net`, resolved after every
+  other contact each step. Every new constant is an uncalibrated
+  placeholder — real Rocket League net material properties have never been
+  published. 10 new tests: 5 in `net.rs` (perimeter anchoring, zero-stretch
+  springs at rest, anchored points immovable under gravity, an undisturbed
+  net settling instead of oscillating forever, and the real catching proof
+  — a ball fired at the net's own center loses over half its speed within
+  1 second compared to free flight); `collision.rs` replaced the old
+  `contacts_between_two_spheres_is_empty` regression test with 2 proving
+  `sphere_vs_sphere`'s own correctness (net +1); 2 in `arena.rs`; 2 in
+  `world.rs` (a wiring-count test plus the real live end-to-end proof — a
+  ball fired at a lone net panel in an isolated minimal scene loses at
+  least half its speed compared to the identical shot with no net
+  present). 256 total in `rb_physics_bullet` (+10 over FR-032's 246).
 
 ## In progress
 
@@ -975,7 +1008,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (296 tests: 23 in `rb_domain`, 246 in
+- `cargo test --workspace`: pass (306 tests: 23 in `rb_domain`, 256 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

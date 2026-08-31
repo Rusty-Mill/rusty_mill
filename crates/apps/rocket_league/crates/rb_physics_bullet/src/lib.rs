@@ -87,12 +87,20 @@
 //! This audit does NOT close `RB-PHYSICS-001-FR-005`'s real-data
 //! calibration, which still needs `PHASE-0-EXIT`.
 //!
+//! Since `RB-PHYSICS-001-FR-033`, each goal also gets a real net
+//! (`with_net`, a `net::NetMesh` each — a mass-spring grid, anchored along
+//! its own perimeter to the goal frame, catching the *ball* via this
+//! crate's existing dynamic-vs-dynamic sequential-impulse solver path
+//! rather than a bespoke penalty-force system), replacing part of
+//! `RB-PHYSICS-001-FR-029`'s solid-bounding-box stand-in — see `net`'s own
+//! module doc comment for the design and for what's explicitly still out
+//! of scope (a car's own contact against the net, a full 3D "sock" shape,
+//! bending stiffness).
+//!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
-//! split impulse; warm-starting/sleeping; a *net* inside the goal box beyond its
-//! own bounding walls (`RB-PHYSICS-001-FR-029` models the box's own solid
-//! boundary, not a springy/catching net mesh); and consuming a *recorded*
-//! input sequence — `PhysicsWorld::set_car_input` sets a car's current
-//! input (persisting until changed), but nothing yet drives that from real
+//! split impulse; warm-starting/sleeping; and consuming a *recorded* input
+//! sequence — `PhysicsWorld::set_car_input` sets a car's current input
+//! (persisting until changed), but nothing yet drives that from real
 //! `RB-VERIFY-002` capture data frame-by-frame.
 
 pub mod arena;
@@ -101,6 +109,7 @@ pub mod collision;
 pub mod drive;
 pub mod integrate;
 pub mod mat3;
+pub mod net;
 pub mod solver;
 pub mod world;
 
@@ -110,4 +119,5 @@ pub use body::{
 };
 pub use collision::Contact;
 pub use mat3::Mat3;
+pub use net::NetMesh;
 pub use world::{simulate, PhysicsWorld};
