@@ -72,17 +72,24 @@
 //! edge sits exactly at floor level, so a post fillet there simply ends
 //! flush with the ground, the same as any other fillet meeting the floor.
 //!
+//! Since `RB-PHYSICS-001-FR-027`, a car (box) is actually deflected by
+//! every fillet in this module too — `collision::contacts_vs_quarter_pipe`/
+//! `contacts_vs_corner_fillet` test a box's own 8 corners against the
+//! curved surface (the same technique `contacts_vs_plane`'s box path
+//! already used for a flat plane), an approximation of the box as a whole,
+//! not a full convex-vs-curved-surface narrow phase — see
+//! `collision::box_vs_quarter_pipe`'s own doc comment for exactly what
+//! that does and doesn't catch.
+//!
 //! **Still not modeled**: the goal's own interior/net structure beyond the
 //! cutout itself (the ball passes into open space, not a bounded net
-//! volume); a car (box) actually being deflected by any of these fillets,
-//! or driving into the goal at all
-//! (`collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet`
-//! always return no contact for a box, and `contacts_vs_goal_wall`
-//! deliberately ignores the window for one — see its own doc comment); and
-//! any geometry finer than a single flat plane, single-radius edge fillet,
-//! or single-radius corner fillet per boundary segment (the real field
-//! mesh's corners and transitions are more complex than this). See
-//! `RB-PHYSICS-001`'s Non-goals.
+//! volume); a car actually driving into the goal at all
+//! (`contacts_vs_goal_wall` deliberately ignores the window for a box —
+//! see its own doc comment, unaffected by FR-027 since a goal wall isn't a
+//! curved fillet); and any geometry finer than a single flat plane,
+//! single-radius edge fillet, or single-radius corner fillet per boundary
+//! segment (the real field mesh's corners and transitions are more
+//! complex than this). See `RB-PHYSICS-001`'s Non-goals.
 
 use crate::body::{StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
 use rb_domain::Vec3;

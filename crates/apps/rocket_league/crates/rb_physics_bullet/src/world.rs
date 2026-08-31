@@ -13,8 +13,9 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// `with_wall` — a plain flat `StaticPlane` each, typically with a
 /// horizontal normal), and zero or more curved wall-to-floor/wall-to-ceiling
 /// fillets (`curves`, added via `with_curve` — see `RB-PHYSICS-001-FR-020`
-/// and `curves`' own doc comment for why only the ball is deflected by
-/// one). Every body collides with the ground and with every wall
+/// and `curves`' own doc comment; since `RB-PHYSICS-001-FR-027`, a car is
+/// deflected by one too, not just the ball). Every body collides with the
+/// ground and with every wall
 /// (`resolve_plane_contact`, the same body-vs-static-plane machinery for
 /// both — a wall is just a plane whose normal isn't "up");
 /// every car also collides with the ball and with every other car
@@ -57,19 +58,20 @@ pub struct PhysicsWorld {
     pub ground: StaticPlane,
     pub walls: Vec<StaticPlane>,
     /// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`),
-    /// added via `with_curve` — empty by default, same as `walls`. Only the
-    /// ball is actually deflected by a curve (`collision::
-    /// contacts_vs_quarter_pipe` returns nothing for a box/car — see its own
-    /// doc comment); a car drives straight through a curve's footprint
-    /// unaffected, exactly as if it weren't there.
+    /// added via `with_curve` — empty by default, same as `walls`. Both the
+    /// ball and a car are deflected by a curve since `RB-PHYSICS-001-FR-027`
+    /// — a car's own box is approximated by testing its 8 corners against
+    /// the curve (see `collision::box_vs_quarter_pipe`'s own doc comment
+    /// for what that does and doesn't catch), not a full convex-vs-curve
+    /// narrow phase.
     pub curves: Vec<StaticQuarterPipe>,
     /// Compound-corner fillets (`RB-PHYSICS-001-FR-023`) — the small
     /// spherical patches blending a vertical-edge fillet (`curves`) into a
     /// floor- or ceiling-seam fillet (also `curves`) at each corner wall's
     /// own top/bottom endpoint, added via `with_corner_fillet`. Same
-    /// ball-only deflection convention as `curves` (`collision::
-    /// contacts_vs_corner_fillet` returns nothing for a box/car), and empty
-    /// by default.
+    /// corner-testing deflection convention `curves` uses for a car, since
+    /// `RB-PHYSICS-001-FR-027` (`collision::box_vs_corner_fillet`), and
+    /// empty by default.
     pub corner_fillets: Vec<StaticCornerFillet>,
     /// Windowed back walls with an actual goal-mouth opening
     /// (`RB-PHYSICS-001-FR-024`), added via `with_goal_wall` — empty by
@@ -177,8 +179,8 @@ impl PhysicsWorld {
     /// Adds one curved wall-to-floor/wall-to-ceiling fillet to the scene
     /// (`RB-PHYSICS-001-FR-020`) — callable more than once, same pattern as
     /// `with_wall`; a scene with no curves added (the default) behaves
-    /// exactly as before curves existed. Only deflects the ball — see
-    /// `curves`' own doc comment.
+    /// exactly as before curves existed. Deflects both the ball and a car —
+    /// see `curves`' own doc comment.
     pub fn with_curve(mut self, curve: StaticQuarterPipe) -> PhysicsWorld {
         self.curves.push(curve);
         self
@@ -187,8 +189,8 @@ impl PhysicsWorld {
     /// Adds one compound-corner fillet to the scene
     /// (`RB-PHYSICS-001-FR-023`) — callable more than once, same pattern as
     /// `with_curve`; a scene with no corner fillets added (the default)
-    /// behaves exactly as before they existed. Only deflects the ball — see
-    /// `corner_fillets`' own doc comment.
+    /// behaves exactly as before they existed. Deflects both the ball and a
+    /// car — see `corner_fillets`' own doc comment.
     pub fn with_corner_fillet(mut self, corner_fillet: StaticCornerFillet) -> PhysicsWorld {
         self.corner_fillets.push(corner_fillet);
         self
@@ -324,9 +326,10 @@ impl PhysicsWorld {
     }
 
     /// Like `resolve_plane_contact`, but against a curved fillet
-    /// (`RB-PHYSICS-001-FR-020`) instead of a flat plane — a no-op for a
-    /// box (car), since `collision::contacts_vs_quarter_pipe` never
-    /// generates a contact for one (see its own doc comment).
+    /// (`RB-PHYSICS-001-FR-020`) instead of a flat plane — resolves for a
+    /// box (car) too, since `RB-PHYSICS-001-FR-027`
+    /// (`collision::contacts_vs_quarter_pipe`'s own doc comment covers what
+    /// that approximation does and doesn't catch).
     fn resolve_curve_contact(body: &mut RigidBody, curve: &StaticQuarterPipe, dt: f32) {
         let contacts = collision::contacts_vs_quarter_pipe(body, curve);
         if !contacts.is_empty() {
@@ -335,9 +338,8 @@ impl PhysicsWorld {
     }
 
     /// Like `resolve_curve_contact`, but against a compound-corner fillet
-    /// (`RB-PHYSICS-001-FR-023`) instead of an edge fillet — a no-op for a
-    /// box (car), since `collision::contacts_vs_corner_fillet` never
-    /// generates a contact for one (see its own doc comment).
+    /// (`RB-PHYSICS-001-FR-023`) instead of an edge fillet — same
+    /// box-deflects-too behavior since `RB-PHYSICS-001-FR-027`.
     fn resolve_corner_fillet_contact(body: &mut RigidBody, fillet: &StaticCornerFillet, dt: f32) {
         let contacts = collision::contacts_vs_corner_fillet(body, fillet);
         if !contacts.is_empty() {
@@ -1952,13 +1954,16 @@ mod tests {
     }
 
     #[test]
-    fn a_car_is_not_deflected_by_a_curved_transition() {
-        // Regression guard for the documented Non-goal: box (car)
-        // collision against a curve isn't implemented yet
-        // (RB-PHYSICS-001-FR-020) -- a car sitting at the exact same
-        // overlapping position the ball test above uses should be
-        // completely unaffected by the curve (no upward push), only by
-        // the ordinary flat floor/wall contacts it would already have.
+    fn a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height()
+    {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-027: a car sitting
+        // at the exact same overlapping position the ball test above uses
+        // (well within the curve's own footprint, closer to the wall than
+        // the fillet's floor-side tangent point) should get pushed up onto
+        // the curve's own surface instead of staying embedded, the same
+        // live-physics proof already given for the ball, now for a car's
+        // own box via `collision::box_vs_quarter_pipe`'s corner-testing
+        // approximation.
         let floor = flat_ground();
         let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
         let curve = crate::body::StaticQuarterPipe::between_planes(
@@ -1983,10 +1988,73 @@ mod tests {
         }
 
         assert!(
-            (world.cars[0].position.z - car_half_extents.z).abs() < 1.0,
-            "expected the car to stay at its ordinary flat-floor resting height, unaffected by \
-             the curve, got z={}",
+            world.cars[0].position.z > car_half_extents.z + 5.0,
+            "expected the curve to push the car up off flat-floor height, got z={}",
             world.cars[0].position.z
+        );
+    }
+
+    #[test]
+    fn a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced() {
+        // The same live-physics proof
+        // `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`
+        // gives for the ball (RB-PHYSICS-001-FR-023), adapted for a car's
+        // own box via `collision::box_vs_corner_fillet`'s corner-testing
+        // approximation (RB-PHYSICS-001-FR-027). Unlike a sphere (a single
+        // point, so "distance to the fillet's center shrinks" is exactly
+        // "penetration shrinks"), an axis-aligned box's corners sit at
+        // different depths into the fillet at once -- resolving one
+        // corner's contact can rotate the box in a way that moves its
+        // *center* away from the fillet even as every individual
+        // corner's own overlap is being corrected. So this checks the
+        // real invariant that generalizes: the worst (deepest) corner
+        // penetration this fillet reports should be smaller once the
+        // solver has run than it was at the deeply-embedded starting
+        // position, not that the box's own center approaches the
+        // fillet's.
+        let floor = flat_ground();
+        let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let radius = 292.0;
+        let fillet =
+            crate::body::StaticCornerFillet::between_three_planes(&floor, &wall_x, &wall_y, radius);
+
+        let toward_corner = Vec3::new(1.0, 1.0, -1.0)
+            .normalize()
+            .expect("(1, 1, -1) is nonzero");
+        let starting_distance = fillet.radius;
+        let car = some_car(fillet.center + toward_corner * starting_distance);
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, -5000.0, 5000.0));
+
+        let max_penetration = |body: &RigidBody| -> f32 {
+            collision::contacts_vs_corner_fillet(body, &fillet)
+                .iter()
+                .map(|c| c.penetration_depth)
+                .fold(0.0f32, f32::max)
+        };
+        let starting_penetration = max_penetration(&car);
+        assert!(
+            starting_penetration > 0.0,
+            "expected the starting position to actually overlap the fillet"
+        );
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_car(car)
+            .with_wall(wall_x)
+            .with_wall(wall_y)
+            .with_corner_fillet(fillet);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_penetration = max_penetration(&world.cars[0]);
+        assert!(
+            final_penetration < starting_penetration - 5.0,
+            "expected the compound-corner fillet to meaningfully reduce the car's worst \
+             corner penetration, started at {starting_penetration}, got {final_penetration}"
         );
     }
 
