@@ -2383,15 +2383,14 @@ mod tests {
         // axis, the same live-physics proof already given for the
         // floor/wall and diagonal-wall fillets, now for a wall-to-wall
         // corner whose two planes aren't perpendicular. Checks the ball
-        // actually moved a clear distance toward the axis, not that it
-        // settles and stays at the exact resting distance: once the
-        // correction resolves the overlap, this fillet's own contact stops
-        // firing (same as any other single, non-repeating contact source
-        // here), so nothing cancels whatever residual velocity the
-        // correction left the ball with, and it coasts onward rather than
-        // stopping there -- the same reason `RB-PHYSICS-001-FR-020`'s and
-        // `FR-021`'s own equivalent tests only check the ball moved
-        // meaningfully in the right direction, not that it settled exactly.
+        // settles at (not past) the fillet's own resting distance: since
+        // `RB-PHYSICS-001-FR-034`, penetration correction runs entirely on
+        // the split-impulse push channel rather than leaking into the
+        // ball's real velocity, so once the overlap resolves there's no
+        // residual velocity left to coast onward with (unlike before
+        // FR-034, when this same test asserted only "moved meaningfully",
+        // since the ball would overshoot the resting distance and keep
+        // going).
         let wall_a = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), 0.0);
         let wall_b = StaticPlane::new(
             Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2,
@@ -2436,10 +2435,11 @@ mod tests {
             0.0,
         );
         let final_dist = final_horizontal_rel.length();
+        let resting_distance = curve.radius - ball_radius;
         assert!(
-            final_dist < embedded_distance - 10.0,
-            "expected the corner-edge fillet to push the ball meaningfully toward the axis, \
-             started {embedded_distance} units out, got {final_dist}"
+            (final_dist - resting_distance).abs() < 1.0,
+            "expected the corner-edge fillet to settle the ball at its resting distance \
+             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
         );
     }
 
@@ -2461,11 +2461,9 @@ mod tests {
         // in what would otherwise be the sharp, unrounded corner) should be
         // pushed back toward the fillet's center, the same live-physics
         // proof already given for the edge fillets, now for a compound
-        // 3-plane corner. Same weaker "moved meaningfully" assertion as
-        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
-        // for the same residual-velocity reason (a single-fire contact
-        // stops firing once resolved, and nothing cancels whatever
-        // velocity it left the ball with).
+        // 3-plane corner. Checks the ball settles at (not past) the
+        // fillet's own resting distance, same reasoning as
+        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`.
         let floor = flat_ground();
         let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
         let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
@@ -2497,10 +2495,11 @@ mod tests {
         }
 
         let final_dist = (world.ball.position - fillet.center).length();
+        let resting_distance = fillet.radius - ball_radius;
         assert!(
-            final_dist < embedded_distance - 10.0,
-            "expected the compound-corner fillet to push the ball meaningfully toward the \
-             center, started {embedded_distance} units out, got {final_dist}"
+            (final_dist - resting_distance).abs() < 1.0,
+            "expected the compound-corner fillet to settle the ball at its resting distance \
+             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
         );
     }
 
@@ -2856,10 +2855,10 @@ mod tests {
         // (deep in what would otherwise be the sharp, unrounded corner
         // between the flat back wall and the post's own inward-facing
         // plane) gets pushed back toward the axis -- the same live-physics
-        // proof already given for every other fillet in this port. Same
-        // weaker "moved meaningfully," not "settled-and-stayed," assertion
-        // as `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
-        // for the same residual-velocity reason.
+        // proof already given for every other fillet in this port. Checks
+        // the ball settles at (not past) the fillet's own resting distance,
+        // same reasoning as
+        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`.
         let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
         let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
         let radius = 292.0;
@@ -2899,10 +2898,11 @@ mod tests {
             0.0,
         );
         let final_dist = final_horizontal_rel.length();
+        let resting_distance = curve.radius - ball_radius;
         assert!(
-            final_dist < embedded_distance - 10.0,
-            "expected the goal-post fillet to push the ball meaningfully toward the axis, \
-             started {embedded_distance} units out, got {final_dist}"
+            (final_dist - resting_distance).abs() < 1.0,
+            "expected the goal-post fillet to settle the ball at its resting distance \
+             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
         );
     }
 
@@ -2917,8 +2917,8 @@ mod tests {
         // fillet's center, the same live-physics proof
         // `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`
         // already gives for the arena's own compound corners, now for a
-        // goal's. Same weaker "moved meaningfully" assertion as that test,
-        // for the same residual-velocity reason.
+        // goal's. Checks the ball settles at (not past) the fillet's own
+        // resting distance, same reasoning as that test.
         let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
         let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
         let crossbar = StaticPlane::new(Vec3::new(0.0, 0.0, -1.0), -600.0);
@@ -2951,10 +2951,11 @@ mod tests {
         }
 
         let final_dist = (world.ball.position - fillet.center).length();
+        let resting_distance = fillet.radius - ball_radius;
         assert!(
-            final_dist < embedded_distance - 10.0,
-            "expected the goal corner fillet to push the ball meaningfully toward the center, \
-             started {embedded_distance} units out, got {final_dist}"
+            (final_dist - resting_distance).abs() < 1.0,
+            "expected the goal corner fillet to settle the ball at its resting distance \
+             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
         );
     }
 }

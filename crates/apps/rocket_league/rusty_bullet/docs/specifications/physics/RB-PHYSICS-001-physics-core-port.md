@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.33.0
+- Version: 0.34.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -57,8 +57,12 @@
   goal gets a real mass-spring net panel catching the ball (`net::NetMesh`)
   — implemented, scoped to the ball only (a car still passes through a net
   panel's own footprint, stopped instead by FR-029's pre-existing solid
-  bounding box); split impulse, warm-starting, a car's own contact against
-  a net, and that real-data calibration are open follow-up work)
+  bounding box); and, since FR-034, every contact's positional/penetration
+  correction runs on its own separate split-impulse "push" channel instead
+  of folding into the body's real velocity, so resolving deep overlap no
+  longer injects the spurious velocity a combined Baumgarte term used to —
+  implemented; warm-starting, a car's own contact against a net, and that
+  real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -1586,6 +1590,89 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     tests (5 in `net.rs`, 2 in `collision.rs` net of replacing 1, 2 in
     `arena.rs`, 2 in `world.rs`, minus 1 test replaced), bringing the crate
     to 256 total (+10 over FR-032's 246).
+- `RB-PHYSICS-001-FR-034` (split impulse, implemented): every contact's
+  normal row now also solves a second, entirely separate "push"
+  pseudo-velocity channel (`solver::resolve_push_row`/
+  `resolve_two_body_push_row`), fed only by that contact's own positional
+  (penetration/ERP) error — `ConstraintRow`/`TwoBodyRow` gained a new
+  `rhs_penetration` field, split out of the single combined `rhs` this
+  port used before this requirement — never the velocity/restitution
+  error, which stays on the real `rhs`/`applied_impulse` channel exactly
+  as before. Each of `SOLVER_ITERATIONS` iterations resolves both channels
+  for every contact's normal row, the push channel's own accumulator
+  (`applied_push_impulse`) entirely separate scratch state from the real
+  channel's `applied_impulse`; after the loop, the real delta is applied
+  to the body's velocity exactly as before, and the new push delta is
+  applied directly to the body's position/orientation via a new
+  `solver::apply_push_delta` (built on the existing
+  `integrate::integrate_transform`, not new integration math) — mirroring
+  Bullet's own `btSolverBody::writebackVelocity`, which performs the
+  identical second, independent `integrateTransform` call using the push
+  velocity right after writing back the real velocity delta. Wired into
+  all three of this module's resolve entry points — `resolve_contacts`,
+  `resolve_contacts_between`, and `resolve_dynamic_manifolds` (the last
+  carrying one `push_deltas[i]` accumulator per body index, shared across
+  manifolds the same way its pre-existing real `deltas[i]` already is) —
+  with zero call-site changes anywhere outside `solver.rs` (`world.rs`,
+  `net.rs`, and every other caller of these three functions is
+  unaffected). A friction row never receives positional correction (its
+  `rhs_penetration` is always `0.0`), matching Bullet's own split-impulse
+  resolve, which only ever runs against a contact's normal row.
+  - **Non-goals (this requirement).** Warm-starting and sleeping remain
+    exactly as documented before this requirement (see this spec's own
+    Non-goals and Open questions) — split impulse and warm-starting are
+    independent fixes for two different symptoms of "this port re-derives
+    every contact from zero each frame": split impulse stops deep
+    penetration from injecting spurious velocity; warm-starting, still
+    open, is what would actually let a bouncy resting contact settle. The
+    restitution/friction average-not-max combine mode is untouched.
+    `LINEAR_SLOP` stays `0.0` (Bullet's own default), so a contact with
+    zero or negative penetration still takes the same `positional_error =
+    0.0` branch as before this requirement — nothing about this
+    requirement changes behavior for an already-settled, non-penetrating
+    contact.
+  - **Acceptance criteria.** A deeply-penetrating contact between two
+    bodies starting and staying at rest (zero restitution, zero incoming
+    velocity) leaves the real post-solve velocity along the contact normal
+    near zero — no spurious velocity injected purely from resolving
+    penetration — while the bodies' positions measurably separate to
+    relieve the overlap. A body embedded well past a curved fillet's own
+    resting distance, given enough simulated time, settles at (not past)
+    that resting distance instead of coasting past it under residual
+    velocity the old combined `rhs` term would have left behind.
+  - **Verification plan.** Two new `solver.rs` unit tests prove the core
+    claim directly:
+    `split_impulse_corrects_deep_penetration_via_position_not_velocity`
+    (`resolve_contacts`, one body vs. a static plane) and
+    `split_impulse_corrects_deep_penetration_via_position_not_velocity_between_two_bodies`
+    (`resolve_contacts_between`, two dynamic bodies) — each starts a body
+    deeply overlapping with zero restitution and zero incoming velocity,
+    resolves once, and checks the real velocity along the contact normal
+    stayed near zero while position/separation moved measurably. All 12 of
+    `solver.rs`'s pre-existing tests (resting, bouncing, friction,
+    momentum, multi-body-pinch, box-symmetry) pass unchanged, confirming
+    the `rhs`/`rhs_penetration` split is behavior-preserving for every
+    case they already covered — the key piece of upfront analysis this
+    requirement relied on: every one of those fixtures uses either zero
+    relative velocity at exact, zero-penetration contact (`touching_ball`,
+    `symmetric_pinch`, `resting_sphere`) or otherwise already computed
+    `positional_error` as `0.0` before this requirement, so splitting it
+    into a separate channel changes nothing observable for them.
+    `world.rs`'s existing curved-fillet "embedded past resting distance"
+    live end-to-end proofs
+    (`a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
+    `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`,
+    `a_ball_embedded_in_a_goal_posts_fillet_footprint_is_pushed_toward_the_axis`,
+    `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`)
+    had their own assertions tightened by this requirement: before it,
+    each only checked the ball moved "meaningfully" toward the resting
+    surface, since the old combined `rhs` term left residual velocity for
+    the ball to keep coasting on after the correction resolved; after it,
+    each instead checks the ball settles at (not past) its exact resting
+    distance, since the push channel no longer leaves any such residual
+    velocity behind — a direct, live-`PhysicsWorld` confirmation of this
+    requirement's own claim, not just an isolated `solver.rs`-level one.
+    2 new tests, bringing the crate to 258 total (+2 over FR-033's 256).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -2863,13 +2950,15 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 - Restitution/friction combine mode (`rb_physics_bullet::solver` currently
   averages; Bullet's actual default is `max` for both) — revisit once real
   data exists to calibrate against.
-- No-split-impulse and no-warm-starting/sleeping are documented, deliberate
-  gaps (see Non-goals). Now that ball-vs-car and car-vs-car collision are
-  both real and actually wired into `PhysicsWorld` (not just ground
-  contact), these matter more than they did before — worth revisiting once
-  real recorded ball/car-hit behavior exists to compare against, rather
-  than only the unit tests' internal-consistency checks (momentum
-  conservation, no residual closing speed).
+- No-warm-starting/sleeping remains a documented, deliberate gap (see
+  Non-goals) — `RB-PHYSICS-001-FR-034` closed the split-impulse half of
+  this bullet, leaving only warm-starting/sleeping open. Now that
+  ball-vs-car and car-vs-car collision are both real and actually wired
+  into `PhysicsWorld` (not just ground contact), it matters more than it
+  did before — worth revisiting once real recorded ball/car-hit behavior
+  exists to compare against, rather than only the unit tests'
+  internal-consistency checks (momentum conservation, no residual closing
+  speed).
 - `box_vs_box`'s edge-edge contact point uses the midpoint of the two
   closest points on the involved edges, and its face-contact clipping
   falls back to a single clamped-center point if clipping ever yields zero
@@ -2880,6 +2969,49 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.34.0 (2026-08-31): FR-034 added and implemented (split impulse) —
+  closes the "no split impulse" half of this spec's own documented
+  solver-simplification gap (see Non-goals/Open questions), leaving only
+  warm-starting/sleeping open. `ConstraintRow`/`TwoBodyRow` (`solver.rs`)
+  each gained `rhs_penetration`/`applied_push_impulse` fields, splitting
+  the normal row's combined `rhs = (positional_error + velocity_error) *
+  jac_diag_ab_inv` into two independent terms (a friction row's
+  `rhs_penetration` is always `0.0`). Two new resolve functions,
+  `resolve_push_row`/`resolve_two_body_push_row`, run the same
+  projected-Gauss-Seidel iteration as `resolve_row`/`resolve_two_body_row`
+  but against `rhs_penetration`/`applied_push_impulse` and a separate
+  `push_delta`/`push_delta_a`/`push_delta_b` accumulator, always clamped
+  to `[0, UPPER_LIMIT]`. A new `apply_push_delta` applies that accumulated
+  push delta directly to a body's position/orientation via the existing
+  `integrate::integrate_transform` — mirroring Bullet's own
+  `btSolverBody::writebackVelocity`'s second, independent
+  `integrateTransform` call. `resolve_contacts`, `resolve_contacts_between`,
+  and `resolve_dynamic_manifolds` (the last via a new per-body-index
+  `push_deltas` vector, reusing `delta_pair_mut`) each
+  gained the push-channel resolve/apply calls alongside their pre-existing
+  real-channel ones; no other module or call site changed. 2 new
+  `solver.rs` tests
+  (`split_impulse_corrects_deep_penetration_via_position_not_velocity`/
+  `..._between_two_bodies`) directly prove a deeply-penetrating, at-rest
+  contact leaves near-zero real velocity while the body/bodies' positions
+  measurably separate. This requirement also surfaced (via failing tests,
+  not by design) that 4 pre-existing `world.rs` live end-to-end fillet
+  tests
+  (`a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
+  `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`,
+  `a_ball_embedded_in_a_goal_posts_fillet_footprint_is_pushed_toward_the_axis`,
+  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`)
+  had encoded the *old*, pre-split-impulse behavior in their own
+  assertions — each expected the ball to keep coasting past its resting
+  distance under residual velocity the old combined `rhs` term left
+  behind, and each now instead settles almost exactly at that resting
+  distance with no such residual velocity to coast on. Their assertions
+  and comments were updated to check settling at (not past) the resting
+  distance, a strictly stronger and more physically correct proof than
+  the "moved meaningfully" one they replace — a direct sign this
+  requirement's fix is real and not just internally self-consistent.
+  Bringing the crate to 258 tests total (+2 over FR-033's 256, plus the 4
+  fillet-test assertion corrections).
 - 0.33.0 (2026-08-31): FR-033 added and implemented (genuine net mesh,
   ball only) — closes the "genuine net mesh" Non-goal `FR-029`'s own doc
   comment left open. New module `net` (`net::NetMesh`): a rectangular

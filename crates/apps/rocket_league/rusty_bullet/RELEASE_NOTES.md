@@ -6,6 +6,60 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Split impulse
+**2026-08-31** · PR pending · commit pending
+
+- **Deep penetration correction no longer injects spurious velocity into a
+  contact.** Every contact's normal row now also solves a second, entirely
+  separate "push" pseudo-velocity channel
+  (`solver::resolve_push_row`/`resolve_two_body_push_row`), fed only by
+  that contact's own positional (penetration/ERP) error — never its
+  velocity/restitution error, which stays on the real channel exactly as
+  before. This is Bullet's own default (`m_splitImpulse = true`),
+  documented as a deliberate gap in this port since the solver was first
+  written.
+- **Correction now moves position, not velocity.** After a manifold's
+  iterations finish, the real velocity delta is applied to the body
+  exactly as before, and the new push delta is applied directly to the
+  body's position/orientation via a new `solver::apply_push_delta` (built
+  on the existing `integrate::integrate_transform`, no new integration
+  math) — mirroring Bullet's own `btSolverBody::writebackVelocity`, which
+  performs the identical second, independent `integrateTransform` call
+  using the push velocity right after writing back the real velocity
+  delta.
+- **Wired into every resolve path with zero call-site changes elsewhere.**
+  `resolve_contacts`, `resolve_contacts_between`, and
+  `resolve_dynamic_manifolds` each gained the push-channel resolve/apply
+  calls; `world.rs`, `net.rs`, and every other caller of these three
+  functions is unaffected.
+- **2 new `solver.rs` tests** directly prove the core claim: a
+  deeply-penetrating, at-rest contact (zero restitution, zero incoming
+  velocity) leaves the real post-solve velocity along the contact normal
+  near zero, while the body/bodies' positions measurably separate to
+  relieve the overlap — for both the one-body (`resolve_contacts`) and
+  two-body (`resolve_contacts_between`) paths.
+- **4 pre-existing `world.rs` live end-to-end fillet tests got measurably
+  stronger, not just updated.** Before this change, a ball embedded past a
+  curved fillet's resting distance only asserted it moved "meaningfully"
+  back toward that surface, because the old combined penetration+velocity
+  term left the ball with residual velocity to keep coasting on after the
+  correction resolved. After this change, the same tests assert the ball
+  settles at (not past) its exact resting distance, since the new push
+  channel leaves no such residual velocity behind — independent,
+  live-`PhysicsWorld` confirmation that this fix does what it claims.
+- All 12 of `solver.rs`'s pre-existing tests pass unchanged, confirming
+  splitting the old combined `rhs` term into separate `rhs`/
+  `rhs_penetration` fields is behavior-preserving for every case they
+  already covered.
+- Still open: warm-starting/sleeping (a *bouncy* resting contact still
+  re-solves from zero every frame and never settles — a different
+  symptom split impulse doesn't address) and the average-not-max
+  restitution/friction combine mode.
+- 2 new tests, 258 total in `rb_physics_bullet` (+2 over
+  `RB-PHYSICS-001-FR-033`'s 256).
+
+---
+
 ## Genuine goal net
 **2026-08-31** · [PR #75](https://github.com/baileyrd/rusty_bullet/pull/75) · `e1ffb4f`
 
