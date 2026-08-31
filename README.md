@@ -51,6 +51,9 @@ have landed so far.
 | [`rusty_json`](crates/rusty_json) | `crates/rusty_json` | From-scratch JSON library, `no_std`-capable, with `serde` interop |
 | [`rusty_json-derive`](crates/rusty_json/rusty_json-derive) | `crates/rusty_json/rusty_json-derive` | `rusty_json`'s `#[derive(RustyJson)]` proc-macro |
 | [`rusty_oauth`](crates/rusty_oauth) | `crates/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |
+| [`rusty_proxmox`](crates/rusty_proxmox) | `crates/rusty_proxmox` | Async client for the Proxmox VE REST API: nodes, guests (QEMU/LXC), and power control |
+| [`rusty_opnsense`](crates/rusty_opnsense) | `crates/rusty_opnsense` | Async client for the OPNsense REST API: system status, services, interfaces, firewall aliases, and gateways |
+| [`rusty_homelab_mcp`](crates/rusty_homelab_mcp) | `crates/rusty_homelab_mcp` | MCP server exposing homelab control (Proxmox VE, OPNsense) as tools, built on the `rusty-mcp` scaffold |
 | [`reactor-core`](crates/rustils_async/crates/reactor-core) | `crates/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
 | [`platform-async`](crates/rustils_async/crates/platform-async) | `crates/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
 | [`platform-async-mock`](crates/rustils_async/crates/platform-async-mock) | `crates/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |

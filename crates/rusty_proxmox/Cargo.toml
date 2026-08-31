@@ -1,0 +1,30 @@
+[package]
+name = "rusty_proxmox"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Async client for the Proxmox VE REST API: nodes, guests (QEMU/LXC), and power control."
+repository = "https://github.com/baileyrd/rusty_proxmox"
+authors = ["rusty_proxmox contributors"]
+readme = "README.md"
+keywords = ["proxmox", "pve", "homelab", "virtualization"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+# rusty_request is a sibling in this same workspace -- a plain path
+# dependency, same convention as every other in-workspace consumer. The
+# `tokio` feature is required, not optional: this crate (and its own
+# consumers, e.g. rusty_homelab_mcp) run under a real `tokio` runtime
+# (rmcp/the wider MCP ecosystem require it), and rusty_request defaults to
+# driving its connector over its own from-scratch `rusty_tokio` runtime
+# instead -- polling that from within a real tokio runtime would leave its
+# I/O and timers with no reactor driving them. See rusty_request's README
+# ("Running on real tokio instead") for the full picture.
+rusty_request = { path = "../rusty_request", features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
