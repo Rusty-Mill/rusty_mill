@@ -122,19 +122,21 @@ impl PhysicsWorld {
     /// `arena::standard_walls`, the curved wall-to-floor/wall-to-ceiling,
     /// corner-wall vertical-edge, and goal-cutout-edge fillets from
     /// `arena::standard_curves`/`standard_goal_cutout_fillets`, the
-    /// compound-corner fillets from `arena::standard_corner_fillets`, the
-    /// windowed goal walls from `arena::standard_goal_walls`, and the same
-    /// flat ground (`arena::standard_ground`) every scene already used.
+    /// compound-corner fillets from `arena::standard_corner_fillets`/
+    /// `standard_goal_corner_fillets`, the windowed goal walls from
+    /// `arena::standard_goal_walls`, and the same flat ground
+    /// (`arena::standard_ground`) every scene already used.
     /// Equivalent to `PhysicsWorld::new(ball, arena::standard_ground())`
     /// followed by a `with_wall` call for each of `arena::standard_walls()`'s
     /// 7 planes, a `with_curve` call for each of `arena::standard_curves()`'s
     /// 24 fillets and `arena::standard_goal_cutout_fillets()`'s 6, a
     /// `with_corner_fillet` call for each of
-    /// `arena::standard_corner_fillets()`'s 16 fillets, and a
-    /// `with_goal_wall` call for each of `arena::standard_goal_walls()`'s 2
-    /// windowed walls — still without a modeled goal interior/net beyond
-    /// the cutout itself (see `arena`'s module doc). Cars are added
-    /// afterward with `with_car`, exactly as with `PhysicsWorld::new`.
+    /// `arena::standard_corner_fillets()`'s 16 fillets and
+    /// `arena::standard_goal_corner_fillets()`'s 4, and a `with_goal_wall`
+    /// call for each of `arena::standard_goal_walls()`'s 2 windowed walls —
+    /// still without a modeled goal interior/net beyond the cutout itself
+    /// (see `arena`'s module doc). Cars are added afterward with
+    /// `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
@@ -147,6 +149,9 @@ impl PhysicsWorld {
             world = world.with_curve(curve);
         }
         for corner_fillet in crate::arena::standard_corner_fillets() {
+            world = world.with_corner_fillet(corner_fillet);
+        }
+        for corner_fillet in crate::arena::standard_goal_corner_fillets() {
             world = world.with_corner_fillet(corner_fillet);
         }
         for goal_wall in crate::arena::standard_goal_walls() {
@@ -2168,10 +2173,12 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_sixteen_compound_corner_fillets() {
+    fn standard_arena_has_twenty_compound_corner_fillets() {
+        // 16 arena corners (RB-PHYSICS-001-FR-023) plus 4 goal post-crossbar
+        // corners (RB-PHYSICS-001-FR-026, 2 posts times 2 goals).
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.corner_fillets.len(), 16);
+        assert_eq!(world.corner_fillets.len(), 20);
     }
 
     #[test]
@@ -2426,6 +2433,58 @@ mod tests {
         assert!(
             final_dist < embedded_distance - 10.0,
             "expected the goal-post fillet to push the ball meaningfully toward the axis, \
+             started {embedded_distance} units out, got {final_dist}"
+        );
+    }
+
+    #[test]
+    fn a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-026: three planes
+        // meeting at a single vertex -- here a back wall, a post plane, and
+        // a crossbar plane, exactly like the compound corner where a goal
+        // post's own fillet meets the crossbar's -- a ball embedded past
+        // the fillet's own radius (deep in what would otherwise be the
+        // sharp, unrounded corner) should be pushed back toward the
+        // fillet's center, the same live-physics proof
+        // `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`
+        // already gives for the arena's own compound corners, now for a
+        // goal's. Same weaker "moved meaningfully" assertion as that test,
+        // for the same residual-velocity reason.
+        let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
+        let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
+        let crossbar = StaticPlane::new(Vec3::new(0.0, 0.0, -1.0), -600.0);
+        let radius = 292.0;
+        let fillet =
+            crate::body::StaticCornerFillet::between_three_planes(&wall, &post, &crossbar, radius);
+
+        let ball_radius = 92.75;
+        let toward_corner = Vec3::new(1.0, 1.0, 1.0)
+            .normalize()
+            .expect("(1, 1, 1) is nonzero");
+        // Overlapping the fillet's own material by 10 units (further from
+        // the center than the resting distance, toward the sharp corner
+        // the fillet replaces).
+        let embedded_distance = fillet.radius - ball_radius + 10.0;
+        let embedded_position = fillet.center + toward_corner * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall)
+            .with_wall(post)
+            .with_wall(crossbar)
+            .with_corner_fillet(fillet);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_dist = (world.ball.position - fillet.center).length();
+        assert!(
+            final_dist < embedded_distance - 10.0,
+            "expected the goal corner fillet to push the ball meaningfully toward the center, \
              started {embedded_distance} units out, got {final_dist}"
         );
     }
