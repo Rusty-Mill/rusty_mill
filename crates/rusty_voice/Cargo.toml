@@ -1,0 +1,24 @@
+[package]
+name = "rusty_voice"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A sovereign voice-to-text application leveraging rusty_whisper and rusty_audio built exclusively with Rusty Mill libraries"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_voice"
+keywords = ["voice", "whisper", "speech", "sovereign", "audio"]
+categories = ["command-line-utilities", "multimedia"]
+
+[dependencies]
+rusty-whisper = { path = "../rusty_whisper" }
+rusty_audio = { path = "../rusty_audio" }
+rusty_std = { path = "../rusty_std" }
+rusty_tokio = { path = "../rusty_tokio" }
+rusty_json = { path = "../rusty_json" }
+rusty_err = { path = "../rusty_err" }
+rusty_gui = { path = "../rusty_gui" }
+rusty_gpu = { path = "../rusty_gpu" }
+rusty_font = { path = "../rusty_font" }
+
+[features]
+default = []
