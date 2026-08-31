@@ -6,6 +6,36 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## `collision.rs` remaining closed-form shape pairings reference validation
+**2026-08-31** · PR pending · commit pending
+
+- **Fetched and read Bullet's real `btConvexPlaneCollisionAlgorithm.cpp`/
+  `.h`, `btSphereBoxCollisionAlgorithm.cpp`,
+  `btSphereSphereCollisionAlgorithm.cpp`, and `btManifoldPoint.h`
+  directly** to check every Bullet-reference claim `sphere_vs_plane`,
+  `box_vs_plane`, `sphere_vs_box`, and `sphere_vs_sphere` make —
+  `box_vs_box` was already checked this way (FR-042); this closes out the
+  rest of `collision.rs`.
+- **`sphere_vs_plane` and `sphere_vs_sphere` confirmed exact.**
+- **`sphere_vs_box`'s deep-penetration face selection confirmed to
+  reproduce Bullet's own exact tie-break order**, not just a
+  mathematically-equivalent alternative: real Bullet checks
+  `+x, -x, +y, -y, +z, -z` in that fixed order, only overriding on a
+  strictly smaller distance, so an exact tie always resolves to whichever
+  face is checked earliest — worked through by hand on a deliberately
+  non-symmetric tied case and confirmed to match.
+- **One genuine, deliberate divergence found in `box_vs_plane`, not
+  adopted.** Real Bullet's default configuration generates only one
+  contact point per frame via a single GJK support query, relying on
+  several frames of persistent-manifold accumulation to reach a resting
+  box's full 4-corner manifold. This port's `box_vs_plane` computes all 4
+  corners exactly in one pass — confirmed a favorable divergence in the
+  same spirit as `box_vs_box`'s own FR-042 finding, not adopted.
+- **1 new regression test** pins the exact tie-break-order match
+  directly. All 277 pre-existing tests pass unchanged; 278 total.
+
+---
+
 ## `body.rs`/`mat3.rs` reference validation
 **2026-08-31** · [#99](https://github.com/baileyrd/rusty_bullet/pull/99) · `4d3de85`
 
