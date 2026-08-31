@@ -524,19 +524,40 @@ impl PhysicsWorld {
             .iter()
             .map(|car| !collision::contacts_vs_plane(car, &self.ground).is_empty())
             .collect();
-        // Same idea as car_on_ground, but for walls: the first wall (if
-        // any) this car is touching, by its outward normal. A car touching
-        // two walls at once (a corner) picks whichever wall comes first in
-        // `self.walls` — not disambiguated, a documented simplification
-        // (see RB-PHYSICS-001-FR-013's Non-goals).
+        // Same idea as car_on_ground, but for walls: the outward push-off
+        // direction for a wall jump. Since `RB-PHYSICS-001-FR-039`, a car
+        // touching two walls at once (a corner — reachable at a diagonal
+        // corner wall's own two seams, where it meets a side or back wall)
+        // sums every touched wall's normal and normalizes the result,
+        // instead of the old "whichever wall comes first in `self.walls`"
+        // simplification (RB-PHYSICS-001-FR-013's original Non-goal) — so a
+        // corner wall jump pushes diagonally away from the corner, blending
+        // both walls, rather than firing along only one of them depending
+        // on iteration order. A car touching exactly one wall gets that
+        // wall's own normal back unchanged (summing a single unit vector
+        // and normalizing is a no-op), so the common single-wall case is
+        // unaffected. The only case `normalize` can fail is two touched
+        // walls with exactly opposite normals (summing to zero) —
+        // geometrically impossible for a convex arena interior, but falls
+        // back to the first touched wall's normal rather than panicking if
+        // it ever happened.
         let car_wall_normal: Vec<Option<Vec3>> = self
             .cars
             .iter()
             .map(|car| {
-                self.walls
+                let touched_normals: Vec<Vec3> = self
+                    .walls
                     .iter()
-                    .find(|wall| !collision::contacts_vs_plane(car, wall).is_empty())
+                    .filter(|wall| !collision::contacts_vs_plane(car, wall).is_empty())
                     .map(|wall| wall.normal)
+                    .collect();
+                let mut summed_normal = Vec3::ZERO;
+                for normal in &touched_normals {
+                    summed_normal += *normal;
+                }
+                summed_normal
+                    .normalize()
+                    .or_else(|| touched_normals.first().copied())
             })
             .collect();
 
@@ -1690,6 +1711,58 @@ mod tests {
             world.cars[0].linear_velocity.x > 0.0,
             "expected the wall jump to push the car away from the wall (positive x), got {:?}",
             world.cars[0].linear_velocity
+        );
+        assert!(
+            (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,
+            "expected roughly JUMP_SPEED upward velocity from the wall jump, got {}",
+            world.cars[0].linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn a_car_touching_two_walls_at_a_corner_wall_jumps_diagonally_outward() {
+        // RB-PHYSICS-001-FR-039: a car wedged into a corner (touching both
+        // walls at once) should push off diagonally, blending both walls'
+        // normals, not fire along only one of them depending on which wall
+        // happens to come first in `self.walls`. Two perpendicular walls,
+        // normals (1,0,0) and (0,1,0): the old "first wall wins" picker
+        // would give a wall jump with zero y-velocity (or zero x-velocity,
+        // depending on push order); the fix should give roughly equal,
+        // both-positive x and y components instead.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 100.0);
+        // Same zero-gap-contact convention as the single-wall test above:
+        // 60-unit x half-extent and 30-unit y half-extent, so a car
+        // centered at (160, 130, ...) touches both walls exactly.
+        let car = some_car(Vec3::new(160.0, 130.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(car)
+            .with_wall(wall_x)
+            .with_wall(wall_y);
+        world.gravity = Vec3::ZERO; // isolate the wall jump from falling
+
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 60.0);
+
+        let vx = world.cars[0].linear_velocity.x;
+        let vy = world.cars[0].linear_velocity.y;
+        assert!(
+            vx > 0.0 && vy > 0.0,
+            "expected the corner wall jump to push the car away from both walls \
+             (positive x and y), got {:?}",
+            world.cars[0].linear_velocity
+        );
+        assert!(
+            (vx - vy).abs() < 1.0,
+            "expected a symmetric corner (equal-normal walls) to push off with roughly \
+             equal x and y components, got vx={vx}, vy={vy}"
         );
         assert!(
             (world.cars[0].linear_velocity.z - crate::drive::JUMP_SPEED).abs() < 1.0,

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.38.0
+- Version: 0.39.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -88,9 +88,12 @@
   former "a car still passes through untouched" Non-goal — no new collision
   code was needed, since `collision::contacts_between` already dispatches
   box-vs-sphere for a car against a net point the same way it always has for
-  ball-vs-car — implemented; static-contact warm-starting,
-  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, and that
-  real-data calibration are open follow-up work)
+  ball-vs-car — implemented; and, since FR-039, a wall jump at a corner
+  (a car touching two walls at once) pushes off along every touched wall's
+  normal summed and normalized, instead of picking whichever wall came
+  first in `PhysicsWorld.walls` — implemented; static-contact
+  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
+  and that real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -268,18 +271,20 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   read as visibly larger than `FILLET_RADIUS` (enforced at compile time by
   a `const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);` check),
   not measured against real field mesh data either.
-- **Disambiguating or blending a car's simultaneous contact with two walls
-  at a corner, for wall-jump purposes.** Physical collision resolution
-  already handles a car touching two walls at once correctly — `step`
+- ~~Disambiguating or blending a car's simultaneous contact with two walls
+  at a corner, for wall-jump purposes.~~ Physical collision resolution
+  already handled a car touching two walls at once correctly — `step`
   resolves every wall independently, so both contacts are resolved on the
-  same step regardless of the arena's shape (see FR-013). What's still not
-  disambiguated is *which* wall's normal `drive::apply_driven_forces` uses
-  to decide a wall jump's push-off direction when a car is touching more
-  than one wall at a corner at once: it picks whichever wall comes first in
-  `PhysicsWorld.walls`, not a blend of the two normals — a documented
-  simplification for a case this port's test scenes don't exercise (FR-019's
-  new corner walls make this case reachable in the standard arena for the
-  first time, but still untested here).
+  same step regardless of the arena's shape (see FR-013). Which wall's
+  normal `drive::apply_driven_forces` uses to decide a wall jump's push-off
+  direction when a car is touching more than one wall at a corner at once
+  used to pick whichever wall came first in `PhysicsWorld.walls`, not a
+  blend of the two normals — a documented simplification for a case
+  FR-019's new corner walls made reachable in the standard arena but this
+  port's test scenes didn't yet exercise. `RB-PHYSICS-001-FR-039` closes
+  that gap: the push-off direction is now every touched wall's normal
+  summed and normalized, so a corner wall jump pushes diagonally away from
+  the corner instead of along only one of the two walls.
 - **Per-axis air-control torque, and any assisted/auto-rotation
   behavior.** FR-011's `AIR_CONTROL_TORQUE` is one shared constant for
   pitch, yaw, and roll; real Rocket League's actual per-axis rates differ
@@ -1999,8 +2004,59 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     reach the panel's anchored bottom row, which `NetMesh::step`'s own
     contact-resolution loop deliberately skips (see that function's own
     doc comment) — a real trap this test's own first draft fell into
-    before being corrected. 3 new tests, bringing the crate to 270 total
-    (+3 over FR-037's 267).
+    before being corrected. 3 new tests, bringing the crate to 271 total
+    (+3 over FR-039's 268).
+- `RB-PHYSICS-001-FR-039` (wall-jump corner disambiguation, implemented):
+  closes the "first wall in `self.walls`" simplification `RB-PHYSICS-001-FR-013`
+  originally documented and `FR-019`'s new diagonal corner walls made
+  reachable in the standard arena for the first time (see both entries'
+  own Non-goals). `PhysicsWorld::step`'s per-car wall-normal computation
+  (feeding `drive::apply_driven_forces`'s `wall_normal` parameter) now
+  collects *every* wall a car is touching this step, sums their normals,
+  and normalizes the result, instead of `Iterator::find`-ing the first
+  match. A car touching exactly one wall gets that wall's own normal back
+  unchanged — summing a single unit vector and normalizing it is a no-op —
+  so the far more common single-wall case is bit-for-bit unaffected (every
+  pre-existing wall-jump test, including
+  `a_car_touching_a_wall_wall_jumps_outward_and_upward`, passes unchanged).
+  A car touching two walls at once now pushes off diagonally, along the
+  sum of both normals, rather than firing along only one of them depending
+  on which wall happens to be earlier in `PhysicsWorld.walls`. No new
+  collision code was needed: `resolve_plane_contact` already resolved a
+  car touching two walls simultaneously correctly (each wall's own contact
+  independently, every step) — only the wall-jump *push-off direction*
+  picker was affected, since it's `drive::apply_driven_forces`'s own
+  input, not part of physical contact resolution at all.
+  - **Non-goals (this requirement).** No genuine multi-wall solid-angle
+    weighting (e.g. giving a near-tangent wall's normal less influence than
+    a near-perpendicular one) — an unweighted sum, same as summing
+    unit-length contact normals in `collision`'s own multi-contact
+    manifolds elsewhere in this crate. No change to physical contact
+    resolution itself (`resolve_plane_contact` already handled simultaneous
+    multi-wall contact correctly, see FR-013) — this closes only the
+    wall-jump-direction gap, not a collision-detection one. The
+    exactly-opposite-normals degenerate case (summing to the zero vector,
+    geometrically impossible for a convex arena interior but handled
+    defensively by falling back to the first touched wall's normal) is not
+    exercised by any test, since no reachable scene in this crate's own
+    arena or test helpers can produce it.
+  - **Acceptance criteria.** A car touching exactly one wall wall-jumps
+    identically to before this change (all pre-existing wall-jump tests
+    pass unchanged). A car touching two walls at a right-angle corner
+    wall-jumps with both horizontal velocity components positive and, for
+    a symmetric (equal-angle) corner, roughly equal in magnitude — proof
+    the push-off direction blends both walls rather than picking one.
+  - **Verification plan.** New `world.rs` test
+    `a_car_touching_two_walls_at_a_corner_wall_jumps_diagonally_outward`:
+    two perpendicular walls (normals `(1,0,0)` and `(0,1,0)`), a car
+    positioned to touch both simultaneously (zero gap on each, matching the
+    existing single-wall test's own contact convention), jump pressed while
+    airborne with gravity zeroed out to isolate the wall jump. Asserts both
+    `vx > 0.0` and `vy > 0.0` (the old "first wall wins" picker would zero
+    one of them) and `|vx - vy| < 1.0` (the two walls' normals are
+    symmetric, so a true blend gives equal components), plus the same
+    roughly-`JUMP_SPEED` vertical check every wall-jump test already makes.
+    1 new test, bringing the crate to 268 total (+1 over FR-037's 267).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3219,13 +3275,15 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   net, not the ball alone. Still open: a full 3D "sock" shape/visual net
   sag/bending stiffness beyond FR-033's flat structural-plus-shear-spring
   panel — see FR-038's own Non-goals for what it did and didn't touch.
-- Disambiguating or blending a car's simultaneous contact with two walls
+- ~~Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
   the wall-jump push-off direction picker (`PhysicsWorld::step`'s
   "first wall in `self.walls`" rule) isn't. FR-019's corner walls make this
   case reachable in the standard arena for the first time; still not
-  exercised by any test here. Not started.
+  exercised by any test here. Not started.~~ Implemented, see
+  `RB-PHYSICS-001-FR-039`: the picker now sums every touched wall's normal
+  and normalizes the result instead of picking whichever wall comes first.
 - Sourcing or verifying `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
   against real field mesh data (see
   FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — this port has
@@ -3320,7 +3378,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
-- 0.38.0 (2026-08-31): FR-038 added and implemented (car-vs-net contact) —
+- 0.39.0 (2026-08-31): FR-038 added and implemented (car-vs-net contact) —
   closes this port's own former Non-goal that a car passes straight
   through a `net::NetMesh`'s spatial footprint untouched
   (`RB-PHYSICS-001-FR-033`'s own entry). `net::NetMesh::step` changed from
@@ -3348,7 +3406,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   height would only ever reach the panel's anchored bottom row, which
   `NetMesh::step`'s own contact-resolution loop deliberately skips — a
   real trap this test's own first draft fell into before being corrected.
-  Bringing the crate to 270 total (+3 over FR-037's 267).
+  Bringing the crate to 271 total (+3 over FR-039's 268).
+- 0.38.0 (2026-08-31): FR-039 added and implemented (wall-jump corner
+  disambiguation) — closes the "first wall in `self.walls`" simplification
+  FR-013 originally documented and FR-019's new diagonal corner walls made
+  reachable in the standard arena for the first time.
+  `PhysicsWorld::step`'s per-car wall-normal computation now collects every
+  wall a car is touching this step, sums their normals, and normalizes the
+  result, instead of `Iterator::find`-ing the first match — a car touching
+  exactly one wall gets that wall's own normal back unchanged (summing a
+  single unit vector and normalizing it is a no-op), so the far more common
+  single-wall case is bit-for-bit unaffected; a car touching two walls at
+  once now pushes off diagonally along the sum of both, instead of firing
+  along only one of them depending on iteration order. No new collision
+  code was needed — `resolve_plane_contact` already resolved simultaneous
+  multi-wall contact correctly; only the wall-jump push-off direction
+  picker, `drive::apply_driven_forces`'s own input, was affected. 1 new
+  `world.rs` test,
+  `a_car_touching_two_walls_at_a_corner_wall_jumps_diagonally_outward`
+  (two perpendicular walls, a car touching both at once, asserting both
+  horizontal velocity components come out positive and roughly equal after
+  a wall jump), bringing the crate to 268 total (+1 over FR-037's 267).
 - 0.37.0 (2026-08-31): FR-037 added and implemented (sleeping) — closes
   the "no sleeping" half of `solver`'s own documented gap FR-035 left open,
   and with it the actual fix for a *bouncy* resting contact never

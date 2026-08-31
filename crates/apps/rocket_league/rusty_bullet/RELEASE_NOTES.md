@@ -32,8 +32,33 @@ keyed by the commit/PR that shipped them.
   car are resolved against the same net step, not just the first body in
   the slice) and 1 in `world.rs` (the live-`PhysicsWorld` end-to-end
   proof, mirroring the ball's own version).
-- 3 new tests, 270 total in `rb_physics_bullet` (+3 over FR-037's 267). All
+- 3 new tests, 271 total in `rb_physics_bullet` (+3 over FR-039's 268). All
   pre-existing tests pass unchanged.
+
+---
+
+## Wall-jump corner disambiguation
+**2026-08-31** · PR pending · commit pending
+
+- **A wall jump at a corner now pushes off diagonally, blending both
+  touched walls**, instead of firing along only one of them depending on
+  iteration order. `PhysicsWorld::step`'s per-car wall-normal computation
+  sums every wall a car is touching this step and normalizes the result,
+  instead of `Iterator::find`-ing the first match.
+- **Closes a simplification documented since FR-013**, made reachable in
+  the standard arena for the first time by FR-019's diagonal corner walls
+  (a car can now genuinely touch two walls at once at a real corner).
+- **A car touching exactly one wall is bit-for-bit unaffected** — summing
+  a single unit-length wall normal and normalizing it is a no-op, so every
+  pre-existing wall-jump test passes unchanged.
+- **No new collision code was needed** — `resolve_plane_contact` already
+  resolved simultaneous multi-wall contact correctly; only the wall-jump
+  push-off direction picker, `drive::apply_driven_forces`'s own input, was
+  affected.
+- **1 new test**, `a_car_touching_two_walls_at_a_corner_wall_jumps_diagonally_outward`
+  (two perpendicular walls, a car touching both at once, asserting the
+  push-off comes out diagonal with equal horizontal components). 268 total
+  in `rb_physics_bullet` (+1 over FR-037's 267).
 
 ---
 
