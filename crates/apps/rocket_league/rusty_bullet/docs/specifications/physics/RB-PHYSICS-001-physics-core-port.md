@@ -1,9 +1,9 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.26.0
+- Version: 0.27.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
-  ball-vs-curved-fillet collision all implemented, tested, and wired into a
+  ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
   real N-body `PhysicsWorld` scene; ground-driving car input (throttle,
   steering), boost, handbrake, a variable-height ground jump, a double jump
   (plain or a directional dodge, itself flip-cancelable), a wall jump
@@ -22,10 +22,18 @@
   fillets that touch them now sized with a distinctly larger,
   non-cardinal-wall radius since FR-025, and, since FR-026, a
   compound-corner fillet rounding each goal's own remaining sharp
-  post-crossbar vertex too (4 total, 2 per goal) — implemented; a car
-  (box) actually being deflected by any fillet or driving into a goal, a
-  modeled goal interior/net, split impulse, warm-starting, a combined
-  multi-body solve, and constant calibration are open follow-up work)
+  post-crossbar vertex too (4 total, 2 per goal), and, since FR-027, a car
+  (box) actually being deflected by every one of those fillets too — a
+  car's own box, ignored by every fillet's contact test until now, is
+  approximated by testing its 8 corners against the curved surface
+  (`collision::box_vs_quarter_pipe`/`box_vs_corner_fillet`, the same
+  "test every corner" technique `box_vs_plane` already used for a flat
+  plane), not a full convex-vs-curved-surface narrow phase — implemented;
+  a car still can't drive into a goal (a goal wall isn't a curved fillet,
+  so `StaticGoalWall`/`contacts_vs_goal_wall` are entirely unaffected by
+  FR-027), and a modeled goal interior/net, split impulse, warm-starting,
+  a combined multi-body solve, and constant calibration are open
+  follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -89,9 +97,11 @@ boundary: wall-to-floor/wall-to-ceiling transitions at all 9 walls (the 4
 cardinal walls, FR-020, and, since FR-021, the 4 diagonal corner walls
 too), all 8 of the corner walls' own vertical edges where they meet their
 neighboring side/back walls (since FR-022) — a `StaticQuarterPipe` fillet
-each deflecting the ball (not yet a car) away from the sharp edge a flat
-wall and the floor/ceiling, or two flat walls, would otherwise meet at —
-a `StaticCornerFillet` spherical patch at each of the 16 compound corners
+each deflecting the ball, and, since FR-027, a car too (approximated via
+corner-testing rather than a full convex-vs-curved-surface narrow phase —
+see FR-027) away from the sharp edge a flat wall and the floor/ceiling, or
+two flat walls, would otherwise meet at — a `StaticCornerFillet` spherical
+patch at each of the 16 compound corners
 where a vertical-edge fillet meets a floor- or ceiling-seam fillet, near a
 corner wall's own top/bottom endpoint (since FR-023), and, since FR-024,
 an actual goal-mouth window — a `StaticGoalWall` — cut into each back
@@ -100,8 +110,10 @@ goal, with its own 3 rounded edges (two posts and a crossbar,
 `StaticQuarterPipe`s again), and, since FR-025, a distinctly larger
 `arena::CORNER_ARCH_RADIUS` (instead of the cardinal walls' own
 `arena::FILLET_RADIUS`) governing a corner wall's own floor/ceiling-seam
-arches and all 16 compound-corner fillets that touch them — see
-FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
+arches and all 16 compound-corner fillets that touch them, and, since
+FR-026, a compound-corner fillet rounding each goal's own remaining sharp
+post-crossbar vertex too (4 total, 2 per goal) — see
+FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027.
 
 ## Non-goals (this increment)
 
@@ -119,27 +131,33 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   gameplay/matchmaking rule, not a physics-core one) and has no concept of
   teams — a caller (eventually `rb_verify_cli`, once real multi-car
   recorded data exists) owns that policy.
-- **A car (box) actually being deflected by a curved fillet or driving into
-  a goal, a modeled goal interior/net, and any geometry finer than a flat
-  plane, single-radius edge fillet, or single-radius corner fillet per
-  boundary segment.** `arena::standard_curves` builds 24 `StaticQuarterPipe`
-  fillets — 16 floor/ceiling-seam fillets (one floor-side and one
-  ceiling-side per wall, for all 9 walls including the 4 diagonal corner
-  walls since FR-021) plus, since FR-022, 8 vertical-edge fillets (one per
-  corner wall endpoint, where it meets its neighboring side/back wall) —
-  `arena::standard_corner_fillets` builds 16 `StaticCornerFillet`s (since
+- **A car actually driving into a goal, a modeled goal interior/net, and
+  any geometry finer than a flat plane, single-radius edge fillet, or
+  single-radius corner fillet per boundary segment.** (A car actually
+  being deflected by a curved fillet was this same bullet's other half
+  through FR-026 — that half is now resolved, see
+  `RB-PHYSICS-001-FR-027`.) `arena::standard_curves` builds 24
+  `StaticQuarterPipe` fillets — 16 floor/ceiling-seam fillets (one
+  floor-side and one ceiling-side per wall, for all 9 walls including the 4
+  diagonal corner walls since FR-021) plus, since FR-022, 8 vertical-edge
+  fillets (one per corner wall endpoint, where it meets its neighboring
+  side/back wall) — `arena::standard_corner_fillets` builds 16
+  `StaticCornerFillet`s (since
   FR-023, one per compound corner where a vertical-edge fillet meets a
   floor- or ceiling-seam fillet) — and `arena::standard_goal_cutout_fillets`
   builds 6 more `StaticQuarterPipe`s (since FR-024, two posts and a crossbar
   per goal, rounding the goal-mouth window's own rim) and
   `arena::standard_goal_corner_fillets` builds 4 more `StaticCornerFillet`s
   (since FR-026, one per goal post per goal, rounding each goal's own
-  post-crossbar compound corner) — all deflecting only
-  the ball; `collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet`
-  return no contact at all for a box, so a car drives straight through any
-  fillet's footprint completely unaffected, exactly as if it weren't there
-  (see FR-020's own Non-goals note), and `contacts_vs_goal_wall`
-  deliberately ignores the goal-mouth window for a box too, so a car still
+  post-crossbar compound corner) — every one of these now deflects the ball
+  and, since FR-027, a car too: `collision::contacts_vs_quarter_pipe`/
+  `contacts_vs_corner_fillet` dispatch a box to `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet`'s corner-testing approximation (testing the box's
+  own 8 corners, not a full convex-vs-curved-surface narrow phase — see
+  FR-027's own entry) instead of the "always empty" no-op they returned for
+  a box through FR-026. `contacts_vs_goal_wall`, unaffected by FR-027 since
+  a goal wall isn't a curved fillet, deliberately ignores the goal-mouth
+  window for a box too, so a car still
   collides with the back wall exactly as if the window weren't there
   either — a car cannot drive into a goal in this port. The goal-mouth
   window itself (since FR-024) opens onto open space, not a bounded net
@@ -576,8 +594,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   Non-goals). `PhysicsWorld` gains `curves: Vec<StaticQuarterPipe>` and
   a `with_curve` builder (mirroring `walls`/`with_wall`), resolved via a new
   `resolve_curve_contact` alongside `resolve_plane_contact` for the ball and
-  every car (a no-op for cars, since the box arm of `contacts_vs_quarter_pipe`
-  is always empty). `solver::resolve_contacts`'s second parameter changed
+  every car (a no-op for cars at the time this requirement shipped, since
+  the box arm of `contacts_vs_quarter_pipe` was always empty — now
+  implemented, see FR-027). `solver::resolve_contacts`'s second parameter changed
   from `&StaticPlane` to plain `restitution: f32, friction: f32` — the only
   two fields it ever actually used — so this same solver path serves a
   `StaticQuarterPipe` fillet exactly as it already served a `StaticPlane`,
@@ -588,8 +607,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   real transition radius either); `PhysicsWorld::standard_arena` now adds
   these 8 curves alongside its existing 9 walls. Still not modeled at the
   time this requirement shipped: a car actually being deflected by a
-  fillet, fillets at the 4 diagonal corner walls (now implemented, see
-  FR-021), and goal cutouts (see Non-goals).
+  fillet (now implemented, see FR-027), fillets at the 4 diagonal corner
+  walls (now implemented, see FR-021), and goal cutouts (see Non-goals).
 - `RB-PHYSICS-001-FR-021` (curved corner-wall-to-floor/wall-to-ceiling
   transitions, implemented): extends FR-020's fillet treatment to the 4
   diagonal corner walls `FR-019` introduced — `arena::standard_curves` now
@@ -621,9 +640,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   standard_arena` picks up the extra 8 curves automatically, since it
   already loops over every curve `arena::standard_curves()` returns. Still
   not modeled at the time this requirement shipped: a car actually being
-  deflected by any fillet (unchanged from FR-020), a fillet at a corner
-  wall's own *vertical* edges (now implemented, see FR-022), and goal
-  cutouts (see Non-goals).
+  deflected by any fillet (now implemented, see FR-027), a fillet at a
+  corner wall's own *vertical* edges (now implemented, see FR-022), and
+  goal cutouts (see Non-goals).
 - `RB-PHYSICS-001-FR-022` (curved corner-wall vertical-edge fillets,
   implemented): rounds off the last sharp edges the standard arena's
   octagonal footprint has — the 8 vertical edges where each of the 4
@@ -665,7 +684,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   corner-wall floor/ceiling-seam case FR-021 introduced. `FILLET_RADIUS` is
   reused as-is once again, rather than a separate, smaller radius for these
   visibly shallower edges. Still not modeled: a car actually being
-  deflected by any fillet, and goal cutouts (see Non-goals) — the
+  deflected by any fillet (now implemented, see FR-027), and goal cutouts
+  (see Non-goals) — the
   compound corner where a vertical-edge fillet meets a floor- or
   ceiling-seam fillet, near a wall's own endpoint, is addressed next (see
   FR-023).
@@ -718,12 +738,13 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   `PhysicsWorld` gains a
   parallel `corner_fillets: Vec<StaticCornerFillet>` field and
   `with_corner_fillet` builder, resolved for the ball and every car exactly
-  like `curves` (a no-op for a car, since `contacts_vs_corner_fillet`
-  returns no contact for a box — the same documented deferred case as every
-  other fillet here); `PhysicsWorld::standard_arena` wires in all 16 via
+  like `curves` (a no-op for a car at the time this requirement shipped,
+  since `contacts_vs_corner_fillet`
+  returned no contact for a box — the same documented deferred case as every
+  other fillet here; now implemented, see FR-027); `PhysicsWorld::standard_arena` wires in all 16 via
   `arena::standard_corner_fillets` automatically. Still not modeled: a car
-  actually being deflected by any fillet, and goal cutouts (addressed next,
-  see FR-024).
+  actually being deflected by any fillet (now implemented, see FR-027), and
+  goal cutouts (addressed next, see FR-024).
 - `RB-PHYSICS-001-FR-024` (goal cutouts, implemented): opens an actual
   goal-mouth window in each back wall — until now every back wall was a
   single solid, flat `StaticPlane` spanning the full width, with no
@@ -782,7 +803,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   approach the arena's other edge fillets used before FR-023 introduced one
   for the corner walls specifically; a dedicated `StaticCornerFillet` was
   later added for these goal corners too, see FR-026. Still not modeled: a
-  car actually being deflected by any fillet or driving into a goal, and a
+  car actually being deflected by any fillet (now implemented, see FR-027)
+  or driving into a goal, and a
   modeled goal interior/net beyond the cutout itself (the goal's own two
   compound top corners are now modeled, see FR-026).
 - `RB-PHYSICS-001-FR-025` (corner-wall floor/ceiling arch radius,
@@ -817,7 +839,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   (`RB-PHYSICS-001-FR-024`) — these remain independent, additive contact
   sources next to the bigger arches, not blended with them, the same
   "no blended 3D corner" convention this port has used since before
-  FR-023. Still not modeled: a car actually being deflected by any fillet,
+  FR-023. Still not modeled: a car actually being deflected by any fillet
+  (now implemented, see FR-027),
   and everything else `FR-024`'s own Non-goals already cover.
 - `RB-PHYSICS-001-FR-026` (goal post-crossbar corner fillets, implemented):
   rounds off the two remaining sharp compound corners per goal — where a
@@ -852,9 +875,63 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   other two corners, where a post meets the floor — the window's own bottom
   edge sits exactly at floor level (`z = 0`), so a post's own fillet there
   simply ends flush with the ground, with no sharp, unrounded vertex left
-  to round off, unlike the top post-crossbar corner. Still not modeled: a
-  car actually being deflected by any fillet or driving into a goal, and a
+  to round off, unlike the top post-crossbar corner. Still not modeled at
+  the time this requirement shipped: a car actually being deflected by any
+  fillet (now implemented, see FR-027) or driving into a goal, and a
   modeled goal interior/net beyond the cutout itself (see Non-goals).
+- `RB-PHYSICS-001-FR-027` (car deflection by curved fillets, implemented):
+  a car (box) drove straight through every curved fillet in this port —
+  `StaticQuarterPipe` and `StaticCornerFillet` alike — until now, since
+  `collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` always
+  returned an empty manifold for a `Shape::Box`, a documented deferred case
+  repeated across FR-020 through FR-026's own Non-goals. This requirement
+  closes that gap by reducing a box-vs-curve test to the same "test every
+  corner" technique `box_vs_plane` already uses for a flat plane (already
+  in this codebase, generating up to 4 contacts for a box resting on a
+  plane): new `collision::box_vs_quarter_pipe(position, orientation,
+  half_extents, pipe)` checks each of the box's 8 corners as a
+  zero-radius sphere via the existing `sphere_vs_quarter_pipe(world_corner,
+  0.0, pipe)` call, collecting every corner that reports a contact into the
+  manifold; new `collision::box_vs_corner_fillet` does the identical thing
+  against `sphere_vs_corner_fillet` for the sphere-shaped compound-corner
+  fillets. `contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` now
+  dispatch a `Shape::Box` to these new functions instead of returning
+  `Vec::new()`. Each surviving contact's `point` field is overwritten to
+  the corner's own world position rather than the fillet-surface point
+  `sphere_vs_quarter_pipe`/`sphere_vs_corner_fillet` itself computes — the
+  same rel_pos/torque-accuracy reason `box_vs_plane`'s own doc comment
+  already documents: a tilted box's corner isn't generally "below" the body
+  center along the surface normal, so the solver needs the true
+  contact-to-center offset to compute correct torque, not a point that
+  merely lies on the curved surface along the contact normal. This is
+  explicitly documented, in both new functions' own doc comments, as an
+  **approximation, not a full convex-vs-curved-surface narrow phase** — no
+  GJK/EPA support-mapping machinery was added, and this port still doesn't
+  have any: a face of the box resting flush against a shallow curve (a
+  radius large relative to the box) could have every one of its own corners
+  still just clear of the fillet while the face's middle already overlaps
+  it, under-detecting that case, the same category of "exact per test
+  point, an approximation of the whole shape" caveat this crate has always
+  carried for curved geometry (see FR-020's original Non-goals). No new
+  shape or fundamentally new collision primitive was needed — this is a
+  generalization of existing dispatch, not new physics/math machinery.
+  `PhysicsWorld::step` already called `resolve_curve_contact`/
+  `resolve_corner_fillet_contact` for every car in the scene — that call
+  was wired in from FR-023 onward, just always a no-op for a car until now,
+  since `contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` always
+  returned empty for a box — so `world.rs`'s step loop itself needed no
+  changes, only doc-comment updates reflecting the new real behavior (the
+  "no-op for a box" language in `resolve_curve_contact`/
+  `resolve_corner_fillet_contact`'s own doc comments, the `curves`/
+  `corner_fillets` field doc comments, the `with_curve`/`with_corner_fillet`
+  builder doc comments, and `arena.rs`'s own module-level "Still not
+  modeled" list). Explicitly unaffected by this requirement:
+  `StaticGoalWall`/`contacts_vs_goal_wall` — a car still sees the exact same
+  solid, full-width back wall it always has, deliberately ignoring the
+  goal-mouth window, since a goal wall isn't a curved fillet at all and this
+  generalization only touches `StaticQuarterPipe`/`StaticCornerFillet`
+  dispatch; a car actually driving into a goal remains a real, separate,
+  not-yet-implemented capability (see Non-goals).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -888,11 +965,15 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   same test with a different normal), dispatching to a sphere- or
   box-specific test and returning a manifold (`Vec<Contact>`, 0 to 4
   points); `contacts_vs_quarter_pipe` (since FR-020) — analytic
-  sphere-vs-fillet contact generation (always 0 or 1 points; a box always
-  returns none, see FR-020's Non-goals); `contacts_vs_corner_fillet` (since
+  sphere-vs-fillet contact generation for a sphere (always 0 or 1 points),
+  dispatching to `box_vs_quarter_pipe`'s corner-testing approximation
+  (0-8 points) for a box since `RB-PHYSICS-001-FR-027` (a box always
+  returned no contact through FR-026, see FR-020's original Non-goals);
+  `contacts_vs_corner_fillet` (since
   FR-023) — the same analytic sphere-only contact generation against a
   `StaticCornerFillet` instead, using its spherical-triangle containment
-  test in place of a `StaticQuarterPipe`'s 2-sided sector one;
+  test in place of a `StaticQuarterPipe`'s 2-sided sector one, and the same
+  `box_vs_corner_fillet` corner-testing dispatch for a box since FR-027;
   `contacts_vs_goal_wall` (since FR-024) — dispatches by shape instead of
   always analytic sphere-only: a sphere gets `sphere_vs_goal_wall`'s
   windowed treatment (no contact for a center inside the window), while a
@@ -951,10 +1032,14 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   always present), `walls: Vec<StaticPlane>` (any number, via repeated
   `with_wall` calls, empty by default), `curves: Vec<StaticQuarterPipe>`
   (since FR-020; any number, via repeated `with_curve` calls, empty by
-  default — only ever deflects the ball, a no-op for every car),
-  `corner_fillets: Vec<StaticCornerFillet>` (since FR-023; any number, via
-  repeated `with_corner_fillet` calls, empty by default — same ball-only
-  deflection convention as `curves`), `goal_walls: Vec<StaticGoalWall>`
+  default — deflected the ball only, a no-op for every car, through
+  FR-026; since `RB-PHYSICS-001-FR-027`, a car is deflected too, via the
+  8-corner testing approximation `collision::box_vs_quarter_pipe`
+  provides), `corner_fillets: Vec<StaticCornerFillet>` (since FR-023; any
+  number, via
+  repeated `with_corner_fillet` calls, empty by default — same
+  ball-and-since-FR-027-car deflection convention as `curves`, via
+  `collision::box_vs_corner_fillet`), `goal_walls: Vec<StaticGoalWall>`
   (since FR-024; any number, via repeated `with_goal_wall` calls, empty by
   default — unlike `curves`/`corner_fillets`, resolved for *every* body,
   since a box's own contact-generation path through it is unaffected by
@@ -1477,6 +1562,52 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   (`standard_goal_corner_fillets_has_four_fillets` and
   `every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar`)
   plus the 1 new `world.rs` end-to-end test above).
+- FR-027 (met, car deflection by curved fillets): `collision.rs` gained
+  two pairs of tests, one pair per curved shape, proving the corner-testing
+  approximation is real physical geometry for a box, not a detection hack
+  or a silent no-op: `box_embedded_in_the_quarter_pipes_footprint_has_contact`
+  centers a car box directly on a quarter-pipe's own surface (along its
+  sector bisector) and confirms at least one real contact comes back, with
+  every contact's normal pointing back toward the axis (the radial vector
+  from the axis to the contact point has a negative dot product with the
+  contact normal); `box_far_from_the_quarter_pipe_has_no_contact` places a
+  box deep on the opposite side of the fillet's own angular sector — not
+  just far away radially, since a point far along the sector's own bisector
+  direction is still angularly "inside" the wedge regardless of distance —
+  and confirms no contact at all; `box_embedded_in_the_corner_fillets_footprint_has_contact`
+  and `box_outside_the_corner_fillets_bounds_has_no_contact` give the same
+  two proofs for the sphere-shaped compound-corner fillet
+  (`StaticCornerFillet`) instead of the cylindrical quarter-pipe. `world.rs`
+  gained two live end-to-end `PhysicsWorld` proofs:
+  `a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`
+  replaces the old `a_car_is_not_deflected_by_a_curved_transition` regression
+  test (whose entire premise this requirement reverses) — a car resting at
+  flat-floor height, at the exact position the analogous ball test already
+  uses (already overlapping a wall-to-floor curve's own material), gets
+  pushed up off that height, mirroring the ball's own equivalent proof;
+  `a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced`
+  checks, for a car embedded in a compound-corner fillet, that the worst
+  (maximum) corner penetration this fillet reports shrinks meaningfully
+  after the solver runs — deliberately not that the box's own center of
+  mass moves closer to the fillet's center, the way the equivalent ball
+  test does, since a sphere is a single point but an oriented box has
+  multiple corners at different depths simultaneously: resolving one
+  corner's contact can rotate the box in a way that moves its center of
+  mass *away* from the fillet's center even as every individual corner's
+  own overlap shrinks, so "distance from center-of-mass to fillet center"
+  isn't the right invariant for a box the way it is for a sphere. This was
+  found empirically while writing the test — an earlier version asserting
+  center-of-mass distance shrank actually failed (the car ended up farther
+  from the fillet's center even though the fillet was correctly resolving
+  penetration), which is what led to writing the assertion this more
+  careful, per-corner way instead. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027
+  behavior covered by `rb_physics_bullet`'s unit tests (218 tests as of
+  this version — net +3 over 0.26.0's 215: the 4 `collision.rs` tests above
+  replace the 2 pre-existing "always empty for a box" regression tests
+  FR-027's behavior change made obsolete, net +2, plus the 2 `world.rs`
+  tests above replace the 1 pre-existing `a_car_is_not_deflected_by_a_curved_transition`
+  regression test, net +1).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -1571,8 +1702,11 @@ matching the real corner shape would need genuinely different (curved)
 collision geometry, not just a better number (see FR-019 and Open
 questions). FR-020's `arena::FILLET_RADIUS` has exactly the same status as
 `CORNER_LENGTH` — this port's own invention, no public reference, and only
-governs the ball (see FR-020's own Non-goals: a car isn't deflected by a
-curve at all yet, so there's nothing to validate there either). FR-022's,
+governed the ball through FR-026 (see FR-020's own Non-goals). Since
+FR-027, `FILLET_RADIUS` also governs a car's own corner-testing
+approximation — no real recorded car-vs-curve data has exercised either
+the ball's or the car's response to it, so the constant's validation
+status is unchanged by FR-027, only its reach. FR-022's,
 FR-024's, and FR-026's own fillets (the 8 vertical corner-wall edges, the 6
 goal-cutout edges, and the 4 goal post-crossbar compound corners) reuse
 this same `FILLET_RADIUS` constant rather than
@@ -1588,7 +1722,9 @@ questions for why. `CORNER_ARCH_RADIUS` has exactly the same unvalidated
 status as `FILLET_RADIUS`/`CORNER_LENGTH`: this port's own invention, no
 public reference, chosen only to read as visibly larger than
 `FILLET_RADIUS` in tests (enforced at compile time, not calibrated), and
-only governs the ball, same as every other fillet radius in this crate.
+governs both the ball and, since FR-027, a car's own corner-testing
+approximation too, same as every other fillet radius in this crate —
+unvalidated for either.
 FR-026's own 4 goal post-crossbar compound-corner fillets reuse
 `FILLET_RADIUS` unchanged rather than `CORNER_ARCH_RADIUS` — unlike the
 arena's own compound corners (FR-023/FR-025), both edge fillets meeting at
@@ -1610,9 +1746,11 @@ The unit
 tests confirm the fillet's *shape* of response (pushes back toward the
 axis once the sphere's surface crosses the fillet's own radius from
 inside, respects its own sector — 90 degrees for a floor/ceiling seam, 45
-for a corner wall's own vertical edge — leaves a box untouched), not that a
-real ball's actual wall-to-floor/wall-to-ceiling or wall-to-wall transition
-behavior matches this radius or trigger condition, at a cardinal wall, a
+for a corner wall's own vertical edge — and, since FR-027, deflects a box
+the same way via its own 8-corner approximation), not that a
+real ball's or car's actual wall-to-floor/wall-to-ceiling or wall-to-wall
+transition behavior matches this radius, this trigger condition, or (for a
+car) the corner-testing approximation itself, at a cardinal wall, a
 corner wall's floor/ceiling seam, or a corner wall's own vertical edge
 alike. `StaticQuarterPipe::between_planes`'s own generalization (FR-022) —
 solving the axis point as a real 2x2 linear system, and testing sector
@@ -1637,6 +1775,48 @@ own goal dimensions), the same "prove the general mechanism, not just
 that the specific arena numbers happen to work out" discipline every
 other new shape's own constructor/containment logic in this port already
 gets.
+`collision::box_vs_quarter_pipe`/`box_vs_corner_fillet` (FR-027) are
+independently unit-tested against a synthetic fixture, not just proven
+out against the standard arena's own fillets: a box centered directly on a
+quarter-pipe's own surface (along its sector bisector) reports at least
+one contact with every normal pointing back toward the axis, a box placed
+deep on the opposite side of the fillet's own angular sector (not merely
+far away radially — a point far along the sector's own bisector direction
+is still angularly "inside" the wedge regardless of distance) reports no
+contact, and the same two proofs hold for a `StaticCornerFillet`. The unit
+tests confirm the corner-testing approximation's own *shape* of response
+(a box embedded in a fillet's footprint gets at least one real contact, a
+box outside the fillet's own bounds gets none), not that it matches a real
+convex-vs-curved-surface narrow phase's actual contact count or manifold
+shape — this port still has no GJK/EPA support-mapping machinery, and the
+documented under-detection case (a face resting flush against a shallow
+curve, with every corner just clear of the fillet while the face's middle
+already overlaps it) isn't exercised by any test here, since none of this
+port's own fillet radii are large enough relative to a car's own
+dimensions to make it easy to construct. The two live end-to-end `world.rs`
+proofs take deliberately different shapes for the same reason a sphere and
+a box need different invariants:
+`a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`
+mirrors the ball's own equivalent `StaticQuarterPipe` proof directly (a
+car resting at ordinary flat-floor height, already overlapping the curve's
+own material, gets pushed up off that height), since a resting height is
+just as well-defined for a box as for a sphere; but
+`a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced`
+deliberately checks that the *worst (maximum) corner penetration* this
+fillet reports shrinks meaningfully after the solver runs, not that the
+box's own center of mass moves closer to the fillet's center the way the
+equivalent ball test checks distance-to-center — a real, documented
+test-design decision, not just an implementation detail: an oriented box
+has multiple corners at different depths simultaneously, so resolving one
+corner's contact can rotate the box in a way that moves its center of mass
+*away* from the fillet's center even as every individual corner's own
+overlap shrinks, making "distance from center-of-mass to fillet center"
+the wrong invariant for a box the way it's the right one for a sphere (a
+single point). This was found empirically while writing the test — an
+earlier version asserting center-of-mass distance shrank actually failed,
+with the car ending up farther from the fillet's center even though the
+fillet was correctly resolving every corner's penetration — which is what
+led to writing the assertion the more careful, per-corner way instead.
 
 ## Traceability
 
@@ -1660,11 +1840,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   is now implemented as FR-016; a dodge variant of the wall jump is now
   implemented as FR-017; a gentle landing auto-orientation assist is now
   implemented as FR-018.)
-- A car (box) actually being deflected by a curved fillet (see FR-020's
-  Non-goals) — needs real support-mapping/SAT-style collision machinery
-  against curved geometry this port doesn't have; a car currently drives
-  straight through a curve's or corner fillet's footprint unaffected. Not
-  started. (The compound corner where a vertical-edge fillet meets a
+- A car (box) actually being deflected by a curved fillet through genuine
+  convex-vs-curved-surface narrow-phase collision machinery
+  (support-mapping/SAT-style, e.g. GJK/EPA) rather than FR-027's
+  corner-testing approximation (testing the box's own 8 corners, the same
+  technique `box_vs_plane` already used for a flat plane) — this port still
+  doesn't have that machinery, so a face of the box resting flush against a
+  shallow curve (a radius large relative to the box) could have every one
+  of its own corners still just clear of the fillet while the face's middle
+  already overlaps it, under-detecting that case (see FR-027's own doc
+  comments). Needs a concrete reason (e.g. real recorded car-vs-curve
+  contact data showing this under-detection actually matters in practice)
+  before it's worth the added complexity. Not started. (Deflecting a car at
+  all — previously this bullet's entire subject, when a car drove straight
+  through every curve's or corner fillet's footprint completely unaffected
+  — is now implemented via the corner-testing approximation, see FR-027.
+  The compound corner where a vertical-edge fillet meets a
   floor-seam or ceiling-seam fillet, near a corner wall's own top/bottom
   endpoint, is now modeled with its own `StaticCornerFillet` sphere, as
   FR-023 — though it, the edge fillet, and the seam fillet it meets remain
@@ -1693,10 +1884,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   entirely. A concrete reason to model either (e.g. real recorded
   goal-area or car-scoring behavior that diverges specifically because of
   it) would justify the added complexity — the car case also still needs
-  the same real support-mapping/SAT-style curved-geometry machinery the
-  fillet-deflection question above does, since a car driving in would also
-  need to clear the goal-cutout edge fillets, not just the flat window.
-  Not started.
+  the same genuine convex-vs-curved-surface narrow-phase machinery the
+  question above does (FR-027's corner-testing approximation isn't
+  necessarily precise enough for a car actually clearing a goal-cutout edge
+  fillet's own boundary, not just the flat window). Not started.
 - Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
@@ -1706,7 +1897,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   exercised by any test here. Not started.
 - Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS`/
   `CORNER_ARCH_RADIUS` against real field mesh data (see
-  FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026) — this
+  FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — this
   port has no reference for any of the three at all, unlike `SIDE_WALL_X`/
   `BACK_WALL_Y`/`CEILING_Z`; even a sourced value would only approximate
   the real corner/transition, which isn't a single flat plane,
@@ -1781,6 +1972,82 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.27.0 (2026-08-31): FR-027 added and implemented (car deflection by
+  curved fillets) — closes the long-repeated Non-goal, documented across
+  FR-020 through FR-026, that a car (box) drove straight through every
+  curved fillet in this port unaffected while the ball was properly
+  deflected. New `collision::box_vs_quarter_pipe(position, orientation,
+  half_extents, pipe)` tests each of the box's 8 corners as a zero-radius
+  sphere via the existing `sphere_vs_quarter_pipe(world_corner, 0.0, pipe)`
+  call and collects every corner that reports a contact — exactly the same
+  "test every corner" technique `box_vs_plane` already uses for a box
+  against a flat plane (already in this codebase, generating up to 4
+  contacts for a box resting on a plane), generalized here to a curved
+  surface instead of a flat one; new `box_vs_corner_fillet` does the
+  identical thing against `sphere_vs_corner_fillet` for the sphere-shaped
+  compound-corner fillets. `contacts_vs_quarter_pipe`/
+  `contacts_vs_corner_fillet` now dispatch a `Shape::Box` to these new
+  functions instead of returning `Vec::new()`. Each surviving contact's
+  `point` field is overwritten to the corner's own world position rather
+  than the fillet-surface point `sphere_vs_quarter_pipe`/
+  `sphere_vs_corner_fillet` itself computes, for the same rel_pos/
+  torque-accuracy reason `box_vs_plane`'s own doc comment already
+  documents (a tilted box's corner isn't generally "below" the body center
+  along the surface normal, so the solver needs the true contact-to-center
+  offset). Both new functions' own doc comments document this explicitly
+  as an approximation, not a full convex-vs-curved-surface narrow phase —
+  no GJK/EPA support-mapping machinery was added, and this port still
+  doesn't have any: a face of the box resting flush against a shallow
+  curve (a radius large relative to the box) could have every one of its
+  own corners still just clear of the fillet while the face's middle
+  already overlaps it, under-detecting that case — the same category of
+  "exact per test point, an approximation of the whole shape" caveat this
+  crate has always carried for curved geometry. No new shape or
+  fundamentally new collision primitive was needed — this is a
+  generalization of existing dispatch, not new physics/math machinery.
+  `PhysicsWorld::step` already called `resolve_curve_contact`/
+  `resolve_corner_fillet_contact` for every car in the scene (wired in
+  since FR-023), just always a no-op before now, since
+  `contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` always returned
+  empty for a box — so no `world.rs` step-loop changes were needed, only
+  doc-comment updates reflecting the new real behavior (the "no-op for a
+  box" language in `resolve_curve_contact`/`resolve_corner_fillet_contact`'s
+  own doc comments, the `curves`/`corner_fillets` field doc comments, the
+  `with_curve`/`with_corner_fillet` builder doc comments, and `arena.rs`'s
+  own module-level "Still not modeled" list). Explicitly unaffected:
+  `StaticGoalWall`/`contacts_vs_goal_wall` — a car still sees the exact
+  same solid, full-width back wall it always has, deliberately ignoring
+  the goal-mouth window, since a goal wall isn't a curved fillet at all; a
+  car actually driving into a goal remains a real, separate,
+  not-yet-implemented capability. New tests: `collision.rs` renamed/
+  replaced the 2 pre-existing "always empty for a box" regression tests
+  (`box_vs_quarter_pipe_is_always_empty`, `box_vs_corner_fillet_is_always_empty`)
+  with 4 new tests proving the corner-testing approximation actually works
+  both ways — `box_embedded_in_the_quarter_pipes_footprint_has_contact` and
+  `box_far_from_the_quarter_pipe_has_no_contact` for the cylindrical
+  quarter-pipe, `box_embedded_in_the_corner_fillets_footprint_has_contact`
+  and `box_outside_the_corner_fillets_bounds_has_no_contact` for the
+  sphere-shaped compound-corner fillet (net +2); `world.rs` replaced the
+  pre-existing `a_car_is_not_deflected_by_a_curved_transition` regression
+  test, whose entire premise this requirement reverses, with
+  `a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`
+  (mirroring the ball's own equivalent live-physics proof) and added
+  `a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced`
+  (net +1) — the latter deliberately asserts that the fillet's own worst
+  (maximum) corner penetration shrinks after the solver runs, not that the
+  box's center of mass moves closer to the fillet's center the way the
+  equivalent ball test does, since an earlier version asserting
+  center-of-mass distance actually failed empirically (a box's multiple
+  simultaneously-penetrating corners can rotate the box away from the
+  fillet's center even as every individual corner's own overlap shrinks —
+  see the spec's own Verification plan for the full reasoning). Net +3
+  tests, bringing the crate to 218 tests total (2 in `collision.rs` net
+  above the 2 replaced, plus 1 in `world.rs` net above the 1 replaced).
+  Still not modeled: a car actually driving into a goal, a modeled goal
+  interior/net beyond the cutout itself, a genuine convex-vs-curved-surface
+  narrow phase for a car (support-mapping/SAT-style, e.g. GJK/EPA) in place
+  of this increment's corner-testing approximation, and everything else
+  FR-024's own Non-goals already cover.
 - 0.26.0 (2026-08-31): FR-026 added and implemented (goal post-crossbar
   corner fillets) — rounds off the two remaining sharp compound corners per
   goal (4 total, 2 per goal), where a post's own vertical-edge fillet
