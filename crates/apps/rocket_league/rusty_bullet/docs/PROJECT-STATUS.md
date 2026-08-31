@@ -2,7 +2,7 @@
 
 - Last verified main commit: `dfbefb4` (merge of [#69](https://github.com/baileyrd/rusty_bullet/pull/69))
 - Verified at: 2026-08-31
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via a corner-testing approximation, not a full convex-vs-curved-surface narrow phase) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box, not a net mesh) so a ball or car passing through settles instead of flying forever, and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via a corner-testing approximation, not a full convex-vs-curved-surface narrow phase) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box, not a net mesh) so a ball or car passing through settles instead of flying forever, and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones, and, since FR-031, uncalibrated placeholder constants have been individually audited against the community reverse-engineering effort (some corrected, some confirmed, the rest explicitly flagged) — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; real-data constant calibration (FR-005) still blocked on PHASE-0-EXIT) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -874,6 +874,34 @@
   (`solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`,
   `world::tests::a_ball_pinched_between_two_closing_cars_is_resolved_by_a_shared_multi_body_solve`),
   244 total in `rb_physics_bullet` (+2 over FR-029's 242).
+- `RB-PHYSICS-001-FR-031` (constant-calibration audit — does NOT close
+  `FR-005`) — `FR-005`'s real calibration against recorded ground truth
+  stays blocked on `PHASE-0-EXIT`; this narrower requirement sources
+  every uncalibrated placeholder constant in `drive.rs`/`arena.rs` against
+  the community reverse-engineering effort instead: the RocketSim
+  (`ZealanL/RocketSim`) and RLUtilities (`samuelpmish/RLUtilities`) source
+  code plus the RLBot wiki's "Useful Game Values" page — three
+  independently-written references, agreement across all three treated as
+  high confidence. Corrected with code changes: `drive::JUMP_SPEED`
+  (`292.0` → `875.0/3.0`, ≈291.667 uu/s) and
+  `drive::JUMP_HOLD_ACCELERATION` (`1400.0` → `4375.0/3.0`, ≈1458.33
+  uu/s²) to their precise real values; split `drive::MAX_CAR_SPEED` (2300,
+  boost's own cap, confirmed correct) from a new
+  `drive::UNBOOSTED_MAX_CAR_SPEED` (1410, throttle's own cap) — a real
+  behavioral fix, since throttle alone could previously reach the boosted
+  top speed. Confirmed already correct, no change: `JUMP_HOLD_MAX_DURATION`
+  (0.2), `BOOST_ACCELERATION` (991.667), `MAX_BOOST` (100), gravity (-650),
+  `GOAL_DEPTH` (880). Explicitly flagged as audited-but-still-uncalibrated
+  (a real reference exists but doesn't safely port into this port's own
+  unit system/mechanic shape, or no reference exists at all):
+  `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `WALL_JUMP_HORIZONTAL_SPEED`,
+  `STEER_TORQUE`, `AIR_CONTROL_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  `LANDING_AUTO_UPRIGHT_TORQUE`, `FILLET_RADIUS`, `CORNER_ARCH_RADIUS`.
+  Surfaced two open ambiguities without acting on them (ball radius 91.25
+  vs. this port's 92.75; `CEILING_Z` 2044 vs. RocketSim's cited 2048) —
+  recorded as open questions rather than guessed at. 1 new test
+  (`drive::tests::throttle_alone_cannot_reach_the_boosted_top_speed`), 245
+  total in `rb_physics_bullet` (+1 over FR-030's 244).
 
 ## In progress
 
@@ -917,18 +945,14 @@
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. `RB-PHYSICS-001-FR-031`/`FR-032` — a scoped constant-calibration audit
-   (sourcing every uncalibrated placeholder against the best available
-   community reference, explicitly flagging any with none, without
-   misrepresenting it as closing `FR-005`'s real-data calibration, which
-   still needs `PHASE-0-EXIT`) and a genuine GJK/EPA narrow phase for car
+2. `RB-PHYSICS-001-FR-032` — a genuine GJK/EPA narrow phase for car
    vs. curved fillets (replacing FR-027's 8-corner-testing approximation).
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (294 tests: 23 in `rb_domain`, 244 in
+- `cargo test --workspace`: pass (295 tests: 23 in `rb_domain`, 245 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

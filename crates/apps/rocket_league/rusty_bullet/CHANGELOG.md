@@ -375,6 +375,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   contacts (ground/walls/curves/goal geometry) are unaffected — each
   body's contact with static geometry never depended on another dynamic
   body, so only the dynamic-vs-dynamic path needed the fix.
+- `rb_physics_bullet::drive` (`RB-PHYSICS-001-FR-031`) — a scoped
+  constant-calibration audit (does NOT close `FR-005`'s real-data
+  calibration, still blocked on `PHASE-0-EXIT`): sourced every
+  uncalibrated placeholder constant against RocketSim, RLUtilities, and
+  the RLBot community wiki. Corrected `JUMP_SPEED` (→ `875.0/3.0`) and
+  `JUMP_HOLD_ACCELERATION` (→ `4375.0/3.0`) to their precise real values;
+  added `UNBOOSTED_MAX_CAR_SPEED` (1410) as throttle's own speed cap,
+  separate from the boosted `MAX_CAR_SPEED` (2300) — a real fix, since
+  throttle alone previously could reach the boosted top speed. Confirmed
+  several more constants already correct (`JUMP_HOLD_MAX_DURATION`,
+  `BOOST_ACCELERATION`, `MAX_BOOST`, gravity, `GOAL_DEPTH`) and explicitly
+  flagged the rest as audited-but-still-uncalibrated in their own doc
+  comments, rather than silently leaving them ambiguous.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

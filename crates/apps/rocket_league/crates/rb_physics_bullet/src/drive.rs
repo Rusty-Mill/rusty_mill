@@ -174,34 +174,63 @@
 //!
 //! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
 //! — it's this project's own model of Rocket League's driving mechanics,
-//! since the real numbers are not public. `MAX_CAR_SPEED`, `MAX_BOOST`,
-//! `BOOST_ACCELERATION`, and `JUMP_SPEED` are commonly-cited
+//! since the real numbers are not public, sourced instead from the
+//! community reverse-engineering effort (RocketSim, RLUtilities, and the
+//! RLBot wiki's independently-converging "Useful Game Values" — see
+//! `RB-PHYSICS-001-FR-031`'s audit for the full source-by-source
+//! breakdown). `MAX_CAR_SPEED`, `UNBOOSTED_MAX_CAR_SPEED`, `MAX_BOOST`,
+//! `BOOST_ACCELERATION`, `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`, and
+//! `JUMP_HOLD_ACCELERATION` are commonly-cited, multi-source-confirmed
 //! community-reverse-engineered approximations (the same body of public
 //! research `PhysicsWorld::new`'s gravity constant comes from);
 //! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
 //! constants standing in for Rocket League's real speed-dependent throttle
 //! curve and boost-drain behavior; `STEER_TORQUE`,
 //! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
-//! `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, and `DODGE_ANGULAR_SPEED`
-//! are uncalibrated placeholders chosen only to produce a visibly
-//! responsive turn/slide/spin/push-off/flip for this car's mass/inertia in
-//! tests. None of these are independently confirmed by this project — see
-//! `RB-PHYSICS-001-FR-005`.
+//! `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, and
+//! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
+//! only to produce a visibly responsive turn/slide/spin/push-off/flip for
+//! this car's mass/inertia in tests — `RB-PHYSICS-001-FR-031`'s audit
+//! found real reference numbers for some of these (a dodge's real ~500
+//! uu/s base impulse and direction/speed-dependent scaling; a wall jump
+//! reusing the plain jump impulse rather than its own faster speed; real
+//! air-control torque/damping coefficients), but none of them port
+//! directly: they're expressed as torques or velocity-dependent curves
+//! calibrated against real Rocket League's own specific car mass/inertia
+//! tensor and mechanic shape, neither of which this port's own
+//! placeholder car body or simplified single-impulse mechanics are
+//! calibrated to match, so adopting the raw numbers here would be false
+//! precision, not a real fix — see the audit's own findings for detail.
+//! None of these are independently confirmed by this project — see
+//! `RB-PHYSICS-001-FR-005`/`FR-031`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
 
-/// Commonly-cited approximate max ground speed a car's engine alone can
-/// reach (uu/s) — Rocket League's unboosted top speed. Also used here as
-/// boost's own speed cap (real Rocket League's actual top speed, boosted
-/// or not, is the same number) — a simplification, since throttle and
-/// boost don't share one real top speed, but this port doesn't yet model
-/// two separate ceilings.
+/// Commonly-cited boosted top speed (uu/s), boost's own speed cap here —
+/// confirmed against real Rocket League's own reverse-engineered constants
+/// during `RB-PHYSICS-001-FR-031`'s audit (`CAR_MAX_SPEED = 2300.f` in the
+/// RocketSim project's `RLConst.h`; matched independently by RLUtilities'
+/// `Car::v_max` and the RLBot community wiki's "Useful Game Values" page).
+/// Also used as the turning-torque scale-up reference in `speed_factor`
+/// below — an arbitrary normalization choice, not a claim that a car's
+/// actual turning grip caps out at boosted speed specifically.
 pub const MAX_CAR_SPEED: f32 = 2300.0;
+
+/// Commonly-cited *unboosted* top speed (uu/s) — throttle's own speed cap,
+/// distinct from `MAX_CAR_SPEED`. Before `RB-PHYSICS-001-FR-031`'s audit,
+/// throttle alone could push a car all the way to `MAX_CAR_SPEED` (2300),
+/// which is real Rocket League's *boosted* cap, not its unboosted one; the
+/// audit found a consistent, independently-corroborated real value (1410)
+/// across RocketSim's `RLConst.h` — whose `DRIVE_SPEED_TORQUE_FACTOR_CURVE`
+/// drives available drive torque to exactly zero at 1410 uu/s — and the
+/// RLBot community wiki's "Useful Game Values" page, so throttle now caps
+/// here instead.
+pub const UNBOOSTED_MAX_CAR_SPEED: f32 = 1410.0;
 
 /// Simplified constant throttle acceleration (uu/s^2). Rocket League's
 /// real throttle curve tapers off nonlinearly as speed rises toward
-/// `MAX_CAR_SPEED`; this port uses one constant instead, a real
+/// `UNBOOSTED_MAX_CAR_SPEED`; this port uses one constant instead, a real
 /// simplification (not a taper), pending calibration against recorded
 /// data.
 const THROTTLE_ACCELERATION: f32 = 1600.0;
@@ -237,14 +266,19 @@ const BOOST_CONSUMPTION_RATE: f32 = 33.3;
 /// tire model to calibrate a real rear-grip-loss number against.
 const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 
-/// Commonly-cited approximate jump impulse speed (uu/s), applied as an
-/// instantaneous vertical velocity change (not a continuous force) on a
-/// fresh grounded jump press — a flat speed regardless of the car's mass,
-/// matching how the real jump impulse doesn't scale with car mass either.
-/// Also reused as the double jump's impulse magnitude (see the module doc
-/// comment) — `pub` so `world.rs`'s end-to-end tests can assert against it
-/// directly, the same way `MAX_CAR_SPEED`/`MAX_BOOST` already are.
-pub const JUMP_SPEED: f32 = 292.0;
+/// Jump impulse speed (uu/s), applied as an instantaneous vertical
+/// velocity change (not a continuous force) on a fresh grounded jump
+/// press — a flat speed regardless of the car's mass, matching how the
+/// real jump impulse doesn't scale with car mass either. Also reused as
+/// the double jump's impulse magnitude (see the module doc comment) —
+/// `pub` so `world.rs`'s end-to-end tests can assert against it directly,
+/// the same way `MAX_CAR_SPEED`/`MAX_BOOST` already are. Refined from an
+/// earlier `292.0` approximation to the precise value during
+/// `RB-PHYSICS-001-FR-031`'s audit: RocketSim's `RLConst.h` defines
+/// `JUMP_IMMEDIATE_FORCE = 875.f/3.f`, and RLUtilities independently
+/// hardcodes `Jump::speed = 291.667f` — the same number both projects
+/// also apply, unmodified, to the double jump.
+pub const JUMP_SPEED: f32 = 875.0 / 3.0;
 
 /// Uncalibrated placeholder air-control torque magnitude, shared by pitch,
 /// yaw, and roll (about the car's local right, up, and forward axes
@@ -294,22 +328,29 @@ pub const DODGE_SPEED: f32 = 1400.0;
 /// documented Rocket League value.
 const DODGE_ANGULAR_SPEED: f32 = 5.5;
 
-/// Uncalibrated placeholder maximum duration (seconds) that continuing to
-/// hold `jump` after a fresh ground-jump press keeps adding extra upward
-/// acceleration (`JUMP_HOLD_ACCELERATION`) — this port has no public
-/// reference for real Rocket League's actual hold-window length the way
-/// `JUMP_SPEED` does, so this is chosen only to make a fully held jump
-/// visibly taller than a tapped one in tests, not derived from any
-/// measured or documented Rocket League value.
+/// Maximum duration (seconds) that continuing to hold `jump` after a fresh
+/// ground-jump press keeps adding extra upward acceleration
+/// (`JUMP_HOLD_ACCELERATION`). Confirmed, not just guessed, during
+/// `RB-PHYSICS-001-FR-031`'s audit: this port's pre-existing `0.2` already
+/// matches both RocketSim's `RLConst.h` (`JUMP_MAX_TIME = 0.2f`) and
+/// RLUtilities' `Jump::max_duration = 0.2f`. Real Rocket League also has a
+/// `JUMP_MIN_TIME` (0.025s) during which the hold acceleration is scaled
+/// down (0.62x) rather than applied at full strength immediately — that
+/// two-phase ramp isn't modeled here, only the flat-acceleration
+/// approximation.
 const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
 
-/// Uncalibrated placeholder continuous upward acceleration (uu/s^2)
-/// applied every step `jump` is held and `JUMP_HOLD_MAX_DURATION` hasn't
-/// yet elapsed since the ground jump's own fresh press, on top of that
-/// press's fixed `JUMP_SPEED` impulse — chosen only to produce a clearly
-/// taller held jump than a tapped one for this car's mass in tests, not
-/// derived from any measured or documented Rocket League value.
-const JUMP_HOLD_ACCELERATION: f32 = 1400.0;
+/// Continuous upward acceleration (uu/s^2) applied every step `jump` is
+/// held and `JUMP_HOLD_MAX_DURATION` hasn't yet elapsed since the ground
+/// jump's own fresh press, on top of that press's fixed `JUMP_SPEED`
+/// impulse. Refined from an earlier `1400.0` approximation to the precise
+/// value during `RB-PHYSICS-001-FR-031`'s audit: RocketSim's `RLConst.h`
+/// defines `JUMP_ACCEL = 4375.f/3.f`, matched independently by RLUtilities'
+/// `Jump::acceleration = 1458.3333f`. Real Rocket League scales this down
+/// (0.62x) during the first 0.025s of the hold — see
+/// `JUMP_HOLD_MAX_DURATION`'s own doc comment — which this port doesn't
+/// model, applying the full acceleration from the first held step instead.
+const JUMP_HOLD_ACCELERATION: f32 = 4375.0 / 3.0;
 
 /// Uncalibrated placeholder landing-auto-orientation restoring-torque
 /// magnitude — applied while airborne with no active `pitch`/`roll` air
@@ -424,7 +465,7 @@ pub fn apply_driven_forces(
 
         let forward_speed = car.linear_velocity.dot(&forward);
         let throttle = input.throttle.clamp(-1.0, 1.0);
-        if throttle != 0.0 && throttle.signum() * forward_speed < MAX_CAR_SPEED {
+        if throttle != 0.0 && throttle.signum() * forward_speed < UNBOOSTED_MAX_CAR_SPEED {
             car.apply_central_force(forward * (throttle * THROTTLE_ACCELERATION * car.mass()));
         }
 
@@ -878,14 +919,48 @@ mod tests {
     }
 
     #[test]
-    fn throttle_stops_accelerating_at_max_speed() {
+    fn throttle_stops_accelerating_at_unboosted_max_speed() {
+        // RB-PHYSICS-001-FR-031: throttle's own cap is UNBOOSTED_MAX_CAR_SPEED
+        // (1410 uu/s), not the boosted MAX_CAR_SPEED (2300) — see
+        // UNBOOSTED_MAX_CAR_SPEED's own doc comment for why these are now
+        // two separate constants.
         let mut c = car();
         let mut boost = MAX_BOOST;
-        c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
+        c.linear_velocity = Vec3::new(UNBOOSTED_MAX_CAR_SPEED, 0.0, 0.0);
         step_with_input(&mut c, &full_throttle(), true, &mut boost, 1.0 / 60.0);
         assert!(
-            (c.linear_velocity.x - MAX_CAR_SPEED).abs() < 1e-4,
-            "expected throttle to stop pushing past MAX_CAR_SPEED, got {}",
+            (c.linear_velocity.x - UNBOOSTED_MAX_CAR_SPEED).abs() < 1e-4,
+            "expected throttle to stop pushing past UNBOOSTED_MAX_CAR_SPEED, got {}",
+            c.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn throttle_alone_cannot_reach_the_boosted_top_speed() {
+        // The real bug RB-PHYSICS-001-FR-031 fixed: before the audit,
+        // throttle shared MAX_CAR_SPEED (2300, the *boosted* cap) as its
+        // own ceiling, letting a car reach boosted top speed on throttle
+        // alone. Held throttle for a generous 20 simulated seconds (no
+        // drag to fight against) should now plateau at UNBOOSTED_MAX_CAR_SPEED,
+        // well short of MAX_CAR_SPEED.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let dt = 1.0 / 60.0;
+        for _ in 0..(20.0 / dt) as u32 {
+            step_with_input(&mut c, &full_throttle(), true, &mut boost, dt);
+        }
+        assert!(
+            // A per-step check, not a hard clamp: the last step before the
+            // cap can still add one full THROTTLE_ACCELERATION*dt (~26.7
+            // uu/s at this test's dt) worth of overshoot before the next
+            // step's check catches it.
+            c.linear_velocity.x <= UNBOOSTED_MAX_CAR_SPEED + 30.0,
+            "expected throttle alone to cap out at UNBOOSTED_MAX_CAR_SPEED, got {}",
+            c.linear_velocity.x
+        );
+        assert!(
+            c.linear_velocity.x < MAX_CAR_SPEED - 1.0,
+            "expected throttle alone to stay well short of the boosted MAX_CAR_SPEED, got {}",
             c.linear_velocity.x
         );
     }

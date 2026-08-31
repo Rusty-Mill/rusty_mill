@@ -71,6 +71,19 @@
 //! simplified relative to Bullet's actual interleaved-across-islands
 //! solver).
 //!
+//! Since `RB-PHYSICS-001-FR-031`, `drive`'s and `arena`'s uncalibrated
+//! placeholder constants have each been individually audited against the
+//! community reverse-engineering effort (RocketSim, RLUtilities, the RLBot
+//! wiki) — some corrected to a real, multi-source-confirmed value
+//! (`drive::JUMP_SPEED`, `drive::JUMP_HOLD_ACCELERATION`, and a new
+//! `drive::UNBOOSTED_MAX_CAR_SPEED` split from the boosted
+//! `drive::MAX_CAR_SPEED`), some confirmed already correct, and the rest
+//! explicitly flagged (in their own doc comments and in the FR-031 spec
+//! entry) as still uncalibrated rather than left silently ambiguous — see
+//! `drive`'s own module doc comment for the full per-constant breakdown.
+//! This audit does NOT close `RB-PHYSICS-001-FR-005`'s real-data
+//! calibration, which still needs `PHASE-0-EXIT`.
+//!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! split impulse; warm-starting/sleeping; a *net* inside the goal box beyond its
 //! own bounding walls (`RB-PHYSICS-001-FR-029` models the box's own solid
