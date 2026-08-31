@@ -1,0 +1,10 @@
+# nextest runs each test in its own process rather than sharing a test
+# binary's process the way `cargo test` does -- a test that relied on
+# another test's side effects within the same process (shared global
+# state, a window/message loop left open, etc.) can hang instead of
+# failing outright under this per-process model. Without a timeout that
+# hangs the whole CI job indefinitely instead of failing loudly; cap any
+# single test at 10 minutes so a regression here shows up as a fast,
+# named test failure.
+[profile.default]
+slow-timeout = { period = "2m", terminate-after = 5 }
