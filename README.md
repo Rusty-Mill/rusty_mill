@@ -96,6 +96,7 @@ have landed so far.
 | [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
 | [`rusty_ansder`](crates/rusty_ansder) | `crates/rusty_ansder` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine and ASN.1 DER parser, built on `rusty_wire`/`rusty_simd`/`rusty_regx`/`rusty_json`/`rusty_std` |
 | [`rusty_boot`](crates/rusty_boot) | `crates/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
+| [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
 | [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
@@ -536,6 +537,16 @@ dependencies — no swap needed, since it demonstrates the full merged
 stack booting end to end. Not `cargo fmt`-clean under this workspace's
 `rustfmt.toml`; reformatted with `cargo fmt --all`, no behavior change.
 
+`rusty_whisper` depends on `rusty_simd`, `rusty_wire`, and `rusty_std`
+via relative `path` dependencies, all already merged as siblings under
+this workspace's `crates/` — no dependency swap needed. Its optional
+`mic` feature (off by default, only enabled here by this workspace's
+`--all-features` build) pulls in `cpal` for native microphone capture,
+which links against ALSA via `alsa-sys`/pkg-config on Linux — this
+workspace's CI now installs `libasound2-dev` on the Linux leg
+accordingly (no Windows equivalent needed; `cpal` talks to WASAPI
+directly there).
+
 `rustils` was its own nested Cargo workspace of eight crates (`platform`,
 `platform-mock`, `platform-parity`, `platform-linux`, `platform-windows`,
 `platform-bsd`, `winargv`, `coreutils`), de-inherited the same way as
@@ -617,6 +628,7 @@ second nested workspace),
 [`rusty_jinja`](https://github.com/baileyrd/rusty_jinja),
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
 nested workspace),
-[`rusty_ansder`](https://github.com/baileyrd/rusty_ansder), and
-[`rusty_boot`](https://github.com/baileyrd/rusty_boot) — merged one at a
-time, same process.
+[`rusty_ansder`](https://github.com/baileyrd/rusty_ansder),
+[`rusty_boot`](https://github.com/baileyrd/rusty_boot), and
+[`rusty_whisper`](https://github.com/baileyrd/rusty_whisper) — merged one
+at a time, same process.
