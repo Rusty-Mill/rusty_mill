@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## `solver.rs` constraint-row setup/resolve reference validation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [#103](https://github.com/baileyrd/rusty_bullet/pull/103) · `69c07b9`
 
 - **Fetched and read Bullet's real
   `btSequentialImpulseConstraintSolver.cpp`/`.h`, `btContactSolverInfo.h`,
