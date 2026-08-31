@@ -2,7 +2,7 @@
 
 - Last verified main commit: `ff1391a` (merge of [#59](https://github.com/baileyrd/rusty_bullet/pull/59))
 - Verified at: 2026-08-31
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall for the ball — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by any fillet or driving into a goal, a modeled goal interior/net, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall for the ball, and, since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by any fillet or driving into a goal, a modeled goal interior/net, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -690,6 +690,33 @@
   test in `world.rs` in `rb_physics_bullet` (212 total): the real end-to-end
   proof, a ball embedded past a corner-wall floor arch's own (larger)
   radius gets pushed meaningfully back toward the axis.
+- `RB-PHYSICS-001-FR-026` (goal post-crossbar corner fillets) — closes the
+  gap `RB-PHYSICS-001-FR-024`'s own doc comment flagged: the two compound
+  corners per goal where a post's own vertical edge fillet meets the
+  crossbar's own horizontal edge fillet, one per post per goal (4 total).
+  New `arena::standard_goal_corner_fillets` builds all 4 directly from
+  `StaticCornerFillet::between_three_planes` on the real back wall/post/
+  crossbar planes that meet there — the same approach `RB-PHYSICS-001-FR-023`
+  used for the arena's own 16 compound corners, and no new shape or
+  collision code, since `StaticCornerFillet`/`sphere_vs_corner_fillet`
+  already generalize to any three non-parallel planes. Reuses
+  `FILLET_RADIUS` unchanged: unlike `FR-025`'s arena corners, both edge
+  fillets meeting here already share one radius, so there's no
+  mismatched-radius concern. The goal's other two corners, where a post
+  meets the floor, deliberately get no such treatment: the window's own
+  bottom edge sits exactly at floor level, so a post's fillet there simply
+  ends flush with the ground the ball already rolls on, not a sharp,
+  unrounded vertex. `PhysicsWorld::standard_arena` wires the 4 new fillets
+  in via the same `with_corner_fillet` builder `standard_corner_fillets`'s
+  16 already used, bringing `corner_fillets` to 20 total. 3 new unit tests
+  across `arena.rs`/`world.rs` in `rb_physics_bullet` (215 total): 2 in
+  `arena.rs` — exactly 4 fillets, and every fillet's center sits
+  `FILLET_RADIUS` in from a back wall, a post plane, and the crossbar
+  plane simultaneously (proving a real triple intersection, not an
+  arbitrary point); 1 in `world.rs` — the real end-to-end proof, a ball
+  embedded past a goal corner fillet's own radius (on a synthetic
+  back-wall/post/crossbar fixture) gets pushed meaningfully back toward
+  the center.
 
 ## In progress
 
@@ -768,7 +795,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (262 tests: 23 in `rb_domain`, 212 in
+- `cargo test --workspace`: pass (265 tests: 23 in `rb_domain`, 215 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

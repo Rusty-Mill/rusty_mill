@@ -58,13 +58,24 @@
 //! itself (see `goal_post_plane`/`goal_crossbar_plane`'s own doc comments
 //! for why that would be wrong).
 //!
+//! `standard_goal_corner_fillets` (`RB-PHYSICS-001-FR-026`) closes the gap
+//! `standard_goal_cutout_fillets`' own doc comment flagged: the two compound
+//! corners per goal where a post's own vertical fillet meets the crossbar's
+//! own horizontal fillet, one per post per goal (4 total). Same approach
+//! `RB-PHYSICS-001-FR-023` used for the arena's own compound corners —
+//! `body::StaticCornerFillet::between_three_planes` directly on the three
+//! real flat planes that meet there (the back wall, that post's plane, and
+//! the crossbar) — reusing `FILLET_RADIUS` unchanged, since (unlike
+//! `FR-025`'s arena corners) both edge fillets meeting here already share
+//! one radius. The goal's other two corners, where a post meets the floor,
+//! aren't compound corners needing this treatment: the window's own bottom
+//! edge sits exactly at floor level, so a post fillet there simply ends
+//! flush with the ground, the same as any other fillet meeting the floor.
+//!
 //! **Still not modeled**: the goal's own interior/net structure beyond the
 //! cutout itself (the ball passes into open space, not a bounded net
-//! volume); the two compound corners per goal where a post's own fillet
-//! meets the crossbar's (independent, additive fillets here, same
-//! "no blended 3D corner" approach `standard_curves`' edge fillets used
-//! before `RB-PHYSICS-001-FR-023`); a car (box) actually being deflected by
-//! any of these fillets, or driving into the goal at all
+//! volume); a car (box) actually being deflected by any of these fillets,
+//! or driving into the goal at all
 //! (`collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet`
 //! always return no contact for a box, and `contacts_vs_goal_wall`
 //! deliberately ignores the window for one — see its own doc comment); and
@@ -296,6 +307,47 @@ pub fn standard_goal_cutout_fillets() -> Vec<StaticQuarterPipe> {
             FILLET_RADIUS,
             Vec3::new(1.0, 0.0, 0.0),
         ));
+    }
+
+    fillets
+}
+
+/// Compound-corner fillets at each goal's two top corners
+/// (`RB-PHYSICS-001-FR-026`) — the vertices where a post's own vertical
+/// fillet (`standard_goal_cutout_fillets`) meets the crossbar's own
+/// horizontal fillet, one per post per goal (4 total: 2 posts times 2
+/// goals). `standard_goal_cutout_fillets`' own doc comment flagged these as
+/// deliberately left as a sharp, unblended vertex; this closes that gap the
+/// same way `RB-PHYSICS-001-FR-023` closed the arena's own compound
+/// corners — via `StaticCornerFillet::between_three_planes` directly on the
+/// three real flat planes that meet there (the back wall, that post's own
+/// plane, and the crossbar), rather than from the two edge fillets
+/// `standard_goal_cutout_fillets` builds at that vertex, since a corner
+/// fillet's center is already exactly their common axis intersection (see
+/// `between_three_planes`'s own doc comment). Reuses `FILLET_RADIUS`
+/// unchanged — unlike the arena's own diagonal-corner fillets
+/// (`RB-PHYSICS-001-FR-025`), both edge fillets meeting here already share
+/// one radius, so there's no mismatched-radius concern requiring a
+/// dedicated constant. The goal's other two corners, where a post meets the
+/// floor, aren't compound corners at all: the window's own bottom edge
+/// sits exactly at floor level, so nothing here is any different from an
+/// ordinary post fillet ending flush with the ground the ball already
+/// rolls on.
+pub fn standard_goal_corner_fillets() -> Vec<StaticCornerFillet> {
+    let crossbar = goal_crossbar_plane();
+    let mut fillets = Vec::with_capacity(4);
+
+    for &back_sign in &[1.0f32, -1.0] {
+        let wall = back_wall_plane(back_sign);
+        for &post_sign in &[1.0f32, -1.0] {
+            let post = goal_post_plane(post_sign);
+            fillets.push(StaticCornerFillet::between_three_planes(
+                &wall,
+                &post,
+                &crossbar,
+                FILLET_RADIUS,
+            ));
+        }
     }
 
     fillets
@@ -842,6 +894,48 @@ mod tests {
                     .any(|p| sits_radius_in(p, &fillet.axis_point)),
                 "expected {:?} to sit radius-in from a post or crossbar plane",
                 fillet.axis_point
+            );
+        }
+    }
+
+    #[test]
+    fn standard_goal_corner_fillets_has_four_fillets() {
+        assert_eq!(standard_goal_corner_fillets().len(), 4);
+    }
+
+    #[test]
+    fn every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar() {
+        // Each of the 4 fillets should sit exactly FILLET_RADIUS from
+        // *some* back wall, *some* post plane, and the crossbar plane
+        // simultaneously -- proving `between_three_planes` actually solved
+        // for the real triple intersection this goal's geometry produces,
+        // not just some arbitrary point (the same proof
+        // `every_standard_corner_fillets_center_sits_radius_in_from_a_floor_or_ceiling_a_side_or_back_wall_and_a_corner_wall`
+        // gives for the arena's own compound corners).
+        let back_walls = [back_wall_plane(1.0), back_wall_plane(-1.0)];
+        let post_planes = [goal_post_plane(1.0), goal_post_plane(-1.0)];
+        let crossbar = goal_crossbar_plane();
+        let sits_radius_in = |plane: &StaticPlane, point: &Vec3| {
+            (plane.signed_distance(point) - FILLET_RADIUS).abs() < 1e-2
+        };
+
+        for fillet in standard_goal_corner_fillets() {
+            assert!(
+                back_walls.iter().any(|p| sits_radius_in(p, &fillet.center)),
+                "expected {:?} to sit radius-in from a back wall",
+                fillet.center
+            );
+            assert!(
+                post_planes
+                    .iter()
+                    .any(|p| sits_radius_in(p, &fillet.center)),
+                "expected {:?} to sit radius-in from a post plane",
+                fillet.center
+            );
+            assert!(
+                sits_radius_in(&crossbar, &fillet.center),
+                "expected {:?} to sit radius-in from the crossbar",
+                fillet.center
             );
         }
     }
