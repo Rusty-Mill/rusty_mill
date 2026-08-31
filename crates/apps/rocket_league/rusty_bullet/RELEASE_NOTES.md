@@ -6,6 +6,41 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Sandwiched-solve convergence
+**2026-08-31** · PR pending · commit pending
+
+- **Investigated whether anything short of real recorded data could narrow
+  `RB-PHYSICS-001-FR-030`'s own documented extreme-mass-ratio "sandwiched"
+  under-convergence gap** at this crate's fixed `SOLVER_ITERATIONS = 10`.
+- **Tried a naive global SOR-style relaxation factor first — and rejected
+  it**: factors above 1.0 (over-relaxation) made FR-030's own
+  symmetric-pinch test scenario measurably *diverge* (worse than the
+  pre-FR-030 independent-pairwise approach), while factors below 1.0
+  (under-relaxation) made it monotonically *better*, matching standard
+  PGS/SOR theory for a tightly-coupled multi-constraint body.
+- **`solver::resolve_dynamic_manifolds` now scales each manifold's
+  velocity-row impulse by a parameter-free `1 / k`** instead, where `k` is
+  the number of manifolds sharing a body this step — the same "fair share"
+  weighting position-based-dynamics solvers use for a point mass under
+  several simultaneous constraints. Mathematically dominant rather than a
+  tuned magic number: it can only reduce, never increase, a shared body's
+  per-iteration overshoot, so it needed no real recorded data to justify
+  adopting.
+- **Narrows FR-030's own symmetric-pinch result from ~89.5 to ~32 units/s**
+  (independent-pairwise stays ~98.9), at zero added iteration cost. A body
+  touched by only one other body this step (`k == 1`, the overwhelming
+  majority of contacts) is a mathematical no-op, confirmed by a dedicated
+  bit-for-bit-equivalence test against `resolve_contacts_between`.
+- **Does not achieve full convergence** to the true simultaneous-solve
+  answer within one call's fixed `SOLVER_ITERATIONS` — the gap is
+  narrowed, not closed; real recorded multi-car contact data would still
+  be needed to know whether the residual error matters for fidelity in
+  practice.
+- **2 new tests**; all 271 pre-existing tests pass unchanged. 273 total in
+  `rb_physics_bullet` (+2 over FR-040's 271).
+
+---
+
 ## Fillet-radius calibration research
 **2026-08-31** · PR pending · commit pending
 

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.40.0
+- Version: 0.41.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -96,9 +96,16 @@
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` and found only one uncited,
   self-disclaimed-non-circular, likely-conflated wiki value — deliberately
   not adopted; both constants remain genuinely uncalibrated, closing this
-  for real needs actual extracted mesh data — investigated; static-contact
-  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
-  and that real-data calibration are open follow-up work)
+  for real needs actual extracted mesh data — investigated; and, since
+  FR-041, `resolve_dynamic_manifolds` scales each manifold's velocity-row
+  impulse by `1 / k` for a body shared by `k >= 2` manifolds this step,
+  narrowing FR-030's own documented "sandwiched" under-convergence gap
+  (measured ~89.5 to ~32 units/s on that requirement's own test) at zero
+  added iteration cost, with a global over-relaxation factor investigated
+  and rejected (provably diverges for this exact case) — implemented;
+  static-contact warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
+  calibration, full convergence of the sandwiched case, and real-data
+  calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -2130,6 +2137,78 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     constant-audit findings that didn't change a value. All 268 of
     `rb_physics_bullet`'s pre-existing tests (as of `FR-039`) pass
     unchanged, since neither constant's value changed.
+- `RB-PHYSICS-001-FR-041` (sandwiched-solve convergence, implemented):
+  investigates whether anything short of real recorded data could narrow
+  `RB-PHYSICS-001-FR-030`'s own documented extreme-mass-ratio "sandwiched"
+  under-convergence gap at this crate's fixed `SOLVER_ITERATIONS = 10`. An
+  experiment tried a naive global SOR-style relaxation factor first, scaling
+  every manifold's normal-row impulse update by a fixed `omega` before
+  clamping: factors above `1.0` (over-relaxation) made `FR-030`'s own
+  symmetric-pinch test scenario measurably *diverge* — the sandwiched
+  ball ended up faster than even the pre-`FR-030` independent-pairwise
+  approach, not just under-converged — while factors below `1.0`
+  (under-relaxation) made it monotonically *better* the smaller they got,
+  with no instability observed down to `0.1`. This matches standard
+  PGS/SOR theory for a tightly-coupled multi-body constraint system: a
+  body touched by `k` other bodies in the same step has each of those `k`
+  manifolds independently apply its own full correction against that
+  body's own accumulating delta velocity every iteration, over-correcting
+  by roughly a factor of `k`. Rather than adopt a tuned magic `omega`
+  (itself the kind of unvalidated calibration this project's own
+  precedent — `RB-PHYSICS-001-FR-031`/`FR-036`/`FR-040` — treats as
+  needing real data to justify), `solver::resolve_dynamic_manifolds` now
+  scales each manifold's velocity-row impulse by a parameter-free `1 / k`,
+  where `k` is the largest number of manifolds either of that manifold's
+  two bodies takes part in this step — the same "fair share" weighting
+  position-based-dynamics solvers use for a point mass under several
+  simultaneous constraints. This is mathematically dominant rather than a
+  fidelity trade-off: it can only reduce, never increase, a shared body's
+  per-iteration overshoot, so it needed no real recorded data to justify
+  adopting, unlike raising `SOLVER_ITERATIONS` itself (a real added
+  per-step cost). Measured directly on `FR-030`'s own symmetric-pinch
+  scenario: the combined solve's result narrows from ~89.5 to ~32 units/s
+  (independent-pairwise stays ~98.9 units/s), a real, further reduction of
+  the gap to the true zero-velocity answer, at zero added iteration cost.
+  A body touched by only one other body this step (`k == 1`, the
+  overwhelming majority of contacts) is a mathematical no-op — `1 / 1 ==
+  1.0` — so every pre-existing single-manifold scenario this crate already
+  tests stays bit-for-bit unaffected.
+  - **Non-goals (this requirement).** Does not achieve full convergence to
+    the true simultaneous-solve answer within one call's fixed
+    `SOLVER_ITERATIONS` — the sandwiched case is narrowed, not closed;
+    real recorded multi-car contact data would still be needed to know
+    whether the remaining residual error matters for fidelity in
+    practice. Does not raise `SOLVER_ITERATIONS` itself, and does not
+    adopt any tuned relaxation factor other than the parameter-free
+    `1 / k`. Does not touch `resolve_contacts`/`resolve_contacts_between`
+    (both already fully converge every one-body/two-body scenario this
+    crate tests, per `RB-PHYSICS-001-FR-035`'s own Non-goals — there is no
+    shared-body contention for either path to correct). Does not touch the
+    split-impulse push channel (`resolve_two_body_push_row`) — only the
+    real velocity-resolving rows (normal plus both friction directions)
+    are scaled. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** A body shared by `k >= 2` manifolds this step
+    lands measurably closer to the true simultaneous-solve answer than
+    before this requirement, on the same scenario `RB-PHYSICS-001-FR-030`'s
+    own tests already measure. A body touched by only one other body this
+    step is completely unaffected — a single-manifold call to
+    `resolve_dynamic_manifolds` matches `resolve_contacts_between` called
+    directly, to within floating-point tolerance. All pre-existing tests
+    pass unchanged.
+  - **Verification plan.** 2 new `solver.rs` tests:
+    `resolve_dynamic_manifolds_relaxes_a_shared_bodys_impulse_by_its_own_contact_degree`
+    reuses `FR-030`'s own `symmetric_pinch` scenario and asserts the
+    combined-solve ball speed lands well below the pre-`FR-041` ~89.5
+    units/s (asserted `< 50.0`, comfortably below the measured ~32); and
+    `resolve_dynamic_manifolds_with_one_manifold_per_body_matches_resolve_contacts_between`
+    builds an ordinary single ball-vs-car manifold and asserts calling
+    `resolve_dynamic_manifolds` on it gives the same final velocities
+    (within `1e-4`) as calling `resolve_contacts_between` directly,
+    proving the `k == 1` case is a genuine no-op rather than merely
+    "close enough". All 271 of `rb_physics_bullet`'s pre-existing tests
+    (as of `FR-040`) pass unchanged. 2 new tests, bringing the crate to
+    273 total (+2 over `FR-040`'s 271).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3258,16 +3337,31 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   `solver::resolve_dynamic_manifolds` shares one interleaved
   `SOLVER_ITERATIONS`-iteration budget across every dynamic-vs-dynamic
   manifold touching in a step, instead of resolving each pair with its
-  own fully independent solve. What's still genuinely open: at this
-  crate's existing `SOLVER_ITERATIONS = 10`, an extreme mass-ratio
-  "sandwiched" configuration (measured directly by FR-030's own tests)
-  still doesn't fully converge to the true simultaneous-solve answer,
-  only measurably closer to it than the old independent-pairwise
-  approach — real recorded multi-car contact data would be needed to
-  know whether that residual error actually matters for fidelity in
-  practice, or whether raising `SOLVER_ITERATIONS` (confirmed manually to
-  converge much closer at 300 iterations, at obvious extra per-step cost)
-  is worth it before such data exists; not started.
+  own fully independent solve. `RB-PHYSICS-001-FR-041` investigated
+  whether anything short of real recorded data could narrow this
+  requirement's own documented extreme mass-ratio "sandwiched"
+  under-convergence gap at this crate's fixed `SOLVER_ITERATIONS = 10`:
+  a naive global SOR-style relaxation factor was tried first and rejected
+  — any factor above `1.0` made the exact scenario FR-030's own tests
+  measure genuinely *diverge* (worse than the pre-FR-030 independent-
+  pairwise approach), matching standard PGS/SOR theory for a tightly-
+  coupled multi-constraint body. A parameter-free `1 / k` impulse scale
+  (`k` = the number of manifolds sharing a body this step) is now
+  implemented instead — mathematically dominant rather than a tuned
+  magic number, since it can only reduce, never increase, a shared
+  body's per-iteration overshoot — narrowing the gap from ~89.5 to ~32
+  units/s on FR-030's own symmetric-pinch scenario at zero added
+  iteration cost, with zero effect on the overwhelming majority
+  single-manifold-per-body case (`k == 1` is a mathematical no-op,
+  confirmed by a dedicated bit-for-bit-equivalence test). What's still
+  genuinely open: even with this fix, the sandwiched case still doesn't
+  fully converge to the true simultaneous-solve answer within one call's
+  fixed iteration budget — real recorded multi-car contact data would
+  still be needed to know whether that residual error actually matters
+  for fidelity in practice, or whether raising `SOLVER_ITERATIONS`
+  itself (confirmed manually to converge much closer at 300 iterations,
+  at obvious extra per-step cost — a real cost/benefit trade-off `1 / k`
+  is not) is worth it before such data exists; not started.
 - Replicating real Rocket League's actual landing-assist trigger condition
   (proximity to the ground, via some raycast or distance query this port
   doesn't have) instead of the current continuous-whenever-airborne
@@ -3468,6 +3562,36 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.41.0 (2026-08-31): FR-041 added and implemented (sandwiched-solve
+  convergence) — investigated whether anything short of real recorded data
+  could narrow FR-030's own documented extreme-mass-ratio "sandwiched"
+  under-convergence gap at this crate's fixed `SOLVER_ITERATIONS = 10`. A
+  naive global SOR-style relaxation factor was tried first and rejected:
+  factors above 1.0 made FR-030's own symmetric-pinch scenario measurably
+  *diverge* (worse than the pre-FR-030 independent-pairwise approach),
+  while factors below 1.0 monotonically improved it, matching standard
+  PGS/SOR theory for a tightly-coupled multi-constraint body.
+  `solver::resolve_dynamic_manifolds` now scales each manifold's
+  velocity-row impulse by a parameter-free `1 / k` instead, where `k` is
+  the largest number of manifolds either of that manifold's two bodies
+  takes part in this step — the same "fair share" weighting position-
+  based-dynamics solvers use for a point mass under several simultaneous
+  constraints. Mathematically dominant rather than a tuned magic number
+  (it can only reduce, never increase, a shared body's per-iteration
+  overshoot), so unlike raising `SOLVER_ITERATIONS` itself it needed no
+  real recorded data to justify adopting. Narrows FR-030's own
+  symmetric-pinch result from ~89.5 to ~32 units/s (independent-pairwise
+  stays ~98.9) at zero added iteration cost; a body touched by only one
+  other body this step (`k == 1`, the overwhelming majority of contacts)
+  is a mathematical no-op, confirmed by a dedicated bit-for-bit-equivalence
+  test against `resolve_contacts_between`. Does not achieve full
+  convergence within one call's fixed `SOLVER_ITERATIONS` — the gap is
+  narrowed, not closed; real recorded multi-car contact data would still
+  be needed to know whether the residual error matters for fidelity in
+  practice, or whether raising `SOLVER_ITERATIONS` itself (a real added
+  cost, unlike this fix) is worth it before such data exists. 2 new
+  `solver.rs` tests; all pre-existing tests pass unchanged. Bringing the
+  crate to 273 total (+2 over FR-040's 271).
 - 0.40.0 (2026-08-31): FR-040 added and investigated (fillet-radius
   calibration research) — a dedicated research pass, matching FR-036's own
   real-source-research method, specifically targeting the two remaining

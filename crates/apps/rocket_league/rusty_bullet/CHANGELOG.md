@@ -513,6 +513,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   constants remain unchanged and genuinely uncalibrated; closing this for
   real needs actual extracted collision-mesh geometry. No new tests
   (documentation-only); all pre-existing tests pass unchanged.
+- `solver::resolve_dynamic_manifolds` (`RB-PHYSICS-001-FR-041`) —
+  investigated whether anything short of real recorded data could narrow
+  FR-030's own documented extreme-mass-ratio "sandwiched"
+  under-convergence gap. A naive global over-relaxation factor was tried
+  and rejected (provably diverges for that exact case); each manifold's
+  velocity-row impulse now scales by a parameter-free `1 / k` instead
+  (`k` = the number of manifolds sharing a body this step) — narrowing
+  FR-030's own result from ~89.5 to ~32 units/s at zero added iteration
+  cost, with zero effect on the overwhelming majority single-manifold
+  case. 2 new tests; all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

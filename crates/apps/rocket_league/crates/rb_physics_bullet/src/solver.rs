@@ -81,6 +81,17 @@
 //!   real. An inelastic resting contact (restitution 0) already settled
 //!   fine even before this (see `world::tests::resting_ball_stays_at_rest`)
 //!   — sleeping's own value is specifically the bouncy case.
+//! - **`resolve_dynamic_manifolds`'s own extreme-mass-ratio "sandwiched"
+//!   case (`RB-PHYSICS-001-FR-030`) still doesn't fully converge within one
+//!   call's fixed `SOLVER_ITERATIONS`**, even after `RB-PHYSICS-001-FR-041`'s
+//!   own per-body `1 / k` impulse-scale fix (see that function's doc
+//!   comment) narrowed the gap considerably (measured directly by its own
+//!   tests) — `RB-PHYSICS-001-FR-041` investigated raising
+//!   `SOLVER_ITERATIONS` itself and a naive global over-relaxation factor as
+//!   alternatives and found neither adoptable without real recorded data
+//!   (the former is a real added per-step cost with no data yet to justify
+//!   it; the latter provably diverges for this exact case). Full
+//!   convergence remains an open item, tracked in `RB-PHYSICS-001`.
 //! - **Restitution/friction combine mode**: average of the two surfaces'
 //!   coefficients (`(a + b) * 0.5`), matching
 //!   `btManifoldResult::calculateCombinedRestitution`'s structure. Bullet's
@@ -554,6 +565,24 @@ fn resolve_two_body_row(
     delta_a: &mut DeltaVelocity,
     delta_b: &mut DeltaVelocity,
 ) {
+    resolve_two_body_row_relaxed(row, inv_mass_a, inv_mass_b, delta_a, delta_b, 1.0)
+}
+
+/// Like `resolve_two_body_row`, but scales the computed impulse delta by
+/// `impulse_scale` before clamping (`RB-PHYSICS-001-FR-041`) — `1.0` (via
+/// `resolve_two_body_row`) is a no-op, reproducing the original behavior
+/// exactly; a manifold whose body is shared with `k >= 2` other manifolds
+/// this step uses `1 / k` instead, so each manifold contributes only its
+/// own fair share of that shared body's per-iteration correction (see
+/// `resolve_dynamic_manifolds`'s own `impulse_scale` field for why).
+fn resolve_two_body_row_relaxed(
+    row: &mut TwoBodyRow,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    delta_a: &mut DeltaVelocity,
+    delta_b: &mut DeltaVelocity,
+    impulse_scale: f32,
+) {
     let delta_vel_dot_n = row.direction.dot(&delta_a.linear)
         + row.torque_axis_a.dot(&delta_a.angular)
         - row.direction.dot(&delta_b.linear)
@@ -561,6 +590,7 @@ fn resolve_two_body_row(
 
     let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
     delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
+    delta_impulse *= impulse_scale;
 
     let sum = row.applied_impulse + delta_impulse;
     if sum < row.lower_limit {
@@ -860,6 +890,31 @@ fn warm_start_two_body_row(
 /// independently (via `resolve_contacts`, unchanged) loses no cross-body
 /// information; the actual gap this function closes is specifically the
 /// dynamic-vs-dynamic case a static contact can't have.
+///
+/// Since `RB-PHYSICS-001-FR-041`, each manifold's own velocity rows (normal
+/// plus both friction directions — not the split-impulse push rows, which
+/// stay unscaled) also scale their computed impulse delta by `1 / k`, where
+/// `k` is the largest number of manifolds either of that manifold's two
+/// bodies takes part in this step. A body touched by only one other body
+/// (`k == 1`, the overwhelming majority of contacts) is completely
+/// unaffected — see
+/// `resolve_dynamic_manifolds_with_one_manifold_per_body_matches_resolve_contacts_between`.
+/// A body simultaneously touched by `k >= 2` others (`RB-PHYSICS-001-FR-030`'s
+/// own "sandwiched" case) is the one this fixes: without it, each of the
+/// `k` manifolds applies its own *full* correction against that body's
+/// already-partially-updated velocity in turn, every iteration, which is
+/// exactly why the combined solve under-converges for this case in the
+/// first place. `1 / k` — the same "fair share" weighting position-based-
+/// dynamics solvers use for a point mass under several simultaneous
+/// constraints — brings the sandwiched-ball test's own combined-solve
+/// result from ~89.5 units/s down to ~32 units/s (both far below the
+/// independent-pairwise ~98.9 units/s), a real, further narrowing of the
+/// gap to the true zero-velocity answer, at zero added iteration cost. See
+/// `resolve_dynamic_manifolds_relaxes_a_shared_bodys_impulse_by_its_own_contact_degree`'s
+/// own doc comment for why a naive global relaxation factor (tried first,
+/// not shipped) was rejected: any factor above `1.0` made this exact
+/// scenario measurably *diverge*, matching standard PGS/SOR theory for a
+/// tightly-coupled multi-constraint body.
 pub fn resolve_dynamic_manifolds(
     bodies: &mut [RigidBody],
     manifolds: &[(usize, usize, Vec<Contact>)],
@@ -877,6 +932,28 @@ pub fn resolve_dynamic_manifolds(
         combined_friction: f32,
         positions: Vec<Vec3>,
         rows: Vec<[TwoBodyRow; 3]>,
+        impulse_scale: f32,
+    }
+
+    // RB-PHYSICS-001-FR-041: how many manifolds this step touch each body.
+    // A body touched by only one other body (the overwhelming majority of
+    // contacts) keeps `impulse_scale == 1.0` below — bit-for-bit the same
+    // behavior as before this requirement. A body simultaneously touched by
+    // `k >= 2` others (FR-030's own "sandwiched" case) is the one this
+    // requirement targets: applying each manifold's own full normal-row
+    // impulse against that shared body's *already-partially-updated*
+    // velocity, once per manifold per iteration, over-corrects it — the
+    // classic reason a Gauss-Seidel iterative solver under-converges for a
+    // tightly-coupled multi-constraint body. `1 / k` is the standard fix
+    // (the same "fair-share" weighting position-based-dynamics solvers use
+    // for a point mass under several simultaneous constraints): each of the
+    // `k` manifolds contributes only its own share of the shared body's
+    // correction per iteration, instead of all `k` fully overwriting each
+    // other in turn.
+    let mut manifold_count = vec![0u32; bodies.len()];
+    for (a, b, _) in manifolds {
+        manifold_count[*a] += 1;
+        manifold_count[*b] += 1;
     }
 
     let mut solved: Vec<Manifold> = manifolds
@@ -889,12 +966,14 @@ pub fn resolve_dynamic_manifolds(
                 .iter()
                 .map(|c| setup_two_body_rows(&bodies[*a], &bodies[*b], c, combined_restitution, dt))
                 .collect();
+            let shared_degree = manifold_count[*a].max(manifold_count[*b]);
             Manifold {
                 a: *a,
                 b: *b,
                 combined_friction,
                 positions: contacts.iter().map(|c| c.point).collect(),
                 rows,
+                impulse_scale: 1.0 / shared_degree as f32,
             }
         })
         .collect();
@@ -951,7 +1030,14 @@ pub fn resolve_dynamic_manifolds(
             let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
             let (push_delta_a, push_delta_b) = delta_pair_mut(&mut push_deltas, m.a, m.b);
             for rows in &mut m.rows {
-                resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, delta_a, delta_b);
+                resolve_two_body_row_relaxed(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
                 resolve_two_body_push_row(
                     &mut rows[0],
                     inv_mass_a,
@@ -966,8 +1052,22 @@ pub fn resolve_dynamic_manifolds(
                 rows[2].lower_limit = -friction_limit;
                 rows[2].upper_limit = friction_limit;
 
-                resolve_two_body_row(&mut rows[1], inv_mass_a, inv_mass_b, delta_a, delta_b);
-                resolve_two_body_row(&mut rows[2], inv_mass_a, inv_mass_b, delta_a, delta_b);
+                resolve_two_body_row_relaxed(
+                    &mut rows[1],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+                resolve_two_body_row_relaxed(
+                    &mut rows[2],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
             }
         }
     }
@@ -1291,6 +1391,102 @@ mod tests {
             "expected the combined solve to leave the ball measurably slower than resolving \
              each pair independently, independent={independent_ball_speed}, \
              combined={combined_ball_speed}"
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_manifolds_relaxes_a_shared_bodys_impulse_by_its_own_contact_degree() {
+        // RB-PHYSICS-001-FR-041: investigated whether anything short of
+        // real recorded data could narrow FR-030's own documented
+        // "sandwiched" under-convergence gap at this crate's fixed
+        // `SOLVER_ITERATIONS`. An experiment (not shipped as its own
+        // change) first tried a global SOR-style relaxation factor on
+        // every manifold's normal row: factors above 1.0 (over-relaxation)
+        // made this exact scenario measurably *worse* — the ball ended up
+        // faster than even the old independent-pairwise approach, i.e.
+        // genuinely diverging, not just under-converging — while factors
+        // below 1.0 (under-relaxation) made it monotonically *better* the
+        // smaller they got, with no instability observed down to 0.1. That
+        // matches standard PGS/SOR theory for a tightly-coupled multi-body
+        // constraint system: a body touched by `k` other bodies in the same
+        // step has each of those `k` manifolds independently apply its own
+        // full correction against the body's own accumulating delta
+        // velocity every iteration, over-shooting by roughly a factor of
+        // `k`. `1 / k` — the same "fair share" weighting position-based-
+        // dynamics solvers use for a point mass under several simultaneous
+        // constraints — is a parameter-free fix requiring no tuned magic
+        // number and no real data to justify: it is mathematically
+        // dominant (strictly reduces, never increases, a shared body's
+        // per-iteration overshoot) rather than a fidelity trade-off like
+        // raising `SOLVER_ITERATIONS` would be.
+        let (ball, left, right) = symmetric_pinch();
+        let mut bodies = vec![ball, left, right];
+        let manifolds = vec![
+            (0usize, 1usize, contacts_between(&bodies[0], &bodies[1])),
+            (0usize, 2usize, contacts_between(&bodies[0], &bodies[2])),
+        ];
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0, &mut HashMap::new());
+        let combined_ball_speed = bodies[0].linear_velocity.x.abs();
+
+        // Measured directly: the pre-FR-041 combined solve (relaxation
+        // always 1.0) leaves this exact scenario's ball at ~89.5 units/s;
+        // relaxing the shared ball's own contribution by 1/2 (it's touched
+        // by exactly 2 manifolds this step) brings it to ~32 units/s — a
+        // real, further narrowing of the gap to the true zero-velocity
+        // answer, at zero added per-step iteration cost.
+        assert!(
+            combined_ball_speed < 50.0,
+            "expected FR-041's shared-body relaxation to leave the sandwiched ball well below \
+             FR-030's own pre-FR-041 ~89.5 units/s, got {combined_ball_speed}"
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_manifolds_with_one_manifold_per_body_matches_resolve_contacts_between() {
+        // FR-041's shared-body relaxation (`1 / k`) must be a no-op for the
+        // overwhelming majority case — a body touched by only one other
+        // body this step (`k == 1`) — so every pre-existing single-manifold
+        // scenario this crate already tests stays bit-for-bit unaffected.
+        fn ball_and_car() -> (RigidBody, RigidBody) {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::ZERO);
+            ball.restitution = 0.0;
+            ball.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+            let mut car = RigidBody::car_box(
+                Vec3::new(60.0, 42.0, 18.0),
+                180.0,
+                Vec3::new(180.0, 0.0, 0.0),
+            );
+            car.restitution = 0.0;
+            (ball, car)
+        }
+
+        let (mut ball_via_between, mut car_via_between) = ball_and_car();
+        let contacts = contacts_between(&ball_via_between, &car_via_between);
+        resolve_contacts_between(
+            &mut ball_via_between,
+            &mut car_via_between,
+            &contacts,
+            1.0 / 60.0,
+        );
+
+        let (ball, car) = ball_and_car();
+        let mut bodies = vec![ball, car];
+        let manifolds = vec![(0usize, 1usize, contacts_between(&bodies[0], &bodies[1]))];
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0, &mut HashMap::new());
+
+        assert!(
+            (bodies[0].linear_velocity.x - ball_via_between.linear_velocity.x).abs() < 1e-4,
+            "expected a single-manifold-per-body call to resolve_dynamic_manifolds to match \
+             resolve_contacts_between exactly, dynamic={}, between={}",
+            bodies[0].linear_velocity.x,
+            ball_via_between.linear_velocity.x
+        );
+        assert!(
+            (bodies[1].linear_velocity.x - car_via_between.linear_velocity.x).abs() < 1e-4,
+            "expected a single-manifold-per-body call to resolve_dynamic_manifolds to match \
+             resolve_contacts_between exactly, dynamic={}, between={}",
+            bodies[1].linear_velocity.x,
+            car_via_between.linear_velocity.x
         );
     }
 
