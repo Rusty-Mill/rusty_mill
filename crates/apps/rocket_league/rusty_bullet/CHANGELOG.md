@@ -576,6 +576,21 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   adopted, since this function's only production call site always
   receives an already-renormalized orientation. 1 new test pins this;
   all pre-existing tests pass unchanged.
+- `collision::sphere_vs_plane`/`box_vs_plane`/`sphere_vs_box`/
+  `sphere_vs_sphere` (`RB-PHYSICS-001-FR-047`) — fetched and read Bullet's
+  real `btConvexPlaneCollisionAlgorithm.cpp`/`.h`,
+  `btSphereBoxCollisionAlgorithm.cpp`,
+  `btSphereSphereCollisionAlgorithm.cpp`, and `btManifoldPoint.h` and
+  confirmed `sphere_vs_plane`/`sphere_vs_sphere` exact, and
+  `sphere_vs_box`'s deep-penetration face selection confirmed to
+  reproduce Bullet's own exact `+x, -x, +y, -y, +z, -z` face-check
+  tie-break order. Found `box_vs_plane` computes all 4 corners exactly in
+  one pass, where real Bullet's default configuration produces only one
+  contact point per frame via a single GJK support query, relying on
+  several frames of persistent-manifold accumulation to reach the same
+  4-corner manifold — a favorable divergence, not adopted, in the same
+  spirit as `box_vs_box`'s own FR-042 finding. 1 new test pins the exact
+  tie-break-order match; all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

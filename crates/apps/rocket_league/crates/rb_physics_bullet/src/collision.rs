@@ -7,6 +7,15 @@
 //! arbitrarily-oriented boxes have no such shortcut. `PhysicsWorld` now
 //! calls `box_vs_box` (via `contacts_between`) for every pair of cars in
 //! its scene, not just as a unit-tested-in-isolation capability.
+//!
+//! Since `RB-PHYSICS-001-FR-047`, every closed-form test here
+//! (`sphere_vs_plane`, `box_vs_plane`, `sphere_vs_box`, `sphere_vs_sphere`)
+//! has been checked directly against Bullet's own real
+//! `btConvexPlaneCollisionAlgorithm`/`btSphereBoxCollisionAlgorithm`/
+//! `btSphereSphereCollisionAlgorithm` source — see each function's own doc
+//! comment for its finding, and `box_vs_plane`'s in particular for the one
+//! genuine, deliberate divergence found (already the case for `box_vs_box`
+//! since `RB-PHYSICS-001-FR-042`).
 
 use crate::body::{RigidBody, Shape};
 use rb_domain::{Quat, Vec3};
@@ -38,6 +47,14 @@ use crate::body::{
 /// plane is always `position - normal * radius`, so the general
 /// closest-point search Bullet's narrow phase would otherwise run reduces
 /// to a single distance comparison.
+///
+/// Confirmed against real `btConvexPlaneCollisionAlgorithm::processCollision`
+/// (`RB-PHYSICS-001-FR-047`): for a sphere, its GJK support vertex along
+/// `-planeNormal` is exactly `center - radius * planeNormal`, so this
+/// closed form is Bullet's own real algorithm reduced analytically, not an
+/// approximation of it — same `distance`/`pOnB`/`normalOnSurfaceB`
+/// (`= plane.getWorldTransform().getBasis() * planeNormal`, matching this
+/// function's own `normal: plane.normal`) conventions confirmed exact.
 fn sphere_vs_plane(position: Vec3, radius: f32, plane: &StaticPlane) -> Option<Contact> {
     let center_distance = plane.signed_distance(&position);
     let gap = center_distance - radius;
@@ -65,6 +82,30 @@ fn sphere_vs_plane(position: Vec3, radius: f32, plane: &StaticPlane) -> Option<C
 /// generally directly "below" the body's center along the plane normal,
 /// and the solver needs the true contact-to-center offset (`rel_pos`) to
 /// compute torque correctly.
+///
+/// **One genuine, deliberate divergence from real Bullet, found and not
+/// adopted (`RB-PHYSICS-001-FR-047`).** Real
+/// `btConvexPlaneCollisionAlgorithm::processCollision` does NOT compute
+/// every extreme corner in one pass: it calls a single GJK
+/// `localGetSupportingVertex` query along `-planeNormal`, producing
+/// exactly *one* contact point per frame — a box resting flat on a plane
+/// gets a persistent-manifold-accumulated set of up to 4 points only
+/// gradually, as numerical jitter shifts which corner the single support
+/// query happens to return frame to frame (its own optional "perturbation"
+/// multi-point path — `m_numPerturbationIterations` re-querying the
+/// support vertex at several rotated orientations — is configured off by
+/// default: `btConvexPlaneCollisionAlgorithm::CreateFunc`'s own real
+/// default is `m_numPerturbationIterations = 1`,
+/// `m_minimumPointsPerturbationThreshold = 0`, so the perturbation loop's
+/// own `getNumContacts() < m_minimumPointsPerturbationThreshold` guard is
+/// never true). This function's own instantaneous, exact 4-corner
+/// computation is a deliberate, more rigorous simplification of that real
+/// single-vertex-plus-persistence dance — same favorable divergence
+/// already established for `box_vs_box` against `dBoxBox`
+/// (`RB-PHYSICS-001-FR-042`) — not adopted, since replicating Bullet's own
+/// frame-by-frame settling behavior here would only reintroduce several
+/// frames of a box "sinking in" before all 4 corners register, with no
+/// compensating benefit.
 fn box_vs_plane(
     position: Vec3,
     orientation: Quat,
@@ -517,6 +558,31 @@ pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) 
 /// a single point: the box's three face axes are the only separating axes
 /// that can possibly apply, so picking whichever face is nearest (least
 /// negative penetration) is exact, not approximate.
+///
+/// Both cases confirmed against real
+/// `btSphereBoxCollisionAlgorithm::getSphereDistance`/`getSpherePenetration`
+/// (`RB-PHYSICS-001-FR-047`): the outside case's clamp-then-normalize is
+/// the same closest-point construction, and the deep-penetration case's
+/// per-axis-margin-then-sign selection below is confirmed to reproduce
+/// `getSpherePenetration`'s own face-checking order exactly, not just a
+/// mathematically-equivalent alternative — that function initializes to
+/// the `+x` face and only overrides on a *strictly* smaller distance,
+/// checking `+x, -x, +y, -y, +z, -z` in that order, so an exact tie always
+/// resolves to whichever of those is checked earliest. Comparing per-axis
+/// margins with `<=` (below) reproduces the same axis preference
+/// (`x` over `y` over `z`), and `sign(local_center.<axis>) >= 0.0`
+/// reproduces the same within-axis preference (`+` over `-`) — see
+/// `sphere_embedded_at_an_axis_tie_prefers_the_lower_axis_like_bullets_own_face_check_order`
+/// for a worked, non-symmetric case pinning this exactly. One numeric
+/// difference found and not adopted: this function's outside/inside
+/// branch threshold is `outside_distance > 1e-6` (linear), while real
+/// Bullet's is `dist2 <= SIMD_EPSILON` (squared, ~1.19e-7 — a linear
+/// distance of ~3.45e-4, roughly 2.5 orders of magnitude looser). Harmless
+/// either way: the only consequence is which branch runs in an
+/// astronomically narrow band right at the box's surface, and unlike a
+/// quaternion normalize (`RB-PHYSICS-001-FR-045`), dividing by a small but
+/// genuinely nonzero `outside_distance` here is numerically stable at any
+/// magnitude a `f32` can represent.
 fn sphere_vs_box(
     sphere_position: Vec3,
     radius: f32,
@@ -596,6 +662,20 @@ fn sphere_vs_box(
 /// doc comment for why a real net's mass-spring points reuse this crate's
 /// existing sphere shape and two-body solver path rather than a bespoke
 /// penalty-force system).
+///
+/// Confirmed byte-for-byte accurate against real
+/// `btSphereSphereCollisionAlgorithm::processCollision`
+/// (`RB-PHYSICS-001-FR-047`): `diff = posA - posB`,
+/// `normalOnSurfaceB = diff / len`, `pos1 = posB + radius1 * normalOnSurfaceB`,
+/// and `dist = len - (radius0 + radius1)` all match this function's
+/// `delta`/`normal`/`point`/`gap` exactly. Two harmless, non-adopted
+/// numeric differences: the degenerate-coincident-centers threshold here
+/// is `dist > 1e-6` vs. real Bullet's `len > SIMD_EPSILON` (~1.19e-7 —
+/// same one-order-of-magnitude-tighter pattern as `sphere_vs_box`, above,
+/// and `integrate_transform`, `RB-PHYSICS-001-FR-045`), and the arbitrary
+/// fallback direction for that unreachable-in-practice case is `(0, 0, 1)`
+/// here vs. Bullet's own `(1, 0, 0)` default — an arbitrary choice on both
+/// sides, so no behavioral divergence either way.
 fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> Option<Contact> {
     let delta = pos_a - pos_b;
     let dist = delta.length();
@@ -1252,6 +1332,28 @@ mod tests {
         let contacts = contacts_between(&ball, &stationary_car());
         assert!((contacts[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
         assert!(contacts[0].penetration_depth > 0.0);
+    }
+
+    #[test]
+    fn sphere_embedded_at_an_axis_tie_prefers_the_lower_axis_like_bullets_own_face_check_order() {
+        // RB-PHYSICS-001-FR-047: half_extents/position chosen so the box's
+        // own -x face and +y face are *exactly* tied at margin 3.0 (the z
+        // faces sit at margin 100.0, never in contention). Real Bullet's
+        // `getSpherePenetration` checks faces in a fixed
+        // +x, -x, +y, -y, +z, -z order, only overriding its running
+        // minimum on a *strictly* smaller distance — so on this exact tie
+        // it settles on -x (checked before +y). A naive "first satisfying
+        // axis" scan in a different order, or one that didn't also
+        // prioritize the correct sign within an axis, could just as
+        // plausibly have picked +y here instead.
+        let car = RigidBody::car_box(Vec3::new(5.0, 5.0, 100.0), 180.0, Vec3::ZERO);
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-2.0, 2.0, 0.0));
+        let contacts = contacts_between(&ball, &car);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
+        // depth = margin (3.0) + radius (1.0): see the deep-penetration
+        // branch's own `(point, normal, -depth - radius)` gap construction.
+        assert!((contacts[0].penetration_depth - 4.0).abs() < 1e-5);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.46.0
+- Version: 0.47.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -146,7 +146,22 @@
   own `setRotation` does, safe only because this function's single
   production call site always receives an already-renormalized
   orientation — pinned by a new regression test — investigated, 1 new
-  test; static-contact warm-starting,
+  test; and, since FR-047, `collision.rs`'s remaining closed-form shape
+  pairings (`sphere_vs_plane`, `box_vs_plane`, `sphere_vs_box`,
+  `sphere_vs_sphere`) were checked directly against fetched
+  `btConvexPlaneCollisionAlgorithm`/`btSphereBoxCollisionAlgorithm`/
+  `btSphereSphereCollisionAlgorithm` source: `sphere_vs_plane` and
+  `sphere_vs_sphere` confirmed exact, `sphere_vs_box`'s deep-penetration
+  face selection confirmed to reproduce Bullet's own exact face-check
+  tie-break order (not just a mathematically valid alternative one), and
+  one genuine, deliberate divergence found in `box_vs_plane` — real
+  Bullet's default configuration generates only one contact point per
+  frame via a single GJK support query, relying on several frames of
+  persistent-manifold accumulation to reach a resting box's full 4-corner
+  manifold, where this port computes all 4 corners exactly in one pass —
+  confirmed a more-rigorous simplification in the same spirit as
+  `box_vs_box`'s own FR-042 finding, not adopted — pinned by a new
+  regression test — investigated, 1 new test; static-contact warm-starting,
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
   of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
   selection, and real-data calibration (including which combine mode, if
@@ -2601,6 +2616,90 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     reference. All 276 of `rb_physics_bullet`'s pre-existing tests (as of
     `FR-045`) pass unchanged. 1 new test, bringing the crate to 277 total
     (+1 over `FR-045`'s 276).
+- `RB-PHYSICS-001-FR-047` (`collision.rs` remaining closed-form shape
+  pairings reference validation, investigated): `collision.rs`'s
+  `sphere_vs_plane`, `box_vs_plane`, `sphere_vs_box`, and `sphere_vs_sphere`
+  all claim to be closed-form reductions of specific real Bullet collision
+  algorithms — `box_vs_box` was already checked this way
+  (`RB-PHYSICS-001-FR-042`); this requirement fetched and read the
+  remaining four's own real references directly
+  (`btConvexPlaneCollisionAlgorithm.cpp`/`.h`,
+  `btSphereBoxCollisionAlgorithm.cpp`, `btSphereSphereCollisionAlgorithm.cpp`,
+  `btManifoldPoint.h`) and checked every specific claim against them.
+  1. **`sphere_vs_plane` and `sphere_vs_sphere` confirmed exact.** A
+     sphere's GJK support vertex along `-planeNormal` is exactly
+     `center - radius * planeNormal`, so `sphere_vs_plane` is Bullet's own
+     `btConvexPlaneCollisionAlgorithm::processCollision` reduced
+     analytically, not an approximation of it; `sphere_vs_sphere`'s
+     `diff`/`normalOnSurfaceB`/`pos1`/`dist` construction matches real
+     `btSphereSphereCollisionAlgorithm::processCollision` line for line.
+  2. **`sphere_vs_box`'s deep-penetration face selection confirmed to
+     reproduce Bullet's own exact tie-break order.** Real
+     `btSphereBoxCollisionAlgorithm::getSpherePenetration` initializes its
+     running minimum to the `+x` face and checks `+x, -x, +y, -y, +z, -z`
+     in that fixed order, only overriding on a *strictly* smaller
+     distance — so an exact tie always resolves to whichever face is
+     checked earliest. This function's own per-axis-margin-then-sign
+     approach was worked through several non-symmetric tied cases by hand
+     and confirmed to reproduce the identical resolution (`x` preferred
+     over `y` over `z` on an axis-level tie via `<=` comparisons; `+`
+     preferred over `-` within an axis via `sign(v) >= 0.0`), not merely a
+     different mathematically-valid alternative. Two harmless, unadopted
+     numeric-epsilon differences also found, in the same category as
+     `RB-PHYSICS-001-FR-045`'s degenerate-quaternion-guard finding: this
+     function's outside/inside-branch threshold is linear
+     (`outside_distance > 1e-6`) versus real Bullet's squared
+     (`dist2 <= SIMD_EPSILON`, ≈ a 2.5-orders-of-magnitude-looser linear
+     bound), and `sphere_vs_sphere`'s degenerate-coincident-centers
+     threshold (`1e-6`) versus Bullet's `SIMD_EPSILON` (~1.19e-7).
+  3. **A genuine, deliberate divergence found in `box_vs_plane`, not
+     adopted.** Real `btConvexPlaneCollisionAlgorithm` does not compute
+     every extreme corner in one pass: `processCollision` calls a single
+     GJK support-vertex query along `-planeNormal`, producing exactly one
+     contact point per frame. Its own optional multi-point "perturbation"
+     path exists specifically to approximate more contact points for a
+     resting polyhedral shape, but is configured off by real Bullet's own
+     default (`btConvexPlaneCollisionAlgorithm::CreateFunc`'s real default
+     is `m_numPerturbationIterations = 1`,
+     `m_minimumPointsPerturbationThreshold = 0`, making the perturbation
+     loop's own `getNumContacts() < m_minimumPointsPerturbationThreshold`
+     guard never true) — so a box resting flat on a plane only reaches a
+     4-point manifold gradually, via several frames of persistent-manifold
+     accumulation as numerical jitter shifts which corner the single
+     support query happens to return. This function's own instantaneous,
+     exact 4-corner computation is confirmed a deliberate, more rigorous
+     simplification of that real single-vertex-plus-persistence
+     dance — the same favorable divergence already established for
+     `box_vs_box` against `dBoxBox` (`RB-PHYSICS-001-FR-042`) — not
+     adopted, since replicating Bullet's own frame-by-frame settling
+     behavior would only reintroduce several frames of a box visibly
+     "sinking in" before all 4 corners register, with no compensating
+     benefit.
+  - **Non-goals (this requirement).** Does not change
+    `sphere_vs_plane`/`sphere_vs_box`/`sphere_vs_sphere`'s behavior — all
+    confirmed already exact or an already-correct favorable divergence,
+    nothing to change. Does not change `box_vs_plane` to match Bullet's
+    real single-contact-plus-persistence behavior (finding 3 above; this
+    port's own instantaneous exact computation is deliberately kept). Does
+    not touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still
+    blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** Every Bullet-reference claim in these four
+    functions' doc comments is now backed by a citation to the specific
+    fetched reference file and behavior it was checked against.
+    `sphere_vs_box`'s exact face-tie-break-order match is pinned by a
+    dedicated test using a non-symmetric tied case, so a future refactor
+    that changed the axis- or sign-preference order would fail a test
+    rather than silently diverging from Bullet's own tie-break behavior.
+    All pre-existing tests pass unchanged.
+  - **Verification plan.** 1 new `collision.rs` test:
+    `sphere_embedded_at_an_axis_tie_prefers_the_lower_axis_like_bullets_own_face_check_order`
+    embeds a sphere in a box at a position chosen so the box's own `-x`
+    and `+y` faces are exactly tied at margin 3.0, and asserts the
+    resulting contact picks `-x` (the face Bullet's own fixed
+    `+x, -x, +y, -y, +z, -z` check order would settle on), not `+y`.
+    All 277 of `rb_physics_bullet`'s pre-existing tests (as of `FR-046`)
+    pass unchanged. 1 new test, bringing the crate to 278 total (+1 over
+    `FR-046`'s 277).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3979,6 +4078,29 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.47.0 (2026-08-31): FR-047 added and investigated (`collision.rs`
+  remaining closed-form shape pairings reference validation) — fetched and
+  read Bullet's real `btConvexPlaneCollisionAlgorithm.cpp`/`.h`,
+  `btSphereBoxCollisionAlgorithm.cpp`, `btSphereSphereCollisionAlgorithm.cpp`,
+  and `btManifoldPoint.h` to check every Bullet-reference claim
+  `sphere_vs_plane`, `box_vs_plane`, `sphere_vs_box`, and `sphere_vs_sphere`
+  make (`box_vs_box` was already checked this way,
+  `RB-PHYSICS-001-FR-042`). Confirmed `sphere_vs_plane` and
+  `sphere_vs_sphere` exact, and `sphere_vs_box`'s deep-penetration face
+  selection confirmed to reproduce Bullet's own exact
+  `+x, -x, +y, -y, +z, -z` tie-break check order, not just a
+  mathematically-equivalent alternative — pinned by a new test using a
+  deliberately non-symmetric tied case. Found one genuine, deliberate
+  divergence: real `btConvexPlaneCollisionAlgorithm` generates only one
+  contact point per frame via a single GJK support query (its own
+  multi-point "perturbation" path is off by Bullet's own real default),
+  relying on several frames of persistent-manifold accumulation to reach a
+  resting box's full 4-corner manifold, where `box_vs_plane` computes all
+  4 corners exactly in one pass — not adopted, confirmed a favorable
+  divergence in the same spirit as `box_vs_box`'s own FR-042 finding. 1
+  new test, bringing `rb_physics_bullet` to 278 tests (+1 over FR-046's
+  277); investigated, doc-only changes to production code plus the 1 new
+  test — no other runtime behavior changed.
 - 0.46.0 (2026-08-31): FR-046 added and investigated (`body.rs`/`mat3.rs`
   reference validation) — fetched and read Bullet's real
   `btSphereShape.cpp`, `btBoxShape.cpp`, `btRigidBody.cpp`/`.h`, and
