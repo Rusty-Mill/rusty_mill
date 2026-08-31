@@ -3,7 +3,10 @@
 //! integrate) at fixed timestep — no substepping/interpolation yet, since
 //! nothing in this scope needs it (no CCD-worthy speeds).
 
-use crate::body::{RigidBody, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
+use crate::body::{
+    RigidBody, StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane,
+    StaticQuarterPipe,
+};
 use crate::collision;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
@@ -82,6 +85,13 @@ pub struct PhysicsWorld {
     /// single center-point test — see its own doc comment), so a car can
     /// now actually drive into a goal.
     pub goal_walls: Vec<StaticGoalWall>,
+    /// The goal box's own side walls and roof (`RB-PHYSICS-001-FR-029`),
+    /// added via `with_bounded_wall` — empty by default. Each only
+    /// collides within its own rectangular bound (see
+    /// `body::StaticBoundedWall`'s own doc comment for why an unbounded
+    /// plane there would be wrong); resolved for the ball and every car,
+    /// same as `goal_walls`.
+    pub bounded_walls: Vec<StaticBoundedWall>,
     pub gravity: Vec3,
     elapsed_secs: f32,
 }
@@ -112,6 +122,7 @@ impl PhysicsWorld {
             curves: Vec::new(),
             corner_fillets: Vec::new(),
             goal_walls: Vec::new(),
+            bounded_walls: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
         }
@@ -134,11 +145,15 @@ impl PhysicsWorld {
     /// 24 fillets and `arena::standard_goal_cutout_fillets()`'s 6, a
     /// `with_corner_fillet` call for each of
     /// `arena::standard_corner_fillets()`'s 16 fillets and
-    /// `arena::standard_goal_corner_fillets()`'s 4, and a `with_goal_wall`
-    /// call for each of `arena::standard_goal_walls()`'s 2 windowed walls —
-    /// still without a modeled goal interior/net beyond the cutout itself
-    /// (see `arena`'s module doc). Cars are added afterward with
-    /// `with_car`, exactly as with `PhysicsWorld::new`.
+    /// `arena::standard_goal_corner_fillets()`'s 4, a `with_goal_wall`
+    /// call for each of `arena::standard_goal_walls()`'s 2 windowed walls,
+    /// and, since `RB-PHYSICS-001-FR-029`, a modeled goal interior behind
+    /// each window: a `with_wall` call for each of
+    /// `arena::standard_goal_back_walls()`'s 2 plain back-of-net planes,
+    /// and a `with_bounded_wall` call for each of
+    /// `arena::standard_goal_side_walls()`'s 4 and
+    /// `arena::standard_goal_roofs()`'s 2 bounded side/roof walls. Cars are
+    /// added afterward with `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
@@ -158,6 +173,15 @@ impl PhysicsWorld {
         }
         for goal_wall in crate::arena::standard_goal_walls() {
             world = world.with_goal_wall(goal_wall);
+        }
+        for wall in crate::arena::standard_goal_back_walls() {
+            world = world.with_wall(wall);
+        }
+        for wall in crate::arena::standard_goal_side_walls() {
+            world = world.with_bounded_wall(wall);
+        }
+        for wall in crate::arena::standard_goal_roofs() {
+            world = world.with_bounded_wall(wall);
         }
         world
     }
@@ -203,6 +227,16 @@ impl PhysicsWorld {
     /// a car too.
     pub fn with_goal_wall(mut self, goal_wall: StaticGoalWall) -> PhysicsWorld {
         self.goal_walls.push(goal_wall);
+        self
+    }
+
+    /// Adds one bounded wall to the scene (`RB-PHYSICS-001-FR-029`) —
+    /// callable more than once, same pattern as `with_wall`; a scene with
+    /// no bounded walls added (the default) behaves exactly as before
+    /// they existed. Deflects both the ball and every car, same as
+    /// `goal_walls`.
+    pub fn with_bounded_wall(mut self, bounded_wall: StaticBoundedWall) -> PhysicsWorld {
+        self.bounded_walls.push(bounded_wall);
         self
     }
 
@@ -364,6 +398,24 @@ impl PhysicsWorld {
         }
     }
 
+    /// Like `resolve_goal_wall_contact`, but against a `StaticBoundedWall`
+    /// (`RB-PHYSICS-001-FR-029`) instead of a `StaticGoalWall` — resolved
+    /// for a box (car) exactly like a sphere (ball), via
+    /// `collision::contacts_vs_bounded_wall`'s per-corner bound treatment
+    /// for a box (see its own doc comment).
+    fn resolve_bounded_wall_contact(body: &mut RigidBody, wall: &StaticBoundedWall, dt: f32) {
+        let contacts = collision::contacts_vs_bounded_wall(body, wall);
+        if !contacts.is_empty() {
+            solver::resolve_contacts(
+                body,
+                wall.plane.restitution,
+                wall.plane.friction,
+                &contacts,
+                dt,
+            );
+        }
+    }
+
     /// Integrates `body`'s transform from its (already-resolved) velocity,
     /// then refreshes its world-space inertia tensor for the new
     /// orientation — the last phase of `stepSimulation`
@@ -489,6 +541,9 @@ impl PhysicsWorld {
         for goal_wall in &self.goal_walls {
             Self::resolve_goal_wall_contact(&mut self.ball, goal_wall, dt);
         }
+        for bounded_wall in &self.bounded_walls {
+            Self::resolve_bounded_wall_contact(&mut self.ball, bounded_wall, dt);
+        }
         for car in &mut self.cars {
             Self::resolve_plane_contact(car, &self.ground, dt);
             for wall in &self.walls {
@@ -502,6 +557,9 @@ impl PhysicsWorld {
             }
             for goal_wall in &self.goal_walls {
                 Self::resolve_goal_wall_contact(car, goal_wall, dt);
+            }
+            for bounded_wall in &self.bounded_walls {
+                Self::resolve_bounded_wall_contact(car, bounded_wall, dt);
             }
         }
 
@@ -1883,13 +1941,15 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_seven_walls_and_the_standard_ground() {
-        // 7, not 9 -- the back walls moved out of `standard_walls` and into
-        // `goal_walls` as of RB-PHYSICS-001-FR-024 (see
-        // `standard_arena_has_two_goal_walls`).
+    fn standard_arena_has_nine_walls_and_the_standard_ground() {
+        // 7 real arena walls (the back walls moved out of `standard_walls`
+        // and into `goal_walls` as of RB-PHYSICS-001-FR-024 -- see
+        // `standard_arena_has_two_goal_walls`) plus, since
+        // RB-PHYSICS-001-FR-029, 2 more plain planes for each goal box's
+        // own back-of-net wall (`standard_goal_back_walls`) -- 9 total.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.walls.len(), 7);
+        assert_eq!(world.walls.len(), 9);
         assert_eq!(world.ground, crate::arena::standard_ground());
     }
 
@@ -1908,6 +1968,15 @@ mod tests {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
         assert_eq!(world.goal_walls.len(), 2);
+    }
+
+    #[test]
+    fn standard_arena_has_six_bounded_walls() {
+        // 4 goal side walls (2 per goal) plus 2 goal roofs (1 per goal),
+        // since RB-PHYSICS-001-FR-029.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        let world = PhysicsWorld::standard_arena(ball);
+        assert_eq!(world.bounded_walls.len(), 6);
     }
 
     #[test]
@@ -2474,6 +2543,137 @@ mod tests {
             world.cars[0].position.y < crate::arena::BACK_WALL_Y - 1.0,
             "expected the car to be stopped by the solid part of the back wall, got y={}",
             world.cars[0].position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_into_the_goal_is_stopped_by_the_goal_back_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-029's own
+        // back-of-net wall: a ball fired straight toward the back of the
+        // goal box settles there instead of flying forever into unbounded
+        // open space the way it did before this requirement -- proof the
+        // goal box's own interior is bounded, not just the cutout itself.
+        //
+        // Isolated to just this one new wall via `PhysicsWorld::new` plus
+        // `with_wall`, rather than the full `PhysicsWorld::standard_arena`
+        // -- the standard arena's own goal-cutout fillets sit right at the
+        // window's edge, close enough to this scene's own path that the
+        // pre-existing "quarter-pipe sector membership is angle-only, not
+        // radially bounded" limitation (the same category noted in
+        // `StaticQuarterPipe`'s own doc comment and the FR-025 test-writing
+        // notes) can fire spuriously; a synthetic, single-wall scene proves
+        // this wall's own behavior without that unrelated interaction.
+        let mut ball = RigidBody::sphere(
+            92.75,
+            1.0,
+            Vec3::new(
+                0.0,
+                crate::arena::BACK_WALL_Y + 10.0,
+                crate::arena::GOAL_HEIGHT * 0.5,
+            ),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 400.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for mut wall in crate::arena::standard_goal_back_walls() {
+            wall.restitution = 0.0;
+            world = world.with_wall(wall);
+        }
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        let goal_back_wall_y = crate::arena::BACK_WALL_Y + crate::arena::GOAL_DEPTH;
+        assert!(
+            world.ball.position.y > crate::arena::BACK_WALL_Y
+                && world.ball.position.y < goal_back_wall_y + 5.0,
+            "expected the ball to settle inside the goal box against its own back wall, got y={}",
+            world.ball.position.y
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_sideways_inside_the_goal_is_stopped_by_a_goal_side_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-029's own side
+        // walls: a ball fired sideways across the goal's own width (not
+        // through the front window) settles against a goal side wall
+        // instead of flying through the main field's own much-wider side
+        // wall position. Isolated to just the 4 side walls via
+        // `with_bounded_wall`, for the same reason the back-wall test
+        // above is isolated -- see its own doc comment.
+        let mut ball = RigidBody::sphere(
+            92.75,
+            1.0,
+            Vec3::new(
+                0.0,
+                crate::arena::BACK_WALL_Y + crate::arena::GOAL_DEPTH * 0.5,
+                crate::arena::GOAL_HEIGHT * 0.5,
+            ),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(400.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for mut wall in crate::arena::standard_goal_side_walls() {
+            wall.plane.restitution = 0.0;
+            world = world.with_bounded_wall(wall);
+        }
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.x > 0.0
+                && world.ball.position.x < crate::arena::GOAL_HALF_WIDTH + 5.0,
+            "expected the ball to settle inside the goal box against its own side wall, got x={}",
+            world.ball.position.x
+        );
+    }
+
+    #[test]
+    fn a_ball_shot_upward_inside_the_goal_is_stopped_by_the_goal_roof() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-029's own roof: a
+        // ball fired straight up settles against the goal's own roof
+        // instead of flying up to the main arena's much higher real
+        // ceiling. Isolated to just the 2 roofs via `with_bounded_wall`,
+        // for the same reason the back-wall test above is isolated -- see
+        // its own doc comment.
+        let mut ball = RigidBody::sphere(
+            92.75,
+            1.0,
+            Vec3::new(
+                0.0,
+                crate::arena::BACK_WALL_Y + crate::arena::GOAL_DEPTH * 0.5,
+                crate::arena::GOAL_HEIGHT * 0.5,
+            ),
+        );
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, 400.0);
+
+        let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+        for mut wall in crate::arena::standard_goal_roofs() {
+            wall.plane.restitution = 0.0;
+            world = world.with_bounded_wall(wall);
+        }
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(3.0 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.ball.position.z > crate::arena::GOAL_HEIGHT * 0.5
+                && world.ball.position.z < crate::arena::GOAL_HEIGHT + 5.0,
+            "expected the ball to settle inside the goal box against its own roof, got z={}",
+            world.ball.position.z
         );
     }
 

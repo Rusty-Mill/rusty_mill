@@ -35,11 +35,16 @@
 //! `StaticGoalWall` each — since `RB-PHYSICS-001-FR-028`, both the ball and
 //! a car can pass through the window, the car via the same per-corner
 //! approach FR-027 established; see `collision::contacts_vs_goal_wall`'s
-//! own doc comment); `arena` builds
+//! own doc comment), and, since `RB-PHYSICS-001-FR-029`, a modeled goal
+//! interior behind each window (`with_bounded_wall`, a `StaticBoundedWall`
+//! each — collides only within its own rectangular bound, unlike a plain
+//! `StaticPlane`; see `body::StaticBoundedWall`'s own doc comment for why);
+//! `arena` builds
 //! Rocket League's actual standard-arena octagonal footprint, a ceiling, an
-//! actual goal-mouth opening in each back wall, and all 30 edge fillets
-//! plus 20 compound-corner fillets throughout its vertical boundary from
-//! that same machinery (`PhysicsWorld::standard_arena`) — 16 floor/
+//! actual goal-mouth opening in each back wall, all 30 edge fillets plus 20
+//! compound-corner fillets throughout its vertical boundary, and each
+//! goal's own bounded interior volume from that same machinery
+//! (`PhysicsWorld::standard_arena`) — 16 floor/
 //! ceiling-seam fillets (the 4 cardinal walls and, since
 //! `RB-PHYSICS-001-FR-021`, the 4 diagonal corner walls too, the latter
 //! since `RB-PHYSICS-001-FR-025` using a distinctly larger radius than the
@@ -48,22 +53,24 @@
 //! compound-corner fillets (since `RB-PHYSICS-001-FR-023`, one per vertex
 //! where a vertical-edge fillet meets a floor- or ceiling-seam fillet),
 //! since `RB-PHYSICS-001-FR-024`, 6 goal-cutout-edge fillets (two posts and
-//! a crossbar per goal) rounding each goal-mouth window's own rim, and,
-//! since `RB-PHYSICS-001-FR-026`, 4 more compound-corner fillets rounding
-//! each goal's own post-crossbar vertex.
+//! a crossbar per goal) rounding each goal-mouth window's own rim, since
+//! `RB-PHYSICS-001-FR-026`, 4 more compound-corner fillets rounding each
+//! goal's own post-crossbar vertex, and, since `RB-PHYSICS-001-FR-029`, a
+//! bounded box behind each goal's own window (2 plain back-of-net planes,
+//! 4 bounded side walls, 2 bounded roofs) so a ball or car passing through
+//! no longer sails into unbounded open space.
 //!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
 //! a combined multi-body solve across simultaneous contacts — `world::step`
 //! resolves each ball-vs-car and car-vs-car pair independently, one full
 //! solver pass at a time, which is an approximation once 3+ bodies are
 //! mutually touching in the same step (see `world`'s doc comment); split
-//! impulse; warm-starting/sleeping; a modeled goal interior/net beyond the
-//! cutout itself (since `RB-PHYSICS-001-FR-028`, a car can drive into a
-//! goal, just like the ball — but the goal opens onto open space, not a
-//! bounded net volume); and consuming a *recorded* input sequence —
-//! `PhysicsWorld::set_car_input` sets a car's current input (persisting
-//! until changed), but nothing yet drives that from real `RB-VERIFY-002`
-//! capture data frame-by-frame.
+//! impulse; warm-starting/sleeping; a *net* inside the goal box beyond its
+//! own bounding walls (`RB-PHYSICS-001-FR-029` models the box's own solid
+//! boundary, not a springy/catching net mesh); and consuming a *recorded*
+//! input sequence — `PhysicsWorld::set_car_input` sets a car's current
+//! input (persisting until changed), but nothing yet drives that from real
+//! `RB-VERIFY-002` capture data frame-by-frame.
 
 pub mod arena;
 pub mod body;
@@ -75,7 +82,8 @@ pub mod solver;
 pub mod world;
 
 pub use body::{
-    RigidBody, Shape, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
+    RigidBody, Shape, StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane,
+    StaticQuarterPipe,
 };
 pub use collision::Contact;
 pub use mat3::Mat3;
