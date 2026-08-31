@@ -28,7 +28,9 @@ pub struct Contact {
 /// bodies don't jitter between "touching" and "not touching" every frame.
 const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
 
-use crate::body::{StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
+use crate::body::{
+    StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
+};
 
 /// Analytic sphere-vs-plane contact: the sphere's closest point to the
 /// plane is always `position - normal * radius`, so the general
@@ -185,6 +187,77 @@ pub fn contacts_vs_goal_wall(body: &RigidBody, wall: &StaticGoalWall) -> Vec<Con
             .collect(),
         Shape::Box { half_extents } => {
             box_vs_goal_wall(body.position, body.orientation, half_extents, wall)
+        }
+    }
+}
+
+/// Like `sphere_vs_plane`, but against a `StaticBoundedWall`'s own bound
+/// (`RB-PHYSICS-001-FR-029`) — the opposite gate from `sphere_vs_goal_wall`:
+/// a sphere whose *center* falls outside the bound gets no contact at all,
+/// rather than one whose center falls inside it.
+fn sphere_vs_bounded_wall(
+    position: Vec3,
+    radius: f32,
+    wall: &StaticBoundedWall,
+) -> Option<Contact> {
+    if !wall.contains_in_bound(&position) {
+        return None;
+    }
+    sphere_vs_plane(position, radius, &wall.plane)
+}
+
+/// Like `box_vs_goal_wall`, but against a `StaticBoundedWall`'s own bound
+/// (`RB-PHYSICS-001-FR-029`) instead of a `StaticGoalWall`'s window — each
+/// of the box's 8 corners is tested individually against
+/// `contains_in_bound`, and a corner *outside* the bound contributes no
+/// contact (the opposite gate from `box_vs_goal_wall`'s own per-corner
+/// window test). A corner inside the bound falls through to an ordinary
+/// `box_vs_plane`-style corner test.
+fn box_vs_bounded_wall(
+    position: Vec3,
+    orientation: Quat,
+    half_extents: Vec3,
+    wall: &StaticBoundedWall,
+) -> Vec<Contact> {
+    let mut contacts = Vec::with_capacity(4);
+    for &sx in &[-1.0f32, 1.0] {
+        for &sy in &[-1.0f32, 1.0] {
+            for &sz in &[-1.0f32, 1.0] {
+                let local_corner = Vec3::new(
+                    sx * half_extents.x,
+                    sy * half_extents.y,
+                    sz * half_extents.z,
+                );
+                let world_corner = position + orientation.rotate(&local_corner);
+                if !wall.contains_in_bound(&world_corner) {
+                    continue;
+                }
+                let gap = wall.plane.signed_distance(&world_corner);
+                if gap <= CONTACT_PROCESSING_THRESHOLD {
+                    contacts.push(Contact {
+                        normal: wall.plane.normal,
+                        point: world_corner,
+                        penetration_depth: -gap,
+                    });
+                }
+            }
+        }
+    }
+    contacts
+}
+
+/// Dispatches a `StaticBoundedWall`'s contact generation by shape
+/// (`RB-PHYSICS-001-FR-029`) — used for the goal box's own side walls and
+/// roof, each only solid within a rectangular bound immediately behind the
+/// goal-mouth window (see `StaticBoundedWall`'s own doc comment for why an
+/// unbounded plane there would be wrong).
+pub fn contacts_vs_bounded_wall(body: &RigidBody, wall: &StaticBoundedWall) -> Vec<Contact> {
+    match body.shape {
+        Shape::Sphere { radius } => sphere_vs_bounded_wall(body.position, radius, wall)
+            .into_iter()
+            .collect(),
+        Shape::Box { half_extents } => {
+            box_vs_bounded_wall(body.position, body.orientation, half_extents, wall)
         }
     }
 }
@@ -1489,5 +1562,76 @@ mod tests {
         let unwindowed = contacts_vs_plane(&car, &wall.plane);
         assert_eq!(windowed, unwindowed);
         assert!(!windowed.is_empty());
+    }
+
+    /// A wall at x=20 (normal (-1,0,0)), bounded to a 10-wide (y), 30-tall
+    /// (z) rectangle centered at (20, 110, 30) -- the same fixture
+    /// `body::tests::bounded_wall` uses.
+    fn bounded_wall() -> StaticBoundedWall {
+        let plane = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -20.0);
+        StaticBoundedWall::new(
+            plane,
+            Vec3::new(20.0, 110.0, 30.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            10.0,
+            30.0,
+        )
+    }
+
+    #[test]
+    fn sphere_inside_the_bound_behaves_like_an_ordinary_plane() {
+        let wall = bounded_wall();
+        let s = RigidBody::sphere(1.0, 1.0, Vec3::new(19.5, 110.0, 30.0));
+        let contacts = contacts_vs_bounded_wall(&s, &wall);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - 0.5).abs() < 1e-5);
+        assert_eq!(contacts[0].normal, wall.plane.normal);
+    }
+
+    #[test]
+    fn sphere_outside_the_bound_has_no_contact() {
+        // Same position relative to the plane (0.5 units embedded) as the
+        // test above, but outside the bound's own y range -- would collide
+        // against a plain, unbounded `StaticPlane`, but not here.
+        let wall = bounded_wall();
+        let s = RigidBody::sphere(1.0, 1.0, Vec3::new(19.5, 130.0, 30.0));
+        assert!(contacts_vs_bounded_wall(&s, &wall).is_empty());
+    }
+
+    #[test]
+    fn box_squarely_inside_the_bound_behaves_like_an_ordinary_plane() {
+        let wall = bounded_wall();
+        let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(19.5, 110.0, 30.0));
+        let bounded = contacts_vs_bounded_wall(&car, &wall);
+        let unbounded = contacts_vs_plane(&car, &wall.plane);
+        assert_eq!(bounded, unbounded);
+        assert!(!bounded.is_empty());
+    }
+
+    #[test]
+    fn box_straddling_the_bounds_edge_only_collides_on_the_corners_still_inside_it() {
+        // A car centered exactly on the bound's own right edge (y=120) has
+        // half its corners (y=121) outside the bound and half (y=119)
+        // inside -- the opposite gate from `box_vs_goal_wall`'s own
+        // straddling test, but the same partial-collision shape.
+        let wall = bounded_wall();
+        let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(19.5, 120.0, 30.0));
+        let contacts = contacts_vs_bounded_wall(&car, &wall);
+        assert_eq!(
+            contacts.len(),
+            2,
+            "only the two inside-the-bound corners on the y=119 face should register a contact"
+        );
+        for contact in &contacts {
+            assert!(contact.point.y < 120.0);
+        }
+    }
+
+    #[test]
+    fn box_entirely_outside_the_bound_has_no_contact() {
+        let wall = bounded_wall();
+        let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(19.5, 200.0, 30.0));
+        assert!(contacts_vs_bounded_wall(&car, &wall).is_empty());
     }
 }

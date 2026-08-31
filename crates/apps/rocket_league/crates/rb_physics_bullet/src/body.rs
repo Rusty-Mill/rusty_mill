@@ -555,6 +555,59 @@ impl StaticGoalWall {
     }
 }
 
+/// An immovable flat `StaticPlane` that only collides *within* a
+/// rectangular bound in the plane's own local 2D frame (`u_axis`/`v_axis`)
+/// — the opposite convention from `StaticGoalWall`'s window, which
+/// collides everywhere *except* inside a rectangle (`RB-PHYSICS-001-FR-029`).
+/// Used to build the goal box's own side walls and roof: each only needs
+/// to be solid within the goal's own depth/height footprint immediately
+/// behind the goal-mouth window, not across the entire infinite plane a
+/// plain `StaticPlane` would otherwise be — an unbounded plane at, say,
+/// `x = arena::GOAL_HALF_WIDTH` would incorrectly wall off the *entire*
+/// main field at that x coordinate, the same problem `arena::
+/// goal_post_plane`'s own doc comment already documents for a different
+/// purely-geometric plane. See `arena::goal_side_wall`/`goal_roof` for the
+/// real standard-arena numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticBoundedWall {
+    pub plane: StaticPlane,
+    pub bound_center: Vec3,
+    pub u_axis: Vec3,
+    pub v_axis: Vec3,
+    pub half_u: f32,
+    pub half_v: f32,
+}
+
+impl StaticBoundedWall {
+    pub fn new(
+        plane: StaticPlane,
+        bound_center: Vec3,
+        u_axis: Vec3,
+        v_axis: Vec3,
+        half_u: f32,
+        half_v: f32,
+    ) -> StaticBoundedWall {
+        StaticBoundedWall {
+            plane,
+            bound_center,
+            u_axis,
+            v_axis,
+            half_u,
+            half_v,
+        }
+    }
+
+    /// Whether `point` falls within the bound's rectangle, projected onto
+    /// the plane's own `u_axis`/`v_axis` — same distance-along-normal-
+    /// independent test as `StaticGoalWall::contains_in_window`, just with
+    /// the opposite meaning once used to gate a contact (see this struct's
+    /// own doc comment).
+    pub fn contains_in_bound(&self, point: &Vec3) -> bool {
+        let rel = *point - self.bound_center;
+        rel.dot(&self.u_axis).abs() <= self.half_u && rel.dot(&self.v_axis).abs() <= self.half_v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,5 +1012,68 @@ mod tests {
         let wall = goal_wall_with_window();
         let far_in_front = wall.window_center + Vec3::new(0.0, -5000.0, 0.0);
         assert!(wall.contains_in_window(&far_in_front));
+    }
+
+    /// A goal side wall at x=20 (normal (-1,0,0), pointing back into the
+    /// goal box), bounded to a 10-wide (y), 30-tall (z) rectangle centered
+    /// at (20, 110, 30) -- vaguely proportioned like `arena`'s own real
+    /// goal side wall, just at a convenient round scale for these tests.
+    fn bounded_wall() -> StaticBoundedWall {
+        let plane = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -20.0);
+        StaticBoundedWall::new(
+            plane,
+            Vec3::new(20.0, 110.0, 30.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            10.0,
+            30.0,
+        )
+    }
+
+    #[test]
+    fn contains_in_bound_is_true_for_the_bounds_own_center() {
+        let wall = bounded_wall();
+        assert!(wall.contains_in_bound(&wall.bound_center));
+    }
+
+    #[test]
+    fn contains_in_bound_is_true_just_inside_each_edge() {
+        let wall = bounded_wall();
+        let just_inside = [
+            wall.bound_center + Vec3::new(0.0, 9.0, 0.0),
+            wall.bound_center + Vec3::new(0.0, -9.0, 0.0),
+            wall.bound_center + Vec3::new(0.0, 0.0, 29.0),
+            wall.bound_center + Vec3::new(0.0, 0.0, -29.0),
+        ];
+        for point in just_inside {
+            assert!(
+                wall.contains_in_bound(&point),
+                "expected {point:?} to be inside the bound"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_in_bound_is_false_just_outside_each_edge() {
+        let wall = bounded_wall();
+        let just_outside = [
+            wall.bound_center + Vec3::new(0.0, 11.0, 0.0),
+            wall.bound_center + Vec3::new(0.0, -11.0, 0.0),
+            wall.bound_center + Vec3::new(0.0, 0.0, 31.0),
+            wall.bound_center + Vec3::new(0.0, 0.0, -31.0),
+        ];
+        for point in just_outside {
+            assert!(
+                !wall.contains_in_bound(&point),
+                "expected {point:?} to be outside the bound"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_in_bound_ignores_distance_from_the_plane_itself() {
+        let wall = bounded_wall();
+        let far_in_front = wall.bound_center + Vec3::new(-5000.0, 0.0, 0.0);
+        assert!(wall.contains_in_bound(&far_in_front));
     }
 }

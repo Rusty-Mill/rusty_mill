@@ -348,6 +348,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   FR-027 — `resolve_goal_wall_contact` already ran for every car. Goal
   interior/net still not modeled — the goal opens onto open space for a
   car too, not a bounded volume.
+- `rb_physics_bullet::body`/`collision`/`arena` (`RB-PHYSICS-001-FR-029`) —
+  a modeled goal interior: new `body::StaticBoundedWall` collides only
+  *within* a rectangular bound (the opposite gate from `StaticGoalWall`'s
+  window), with new `collision::sphere_vs_bounded_wall`/
+  `box_vs_bounded_wall`/`contacts_vs_bounded_wall`. New
+  `arena::standard_goal_back_walls` (2 plain, unbounded planes `GOAL_DEPTH`
+  behind each real back wall — reachable only through the window, so
+  unbounded is exact here), `standard_goal_side_walls` (4 bounded walls,
+  reusing `goal_post_plane` unchanged) and `standard_goal_roofs` (2 bounded
+  walls, reusing `goal_crossbar_plane` unchanged) close the "ball/car
+  passes into open space" gap FR-024 through FR-028 all flagged. New
+  `PhysicsWorld.bounded_walls`/`with_bounded_wall`, resolved for the ball
+  and every car. Models a solid bounding volume, not a net mesh — no
+  cloth/soft-body simulation added.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

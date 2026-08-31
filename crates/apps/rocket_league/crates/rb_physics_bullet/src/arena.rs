@@ -87,14 +87,31 @@
 //! FR-027 established for curved geometry), rather than falling straight
 //! through to an unwindowed plane contact the way it did through FR-027.
 //!
-//! **Still not modeled**: the goal's own interior/net structure beyond the
-//! cutout itself (a ball or car passes into open space, not a bounded net
-//! volume); and any geometry finer than a single flat plane, single-radius
-//! edge fillet, or single-radius corner fillet per boundary segment (the
-//! real field mesh's corners and transitions are more complex than this).
-//! See `RB-PHYSICS-001`'s Non-goals.
+//! `standard_goal_back_walls`/`standard_goal_side_walls`/`standard_goal_roofs`
+//! (`RB-PHYSICS-001-FR-029`) model a bounded interior behind each
+//! goal-mouth window, closing the "a ball or car passes into open,
+//! unbounded space" gap FR-024 through FR-028's own doc comments flagged —
+//! 2 plain back-of-net planes (`goal_back_wall_plane`, `GOAL_DEPTH` behind
+//! the real back wall, reachable only through the window so an unbounded
+//! plane there is exact, not an approximation) plus 4 bounded side walls
+//! and 2 bounded roofs (`goal_side_wall`/`goal_roof`, each a
+//! `body::StaticBoundedWall` reusing `goal_post_plane`/`goal_crossbar_plane`
+//! unchanged but bounded to the goal's own depth/width/height footprint —
+//! an unbounded plane at either position would incorrectly wall off the
+//! *entire* main field, the same problem those planes' own doc comments
+//! already documented for their original, purely-geometric role).
+//!
+//! **Still not modeled**: a genuine net *mesh* inside the goal box (this
+//! models a solid bounding volume, not springy/catching netting a ball
+//! could tangle in or a real net's own visual sag); and any geometry finer
+//! than a single flat plane, single-radius edge fillet, or single-radius
+//! corner fillet per boundary segment (the real field mesh's corners and
+//! transitions are more complex than this). See `RB-PHYSICS-001`'s
+//! Non-goals.
 
-use crate::body::{StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
+use crate::body::{
+    StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
+};
 use rb_domain::Vec3;
 
 /// Side wall position (the field's half-width along X) — a commonly-cited
@@ -161,6 +178,14 @@ pub const GOAL_HALF_WIDTH: f32 = 892.755;
 /// Height of the goal-mouth window — same sourcing caveat as
 /// `GOAL_HALF_WIDTH`.
 pub const GOAL_HEIGHT: f32 = 642.775;
+
+/// Uncalibrated placeholder: how far behind the back wall the goal box's
+/// own interior extends (`RB-PHYSICS-001-FR-029`) — this port has no
+/// verified reference for Rocket League's actual net depth at all, unlike
+/// `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`; chosen only to be a visibly real
+/// interior volume (comparable in scale to the goal mouth's own
+/// dimensions), not measured from real field mesh data.
+pub const GOAL_DEPTH: f32 = 880.0;
 
 /// The floor: a flat plane at `z = 0`, normal `+Z` (up) — identical to the
 /// `flat_ground()` helper this crate's tests have used since v0, just
@@ -361,6 +386,96 @@ pub fn standard_goal_corner_fillets() -> Vec<StaticCornerFillet> {
     }
 
     fillets
+}
+
+/// The goal box's own back-of-net wall on the `sign`d side (`1.0` for
+/// `+Y`, `-1.0` for `-Y`), `GOAL_DEPTH` behind the real back wall
+/// (`RB-PHYSICS-001-FR-029`) — a plain, unbounded `StaticPlane` like
+/// `back_wall_plane` itself, not a `StaticBoundedWall`: nothing can ever
+/// reach this plane except by first passing through the goal-mouth
+/// window (`GOAL_HALF_WIDTH` wide, `GOAL_HEIGHT` tall — see
+/// `StaticGoalWall`'s own doc comment), since the real back wall is solid
+/// everywhere else, so an unbounded plane here is exact, not an
+/// approximation the way one at the goal's own side/roof position would
+/// be (see `goal_side_wall`/`goal_roof`'s own doc comments).
+fn goal_back_wall_plane(sign: f32) -> StaticPlane {
+    StaticPlane::new(Vec3::new(0.0, -sign, 0.0), -(BACK_WALL_Y + GOAL_DEPTH))
+}
+
+/// Both goals' own back-of-net walls (`RB-PHYSICS-001-FR-029`) — 2 plain
+/// `StaticPlane`s, one per goal, added to `PhysicsWorld.walls` alongside
+/// the rest of the arena's flat walls (unlike the goal's side walls and
+/// roof, this needs no bound — see `goal_back_wall_plane`'s own doc
+/// comment).
+pub fn standard_goal_back_walls() -> Vec<StaticPlane> {
+    vec![goal_back_wall_plane(1.0), goal_back_wall_plane(-1.0)]
+}
+
+/// One of a goal box's own two side walls, on goal `back_sign` (`1.0` for
+/// `+Y`, `-1.0` for `-Y`) and post `post_sign` (`1.0` for `+X`, `-1.0` for
+/// `-X`) (`RB-PHYSICS-001-FR-029`). Reuses `goal_post_plane(post_sign)` as
+/// its own flat plane unchanged — the post's own inward-facing surface at
+/// `x = post_sign * GOAL_HALF_WIDTH` is exactly where the goal box's own
+/// side wall needs to sit too — but wraps it in a `StaticBoundedWall`
+/// bounded to the goal's own depth (`y` from the real back wall out to
+/// `GOAL_DEPTH` behind it) and height (`z` from the floor up to
+/// `GOAL_HEIGHT`) range: unlike a post's own fillet-deriving role (see
+/// `goal_post_plane`'s own doc comment), this plane needs to actually
+/// collide, and an unbounded one at this `x` position would incorrectly
+/// wall off the *entire* main field at that `x` coordinate, the same
+/// problem `goal_post_plane`'s own doc comment already documents for a
+/// different purpose.
+fn goal_side_wall(back_sign: f32, post_sign: f32) -> StaticBoundedWall {
+    StaticBoundedWall::new(
+        goal_post_plane(post_sign),
+        Vec3::new(
+            post_sign * GOAL_HALF_WIDTH,
+            back_sign * (BACK_WALL_Y + GOAL_DEPTH * 0.5),
+            GOAL_HEIGHT * 0.5,
+        ),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        GOAL_DEPTH * 0.5,
+        GOAL_HEIGHT * 0.5,
+    )
+}
+
+/// Both goals' own two side walls each (`RB-PHYSICS-001-FR-029`) — 4
+/// `StaticBoundedWall`s total, one per post per goal.
+pub fn standard_goal_side_walls() -> Vec<StaticBoundedWall> {
+    let mut walls = Vec::with_capacity(4);
+    for &back_sign in &[1.0f32, -1.0] {
+        for &post_sign in &[1.0f32, -1.0] {
+            walls.push(goal_side_wall(back_sign, post_sign));
+        }
+    }
+    walls
+}
+
+/// A goal box's own roof, on goal `sign` (`1.0` for `+Y`, `-1.0` for
+/// `-Y`) (`RB-PHYSICS-001-FR-029`). Reuses `goal_crossbar_plane()`
+/// unchanged — the crossbar's own downward-facing surface at
+/// `z = GOAL_HEIGHT` is exactly where the goal box's own roof needs to
+/// sit too — but wraps it in a `StaticBoundedWall` bounded to the goal's
+/// own width (`x` within `GOAL_HALF_WIDTH` either way) and depth (`y`
+/// from the real back wall out to `GOAL_DEPTH` behind it) range, for the
+/// same "an unbounded plane here would wall off the whole field" reason
+/// `goal_side_wall`'s own doc comment gives.
+fn goal_roof(sign: f32) -> StaticBoundedWall {
+    StaticBoundedWall::new(
+        goal_crossbar_plane(),
+        Vec3::new(0.0, sign * (BACK_WALL_Y + GOAL_DEPTH * 0.5), GOAL_HEIGHT),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        GOAL_HALF_WIDTH,
+        GOAL_DEPTH * 0.5,
+    )
+}
+
+/// Both goals' own roofs (`RB-PHYSICS-001-FR-029`) — 2 `StaticBoundedWall`s
+/// total, one per goal.
+pub fn standard_goal_roofs() -> Vec<StaticBoundedWall> {
+    vec![goal_roof(1.0), goal_roof(-1.0)]
 }
 
 /// Curved fillets for the standard arena: wall-to-floor/wall-to-ceiling
@@ -947,6 +1062,93 @@ mod tests {
                 "expected {:?} to sit radius-in from the crossbar",
                 fillet.center
             );
+        }
+    }
+
+    #[test]
+    fn standard_goal_back_walls_has_two_walls() {
+        assert_eq!(standard_goal_back_walls().len(), 2);
+    }
+
+    #[test]
+    fn every_goal_back_wall_sits_goal_depth_behind_the_real_back_wall() {
+        for wall in standard_goal_back_walls() {
+            // The real back wall (at BACK_WALL_Y from center) should sit
+            // exactly GOAL_DEPTH in front of this plane -- proving it's
+            // positioned relative to the actual back wall, not just some
+            // arbitrary distant point.
+            let point_on_real_back_wall = wall.normal * -BACK_WALL_Y;
+            assert!(
+                (wall.signed_distance(&point_on_real_back_wall) - GOAL_DEPTH).abs() < 1e-2,
+                "expected the real back wall to sit exactly GOAL_DEPTH in front of {wall:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_goal_side_walls_has_four_walls() {
+        assert_eq!(standard_goal_side_walls().len(), 4);
+    }
+
+    #[test]
+    fn every_goal_side_walls_plane_matches_some_goal_post_plane() {
+        let post_planes = [goal_post_plane(1.0), goal_post_plane(-1.0)];
+        for wall in standard_goal_side_walls() {
+            assert!(
+                post_planes.contains(&wall.plane),
+                "expected {:?} to reuse some goal_post_plane unchanged",
+                wall.plane
+            );
+        }
+    }
+
+    #[test]
+    fn every_goal_side_walls_bound_covers_the_real_goal_depth_and_height() {
+        for wall in standard_goal_side_walls() {
+            // The bound's own y-extent should span exactly from the real
+            // back wall out to GOAL_DEPTH behind it -- one of its two
+            // edges (center +/- half_u) should sit exactly at the real
+            // back wall (|y| == BACK_WALL_Y), the other exactly at
+            // GOAL_DEPTH behind it, regardless of which goal this is.
+            let near_edge = wall.bound_center.y - wall.half_u;
+            let far_edge = wall.bound_center.y + wall.half_u;
+            let edges_abs = [near_edge.abs(), far_edge.abs()];
+            assert!(
+                edges_abs.iter().any(|e| (e - BACK_WALL_Y).abs() < 1e-2),
+                "expected one bound edge to sit at the real back wall, got {edges_abs:?}"
+            );
+            assert!(
+                edges_abs
+                    .iter()
+                    .any(|e| (e - (BACK_WALL_Y + GOAL_DEPTH)).abs() < 1e-2),
+                "expected one bound edge to sit GOAL_DEPTH behind the real back wall, got {edges_abs:?}"
+            );
+            assert!(
+                (wall.half_v - GOAL_HEIGHT * 0.5).abs() < 1e-2,
+                "expected the bound's own half-height to match GOAL_HEIGHT * 0.5"
+            );
+            assert!((wall.bound_center.z - GOAL_HEIGHT * 0.5).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn standard_goal_roofs_has_two_roofs() {
+        assert_eq!(standard_goal_roofs().len(), 2);
+    }
+
+    #[test]
+    fn every_goal_roofs_plane_is_the_goal_crossbar_plane() {
+        let crossbar = goal_crossbar_plane();
+        for roof in standard_goal_roofs() {
+            assert_eq!(roof.plane, crossbar);
+        }
+    }
+
+    #[test]
+    fn every_goal_roofs_bound_covers_the_real_goal_width() {
+        for roof in standard_goal_roofs() {
+            assert!((roof.half_u - GOAL_HALF_WIDTH).abs() < 1e-2);
+            assert!((roof.bound_center.x).abs() < 1e-2);
         }
     }
 }

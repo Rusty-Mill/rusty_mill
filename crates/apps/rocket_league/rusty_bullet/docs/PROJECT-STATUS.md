@@ -2,7 +2,7 @@
 
 - Last verified main commit: `3141f1e` (merge of [#65](https://github.com/baileyrd/rusty_bullet/pull/65))
 - Verified at: 2026-08-31
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via a corner-testing approximation, not a full convex-vs-curved-surface narrow phase) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), and, since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a modeled goal interior/net and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via a corner-testing approximation, not a full convex-vs-curved-surface narrow phase) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box, not a net mesh) so a ball or car passing through settles instead of flying forever — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a combined multi-body solve and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -795,6 +795,48 @@
   flight-duration bound for the same pre-existing `StaticQuarterPipe`
   infinite-axis reason), plus a regression guard confirming a car aimed at
   the solid part of the wall is still stopped by it.
+- `RB-PHYSICS-001-FR-029` (modeled goal interior) — closes the "a ball or
+  car passes into open, unbounded space" gap repeated across FR-024
+  through FR-028's own "Still not modeled" lists: a ball or car passing
+  through a goal-mouth window now settles inside a bounded goal box
+  instead of flying forever. New `body::StaticBoundedWall` collides only
+  *within* a rectangular bound — the opposite gate from `StaticGoalWall`'s
+  window (solid everywhere *except* inside a rectangle) — with new
+  `collision::sphere_vs_bounded_wall`/`box_vs_bounded_wall`/
+  `contacts_vs_bounded_wall` dispatching by shape, the box path using the
+  same "test every corner" technique FR-027/FR-028 established. New
+  `arena::standard_goal_back_walls` (2 plain, unbounded `StaticPlane`s,
+  `GOAL_DEPTH` behind each real back wall — deliberately unbounded, since
+  nothing can reach that plane except by first passing through the window)
+  plus `arena::standard_goal_side_walls`/`standard_goal_roofs` (4 and 2
+  bounded walls, reusing `goal_post_plane`/`goal_crossbar_plane` completely
+  unchanged, bounded to the goal's own depth/width/height footprint — an
+  unbounded plane at either position would incorrectly wall off the entire
+  main field, the same problem those planes' own pre-existing doc comments
+  already documented). `PhysicsWorld` gains `bounded_walls`/
+  `with_bounded_wall`, resolved for the ball and every car like
+  `goal_walls`. Two real test-design findings worth keeping: the 3 new live
+  end-to-end proofs are deliberately isolated to a minimal scene built from
+  just the new wall(s) under test, not the full `PhysicsWorld::standard_arena`
+  — using the full arena, a ball fired sideways or upward from deep inside
+  the goal box got flung to wildly wrong positions, root-caused to the
+  pre-existing "a `StaticQuarterPipe`'s sector-membership test only checks
+  angle, not radial distance" limitation, spuriously triggered by the
+  standard arena's own goal-cutout-edge fillets sitting near the window;
+  separately, an early version zeroed only the ball's own restitution and
+  got nondeterministic results, since the wall's own default 0.5
+  restitution still applied in the solver — fixed by zeroing the wall's
+  restitution too. Still not modeled: a genuine net *mesh* — this models a
+  solid bounding volume standing in for the net's functional role, not
+  springy/catching netting or a real net's own visual sag. 21 net new/
+  renamed unit tests across `body.rs`/`collision.rs`/`arena.rs`/`world.rs`
+  in `rb_physics_bullet` (242 total): 4 in `body.rs` for
+  `contains_in_bound` (mirroring `StaticGoalWall::contains_in_window`'s own
+  tests with the gate inverted), 5 in `collision.rs` against a synthetic
+  fixture, 8 in `arena.rs` proving the new geometry functions place things
+  correctly, and 4 in `world.rs` (1 wiring-count check plus the 3 live
+  end-to-end proofs described above, plus renaming the pre-existing
+  wall-count test to account for the 2 new back-of-net planes).
 
 ## In progress
 
@@ -835,9 +877,9 @@
   recorded controller input or to `rb_verify_cli`).
 - `RB-PHYSICS-001`'s combined multi-body solve (each ball-vs-car/car-vs-car
   pair resolves independently, one full solver pass at a time — a real
-  approximation once 3+ bodies mutually touch in the same step) and a
-  modeled goal interior/net — real, not-yet-started follow-up work (see
-  the spec's Non-goals/Open questions); a car can now drive, steer, boost
+  approximation once 3+ bodies mutually touch in the same step) — real,
+  not-yet-started follow-up work (see the spec's Non-goals/Open
+  questions); a car can now drive, steer, boost
   (on the ground or in the air), handbrake/drift, take a ground jump (with
   variable height), a double jump or a directional, flip-cancelable dodge,
   and a wall jump (itself dodgeable and flip-cancelable the same way),
@@ -851,18 +893,17 @@
   every one of the 20 compound corners where an edge fillet meets a seam
   fillet alike — instead of hitting a sharp edge or vertex anywhere, and,
   since FR-028, both the ball and a car can now pass straight through
-  either goal's own window (rounded at its own rim) into open space beyond
-  the back wall — but there's still no modeled goal interior/net beyond
-  the cutout for either.
+  either goal's own window (rounded at its own rim) into a bounded goal
+  box behind it (since FR-029) instead of open, unbounded space — though
+  that box models a solid boundary, not a genuine net mesh.
 
 ## Next
 
 1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
    capture plugin against ADR-0005's JSON-Lines format, on the owner's own
    Windows/BakkesMod/game environment (this sandbox can't).
-2. A modeled goal interior/net beyond the cutout, and a combined
-   multi-body solve for 3+ simultaneously-touching bodies — real follow-up
-   work for `rb_physics_bullet::arena`/`world`/`solver`.
+2. A combined multi-body solve for 3+ simultaneously-touching bodies —
+   real follow-up work for `rb_physics_bullet::world`/`solver`.
    `RB-PHYSICS-001-FR-005` (constant calibration, including `drive`'s and
    `arena`'s own uncalibrated constants) needs `PHASE-0-EXIT` real data
    regardless.
@@ -871,7 +912,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (271 tests: 23 in `rb_domain`, 221 in
+- `cargo test --workspace`: pass (292 tests: 23 in `rb_domain`, 242 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

@@ -6,6 +6,57 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Modeled goal interior
+**2026-08-31** · PR pending · commit pending
+
+- **A ball or car passing through a goal-mouth window now settles inside a
+  bounded goal box** instead of sailing forever into open, unbounded
+  space — closing the "modeled goal interior/net" gap repeated across
+  `RB-PHYSICS-001-FR-024` through `FR-028`'s own "Still not modeled" lists.
+- **New `body::StaticBoundedWall`** collides only *within* a rectangular
+  bound in the plane's own local frame — the opposite gate convention from
+  `StaticGoalWall`'s window (which collides everywhere *except* inside a
+  rectangle). New `collision::sphere_vs_bounded_wall`/`box_vs_bounded_wall`/
+  `contacts_vs_bounded_wall` dispatch by shape, the box path using the same
+  "test every corner" technique established by FR-027/FR-028 (a corner
+  *outside* the bound is skipped, the opposite of `box_vs_goal_wall`'s
+  per-corner window test).
+- **New `arena::standard_goal_back_walls`** (2 plain, unbounded
+  `StaticPlane`s, `GOAL_DEPTH` behind each real back wall) — deliberately
+  unbounded, since nothing can reach that plane except by first passing
+  through the goal-mouth window. **New `arena::standard_goal_side_walls`**
+  (4 bounded walls, reusing `goal_post_plane` completely unchanged) and
+  **`arena::standard_goal_roofs`** (2 bounded walls, reusing
+  `goal_crossbar_plane` unchanged) — an unbounded plane at either position
+  would incorrectly wall off the *entire* main field, the same problem
+  those planes' own pre-existing doc comments already documented for their
+  original, purely-geometric role.
+- **`PhysicsWorld` gains `bounded_walls`/`with_bounded_wall`**, resolved
+  for the ball and every car exactly like `goal_walls`.
+- **Two real test-design findings worth keeping**: the 3 new live
+  end-to-end proofs are deliberately isolated to a minimal scene built
+  from just the specific new wall(s) under test, not the full
+  `PhysicsWorld::standard_arena` — using the full arena, a ball fired
+  sideways or upward from deep inside the goal box got flung to wildly
+  wrong positions, root-caused to the pre-existing "a `StaticQuarterPipe`'s
+  sector-membership test only checks angle, not radial distance"
+  limitation, spuriously triggered by the standard arena's own
+  goal-cutout-edge fillets sitting near the window. Separately, an early
+  version of these tests zeroed only the *ball's* own restitution and got
+  nondeterministic results, since the *wall's* own default 0.5 restitution
+  still applied in the solver — fixed by zeroing the wall's restitution
+  too.
+- **Still not modeled**: a genuine net *mesh* — this models a solid
+  bounding volume standing in for the net's functional role, not
+  springy/catching netting or a real net's own visual sag.
+- 4 new tests in `body.rs`, 5 in `collision.rs`, 8 in `arena.rs`, and 4 in
+  `world.rs` (1 wiring-count + 3 live end-to-end proofs, plus a
+  pre-existing wall-count test in `world.rs` renamed to match the 2 new
+  back-of-net planes). 242 tests total in `rb_physics_bullet` (+21 over
+  `RB-PHYSICS-001-FR-028`'s 221).
+
+---
+
 ## Car actually driving into a goal
 **2026-08-31** · [PR #65](https://github.com/baileyrd/rusty_bullet/pull/65) · `3141f1e`
 
