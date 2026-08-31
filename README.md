@@ -84,6 +84,7 @@ have landed so far.
 | [`rusty_codec`](crates/rusty_codec) | `crates/rusty_codec` | `no_std` + `alloc` sovereign TOML configuration parser and binary buffer serialization crate, built on `rusty_wire`/`rusty_std` |
 | [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
+| [`rusty_crypto_key`](crates/rusty_crypto_key) | `crates/rusty_crypto_key` | A zeroize-on-drop key storage and file persistence micro-crate (`0600` permissions on Unix) |
 | [`rusty-db-core`](crates/rusty_db/crates/rusty-db-core) | `crates/rusty_db/crates/rusty-db-core` | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of `rusty_db`) |
 | [`rusty-db-derive`](crates/rusty_db/crates/rusty-db-derive) | `crates/rusty_db/crates/rusty-db-derive` | `#[derive(Mapped)]` macro for `rusty_db`: maps a struct to a table |
 | [`rusty-db-sqlite`](crates/rusty_db/crates/rusty-db-sqlite) | `crates/rusty_db/crates/rusty-db-sqlite` | SQLite driver for `rusty_db`, built on `sqlx` |
@@ -477,6 +478,9 @@ swapping — its own merge is just the subtree add plus workspace wiring.
 plus `rusty_win32` on Windows and `rusty_libc` on Linux) were already
 `path` dependencies pointing at sibling directories under `crates/`.
 
+`rusty_crypto_key` has zero dependencies of any kind, so nothing needed
+swapping — its merge is just the subtree add plus workspace wiring.
+
 `rusty_db` was its own nested Cargo workspace (six crates: `rusty-db-core`,
 `rusty-db-derive`, `rusty-db-sqlite`, `rusty-db-postgres`, `rusty-db-mysql`,
 and the `rusty-db` facade), de-inherited the same way as `rusty_search`
@@ -584,6 +588,7 @@ behind one nested workspace),
 [`rusty_codec`](https://github.com/baileyrd/rusty_codec),
 [`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_audio`](https://github.com/baileyrd/rusty_audio),
+[`rusty_crypto_key`](https://github.com/baileyrd/rusty_crypto_key),
 [`rusty_db`](https://github.com/baileyrd/rusty_db) (six crates behind a
 second nested workspace),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
