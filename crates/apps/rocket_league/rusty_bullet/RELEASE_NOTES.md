@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Warm-starting
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #79](https://github.com/baileyrd/rusty_bullet/pull/79) · `a79d923`
 
 - **`solver::resolve_dynamic_manifolds` (every ball-vs-car/car-vs-car
   manifold) now warm-starts from the previous call's converged impulses**
