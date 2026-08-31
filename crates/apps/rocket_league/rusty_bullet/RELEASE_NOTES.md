@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Split impulse
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #77](https://github.com/baileyrd/rusty_bullet/pull/77) · `dedfeec`
 
 - **Deep penetration correction no longer injects spurious velocity into a
   contact.** Every contact's normal row now also solves a second, entirely
