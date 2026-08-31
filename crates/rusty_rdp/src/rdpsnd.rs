@@ -104,7 +104,7 @@ fn unwrap<'a>(buf: &'a [u8], expected: u8) -> Result<Reader<'a>> {
 /// trailing Wave PDU has no header of its own (see [`decode_wave`]).
 pub fn decode_msg_type(buf: &[u8]) -> Result<u8> {
     let mut r = Reader::new(buf);
-    r.read_u8()
+    Ok(r.read_u8()?)
 }
 
 /// `AUDIO_FORMAT` — describes one supported audio format.

@@ -328,7 +328,7 @@ fn unwrap<'a>(buf: &'a [u8], expected: u16) -> Result<Reader<'a>> {
 /// right decoder.
 pub fn decode_cmd_id(buf: &[u8]) -> Result<u16> {
     let mut r = Reader::new(buf);
-    r.read_u16_le()
+    Ok(r.read_u16_le()?)
 }
 
 /// `RDPGFX_CAPSET` (MS-RDPEGFX 2.2.1.6) — one capability set entry: a

@@ -57,7 +57,6 @@ rusty_tls = { path = "../rusty_tls", optional = true }
 # retired in this series.
 platform = { path = "../rustils/crates/platform", optional = true }
 rusty_wire = { path = "../rusty_wire" }
-rusty_ansder = { path = "../rusty_ansder" }
 # Test-only, despite living in [dependencies] rather than
 # [dev-dependencies]: Cargo doesn't allow dev-dependencies to be
 # optional, so this is the only way to keep it out of the default

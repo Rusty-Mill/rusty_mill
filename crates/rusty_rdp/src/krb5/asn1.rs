@@ -204,7 +204,7 @@ pub fn write_octet_string(w: &mut Writer, bytes: &[u8]) {
 /// Read an `OCTET STRING`.
 pub fn read_octet_string<'a>(r: &mut Reader<'a>) -> Result<&'a [u8]> {
     let len = expect_tag(r, TAG_OCTET_STRING)?;
-    r.read_bytes(len)
+    Ok(r.read_bytes(len)?)
 }
 
 /// Write a context-tagged `[n]` `OCTET STRING`.

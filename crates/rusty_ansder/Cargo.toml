@@ -3,18 +3,18 @@ name = "rusty_ansder"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering Engine and ASN.1 DER Parser for Rusty Mill"
+description = "ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_ansder"
-keywords = ["rag", "ai", "qa", "search", "der"]
-categories = ["science", "encoding"]
+keywords = ["der", "asn1", "ber", "encoding", "no-deps"]
+categories = ["encoding"]
 
+# The RAG/Q&A engine this crate used to also carry -- and the
+# rusty_simd/rusty_regx/rusty_json/rusty_std dependencies that came with
+# it, none of which this crate's own DER code ever used -- moved to
+# ../rusty_rag.
 [dependencies]
 rusty_wire = { path = "../rusty_wire", default-features = false }
-rusty_simd = { path = "../rusty_simd", default-features = false }
-rusty_regx = { path = "../rusty_regx" }
-rusty_json = { path = "../rusty_json" }
-rusty_std = { path = "../rusty_std" }
 
 [features]
 default = ["std"]

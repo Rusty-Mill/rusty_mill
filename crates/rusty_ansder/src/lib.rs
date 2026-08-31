@@ -1,8 +1,8 @@
-//! Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering Engine and ASN.1 DER Parser for Rusty Mill.
+//! ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on [`rusty_wire`].
 //!
-//! Exposes:
-//! - [`rag`]: Sovereign AI retrieval and Q&A engine connecting search and LLM inference.
-//! - [`der`]: ASN.1 BER/DER TLV encoder and decoder built on [`rusty_wire`].
+//! Formerly bundled together with an unrelated sovereign RAG/Q&A engine
+//! under this crate's portmanteau name ("ans" + "der"); that engine now
+//! lives in its own crate, `rusty_rag`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -10,7 +10,5 @@
 extern crate alloc;
 
 pub mod der;
-pub mod rag;
 
 pub use der::*;
-pub use rag::*;

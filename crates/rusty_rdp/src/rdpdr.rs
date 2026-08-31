@@ -1469,7 +1469,7 @@ fn skip_optional_trailing_pad(r: &mut Reader<'_>) -> Result<()> {
             length: remaining,
         });
     }
-    r.skip(remaining)
+    Ok(r.skip(remaining)?)
 }
 
 /// `DR_QUERY_INFORMATION_REQ` — a query information request

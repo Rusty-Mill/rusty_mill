@@ -110,7 +110,7 @@ pub fn write_enumerated(w: &mut Writer, value: u8) {
 
 /// Read a single-byte ENUMERATED value.
 pub fn read_enumerated(r: &mut Reader<'_>) -> Result<u8> {
-    r.read_u8()
+    Ok(r.read_u8()?)
 }
 
 /// Write a pre-computed CHOICE index / MCS domain-PDU header byte.
@@ -120,7 +120,7 @@ pub fn write_choice(w: &mut Writer, choice: u8) {
 
 /// Read a CHOICE index / MCS domain-PDU header byte.
 pub fn read_choice(r: &mut Reader<'_>) -> Result<u8> {
-    r.read_u8()
+    Ok(r.read_u8()?)
 }
 
 /// Write a single-byte SELECTION (bit map of present optional fields).
@@ -130,7 +130,7 @@ pub fn write_selection(w: &mut Writer, selection: u8) {
 
 /// Read a single-byte SELECTION.
 pub fn read_selection(r: &mut Reader<'_>) -> Result<u8> {
-    r.read_u8()
+    Ok(r.read_u8()?)
 }
 
 /// Write the "number of sets" count that precedes a `SET OF` (single byte in
@@ -141,7 +141,7 @@ pub fn write_number_of_sets(w: &mut Writer, count: u8) {
 
 /// Read the "number of sets" count.
 pub fn read_number_of_sets(r: &mut Reader<'_>) -> Result<u8> {
-    r.read_u8()
+    Ok(r.read_u8()?)
 }
 
 /// Write `n` zero padding bytes.
@@ -153,7 +153,7 @@ pub fn write_padding(w: &mut Writer, n: usize) {
 
 /// Skip `n` padding bytes.
 pub fn read_padding(r: &mut Reader<'_>, n: usize) -> Result<()> {
-    r.skip(n)
+    Ok(r.skip(n)?)
 }
 
 /// Write a constrained OCTET STRING whose length is at least `min`.
@@ -170,7 +170,7 @@ pub fn write_octet_string(w: &mut Writer, data: &[u8], min: usize) -> Result<()>
 /// Read a constrained OCTET STRING written by [`write_octet_string`].
 pub fn read_octet_string<'a>(r: &mut Reader<'a>, min: usize) -> Result<&'a [u8]> {
     let mlength = read_length(r)?;
-    r.read_bytes(mlength + min)
+    Ok(r.read_bytes(mlength + min)?)
 }
 
 /// Write the six-tuple OBJECT IDENTIFIER form GCC uses (`{0 0 20 124 0 1}`).
@@ -225,7 +225,7 @@ pub fn write_numeric_string(w: &mut Writer, digits: &[u8], min: usize) -> Result
 pub fn read_numeric_string(r: &mut Reader<'_>, min: usize) -> Result<()> {
     let mlength = read_length(r)?;
     let chars = mlength + min;
-    r.skip((chars + 1) / 2)
+    Ok(r.skip((chars + 1) / 2)?)
 }
 
 #[cfg(test)]
