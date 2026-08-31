@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.43.0
+- Version: 0.44.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -124,7 +124,13 @@
   that two surfaces sharing a coefficient combine back to that same
   coefficient, which matters given most bodies here still share the same
   uncalibrated placeholder value — investigated, doc-only correction, no
-  runtime behavior changed; static-contact warm-starting,
+  runtime behavior changed; and, since FR-044, this spec's own top-level
+  Non-goals section was found to still carry a stale "split impulse isn't
+  implemented" bullet, contradicted by FR-034's own already-shipped
+  implementation — corrected to match reality, matching the
+  strikethrough-and-close convention already used for two other resolved
+  Non-goals items in the same section — doc-only correction, no runtime
+  behavior changed; static-contact warm-starting,
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
   of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
   selection, and real-data calibration (including which combine mode, if
@@ -353,9 +359,17 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   but nothing here yet reads a real `RB-VERIFY-002` capture file
   frame-by-frame to do that automatically; that's `rb_verify_cli`'s
   concern once real capture data exists.
-- **Split impulse.** This port always takes Bullet's non-split contact-resolution
-  branch (position and velocity correction combined into one `rhs`). See
-  `rb_physics_bullet::solver`'s module doc for what this trades away.
+- ~~**Split impulse.** This port always takes Bullet's non-split
+  contact-resolution branch (position and velocity correction combined into
+  one `rhs`).~~ Implemented, see `RB-PHYSICS-001-FR-034`: every contact's
+  normal row now solves a second, entirely separate "push" pseudo-velocity
+  channel fed only by that contact's own positional/penetration error,
+  applied directly to the body's position/orientation after the solve
+  instead of folding into its real velocity — mirroring Bullet's own
+  `btSolverBody::writebackVelocity`. `RB-PHYSICS-001-FR-044` found this
+  bullet had gone stale (still asserting the pre-`FR-034` behavior,
+  contradicting `FR-034`'s own already-shipped Requirements entry and
+  `rb_physics_bullet::solver`'s own module doc comment) and corrected it.
 - **Warm-starting for `resolve_contacts`/`resolve_contacts_between`.**
   `resolve_dynamic_manifolds` gained warm-starting in
   `RB-PHYSICS-001-FR-035`; the other two paths still re-derive every
@@ -2389,6 +2403,48 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     justification depends on. All 273 of `rb_physics_bullet`'s pre-existing
     tests (as of `FR-042`) pass unchanged. 2 new tests, bringing the crate
     to 275 total (+2 over `FR-042`'s 273).
+- `RB-PHYSICS-001-FR-044` (stale Non-goals correction, investigated): this
+  spec's own top-level "Non-goals (this increment)" section carried a
+  "**Split impulse.** This port always takes Bullet's non-split
+  contact-resolution branch" bullet that had gone stale — `RB-PHYSICS-001-
+  FR-034` implemented split impulse (a second, separate "push"
+  pseudo-velocity channel per contact's normal row, fed only by positional/
+  penetration error, applied directly to position/orientation rather than
+  folding into real velocity) well before this requirement, and that
+  Requirements entry, the version 0.34.0 Change History entry, and
+  `rb_physics_bullet::solver`'s own module doc comment all already
+  correctly describe it as implemented — only this one Non-goals bullet
+  had never been updated to match. Confirmed the implementation is
+  genuinely present (not merely documented) by locating
+  `solver::resolve_push_row`/`resolve_two_body_push_row`/`apply_push_delta`
+  directly in `solver.rs`, and confirmed via `grep` across the whole repo
+  that this was the only occurrence of the stale claim anywhere in code or
+  docs. Corrected the bullet to a strikethrough-and-close note, matching
+  the same convention this section already uses for its own two other
+  resolved Non-goals items (the wall-jump-corner disambiguation, closed via
+  `FR-039`; the curved-geometry Non-goal, closed progressively via `FR-026`
+  through `FR-033`) — a pattern this spec had already established for
+  exactly this situation, just not yet applied here.
+  - **Non-goals (this requirement).** Does not change any production code
+    — `solver::combine_restitution`/`combine_friction`,
+    `resolve_push_row`/`resolve_two_body_push_row`/`apply_push_delta`, and
+    every other function this bullet touches are unchanged; only the
+    Non-goals bullet's own text was wrong, not the implementation it
+    described. Does not re-audit the rest of this spec's Non-goals section
+    for other staleness beyond the one bullet this requirement found —
+    every other bullet in that section was checked against its own
+    referenced FR and confirmed still accurate as of this requirement.
+  - **Acceptance criteria.** The "Split impulse" Non-goals bullet no longer
+    contradicts `RB-PHYSICS-001-FR-034`'s own Requirements entry,
+    `rb_physics_bullet::solver`'s module doc comment, or the version 0.34.0
+    Change History entry. All pre-existing tests pass unchanged, since no
+    production code changed.
+  - **Verification plan.** No new tests: this is a pure documentation
+    correction with no runtime behavior to characterize, the same
+    precedent `RB-PHYSICS-001-FR-032`/`FR-040`/`FR-042` established for
+    documentation-only findings being real, valuable work. All 275 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-043`) pass
+    unchanged.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3767,6 +3823,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.44.0 (2026-08-31): FR-044 added and investigated (stale Non-goals
+  correction) — this spec's own top-level "Non-goals (this increment)"
+  section still carried a "Split impulse. This port always takes Bullet's
+  non-split contact-resolution branch" bullet, contradicted by
+  `RB-PHYSICS-001-FR-034`'s own already-shipped implementation (its own
+  Requirements entry, the version 0.34.0 Change History entry, and
+  `rb_physics_bullet::solver`'s own module doc comment all already
+  correctly describe split impulse as implemented — only this one
+  Non-goals bullet had never been updated to match). Confirmed the
+  implementation is genuinely present by locating `solver::
+  resolve_push_row`/`resolve_two_body_push_row`/`apply_push_delta`
+  directly in `solver.rs`, and confirmed via a repo-wide `grep` that this
+  was the only stale occurrence anywhere in code or docs. Corrected the
+  bullet to a strikethrough-and-close note, matching the same convention
+  this section already uses for its own two other resolved Non-goals items
+  (the wall-jump-corner disambiguation closed via FR-039; the
+  curved-geometry Non-goal closed progressively via FR-026 through
+  FR-033). Zero production code changed. No new tests (documentation-only,
+  no value or behavior changed, the same precedent FR-032/FR-040/FR-042
+  established for a documentation-only finding being real, valuable work).
+  All 275 pre-existing tests pass unchanged (total unchanged from FR-043).
 - 0.43.0 (2026-08-31): FR-043 added and investigated (restitution/friction
   combine-mode reference validation) — this spec's own "Restitution/
   friction combine mode" Open Question claimed, without ever having
