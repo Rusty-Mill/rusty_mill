@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Car deflection by curved fillets
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #63](https://github.com/baileyrd/rusty_bullet/pull/63) · `f13e5f5`
 
 - **A car (box) is now actually deflected by every curved fillet in this
   port**, closing the Non-goal repeated across every fillet increment
