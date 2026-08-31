@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## `integrate.rs` reference validation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #97](https://github.com/baileyrd/rusty_bullet/pull/97) · `cbd9918`
 
 - **Fetched and read Bullet's real `btRigidBody.cpp`/`.h`,
   `btTransformUtil.h`, `btQuaternion.h`, and `btScalar.h` directly** to
