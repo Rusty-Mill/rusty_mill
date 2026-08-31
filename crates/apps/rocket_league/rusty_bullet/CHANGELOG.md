@@ -478,6 +478,21 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   a new `input_is_active` helper finds the car's input genuinely active,
   before that input's own force has had a chance to move it. 8 new tests
   (5 in `body.rs`, 3 in `world.rs`); all pre-existing tests pass unchanged.
+- `rb_physics_bullet::net`/`world` (`RB-PHYSICS-001-FR-038`) — car-vs-net
+  contact, closing this port's own former Non-goal that a car passes
+  straight through a `net::NetMesh`'s spatial footprint untouched.
+  `net::NetMesh::step` changed from a single `&mut RigidBody` (the ball
+  alone) to `&mut [RigidBody]` (every body that can touch the net); its
+  inner contact-resolution loop now iterates every body in the slice
+  against each free point. No new collision code needed:
+  `collision::contacts_between` already dispatches to `sphere_vs_box` for
+  a car against a net point the same way it always has for ball-vs-car.
+  `PhysicsWorld::step` reuses the same ball-plus-cars snapshot
+  `solver::resolve_dynamic_manifolds` already resolved that step for the
+  net-step call too. All of `net.rs`'s pre-existing tests updated only
+  their call syntax (`std::slice::from_mut(&mut ball)`), not their own
+  assertions. 3 new tests (2 in `net.rs`, 1 in `world.rs`); all
+  pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

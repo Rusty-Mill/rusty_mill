@@ -56,8 +56,8 @@ use std::collections::HashMap;
 /// flip-cancel the dodge's spin — all driving the car via
 /// `drive::apply_driven_forces`. Since `RB-PHYSICS-001-FR-033`, `nets`
 /// (added via `with_net`) gives the ball a real mass-spring net to be
-/// caught by, resolved after every other contact each step — see `nets`'
-/// own doc comment.
+/// caught by, resolved after every other contact each step, and since
+/// `RB-PHYSICS-001-FR-038`, every car too — see `nets`' own doc comment.
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
@@ -103,12 +103,13 @@ pub struct PhysicsWorld {
     /// same as `goal_walls`.
     pub bounded_walls: Vec<StaticBoundedWall>,
     /// Real mass-spring net panels (`RB-PHYSICS-001-FR-033`), added via
-    /// `with_net` — empty by default. Catches only the ball, not a car
-    /// (see `net::NetMesh`'s own doc comment for why); resolved after every
-    /// other contact this step, mutating `ball`'s velocity directly rather
-    /// than through `solver::resolve_dynamic_manifolds`' shared multi-body
-    /// solve (a net's own points aren't part of that scene-wide `bodies`
-    /// list at all).
+    /// `with_net` — empty by default. Catches the ball and, since
+    /// `RB-PHYSICS-001-FR-038`, every car too (see `net::NetMesh`'s own doc
+    /// comment); resolved after every other contact this step, reusing the
+    /// same ball-plus-cars snapshot `solver::resolve_dynamic_manifolds` just
+    /// resolved rather than going through that function's own shared
+    /// multi-body solve (a net's own points aren't part of that scene-wide
+    /// `bodies` list at all).
     pub nets: Vec<NetMesh>,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -275,7 +276,7 @@ impl PhysicsWorld {
     /// Adds one net panel to the scene (`RB-PHYSICS-001-FR-033`) — callable
     /// more than once, same pattern as `with_bounded_wall`; a scene with no
     /// nets added (the default) behaves exactly as before nets existed.
-    /// Catches only the ball — see `nets`' own doc comment.
+    /// Catches the ball and every car — see `nets`' own doc comment.
     pub fn with_net(mut self, net: NetMesh) -> PhysicsWorld {
         self.nets.push(net);
         self
@@ -647,20 +648,25 @@ impl PhysicsWorld {
             &mut self.dynamic_manifold_caches,
         );
 
+        // Net panels (RB-PHYSICS-001-FR-033, and since RB-PHYSICS-001-FR-038,
+        // a car too): each net's own internal physics (spring forces, its own
+        // sub-stepped integration) plus every body's contact against it,
+        // resolved after every other contact this step so each body's
+        // velocity going in already reflects gravity, driven forces, and
+        // every static/dynamic contact above — see `nets`' own doc comment
+        // for why this isn't part of `resolve_dynamic_manifolds`' shared
+        // solve. Reuses the same `bodies` snapshot `resolve_dynamic_manifolds`
+        // just resolved (index 0 the ball, index `i + 1` `self.cars[i]`,
+        // exactly as above) rather than syncing back to `self.ball`/`self.cars`
+        // and rebuilding a fresh one, deferring that sync until every net has
+        // had its turn.
+        for net in &mut self.nets {
+            net.step(&mut bodies, self.gravity, dt);
+        }
+
         self.ball = bodies[0];
         for (car, resolved) in self.cars.iter_mut().zip(bodies.iter().skip(1)) {
             *car = *resolved;
-        }
-
-        // Net panels (RB-PHYSICS-001-FR-033): each net's own internal
-        // physics (spring forces, its own sub-stepped integration) plus the
-        // ball's contact against it, resolved after every other contact
-        // this step so the ball's velocity going in already reflects
-        // gravity, driven forces, and every static/dynamic contact above —
-        // see `nets`' own doc comment for why this isn't part of
-        // `resolve_dynamic_manifolds`' shared solve.
-        for net in &mut self.nets {
-            net.step(&mut self.ball, self.gravity, dt);
         }
 
         // Sleeping (RB-PHYSICS-001-FR-037): evaluated once every other
@@ -2991,6 +2997,56 @@ mod tests {
         assert!(
             caught_speed.abs() < free_flight_speed.abs() * 0.5,
             "expected the net to catch the ball, losing at least half its speed compared to \
+             free flight, caught vy={caught_speed}, free-flight vy={free_flight_speed}"
+        );
+    }
+
+    #[test]
+    fn a_car_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched() {
+        // RB-PHYSICS-001-FR-038: the same "caught vs. free flight" proof as
+        // `a_ball_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched`,
+        // but for a car — closing this port's own former Non-goal that "a
+        // car still passes straight through a NetMesh's spatial footprint
+        // untouched." Uses a car (`with_car`) instead of the scene's own
+        // ball, with the ball placed far away so it can't also contact the
+        // net and confound the measurement.
+        let net_y = crate::arena::BACK_WALL_Y + crate::arena::NET_DEPTH;
+
+        let run = |with_net: bool| -> f32 {
+            let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(10_000.0, 10_000.0, 10_000.0));
+            let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
+            // z = 300, not resting on the ground: the net panel is centered
+            // at `GOAL_HEIGHT * 0.5` (~321), so a car floating near the
+            // panel's own vertical middle (matching the equivalent ball
+            // test's own z=300 above) actually overlaps its free interior
+            // points — a car resting flat on the ground at car-height would
+            // only ever reach the panel's anchored bottom row, which
+            // `NetMesh::step`'s own contact-resolution loop deliberately
+            // skips (see its own doc comment), passing through untouched
+            // for a reason unrelated to this requirement.
+            let car = RigidBody::car_box(
+                Vec3::new(60.0, 40.0, 20.0),
+                1.0,
+                Vec3::new(0.0, net_y - 800.0, 300.0),
+            );
+            world = world.with_car(car);
+            world.cars[0].linear_velocity = Vec3::new(0.0, 1500.0, 0.0);
+            world.gravity = Vec3::ZERO;
+            if with_net {
+                world = world.with_net(crate::arena::standard_nets().remove(0));
+            }
+            let dt = 1.0 / 120.0;
+            for _ in 0..(1.0 / dt) as u32 {
+                world.step(dt);
+            }
+            world.cars[0].linear_velocity.y
+        };
+
+        let caught_speed = run(true);
+        let free_flight_speed = run(false);
+        assert!(
+            caught_speed.abs() < free_flight_speed.abs() * 0.5,
+            "expected the net to catch the car, losing at least half its speed compared to \
              free flight, caught vy={caught_speed}, free-flight vy={free_flight_speed}"
         );
     }
