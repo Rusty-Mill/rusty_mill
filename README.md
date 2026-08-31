@@ -88,6 +88,7 @@ have landed so far.
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
+| [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
 | [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
@@ -492,6 +493,16 @@ relative `path` dependencies, all already merged as siblings under this
 workspace's `crates/` — no dependency swap needed, just the subtree add
 plus workspace wiring.
 
+`rusty_whisper` depends on `rusty_simd`, `rusty_wire`, and `rusty_std`
+via relative `path` dependencies, all already merged as siblings under
+this workspace's `crates/` — no dependency swap needed. Its optional
+`mic` feature (off by default, only enabled here by this workspace's
+`--all-features` build) pulls in `cpal` for native microphone capture,
+which links against ALSA via `alsa-sys`/pkg-config on Linux — this
+workspace's CI now installs `libasound2-dev` on the Linux leg
+accordingly (no Windows equivalent needed; `cpal` talks to WASAPI
+directly there).
+
 `rustils` was its own nested Cargo workspace of eight crates (`platform`,
 `platform-mock`, `platform-parity`, `platform-linux`, `platform-windows`,
 `platform-bsd`, `winargv`, `coreutils`), de-inherited the same way as
@@ -568,6 +579,8 @@ behind one nested workspace),
 [`rusty_crypto_key`](https://github.com/baileyrd/rusty_crypto_key),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
 [`rusty_config`](https://github.com/baileyrd/rusty_config),
-[`rusty_jinja`](https://github.com/baileyrd/rusty_jinja), and
+[`rusty_jinja`](https://github.com/baileyrd/rusty_jinja),
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
-nested workspace) — merged one at a time, same process.
+nested workspace), and
+[`rusty_whisper`](https://github.com/baileyrd/rusty_whisper) — merged one
+at a time, same process.

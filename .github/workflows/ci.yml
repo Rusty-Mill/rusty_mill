@@ -73,6 +73,16 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get install -y dbus gnome-keyring
 
+      # rusty_whisper's optional `mic` feature depends on `cpal` for native
+      # microphone capture, which links against ALSA via `alsa-sys`/
+      # pkg-config on Linux. Off by default in the standalone repo
+      # specifically to avoid this system dependency, but this workspace's
+      # `--all-features` build enables it. No Windows equivalent needed --
+      # cpal talks to WASAPI directly there, no pkg-config-managed system lib.
+      - name: Install ALSA (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libasound2-dev
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
