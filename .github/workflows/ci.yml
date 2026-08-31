@@ -182,9 +182,25 @@ jobs:
         with:
           tool: nextest
 
+      # rusty_lines' windows_raw_mode integration suite deliberately shares
+      # one process-wide console across all its tests (a real Windows
+      # console is a singular resource -- see that file's own doc comment),
+      # serialized behind a Mutex rather than relying on `cargo test`'s
+      # default of running everything in one process. nextest instead runs
+      # every test in its own separate process, so each test now allocates
+      # an independent console instead of reusing one already configured by
+      # an earlier test in the same process -- 4 of its 5 tests started
+      # panicking or hanging under nextest specifically (confirmed via a
+      # live CI run: see the terminated `ctrl_d_on_empty_line_is_eof`
+      # timeout). Excluded here and run separately below via `cargo test`,
+      # the harness this suite was actually designed and verified against.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features -E 'not binary_id(rusty_lines::windows_raw_mode)'
+
+      - name: Test rusty_lines' Windows raw-mode suite (cargo test)
+        if: runner.os == 'Windows' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_lines'))
+        run: cargo test --test windows_raw_mode -p rusty_lines --all-features
 
       # nextest doesn't execute doctests -- run those separately so this
       # switch doesn't quietly drop doctest coverage.
