@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Genuine goal net
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #75](https://github.com/baileyrd/rusty_bullet/pull/75) · `e1ffb4f`
 
 - **Each goal now has a real mass-spring net catching the ball**, replacing
   part of `RB-PHYSICS-001-FR-029`'s solid-bounding-box stand-in with actual
