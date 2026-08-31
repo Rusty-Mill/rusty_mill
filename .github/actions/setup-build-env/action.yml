@@ -1,0 +1,48 @@
+name: 'Set up Rust build environment'
+description: >
+  Installs the Rust toolchain (plus optional components), the native
+  system libraries the workspace's --all-features build links against, and
+  wires up Swatinem/rust-cache.
+inputs:
+  components:
+    description: 'Extra rustup components to install (e.g. clippy, rustfmt)'
+    required: false
+    default: ''
+  cache-shared-key:
+    description: 'Cache namespace shared across jobs/matrix legs that should reuse the same target-dir cache'
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    # rusty_term's gui/gui-gpu features and rusty_gui's Linux X11 backend
+    # link against X11/wayland directly; rusty_a2a's grpc feature runs a
+    # build.rs that needs `protoc`; platform-linux's secret_service
+    # integration tests spawn a real dbus-daemon + gnome-keyring-daemon;
+    # rusty_whisper's mic feature links ALSA via cpal/alsa-sys. None of
+    # this ships on the ubuntu-latest image by default. One combined
+    # apt-get install (instead of five separate ones) to cut round-trips.
+    - name: Install native build dependencies (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
+          libxi-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev \
+          protobuf-compiler dbus gnome-keyring libasound2-dev
+
+    # rusty_a2a's grpc feature needs protoc on Windows too (cpal talks to
+    # WASAPI directly there, so no ALSA/X11/dbus equivalent is needed).
+    - name: Install protoc (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: choco install protoc -y
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-shared-key }}

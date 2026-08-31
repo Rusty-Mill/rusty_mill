@@ -1,0 +1,51 @@
+name: 'Select workspace packages for CI scope'
+description: >
+  Turns the plan job's affected-crate output into cargo -p/--workspace
+  flags, applying per-OS exclusions either way.
+inputs:
+  full:
+    description: 'plan job output: "true" to build/test/clippy the whole workspace'
+    required: true
+  packages:
+    description: 'plan job output: space-separated affected package names (ignored when full is "true")'
+    required: true
+  windows-exclude:
+    description: 'space-separated package names to leave out on Windows runners'
+    required: false
+    default: ''
+outputs:
+  args:
+    description: 'cargo package-selection flags to pass to build/test/clippy; empty means nothing to do'
+    value: ${{ steps.compute.outputs.args }}
+runs:
+  using: composite
+  steps:
+    - id: compute
+      shell: bash
+      run: |
+        set -euo pipefail
+        is_windows_excluded() {
+          for x in ${{ inputs.windows-exclude }}; do
+            [ "$x" = "$1" ] && return 0
+          done
+          return 1
+        }
+
+        if [ "${{ inputs.full }}" = "true" ]; then
+          args="--workspace"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            for x in ${{ inputs.windows-exclude }}; do
+              args="$args --exclude $x"
+            done
+          fi
+        else
+          args=""
+          for p in ${{ inputs.packages }}; do
+            if [ "${{ runner.os }}" = "Windows" ] && is_windows_excluded "$p"; then
+              continue
+            fi
+            args="$args -p $p"
+          done
+        fi
+
+        echo "args=$args" >> "$GITHUB_OUTPUT"

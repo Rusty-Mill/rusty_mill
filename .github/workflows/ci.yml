@@ -4,8 +4,15 @@ name: CI
 # their own workflow under crates/<crate>/.github/workflows/ before the
 # merge (dead now that they're not at a repo root — GitHub Actions only
 # reads .github/workflows/ at the repository root), left in place for
-# history. This workflow supersedes them all with a single matrix that
-# builds and tests the whole workspace.
+# history.
+#
+# The `plan` job below computes which workspace crates a PR actually
+# touches (plus everything that transitively depends on them) and every
+# other job scopes its cargo invocation to just that set via `-p`, instead
+# of always running `--workspace` across ~70 largely-unrelated crates.
+# Pushes to main, and PRs that touch a workspace-wide file (root
+# Cargo.toml/Cargo.lock, or this CI config itself), still get the full
+# sweep.
 on:
   push:
     branches: [main]
@@ -13,6 +20,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # A one-shot CI build gets little benefit from incremental compilation
+  # (there's no prior local state to reuse) and it adds bookkeeping
+  # overhead and cache size for no payoff; disabling it is the standard
+  # recommendation alongside Swatinem/rust-cache. Trimming debug info
+  # similarly speeds up compilation/linking and shrinks what the cache has
+  # to save/restore -- CI only needs `cargo test`/`clippy` to fail loudly,
+  # not to produce a debuggable binary.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -29,8 +45,77 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  test:
-    name: test (${{ matrix.os }})
+  plan:
+    name: plan (affected crates)
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
+      packages: ${{ steps.plan.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: plan
+          cache-targets: false
+
+      - name: Determine affected crates
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Event is ${{ github.event_name }}, not pull_request -- running the full workspace sweep."
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "packages=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base="${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags --depth=1 origin "$base"
+          changed="$(git diff --name-only "$base" HEAD)"
+          echo "Changed files:"
+          echo "$changed"
+
+          if echo "$changed" | grep -Eq '^(Cargo\.toml|Cargo\.lock|\.github/(workflows|actions|scripts)/)'; then
+            echo "A workspace-wide file changed -- running the full workspace sweep."
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "packages=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cargo metadata --format-version=1 --all-features > /tmp/metadata.json
+          packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
+
+          if [ -z "$packages" ]; then
+            echo "No workspace crate touched by this PR -- build/test/clippy will be skipped."
+          else
+            echo "Affected crates: $packages"
+          fi
+          {
+            echo "full=false"
+            echo "packages=$packages"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        shell: bash
+        run: |
+          if [ "${{ steps.plan.outputs.full }}" = "true" ]; then
+            echo "### CI scope: full workspace sweep" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
+            echo "### CI scope: no workspace crate affected -- build/test/clippy skipped" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### CI scope: affected crates" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${{ steps.plan.outputs.packages }}" | tr ' ' '\n' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
     strategy:
       fail-fast: false
       matrix:
@@ -38,94 +123,74 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-build-env
         with:
           components: clippy
+          cache-shared-key: clippy-${{ matrix.os }}
 
-      # rusty_term's `gui`/`gui-gpu` features and rusty_gui's Linux X11
-      # backend link against X11/wayland directly rather than through an
-      # x11/xcb crate, so the runner needs the dev headers even though
-      # there's no display to actually present to.
-      - name: Install GUI build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev
-
-      # rusty_a2a's `grpc` feature runs a build.rs that compiles spec/a2a.proto
-      # via prost-build, which needs a `protoc` binary on PATH. rusty_a2a's own
-      # CI only ever ran on ubuntu-latest, so this is the first time that
-      # feature is built on Windows too.
-      - name: Install protoc (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y protobuf-compiler
-      - name: Install protoc (Windows)
-        if: runner.os == 'Windows'
-        run: choco install protoc -y
-
-      # platform-linux's secret_service integration tests spawn a real
-      # dbus-daemon + gnome-keyring-daemon and exercise the Secret Service
-      # D-Bus API end to end -- rustils' own CI installed both the same way
-      # (they hard-fail rather than silently skip if the daemon binary is
-      # missing, matching this workspace's "no racy/skippable-by-accident
-      # test" convention).
-      - name: Install dbus and gnome-keyring (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y dbus gnome-keyring
-
-      # rusty_whisper's optional `mic` feature depends on `cpal` for native
-      # microphone capture, which links against ALSA via `alsa-sys`/
-      # pkg-config on Linux. Off by default in the standalone repo
-      # specifically to avoid this system dependency, but this workspace's
-      # `--all-features` build enables it. No Windows equivalent needed --
-      # cpal talks to WASAPI directly there, no pkg-config-managed system lib.
-      - name: Install ALSA (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y libasound2-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # rusty_stream is built on io_uring, a Linux-only kernel interface --
+      # excluded on windows-latest rather than making its internals
+      # cfg-gated portable shims like rusty_win32 does the other way.
+      - uses: ./.github/actions/select-packages
+        id: scope
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          full: ${{ needs.plan.outputs.full }}
+          packages: ${{ needs.plan.outputs.packages }}
+          windows-exclude: rusty_stream
 
-      # rusty_stream's design is built on io_uring, a Linux-only kernel
-      # interface -- its own CI only ever ran on ubuntu-latest, and its
-      # source uses rusty_tokio's io-uring-fs types unconditionally rather
-      # than behind a `cfg(target_os = "linux")` no-op shell the way
-      # rusty_win32 does the reverse (Windows-only behind cfg, portable
-      # everywhere else). Excluded from windows-latest rather than
-      # rewriting its internals to be cross-platform.
-      - name: Set per-OS workspace flags
-        id: os-flags
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            echo "exclude=--exclude rusty_stream" >> "$GITHUB_OUTPUT"
-          else
-            echo "exclude=" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Clippy
+        if: steps.scope.outputs.args != ''
+        run: cargo clippy ${{ steps.scope.outputs.args }} --all-targets --all-features -- -D warnings
 
-      - name: Clippy (workspace, all features)
-        run: cargo clippy --workspace ${{ steps.os-flags.outputs.exclude }} --all-targets --all-features -- -D warnings
+  test:
+    name: test (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-build-env
+        with:
+          cache-shared-key: test-${{ matrix.os }}
+
+      - uses: ./.github/actions/select-packages
+        id: scope
+        with:
+          full: ${{ needs.plan.outputs.full }}
+          packages: ${{ needs.plan.outputs.packages }}
+          windows-exclude: rusty_stream
 
       # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
       # walking target/{debug,release} at runtime rather than through a
       # Cargo dependency (see the root README's "How the crates relate") --
       # mill-term only has a *library* dependency on rusty_git, so nothing
       # in the dependency graph forces cargo to finish building rusty_git's
-      # own `rgit` binary before mill-term's test binary starts running
-      # under a plain `cargo test --workspace`. A separate, blocking build
-      # step first guarantees every workspace binary exists on disk before
-      # any test executes (see #12).
-      - name: Build (workspace, all features)
-        run: cargo build --workspace ${{ steps.os-flags.outputs.exclude }} --all-features
+      # own `rgit` binary before mill-term's test binary starts running. A
+      # separate, blocking build step first guarantees every selected
+      # workspace binary exists on disk before any test executes (see #12).
+      - name: Build
+        if: steps.scope.outputs.args != ''
+        run: cargo build ${{ steps.scope.outputs.args }} --all-features
 
-      - name: Test (workspace, all features)
-        run: cargo test --workspace ${{ steps.os-flags.outputs.exclude }} --all-features
+      - name: Install cargo-nextest
+        if: steps.scope.outputs.args != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Test (nextest)
+        if: steps.scope.outputs.args != ''
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features
+
+      # nextest doesn't execute doctests -- run those separately so this
+      # switch doesn't quietly drop doctest coverage.
+      - name: Test (doctests)
+        if: steps.scope.outputs.args != ''
+        run: cargo test --doc ${{ steps.scope.outputs.args }} --all-features
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/rusty_win32/Cargo.toml) — this mirrors its own CI's
@@ -133,6 +198,8 @@ jobs:
   # feedback on it without waiting on the windows-latest queue.
   win32-cross-compile-check:
     name: rusty_win32 cross-compile check (mingw, Linux)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_win32')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +207,9 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: win32-cross
       - name: Install mingw-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64
       - name: cargo check --target x86_64-pc-windows-gnu (std feature)
