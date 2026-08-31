@@ -591,6 +591,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   4-corner manifold — a favorable divergence, not adopted, in the same
   spirit as `box_vs_box`'s own FR-042 finding. 1 new test pins the exact
   tie-break-order match; all pre-existing tests pass unchanged.
+- `solver::restitution_curve`/`plane_space`/`setup_rows`/`resolve_row`
+  (`RB-PHYSICS-001-FR-048`) — fetched and read Bullet's real
+  `btSequentialImpulseConstraintSolver.cpp`/`.h`, `btContactSolverInfo.h`,
+  and `btVector3.h` and confirmed `plane_space` byte-for-byte exact,
+  `restitution_curve` behaviorally exact (its `.max(0.0)` folds in a
+  clamp real Bullet applies at its own call site instead), `setup_rows`
+  exact against real `setupContactConstraint`/`setupFrictionConstraint`
+  (correcting a stale citation to an unrelated function), `resolve_row`'s
+  unified two-bound resolver behaviorally equivalent to Bullet's own two
+  separate resolvers, and all 6 of `btContactSolverInfo`'s cited defaults
+  exact. Found one genuine, significant divergence, not adopted: this
+  port always derives both friction directions from a fixed,
+  velocity-independent basis, where real Bullet's actual default aligns
+  one direction with the tangential component of the current relative
+  sliding velocity — flagged as open follow-up work for a dedicated
+  future FR rather than fixed here. 1 new test pins the
+  `restitution_curve`/call-site-clamp equivalence; all pre-existing tests
+  pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

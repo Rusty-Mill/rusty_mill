@@ -6,6 +6,47 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## `solver.rs` constraint-row setup/resolve reference validation
+**2026-08-31** · PR pending · commit pending
+
+- **Fetched and read Bullet's real
+  `btSequentialImpulseConstraintSolver.cpp`/`.h`, `btContactSolverInfo.h`,
+  and `btVector3.h` directly** to check every Bullet-reference claim
+  `restitution_curve`, `plane_space`, `setup_rows`, and `resolve_row`
+  make.
+- **`plane_space` confirmed byte-for-byte exact** against real
+  `btPlaneSpace1`.
+- **`restitution_curve` confirmed behaviorally exact.** Real
+  `restitutionCurve` can return a raw negative value; its one caller
+  clamps a non-positive result to `0.` immediately afterward. This
+  function's own `.max(0.0)` folds that call-site clamp inline — a
+  confirmed equivalent restructuring, not a divergence.
+- **`setup_rows` confirmed exact** against real
+  `setupContactConstraint`/`setupFrictionConstraint`, correcting a stale
+  doc-comment citation to a differently-named, unrelated function.
+- **`resolve_row` confirmed a behaviorally-equivalent unification** of
+  Bullet's own two separate resolver functions (one lower-bound-only, one
+  two-bound), given the normal row's effectively-infinite upper limit.
+- **All 6 of `btContactSolverInfo`'s cited default constants confirmed
+  exact.**
+- **One genuine, significant divergence found, not adopted.** This port
+  always derives both friction directions from a fixed,
+  velocity-independent basis (`plane_space(&contact.normal)`). Real
+  Bullet's actual default instead aligns friction direction 1 with the
+  tangential component of the current relative sliding velocity itself,
+  falling back to the fixed basis only when that velocity is negligible.
+  A fixed two-axis friction limit can over/under-estimate the true
+  circular friction cone by up to `sqrt(2)` relative to the real slide
+  direction — a physically meaningful difference, flagged as open
+  follow-up work for a dedicated future FR (the same scoping already used
+  for FR-030/FR-034/FR-035/FR-037) rather than folded into this
+  reference-validation pass.
+- **1 new regression test** pins the `restitution_curve`/call-site-clamp
+  equivalence directly. All 278 pre-existing tests pass unchanged; 279
+  total.
+
+---
+
 ## `collision.rs` remaining closed-form shape pairings reference validation
 **2026-08-31** · [#101](https://github.com/baileyrd/rusty_bullet/pull/101) · `ed8c59e`
 

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.47.0
+- Version: 0.48.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -161,9 +161,33 @@
   manifold, where this port computes all 4 corners exactly in one pass —
   confirmed a more-rigorous simplification in the same spirit as
   `box_vs_box`'s own FR-042 finding, not adopted — pinned by a new
-  regression test — investigated, 1 new test; static-contact warm-starting,
-  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
-  of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
+  regression test — investigated, 1 new test; and, since FR-048,
+  `solver.rs`'s own `restitution_curve`/`plane_space`/`setup_rows`/
+  `resolve_row` were checked directly against fetched
+  `btSequentialImpulseConstraintSolver`/`btContactSolverInfo`/`btVector3`
+  source: `plane_space` confirmed byte-for-byte exact against real
+  `btPlaneSpace1`, `restitution_curve` confirmed behaviorally exact (its own
+  `.max(0.0)` folds in a clamp real Bullet applies at its one call site
+  instead), `setup_rows`'s normal- and friction-row ERP/CFM/velocity-error/
+  positional-error formulas confirmed exact against real
+  `setupContactConstraint`/`setupFrictionConstraint`, `resolve_row`'s single
+  unified two-bound resolver confirmed behaviorally equivalent to real
+  Bullet's own two separate resolvers (one lower-bound-only, one two-bound)
+  given the normal row's effectively-infinite upper limit, and all 6 of
+  `btContactSolverInfo`'s cited default constants confirmed exact; one
+  genuine, significant divergence found and not adopted — this port always
+  derives both friction directions from a fixed, velocity-independent
+  `plane_space(&contact.normal)` basis, where real Bullet's actual default
+  aligns friction direction 1 with the tangential component of the current
+  relative sliding velocity itself, falling back to `btPlaneSpace1` only
+  when that velocity is negligible — a physically meaningful difference
+  (a fixed two-axis friction limit can over- or under-estimate the true
+  circular friction cone by up to `sqrt(2)` relative to the actual slide
+  direction) left open for a dedicated future FR rather than folded into
+  this reference-validation pass — investigated, 1 new test; static-contact
+  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
+  full convergence of the sandwiched case, a rigorous (non-heuristic)
+  edge-edge nearest-pair selection, velocity-aligned friction direction
   selection, and real-data calibration (including which combine mode, if
   either, actually matches real Rocket League) are open follow-up work)
 - Owners: baileyrd
@@ -2700,6 +2724,112 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     All 277 of `rb_physics_bullet`'s pre-existing tests (as of `FR-046`)
     pass unchanged. 1 new test, bringing the crate to 278 total (+1 over
     `FR-046`'s 277).
+- `RB-PHYSICS-001-FR-048` (`solver.rs` constraint-row setup/resolve
+  reference validation, investigated): `solver.rs`'s `restitution_curve`,
+  `plane_space`, `setup_rows`, and `resolve_row` all claim close fidelity
+  to specific real Bullet solver functions and `btContactSolverInfo`'s
+  cited defaults — this requirement fetched and read the real references
+  directly (`btSequentialImpulseConstraintSolver.cpp`/`.h`,
+  `btContactSolverInfo.h`, `btVector3.h`), matching
+  `RB-PHYSICS-001-FR-036`/`FR-042`/`FR-043`/`FR-045`/`FR-046`/`FR-047`'s
+  own method, and checked every specific claim against it.
+  1. **`plane_space` confirmed byte-for-byte exact** against real
+     `btPlaneSpace1`, including its `|n.z| > 1/sqrt(2)` branch threshold.
+  2. **`restitution_curve` confirmed behaviorally exact.** Real
+     `restitutionCurve` returns the raw, unclamped `restitution * -rel_vel`
+     (which can be negative — e.g. a contact still registered while
+     already separating faster than the velocity threshold); its one
+     caller, `setupContactConstraint`, immediately clamps a non-positive
+     result to exactly `0.` before it reaches `velocityError`. This
+     function's own `.max(0.0)` folds that call-site clamp directly into
+     the curve rather than as a separate step — the value `setup_rows`
+     ultimately uses is identical either way, so this is a confirmed
+     equivalent restructuring, not a divergence.
+  3. **`setup_rows` confirmed exact** against real
+     `setupContactConstraint`/`setupFrictionConstraint` (reached via
+     `addFrictionConstraint`'s own default `desiredVelocity = 0`,
+     `cfmSlip = 0` — the doc comment previously cited a differently-named,
+     unrelated function, `setFrictionConstraintImpulse`, which only resets
+     a cached impulse to zero; corrected). The normal row's `velocity_error`/
+     `positional_error` split on `gap_with_slop > 0.0` matches the
+     reference's identical split on `penetration > 0` exactly
+     (`penetration = cp.getDistance() + m_linearSlop` equals this port's
+     own `gap_with_slop`, given `Contact::penetration_depth =
+     -getDistance()`), and the friction row's `rhs: -rel_vel *
+     jac_diag_ab_inv` matches the reference's `rhs = (desiredVelocity -
+     rel_vel) * jacDiagABInv` at its real default `desiredVelocity = 0`
+     (this port has no conveyor-belt/friction-anchor feature, so that
+     default is its only reachable case).
+  4. **`resolve_row` confirmed a behaviorally-equivalent unification.**
+     This crate uses one function (checking both bounds) for every row,
+     where real Bullet dispatches to two — `resolveSingleConstraintRowLowerLimit`
+     (lower bound only) for the normal row, `resolveSingleConstraintRowGeneric`
+     (both bounds) for friction rows. Confirmed this changes nothing: the
+     normal row's own `upper_limit` (`1e10`, matching real Bullet's own
+     `m_upperLimit = 1e10f` for that row exactly) is astronomically larger
+     than any impulse a real contact produces, so the unified function's
+     extra upper check is unreachable there, and the two real functions are
+     otherwise byte-for-byte identical.
+  5. **All 6 of `btContactSolverInfo`'s cited default constants confirmed
+     exact**: `ERP2 = 0.2`, `GLOBAL_CFM = 0.0`, `LINEAR_SLOP = 0.0`,
+     `RESTITUTION_VELOCITY_THRESHOLD = 0.2`, `RELAXATION = 1.0`,
+     `SOLVER_ITERATIONS = 10` all match real `btContactSolverInfoData`'s
+     own constructor exactly.
+  6. **A genuine, significant divergence found, not adopted.** This port's
+     `setup_rows` always derives both friction directions from
+     `plane_space(&contact.normal)` — a fixed, velocity-independent
+     tangent-plane basis. Real Bullet's actual default (in `convertContact`)
+     instead derives friction direction 1 from the tangential component of
+     the *current relative sliding velocity itself*
+     (`cp.m_lateralFrictionDir1 = vel - normal * rel_vel`, normalized),
+     falling back to `btPlaneSpace1`'s own fixed basis only when that
+     tangential velocity is negligible (`lat_rel_vel <= SIMD_EPSILON`) — so
+     `btPlaneSpace1` is Bullet's own degenerate-case fallback, not its
+     everyday default, contrary to what this port's own doc comments
+     previously implied. This is a physically meaningful difference, not
+     cosmetic: each friction row is independently clamped to
+     `[-mu * N, +mu * N]`, so two *fixed* orthogonal rows approximate the
+     true circular friction cone with a square in tangent space, letting up
+     to `sqrt(2)` times the correct friction magnitude be achieved at the
+     square's diagonal for a body sliding along neither fixed axis — real
+     Bullet's velocity-aligned direction 1 avoids this by keeping direction
+     2 orthogonal to the actual slide (so it solves near zero) and letting
+     direction 1 alone reproduce the correct single-direction-sliding
+     result. Not adopted in this requirement: implementing velocity-aligned
+     friction direction selection (plus its own degenerate-velocity
+     fallback) is a real, testable behavioral change in its own right,
+     deserving a dedicated follow-up requirement with its own before/after
+     tests, the same scoping this port already used for
+     `RB-PHYSICS-001-FR-030`/`FR-034`/`FR-035`/`FR-037` (each one dedicated
+     solver feature).
+  - **Non-goals (this requirement).** Does not change
+    `restitution_curve`/`plane_space`/`setup_rows`/`resolve_row`'s
+    behavior — all confirmed already exact or a confirmed-equivalent
+    restructuring, nothing to change. Does not implement velocity-aligned
+    friction direction selection (finding 6 above) — left as an explicitly
+    tracked open item for a dedicated future requirement. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** Every Bullet-reference claim in these four
+    functions' doc comments (plus the `btContactSolverInfo` defaults'
+    own) is now backed by a citation to the specific fetched reference
+    file and behavior it was checked against, including correcting the
+    stale `setFrictionConstraintImpulse` citation. The
+    `restitution_curve`/call-site-clamp equivalence is pinned by a
+    dedicated test. The fixed-vs-velocity-aligned friction-direction
+    divergence is documented in both `solver.rs`'s module doc comment and
+    this spec, flagged as open follow-up work rather than silently
+    dropped. All pre-existing tests pass unchanged.
+  - **Verification plan.** 1 new `solver.rs` test:
+    `restitution_curve_clamps_a_fast_separating_relative_velocity_to_zero`
+    asserts `restitution_curve` never returns a negative value for a fast,
+    separating relative velocity, confirming its inlined clamp reproduces
+    real Bullet's own call-site clamp exactly. (`plane_space`'s own
+    byte-for-byte match was already pinned by the pre-existing
+    `plane_space_directions_are_orthonormal_and_perpendicular_to_normal`
+    test — no need for a second one.) All 278 of `rb_physics_bullet`'s
+    pre-existing tests (as of `FR-047`) pass unchanged. 1 new test,
+    bringing the crate to 279 total (+1 over `FR-047`'s 278).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4078,6 +4208,33 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.48.0 (2026-08-31): FR-048 added and investigated (`solver.rs`
+  constraint-row setup/resolve reference validation) — fetched and read
+  Bullet's real `btSequentialImpulseConstraintSolver.cpp`/`.h`,
+  `btContactSolverInfo.h`, and `btVector3.h` to check every Bullet-reference
+  claim `restitution_curve`, `plane_space`, `setup_rows`, and `resolve_row`
+  make. Confirmed `plane_space` byte-for-byte exact against real
+  `btPlaneSpace1`; `restitution_curve` behaviorally exact (its `.max(0.0)`
+  folds in a clamp real Bullet applies at its one call site instead, not a
+  divergence); `setup_rows`'s normal/friction row formulas exact against
+  real `setupContactConstraint`/`setupFrictionConstraint` (correcting a
+  stale citation to an unrelated, differently-named function); `resolve_row`'s
+  single unified two-bound resolver behaviorally equivalent to Bullet's own
+  two separate resolvers, given the normal row's effectively-infinite upper
+  limit; and all 6 of `btContactSolverInfo`'s cited default constants exact.
+  Found one genuine, significant divergence, not adopted: this port always
+  derives both friction directions from a fixed, velocity-independent
+  `plane_space` basis, while real Bullet's actual default aligns friction
+  direction 1 with the tangential component of the current relative sliding
+  velocity, falling back to `btPlaneSpace1` only when that velocity is
+  negligible — a fixed two-axis friction limit can over/under-estimate the
+  true circular friction cone by up to `sqrt(2)` relative to the real slide
+  direction, so this is flagged as open follow-up work (a dedicated future
+  requirement, the same scoping already used for `RB-PHYSICS-001-FR-030`/
+  `FR-034`/`FR-035`/`FR-037`) rather than folded into this pass. 1 new test,
+  bringing `rb_physics_bullet` to 279 tests (+1 over FR-047's 278);
+  investigated, doc-only changes to production code plus the 1 new test —
+  no other runtime behavior changed.
 - 0.47.0 (2026-08-31): FR-047 added and investigated (`collision.rs`
   remaining closed-form shape pairings reference validation) — fetched and
   read Bullet's real `btConvexPlaneCollisionAlgorithm.cpp`/`.h`,

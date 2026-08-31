@@ -113,6 +113,42 @@
 //!   (`RB-VERIFY-001`/`RB-VERIFY-002` data) — this remains an open item in
 //!   `RB-PHYSICS-001`, not asserted as settled; only the reference-fact
 //!   claim and this port's own justification for diverging from it changed.
+//! - **Fixed friction-direction basis, not velocity-aligned**
+//!   (`RB-PHYSICS-001-FR-048`). `RB-PHYSICS-001-FR-048` fetched and read
+//!   Bullet's real `btSequentialImpulseConstraintSolver::convertContact`
+//!   directly (matching `RB-PHYSICS-001-FR-036`/`FR-042`/`FR-043`/`FR-045`/
+//!   `FR-046`/`FR-047`'s own method) and found this crate's own
+//!   `setup_rows` always derives both friction directions from
+//!   `plane_space(&contact.normal)` (`RB-PHYSICS-001-FR-048` confirmed this
+//!   *function* byte-for-byte accurate against real `btPlaneSpace1` — see
+//!   its own doc comment) — a fixed, velocity-independent orthonormal
+//!   basis of the contact normal's tangent plane. Real Bullet's actual
+//!   default instead derives friction direction 1 from the tangential
+//!   component of the *current relative sliding velocity itself*
+//!   (`cp.m_lateralFrictionDir1 = vel - normal * rel_vel`, normalized),
+//!   falling back to `btPlaneSpace1`'s own fixed basis only when that
+//!   tangential velocity is negligible (`lat_rel_vel <= SIMD_EPSILON`) —
+//!   i.e. `btPlaneSpace1` is Bullet's own *degenerate-case fallback*, not
+//!   its everyday default, contrary to what this crate's own doc comments
+//!   previously implied by only ever citing it as "the" friction-basis
+//!   port. This is a real, physically meaningful difference, not a cosmetic
+//!   one: each friction row is independently clamped to
+//!   `[-mu * N, +mu * N]`, so two *fixed* orthogonal rows approximate the
+//!   true circular friction cone with a square in tangent space — for a
+//!   body sliding along neither fixed axis, up to `sqrt(2)` times the
+//!   correct friction magnitude is achievable at the square's diagonal.
+//!   Aligning friction direction 1 with the actual slide direction (real
+//!   Bullet's approach) keeps direction 2 orthogonal to the slide (so it
+//!   naturally solves near zero) and lets direction 1 alone reproduce the
+//!   textbook single-direction-sliding friction result exactly. Not
+//!   adopted in `RB-PHYSICS-001-FR-048`: implementing velocity-aligned
+//!   friction direction selection (plus its own degenerate-velocity
+//!   fallback) is a real, testable behavioral change in its own right,
+//!   deserving a dedicated follow-up FR with its own before/after tests
+//!   (the same scoping this port already used for `RB-PHYSICS-001-FR-030`/
+//!   `FR-034`/`FR-035`/`FR-037`, each one dedicated solver feature) rather
+//!   than folding it into a reference-validation pass — tracked as an open
+//!   item in `RB-PHYSICS-001`.
 
 use crate::body::RigidBody;
 use crate::collision::Contact;
@@ -122,6 +158,10 @@ use std::collections::HashMap;
 
 /// `btContactSolverInfo`'s defaults this port fixes rather than exposes as
 /// config yet (bullet3/src/BulletDynamics/ConstraintSolver/btContactSolverInfo.h).
+/// Confirmed byte-for-byte against real `btContactSolverInfoData`'s own
+/// constructor (`RB-PHYSICS-001-FR-048`): `m_erp2 = 0.2`, `m_globalCfm = 0.`,
+/// `m_linearSlop = 0.`, `m_restitutionVelocityThreshold = 0.2f`,
+/// `m_sor = 1.`, `m_numIterations = 10` all match exactly.
 const ERP2: f32 = 0.2;
 const GLOBAL_CFM: f32 = 0.0;
 const LINEAR_SLOP: f32 = 0.0;
@@ -145,7 +185,18 @@ fn combine_friction(a: f32, b: f32) -> f32 {
     (a + b) * 0.5
 }
 
-/// Port of `btSequentialImpulseConstraintSolver::restitutionCurve`.
+/// Port of `btSequentialImpulseConstraintSolver::restitutionCurve`, with its
+/// own call site's clamp folded in. Confirmed against real source
+/// (`RB-PHYSICS-001-FR-048`): the reference's own `restitutionCurve` returns
+/// the raw `restitution * -rel_vel` unclamped (it *can* be negative, e.g. a
+/// contact still registered while already separating faster than
+/// `velocity_threshold`) — but its one caller, `setupContactConstraint`,
+/// immediately clamps a non-positive result to exactly `0.` before using it
+/// (`if (restitution <= 0.) restitution = 0.f;`) before it ever reaches
+/// `velocityError`. This function's own `.max(0.0)` reproduces that
+/// call-site clamp inline rather than as a separate step — the *value* this
+/// crate's own `setup_rows` ultimately uses is identical either way, so this
+/// is a confirmed-equivalent restructuring, not a divergence.
 fn restitution_curve(rel_vel: f32, restitution: f32, velocity_threshold: f32) -> f32 {
     if rel_vel.abs() < velocity_threshold {
         0.0
@@ -156,6 +207,17 @@ fn restitution_curve(rel_vel: f32, restitution: f32, velocity_threshold: f32) ->
 
 /// Port of `btPlaneSpace1`: builds two vectors orthogonal to `n` (and to
 /// each other), used as the two friction directions in the tangent plane.
+/// Confirmed byte-for-byte accurate against real `btPlaneSpace1`
+/// (`RB-PHYSICS-001-FR-048`), including its `|n.z| > 1/sqrt(2)` branch
+/// threshold — but real Bullet only calls this as its own *fallback*, when
+/// a contact's tangential relative velocity is too small to derive a
+/// direction from (or `SOLVER_DISABLE_VELOCITY_DEPENDENT_FRICTION_DIRECTION`
+/// is set); its actual default derives friction direction 1 from the
+/// tangential component of the real relative sliding velocity instead. This
+/// crate's own `setup_rows` always uses this function, unconditionally —
+/// see the module doc comment's own "Fixed friction-direction basis" bullet
+/// for why that's a real, deliberately-not-adopted divergence, not confirmed
+/// equivalent to Bullet's actual default the way this function itself is.
 fn plane_space(n: &Vec3) -> (Vec3, Vec3) {
     if n.z.abs() > std::f32::consts::FRAC_1_SQRT_2 {
         let a = n.y * n.y + n.z * n.z;
@@ -230,9 +292,26 @@ impl DeltaVelocity {
 }
 
 /// Sets up the normal + two friction constraint rows for one contact,
-/// porting `setupContactConstraint` + `setFrictionConstraintImpulse`
-/// against a static body B (the plane), which is why every `rb1`-branch in
-/// the original is simply the zero case here.
+/// porting `setupContactConstraint` + `setupFrictionConstraint` (reached via
+/// `addFrictionConstraint`'s own default `desiredVelocity = 0`,
+/// `cfmSlip = 0` arguments — not `setFrictionConstraintImpulse`, a
+/// differently-named, unrelated function that only resets a cached impulse
+/// to zero) against a static body B (the plane), which is why every
+/// `rb1`-branch in the original is simply the zero case here.
+///
+/// Confirmed byte-for-byte accurate against both real functions directly
+/// (`RB-PHYSICS-001-FR-048`, matching `RB-PHYSICS-001-FR-036`/`FR-042`/
+/// `FR-043`/`FR-045`/`FR-046`/`FR-047`'s own method): the normal row's
+/// `velocity_error`/`positional_error` split on `gap_with_slop > 0.0` here
+/// matches `setupContactConstraint`'s own identical split on
+/// `penetration > 0` exactly (`penetration = cp.getDistance() +
+/// m_linearSlop` is exactly this crate's own `gap_with_slop`, given
+/// `Contact::penetration_depth = -getDistance()` — see `Contact`'s own doc
+/// comment), and the friction row's `rhs: -rel_vel * jac_diag_ab_inv`
+/// matches `setupFrictionConstraint`'s own `rhs = (desiredVelocity -
+/// rel_vel) * jacDiagABInv` exactly at the real default `desiredVelocity =
+/// 0` (this crate has no conveyor-belt/friction-anchor feature, so this is
+/// its only reachable case).
 fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3] {
     let rel_pos = contact.point - body.position;
     let inv_dt = 1.0 / dt;
@@ -295,6 +374,22 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
 /// Port of `resolveSingleConstraintRowGeneric`/`...LowerLimit`: one
 /// projected-Gauss-Seidel update of a single constraint row against the
 /// body's currently-accumulated delta velocity.
+///
+/// Confirmed against real source (`RB-PHYSICS-001-FR-048`): this crate uses
+/// one unified function (checking both `lower_limit` and `upper_limit`) for
+/// every row, where real Bullet actually dispatches to two different
+/// functions — `resolveSingleConstraintRowLowerLimit` (checks only
+/// `m_lowerLimit`, no upper check at all) for the contact/normal row, and
+/// `resolveSingleConstraintRowGeneric` (checks both) for friction rows.
+/// Confirmed this unification changes nothing: the normal row's own
+/// `upper_limit` is `UPPER_LIMIT` (`1e10`, matching real Bullet's own
+/// `m_upperLimit = 1e10f` for that row exactly), astronomically larger than
+/// any impulse a real contact ever produces, so the Generic formula's extra
+/// upper check is unreachable there — the two real functions are otherwise
+/// byte-for-byte identical (both compute `deltaImpulse = rhs -
+/// appliedImpulse * cfm - deltaVelDotN * jacDiagABInv`, then clamp
+/// `appliedImpulse` to the same lower bound the same way), so this is a
+/// confirmed-equivalent unification, not a divergence.
 fn resolve_row(row: &mut ConstraintRow, inv_mass: f32, delta: &mut DeltaVelocity) {
     let delta_vel_dot_n = row.direction.dot(&delta.linear) + row.torque_axis.dot(&delta.angular);
 
@@ -1168,6 +1263,25 @@ mod tests {
             s.linear_velocity.z > 6.0,
             "expected a strong bounce, got {}",
             s.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn restitution_curve_clamps_a_fast_separating_relative_velocity_to_zero() {
+        // RB-PHYSICS-001-FR-048: real Bullet's own `restitutionCurve` would
+        // return a *negative* value here (`restitution * -rel_vel` with
+        // `rel_vel` positive/separating and past the threshold) — its own
+        // caller clamps that to 0 immediately afterward. This function
+        // folds that clamp inline, so it must never return a negative
+        // number for any input, confirming the two-step-vs-one-step
+        // restructuring is behaviorally exact.
+        let rel_vel = 50.0; // fast separating, well past the 0.2 threshold
+        let restitution = 0.8;
+        let result = restitution_curve(rel_vel, restitution, RESTITUTION_VELOCITY_THRESHOLD);
+        assert_eq!(
+            result, 0.0,
+            "expected the call-site clamp folded into restitution_curve to \
+             produce exactly 0.0, not a raw negative value"
         );
     }
 
