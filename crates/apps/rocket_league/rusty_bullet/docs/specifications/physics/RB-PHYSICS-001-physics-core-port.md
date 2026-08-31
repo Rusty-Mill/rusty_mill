@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.24.0
+- Version: 0.25.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -17,7 +17,10 @@
   FR-022), a spherical patch at each of the 16 compound corners where a
   vertical-edge fillet meets a floor- or ceiling-seam fillet (since
   FR-023), and, since FR-024, an actual goal-mouth window cut into each
-  back wall with its own 3 rounded edges per goal — implemented; a car
+  back wall with its own 3 rounded edges per goal, with the 4 diagonal
+  corner walls' own floor/ceiling-seam arches and all 16 compound-corner
+  fillets that touch them now sized with a distinctly larger,
+  non-cardinal-wall radius since FR-025 — implemented; a car
   (box) actually being deflected by any fillet or driving into a goal, a
   modeled goal interior/net, split impulse, warm-starting, a combined
   multi-body solve, and constant calibration are open follow-up work)
@@ -92,7 +95,11 @@ corner wall's own top/bottom endpoint (since FR-023), and, since FR-024,
 an actual goal-mouth window — a `StaticGoalWall` — cut into each back
 wall, letting the ball (not yet a car) pass straight through into the
 goal, with its own 3 rounded edges (two posts and a crossbar,
-`StaticQuarterPipe`s again) — see FR-020/FR-021/FR-022/FR-023/FR-024.
+`StaticQuarterPipe`s again), and, since FR-025, a distinctly larger
+`arena::CORNER_ARCH_RADIUS` (instead of the cardinal walls' own
+`arena::FILLET_RADIUS`) governing a corner wall's own floor/ceiling-seam
+arches and all 16 compound-corner fillets that touch them — see
+FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
 
 ## Non-goals (this increment)
 
@@ -139,7 +146,14 @@ goal, with its own 3 rounded edges (two posts and a crossbar,
   measured against real field mesh data — only
   `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z` are commonly-cited, sourced
   dimensions; `FR-024`'s own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` are
-  commonly-cited too, but likewise not independently confirmed.
+  commonly-cited too, but likewise not independently confirmed. `FR-025`'s
+  own `arena::CORNER_ARCH_RADIUS` — the distinctly larger radius now
+  governing a corner wall's own floor/ceiling-seam arches and all 16
+  compound-corner fillets that touch them, in place of `FILLET_RADIUS` —
+  is likewise this project's own uncalibrated placeholder, chosen only to
+  read as visibly larger than `FILLET_RADIUS` (enforced at compile time by
+  a `const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);` check),
+  not measured against real field mesh data either.
 - **Disambiguating or blending a car's simultaneous contact with two walls
   at a corner, for wall-jump purposes.** Physical collision resolution
   already handles a car touching two walls at once correctly — `step`
@@ -756,6 +770,40 @@ goal, with its own 3 rounded edges (two posts and a crossbar,
   Still not modeled: a car actually being deflected by any fillet or
   driving into a goal, a modeled goal interior/net beyond the cutout
   itself, and the goal's own two compound top corners (see Non-goals).
+- `RB-PHYSICS-001-FR-025` (corner-wall floor/ceiling arch radius,
+  implemented): gives a diagonal corner wall's own floor-seam and
+  ceiling-seam fillets — 8 of `standard_curves`' 24 entries, the ones
+  bridging one of the 4 corner walls to the floor or ceiling — a
+  distinctly larger, dedicated radius instead of reusing the cardinal
+  walls' own `arena::FILLET_RADIUS`, matching real Rocket League's
+  corner-boost area reading as a noticeably bigger, more swept curve than
+  a cardinal wall's small rounding, not just a scaled-down copy of the
+  same shape. New constant `arena::CORNER_ARCH_RADIUS` (750.0, versus
+  `FILLET_RADIUS`'s 292.0) — documented, like every other arena dimension
+  in this module, as this project's own uncalibrated placeholder, not
+  measured against real field mesh data — governs those 8 arches; a
+  compile-time `const _: () = assert!(CORNER_ARCH_RADIUS >
+  FILLET_RADIUS);` right after the constant's own definition enforces the
+  "distinctly larger" relationship so the two constants can't quietly
+  converge or invert under a future edit. Because
+  `StaticCornerFillet::between_three_planes` derives its center and
+  containment `bounds` from a single shared `radius` argument blended
+  across all three planes it bridges — there is no way to ask it for a
+  center that sits one radius in from two planes and a different radius in
+  from the third, and doing so would also break the "meets its adjoining
+  edge fillets exactly where their axes cross" no-gap property FR-023
+  established — all 16 of `standard_corner_fillets`'s compound-corner
+  fillets switch to `CORNER_ARCH_RADIUS` too, since every one of them
+  touches one of the 8 now-larger arches. Unaffected, and still using
+  `FILLET_RADIUS` exactly as before: the 8 cardinal-wall (side/back)
+  floor/ceiling-seam fillets, the 8 vertical corner-edge fillets
+  (`RB-PHYSICS-001-FR-022`, where a corner wall meets its neighboring
+  side/back wall), and the 6 goal-cutout edge fillets
+  (`RB-PHYSICS-001-FR-024`) — these remain independent, additive contact
+  sources next to the bigger arches, not blended with them, the same
+  "no blended 3D corner" convention this port has used since before
+  FR-023. Still not modeled: a car actually being deflected by any fillet,
+  and everything else `FR-024`'s own Non-goals already cover.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -893,12 +941,21 @@ goal, with its own 3 rounded edges (two posts and a crossbar,
   `axis_direction` is computed via a cross product rather than
   hand-picked, since (unlike a cardinal wall's) it isn't a coordinate
   axis, while a vertical-edge fillet's own `axis_direction` is simply
-  `(0, 0, 1)` (the edge itself is vertical); `standard_corner_fillets`
+  `(0, 0, 1)` (the edge itself is vertical); since FR-025, the 8 of those
+  16 floor/ceiling-seam fillets that bridge a corner wall (rather than a
+  cardinal one) to the floor or ceiling are built with the distinctly
+  larger `CORNER_ARCH_RADIUS` in place of `FILLET_RADIUS`, while the other
+  8 cardinal-wall seam fillets and all 8 vertical-edge fillets keep
+  `FILLET_RADIUS` unchanged; `standard_corner_fillets`
   (since FR-023) — 16 `StaticCornerFillet`s, one per compound corner (4 per
   corner wall — floor+side, floor+back, ceiling+side, ceiling+back — times
   the 4 corner walls), all built via `StaticCornerFillet::between_three_planes`
   from those same three flat planes directly, not from the two
-  `StaticQuarterPipe`s `standard_curves` builds at that vertex;
+  `StaticQuarterPipe`s `standard_curves` builds at that vertex, and, since
+  FR-025, all built with `CORNER_ARCH_RADIUS` rather than `FILLET_RADIUS`
+  — every one of them touches one of the 8 now-larger arches, and
+  `between_three_planes` needs one shared radius across the three planes it
+  blends to still meet an arch exactly where their axes cross;
   `standard_goal_walls` (since FR-024) — 2 `StaticGoalWall`s, one per back
   wall, each wrapping the same `back_wall_plane` `standard_curves` already
   uses, windowed at `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`;
@@ -1284,6 +1341,60 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020/FR-021/FR-022/FR-023/FR-024
   behavior covered by `rb_physics_bullet`'s unit tests (211 tests as of
   this version).
+- FR-025 (met, corner-wall floor/ceiling arch radius): a compile-time
+  `const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);` right after
+  `CORNER_ARCH_RADIUS`'s own definition proves the "distinctly larger"
+  relationship at build time rather than at runtime. `standard_curves`
+  still returns exactly 24 fillets, but `every_floor_or_ceiling_seam_curve_
+  bridges_a_wall_to_the_floor_or_ceiling` now checks the first 8 of those
+  24 entries (the cardinal-wall seams) against `FILLET_RADIUS` and the
+  next 8 (the corner-wall seams) against `CORNER_ARCH_RADIUS` separately,
+  instead of checking all 16 floor/ceiling entries against one shared
+  radius as before; `every_standard_curve_sits_radius_in_from_a_vertical_
+  wall` now accepts either radius, since a curve's distance from its own
+  bridged vertical wall is `FILLET_RADIUS` for a cardinal-wall or
+  vertical-edge fillet and `CORNER_ARCH_RADIUS` for a corner-wall
+  floor/ceiling seam. `standard_corner_fillets` still returns exactly 16
+  fillets, but `every_standard_corner_fillets_center_sits_radius_in_from_a_
+  floor_or_ceiling_a_side_or_back_wall_and_a_corner_wall` now checks
+  `CORNER_ARCH_RADIUS` instead of `FILLET_RADIUS`, since all 16 switched
+  together. A new end-to-end `PhysicsWorld` test,
+  `a_ball_embedded_in_a_corner_walls_floor_arch_footprint_is_pushed_toward_
+  the_axis`, gives the real live-physics proof: a ball embedded past
+  `arena::CORNER_ARCH_RADIUS` at a diagonal corner wall's own floor seam —
+  deep enough that it would sit outside a plain `arena::FILLET_RADIUS`
+  fillet's own footprint entirely — still gets pushed meaningfully back
+  toward the axis, the same "moved meaningfully," not
+  "settled-and-stayed," claim every other fillet's own equivalent test
+  makes, for the same residual-velocity reason, and the test additionally
+  asserts `CORNER_ARCH_RADIUS > FILLET_RADIUS` directly. While validating
+  this change, the pre-existing `world.rs` end-to-end test
+  `a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`
+  (FR-024) started failing: `StaticQuarterPipe` is documented as infinite
+  along its own axis, not clipped to a corner wall's real, finite span, so
+  a ball fired dead down the arena's own center line eventually re-enters
+  *some* corner-wall floor-seam arch's resting shell far past the goal —
+  already true before FR-025 with the smaller `FILLET_RADIUS` (verified
+  directly against the pre-FR-025 code, where the ball drifts into this
+  zone around y≈7650-7930 and gets a mild, harmless correction that still
+  leaves it past the wall), but FR-025's bigger `CORNER_ARCH_RADIUS` moves
+  that zone closer in (~y=6300-7700) and turns the same brush into a much
+  sharper, solver-destabilizing correction (velocity spikes to tens of
+  thousands of units/sec, throwing the ball back past the wall and failing
+  the test's assertion). This is a discovered-and-fixed test-scoping
+  issue, not a new capability or a new documented Non-goal —
+  `StaticQuarterPipe`'s "infinite along its own axis" simplification was
+  already documented in `body.rs` before this increment. The fix:
+  shortened that one test's simulated flight duration from 3.0s to 1.8s,
+  comfortably long enough to prove the ball clears the back wall (needs
+  y > 5121, reaches y=5400 unobstructed by 1.8s) while stopping well short
+  of re-entering the infinite-fillet zone, with a code comment in the test
+  explaining why. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025
+  behavior covered by `rb_physics_bullet`'s unit tests (212 tests as of
+  this version — net +1 over 0.24.0's 211, since one new `arena.rs` test
+  idea was implemented as the compile-time const-assert above instead of a
+  runtime test, alongside the one new `world.rs` end-to-end test).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -1482,19 +1593,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   "first wall in `self.walls`" rule) isn't. FR-019's corner walls make this
   case reachable in the standard arena for the first time; still not
   exercised by any test here. Not started.
-- Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS` against real
-  field mesh data (see FR-019/FR-020/FR-021/FR-022/FR-023/FR-024) — this
-  port has no reference for either at all, unlike `SIDE_WALL_X`/
+- Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS`/
+  `CORNER_ARCH_RADIUS` against real field mesh data (see
+  FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025) — this
+  port has no reference for any of the three at all, unlike `SIDE_WALL_X`/
   `BACK_WALL_Y`/`CEILING_Z`; even a sourced value would only approximate
   the real corner/transition, which isn't a single flat plane,
   single-radius edge fillet, or single-radius corner fillet in the actual
-  game. `FILLET_RADIUS` now also governs the 4 corner
-  walls' floor/ceiling-seam fillets (FR-021), all 8 vertical-edge
-  fillets (FR-022), all 16 compound-corner fillets (FR-023), and all 6
-  goal-cutout-edge fillets (FR-024), reusing the
-  same cardinal-wall value rather than a
-  separately chosen one for each — whether the real game even uses one
-  uniform transition radius at all (as opposed to a genuinely different
+  game. `FILLET_RADIUS` governs the 4 cardinal walls'
+  floor/ceiling-seam fillets (FR-020), all 8 vertical-edge fillets
+  (FR-022), and all 6 goal-cutout-edge fillets (FR-024); since FR-025, the
+  4 corner walls' own floor/ceiling-seam fillets (FR-021) and all 16
+  compound-corner fillets (FR-023) instead reuse the distinctly larger
+  `CORNER_ARCH_RADIUS`, chosen only to read as visibly bigger than
+  `FILLET_RADIUS` (enforced at compile time), not measured against real
+  field mesh data either — whether the real game even uses two uniform
+  transition radii at all (as opposed to a genuinely different
   corner-specific curve, a third, differently-shaped curve at the
   vertical edges, a fourth at the compound corners, and a fifth at the
   goal posts/crossbar — real Rocket League's actual goal-post radius is

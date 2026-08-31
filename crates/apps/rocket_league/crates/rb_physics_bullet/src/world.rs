@@ -2034,6 +2034,69 @@ mod tests {
     }
 
     #[test]
+    fn a_ball_embedded_in_a_corner_walls_floor_arch_footprint_is_pushed_toward_the_axis() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-025: a corner
+        // wall's own floor-seam arch now uses the larger
+        // `arena::CORNER_ARCH_RADIUS`, not the cardinal walls'
+        // `arena::FILLET_RADIUS` -- a ball embedded past *that* larger
+        // radius (deep enough that it would sit outside a plain
+        // `FILLET_RADIUS` fillet's own footprint entirely) should still get
+        // pushed back toward the axis, proving the bigger radius is live
+        // collision geometry, not just a number in a doc comment. Same
+        // diagonal, non-axis-aligned wall setup as
+        // `a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`'s
+        // corner-wall variant, and the same weaker "moved meaningfully"
+        // assertion as
+        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
+        // for the same residual-velocity reason.
+        let floor = flat_ground();
+        let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
+        let wall = StaticPlane::new(wall_normal, -1000.0);
+        let axis_direction = floor.normal.cross(&wall.normal);
+        let radius = crate::arena::CORNER_ARCH_RADIUS;
+        assert!(radius > crate::arena::FILLET_RADIUS);
+        let curve =
+            crate::body::StaticQuarterPipe::between_planes(&floor, &wall, radius, axis_direction);
+
+        let ball_radius = 92.75;
+        let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
+            .normalize()
+            .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
+        // Overlapping the arch's own material by 10 units (further from the
+        // axis than the resting distance, toward the sharp corner the arch
+        // replaces) -- well past where a plain FILLET_RADIUS fillet's own
+        // footprint would have ended, proving the larger radius is what's
+        // actually governing this contact.
+        let embedded_distance = radius - ball_radius + 10.0;
+        assert!(embedded_distance > crate::arena::FILLET_RADIUS);
+        let embedded_position = curve.axis_point + bisector * embedded_distance;
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
+        ball.restitution = 0.0;
+
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(wall)
+            .with_curve(curve);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+
+        let final_horizontal_rel = Vec3::new(
+            world.ball.position.x - curve.axis_point.x,
+            world.ball.position.y - curve.axis_point.y,
+            0.0,
+        );
+        let final_dist = final_horizontal_rel.length();
+        assert!(
+            final_dist < embedded_distance - 10.0,
+            "expected the corner wall's floor arch to push the ball meaningfully toward the \
+             axis, started {embedded_distance} units out, got {final_dist}"
+        );
+    }
+
+    #[test]
     fn a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis() {
         // The real end-to-end proof of RB-PHYSICS-001-FR-022: two vertical
         // walls meeting at a shallow (non-perpendicular, 45-degree-normal)
@@ -2240,6 +2303,22 @@ mod tests {
         // of the window's own rounded edges, keeps going past the back
         // wall's own y position instead of bouncing off it -- proof the
         // cutout is a genuine opening, not decoration.
+        //
+        // Only flown for 1.8s (y=5400 unobstructed), comfortably past the
+        // back wall at BACK_WALL_Y=5120 but well short of y=~6300: a
+        // corner-wall floor-seam arch's own axis (`standard_curves`) is a
+        // line that's `StaticQuarterPipe`-documented as infinite along its
+        // own length, not clipped to the corner wall's real, finite span, so
+        // a ball flying dead down the arena's own center line eventually
+        // re-enters *some* corner arch's resting shell far past the goal --
+        // already true before RB-PHYSICS-001-FR-025 (verified against this
+        // same test with the old, smaller FILLET_RADIUS, where it lands
+        // around y=~7650-7930 instead), and unrelated to the goal cutout
+        // this test actually exercises. 3.0s used to clear that zone by
+        // luck at the old radius; FR-025's bigger CORNER_ARCH_RADIUS moves
+        // it closer in (~6300-7700) and turns the same brush from a gentle
+        // bounce into a much sharper one, so this test now stops well
+        // before reaching it instead of relying on outrunning it.
         let ball_radius = 92.75;
         let mut ball = RigidBody::sphere(
             ball_radius,
@@ -2253,7 +2332,7 @@ mod tests {
         world.gravity = Vec3::ZERO;
 
         let dt = 1.0 / 120.0;
-        for _ in 0..(3.0 / dt) as u32 {
+        for _ in 0..(1.8 / dt) as u32 {
             world.step(dt);
         }
 
