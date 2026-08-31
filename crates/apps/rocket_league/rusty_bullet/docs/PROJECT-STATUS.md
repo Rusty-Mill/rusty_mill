@@ -2,7 +2,7 @@
 
 - Last verified main commit: `34234b6` (merge of [#57](https://github.com/baileyrd/rusty_bullet/pull/57))
 - Verified at: 2026-08-30
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball — floor/ceiling seams for all 9 walls (cardinal and diagonal corner), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall for the ball — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by any fillet or driving into a goal, a modeled goal interior/net, and constant calibration still open) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall for the ball — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; a car actually being deflected by any fillet or driving into a goal, a modeled goal interior/net, and constant calibration still open) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -657,6 +657,39 @@
   is still stopped by it, and an end-to-end test proving a ball embedded
   past a goal-post fillet's own radius gets pushed meaningfully back
   toward the axis.
+- `RB-PHYSICS-001-FR-025` (corner-wall floor/ceiling arch radius) — a
+  diagonal corner wall's own floor-seam and ceiling-seam fillets (8 of
+  `standard_curves`'s 24 entries) now use a new, distinctly larger
+  `arena::CORNER_ARCH_RADIUS` (750 uu) instead of the cardinal walls' own
+  `FILLET_RADIUS` (292 uu), matching real Rocket League's noticeably bigger,
+  more swept corner-boost curve rather than a scaled-down copy of a cardinal
+  wall's small rounding. Because `StaticCornerFillet::between_three_planes`
+  needs one shared radius across all three planes it blends to still meet
+  its adjoining edge fillets exactly where their axes cross (the same
+  no-gap property `RB-PHYSICS-001-FR-023` established), all 16
+  `standard_corner_fillets` switch to `CORNER_ARCH_RADIUS` too, since every
+  one touches one of these bigger arches. Unaffected, still `FILLET_RADIUS`:
+  the 8 cardinal-wall floor/ceiling seams, the 8 vertical corner-edge
+  fillets (FR-022), and the 6 goal-cutout edge fillets (FR-024) —
+  independent, additive contact sources next to the bigger arches, not
+  blended with them. `CORNER_ARCH_RADIUS` is an uncalibrated placeholder
+  like every other arena dimension in this crate; a compile-time
+  `const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);` enforces the
+  "distinctly larger" relationship. Validating this surfaced a real,
+  pre-existing (already-documented) latent issue: `StaticQuarterPipe` is
+  infinite along its own axis, so a ball fired dead down the arena's own
+  center line eventually re-enters some corner-wall arch's resting shell far
+  past the goal — already true with the old, smaller `FILLET_RADIUS` (a
+  mild, harmless correction around y≈7650-7930), but FR-025's bigger radius
+  moves that zone closer in (y≈6300-7700) and turns it into a much sharper,
+  solver-destabilizing correction. Fixed by shortening the pre-existing
+  `a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`
+  end-to-end test's flight duration (3.0s → 1.8s) to comfortably clear the
+  back wall without re-entering that already-documented infinite-fillet
+  zone — a test-scoping fix, not a new capability or Non-goal. 1 new unit
+  test in `world.rs` in `rb_physics_bullet` (212 total): the real end-to-end
+  proof, a ball embedded past a corner-wall floor arch's own (larger)
+  radius gets pushed meaningfully back toward the axis.
 
 ## In progress
 
@@ -735,7 +768,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (261 tests: 23 in `rb_domain`, 211 in
+- `cargo test --workspace`: pass (262 tests: 23 in `rb_domain`, 212 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)

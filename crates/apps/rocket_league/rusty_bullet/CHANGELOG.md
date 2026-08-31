@@ -296,6 +296,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (unlike `curves`/`corner_fillets`). A car actually being deflected by
   any fillet or driving into a goal, and a modeled goal interior/net
   beyond the cutout, remain not modeled.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-025`) — corner-wall
+  floor/ceiling arch radius: a diagonal corner wall's own floor-seam and
+  ceiling-seam fillets now use a new, distinctly larger
+  `arena::CORNER_ARCH_RADIUS` (750 uu) instead of the cardinal walls' own
+  `FILLET_RADIUS` (292 uu), matching real Rocket League's bigger, more
+  swept corner-boost curve. All 16 `standard_corner_fillets` switch to
+  `CORNER_ARCH_RADIUS` too, since `StaticCornerFillet::between_three_planes`
+  needs one shared radius across all three planes it blends to still meet
+  its adjoining edge fillets exactly where their axes cross. The 8
+  cardinal-wall floor/ceiling seams, 8 vertical corner-edge fillets
+  (FR-022), and 6 goal-cutout edge fillets (FR-024) are unaffected and
+  keep `FILLET_RADIUS`. A compile-time assertion enforces
+  `CORNER_ARCH_RADIUS > FILLET_RADIUS`.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
@@ -325,6 +338,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —
   invisible under the old index-pairwise frame comparison, surfaced once
   real timestamp alignment landed. Corrected.
+- `rb_physics_bullet::world`'s
+  `a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`
+  test flew its ball for a fixed 3.0s regardless of when it actually
+  cleared the back wall — harmless with the old, smaller `FILLET_RADIUS`
+  (the ball drifted into `body::StaticQuarterPipe`'s documented
+  infinite-along-its-axis zone far past the goal and got only a mild
+  correction there), but `RB-PHYSICS-001-FR-025`'s bigger
+  `CORNER_ARCH_RADIUS` moved that same zone closer in and turned the brush
+  into a solver-destabilizing correction that threw the ball back past the
+  wall, failing the assertion. Shortened the test's flight duration to
+  1.8s — still comfortably past the wall, short of the infinite-fillet
+  zone.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

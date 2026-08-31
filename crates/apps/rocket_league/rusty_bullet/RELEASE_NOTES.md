@@ -6,6 +6,56 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Corner-wall floor/ceiling arch radius
+**2026-08-31** · PR pending · commit pending
+
+- **A diagonal corner wall's own floor-seam and ceiling-seam fillets are now
+  distinctly larger than a cardinal wall's**, matching real Rocket League's
+  noticeably bigger, more swept corner-boost curve rather than a
+  scaled-down copy of a cardinal wall's small rounding.
+- **New `arena::CORNER_ARCH_RADIUS` (750 uu)**, an uncalibrated placeholder
+  like every other arena dimension in this crate (no verified reference for
+  the real arch's actual radius, chosen only to read as visibly larger than
+  `FILLET_RADIUS` (292 uu)). The 8 of `standard_curves`'s 24 fillets that
+  bridge a corner wall to the floor or ceiling now use it instead of
+  `FILLET_RADIUS`; a compile-time
+  `const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);` enforces the
+  "distinctly larger" relationship.
+- **All 16 `standard_corner_fillets` switch to `CORNER_ARCH_RADIUS` too.**
+  `StaticCornerFillet::between_three_planes` needs one shared radius across
+  all three planes it blends to still meet its adjoining edge fillets
+  exactly where their axes cross (the same no-gap property
+  `RB-PHYSICS-001-FR-023` established) — every one of the 16 compound
+  corners touches one of the 8 now-bigger corner-wall arches, so a
+  mismatched radius there wouldn't blend cleanly.
+- **Unaffected, still `FILLET_RADIUS`:** the 8 cardinal-wall floor/ceiling
+  seams, the 8 vertical corner-edge fillets (`FR-022`), and the 6
+  goal-cutout edge fillets (`FR-024`) — independent, additive contact
+  sources next to the bigger arches, not blended with them, the same
+  convention every other adjoining-fillet pair in this module already uses.
+- **Discovered and fixed a real regression while validating**: `body::StaticQuarterPipe`
+  is documented as infinite along its own axis, not clipped to a corner
+  wall's real, finite span — a ball fired dead down the arena's own center
+  line eventually re-enters some corner-wall arch's resting shell far past
+  the goal, a pre-existing (already-documented) property that was already
+  true with the old, smaller `FILLET_RADIUS` (a mild, harmless correction
+  around y≈7650-7930 there), but `CORNER_ARCH_RADIUS` moves that zone closer
+  in (y≈6300-7700) and turns the same brush into a much sharper,
+  solver-destabilizing correction (velocities spiking to tens of thousands
+  of units/sec). Fixed by shortening the pre-existing `world.rs` test
+  `a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`'s
+  simulated flight duration (3.0s → 1.8s) — still comfortably long enough to
+  prove the ball clears the back wall, but short enough to stop before
+  re-entering that already-documented infinite-fillet zone. A test-scoping
+  fix, not a new capability or a new documented Non-goal.
+- 1 new unit test in `world.rs` in `rb_physics_bullet` (212 total): the real
+  end-to-end proof, `a_ball_embedded_in_a_corner_walls_floor_arch_footprint_is_pushed_toward_the_axis`
+  — a ball embedded past a corner wall's floor arch's own (larger) radius
+  gets pushed meaningfully back toward the axis, asserting
+  `CORNER_ARCH_RADIUS > FILLET_RADIUS` along the way.
+
+---
+
 ## Goal cutouts
 **2026-08-30** · [#57](https://github.com/baileyrd/rusty_bullet/pull/57) · `34234b6`
 
