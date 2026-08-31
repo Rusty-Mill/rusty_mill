@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Stale "split impulse" Non-goals correction
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #95](https://github.com/baileyrd/rusty_bullet/pull/95) · `45cb184`
 
 - This project's own spec still carried a "Split impulse. This port always
   takes Bullet's non-split contact-resolution branch" Non-goals bullet —
