@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Corner-wall floor/ceiling arch radius
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [#59](https://github.com/baileyrd/rusty_bullet/pull/59) · `ff1391a`
 
 - **A diagonal corner wall's own floor-seam and ceiling-seam fillets are now
   distinctly larger than a cardinal wall's**, matching real Rocket League's
