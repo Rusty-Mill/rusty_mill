@@ -36,7 +36,13 @@ impl Shape {
     /// The diagonal of the local-frame inertia tensor (off-diagonal terms
     /// are zero for both shapes about their own center of mass, by
     /// symmetry) — port of `btSphereShape::calculateLocalInertia` /
-    /// `btBoxShape::calculateLocalInertia`.
+    /// `btBoxShape::calculateLocalInertia`. `RB-PHYSICS-001-FR-046` fetched
+    /// and read both reference functions directly (`btSphereShape.cpp`/
+    /// `btBoxShape.cpp`) and confirmed both formulas byte-for-byte,
+    /// including axis ordering: real Bullet's box inertia divides
+    /// `mass / 12` into `ly^2 + lz^2` for x, `lx^2 + lz^2` for y, and
+    /// `lx^2 + ly^2` for z, exactly matching this port's own ordering
+    /// below.
     fn local_inertia(&self, mass: f32) -> Vec3 {
         match *self {
             Shape::Sphere { radius } => {
@@ -208,9 +214,13 @@ impl RigidBody {
 
     /// Recomputes `inv_inertia_world` from the body's current `orientation`
     /// — port of `btRigidBody::updateInertiaTensor`
-    /// (`m_invInertiaTensorWorld = basis.scaled(invInertiaLocal) * basis.transpose()`).
-    /// Must be called after `orientation` changes; `PhysicsWorld::step`
-    /// does this once per step, right after integrating the transform.
+    /// (`m_invInertiaTensorWorld = basis.scaled(invInertiaLocal) * basis.transpose()`),
+    /// confirmed byte-for-byte against the real fetched source by
+    /// `RB-PHYSICS-001-FR-046`. Must be called after `orientation` changes;
+    /// `PhysicsWorld::step` does this once per step, right after
+    /// integrating the transform (see that function's own doc comment for
+    /// why `Mat3::from_quat`'s own reliance on an already-unit-length
+    /// `orientation` is safe here specifically).
     pub fn update_inertia_tensor(&mut self) {
         let basis = Mat3::from_quat(&self.orientation);
         self.inv_inertia_world = basis

@@ -564,6 +564,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   identity on a degenerate result — a real distinction an unconditional
   `Quat::normalize` call would have gotten wrong. 1 new test pins this;
   all pre-existing tests pass unchanged.
+- `body::Shape::local_inertia`/`RigidBody::update_inertia_tensor`,
+  `mat3::Mat3::scaled_columns`/`Mat3::from_quat`
+  (`RB-PHYSICS-001-FR-046`) — fetched and read Bullet's real
+  `btSphereShape.cpp`, `btBoxShape.cpp`, `btRigidBody.cpp`/`.h`, and
+  `btMatrix3x3.h` and confirmed the local-inertia formulas,
+  `update_inertia_tensor`, and `scaled_columns` all byte-for-byte
+  accurate. Found `Mat3::from_quat` hardcodes `s = 2` assuming a
+  unit-length input, while the reference's own `setRotation`
+  self-corrects for a non-unit-length one via `s = 2 / q.length2()` — not
+  adopted, since this function's only production call site always
+  receives an already-renormalized orientation. 1 new test pins this;
+  all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

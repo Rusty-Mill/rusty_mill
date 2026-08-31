@@ -25,7 +25,23 @@ impl Mat3 {
     }
 
     /// Port of `btMatrix3x3::setRotation`: the rotation matrix equivalent
-    /// of a unit quaternion.
+    /// of a unit quaternion. `RB-PHYSICS-001-FR-046` fetched and read the
+    /// real reference source directly and found one genuine difference:
+    /// the reference's own non-SIMD branch computes `s = 2 / q.length2()`
+    /// and scales every cross term by `s` (`xs = q.x() * s`, etc.),
+    /// self-correcting for a quaternion that isn't already unit length —
+    /// this function instead hardcodes `s = 2` (`x2 = x + x` below),
+    /// assuming exact unit length. Not adopted as a change: this
+    /// function's only production call site
+    /// (`RigidBody::update_inertia_tensor`) always passes `orientation`
+    /// right after `integrate::integrate_transform`'s own renormalization,
+    /// so the input is never meaningfully non-unit-length here — unlike
+    /// `btMatrix3x3::setRotation`, a general-purpose utility called from
+    /// many places in real Bullet with far less controlled inputs, this is
+    /// a private, single-call-site helper where the self-correction the
+    /// reference needs would be pure defensive theater. See
+    /// `from_quat_does_not_self_correct_a_non_unit_length_quaternion`
+    /// below, which pins this exact distinction.
     pub fn from_quat(q: &Quat) -> Mat3 {
         let (x, y, z, w) = (q.x, q.y, q.z, q.w);
         let (x2, y2, z2) = (x + x, y + y, z + z);
@@ -72,7 +88,10 @@ impl Mat3 {
 
     /// `self * diag(d)` — scales column `j` by `d[j]`. Port of
     /// `btMatrix3x3::scaled`, used by `RigidBody::update_inertia_tensor` to
-    /// compute `R * diag(invInertiaLocal) * R^T`.
+    /// compute `R * diag(invInertiaLocal) * R^T`. `RB-PHYSICS-001-FR-046`
+    /// confirmed this matches the reference's own per-column scaling
+    /// (`m_el[row][col] * s[col]`) byte-for-byte against the real fetched
+    /// source.
     pub fn scaled_columns(&self, d: &Vec3) -> Mat3 {
         let mut rows = self.rows;
         for row in &mut rows {
@@ -116,6 +135,33 @@ mod tests {
         let m = Mat3::from_quat(&q);
         let v = Vec3::new(1.0, 0.0, 0.0);
         assert!((m.mul_vec3(&v) - q.rotate(&v)).length() < 1e-5);
+    }
+
+    #[test]
+    fn from_quat_does_not_self_correct_a_non_unit_length_quaternion() {
+        // RB-PHYSICS-001-FR-046: real Bullet's own `btMatrix3x3::setRotation`
+        // divides by `q.length2()` internally, so scaling a quaternion by
+        // any positive factor still yields the same valid rotation matrix.
+        // This function deliberately doesn't (see its own doc comment) —
+        // pinning that a scaled-up quaternion produces a matrix whose rows
+        // are no longer unit length, unlike a genuine rotation matrix.
+        let half = std::f32::consts::FRAC_PI_4;
+        let unit = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let scaled = Quat::new(0.0, 0.0, 2.0 * half.sin(), 2.0 * half.cos());
+        assert!((scaled.length_squared() - 4.0).abs() < 1e-5);
+
+        let m_unit = Mat3::from_quat(&unit);
+        let m_scaled = Mat3::from_quat(&scaled);
+
+        let row0_unit_length = m_unit.mul_vec3(&Vec3::new(1.0, 0.0, 0.0)).length();
+        let row0_scaled_length = m_scaled.mul_vec3(&Vec3::new(1.0, 0.0, 0.0)).length();
+        assert!((row0_unit_length - 1.0).abs() < 1e-5);
+        assert!(
+            (row0_scaled_length - 1.0).abs() > 0.1,
+            "expected a non-unit-length quaternion to produce a non-orthonormal \
+             matrix (row length {row0_scaled_length}), matching this function's \
+             own documented lack of self-correction"
+        );
     }
 
     #[test]

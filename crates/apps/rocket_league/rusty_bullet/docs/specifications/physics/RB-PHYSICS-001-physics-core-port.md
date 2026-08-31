@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.45.0
+- Version: 0.46.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -138,7 +138,15 @@
   degenerate-quaternion guard isn't defensive theater, it's necessary to
   match Bullet's real fallback choice (preserve the prior orientation, not
   reset to identity) — pinned by a new regression test — investigated,
-  1 new test; static-contact warm-starting,
+  1 new test; and, since FR-046, `body.rs`/`mat3.rs`'s own Bullet-reference
+  claims (local inertia formulas, `update_inertia_tensor`,
+  `Mat3::scaled_columns`) were all confirmed byte-for-byte accurate against
+  fetched reference source, with one genuine finding: `Mat3::from_quat`
+  doesn't self-correct a non-unit-length input quaternion the way Bullet's
+  own `setRotation` does, safe only because this function's single
+  production call site always receives an already-renormalized
+  orientation — pinned by a new regression test — investigated, 1 new
+  test; static-contact warm-starting,
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
   of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
   selection, and real-data calibration (including which combine mode, if
@@ -2529,6 +2537,70 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     All 275 of `rb_physics_bullet`'s pre-existing tests (as of `FR-044`)
     pass unchanged. 1 new test, bringing the crate to 276 total (+1 over
     `FR-044`'s 275).
+- `RB-PHYSICS-001-FR-046` (`body.rs`/`mat3.rs` reference validation,
+  investigated): `body.rs`'s `Shape::local_inertia`/
+  `RigidBody::update_inertia_tensor` and `mat3.rs`'s `Mat3::scaled_columns`/
+  `Mat3::from_quat` all claim close fidelity to specific real Bullet
+  functions — this requirement fetched and read every one directly
+  (`btSphereShape.cpp`, `btBoxShape.cpp`, `btRigidBody.cpp`/`.h`,
+  `btMatrix3x3.h`), matching `RB-PHYSICS-001-FR-036`/`FR-042`/`FR-043`/
+  `FR-045`'s own method, and checked every specific claim against it.
+  1. **`local_inertia`'s sphere/box formulas.** Confirmed
+     `btSphereShape::calculateLocalInertia`'s `0.4 * mass * margin^2`
+     (Bullet's sphere shape uses its own collision margin as the radius
+     for this purpose, the same analog `RB-PHYSICS-001-FR-036` already
+     established this port's own single radius field plays) and
+     `btBoxShape::calculateLocalInertia`'s `mass / 12 * (ly^2 + lz^2)` for
+     x (and the corresponding cyclic permutations for y/z) both match this
+     port's own formulas byte-for-byte, including axis ordering.
+  2. **`update_inertia_tensor`.** Confirmed `btRigidBody::updateInertiaTensor`
+     (`m_invInertiaTensorWorld = basis.scaled(invInertiaLocal) *
+     basis.transpose()`) matches this function's own implementation
+     exactly, and that `Mat3::scaled_columns` matches `btMatrix3x3::scaled`'s
+     own per-column scaling (`m_el[row][col] * s[col]`) byte-for-byte.
+  3. **A genuine difference found in `Mat3::from_quat`, not adopted.**
+     The reference's own `btMatrix3x3::setRotation` (non-SIMD branch)
+     computes `s = 2 / q.length2()` and scales every cross term by `s`,
+     self-correcting for a quaternion that isn't already unit length; this
+     function instead hardcodes the `2` (`x2 = x + x` etc.), assuming
+     exact unit length. Confirmed empirically (new test, below) that
+     feeding this function a deliberately scaled, non-unit-length
+     quaternion produces a matrix whose rows are no longer unit
+     length — unlike Bullet's own self-correcting version, which would
+     still produce a valid rotation matrix for the same input. Not
+     adopted as a fix: this function's only production call site
+     (`RigidBody::update_inertia_tensor`) always receives `orientation`
+     immediately after `integrate::integrate_transform`'s own
+     renormalization (see that function's own `RB-PHYSICS-001-FR-045`
+     doc comment), so the input here is never meaningfully non-unit-length
+     in practice — unlike `btMatrix3x3::setRotation`, a general-purpose
+     utility called from many places in real Bullet with far less
+     controlled inputs, adding the reference's own self-correction here
+     would be pure defensive theater for an unreachable case.
+  - **Non-goals (this requirement).** Does not change
+    `local_inertia`/`update_inertia_tensor`/`scaled_columns` — all three
+    confirmed already exact, nothing to change. Does not add
+    self-correction to `Mat3::from_quat` for a non-unit-length input, for
+    lack of a reachable production scenario that would exercise it (see
+    finding 3 above). Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** Every Bullet-reference claim in
+    `body.rs`/`mat3.rs`'s doc comments is now backed by a citation to the
+    specific fetched reference file and behavior it was checked against.
+    `Mat3::from_quat`'s lack of self-correction for a non-unit-length
+    input is documented and pinned by a dedicated test, so a future
+    refactor that starts passing it a less-controlled quaternion would
+    fail a test rather than silently producing a non-orthonormal matrix.
+    All pre-existing tests pass unchanged.
+  - **Verification plan.** 1 new `mat3.rs` test:
+    `from_quat_does_not_self_correct_a_non_unit_length_quaternion` builds
+    a known unit quaternion and a scaled (length² = 4) copy of it, and
+    asserts the unit quaternion's own resulting matrix has unit-length
+    rows while the scaled quaternion's own resulting matrix does not —
+    confirming the exact distinction from Bullet's own self-correcting
+    reference. All 276 of `rb_physics_bullet`'s pre-existing tests (as of
+    `FR-045`) pass unchanged. 1 new test, bringing the crate to 277 total
+    (+1 over `FR-045`'s 276).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3907,6 +3979,28 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.46.0 (2026-08-31): FR-046 added and investigated (`body.rs`/`mat3.rs`
+  reference validation) — fetched and read Bullet's real
+  `btSphereShape.cpp`, `btBoxShape.cpp`, `btRigidBody.cpp`/`.h`, and
+  `btMatrix3x3.h` to check every Bullet-reference claim
+  `body.rs`'s `Shape::local_inertia`/`RigidBody::update_inertia_tensor`
+  and `mat3.rs`'s `Mat3::scaled_columns`/`Mat3::from_quat` make. Confirmed
+  the sphere/box local-inertia formulas, `update_inertia_tensor`'s
+  `basis.scaled(invInertiaLocal) * basis.transpose()`, and
+  `Mat3::scaled_columns`'s per-column scaling all byte-for-byte accurate.
+  Found one genuine difference: `Mat3::from_quat` hardcodes an `s = 2`
+  factor assuming an exactly unit-length input quaternion, while the
+  reference's own `btMatrix3x3::setRotation` computes `s = 2 /
+  q.length2()` to self-correct for a non-unit-length input — not adopted,
+  since this function's only production call site
+  (`RigidBody::update_inertia_tensor`) always receives an
+  already-renormalized orientation (see FR-045's own
+  `integrate_transform` finding), making the reference's own
+  self-correction unreachable defensive theater here. Added 1 new
+  `mat3.rs` test pinning this exact distinction
+  (`from_quat_does_not_self_correct_a_non_unit_length_quaternion`). All
+  276 of `rb_physics_bullet`'s pre-existing tests (as of `FR-045`) pass
+  unchanged; 277 total (+1 over `FR-045`'s 276).
 - 0.45.0 (2026-08-31): FR-045 added and investigated (`integrate.rs`
   reference validation) — fetched and read Bullet's real
   `btRigidBody.cpp`/`.h`, `btTransformUtil.h`, `btQuaternion.h`, and

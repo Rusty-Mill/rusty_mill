@@ -6,6 +6,33 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## `body.rs`/`mat3.rs` reference validation
+**2026-08-31** · PR pending · commit pending
+
+- **Fetched and read Bullet's real `btSphereShape.cpp`, `btBoxShape.cpp`,
+  `btRigidBody.cpp`/`.h`, and `btMatrix3x3.h` directly** to check every
+  Bullet-reference claim `body.rs`'s `Shape::local_inertia`/
+  `RigidBody::update_inertia_tensor` and `mat3.rs`'s
+  `Mat3::scaled_columns`/`Mat3::from_quat` make — the same rigor already
+  applied to `collision.rs` (FR-042), `solver.rs` (FR-043), and
+  `integrate.rs` (FR-045).
+- **Sphere/box local-inertia formulas, `update_inertia_tensor`, and
+  `Mat3::scaled_columns` all confirmed byte-for-byte accurate.**
+- **One genuine difference found, not adopted.** `Mat3::from_quat`
+  hardcodes an `s = 2` factor assuming an exactly unit-length input
+  quaternion; the reference's own `btMatrix3x3::setRotation` computes
+  `s = 2 / q.length2()` to self-correct for a non-unit-length input.
+  Confirmed empirically that a scaled, non-unit quaternion produces a
+  non-orthonormal matrix through this function, unlike Bullet's own
+  self-correcting version. Not adopted: this function's only production
+  call site always receives an already-renormalized orientation (per
+  FR-045's own finding), making the reference's self-correction
+  unreachable defensive theater here.
+- **1 new regression test** pins this exact distinction directly. All
+  276 pre-existing tests pass unchanged; 277 total.
+
+---
+
 ## `integrate.rs` reference validation
 **2026-08-31** · [PR #97](https://github.com/baileyrd/rusty_bullet/pull/97) · `cbd9918`
 
