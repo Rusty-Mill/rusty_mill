@@ -118,8 +118,10 @@ pub struct RigidBody {
     pub angular_damping: f32,
 
     /// Bullet's `m_restitution`/`m_friction`, combined at contact time via
-    /// `btManifoldPoint::m_combinedRestitution`/`m_combinedFriction`
-    /// (default combine mode: average — see `solver::combine_restitution`).
+    /// `btManifoldPoint::m_combinedRestitution`/`m_combinedFriction` — this
+    /// port's own combine mode is average, not Bullet's real default
+    /// (an unclamped product); see `solver::combine_restitution`'s own doc
+    /// comment for why (`RB-PHYSICS-001-FR-043`).
     pub restitution: f32,
     pub friction: f32,
 

@@ -93,12 +93,26 @@
 //!   it; the latter provably diverges for this exact case). Full
 //!   convergence remains an open item, tracked in `RB-PHYSICS-001`.
 //! - **Restitution/friction combine mode**: average of the two surfaces'
-//!   coefficients (`(a + b) * 0.5`), matching
-//!   `btManifoldResult::calculateCombinedRestitution`'s structure. Bullet's
-//!   *default* combine mode is actually `btMax` for both — this port uses
-//!   average instead, pending calibration against real recorded ball/
-//!   ground behavior (`RB-VERIFY-001`/`RB-VERIFY-002` data). Tracked as an
-//!   open item in `RB-PHYSICS-001`, not asserted as settled.
+//!   coefficients (`(a + b) * 0.5`). `RB-PHYSICS-001-FR-043` fetched and read
+//!   Bullet's actual `btManifoldResult::calculateCombinedRestitution`/
+//!   `calculateCombinedFriction` reference source directly and found this
+//!   spec's own prior claim about Bullet's default (`btMax`) was wrong: the
+//!   real default for both is an unclamped **product** (`a * b`; friction's
+//!   own version then clamps the result to `[-10, 10]`), with no `max` mode
+//!   anywhere in the reference and no per-pair combine-mode override short
+//!   of a custom `gContactAddedCallback`. This port keeps average rather
+//!   than switching to match the now-correctly-identified reference,
+//!   because product has a real, documented drawback average doesn't:
+//!   two surfaces sharing the same coefficient no longer combine back to
+//!   that same coefficient (e.g. `0.5 * 0.5 == 0.25`, not `0.5`), which
+//!   matters for this port specifically since most bodies currently share
+//!   the same uncalibrated placeholder coefficient (see `body.rs`'s
+//!   `Default` impls) — average preserves that identity, product doesn't.
+//!   Which formula (if either) actually matches real Rocket League still
+//!   needs real recorded ball/ground behavior to calibrate
+//!   (`RB-VERIFY-001`/`RB-VERIFY-002` data) — this remains an open item in
+//!   `RB-PHYSICS-001`, not asserted as settled; only the reference-fact
+//!   claim and this port's own justification for diverging from it changed.
 
 use crate::body::RigidBody;
 use crate::collision::Contact;
@@ -116,10 +130,17 @@ const RELAXATION: f32 = 1.0;
 const SOLVER_ITERATIONS: u32 = 10;
 const UPPER_LIMIT: f32 = 1e10;
 
+/// This port's own combine mode (average) rather than Bullet's real default
+/// (an unclamped product) — see the module doc comment's
+/// "Restitution/friction combine mode" bullet (`RB-PHYSICS-001-FR-043`) for
+/// why. Preserves the identity `combine(a, a) == a`, which the reference's
+/// own product does not.
 fn combine_restitution(a: f32, b: f32) -> f32 {
     (a + b) * 0.5
 }
 
+/// See `combine_restitution`'s own doc comment — same rationale, same
+/// identity-preservation property, same `RB-PHYSICS-001-FR-043` finding.
 fn combine_friction(a: f32, b: f32) -> f32 {
     (a + b) * 0.5
 }
@@ -1239,6 +1260,25 @@ mod tests {
         assert!(p.dot(&q).abs() < 1e-6);
         assert!((p.length() - 1.0).abs() < 1e-5);
         assert!((q.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn combine_restitution_preserves_a_uniform_coefficients_identity() {
+        // RB-PHYSICS-001-FR-043: this is the exact property Bullet's own
+        // reference default (an unclamped product) does not have — see
+        // `combine_restitution`'s own doc comment.
+        assert_eq!(combine_restitution(0.5, 0.5), 0.5);
+        assert_eq!(combine_restitution(0.8, 0.8), 0.8);
+        assert_ne!(combine_restitution(0.5, 0.5), 0.5 * 0.5);
+    }
+
+    #[test]
+    fn combine_friction_preserves_a_uniform_coefficients_identity() {
+        // RB-PHYSICS-001-FR-043: same property, same reference finding, see
+        // `combine_friction`'s own doc comment.
+        assert_eq!(combine_friction(0.5, 0.5), 0.5);
+        assert_eq!(combine_friction(0.9, 0.9), 0.9);
+        assert_ne!(combine_friction(0.5, 0.5), 0.5 * 0.5);
     }
 
     fn car_at_origin() -> RigidBody {
