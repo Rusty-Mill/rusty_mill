@@ -523,6 +523,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   FR-030's own result from ~89.5 to ~32 units/s at zero added iteration
   cost, with zero effect on the overwhelming majority single-manifold
   case. 2 new tests; all pre-existing tests pass unchanged.
+- `collision::box_vs_box` (`RB-PHYSICS-001-FR-042`) — validated its
+  edge-edge contact point and face-clipping degenerate fallback directly
+  against Bullet's own `btBoxBoxDetector::dBoxBox` reference source.
+  Confirmed this port's finite-segment edge-edge contact point is more
+  rigorous than the reference's own unclamped-infinite-line one, and that
+  this port's synthesize-rather-than-drop face-clipping fallback is a
+  deliberate, favorable divergence from the reference's own drop-the-
+  collision behavior. A candidate fix for the edge-edge tangent
+  sign-selection heuristic was built and empirically tested but found
+  genuinely mixed against a brute-force ground truth, so not adopted. No
+  new tests (documentation-only); all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

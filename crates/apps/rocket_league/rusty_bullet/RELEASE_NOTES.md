@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Box-vs-box reference validation
+**2026-08-31** · PR pending · commit pending
+
+- **Fetched and read Bullet's own `btBoxBoxDetector::dBoxBox` reference
+  source directly** to validate two "reasonable, tested choices, never
+  validated against the reference" this project's own spec flagged as open.
+- **Edge-edge contact point: confirmed more rigorous than the reference.**
+  `dBoxBox`'s own contact point uses `dLineClosestApproach` — closest
+  approach between two *infinite lines*, applied with no clamping to the
+  finite edge length at all (confirmed directly in the fetched source).
+  This port's own finite-segment closest-point construction (Ericson's
+  algorithm) correctly stays within both edges — a genuine improvement
+  over the reference it's ported from, not merely an equivalent
+  restatement of it.
+- **Face-clipping degenerate fallback: confirmed a deliberate, favorable
+  divergence.** The reference contains the exact same undocumented
+  "should never happen" judgment call (twice, zero justification given
+  either time) this port's own code comment already made. Where the two
+  diverge is policy: the reference's own fallback drops the collision
+  entirely, while this port synthesizes a contact instead, since SAT has
+  already confirmed real overlap by that point and dropping it risks a
+  body tunneling through in a rare grazing case.
+- **Investigated a candidate fix for the edge-edge sign-selection
+  heuristic — found genuinely mixed, not adopted.** Which of a box's 4
+  candidate parallel edges is "near" is picked via a heuristic either way;
+  swapping this port's center-to-center-vector proxy for the reference's
+  own SAT-normal-based one was built and empirically tested against a
+  brute-force ground truth across 50,000 randomized configurations: the
+  current heuristic wins for large/arbitrary penetration depths (~11.6%
+  vs. ~8.7% optimal-match rate), the candidate wins for realistic
+  near-first-contact depths (~93% vs. ~77%), and neither is reliably
+  optimal. Kept as-is.
+- **No new tests** — documentation-only, no value or behavior changed,
+  the same precedent FR-032/FR-040 established for a rigorously
+  investigated negative result being real, valuable work. All 273
+  pre-existing tests pass unchanged.
+
+---
+
 ## Sandwiched-solve convergence
 **2026-08-31** · [PR #89](https://github.com/baileyrd/rusty_bullet/pull/89) · `4b0a133`
 
