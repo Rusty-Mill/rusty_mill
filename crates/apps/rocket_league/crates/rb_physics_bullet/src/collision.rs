@@ -127,12 +127,12 @@ fn sphere_vs_goal_wall(position: Vec3, radius: f32, wall: &StaticGoalWall) -> Op
 /// treatment (`sphere_vs_goal_wall`), while a box (a car) falls straight
 /// through to `contacts_vs_plane` against the wrapped `plane` --
 /// deliberately ignoring the window entirely, so a car collides with
-/// exactly the same solid, full-width wall it always has. A car actually
-/// being able to drive into the goal is a real, not-yet-implemented
-/// capability (the same deferred-for-cars pattern every fillet in this
-/// port already follows for `contacts_vs_quarter_pipe`/
-/// `contacts_vs_corner_fillet` -- see their own doc comments), not an
-/// oversight.
+/// exactly the same solid, full-width wall it always has. Unlike
+/// `contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` (which do deflect
+/// a car now, since `RB-PHYSICS-001-FR-027`), a goal wall isn't a curved
+/// fillet, so that generalization doesn't touch this dispatch at all -- a
+/// car actually being able to drive into the goal remains a real,
+/// not-yet-implemented capability, not an oversight.
 pub fn contacts_vs_goal_wall(body: &RigidBody, wall: &StaticGoalWall) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_goal_wall(body.position, radius, wall)
@@ -200,18 +200,62 @@ fn sphere_vs_quarter_pipe(
     })
 }
 
-/// Dispatches a contact test against a quarter-pipe fillet. Boxes (cars)
-/// return no contact — colliding an oriented box against a curved surface
-/// needs real support-mapping/SAT-style machinery this port doesn't have
-/// yet, deliberately deferred (see `RB-PHYSICS-001-FR-020`'s Non-goals); a
-/// car can still drive straight through a curve's footprint without being
-/// deflected by it, exactly as if the curve weren't there.
+/// Analytic box-vs-quarter-pipe contact (`RB-PHYSICS-001-FR-027`): reduces
+/// to the same "test every corner" technique `box_vs_plane` already uses
+/// for a flat plane — each of a box's 8 corners is checked as a
+/// zero-radius sphere via `sphere_vs_quarter_pipe` (exact for that single
+/// point), and every corner that reports a contact contributes one to the
+/// manifold. Unlike a flat plane, this is only an approximation of the box
+/// as a *whole* against a curved surface: a face resting flush against a
+/// shallow curve (a radius large relative to the box) can have every one
+/// of its own corners still just clear of the fillet while the face's
+/// middle already overlaps it, under-detecting a case a full box-vs-cylinder
+/// narrow phase (support mapping / GJK-EPA) would catch — this port still
+/// doesn't have that machinery (see `RB-PHYSICS-001-FR-020`'s Non-goals),
+/// so corner-testing is what lets a car ride a curve at all rather than
+/// driving straight through it. Each surviving corner's own world position
+/// is used as `point`, not the fillet-surface point `sphere_vs_quarter_pipe`
+/// itself would compute, for the same rel_pos/torque-accuracy reason
+/// `box_vs_plane`'s own doc comment already gives.
+fn box_vs_quarter_pipe(
+    position: Vec3,
+    orientation: Quat,
+    half_extents: Vec3,
+    pipe: &StaticQuarterPipe,
+) -> Vec<Contact> {
+    let mut contacts = Vec::with_capacity(4);
+    for &sx in &[-1.0f32, 1.0] {
+        for &sy in &[-1.0f32, 1.0] {
+            for &sz in &[-1.0f32, 1.0] {
+                let local_corner = Vec3::new(
+                    sx * half_extents.x,
+                    sy * half_extents.y,
+                    sz * half_extents.z,
+                );
+                let world_corner = position + orientation.rotate(&local_corner);
+                if let Some(mut contact) = sphere_vs_quarter_pipe(world_corner, 0.0, pipe) {
+                    contact.point = world_corner;
+                    contacts.push(contact);
+                }
+            }
+        }
+    }
+    contacts
+}
+
+/// Dispatches a contact test against a quarter-pipe fillet — a sphere (the
+/// ball) via `sphere_vs_quarter_pipe`, a box (a car, since
+/// `RB-PHYSICS-001-FR-027`) via `box_vs_quarter_pipe`'s corner-testing
+/// approximation (see its own doc comment for what that does and doesn't
+/// catch).
 pub fn contacts_vs_quarter_pipe(body: &RigidBody, pipe: &StaticQuarterPipe) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_quarter_pipe(body.position, radius, pipe)
             .into_iter()
             .collect(),
-        Shape::Box { .. } => Vec::new(),
+        Shape::Box { half_extents } => {
+            box_vs_quarter_pipe(body.position, body.orientation, half_extents, pipe)
+        }
     }
 }
 
@@ -257,17 +301,53 @@ fn sphere_vs_corner_fillet(
     })
 }
 
-/// Dispatches a contact test against a corner fillet. Boxes (cars) return
-/// no contact, the same documented deferral as `contacts_vs_quarter_pipe`
-/// (`RB-PHYSICS-001-FR-020`'s Non-goals) — a car drives straight through a
-/// compound corner's footprint unaffected, exactly as it already does
-/// through an edge fillet's.
+/// Analytic box-vs-corner-fillet contact (`RB-PHYSICS-001-FR-027`): the
+/// same corner-testing technique `box_vs_quarter_pipe` uses, generalized
+/// from a cylinder to a sphere — each of a box's 8 corners is checked as a
+/// zero-radius sphere via `sphere_vs_corner_fillet`, and every corner that
+/// reports a contact contributes one to the manifold. Same "exact per
+/// corner, an approximation of the box as a whole" caveat
+/// `box_vs_quarter_pipe`'s own doc comment gives, and the same
+/// world-position (not fillet-surface) `point` convention for correct
+/// torque.
+fn box_vs_corner_fillet(
+    position: Vec3,
+    orientation: Quat,
+    half_extents: Vec3,
+    fillet: &StaticCornerFillet,
+) -> Vec<Contact> {
+    let mut contacts = Vec::with_capacity(4);
+    for &sx in &[-1.0f32, 1.0] {
+        for &sy in &[-1.0f32, 1.0] {
+            for &sz in &[-1.0f32, 1.0] {
+                let local_corner = Vec3::new(
+                    sx * half_extents.x,
+                    sy * half_extents.y,
+                    sz * half_extents.z,
+                );
+                let world_corner = position + orientation.rotate(&local_corner);
+                if let Some(mut contact) = sphere_vs_corner_fillet(world_corner, 0.0, fillet) {
+                    contact.point = world_corner;
+                    contacts.push(contact);
+                }
+            }
+        }
+    }
+    contacts
+}
+
+/// Dispatches a contact test against a corner fillet — a sphere (the ball)
+/// via `sphere_vs_corner_fillet`, a box (a car, since
+/// `RB-PHYSICS-001-FR-027`) via `box_vs_corner_fillet`'s corner-testing
+/// approximation.
 pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_corner_fillet(body.position, radius, fillet)
             .into_iter()
             .collect(),
-        Shape::Box { .. } => Vec::new(),
+        Shape::Box { half_extents } => {
+            box_vs_corner_fillet(body.position, body.orientation, half_extents, fillet)
+        }
     }
 }
 
@@ -1110,9 +1190,12 @@ mod tests {
     }
 
     #[test]
-    fn box_vs_quarter_pipe_is_always_empty() {
-        // Box (car) collision against curved geometry is deliberately not
-        // implemented yet -- see RB-PHYSICS-001-FR-020's Non-goals.
+    fn box_embedded_in_the_quarter_pipes_footprint_has_contact() {
+        // The real proof of RB-PHYSICS-001-FR-027: a car's own box is no
+        // longer always empty against a curved fillet. Centering the car
+        // directly on the pipe's own surface (along its sector bisector)
+        // pushes at least one of its 8 corners past the curve into what
+        // used to be untouchable material.
         let pipe = floor_wall_pipe();
         let bisector = ((pipe.sector_start + pipe.sector_end) * 0.5)
             .normalize()
@@ -1122,6 +1205,40 @@ mod tests {
             Vec3::new(60.0, 30.0, 18.0),
             180.0,
             deeply_overlapping_position,
+        );
+        let contacts = contacts_vs_quarter_pipe(&car, &pipe);
+        assert!(
+            !contacts.is_empty(),
+            "expected at least one of the car's 8 corners to be embedded in the pipe's footprint"
+        );
+        for contact in &contacts {
+            // Every contact should push back toward the axis (this
+            // crate's universal "ride the concave inside" convention --
+            // see sphere_vs_quarter_pipe's own doc comment), not away
+            // from it.
+            let rel = contact.point - pipe.axis_point;
+            let along_axis = rel.dot(&pipe.axis_direction);
+            let radial = rel - pipe.axis_direction * along_axis;
+            assert!(radial.dot(&contact.normal) < 0.0);
+        }
+    }
+
+    #[test]
+    fn box_far_from_the_quarter_pipe_has_no_contact() {
+        // Placed deep on the *opposite* side of the sector from the pipe's
+        // own wedge (the room's ordinary interior, not the rounded
+        // corner) -- clearly outside the sector regardless of distance,
+        // unlike moving further along the sector's own bisector (still
+        // "inside" the wedge angularly at any radius, which isn't the
+        // "far away and clearly unaffected" case this test wants).
+        let pipe = floor_wall_pipe();
+        let bisector = ((pipe.sector_start + pipe.sector_end) * 0.5)
+            .normalize()
+            .unwrap();
+        let car = RigidBody::car_box(
+            Vec3::new(60.0, 30.0, 18.0),
+            180.0,
+            pipe.axis_point - bisector * 1000.0,
         );
         assert!(contacts_vs_quarter_pipe(&car, &pipe).is_empty());
     }
@@ -1194,9 +1311,13 @@ mod tests {
     }
 
     #[test]
-    fn box_vs_corner_fillet_is_always_empty() {
-        // Box (car) collision against curved geometry is deliberately not
-        // implemented yet -- see RB-PHYSICS-001-FR-020's Non-goals.
+    fn box_embedded_in_the_corner_fillets_footprint_has_contact() {
+        // The real proof of RB-PHYSICS-001-FR-027: a car's own box is no
+        // longer always empty against a compound-corner fillet either.
+        // Centering the car directly on the fillet's own surface (toward
+        // the sharp corner it replaces) pushes at least one of its 8
+        // corners past the sphere into what used to be untouchable
+        // material.
         let fillet = floor_two_walls_corner();
         let toward_corner = Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
         let deeply_overlapping_position = fillet.center + toward_corner * fillet.radius;
@@ -1204,6 +1325,34 @@ mod tests {
             Vec3::new(60.0, 30.0, 18.0),
             180.0,
             deeply_overlapping_position,
+        );
+        let contacts = contacts_vs_corner_fillet(&car, &fillet);
+        assert!(
+            !contacts.is_empty(),
+            "expected at least one of the car's 8 corners to be embedded in the fillet's footprint"
+        );
+        for contact in &contacts {
+            // Every contact should push back toward the fillet's own
+            // center, the same "ride the concave inside" convention
+            // `sphere_vs_corner_fillet` already documents.
+            let rel = contact.point - fillet.center;
+            assert!(rel.dot(&contact.normal) < 0.0);
+        }
+    }
+
+    #[test]
+    fn box_outside_the_corner_fillets_bounds_has_no_contact() {
+        // Same "directly away from the sharp corner" direction
+        // `sphere_outside_the_corner_fillets_bounds_has_no_contact` uses --
+        // clearly outside the spherical-triangle bounds regardless of
+        // distance, unlike moving further toward the corner (still
+        // "inside" the bounds at any radius).
+        let fillet = floor_two_walls_corner();
+        let away_from_corner = -Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
+        let car = RigidBody::car_box(
+            Vec3::new(60.0, 30.0, 18.0),
+            180.0,
+            fillet.center + away_from_corner * 1000.0,
         );
         assert!(contacts_vs_corner_fillet(&car, &fillet).is_empty());
     }
