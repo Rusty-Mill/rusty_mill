@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Car actually driving into a goal
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #65](https://github.com/baileyrd/rusty_bullet/pull/65) · `3141f1e`
 
 - **A car (box) can now actually drive into a goal**, closing the last
   goal-related Non-goal repeated across `RB-PHYSICS-001-FR-024` through
