@@ -6,6 +6,59 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Car deflection by curved fillets
+**2026-08-31** · PR pending · commit pending
+
+- **A car (box) is now actually deflected by every curved fillet in this
+  port**, closing the Non-goal repeated across every fillet increment
+  since `RB-PHYSICS-001-FR-020` — until now, a car drove straight through
+  wall-to-floor/ceiling seams, corner-wall vertical edges, compound
+  corners, and goal-cutout edges, untouched; only the ball was ever
+  deflected.
+- **New `collision::box_vs_quarter_pipe`/`box_vs_corner_fillet`** reuse the
+  same "test every corner" technique `box_vs_plane` already used for a
+  flat plane — each of a box's 8 corners is checked as a zero-radius
+  sphere via the existing `sphere_vs_quarter_pipe`/`sphere_vs_corner_fillet`,
+  and every corner that reports a contact contributes one to the manifold.
+  Each surviving contact's `point` is overwritten to the corner's own
+  world position (not the fillet-surface point those functions themselves
+  compute), for the same rel_pos/torque-accuracy reason `box_vs_plane`'s
+  own doc comment already gives.
+- **`contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` now dispatch a
+  `Shape::Box` to these** instead of `Vec::new()`. No `PhysicsWorld::step`
+  changes were needed at all — `resolve_curve_contact`/
+  `resolve_corner_fillet_contact` were already being called for every car
+  in the scene, just as a silent no-op until now.
+- **Documented as an approximation, not a full convex-vs-curved-surface
+  narrow phase** (no GJK/EPA support-mapping machinery was added): a box
+  face resting flush against a shallow curve can have every one of its
+  own corners still just clear of the fillet while the face's middle
+  already overlaps it, under-detecting that case — the same "exact per
+  test-point, an approximation of the whole shape" caveat this crate has
+  always carried for curved geometry.
+- **`StaticGoalWall`/`contacts_vs_goal_wall` is unaffected** — a goal wall
+  isn't a curved fillet, so a car still sees the same solid, full-width
+  back wall it always has, and still can't drive into a goal.
+- 3 net new/replaced unit tests across `collision.rs`/`world.rs` in
+  `rb_physics_bullet` (218 total): `collision.rs` replaced its two old
+  "box vs. curved fillet is always empty" regression tests with proofs
+  that an embedded box gets a correctly-directed contact and a
+  clearly-outside-the-sector/bounds box still gets none; `world.rs`
+  replaced `a_car_is_not_deflected_by_a_curved_transition` (whose entire
+  premise this increment reverses) with an end-to-end proof that a car
+  resting within a curve's footprint gets pushed up exactly like the ball
+  does, and added a compound-corner-fillet car test checking the car's
+  *worst corner penetration* shrinks rather than that its center of mass
+  approaches the fillet's center (the way the equivalent ball test
+  checks) — an oriented box's corners sit at different depths at once, so
+  resolving one corner's contact can rotate the box in a way that moves
+  its center away from the fillet even as every individual corner's own
+  overlap is being corrected. This was found empirically (an earlier,
+  center-of-mass-based assertion actually failed) and led to the more
+  careful, still-correct invariant.
+
+---
+
 ## Goal post-crossbar corner fillets
 **2026-08-31** · [#61](https://github.com/baileyrd/rusty_bullet/pull/61) · `c179716`
 

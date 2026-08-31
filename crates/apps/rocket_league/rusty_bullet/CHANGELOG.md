@@ -321,6 +321,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (the window's bottom edge sits exactly at floor level already).
   `PhysicsWorld::standard_arena` wires the 4 new fillets in, bringing
   `corner_fillets` to 20 total.
+- `rb_physics_bullet::collision` (`RB-PHYSICS-001-FR-027`) — car deflection
+  by curved fillets: new `collision::box_vs_quarter_pipe`/
+  `box_vs_corner_fillet` test a box's own 8 corners against the curved
+  surface as zero-radius spheres, the same "test every corner" technique
+  `box_vs_plane` already used for a flat plane; `contacts_vs_quarter_pipe`/
+  `contacts_vs_corner_fillet` now dispatch a `Shape::Box` to these instead
+  of `Vec::new()`. Closes the Non-goal repeated since FR-020: a car is now
+  actually deflected by every curved fillet in this port, not just the
+  ball. No `PhysicsWorld::step` changes needed — the car-side resolve
+  calls already existed, just as silent no-ops. Documented as an
+  approximation (a flush box face against a shallow curve can under-detect
+  contact), not a full convex-vs-curved-surface narrow phase.
+  `StaticGoalWall`/`contacts_vs_goal_wall` is unaffected — a goal wall
+  isn't a curved fillet, so a car still can't drive into a goal.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
