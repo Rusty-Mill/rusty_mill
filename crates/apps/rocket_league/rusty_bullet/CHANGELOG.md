@@ -552,6 +552,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   the stale bullet to a strikethrough-and-close note, matching the
   convention this section already uses for two other resolved Non-goals
   items. Zero production code changed; no new tests.
+- `integrate::integrate_transform` (`RB-PHYSICS-001-FR-045`) — fetched and
+  read Bullet's real `btRigidBody.cpp`/`.h`, `btTransformUtil.h`,
+  `btQuaternion.h`, and `btScalar.h` and confirmed `apply_damping`,
+  `integrate_velocities`, and `integrate_transform`'s reference claims all
+  byte-for-byte accurate. Found this port's degenerate-quaternion epsilon
+  (`1e-12`) numerically differs from Bullet's own `SIMD_EPSILON` (~5
+  orders of magnitude larger) but is behaviorally equivalent, so not
+  adopted. Found the check-then-normalize fallback branch matches Bullet's
+  real choice to preserve the prior orientation rather than reset to
+  identity on a degenerate result — a real distinction an unconditional
+  `Quat::normalize` call would have gotten wrong. 1 new test pins this;
+  all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
