@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Goal post-crossbar corner fillets
+**2026-08-31** · PR pending · commit pending
+
+- **Rounds off the two compound corners per goal where a post's own
+  vertical edge fillet meets the crossbar's own horizontal edge fillet**,
+  one per post per goal (4 total) — closing a gap `RB-PHYSICS-001-FR-024`'s
+  own doc comment explicitly flagged as deliberately not blended into a
+  single smooth vertex.
+- **New `arena::standard_goal_corner_fillets`** builds all 4 directly via
+  `StaticCornerFillet::between_three_planes` on the real back wall/post/
+  crossbar planes that meet there — the same approach
+  `RB-PHYSICS-001-FR-023` used for the arena's own 16 compound corners. No
+  new shape or collision code needed: `StaticCornerFillet`/
+  `sphere_vs_corner_fillet` already generalize to any three non-parallel
+  planes.
+- **Reuses `FILLET_RADIUS` unchanged.** Unlike `RB-PHYSICS-001-FR-025`'s
+  arena corners, both edge fillets meeting at a goal's post-crossbar
+  corner already share one radius, so there's no mismatched-radius concern
+  requiring a dedicated constant.
+- **The goal's other two corners, where a post meets the floor, get no
+  such treatment** — the window's own bottom edge sits exactly at floor
+  level, so a post's own fillet there simply ends flush with the ground
+  the ball already rolls on, not a sharp, unrounded vertex needing a
+  blend.
+- **`PhysicsWorld::standard_arena` wires the 4 new fillets in** via the
+  same `with_corner_fillet` builder `standard_corner_fillets`'s 16 already
+  used, bringing `corner_fillets` to 20 total.
+- 3 new unit tests across `arena.rs`/`world.rs` in `rb_physics_bullet` (215
+  total): 2 in `arena.rs` — `standard_goal_corner_fillets_has_four_fillets`
+  and `every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar`
+  (proving every fillet's center sits `FILLET_RADIUS` in from a back wall,
+  a post plane, and the crossbar plane simultaneously — a real triple
+  intersection, not an arbitrary point); 1 in `world.rs` —
+  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`,
+  the real end-to-end proof, a ball embedded past a goal corner fillet's
+  own radius gets pushed meaningfully back toward the center.
+
+---
+
 ## Corner-wall floor/ceiling arch radius
 **2026-08-31** · [#59](https://github.com/baileyrd/rusty_bullet/pull/59) · `ff1391a`
 

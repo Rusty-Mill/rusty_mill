@@ -309,6 +309,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (FR-022), and 6 goal-cutout edge fillets (FR-024) are unaffected and
   keep `FILLET_RADIUS`. A compile-time assertion enforces
   `CORNER_ARCH_RADIUS > FILLET_RADIUS`.
+- `rb_physics_bullet::arena` (`RB-PHYSICS-001-FR-026`) — goal
+  post-crossbar corner fillets: new `arena::standard_goal_corner_fillets`
+  rounds off the two compound corners per goal where a post's own
+  vertical edge fillet meets the crossbar's own horizontal edge fillet (4
+  total), via `StaticCornerFillet::between_three_planes` on the real back
+  wall/post/crossbar planes — the same approach FR-023 used for the
+  arena's own compound corners, reusing `FILLET_RADIUS` unchanged since
+  both edge fillets meeting here already share one radius. The goal's
+  other two corners, where a post meets the floor, get no such treatment
+  (the window's bottom edge sits exactly at floor level already).
+  `PhysicsWorld::standard_arena` wires the 4 new fillets in, bringing
+  `corner_fillets` to 20 total.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
