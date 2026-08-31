@@ -907,7 +907,7 @@ mod tests {
         let mut car = RigidBody::car_box(car_half_extents, 180.0, car_position);
         car.restitution = 0.5;
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(
             ball_radius,
             1.0,
@@ -1034,7 +1034,7 @@ mod tests {
         // gravity zeroed, isolating the three-body contact this test
         // checks.
         let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let gap = car_half_extents.x + ball_radius;
 
         let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 500.0));
@@ -1577,7 +1577,7 @@ mod tests {
             restitution: 0.5,
             ..StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), wall_x)
         };
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(
             ball_radius,
             1.0,
@@ -2155,7 +2155,7 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
         );
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(900.0, 0.0, ball_radius));
         ball.restitution = 0.0;
 
@@ -2300,7 +2300,7 @@ mod tests {
         let curve =
             crate::body::StaticQuarterPipe::between_planes(&floor, &wall, 292.0, axis_direction);
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         // 900 units from the origin toward the wall, along the wall's
         // inward direction -- the diagonal analogue of the cardinal test's
         // ball at x=900 for a wall at x=1000.
@@ -2354,7 +2354,7 @@ mod tests {
         let curve =
             crate::body::StaticQuarterPipe::between_planes(&floor, &wall, radius, axis_direction);
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
             .normalize()
             .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
@@ -2424,7 +2424,7 @@ mod tests {
             Vec3::new(0.0, 0.0, 1.0),
         );
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
             .normalize()
             .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
@@ -2491,7 +2491,7 @@ mod tests {
         let fillet =
             crate::body::StaticCornerFillet::between_three_planes(&floor, &wall_x, &wall_y, radius);
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let toward_corner = Vec3::new(1.0, 1.0, -1.0)
             .normalize()
             .expect("(1, 1, -1) is nonzero");
@@ -2528,7 +2528,7 @@ mod tests {
         // The same physical proof as a_ball_bounces_off_a_wall_instead_of_
         // passing_through, but against PhysicsWorld::standard_arena's real
         // field-dimension side wall instead of a hand-placed test wall.
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 1000.0));
         ball.restitution = 0.5;
         ball.linear_velocity = Vec3::new(2000.0, 0.0, 0.0);
@@ -2565,7 +2565,7 @@ mod tests {
         // individually reaches either the side or back wall's own
         // position — proof it's the diagonal corner plane doing the work,
         // not the two cardinal walls.
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 1000.0));
         ball.restitution = 0.5;
         let diag = std::f32::consts::FRAC_1_SQRT_2;
@@ -2616,7 +2616,7 @@ mod tests {
         // it closer in (~6300-7700) and turns the same brush from a gentle
         // bounce into a much sharper one, so this test now stops well
         // before reaching it instead of relying on outrunning it.
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(
             ball_radius,
             1.0,
@@ -2719,7 +2719,7 @@ mod tests {
         // notes) can fire spuriously; a synthetic, single-wall scene proves
         // this wall's own behavior without that unrelated interaction.
         let mut ball = RigidBody::sphere(
-            92.75,
+            93.15,
             1.0,
             Vec3::new(
                 0.0,
@@ -2761,7 +2761,7 @@ mod tests {
         // `with_bounded_wall`, for the same reason the back-wall test
         // above is isolated -- see its own doc comment.
         let mut ball = RigidBody::sphere(
-            92.75,
+            93.15,
             1.0,
             Vec3::new(
                 0.0,
@@ -2801,7 +2801,7 @@ mod tests {
         // for the same reason the back-wall test above is isolated -- see
         // its own doc comment.
         let mut ball = RigidBody::sphere(
-            92.75,
+            93.15,
             1.0,
             Vec3::new(
                 0.0,
@@ -2844,7 +2844,7 @@ mod tests {
         let net_y = crate::arena::BACK_WALL_Y + crate::arena::NET_DEPTH;
 
         let run = |with_net: bool| -> f32 {
-            let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(0.0, net_y - 800.0, 300.0));
+            let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, net_y - 800.0, 300.0));
             let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
             world.ball.linear_velocity = Vec3::new(0.0, 1500.0, 0.0);
             world.gravity = Vec3::ZERO;
@@ -2889,7 +2889,7 @@ mod tests {
             Vec3::new(0.0, 0.0, 1.0),
         );
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let bisector = ((curve.sector_start + curve.sector_end) * 0.5)
             .normalize()
             .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
@@ -2946,7 +2946,7 @@ mod tests {
         let fillet =
             crate::body::StaticCornerFillet::between_three_planes(&wall, &post, &crossbar, radius);
 
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let toward_corner = Vec3::new(1.0, 1.0, 1.0)
             .normalize()
             .expect("(1, 1, 1) is nonzero");

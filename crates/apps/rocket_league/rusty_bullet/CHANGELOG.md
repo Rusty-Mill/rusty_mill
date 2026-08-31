@@ -444,6 +444,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   persistent `dynamic_manifold_caches` field. Deliberately not wired into
   `resolve_contacts`/`resolve_contacts_between` — see that FR's own
   Non-goals.
+- `rb_physics_bullet::arena`/`collision`/`net`/`solver`/`world`
+  (`RB-PHYSICS-001-FR-036`) — a dedicated follow-up to `FR-031`'s own
+  audit, resolving the two ambiguities it surfaced but deliberately didn't
+  act on, using real source-level research (RocketSim's and RLUtilities'
+  own source, and the current RLBot wiki, read directly). Every `92.75`
+  ball-radius literal became `93.15`, not the previously-suspected `91.25`
+  — the real games split the ball into a smaller inertia radius (`91.25`)
+  and a distinctly larger collision radius (`93.15`, the mesh's own
+  collision margin), and since this port's single unified radius field has
+  no separate collision margin of its own, the collision radius is the
+  correct single-constant analog. `arena::CEILING_Z` changed from `2044.0`
+  to `2048.0`, confirmed to share the same reference point as RocketSim's
+  `ARENA_HEIGHT`. Also corrected two mis-documented claims:
+  `arena::CORNER_LENGTH` and `arena::GOAL_DEPTH` were wrongly described as
+  uncalibrated placeholders — both are confirmed exact, so only their doc
+  comments changed. `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` remain
+  untouched and still genuinely uncalibrated. No new tests; all 259
+  pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

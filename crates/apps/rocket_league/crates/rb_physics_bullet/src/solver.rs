@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     fn overlapping_ball() -> RigidBody {
-        RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0))
+        RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0))
     }
 
     /// Zero penetration on purpose: the deep overlap `overlapping_ball()`
@@ -1150,7 +1150,7 @@ mod tests {
     /// test means to check — same reasoning as `downward_impact_bounces_up_
     /// proportional_to_restitution` using an exactly-touching sphere.
     fn touching_ball() -> RigidBody {
-        RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 92.75, 0.0, 0.0))
+        RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 93.15, 0.0, 0.0))
     }
 
     #[test]
@@ -1221,7 +1221,7 @@ mod tests {
     /// from restitution bounce and Baumgarte positional correction.
     fn symmetric_pinch() -> (RigidBody, RigidBody, RigidBody) {
         let half = Vec3::new(60.0, 30.0, 18.0);
-        let ball_radius = 92.75;
+        let ball_radius = 93.15;
         let gap = half.x + ball_radius;
 
         let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::ZERO);
