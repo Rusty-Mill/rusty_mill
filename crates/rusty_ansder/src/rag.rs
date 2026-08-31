@@ -41,7 +41,9 @@ pub struct SearchIndex {
 impl SearchIndex {
     /// Create an empty search index.
     pub fn new() -> Self {
-        SearchIndex { documents: Vec::new() }
+        SearchIndex {
+            documents: Vec::new(),
+        }
     }
 
     /// Add a document to the index.
@@ -66,7 +68,11 @@ impl SearchIndex {
             });
         }
 
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(core::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         hits
     }
@@ -102,7 +108,11 @@ impl SearchIndex {
             }
         }
 
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(core::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         hits
     }
@@ -129,7 +139,12 @@ impl RagEngine {
         let mut context_buf = String::new();
         context_buf.push_str("Context:\n");
         for (i, hit) in hits.iter().enumerate() {
-            context_buf.push_str(&format!("[{}] {}: {}\n", i + 1, hit.doc.title, hit.doc.content));
+            context_buf.push_str(&format!(
+                "[{}] {}: {}\n",
+                i + 1,
+                hit.doc.title,
+                hit.doc.content
+            ));
         }
 
         format!("Based on sovereign context:\n{context_buf}\nAnswer: Found {} relevant document(s) addressing '{question}'.", hits.len())

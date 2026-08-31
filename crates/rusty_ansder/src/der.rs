@@ -49,8 +49,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Wire(e) => write!(f, "wire error: {e}"),
-            Error::InvalidValue { field, value } => write!(f, "invalid ASN.1 value for {field}: {value}"),
-            Error::InvalidLength { field, length } => write!(f, "invalid ASN.1 length for {field}: {length}"),
+            Error::InvalidValue { field, value } => {
+                write!(f, "invalid ASN.1 value for {field}: {value}")
+            }
+            Error::InvalidLength { field, length } => {
+                write!(f, "invalid ASN.1 length for {field}: {length}")
+            }
         }
     }
 }
@@ -205,8 +209,8 @@ mod tests {
         let bytes = w.into_vec();
 
         let mut r = Reader::new(&bytes);
-        assert_eq!(read_boolean(&mut r).unwrap(), true);
-        assert_eq!(read_boolean(&mut r).unwrap(), false);
+        assert!(read_boolean(&mut r).unwrap());
+        assert!(!read_boolean(&mut r).unwrap());
         assert!(r.is_empty());
     }
 
