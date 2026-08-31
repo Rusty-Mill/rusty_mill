@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Ball radius and ceiling height corrections
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #81](https://github.com/baileyrd/rusty_bullet/pull/81) · `ab892bf`
 
 - **Resolved both constant ambiguities `RB-PHYSICS-001-FR-031`'s own audit
   surfaced but deliberately didn't act on**, using real source-level
