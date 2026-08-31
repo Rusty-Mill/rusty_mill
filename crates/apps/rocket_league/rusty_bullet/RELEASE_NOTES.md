@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Constant-calibration audit
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #71](https://github.com/baileyrd/rusty_bullet/pull/71) · `4c7b9a2`
 
 - **A scoped audit of every uncalibrated placeholder constant** in
   `drive.rs`/`arena.rs`, sourced against the community reverse-engineering
