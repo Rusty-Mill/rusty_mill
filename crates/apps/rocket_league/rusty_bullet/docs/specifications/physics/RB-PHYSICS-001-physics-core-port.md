@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.25.0
+- Version: 0.26.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -20,7 +20,9 @@
   back wall with its own 3 rounded edges per goal, with the 4 diagonal
   corner walls' own floor/ceiling-seam arches and all 16 compound-corner
   fillets that touch them now sized with a distinctly larger,
-  non-cardinal-wall radius since FR-025 — implemented; a car
+  non-cardinal-wall radius since FR-025, and, since FR-026, a
+  compound-corner fillet rounding each goal's own remaining sharp
+  post-crossbar vertex too (4 total, 2 per goal) — implemented; a car
   (box) actually being deflected by any fillet or driving into a goal, a
   modeled goal interior/net, split impulse, warm-starting, a combined
   multi-body solve, and constant calibration are open follow-up work)
@@ -129,7 +131,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   FR-023, one per compound corner where a vertical-edge fillet meets a
   floor- or ceiling-seam fillet) — and `arena::standard_goal_cutout_fillets`
   builds 6 more `StaticQuarterPipe`s (since FR-024, two posts and a crossbar
-  per goal, rounding the goal-mouth window's own rim) — all deflecting only
+  per goal, rounding the goal-mouth window's own rim) and
+  `arena::standard_goal_corner_fillets` builds 4 more `StaticCornerFillet`s
+  (since FR-026, one per goal post per goal, rounding each goal's own
+  post-crossbar compound corner) — all deflecting only
   the ball; `collision::contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet`
   return no contact at all for a box, so a car drives straight through any
   fillet's footprint completely unaffected, exactly as if it weren't there
@@ -142,13 +147,16 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   goal structure beyond the cutout and its own rounded rim. `FR-019`'s
   corner-cut inset distance (`arena::CORNER_LENGTH`) and `FR-020`'s fillet
   radius (`arena::FILLET_RADIUS`, also reused by FR-022's vertical-edge
-  fillets and FR-024's goal-cutout fillets; FR-021's corner-wall seams and
+  fillets, FR-024's goal-cutout fillets, and FR-026's goal post-crossbar
+  compound-corner fillets; FR-021's corner-wall seams and
   FR-023's compound corners instead reuse FR-025's `arena::
   CORNER_ARCH_RADIUS`) are both this project's own uncalibrated placeholders, not
   measured against real field mesh data — only
   `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z` are commonly-cited, sourced
   dimensions; `FR-024`'s own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` are
-  commonly-cited too, but likewise not independently confirmed. `FR-025`'s
+  commonly-cited too, but likewise not independently confirmed. FR-026's 4
+  goal post-crossbar compound-corner fillets introduce no new radius
+  constant at all — they reuse `FILLET_RADIUS` unchanged. `FR-025`'s
   own `arena::CORNER_ARCH_RADIUS` — the distinctly larger radius now
   governing a corner wall's own floor/ceiling-seam arches and all 16
   compound-corner fillets that touch them, in place of `FILLET_RADIUS` —
@@ -767,14 +775,16 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   real collision walls — an infinite plane perpendicular to X (or capping
   Z) would incorrectly wall off the *entire* rest of the field at that
   coordinate, unlike a diagonal corner wall's own orientation, which stays
-  non-binding everywhere except right at the true corner. The two compound
-  corners per goal where a post's own fillet meets the crossbar's remain
-  independent, additive fillets, not blended into a single smooth vertex —
-  the same "no blended 3D corner" approach the arena's other edge fillets
-  used before FR-023 introduced one for the corner walls specifically.
-  Still not modeled: a car actually being deflected by any fillet or
-  driving into a goal, a modeled goal interior/net beyond the cutout
-  itself, and the goal's own two compound top corners (see Non-goals).
+  non-binding everywhere except right at the true corner. At the time this
+  requirement shipped, the two compound corners per goal where a post's own
+  fillet meets the crossbar's were left as independent, additive fillets,
+  not blended into a single smooth vertex — the same "no blended 3D corner"
+  approach the arena's other edge fillets used before FR-023 introduced one
+  for the corner walls specifically; a dedicated `StaticCornerFillet` was
+  later added for these goal corners too, see FR-026. Still not modeled: a
+  car actually being deflected by any fillet or driving into a goal, and a
+  modeled goal interior/net beyond the cutout itself (the goal's own two
+  compound top corners are now modeled, see FR-026).
 - `RB-PHYSICS-001-FR-025` (corner-wall floor/ceiling arch radius,
   implemented): gives a diagonal corner wall's own floor-seam and
   ceiling-seam fillets — 8 of `standard_curves`' 24 entries, the ones
@@ -809,6 +819,42 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   "no blended 3D corner" convention this port has used since before
   FR-023. Still not modeled: a car actually being deflected by any fillet,
   and everything else `FR-024`'s own Non-goals already cover.
+- `RB-PHYSICS-001-FR-026` (goal post-crossbar corner fillets, implemented):
+  rounds off the two remaining sharp compound corners per goal — where a
+  post's own vertical-edge fillet (`arena::standard_goal_cutout_fillets`,
+  FR-024) meets the crossbar's own horizontal-edge fillet — an explicitly
+  documented gap FR-024's own doc comment left open ("The two compound
+  corners per goal where a post's fillet meets the crossbar's are
+  deliberately not blended into a single smooth vertex"). New
+  `arena::standard_goal_corner_fillets` returns 4 `StaticCornerFillet`s —
+  one per goal post per goal (2 posts x 2 goals) — mirroring FR-023's own
+  approach for the arena's 16 compound corners exactly: each is built by
+  calling `StaticCornerFillet::between_three_planes` directly on the three
+  real flat planes that meet at that vertex (the back wall, that post's own
+  plane, and the crossbar), rather than derived from the two
+  `StaticQuarterPipe` edge fillets already built at that vertex — since a
+  corner fillet's center is already exactly those two edge fillets' own
+  common axis intersection, the same property `between_three_planes`'s own
+  doc comment (FR-023) already explains. No new shape or collision code was
+  needed: `StaticCornerFillet` and `sphere_vs_corner_fillet` (FR-023) are
+  already fully generic to any three non-parallel planes. Unlike FR-025 (a
+  new, distinctly larger `CORNER_ARCH_RADIUS` was needed there because the
+  arena's own cardinal-vs-corner-wall arches use different radii), this
+  requirement reuses `FILLET_RADIUS` unchanged for all 4 new fillets, since
+  both edge fillets meeting at a goal's post-crossbar corner already share
+  `FILLET_RADIUS` — no mismatched-radius concern exists here.
+  `PhysicsWorld::standard_arena` wires these 4 in via the same generic
+  `with_corner_fillet` builder `standard_corner_fillets`'s 16 already use,
+  so `PhysicsWorld.corner_fillets` now holds 20 total, not 16 — the
+  pre-existing test `standard_arena_has_sixteen_compound_corner_fillets`
+  was renamed `standard_arena_has_twenty_compound_corner_fillets` and its
+  assertion updated to match. Explicitly still out of scope: the goal's
+  other two corners, where a post meets the floor — the window's own bottom
+  edge sits exactly at floor level (`z = 0`), so a post's own fillet there
+  simply ends flush with the ground, with no sharp, unrounded vertex left
+  to round off, unlike the top post-crossbar corner. Still not modeled: a
+  car actually being deflected by any fillet or driving into a goal, and a
+  modeled goal interior/net beyond the cutout itself (see Non-goals).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -969,8 +1015,15 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025.
   `StaticQuarterPipe::between_planes` from the real back-wall plane and a
   purely-geometric post/crossbar plane (`goal_post_plane`/
   `goal_crossbar_plane`, never themselves added as real collision walls);
+  `standard_goal_corner_fillets` (since FR-026) — 4 more
+  `StaticCornerFillet`s (one per goal post per goal), built via
+  `StaticCornerFillet::between_three_planes` directly from those same
+  back-wall/post/crossbar planes, rounding off the two compound corners per
+  goal where a post's own edge fillet meets the crossbar's, added to the
+  same `corner_fillets` list `standard_corner_fillets`'s 16 already
+  populate (20 total) and reusing `FILLET_RADIUS` unchanged;
   `PhysicsWorld::standard_arena` (in `world`)
-  wires all five into a new `PhysicsWorld` in one call, an alternative to
+  wires all of these into a new `PhysicsWorld` in one call, an alternative to
   `PhysicsWorld::new` plus manual `with_wall`/`with_curve`/
   `with_corner_fillet`/`with_goal_wall` calls for a
   caller that wants the real field rather than a custom test arena.
@@ -1400,6 +1453,30 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   this version — net +1 over 0.24.0's 211, since one new `arena.rs` test
   idea was implemented as the compile-time const-assert above instead of a
   runtime test, alongside the one new `world.rs` end-to-end test).
+- FR-026 (met, goal post-crossbar corner fillets):
+  `standard_goal_corner_fillets` returns exactly 4 fillets; every one of
+  their centers sits exactly `FILLET_RADIUS` in from some back wall, some
+  post plane, and the crossbar plane simultaneously — proof
+  `between_three_planes` solved the real triple intersection this goal's
+  own geometry produces, not an arbitrary point, the same "prove the real
+  triple intersection, not an arbitrary point" style test FR-023's own
+  arena-corner test already used. `PhysicsWorld::standard_arena` carries
+  exactly 20 corner fillets (16 arena-corner plus 4 goal-corner). An
+  end-to-end `PhysicsWorld` test,
+  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`,
+  gives the real live-physics proof: a ball embedded past a goal
+  corner fillet's own radius, at a synthetic back-wall/post/crossbar
+  3-plane fixture (not the real arena's own numbers, matching this test
+  file's established convention for fillet unit tests), gets pushed
+  meaningfully back toward the center — the same "moved meaningfully," not
+  "settled-and-stayed," claim every other fillet's own equivalent test
+  makes, for the same residual-velocity reason. All
+  FR-007/FR-008/FR-009/FR-010/FR-011/FR-012/FR-013/FR-014/FR-015/FR-016/FR-017/FR-018/FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026
+  behavior covered by `rb_physics_bullet`'s unit tests (215 tests as of
+  this version — net +3 over 0.25.0's 212: 2 new `arena.rs` tests
+  (`standard_goal_corner_fillets_has_four_fillets` and
+  `every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar`)
+  plus the 1 new `world.rs` end-to-end test above).
 - FR-005 (open): acceptance criteria defined when that work starts.
 
 ## Verification plan
@@ -1495,9 +1572,10 @@ collision geometry, not just a better number (see FR-019 and Open
 questions). FR-020's `arena::FILLET_RADIUS` has exactly the same status as
 `CORNER_LENGTH` — this port's own invention, no public reference, and only
 governs the ball (see FR-020's own Non-goals: a car isn't deflected by a
-curve at all yet, so there's nothing to validate there either). FR-022's
-and FR-024's own fillets (the 8 vertical corner-wall edges and the 6
-goal-cutout edges) reuse this same `FILLET_RADIUS` constant rather than
+curve at all yet, so there's nothing to validate there either). FR-022's,
+FR-024's, and FR-026's own fillets (the 8 vertical corner-wall edges, the 6
+goal-cutout edges, and the 4 goal post-crossbar compound corners) reuse
+this same `FILLET_RADIUS` constant rather than
 introducing a separate one each — a documented simplification, since this
 port has no reason to believe a vertical-edge fillet's own radius, or a
 goal post's, should match a cardinal wall's floor/ceiling-seam radius —
@@ -1511,6 +1589,23 @@ status as `FILLET_RADIUS`/`CORNER_LENGTH`: this port's own invention, no
 public reference, chosen only to read as visibly larger than
 `FILLET_RADIUS` in tests (enforced at compile time, not calibrated), and
 only governs the ball, same as every other fillet radius in this crate.
+FR-026's own 4 goal post-crossbar compound-corner fillets reuse
+`FILLET_RADIUS` unchanged rather than `CORNER_ARCH_RADIUS` — unlike the
+arena's own compound corners (FR-023/FR-025), both edge fillets meeting at
+a goal's post-crossbar vertex already share `FILLET_RADIUS`, so there is no
+mismatched-radius concern here requiring a dedicated, larger arch radius.
+`StaticCornerFillet::between_three_planes`'s own general
+three-plane-intersection center solve and spherical-triangle `bounds`
+derivation were already independently verified against a synthetic
+fixture by FR-023 — FR-026 doesn't re-derive that machinery, only applies
+it to a new triple of real planes (a back wall, a post, and the crossbar),
+proven here by
+`arena.rs`'s `every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar`
+(the same "prove the real
+triple intersection, not an arbitrary point" discipline FR-023's own
+arena-corner test used), plus a new end-to-end `world.rs` test giving the
+same live-physics "pushed meaningfully back toward the center" proof every
+other fillet in this port gets.
 The unit
 tests confirm the fillet's *shape* of response (pushes back toward the
 axis once the sphere's surface crosses the fillet's own radius from
@@ -1576,7 +1671,20 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   independent, additive contact sources, per `RB-PHYSICS-001`'s "single
   flat plane, single-radius edge fillet, or single-radius corner fillet
   per boundary segment" Non-goal — not a single continuously-blended
-  surface across the whole octagon.)
+  surface across the whole octagon. The two compound corners per goal where
+  a post's own edge fillet meets the crossbar's are likewise now modeled
+  with a `StaticCornerFillet`, as FR-026 — built directly via
+  `StaticCornerFillet::between_three_planes` on the back-wall/post/crossbar
+  planes rather than derived from the two edge fillets meeting there,
+  reusing `FILLET_RADIUS` unchanged since both edge fillets meeting at that
+  vertex already share it, unlike the arena's own compound corners, which
+  needed the distinctly larger `CORNER_ARCH_RADIUS` (see FR-025) — with the
+  same independent-additive-fillets caveat as above, not a single
+  continuously-blended surface. The goal's other two corners, where a post
+  meets the floor, still need no such treatment: the window's own bottom
+  edge sits exactly at floor level, so a post's own fillet there simply
+  ends flush with the ground rather than leaving a sharp vertex to round
+  off.)
 - A car actually driving into a goal, and a modeled goal interior/net
   beyond the cutout itself (see FR-024's Non-goals) — the goal-mouth window
   now opens onto open space, not a bounded volume with its own back/side
@@ -1589,15 +1697,6 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   fillet-deflection question above does, since a car driving in would also
   need to clear the goal-cutout edge fillets, not just the flat window.
   Not started.
-- The two compound corners per goal where a post's own edge fillet meets
-  the crossbar's (see FR-024's Non-goals) — modeled as independent,
-  additive fillets rather than a single blended 3D vertex, the same
-  approach the arena's corner-wall edges used before FR-023 introduced a
-  dedicated `StaticCornerFillet` for that specific case. A concrete reason
-  to model this (e.g. real recorded behavior specifically at these
-  compound corners that diverges from the independent-fillets
-  approximation) would justify reusing (or extending) `StaticCornerFillet`
-  here too. Not started.
 - Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
@@ -1607,14 +1706,15 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   exercised by any test here. Not started.
 - Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS`/
   `CORNER_ARCH_RADIUS` against real field mesh data (see
-  FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025) — this
+  FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026) — this
   port has no reference for any of the three at all, unlike `SIDE_WALL_X`/
   `BACK_WALL_Y`/`CEILING_Z`; even a sourced value would only approximate
   the real corner/transition, which isn't a single flat plane,
   single-radius edge fillet, or single-radius corner fillet in the actual
   game. `FILLET_RADIUS` governs the 4 cardinal walls'
   floor/ceiling-seam fillets (FR-020), all 8 vertical-edge fillets
-  (FR-022), and all 6 goal-cutout-edge fillets (FR-024); since FR-025, the
+  (FR-022), all 6 goal-cutout-edge fillets (FR-024), and all 4 goal
+  post-crossbar compound-corner fillets (FR-026); since FR-025, the
   4 corner walls' own floor/ceiling-seam fillets (FR-021) and all 16
   compound-corner fillets (FR-023) instead reuse the distinctly larger
   `CORNER_ARCH_RADIUS`, chosen only to read as visibly bigger than
@@ -1681,6 +1781,50 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.26.0 (2026-08-31): FR-026 added and implemented (goal post-crossbar
+  corner fillets) — rounds off the two remaining sharp compound corners per
+  goal (4 total, 2 per goal), where a post's own vertical-edge fillet
+  (FR-024) meets the crossbar's own horizontal-edge fillet, an explicitly
+  documented gap FR-024's own doc comment left open. New
+  `arena::standard_goal_corner_fillets` builds all 4 by calling
+  `StaticCornerFillet::between_three_planes` directly on the three real
+  flat planes that meet at each vertex (the back wall, that post's own
+  plane, and the crossbar) — the same direct-from-real-planes approach
+  FR-023 used for the arena's own 16 compound corners, rather than deriving
+  from the two edge fillets already built at that vertex, since a corner
+  fillet's center is already exactly those two edge fillets' own common
+  axis intersection. No new shape or collision code needed —
+  `StaticCornerFillet`/`sphere_vs_corner_fillet` (FR-023) are already fully
+  generic to any three non-parallel planes. Unlike FR-025, this increment
+  reuses `FILLET_RADIUS` unchanged for all 4 new fillets rather than
+  introducing a new radius constant, since both edge fillets meeting at a
+  goal's post-crossbar corner already share `FILLET_RADIUS` — no
+  mismatched-radius concern exists here. `PhysicsWorld::standard_arena`
+  wires these 4 in via the same generic `with_corner_fillet` builder
+  `standard_corner_fillets`'s 16 already use, so `PhysicsWorld.corner_fillets`
+  now holds 20 total; the pre-existing test
+  `standard_arena_has_sixteen_compound_corner_fillets` was renamed
+  `standard_arena_has_twenty_compound_corner_fillets` and its assertion
+  updated to match. New tests: `arena.rs` gained
+  `standard_goal_corner_fillets_has_four_fillets` and
+  `every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar`
+  (the same "prove the real triple intersection, not an arbitrary point"
+  style test FR-023's own arena-corner test used); `world.rs` gained
+  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`
+  (the same live-physics "ball embedded past the fillet's own radius gets
+  pushed back toward the center" proof already given for every other
+  fillet type in this port, using a synthetic back-wall/post/crossbar
+  3-plane fixture rather than the real arena's own numbers, matching this
+  test file's established convention for fillet unit tests). Net +3 tests,
+  bringing the crate to 215 tests total (2 in `arena.rs`, 1 in `world.rs`).
+  Explicitly still out of scope: the goal's other two corners, where a post
+  meets the floor — the window's own bottom edge sits exactly at floor
+  level (`z = 0`), so a post's own fillet there simply ends flush with the
+  ground, with no sharp, unrounded vertex requiring a blend, unlike the top
+  post-crossbar corner this increment addresses. Still not modeled: a car
+  actually being deflected by any fillet or driving into a goal, a modeled
+  goal interior/net beyond the cutout itself, and everything else FR-024's
+  own Non-goals already cover.
 - 0.25.0 (2026-08-30): FR-025 added and implemented (corner-wall
   floor/ceiling arch radius) — gives a diagonal corner wall's own
   floor-seam and ceiling-seam fillets a distinctly larger, dedicated
