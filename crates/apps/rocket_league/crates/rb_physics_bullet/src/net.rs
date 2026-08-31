@@ -45,23 +45,26 @@
 //! (grippy netting), matching the qualitative behavior a real net has
 //! without claiming either number is measured.
 //!
-//! Explicitly out of scope (tracked in `RB-PHYSICS-001`, not silently
-//! dropped): a car's own contact against a net — a car still passes
-//! straight through a `NetMesh`'s spatial footprint untouched, exactly as
-//! it did before this module existed, and continues to be stopped by the
-//! pre-existing rigid `StaticBoundedWall`/back-of-net `StaticPlane`
-//! machinery `RB-PHYSICS-001-FR-029` already built (a `NetMesh` panel sits
-//! well in front of that machinery — see `arena::NET_DEPTH` — so it's
-//! always the ball's real backstop regardless of how the net itself
-//! behaves); manifold richness beyond one contact per overlapping point
-//! (no clipped-face-style manifold the way `box_vs_box` builds one); a full
-//! 3D "sock" shape billowing backward from the goal mouth (this models a
-//! single flat rest-shape panel instead, which still deforms backward
-//! dynamically under a real ball impact via its own springs — just not a
+//! Since `RB-PHYSICS-001-FR-038`, `step` takes every body that can touch the
+//! net (the ball and every car, via a `&mut [RigidBody]` slice) rather than
+//! the ball alone — a car is resolved against every free point exactly the
+//! same way the ball always was (`collision::contacts_between`/
+//! `solver::resolve_contacts_between`, dispatching to the same box-vs-sphere
+//! path `ball_bounces_off_a_stationary_car_instead_of_passing_through`
+//! already exercises for ball-vs-car), closing the "a car still passes
+//! through untouched" gap this module's own doc comment used to carry as an
+//! explicit Non-goal.
+//!
+//! Explicitly still out of scope (tracked in `RB-PHYSICS-001`, not silently
+//! dropped): manifold richness beyond one contact per overlapping point per
+//! body (no clipped-face-style manifold the way `box_vs_box` builds one); a
+//! full 3D "sock" shape billowing backward from the goal mouth (this models
+//! a single flat rest-shape panel instead, which still deforms backward
+//! dynamically under a real impact via its own springs — just not a
 //! pre-shaped pocket); and bending stiffness (only structural + shear
 //! springs, no springs resisting the mesh folding along a diagonal) — none
 //! of this crate's existing cloth-adjacent shapes need rendering-quality
-//! draping, only enough structure to catch a ball believably.
+//! draping, only enough structure to catch a ball or car believably.
 
 use crate::body::RigidBody;
 use crate::collision;
@@ -253,22 +256,32 @@ impl NetMesh {
 
     /// Advances the net's own internal physics by `dt` (split into
     /// `NET_SUBSTEPS` sub-steps — see this module's own doc comment) and
-    /// resolves `ball`'s contact against every free point it currently
-    /// overlaps. Each sub-step: accumulate spring forces, apply gravity
+    /// resolves every one of `bodies`' contact against every free point it
+    /// currently overlaps (`RB-PHYSICS-001-FR-038`: the ball and every car,
+    /// via `PhysicsWorld::step`'s own call site — a single-element slice for
+    /// the ball alone works identically to how this function behaved before
+    /// this requirement, since a slice of length 1 is resolved exactly the
+    /// same way). Each sub-step: accumulate spring forces, apply gravity
     /// (a real net does sag a little under its own weight) and damping,
     /// integrate every free point's velocity (mirroring
     /// `PhysicsWorld::apply_forces_and_integrate_velocities`'s own
-    /// gravity-damping-integrate sequence), resolve `ball` against every
-    /// free point within contact range (via
+    /// gravity-damping-integrate sequence), resolve every body in `bodies`
+    /// against every free point within contact range (via
     /// `collision::contacts_between`/`solver::resolve_contacts_between`,
     /// the exact two-dynamic-body path every other dynamic-vs-dynamic
-    /// contact in this crate already uses — this mutates `ball`'s own
-    /// velocity too, progressively across sub-steps, not just the net's),
-    /// then integrate every free point's transform. An anchored point never
-    /// accumulates force, never integrates, and is skipped by every one of
-    /// these phases — its position is simply whatever `rectangular_grid`
-    /// built it at, forever.
-    pub fn step(&mut self, ball: &mut RigidBody, gravity: Vec3, dt: f32) {
+    /// contact in this crate already uses, dispatching to sphere-vs-sphere
+    /// for the ball or box-vs-sphere for a car — this mutates each body's
+    /// own velocity too, progressively across sub-steps, not just the
+    /// net's), then integrate every free point's transform. An anchored
+    /// point never accumulates force, never integrates, and is skipped by
+    /// every one of these phases — its position is simply whatever
+    /// `rectangular_grid` built it at, forever. Bodies in `bodies` are
+    /// resolved against a given point in slice order within each
+    /// sub-step — no significance beyond call order, since each resolve is
+    /// independent (a net point's own mass is tiny enough relative to a
+    /// real ball or car that one sub-step's ordering bias between two
+    /// simultaneous touches isn't a scenario this crate's tests exercise).
+    pub fn step(&mut self, bodies: &mut [RigidBody], gravity: Vec3, dt: f32) {
         let sub_dt = dt / NET_SUBSTEPS as f32;
         for _ in 0..NET_SUBSTEPS {
             for (i, point) in self.points.iter_mut().enumerate() {
@@ -289,9 +302,11 @@ impl NetMesh {
                 if self.anchored[i] {
                     continue;
                 }
-                let contacts = collision::contacts_between(ball, point);
-                if !contacts.is_empty() {
-                    solver::resolve_contacts_between(ball, point, &contacts, sub_dt);
+                for body in bodies.iter_mut() {
+                    let contacts = collision::contacts_between(body, point);
+                    if !contacts.is_empty() {
+                        solver::resolve_contacts_between(body, point, &contacts, sub_dt);
+                    }
                 }
             }
             for (i, point) in self.points.iter_mut().enumerate() {
@@ -382,7 +397,7 @@ mod tests {
         let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(5000.0, 5000.0, 5000.0));
         let gravity = Vec3::new(0.0, 0.0, -650.0);
         for _ in 0..120 {
-            net.step(&mut ball, gravity, 1.0 / 60.0);
+            net.step(std::slice::from_mut(&mut ball), gravity, 1.0 / 60.0);
         }
 
         let anchored_after: Vec<Vec3> = (0..net.points.len())
@@ -405,7 +420,7 @@ mod tests {
         let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(5000.0, 5000.0, 5000.0));
         let gravity = Vec3::new(0.0, 0.0, -650.0);
         for _ in 0..600 {
-            net.step(&mut ball, gravity, 1.0 / 60.0);
+            net.step(std::slice::from_mut(&mut ball), gravity, 1.0 / 60.0);
         }
 
         let max_speed = net
@@ -452,7 +467,7 @@ mod tests {
 
         let dt = 1.0 / 120.0;
         for _ in 0..(1.0 / dt) as u32 {
-            net.step(&mut ball, gravity, dt);
+            net.step(std::slice::from_mut(&mut ball), gravity, dt);
             let (position, orientation) = integrate::integrate_transform(
                 ball.position,
                 ball.orientation,
@@ -469,6 +484,116 @@ mod tests {
             "expected the net to have caught the ball, losing at least half its speed, \
              start speed={ball_speed}, end vy={}",
             ball.linear_velocity.y
+        );
+    }
+
+    #[test]
+    fn a_car_shot_into_the_net_is_measurably_slowed_compared_to_free_flight() {
+        // RB-PHYSICS-001-FR-038: the same proof as
+        // `a_ball_shot_into_the_net_is_measurably_slowed_compared_to_free_flight`,
+        // for a car (box) instead of a sphere — `collision::contacts_between`
+        // already dispatches to `sphere_vs_box` for a box-vs-sphere pair, so
+        // no new collision code was needed, only `step`'s own `&mut
+        // [RigidBody]` slice replacing its old single-`&mut RigidBody`
+        // parameter.
+        let net_center = Vec3::new(0.0, 5000.0, 300.0);
+        let car_speed = 2000.0;
+        let start = net_center - Vec3::new(0.0, 800.0, 0.0);
+
+        let mut net = NetMesh::rectangular_grid(
+            net_center,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            900.0,
+            600.0,
+            5,
+            5,
+        );
+        let mut car = RigidBody::car_box(Vec3::new(60.0, 40.0, 20.0), 1.0, start);
+        car.linear_velocity = Vec3::new(0.0, car_speed, 0.0);
+        let gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.0 / dt) as u32 {
+            net.step(std::slice::from_mut(&mut car), gravity, dt);
+            let (position, orientation) = integrate::integrate_transform(
+                car.position,
+                car.orientation,
+                car.linear_velocity,
+                car.angular_velocity,
+                dt,
+            );
+            car.position = position;
+            car.orientation = orientation;
+        }
+
+        assert!(
+            car.linear_velocity.y.abs() < car_speed * 0.5,
+            "expected the net to have caught the car, losing at least half its speed, \
+             start speed={car_speed}, end vy={}",
+            car.linear_velocity.y
+        );
+    }
+
+    #[test]
+    fn a_ball_and_a_car_are_both_resolved_against_the_same_net_step() {
+        // Proves `step`'s own `bodies` slice genuinely resolves every body
+        // against the net within one call, not just the first element — a
+        // claim this port's earlier single-body-only `step` couldn't even
+        // represent, let alone test. The two bodies are offset far enough
+        // apart along the net's own width that they never touch each other,
+        // isolating each one's own net contact.
+        let net_center = Vec3::new(0.0, 5000.0, 300.0);
+        let speed = 2000.0;
+        let start = net_center - Vec3::new(0.0, 800.0, 0.0);
+
+        let mut net = NetMesh::rectangular_grid(
+            net_center,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            900.0,
+            600.0,
+            5,
+            5,
+        );
+        let mut ball = RigidBody::sphere(93.15, 1.0, start + Vec3::new(-400.0, 0.0, 0.0));
+        ball.linear_velocity = Vec3::new(0.0, speed, 0.0);
+        let mut car = RigidBody::car_box(
+            Vec3::new(60.0, 40.0, 20.0),
+            1.0,
+            start + Vec3::new(400.0, 0.0, 0.0),
+        );
+        car.linear_velocity = Vec3::new(0.0, speed, 0.0);
+        let gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.0 / dt) as u32 {
+            let mut bodies = [ball, car];
+            net.step(&mut bodies, gravity, dt);
+            ball = bodies[0];
+            car = bodies[1];
+            for body in [&mut ball, &mut car] {
+                let (position, orientation) = integrate::integrate_transform(
+                    body.position,
+                    body.orientation,
+                    body.linear_velocity,
+                    body.angular_velocity,
+                    dt,
+                );
+                body.position = position;
+                body.orientation = orientation;
+            }
+        }
+
+        assert!(
+            ball.linear_velocity.y.abs() < speed * 0.5,
+            "expected the net to have caught the ball, got vy={}",
+            ball.linear_velocity.y
+        );
+        assert!(
+            car.linear_velocity.y.abs() < speed * 0.5,
+            "expected the net to have caught the car, got vy={}",
+            car.linear_velocity.y
         );
     }
 }

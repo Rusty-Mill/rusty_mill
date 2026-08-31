@@ -32,7 +32,38 @@ keyed by the commit/PR that shipped them.
   blocker `RB-VERIFY-002-FR-001` already documents.
 - **No new tests** — documentation-only, no runtime value changed, matching
   FR-031/FR-036's own precedent for constant-audit findings that don't
-  change a value. All 267 pre-existing tests pass unchanged.
+  change a value. All 271 pre-existing tests pass unchanged.
+
+---
+
+## Car-vs-net contact
+**2026-08-31** · PR pending · commit pending
+
+- **A car is now caught by a goal net too, not just the ball** — closes
+  this port's own former Non-goal that "a car still passes straight
+  through a `net::NetMesh`'s spatial footprint untouched."
+- **`net::NetMesh::step` changed from a single `&mut RigidBody` (the ball
+  alone) to `&mut [RigidBody]`** (every body that can touch the net). Its
+  inner contact-resolution loop now iterates every body in the slice
+  against each free point. A single-element slice for the ball alone
+  behaves identically to the old signature — every one of this module's
+  pre-existing tests only needed a call-syntax update
+  (`std::slice::from_mut(&mut ball)`), not a changed assertion.
+- **No new collision code was needed** — `collision::contacts_between`
+  already dispatches to `sphere_vs_box` for a car (box) against a net
+  point (sphere) the same way it always has for ball-vs-car.
+- **`PhysicsWorld::step` reuses the same ball-plus-cars snapshot**
+  `solver::resolve_dynamic_manifolds` already resolved that step for the
+  net-step call too, deferring the sync back to `self.ball`/`self.cars`
+  until after every net has had its turn, instead of syncing immediately
+  and rebuilding a second snapshot just for the net loop.
+- **3 new tests**: 2 in `net.rs` (the direct car analog of the existing
+  "caught vs. free flight" ball test, and a test proving both a ball and a
+  car are resolved against the same net step, not just the first body in
+  the slice) and 1 in `world.rs` (the live-`PhysicsWorld` end-to-end
+  proof, mirroring the ball's own version).
+- 3 new tests, 271 total in `rb_physics_bullet` (+3 over FR-039's 268). All
+  pre-existing tests pass unchanged.
 
 ---
 

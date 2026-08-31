@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.38.0
+- Version: 0.40.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -55,11 +55,11 @@
   implemented, and explicitly does NOT close `FR-005`'s real-data
   calibration, still blocked on `PHASE-0-EXIT`; and, since FR-033, each
   goal gets a real mass-spring net panel catching the ball (`net::NetMesh`)
-  — implemented, scoped to the ball only (a car still passes through a net
-  panel's own footprint, stopped instead by FR-029's pre-existing solid
-  bounding box); and, since FR-034, every contact's positional/penetration
-  correction runs on its own separate split-impulse "push" channel instead
-  of folding into the body's real velocity, so resolving deep overlap no
+  — implemented, scoped to the ball only at the time (since `FR-038`, a
+  car is caught too — see that entry); and, since FR-034, every contact's
+  positional/penetration correction runs on its own separate split-impulse
+  "push" channel instead of folding into the body's real velocity, so
+  resolving deep overlap no
   longer injects the spurious velocity a combined Baumgarte term used to —
   implemented; and, since FR-035, `solver::resolve_dynamic_manifolds`
   (every ball-vs-car/car-vs-car manifold) warm-starts each call from the
@@ -82,7 +82,13 @@
   limitation warm-starting alone couldn't (see FR-035's own entry) — a car
   wakes unconditionally on any genuinely active input, before that input's
   own force has had a chance to move it, so an asleep car can always start
-  moving again — implemented; and, since FR-039, a wall jump at a corner
+  moving again — implemented; and, since FR-038, `net::NetMesh::step` takes
+  every body that can touch a net (the ball and every car, via a `&mut
+  [RigidBody]` slice) instead of the ball alone, closing this port's own
+  former "a car still passes through untouched" Non-goal — no new collision
+  code was needed, since `collision::contacts_between` already dispatches
+  box-vs-sphere for a car against a net point the same way it always has for
+  ball-vs-car — implemented; and, since FR-039, a wall jump at a corner
   (a car touching two walls at once) pushes off along every touched wall's
   normal summed and normalized, instead of picking whichever wall came
   first in `PhysicsWorld.walls` — implemented; and, since FR-040, a
@@ -91,9 +97,8 @@
   self-disclaimed-non-circular, likely-conflated wiki value — deliberately
   not adopted; both constants remain genuinely uncalibrated, closing this
   for real needs actual extracted mesh data — investigated; static-contact
-  warm-starting, a car's own contact against a net,
-  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, and that
-  real-data calibration are open follow-up work)
+  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
+  and that real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -205,8 +210,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   behavior — was this bullet's fifth half through FR-029; that half is now
   resolved too, see `RB-PHYSICS-001-FR-033`'s `net::NetMesh` (a real
   mass-spring grid, not FR-029's own solid bounding box), scoped to the
-  ball only — a car's own contact against a net, a full 3D "sock" shape,
-  and bending stiffness remain open, see FR-033's own Non-goals.)
+  ball only at the time — a car's own contact against a net is no longer
+  open, since `RB-PHYSICS-001-FR-038` closed it; a full 3D "sock" shape and
+  bending stiffness remain open, see FR-033's own Non-goals and FR-038's
+  own entry.)
   `arena::standard_curves`
   builds 24
   `StaticQuarterPipe` fillets — 16 floor/ceiling-seam fillets (one
@@ -1960,6 +1967,60 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (a ball put to sleep before the car even exists in the scene, then a
     fast-moving car added and driven into it). 8 new tests, bringing the
     crate to 267 total (+8 over FR-036's 259).
+- `RB-PHYSICS-001-FR-038` (car-vs-net contact, implemented): closes this
+  port's own former Non-goal that "a car still passes straight through a
+  `net::NetMesh`'s spatial footprint untouched" (`RB-PHYSICS-001-FR-033`'s
+  own entry). `net::NetMesh::step` changed from taking the ball alone
+  (`&mut RigidBody`) to taking every body that can touch the net (`&mut
+  [RigidBody]`) — a single-element slice for the ball alone behaves
+  identically to how this function behaved before this requirement, so
+  every one of its own pre-existing unit tests updates only its call
+  syntax (`std::slice::from_mut(&mut ball)`), not its own assertions. Its
+  inner contact-resolution loop now iterates every body in the slice
+  against each free point, instead of just the one `ball` parameter — no
+  new collision code was needed at all, since `collision::contacts_between`
+  already dispatches to `sphere_vs_box` for a box-vs-sphere pair (a car
+  against a net point) the exact same way it always has for ball-vs-car.
+  `PhysicsWorld::step` reuses the same ball-plus-cars `bodies` snapshot
+  `solver::resolve_dynamic_manifolds` already resolved that step for its
+  own net-step call, deferring the sync back to `self.ball`/`self.cars`
+  until after every net has had its turn, instead of syncing immediately
+  and rebuilding a second snapshot just for the net loop.
+  - **Non-goals (this requirement).** Everything FR-033's own Non-goals
+    already scoped out for the ball stays out for a car too: manifold
+    richness beyond one contact per overlapping point per body, a full 3D
+    "sock" shape, and bending stiffness. No new per-body distinction
+    exists in how a net treats a car versus the ball — same restitution/
+    friction, same point-mass contact resolution — since nothing about a
+    real net's own physical behavior toward a car should differ from
+    toward a ball at this level of fidelity, and this port has no
+    evidence (real or cited) suggesting otherwise.
+  - **Acceptance criteria.** A car fired at a net panel loses at least half
+    its speed compared to an identical shot through the same empty space
+    with no net present — the same "caught vs. free flight" proof
+    `RB-PHYSICS-001-FR-033` already established for the ball. Every one of
+    `net.rs`'s and `world.rs`'s pre-existing tests passes unchanged (after
+    the mechanical slice-syntax update), confirming this requirement is
+    behavior-preserving for the ball's own already-covered scenarios.
+  - **Verification plan.** 2 new `net.rs` tests:
+    `a_car_shot_into_the_net_is_measurably_slowed_compared_to_free_flight`
+    (the direct car analog of the pre-existing ball version) and
+    `a_ball_and_a_car_are_both_resolved_against_the_same_net_step` (both
+    bodies in one `step` call, positioned far enough apart along the net's
+    own width that they can't touch each other, proving the slice's own
+    iteration genuinely resolves every element, not just the first — a
+    claim the old single-body signature couldn't even represent). 1 new
+    `world.rs` end-to-end test,
+    `a_car_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched`,
+    mirrors the existing ball version exactly, through a real
+    `PhysicsWorld` — floated near the net panel's own vertical center
+    (matching the ball version's positioning) rather than resting on the
+    ground, since a car sized to rest at ground height would only ever
+    reach the panel's anchored bottom row, which `NetMesh::step`'s own
+    contact-resolution loop deliberately skips (see that function's own
+    doc comment) — a real trap this test's own first draft fell into
+    before being corrected. 3 new tests, bringing the crate to 271 total
+    (+3 over FR-039's 268).
 - `RB-PHYSICS-001-FR-039` (wall-jump corner disambiguation, implemented):
   closes the "first wall in `self.walls`" simplification `RB-PHYSICS-001-FR-013`
   originally documented and `FR-019`'s new diagonal corner walls made
@@ -3280,10 +3341,13 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   the concrete motivation this bullet asked for turned out not to be
   needed to justify it — a "ball tangles in netting" behavior is itself
   the kind of qualitative, visually-checkable fidelity gap worth closing
-  independent of a specific divergence-scoring signal). Still open: a
-  car's own contact against a net (scoped out of FR-033, see its own
-  Non-goals), and a full 3D "sock" shape/visual net sag/bending stiffness
-  beyond FR-033's flat structural-plus-shear-spring panel.
+  independent of a specific divergence-scoring signal). A car's own
+  contact against a net (scoped out of FR-033, see its own Non-goals) is
+  no longer open either — `RB-PHYSICS-001-FR-038` closed it by
+  generalizing `net::NetMesh::step` to take every body that can touch the
+  net, not the ball alone. Still open: a full 3D "sock" shape/visual net
+  sag/bending stiffness beyond FR-033's flat structural-plus-shear-spring
+  panel — see FR-038's own Non-goals for what it did and didn't touch.
 - ~~Disambiguating or blending a car's simultaneous contact with two walls
   at a corner for wall-jump purposes (see FR-019's Non-goals) — physical
   collision resolution already handles this correctly regardless; only
@@ -3404,7 +3468,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
-- 0.39.0 (2026-08-31): FR-040 added and investigated (fillet-radius
+- 0.40.0 (2026-08-31): FR-040 added and investigated (fillet-radius
   calibration research) — a dedicated research pass, matching FR-036's own
   real-source-research method, specifically targeting the two remaining
   uncalibrated placeholder constants FR-036 itself deliberately left
@@ -3426,8 +3490,37 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   `ZealanL/RLArenaCollisionDumper`), the same "requires the owner's own
   Windows/Rocket League environment" blocker `RB-VERIFY-002-FR-001`
   already documents. No new tests (documentation-only, no value changed,
-  the same precedent FR-031/FR-036 established); all 268 pre-existing
-  tests pass unchanged (total unchanged from FR-039).
+  the same precedent FR-031/FR-036 established); all 271 pre-existing
+  tests pass unchanged (total unchanged from FR-038).
+- 0.39.0 (2026-08-31): FR-038 added and implemented (car-vs-net contact) —
+  closes this port's own former Non-goal that a car passes straight
+  through a `net::NetMesh`'s spatial footprint untouched
+  (`RB-PHYSICS-001-FR-033`'s own entry). `net::NetMesh::step` changed from
+  a single `&mut RigidBody` (the ball alone) to `&mut [RigidBody]` (every
+  body that can touch the net); its inner contact-resolution loop now
+  iterates every body in the slice against each free point instead of just
+  one parameter. No new collision code needed: `collision::contacts_between`
+  already dispatches to `sphere_vs_box` for a car (box) against a net point
+  (sphere) the same way it always has for ball-vs-car. `PhysicsWorld::step`
+  reuses the same ball-plus-cars snapshot `solver::resolve_dynamic_manifolds`
+  already resolved that step for the net-step call too, deferring the sync
+  back to `self.ball`/`self.cars` until after every net has had its turn.
+  All of `net.rs`'s pre-existing tests updated only their call syntax
+  (`std::slice::from_mut(&mut ball)`), not their own assertions — a
+  single-element slice behaves identically to the old signature. 3 new
+  tests: 2 in `net.rs` (`a_car_shot_into_the_net_is_measurably_slowed_compared_to_free_flight`,
+  the direct car analog of the pre-existing ball version, and
+  `a_ball_and_a_car_are_both_resolved_against_the_same_net_step`, proving
+  the slice's own iteration resolves every element, not just the first)
+  and 1 in `world.rs`
+  (`a_car_shot_at_a_goal_net_is_caught_instead_of_passing_through_untouched`,
+  the live-`PhysicsWorld` "caught vs. free flight" proof mirroring the
+  ball's own version) — floated near the net panel's own vertical center
+  rather than resting on the ground, since a car sized to rest at ground
+  height would only ever reach the panel's anchored bottom row, which
+  `NetMesh::step`'s own contact-resolution loop deliberately skips — a
+  real trap this test's own first draft fell into before being corrected.
+  Bringing the crate to 271 total (+3 over FR-039's 268).
 - 0.38.0 (2026-08-31): FR-039 added and implemented (wall-jump corner
   disambiguation) — closes the "first wall in `self.walls`" simplification
   FR-013 originally documented and FR-019's new diagonal corner walls made
