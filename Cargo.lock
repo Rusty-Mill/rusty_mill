@@ -5815,6 +5815,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_codec"
+version = "0.1.0"
+dependencies = [
+ "rusty_std",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_compress"
 version = "0.1.0"
 
