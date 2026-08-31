@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Modeled goal interior
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #67](https://github.com/baileyrd/rusty_bullet/pull/67) · `9b69c0c`
 
 - **A ball or car passing through a goal-mouth window now settles inside a
   bounded goal box** instead of sailing forever into open, unbounded
