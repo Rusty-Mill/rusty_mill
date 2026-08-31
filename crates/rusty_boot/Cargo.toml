@@ -1,0 +1,41 @@
+[package]
+name = "rusty_boot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_boot"
+keywords = ["boot", "kernel", "no-std", "sovereign", "libc"]
+categories = ["no-std", "os"]
+
+[dependencies]
+rusty_wire = { path = "../rusty_wire" }
+rusty_regx = { path = "../rusty_regx" }
+rusty_json = { path = "../rusty_json" }
+rusty_compress = { path = "../rusty_compress" }
+rusty_std = { path = "../rusty_std" }
+rusty_sync = { path = "../rusty_sync" }
+rusty_time = { path = "../rusty_time" }
+rusty_err = { path = "../rusty_err" }
+rusty_codec = { path = "../rusty_codec" }
+rusty_audio = { path = "../rusty_audio" }
+rusty_jinja = { path = "../rusty_jinja" }
+rusty_tokio = { path = "../rusty_tokio" }
+rusty_http = { path = "../rusty_http" }
+rusty_lines = { path = "../rusty_lines" }
+rusty_font = { path = "../rusty_font" }
+rusty_gui = { path = "../rusty_gui" }
+rusty_gpu = { path = "../rusty_gpu" }
+rusty_vulkan = { path = "../rusty_vulkan" }
+rush = { path = "../rush" }
+rusty_term = { path = "../rusty_term" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusty_libc = { path = "../rusty_libc" }
+
+[target.'cfg(windows)'.dependencies]
+rusty_win32 = { path = "../rusty_win32" }
+
+[features]
+default = []
