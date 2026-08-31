@@ -325,18 +325,42 @@ fn sphere_vs_quarter_pipe(
 /// for a flat plane — each of a box's 8 corners is checked as a
 /// zero-radius sphere via `sphere_vs_quarter_pipe` (exact for that single
 /// point), and every corner that reports a contact contributes one to the
-/// manifold. Unlike a flat plane, this is only an approximation of the box
-/// as a *whole* against a curved surface: a face resting flush against a
-/// shallow curve (a radius large relative to the box) can have every one
-/// of its own corners still just clear of the fillet while the face's
-/// middle already overlaps it, under-detecting a case a full box-vs-cylinder
-/// narrow phase (support mapping / GJK-EPA) would catch — this port still
-/// doesn't have that machinery (see `RB-PHYSICS-001-FR-020`'s Non-goals),
-/// so corner-testing is what lets a car ride a curve at all rather than
-/// driving straight through it. Each surviving corner's own world position
-/// is used as `point`, not the fillet-surface point `sphere_vs_quarter_pipe`
-/// itself would compute, for the same rel_pos/torque-accuracy reason
-/// `box_vs_plane`'s own doc comment already gives.
+/// manifold.
+///
+/// Unlike `box_vs_plane` (where the analogous corner test is exact because
+/// a plane's signed distance is *linear*), this technique's exactness for
+/// *this* shape isn't a coincidence either, despite the curved surface:
+/// `RB-PHYSICS-001-FR-032` set out to build a genuine GJK-based
+/// convex-vs-curved-surface narrow phase specifically to close a
+/// once-suspected gap here (a face resting flush against a shallow curve
+/// under-detecting because none of its own corners individually register)
+/// — and, in doing so, proved that gap doesn't actually exist for this
+/// containment-style contact. A quarter-pipe's contact test is "is the
+/// box's farthest point from `axis_point`/`axis_direction` at or beyond
+/// `radius`" (see `sphere_vs_quarter_pipe`'s own doc comment for why it's
+/// a *farthest*-point, containment question, not a nearest-point one);
+/// distance-from-an-axis is a *convex* function of position, and the
+/// maximum of a convex function over a convex polytope (the box) is
+/// always attained at one of its extreme points — its 8 corners — never
+/// in a face's interior. So corner-testing isn't approximating anything
+/// here: it's computing the exact same maximum a full box-vs-cylinder
+/// narrow phase (support mapping / GJK-EPA) would, just via simple
+/// enumeration instead of an iterative solver. Confirmed both by this
+/// argument and empirically (`RB-PHYSICS-001-FR-032`'s own verification
+/// plan) before this doc comment was corrected — the previous wording
+/// here claimed a real under-detection bug that further investigation
+/// found to be unfounded, not a limitation this project chose to accept.
+///
+/// A genuinely different remaining approximation (not a detection bug):
+/// when 2+ corners simultaneously violate the radius, each is resolved as
+/// its own independent contact point (its own local radial normal),
+/// rather than as a single unified manifold a full convex-vs-convex
+/// narrow phase might produce — a manifold-*richness* question, not a
+/// detection one, and out of this requirement's scope. Each surviving
+/// corner's own world position is used as `point`, not the fillet-surface
+/// point `sphere_vs_quarter_pipe` itself would compute, for the same
+/// rel_pos/torque-accuracy reason `box_vs_plane`'s own doc comment
+/// already gives.
 fn box_vs_quarter_pipe(
     position: Vec3,
     orientation: Quat,
@@ -365,9 +389,10 @@ fn box_vs_quarter_pipe(
 
 /// Dispatches a contact test against a quarter-pipe fillet — a sphere (the
 /// ball) via `sphere_vs_quarter_pipe`, a box (a car, since
-/// `RB-PHYSICS-001-FR-027`) via `box_vs_quarter_pipe`'s corner-testing
-/// approximation (see its own doc comment for what that does and doesn't
-/// catch).
+/// `RB-PHYSICS-001-FR-027`) via `box_vs_quarter_pipe`'s per-corner test —
+/// exact, not an approximation, for this containment-style contact (see
+/// its own doc comment, corrected by `RB-PHYSICS-001-FR-032`'s
+/// investigation).
 pub fn contacts_vs_quarter_pipe(body: &RigidBody, pipe: &StaticQuarterPipe) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_quarter_pipe(body.position, radius, pipe)
@@ -425,11 +450,13 @@ fn sphere_vs_corner_fillet(
 /// same corner-testing technique `box_vs_quarter_pipe` uses, generalized
 /// from a cylinder to a sphere — each of a box's 8 corners is checked as a
 /// zero-radius sphere via `sphere_vs_corner_fillet`, and every corner that
-/// reports a contact contributes one to the manifold. Same "exact per
-/// corner, an approximation of the box as a whole" caveat
-/// `box_vs_quarter_pipe`'s own doc comment gives, and the same
-/// world-position (not fillet-surface) `point` convention for correct
-/// torque.
+/// reports a contact contributes one to the manifold. Exact, not an
+/// approximation, for the same reason `box_vs_quarter_pipe`'s own doc
+/// comment gives (distance-from-`fillet.center` is convex, so its maximum
+/// over the box is always at a corner) — see that comment for the full
+/// `RB-PHYSICS-001-FR-032` investigation this generalizes from a line to
+/// a point. Same world-position (not fillet-surface) `point` convention
+/// for correct torque.
 fn box_vs_corner_fillet(
     position: Vec3,
     orientation: Quat,
@@ -458,8 +485,8 @@ fn box_vs_corner_fillet(
 
 /// Dispatches a contact test against a corner fillet — a sphere (the ball)
 /// via `sphere_vs_corner_fillet`, a box (a car, since
-/// `RB-PHYSICS-001-FR-027`) via `box_vs_corner_fillet`'s corner-testing
-/// approximation.
+/// `RB-PHYSICS-001-FR-027`) via `box_vs_corner_fillet`'s per-corner test —
+/// exact, not an approximation (see its own doc comment).
 pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_corner_fillet(body.position, radius, fillet)
@@ -1361,6 +1388,96 @@ mod tests {
             pipe.axis_point - bisector * 1000.0,
         );
         assert!(contacts_vs_quarter_pipe(&car, &pipe).is_empty());
+    }
+
+    #[test]
+    fn no_point_on_a_boxs_face_is_ever_farther_from_a_quarter_pipes_axis_than_its_own_corners() {
+        // RB-PHYSICS-001-FR-032's own investigation, made concrete: a
+        // once-suspected bug claimed a box's flat face resting against a
+        // *shallow* (large-radius) curve could have its own middle overlap
+        // the fillet while all 8 corners stayed clear, under-detecting the
+        // contact. That's mathematically impossible for this shape —
+        // `box_vs_quarter_pipe`'s contact question is "is the box's
+        // farthest point from the axis line at or beyond `radius`", and
+        // distance-from-a-line is a *convex* function of position, whose
+        // maximum over a convex polytope (the box) is always attained at
+        // one of its extreme points (corners), never a face's interior.
+        // This test proves that concretely rather than just arguing it:
+        // for a large-radius pipe and a car positioned exactly the way
+        // FR-032's own investigation found (resting flat on the floor,
+        // close enough to the wall that its corners straddle the curve),
+        // every densely-sampled point across each of the box's 6 faces has
+        // a distance-from-axis no greater than the box's own 8 corners'
+        // maximum — corner-testing already finds the true worst case.
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let pipe = crate::body::StaticQuarterPipe::between_planes(
+            &floor,
+            &wall,
+            292.0,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+
+        let half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let position = Vec3::new(900.0, 0.0, half_extents.z);
+
+        let dist_from_axis = |p: Vec3| -> f32 {
+            let rel = p - pipe.axis_point;
+            let along = rel.dot(&pipe.axis_direction);
+            (rel - pipe.axis_direction * along).length()
+        };
+
+        let corners: Vec<Vec3> = [-1.0f32, 1.0]
+            .iter()
+            .flat_map(|&sx| {
+                [-1.0f32, 1.0].iter().flat_map(move |&sy| {
+                    [-1.0f32, 1.0].iter().map(move |&sz| {
+                        position
+                            + Vec3::new(
+                                sx * half_extents.x,
+                                sy * half_extents.y,
+                                sz * half_extents.z,
+                            )
+                    })
+                })
+            })
+            .collect();
+        let corner_max = corners
+            .iter()
+            .map(|&c| dist_from_axis(c))
+            .fold(f32::MIN, f32::max);
+
+        // Densely sample every face's own interior on a fine grid (not
+        // just its 4 corners), covering all 6 faces.
+        const STEPS: i32 = 50;
+        let lerp = |lo: f32, hi: f32, t: f32| lo + (hi - lo) * t;
+        let mut face_sample_max = f32::MIN;
+        for i in 0..=STEPS {
+            for j in 0..=STEPS {
+                let u = i as f32 / STEPS as f32;
+                let v = j as f32 / STEPS as f32;
+                let a = lerp(-half_extents.x, half_extents.x, u);
+                let b = lerp(-half_extents.y, half_extents.y, v);
+                let c = lerp(-half_extents.z, half_extents.z, u);
+                let samples = [
+                    position + Vec3::new(a, b, -half_extents.z), // z- face
+                    position + Vec3::new(a, b, half_extents.z),  // z+ face
+                    position + Vec3::new(a, -half_extents.y, c), // y- face
+                    position + Vec3::new(a, half_extents.y, c),  // y+ face
+                    position + Vec3::new(-half_extents.x, b, c), // x- face
+                    position + Vec3::new(half_extents.x, b, c),  // x+ face
+                ];
+                for s in samples {
+                    face_sample_max = face_sample_max.max(dist_from_axis(s));
+                }
+            }
+        }
+
+        assert!(
+            face_sample_max <= corner_max + 1e-3,
+            "expected no face-interior point to exceed the corners' own maximum distance from \
+             the axis, corner_max={corner_max}, face_sample_max={face_sample_max}"
+        );
     }
 
     /// A floor (z=0) meeting a +X side wall at x=100 and a +Y back wall at

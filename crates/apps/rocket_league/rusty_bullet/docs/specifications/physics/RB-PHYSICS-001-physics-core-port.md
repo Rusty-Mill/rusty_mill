@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.31.0
+- Version: 0.32.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -25,10 +25,12 @@
   post-crossbar vertex too (4 total, 2 per goal), and, since FR-027, a car
   (box) actually being deflected by every one of those fillets too — a
   car's own box, ignored by every fillet's contact test until now, is
-  approximated by testing its 8 corners against the curved surface
+  tested via its 8 corners against the curved surface
   (`collision::box_vs_quarter_pipe`/`box_vs_corner_fillet`, the same
   "test every corner" technique `box_vs_plane` already used for a flat
-  plane), not a full convex-vs-curved-surface narrow phase — implemented,
+  plane) — exact, not an approximation, for this containment-style
+  contact (`RB-PHYSICS-001-FR-032` rigorously confirmed a once-suspected
+  under-detection gap here doesn't actually exist) — implemented,
   and, since FR-028, a car actually driving into a goal too — a new
   `collision::box_vs_goal_wall` tests each of the car's 8 corners against
   the goal-mouth window exactly the same way `sphere_vs_goal_wall`
@@ -117,9 +119,9 @@ boundary: wall-to-floor/wall-to-ceiling transitions at all 9 walls (the 4
 cardinal walls, FR-020, and, since FR-021, the 4 diagonal corner walls
 too), all 8 of the corner walls' own vertical edges where they meet their
 neighboring side/back walls (since FR-022) — a `StaticQuarterPipe` fillet
-each deflecting the ball, and, since FR-027, a car too (approximated via
-corner-testing rather than a full convex-vs-curved-surface narrow phase —
-see FR-027) away from the sharp edge a flat wall and the floor/ceiling, or
+each deflecting the ball, and, since FR-027, a car too (via corner-testing,
+confirmed exact rather than approximate for this containment-style contact
+by `RB-PHYSICS-001-FR-032` — see FR-027) away from the sharp edge a flat wall and the floor/ceiling, or
 two flat walls, would otherwise meet at — a `StaticCornerFillet` spherical
 patch at each of the 16 compound corners
 where a vertical-edge fillet meets a floor- or ceiling-seam fillet, near a
@@ -178,9 +180,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   post-crossbar compound corner) — every one of these now deflects the ball
   and, since FR-027, a car too: `collision::contacts_vs_quarter_pipe`/
   `contacts_vs_corner_fillet` dispatch a box to `box_vs_quarter_pipe`/
-  `box_vs_corner_fillet`'s corner-testing approximation (testing the box's
-  own 8 corners, not a full convex-vs-curved-surface narrow phase — see
-  FR-027's own entry) instead of the "always empty" no-op they returned for
+  `box_vs_corner_fillet`'s corner-testing (testing the box's
+  own 8 corners — exact, not an approximation, for this containment-style
+  contact, per `RB-PHYSICS-001-FR-032` — see FR-027's own entry) instead of the "always empty" no-op they returned for
   a box through FR-026. `contacts_vs_goal_wall`, unaffected by FR-027 since
   a goal wall isn't a curved fillet, deliberately ignored the goal-mouth
   window for a box too through FR-027 — that gap is now closed by
@@ -934,16 +936,23 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   already documents: a tilted box's corner isn't generally "below" the body
   center along the surface normal, so the solver needs the true
   contact-to-center offset to compute correct torque, not a point that
-  merely lies on the curved surface along the contact normal. This is
-  explicitly documented, in both new functions' own doc comments, as an
-  **approximation, not a full convex-vs-curved-surface narrow phase** — no
-  GJK/EPA support-mapping machinery was added, and this port still doesn't
-  have any: a face of the box resting flush against a shallow curve (a
-  radius large relative to the box) could have every one of its own corners
-  still just clear of the fillet while the face's middle already overlaps
-  it, under-detecting that case, the same category of "exact per test
-  point, an approximation of the whole shape" caveat this crate has always
-  carried for curved geometry (see FR-020's original Non-goals). No new
+  merely lies on the curved surface along the contact normal. This was
+  originally documented, in both new functions' own doc comments, as an
+  approximation, not a full convex-vs-curved-surface narrow phase — the
+  concern being that a face of the box resting flush against a shallow
+  curve (a radius large relative to the box) could have every one of its
+  own corners still just clear of the fillet while the face's middle
+  already overlaps it, under-detecting that case.
+  `RB-PHYSICS-001-FR-032` subsequently investigated this concern directly
+  (building a genuine GJK-based replacement specifically to fix it) and
+  found it doesn't actually apply here: a quarter-pipe/corner-fillet's
+  contact test is a *containment* question (is the box's farthest point
+  from the axis/center at or beyond radius), and distance-from-a-line/point
+  is a convex function whose maximum over a convex polytope (the box) is
+  always attained at a corner — so per-corner testing is mathematically
+  exact for this question, not an approximation. See
+  `RB-PHYSICS-001-FR-032`'s own entry and `box_vs_quarter_pipe`'s current
+  doc comment for the full argument and its empirical confirmation. No new
   shape or fundamentally new collision primitive was needed — this is a
   generalization of existing dispatch, not new physics/math machinery.
   `PhysicsWorld::step` already called `resolve_curve_contact`/
@@ -1400,6 +1409,72 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     every existing assertion involving either already used a tolerance
     (`.abs() < 1.0` or looser) comfortably wider than the ~0.33 and ~58.33
     uu/s²-scale differences from their prior placeholder values.
+- `RB-PHYSICS-001-FR-032` (genuine convex-vs-curved-surface narrow phase
+  investigation, resolved — no code change to the narrow phase itself):
+  this requirement set out to replace `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet`'s per-corner technique with a real GJK/EPA
+  convex-vs-convex narrow phase, on the strength of a limitation FR-027's
+  own doc comments claimed: "a face resting flush against a shallow curve
+  (a radius large relative to the box) can have every one of its own
+  corners still just clear of the fillet while the face's middle already
+  overlaps it, under-detecting that case." Building that replacement (a
+  from-scratch GJK closest-points implementation, `gjk::closest_points`,
+  treating a quarter-pipe's axis as a long finite segment and a corner
+  fillet's center as a single point) surfaced a wrong assumption before it
+  ever shipped: swapping it in broke two pre-existing, previously-passing
+  end-to-end tests
+  (`world::tests::a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`,
+  `world::tests::a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced`),
+  because it answered a *different* question than the one this contact
+  actually needs. A quarter-pipe/corner-fillet's contact test is a
+  *containment* question — "is the box's farthest point from
+  `axis_point`/`axis_direction` (or a corner fillet's `center`) at or
+  beyond `radius`" (see `sphere_vs_quarter_pipe`'s own doc comment: the
+  playable side is the *inside* of the curve, so a body is only in
+  contact once some part of it reaches or exceeds the boundary) — not a
+  *closest*-point question. `gjk::closest_points` correctly finds the
+  box's single *nearest* point to the axis/center, which is the *opposite*
+  of what determines contact here, and can be a genuinely different point
+  of the box than the farthest one. Distance-from-a-line (or
+  distance-from-a-point) is a *convex* function of position, and the
+  *maximum* of a convex function over a convex polytope (the box) is
+  always attained at one of its extreme points — its 8 corners — never a
+  face's interior; this is standard convex-analysis fact, not specific to
+  this shape. So the per-corner technique isn't approximating the
+  farthest-point question at all: it's computing the exact same answer a
+  full box-vs-cylinder narrow phase would, just via enumeration instead of
+  an iterative solver. The claimed under-detection gap doesn't exist for
+  this contact's actual question.
+  - **Non-goals (this requirement).** Does not address manifold
+    *richness* (when 2+ corners simultaneously violate the radius, each
+    is still resolved as its own independent contact point rather than a
+    single unified manifold a full convex-vs-convex narrow phase might
+    produce) — a genuinely different question from detection accuracy,
+    and out of this requirement's scope, since nothing in this
+    investigation found evidence it causes a real problem either.
+  - **Acceptance criteria.** The claimed under-detection gap is either
+    fixed with a genuine narrow phase, or rigorously shown not to exist;
+    either way, `box_vs_quarter_pipe`/`box_vs_corner_fillet`'s own doc
+    comments (and this crate's other doc comments referencing the same
+    claim — `lib.rs`'s crate doc, this spec's own Open questions) reflect
+    the actual, verified state, not an unverified inherited claim.
+  - **Verification plan.** Proven two ways: (1) analytically — the
+    convex-maximum argument above, which is a general mathematical fact,
+    not something that needs simulating to be true; (2) empirically, via
+    a new `collision.rs` test,
+    `no_point_on_a_boxs_face_is_ever_farther_from_a_quarter_pipes_axis_than_its_own_corners`,
+    which densely samples (50×50 grid per face) every point across all 6
+    faces of a car-sized box positioned exactly the way the two broken
+    end-to-end tests above did (resting flat on the floor, close enough to
+    a large-radius — 292 uu — wall-floor quarter-pipe that its corners
+    straddle the curve), and confirms no sampled face-interior point ever
+    exceeds the box's own 8 corners' maximum distance from the axis.
+    `box_vs_quarter_pipe`/`box_vs_corner_fillet` themselves are unchanged
+    from `RB-PHYSICS-001-FR-027` (the GJK-based replacement was built,
+    found to regress two real tests, and reverted rather than shipped —
+    the honest outcome of this investigation is a corrected doc comment,
+    not new production code). 1 new test (246 total in `rb_physics_bullet`,
+    +1 over FR-031's 245).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -1441,8 +1516,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   box-specific test and returning a manifold (`Vec<Contact>`, 0 to 4
   points); `contacts_vs_quarter_pipe` (since FR-020) — analytic
   sphere-vs-fillet contact generation for a sphere (always 0 or 1 points),
-  dispatching to `box_vs_quarter_pipe`'s corner-testing approximation
-  (0-8 points) for a box since `RB-PHYSICS-001-FR-027` (a box always
+  dispatching to `box_vs_quarter_pipe`'s corner-testing (exact, not an
+  approximation, per `RB-PHYSICS-001-FR-032`; 0-8 points) for a box since
+  `RB-PHYSICS-001-FR-027` (a box always
   returned no contact through FR-026, see FR-020's original Non-goals);
   `contacts_vs_corner_fillet` (since
   FR-023) — the same analytic sphere-only contact generation against a
@@ -2331,10 +2407,10 @@ tests confirm the fillet's *shape* of response (pushes back toward the
 axis once the sphere's surface crosses the fillet's own radius from
 inside, respects its own sector — 90 degrees for a floor/ceiling seam, 45
 for a corner wall's own vertical edge — and, since FR-027, deflects a box
-the same way via its own 8-corner approximation), not that a
+the same way via its own 8-corner testing, confirmed mathematically exact
+for this containment question by `RB-PHYSICS-001-FR-032`), not that a
 real ball's or car's actual wall-to-floor/wall-to-ceiling or wall-to-wall
-transition behavior matches this radius, this trigger condition, or (for a
-car) the corner-testing approximation itself, at a cardinal wall, a
+transition behavior matches this radius or this trigger condition, at a cardinal wall, a
 corner wall's floor/ceiling seam, or a corner wall's own vertical edge
 alike. `StaticQuarterPipe::between_planes`'s own generalization (FR-022) —
 solving the axis point as a real 2x2 linear system, and testing sector
@@ -2367,16 +2443,17 @@ deep on the opposite side of the fillet's own angular sector (not merely
 far away radially — a point far along the sector's own bisector direction
 is still angularly "inside" the wedge regardless of distance) reports no
 contact, and the same two proofs hold for a `StaticCornerFillet`. The unit
-tests confirm the corner-testing approximation's own *shape* of response
+tests confirm the corner-testing's own *shape* of response
 (a box embedded in a fillet's footprint gets at least one real contact, a
-box outside the fillet's own bounds gets none), not that it matches a real
-convex-vs-curved-surface narrow phase's actual contact count or manifold
-shape — this port still has no GJK/EPA support-mapping machinery, and the
-documented under-detection case (a face resting flush against a shallow
-curve, with every corner just clear of the fillet while the face's middle
-already overlaps it) isn't exercised by any test here, since none of this
-port's own fillet radii are large enough relative to a car's own
-dimensions to make it easy to construct. The two live end-to-end `world.rs`
+box outside the fillet's own bounds gets none). This port still has no
+GJK/EPA support-mapping machinery, but `RB-PHYSICS-001-FR-032` subsequently
+proved (both analytically and via a dedicated dense-sampling test,
+`no_point_on_a_boxs_face_is_ever_farther_from_a_quarter_pipes_axis_than_its_own_corners`)
+that none is needed here: the once-suspected "face resting flush against a
+shallow curve, with every corner just clear of the fillet while the face's
+middle already overlaps it" case cannot actually occur, since this
+contact's containment question is a convex-maximum one always attained at
+a corner. The two live end-to-end `world.rs`
 proofs take deliberately different shapes for the same reason a sphere and
 a box need different invariants:
 `a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`
@@ -2410,16 +2487,18 @@ exactly the corners still outside it (the box equivalent of a sphere's
 single all-or-nothing center-point test, but resolved per-corner
 instead), and a car entirely outside the window collides bit-for-bit
 identically to plain `contacts_vs_plane` against the same wrapped plane.
-The unit tests confirm the corner-testing approximation's own *shape* of
+The unit tests confirm the corner-testing's own *shape* of
 response for a goal wall (a car with every corner inside the window
 passes clean through, a car straddling the edge gets a real partial
 block, a car outside the window is unaffected), not that it matches a
-real car's actual goal-line-crossing behavior; a car's face resting
-flush against the window's own edge, with every corner still just clear
-of it while the face's middle already overlaps it, would fall into
-exactly the same category of under-detection `box_vs_quarter_pipe`/
-`box_vs_corner_fillet` (FR-027) already carry, not a new limitation this
-requirement introduces. The live end-to-end `world.rs` proof,
+real car's actual goal-line-crossing behavior; whether a car's face
+resting flush against the window's own edge, with every corner still just
+clear of it while the face's middle already overlaps it, can actually
+occur is a distinct question from the curved-fillet containment question
+`RB-PHYSICS-001-FR-032` investigated and resolved (the window's boundary
+is a flat rectangle, not a curve) — this concern remains open and
+unverified for the goal wall specifically, not covered by FR-032's
+finding. The live end-to-end `world.rs` proof,
 `a_car_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`,
 mirrors the pre-existing ball test's own live-physics proof directly (a
 car fired at the same goal-mouth-center position/velocity ends up past
@@ -2536,21 +2615,25 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   is now implemented as FR-016; a dodge variant of the wall jump is now
   implemented as FR-017; a gentle landing auto-orientation assist is now
   implemented as FR-018.)
-- A car (box) actually being deflected by a curved fillet through genuine
-  convex-vs-curved-surface narrow-phase collision machinery
-  (support-mapping/SAT-style, e.g. GJK/EPA) rather than FR-027's
-  corner-testing approximation (testing the box's own 8 corners, the same
-  technique `box_vs_plane` already used for a flat plane) — this port still
-  doesn't have that machinery, so a face of the box resting flush against a
-  shallow curve (a radius large relative to the box) could have every one
-  of its own corners still just clear of the fillet while the face's middle
-  already overlaps it, under-detecting that case (see FR-027's own doc
-  comments). Needs a concrete reason (e.g. real recorded car-vs-curve
-  contact data showing this under-detection actually matters in practice)
-  before it's worth the added complexity. Not started. (Deflecting a car at
+- ~~A car (box) actually being deflected by a curved fillet through genuine
+  convex-vs-curved-surface narrow-phase collision machinery~~ —
+  investigated and resolved, see `RB-PHYSICS-001-FR-032`: the specific
+  concern motivating this (a face resting flush against a shallow curve
+  under-detecting because none of its own corners individually register)
+  is mathematically impossible for this contact's actual question
+  (distance-from-an-axis/point is convex, so its maximum over a box is
+  always at a corner — see FR-032's own entry for the full argument and
+  the empirical test proving it). `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet`'s per-corner technique is exact for detecting
+  whether *any* part of the box violates the fillet's radius, not an
+  approximation of it; a genuine GJK/EPA convex-vs-convex narrow phase was
+  actually built during this investigation and found to *regress* two
+  real end-to-end tests, because it answered a different (nearest-point)
+  question than the one this contact needs (farthest-point/containment).
+  (Deflecting a car at
   all — previously this bullet's entire subject, when a car drove straight
   through every curve's or corner fillet's footprint completely unaffected
-  — is now implemented via the corner-testing approximation, see FR-027.
+  — is now implemented via corner-testing, see FR-027.
   The compound corner where a vertical-edge fillet meets a
   floor-seam or ceiling-seam fillet, near a corner wall's own top/bottom
   endpoint, is now modeled with its own `StaticCornerFillet` sphere, as
@@ -2682,6 +2765,44 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.32.0 (2026-08-31): FR-032 added and resolved (genuine
+  convex-vs-curved-surface narrow phase investigation — no change to the
+  narrow phase itself). Set out to replace `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet`'s per-corner technique with a real GJK/EPA
+  convex-vs-convex narrow phase, on the strength of a limitation FR-027's
+  own doc comments claimed: a face resting flush against a shallow curve
+  could have every corner still clear of the fillet while the face's
+  middle already overlapped it, under-detecting that case. Built a
+  from-scratch GJK closest-points implementation (`gjk::closest_points`)
+  and wired it in — doing so broke two pre-existing, previously-passing
+  end-to-end tests
+  (`a_car_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`,
+  `a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced`),
+  because closest-point is the wrong question: a quarter-pipe/corner-fillet
+  contact is a *containment* question (is the box's farthest point from the
+  axis/center at or beyond radius), and distance-from-a-line/point is a
+  convex function whose maximum over a convex polytope (the box) is always
+  attained at a corner — so the original per-corner technique is
+  mathematically exact for this question, not an approximation. Reverted
+  `box_vs_quarter_pipe`/`box_vs_corner_fillet` to their original FR-027
+  implementations, deleted the now-unused `gjk` module entirely (no
+  remaining consumer), and corrected every doc comment across this crate
+  and this spec that had inherited FR-027's unverified "approximation"/
+  "under-detection" claim (`lib.rs`'s crate doc, this spec's own Purpose
+  and scope, Non-goals, Requirements, and Verification plan sections, and
+  the FR-027/FR-020 Open questions entry) to reflect the now-verified
+  state. Added one new regression test,
+  `no_point_on_a_boxs_face_is_ever_farther_from_a_quarter_pipes_axis_than_its_own_corners`,
+  which densely samples (50×50 grid per face) all 6 faces of a car-sized
+  box positioned exactly like the two broken end-to-end tests' scenario and
+  confirms no sampled face-interior point ever exceeds the box's own 8
+  corners' maximum distance from the axis. The goal wall's own analogous
+  window-edge concern (`collision::box_vs_goal_wall`, FR-028) is a distinct
+  question — the window boundary is a flat rectangle, not a curve — and
+  remains open and unverified, not resolved by this investigation. 1 new
+  test (246 total in `rb_physics_bullet`, +1 over FR-031's 245); no other
+  test changes, since `box_vs_quarter_pipe`/`box_vs_corner_fillet`'s actual
+  behavior is unchanged from FR-027.
 - 0.31.0 (2026-08-31): FR-031 added and implemented (constant-calibration
   audit — does NOT close FR-005). Sourced every uncalibrated placeholder
   constant in `drive.rs`/`arena.rs`/`world.rs` against the RocketSim
