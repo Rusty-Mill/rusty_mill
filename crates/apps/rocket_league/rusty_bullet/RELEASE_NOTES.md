@@ -6,6 +6,62 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Warm-starting
+**2026-08-31** · PR pending · commit pending
+
+- **`solver::resolve_dynamic_manifolds` (every ball-vs-car/car-vs-car
+  manifold) now warm-starts from the previous call's converged impulses**
+  instead of zero. A new `solver::ContactCache` carries a manifold's
+  converged real-channel impulses (normal plus both friction rows) from
+  one call to the next, matched by each contact's approximate world
+  position.
+- **The seed is applied to the running velocity delta, not just bookkeeping.**
+  Merely setting a row's `applied_impulse` to a cached value would do
+  nothing on its own here — this port's `GLOBAL_CFM` is always `0.0`, so
+  that field never otherwise enters the per-iteration math. A new
+  `warm_start_two_body_row` instead pre-loads the cached impulse's effect
+  directly into the manifold's shared `DeltaVelocity` accumulators before
+  any iteration runs, mirroring Bullet's own warm-start (applying the
+  cached impulse to the solver body's temporary velocity at setup time).
+- **`resolve_dynamic_manifolds` gained a `caches` parameter** — one
+  `ContactCache` per (normalized) body-index pair. Every call rebuilds it
+  from only that call's own manifolds, so a pair no longer touching drops
+  out automatically, no separate eviction pass needed. `PhysicsWorld`
+  gains one persistent `dynamic_manifold_caches` field, passed into its
+  one `resolve_dynamic_manifolds` call site.
+- **Deliberately scoped to this one call site.** `resolve_contacts`/
+  `resolve_contacts_between` (every static-geometry contact, for both the
+  ball and every car) stay un-warm-started: this port's fixed
+  `SOLVER_ITERATIONS` already fully converges every one-body/two-body
+  scenario this crate tests, so warm-starting them has no scenario to
+  demonstrate value against yet. `resolve_dynamic_manifolds` already had
+  one — `RB-PHYSICS-001-FR-030`'s own documented extreme-mass-ratio
+  "sandwiched" case, which doesn't fully converge within one call's
+  iteration budget.
+- **1 new `solver.rs` test** reuses that exact sandwiched-ball scenario:
+  call 1 (cold) partially converges and populates a cache; from that
+  identical post-call-1 state, call 2 then runs twice on independent
+  copies — once warm (reusing call 1's cache), once cold (a fresh map) —
+  with identical positions, contacts, velocities, and iteration budget
+  both times, isolating exactly what the warm seed contributes. The warm
+  run lands measurably closer to the true zero-velocity equilibrium than
+  the cold repeat.
+- **Does not fix the "bouncy resting contact never settles" limitation.**
+  That symptom comes from restitution re-triggering off a fresh
+  gravity-induced closing velocity every frame, independent of where the
+  solver's iteration starts — warm-starting converges the same
+  wrong-looking bounce faster, it doesn't stop it from recurring. Sleeping
+  (still unimplemented) is the actual fix, and remains the sole open item
+  under this port's old combined "no-warm-starting-or-sleeping" gap, which
+  this change splits.
+- All 14 of `solver.rs`'s pre-existing tests pass unchanged when given an
+  empty cache, confirming this change is behavior-preserving for every
+  case they already covered.
+- 1 new test, 259 total in `rb_physics_bullet` (+1 over
+  `RB-PHYSICS-001-FR-034`'s 258).
+
+---
+
 ## Split impulse
 **2026-08-31** · [PR #77](https://github.com/baileyrd/rusty_bullet/pull/77) · `dedfeec`
 

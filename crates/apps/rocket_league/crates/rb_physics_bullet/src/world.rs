@@ -9,8 +9,10 @@ use crate::body::{
 };
 use crate::collision;
 use crate::net::NetMesh;
+use crate::solver::ContactCache;
 use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
+use std::collections::HashMap;
 
 /// The whole simulated scene: one ball-like sphere, zero or more car-like
 /// boxes, one ground plane, zero or more arena walls (`walls`, added via
@@ -110,6 +112,13 @@ pub struct PhysicsWorld {
     pub nets: Vec<NetMesh>,
     pub gravity: Vec3,
     elapsed_secs: f32,
+    /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) for
+    /// `solver::resolve_dynamic_manifolds`, keyed by (normalized)
+    /// ball-vs-car/car-vs-car body-index pair — see
+    /// `solver::ContactCache`'s own doc comment for what it does and why
+    /// only this call site (not the many per-static-geometry ones below)
+    /// is warm-started.
+    dynamic_manifold_caches: HashMap<(usize, usize), ContactCache>,
 }
 
 impl PhysicsWorld {
@@ -142,6 +151,7 @@ impl PhysicsWorld {
             nets: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
+            dynamic_manifold_caches: HashMap::new(),
         }
     }
 
@@ -489,8 +499,13 @@ impl PhysicsWorld {
     /// `DeltaVelocity` accumulator per body index across every manifold
     /// that body takes part in — still simpler than Bullet's actual
     /// interleaved-across-islands solver architecture (no persistent
-    /// islands, no warm-starting), but a genuine combined solve for the
-    /// step it runs, not a sequence of independent pairwise ones.
+    /// islands), but a genuine combined solve for the step it runs, not a
+    /// sequence of independent pairwise ones. Since
+    /// `RB-PHYSICS-001-FR-035`, `dynamic_manifold_caches` also carries each
+    /// manifold's converged impulses across steps, so
+    /// `solver::resolve_dynamic_manifolds` warm-starts from last step's
+    /// answer instead of zero — see that function's and
+    /// `solver::ContactCache`'s own doc comments.
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
@@ -620,7 +635,12 @@ impl PhysicsWorld {
             }
         }
 
-        solver::resolve_dynamic_manifolds(&mut bodies, &manifolds, dt);
+        solver::resolve_dynamic_manifolds(
+            &mut bodies,
+            &manifolds,
+            dt,
+            &mut self.dynamic_manifold_caches,
+        );
 
         self.ball = bodies[0];
         for (car, resolved) in self.cars.iter_mut().zip(bodies.iter().skip(1)) {

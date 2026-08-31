@@ -36,17 +36,41 @@
 //! the velocity restitution/friction actually see. See each function's own
 //! doc comment for exactly where this happens.
 //!
+//! Since `RB-PHYSICS-001-FR-035`, `resolve_dynamic_manifolds` also
+//! **warm-starts** each manifold's rows from a `ContactCache` the caller
+//! owns and passes back in every call: each contact's converged real-channel
+//! impulse is matched to this call's nearest same-position contact and
+//! pre-applied to that manifold's `DeltaVelocity` before iterating —
+//! mirroring Bullet's own `SOLVER_USE_WARMSTARTING` — so a manifold
+//! under-converged at this port's fixed `SOLVER_ITERATIONS` budget (see
+//! `RB-PHYSICS-001-FR-030`'s own extreme-mass-ratio example) gets
+//! measurably closer to the true answer call over call, instead of
+//! restarting from zero every time. `resolve_contacts`/
+//! `resolve_contacts_between` don't take a `ContactCache` yet — see
+//! `resolve_dynamic_manifolds`'s own doc comment and `RB-PHYSICS-001-FR-035`'s
+//! Non-goals for why.
+//!
 //! Deliberate, documented deviations from Bullet's actual solver (tracked
 //! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
 //! - **No SIMD.** Scalar translation of the SSE2/SSE4/FMA3 code paths —
 //!   this is a from-scratch Rust port, not a binding (see ADR-0004), and
 //!   correctness came before micro-optimization for v0.
-//! - **No warm-starting or sleeping.** Real Bullet carries `m_appliedImpulse`
-//!   across frames (warm starting) and puts settled bodies to sleep. This
-//!   port re-derives every contact's impulses from zero each frame, which
-//!   means a *bouncy* resting contact (restitution > 0) never actually
-//!   settles — each frame's fresh gravity-induced velocity is solved as a
-//!   new "impact" and restitution bounces it back up, indefinitely. An
+//! - **No warm-starting for `resolve_contacts`/`resolve_contacts_between`,
+//!   and no sleeping.** `resolve_dynamic_manifolds` gained warm-starting in
+//!   `RB-PHYSICS-001-FR-035` (see above); the other two paths still
+//!   re-derive every contact's impulses from zero each call — a difference
+//!   in *convergence speed*, not in what they converge to (projected
+//!   Gauss-Seidel reaches the same fixed point regardless of starting
+//!   impulse, given enough iterations, and this port's fixed
+//!   `SOLVER_ITERATIONS` already fully converges every one-body/two-body
+//!   scenario this crate tests — see `RB-PHYSICS-001-FR-035`'s own
+//!   Non-goals). Sleeping (putting a settled body's velocity to sleep once
+//!   it's stayed below a threshold long enough) is the still-missing fix
+//!   for a different symptom: a *bouncy* resting contact (restitution > 0)
+//!   never actually settles, since each frame's fresh gravity-induced
+//!   closing velocity is solved as a new "impact" and restitution bounces
+//!   it back up indefinitely — warm-starting converges that same
+//!   wrong-looking bounce faster, it doesn't stop it from recurring. An
 //!   inelastic resting contact (restitution 0) settles fine (see
 //!   `world::tests::resting_ball_stays_at_rest`); the bouncy case is a real
 //!   limitation, tracked as follow-up work in `RB-PHYSICS-001`, not hidden
@@ -63,6 +87,7 @@ use crate::body::RigidBody;
 use crate::collision::Contact;
 use crate::integrate;
 use rb_domain::Vec3;
+use std::collections::HashMap;
 
 /// `btContactSolverInfo`'s defaults this port fixes rather than exposes as
 /// config yet (bullet3/src/BulletDynamics/ConstraintSolver/btContactSolverInfo.h).
@@ -684,6 +709,99 @@ fn delta_pair_mut(
     }
 }
 
+/// Uncalibrated placeholder (`RB-PHYSICS-001-FR-035`): the world-space
+/// distance within which a `ContactCache` treats this call's contact as
+/// "the same" contact a previous call already cached an impulse for — no
+/// real recorded data exists to calibrate a "same contact" tolerance
+/// against, so this is loosely sized to this port's own scale (ball radius
+/// ~92, car half-extents up to ~60), mirroring Bullet's own fixed
+/// `gContactBreakingThreshold`-style point matching rather than tracking a
+/// genuine per-point stable ID (this port's narrow phase re-derives every
+/// contact from scratch each call and has no such ID to track).
+const CONTACT_MATCH_DISTANCE: f32 = 4.0;
+
+/// One contact's cached, converged real-channel impulses from a previous
+/// `ContactCache`-aware resolve call, matched to a future call's contact by
+/// `position` (see `CONTACT_MATCH_DISTANCE`) — never the split-impulse push
+/// channel, which Bullet's own warm-starting doesn't persist either (a
+/// resting contact's penetration should already be near zero, so there's
+/// nothing meaningful to carry over).
+#[derive(Clone, Copy)]
+struct CachedContact {
+    position: Vec3,
+    /// `[normal, friction_0, friction_1]`, in the same row order
+    /// `setup_two_body_rows`/`setup_rows` always produce.
+    impulses: [f32; 3],
+}
+
+/// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) — the
+/// converged impulses one call's `resolve_dynamic_manifolds` leaves behind
+/// for a specific manifold, fed back into that same manifold's next call so
+/// its rows start iterating from an already-good guess instead of zero
+/// (mirroring Bullet's `SOLVER_USE_WARMSTARTING`, applied to a manifold's
+/// cached `btManifoldPoint`s at solver setup). The caller owns one
+/// `ContactCache` per manifold identity it cares to warm-start (e.g.
+/// `PhysicsWorld` keys one per ball-vs-car/car-vs-car body-index pair) and
+/// passes it back in on every call for that same manifold; passing a fresh
+/// `ContactCache::new()` is exactly equivalent to a cold start.
+#[derive(Clone, Default)]
+pub struct ContactCache {
+    entries: Vec<CachedContact>,
+}
+
+impl ContactCache {
+    pub fn new() -> Self {
+        ContactCache::default()
+    }
+
+    /// The closest cached entry's impulses within `CONTACT_MATCH_DISTANCE`
+    /// of `position`, or `(0.0, 0.0, 0.0)` — an ordinary cold start — if
+    /// none is close enough (a genuinely new contact, or the old one moved
+    /// too far to trust).
+    fn seed_for(&self, position: Vec3) -> (f32, f32, f32) {
+        self.entries
+            .iter()
+            .filter(|entry| (entry.position - position).length() < CONTACT_MATCH_DISTANCE)
+            .min_by(|a, b| {
+                (a.position - position)
+                    .length()
+                    .total_cmp(&(b.position - position).length())
+            })
+            .map(|entry| (entry.impulses[0], entry.impulses[1], entry.impulses[2]))
+            .unwrap_or((0.0, 0.0, 0.0))
+    }
+}
+
+/// Applies a warm-start seed impulse to one row and pre-loads its effect
+/// into the shared `DeltaVelocity`s before iteration begins — the actual
+/// mechanism that makes warm-starting change the solve at all. Merely
+/// setting `row.applied_impulse` to a nonzero seed would do nothing on its
+/// own here: `resolve_two_body_row`'s correction each iteration depends
+/// only on `rhs` and the delta accumulated *so far this call*
+/// (`GLOBAL_CFM` is always `0.0`, so `applied_impulse` never otherwise
+/// enters the math), so the seed must be baked into that starting delta
+/// directly for the first iteration's correction to actually be smaller —
+/// mirroring Bullet's own warm-start, which applies the cached impulse to
+/// the solver body's temporary velocity at setup time, before any
+/// iteration runs.
+fn warm_start_two_body_row(
+    row: &mut TwoBodyRow,
+    seed: f32,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
+    delta_a: &mut DeltaVelocity,
+    delta_b: &mut DeltaVelocity,
+) {
+    if seed == 0.0 {
+        return;
+    }
+    row.applied_impulse = seed;
+    delta_a.linear += row.direction * (inv_mass_a * seed);
+    delta_a.angular += row.angular_component_a * seed;
+    delta_b.linear -= row.direction * (inv_mass_b * seed);
+    delta_b.angular -= row.angular_component_b * seed;
+}
+
 /// Resolves every dynamic-vs-dynamic contact manifold in the scene (every
 /// ball-vs-car and car-vs-car pair with at least one contact this step) as
 /// one shared island solve, fixing `RB-PHYSICS-001-FR-030`'s "combined
@@ -704,12 +822,31 @@ fn delta_pair_mut(
 /// third body's contact genuinely participates in the same convergence as
 /// the other two, the way Bullet's real per-island solver does (see this
 /// module's own doc comment for what's still simplified relative to that:
-/// no warm-starting, average rather than max combine mode). Each body's
-/// split-impulse push accumulator (`push_deltas[i]`) is shared across
-/// manifolds the same way. `manifolds` is `(index_a, index_b, contacts)` triples indexing
+/// average rather than max combine mode). Each body's split-impulse push
+/// accumulator (`push_deltas[i]`) is shared across manifolds the same way.
+/// `manifolds` is `(index_a, index_b, contacts)` triples indexing
 /// into `bodies`; omit a pair from `manifolds` entirely rather than passing
 /// it with an empty `contacts` (an empty manifold would still allocate a
 /// `DeltaVelocity`-touching no-op).
+///
+/// Since `RB-PHYSICS-001-FR-035`, `caches` carries one `ContactCache` per
+/// manifold identity across calls — keyed by `(index_a, index_b)`, order
+/// normalized (`min`, `max`) so a pair is found regardless of which side of
+/// `manifolds` names it first. Every call rebuilds `caches` from scratch
+/// (this call's manifolds only) rather than merging into whatever was
+/// there before: a pair no longer touching is naturally dropped (no
+/// separate eviction pass needed), and `seed_for`'s own position-based
+/// matching already handles a manifold's point count changing between
+/// calls (a brand-new point simply gets a cold `(0.0, 0.0, 0.0)` seed).
+/// Pass an empty `HashMap` for a purely cold-started call (e.g. a one-shot
+/// test); `PhysicsWorld` instead keeps one across its own lifetime so a
+/// manifold under-converged at this port's fixed `SOLVER_ITERATIONS` (like
+/// the extreme mass-ratio "sandwiched" case
+/// `resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+/// measures) gets closer to the true answer call over call instead of
+/// restarting from zero every time — see
+/// `warm_starting_a_sandwiched_ball_across_two_calls_converges_closer_than_a_repeated_cold_start`
+/// for the direct proof.
 ///
 /// Static contacts (ground, arena walls, curves, goal geometry) are
 /// deliberately NOT part of this shared solve — each body's own contact
@@ -721,8 +858,10 @@ pub fn resolve_dynamic_manifolds(
     bodies: &mut [RigidBody],
     manifolds: &[(usize, usize, Vec<Contact>)],
     dt: f32,
+    caches: &mut HashMap<(usize, usize), ContactCache>,
 ) {
     if manifolds.is_empty() {
+        caches.clear();
         return;
     }
 
@@ -730,6 +869,7 @@ pub fn resolve_dynamic_manifolds(
         a: usize,
         b: usize,
         combined_friction: f32,
+        positions: Vec<Vec3>,
         rows: Vec<[TwoBodyRow; 3]>,
     }
 
@@ -747,6 +887,7 @@ pub fn resolve_dynamic_manifolds(
                 a: *a,
                 b: *b,
                 combined_friction,
+                positions: contacts.iter().map(|c| c.point).collect(),
                 rows,
             }
         })
@@ -756,6 +897,46 @@ pub fn resolve_dynamic_manifolds(
     let mut deltas: Vec<DeltaVelocity> = (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
     let mut push_deltas: Vec<DeltaVelocity> =
         (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+
+    // Warm start (RB-PHYSICS-001-FR-035): seed each manifold's rows from
+    // whatever `ContactCache` this same (normalized) pair left behind last
+    // call, before any iteration runs.
+    for m in &mut solved {
+        let key = (m.a.min(m.b), m.a.max(m.b));
+        let Some(cache) = caches.get(&key) else {
+            continue;
+        };
+        let inv_mass_a = inv_masses[m.a];
+        let inv_mass_b = inv_masses[m.b];
+        let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+        for (rows, position) in m.rows.iter_mut().zip(&m.positions) {
+            let seed = cache.seed_for(*position);
+            warm_start_two_body_row(
+                &mut rows[0],
+                seed.0,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+            warm_start_two_body_row(
+                &mut rows[1],
+                seed.1,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+            warm_start_two_body_row(
+                &mut rows[2],
+                seed.2,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+        }
+    }
 
     for _ in 0..SOLVER_ITERATIONS {
         for m in &mut solved {
@@ -791,6 +972,29 @@ pub fn resolve_dynamic_manifolds(
         body.angular_velocity += delta.angular;
         apply_push_delta(body, push_delta, dt);
     }
+
+    // Replace, don't merge: a pair no longer in `manifolds` is dropped
+    // automatically, the same "no separate eviction pass" idiom
+    // `ContactCache`'s own per-call rebuild already uses implicitly.
+    *caches = solved
+        .into_iter()
+        .map(|m| {
+            let entries = m
+                .positions
+                .into_iter()
+                .zip(&m.rows)
+                .map(|(position, rows)| CachedContact {
+                    position,
+                    impulses: [
+                        rows[0].applied_impulse,
+                        rows[1].applied_impulse,
+                        rows[2].applied_impulse,
+                    ],
+                })
+                .collect();
+            ((m.a.min(m.b), m.a.max(m.b)), ContactCache { entries })
+        })
+        .collect();
 }
 
 #[cfg(test)]
@@ -1068,7 +1272,7 @@ mod tests {
             (0usize, 1usize, contacts_between(&bodies[0], &bodies[1])),
             (0usize, 2usize, contacts_between(&bodies[0], &bodies[2])),
         ];
-        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0);
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0, &mut HashMap::new());
         let combined_ball_speed = bodies[0].linear_velocity.x.abs();
 
         assert!(
@@ -1180,6 +1384,73 @@ mod tests {
             after_separation > before_separation + 1.0,
             "expected split impulse to separate the two bodies directly via position, \
              before={before_separation} after={after_separation}"
+        );
+    }
+
+    #[test]
+    fn warm_starting_a_sandwiched_ball_across_two_calls_converges_closer_than_a_repeated_cold_start(
+    ) {
+        // The real point of `RB-PHYSICS-001-FR-035`: reuses
+        // `symmetric_pinch` (the same extreme-mass-ratio scenario
+        // `resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+        // already shows doesn't fully converge in one call's
+        // `SOLVER_ITERATIONS`) to isolate exactly what warm-starting itself
+        // contributes: call 1 (cold, an empty cache) partially converges
+        // and leaves its impulses in `caches`. From that identical
+        // post-call-1 state, call 2 then runs *twice* — once warm (reusing
+        // `caches`) and once cold (a fresh, empty map) — same positions,
+        // contacts, velocities, and iteration budget both times. Only the
+        // warm run starts its `DeltaVelocity` accumulators pre-loaded with
+        // call 1's converged impulse; if that's genuinely doing something,
+        // the warm run must land closer to the true zero-velocity
+        // equilibrium than the cold repeat does.
+        let (ball0, left0, right0) = symmetric_pinch();
+        let mut after_call_1 = vec![ball0, left0, right0];
+        let manifolds_1 = vec![
+            (
+                0usize,
+                1usize,
+                contacts_between(&after_call_1[0], &after_call_1[1]),
+            ),
+            (
+                0usize,
+                2usize,
+                contacts_between(&after_call_1[0], &after_call_1[2]),
+            ),
+        ];
+        let mut caches: HashMap<(usize, usize), ContactCache> = HashMap::new();
+        resolve_dynamic_manifolds(&mut after_call_1, &manifolds_1, 1.0 / 60.0, &mut caches);
+
+        let manifolds_2 = vec![
+            (
+                0usize,
+                1usize,
+                contacts_between(&after_call_1[0], &after_call_1[1]),
+            ),
+            (
+                0usize,
+                2usize,
+                contacts_between(&after_call_1[0], &after_call_1[2]),
+            ),
+        ];
+
+        // Two independent copies of the identical post-call-1 state: only
+        // the cache passed into call 2 differs between them.
+        let mut warm_bodies = after_call_1.clone();
+        let mut warm_caches = caches.clone();
+        resolve_dynamic_manifolds(&mut warm_bodies, &manifolds_2, 1.0 / 60.0, &mut warm_caches);
+        let warm_speed = warm_bodies[0].linear_velocity.x.abs();
+
+        let mut cold_bodies = after_call_1;
+        let mut cold_caches: HashMap<(usize, usize), ContactCache> = HashMap::new();
+        resolve_dynamic_manifolds(&mut cold_bodies, &manifolds_2, 1.0 / 60.0, &mut cold_caches);
+        let cold_speed = cold_bodies[0].linear_velocity.x.abs();
+
+        assert!(
+            warm_speed < cold_speed - 1.0,
+            "expected warm-starting call 2 from call 1's converged impulses to land closer to \
+             the true zero-velocity equilibrium than repeating a cold call 2, warm={warm_speed} \
+             cold={cold_speed}"
         );
     }
 }

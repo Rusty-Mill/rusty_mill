@@ -2,7 +2,7 @@
 
 - Last verified main commit: `dedfeec` (merge of [#77](https://github.com/baileyrd/rusty_bullet/pull/77))
 - Verified at: 2026-08-31
-- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via corner-testing, confirmed exact for this containment-style contact by FR-032) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box) so a ball or car passing through settles instead of flying forever, and, since FR-033, a real mass-spring net panel per goal catching the ball specifically (a car still passes through it, stopped by that same solid box instead), and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones, and, since FR-031, uncalibrated placeholder constants have been individually audited against the community reverse-engineering effort (some corrected, some confirmed, the rest explicitly flagged), and, since FR-032, the once-suspected corner-testing under-detection gap for a car vs. a curved fillet was rigorously investigated and found not to exist (a genuine GJK-based replacement was built, found to regress two real tests, and reverted — the honest outcome is a corrected doc comment, not new production code), and, since FR-034, every contact's penetration/positional correction runs on its own separate split-impulse "push" channel instead of folding into the body's real velocity, so resolving deep overlap no longer injects spurious velocity — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; real-data constant calibration (FR-005) still blocked on PHASE-0-EXIT) — In Progress
+- Current milestone: `PHASE-1-PHYSICS-CORE` (box-shaped car bodies, general 3x3 inertia, multi-contact resolution, ball-vs-car collision, car-vs-car collision, body-vs-arena-wall collision, ground-driving car input (throttle/steering), boost, handbrake, a variable-height ground jump, air control, a double jump (plain or a directional, flip-cancelable dodge), a wall jump (itself dodgeable and flip-cancelable the same way), a gentle landing auto-orientation assist, a modeled octagonal arena footprint plus ceiling (`PhysicsWorld::standard_arena`), curved fillets throughout the arena's vertical boundary deflecting the ball and, since FR-027, a car too (via corner-testing, confirmed exact for this containment-style contact by FR-032) — floor/ceiling seams for all 9 walls (cardinal and diagonal corner, the 4 corner walls' own seams distinctly larger than the cardinal walls' since FR-025), all 8 of the corner walls' own vertical edges (FR-022), and all 16 compound corners where a vertical-edge fillet meets a floor- or ceiling-seam fillet (FR-023, sized to match FR-025's bigger corner-wall arches) — and, since FR-024, an actual goal-mouth window (with its own 3 rounded edges) cut into each back wall, with a car now able to drive through it too since FR-028 (via the same per-corner approximation technique), since FR-026, the 4 compound corners per goal where a post's own fillet meets the crossbar's, and, since FR-029, a modeled bounded interior behind each goal window (a solid box) so a ball or car passing through settles instead of flying forever, and, since FR-033, a real mass-spring net panel per goal catching the ball specifically (a car still passes through it, stopped by that same solid box instead), and, since FR-030, every ball-vs-car/car-vs-car contact manifold in a step is resolved together as one combined multi-body solve instead of independent pairwise ones, and, since FR-031, uncalibrated placeholder constants have been individually audited against the community reverse-engineering effort (some corrected, some confirmed, the rest explicitly flagged), and, since FR-032, the once-suspected corner-testing under-detection gap for a car vs. a curved fillet was rigorously investigated and found not to exist (a genuine GJK-based replacement was built, found to regress two real tests, and reverted — the honest outcome is a corrected doc comment, not new production code), and, since FR-034, every contact's penetration/positional correction runs on its own separate split-impulse "push" channel instead of folding into the body's real velocity, so resolving deep overlap no longer injects spurious velocity, and, since FR-035, `solver::resolve_dynamic_manifolds` (every ball-vs-car/car-vs-car manifold) warm-starts each call from the previous one's converged impulses instead of zero, converging measurably closer to the true answer for an under-converged manifold — all implemented in `rb_physics_bullet` and wired into a real multi-car `PhysicsWorld`; real-data constant calibration (FR-005) still blocked on PHASE-0-EXIT) — In Progress
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
 
 ## Completed
@@ -984,6 +984,36 @@
   check settling at (not past) the resting distance instead — a stronger
   proof this fix is real, not just internally self-consistent. 258 total
   in `rb_physics_bullet` (+2 over FR-033's 256).
+- `RB-PHYSICS-001-FR-035` (warm-starting, implemented for
+  `resolve_dynamic_manifolds` only) — a new `solver::ContactCache` carries
+  a manifold's converged real-channel impulses from one call to the next,
+  matched by each contact's approximate world position. A new
+  `warm_start_two_body_row` applies each row's cached impulse directly to
+  the manifold's shared `DeltaVelocity` accumulators before iterating —
+  merely setting `TwoBodyRow::applied_impulse` would do nothing on its own
+  here (`GLOBAL_CFM` is always `0.0`), so the seed has to be baked into
+  the starting delta itself, mirroring Bullet's own warm-start applying
+  the cached impulse to the solver body's temporary velocity at setup,
+  before any iteration runs. `resolve_dynamic_manifolds` gained a new
+  `caches` parameter (one `ContactCache` per body-index pair); every call
+  rebuilds it from only that call's manifolds, so a pair no longer
+  touching drops automatically. `PhysicsWorld` gains one persistent
+  `dynamic_manifold_caches` field. Deliberately scoped to this one call
+  site: `resolve_contacts`/`resolve_contacts_between` (every
+  static-geometry contact) stay un-warm-started, since this port's fixed
+  `SOLVER_ITERATIONS` already fully converges every one-body/two-body
+  scenario this crate tests — warm-starting has no scenario to
+  demonstrate value against there yet, unlike `resolve_dynamic_manifolds`,
+  which already had FR-030's own documented extreme-mass-ratio
+  "sandwiched" case that doesn't fully converge within one call. 1 new
+  `solver.rs` test reuses that exact scenario across two calls (cold, then
+  warm vs. a repeated cold from the identical post-call-1 state) and shows
+  the warm run lands measurably closer to the true zero-velocity
+  equilibrium. This does NOT fix the still-open "bouncy resting contact
+  never settles" limitation — that comes from restitution re-triggering
+  off a fresh gravity-induced closing velocity every frame, independent of
+  where the solver starts; sleeping (still unimplemented) is the actual
+  fix. 259 total in `rb_physics_bullet` (+1 over FR-034's 258).
 
 ## In progress
 
@@ -1032,7 +1062,7 @@
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (308 tests: 23 in `rb_domain`, 258 in
+- `cargo test --workspace`: pass (309 tests: 23 in `rb_domain`, 259 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
   test), 3 in `rb_verify_cli` (incl. real end-to-end run), plus doc-tests)
