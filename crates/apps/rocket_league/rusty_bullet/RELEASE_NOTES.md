@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Fillet-radius calibration research
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #87](https://github.com/baileyrd/rusty_bullet/pull/87) · `f92ceed`
 
 - **A dedicated research pass looked for a real reference for
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`** — the two uncalibrated
@@ -37,7 +37,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Car-vs-net contact
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #85](https://github.com/baileyrd/rusty_bullet/pull/85) · `fdbd940`
 
 - **A car is now caught by a goal net too, not just the ball** — closes
   this port's own former Non-goal that "a car still passes straight
@@ -68,7 +68,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Wall-jump corner disambiguation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #86](https://github.com/baileyrd/rusty_bullet/pull/86) · `99234c6`
 
 - **A wall jump at a corner now pushes off diagonally, blending both
   touched walls**, instead of firing along only one of them depending on
