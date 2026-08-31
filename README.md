@@ -89,6 +89,7 @@ have landed so far.
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
 | [`rusty_ansder`](crates/rusty_ansder) | `crates/rusty_ansder` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine and ASN.1 DER parser, built on `rusty_wire`/`rusty_simd`/`rusty_regx`/`rusty_json`/`rusty_std` |
+| [`rusty_boot`](crates/rusty_boot) | `crates/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
 | [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
@@ -503,6 +504,16 @@ lints in its own test module (`assert_eq!(x, true)`/`assert_eq!(x, false)`
 instead of `assert!(x)`/`assert!(!x)`), fixed with no behavior change.
 Also not `cargo fmt`-clean under this workspace's `rustfmt.toml`; reformatted.
 
+`rusty_boot` depends on twenty already-merged siblings (`rusty_wire`,
+`rusty_regx`, `rusty_json`, `rusty_compress`, `rusty_std`, `rusty_sync`,
+`rusty_time`, `rusty_err`, `rusty_codec`, `rusty_audio`, `rusty_jinja`,
+`rusty_tokio`, `rusty_http`, `rusty_lines`, `rusty_font`, `rusty_gui`,
+`rusty_gpu`, `rusty_vulkan`, `rush`, `rusty_term`, plus `rusty_libc`/
+`rusty_win32` behind target-cfg'd dependencies) via relative `path`
+dependencies — no swap needed, since it demonstrates the full merged
+stack booting end to end. Not `cargo fmt`-clean under this workspace's
+`rustfmt.toml`; reformatted with `cargo fmt --all`, no behavior change.
+
 `rusty_whisper` depends on `rusty_simd`, `rusty_wire`, and `rusty_std`
 via relative `path` dependencies, all already merged as siblings under
 this workspace's `crates/` — no dependency swap needed. Its optional
@@ -592,6 +603,7 @@ behind one nested workspace),
 [`rusty_jinja`](https://github.com/baileyrd/rusty_jinja),
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
 nested workspace),
-[`rusty_ansder`](https://github.com/baileyrd/rusty_ansder), and
+[`rusty_ansder`](https://github.com/baileyrd/rusty_ansder),
+[`rusty_boot`](https://github.com/baileyrd/rusty_boot), and
 [`rusty_whisper`](https://github.com/baileyrd/rusty_whisper) — merged one
 at a time, same process.
