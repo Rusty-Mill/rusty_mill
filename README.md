@@ -84,6 +84,7 @@ have landed so far.
 | [`rusty_codec`](crates/rusty_codec) | `crates/rusty_codec` | `no_std` + `alloc` sovereign TOML configuration parser and binary buffer serialization crate, built on `rusty_wire`/`rusty_std` |
 | [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
 | [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
+| [`rusty_crypto_key`](crates/rusty_crypto_key) | `crates/rusty_crypto_key` | A zeroize-on-drop key storage and file persistence micro-crate (`0600` permissions on Unix) |
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
@@ -471,6 +472,9 @@ swapping — its own merge is just the subtree add plus workspace wiring.
 plus `rusty_win32` on Windows and `rusty_libc` on Linux) were already
 `path` dependencies pointing at sibling directories under `crates/`.
 
+`rusty_crypto_key` has zero dependencies of any kind, so nothing needed
+swapping — its merge is just the subtree add plus workspace wiring.
+
 `rusty_ansi` needed no pin retirement: its one dependency, `unicode-width`,
 is an ordinary crates.io crate, not a sibling `baileyrd` repo. The
 standalone repo's README carried a CI badge but had no `.github/workflows`
@@ -561,6 +565,7 @@ behind one nested workspace),
 [`rusty_codec`](https://github.com/baileyrd/rusty_codec),
 [`rusty_h2`](https://github.com/baileyrd/rusty_h2),
 [`rusty_audio`](https://github.com/baileyrd/rusty_audio),
+[`rusty_crypto_key`](https://github.com/baileyrd/rusty_crypto_key),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
 [`rusty_config`](https://github.com/baileyrd/rusty_config),
 [`rusty_jinja`](https://github.com/baileyrd/rusty_jinja), and
