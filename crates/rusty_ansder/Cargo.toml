@@ -1,0 +1,23 @@
+[package]
+name = "rusty_ansder"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering Engine and ASN.1 DER Parser for Rusty Mill"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_ansder"
+keywords = ["rag", "ai", "qa", "search", "der"]
+categories = ["science", "encoding"]
+
+[dependencies]
+rusty_wire = { path = "../rusty_wire", default-features = false }
+rusty_simd = { path = "../rusty_simd", default-features = false }
+rusty_regx = { path = "../rusty_regx" }
+rusty_json = { path = "../rusty_json" }
+rusty_std = { path = "../rusty_std" }
+
+[features]
+default = ["std"]
+std = ["rusty_wire/std"]
+
+[dev-dependencies]

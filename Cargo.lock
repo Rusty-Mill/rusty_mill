@@ -5907,6 +5907,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_ansder"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_regx",
+ "rusty_simd 0.1.0",
+ "rusty_std",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_ansi"
 version = "0.1.0"
 dependencies = [

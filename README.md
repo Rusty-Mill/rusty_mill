@@ -88,6 +88,7 @@ have landed so far.
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
+| [`rusty_ansder`](crates/rusty_ansder) | `crates/rusty_ansder` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine and ASN.1 DER parser, built on `rusty_wire`/`rusty_simd`/`rusty_regx`/`rusty_json`/`rusty_std` |
 | [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
@@ -493,6 +494,15 @@ relative `path` dependencies, all already merged as siblings under this
 workspace's `crates/` — no dependency swap needed, just the subtree add
 plus workspace wiring.
 
+`rusty_ansder` depends on `rusty_wire`, `rusty_simd`, `rusty_regx`,
+`rusty_json`, and `rusty_std` via relative `path` dependencies, all
+already merged as siblings under this workspace's `crates/` — no
+dependency swap needed. The standalone repo had no clippy CI: this
+workspace's `-D warnings` gate caught two `clippy::bool_assert_comparison`
+lints in its own test module (`assert_eq!(x, true)`/`assert_eq!(x, false)`
+instead of `assert!(x)`/`assert!(!x)`), fixed with no behavior change.
+Also not `cargo fmt`-clean under this workspace's `rustfmt.toml`; reformatted.
+
 `rusty_whisper` depends on `rusty_simd`, `rusty_wire`, and `rusty_std`
 via relative `path` dependencies, all already merged as siblings under
 this workspace's `crates/` — no dependency swap needed. Its optional
@@ -581,6 +591,7 @@ behind one nested workspace),
 [`rusty_config`](https://github.com/baileyrd/rusty_config),
 [`rusty_jinja`](https://github.com/baileyrd/rusty_jinja),
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
-nested workspace), and
+nested workspace),
+[`rusty_ansder`](https://github.com/baileyrd/rusty_ansder), and
 [`rusty_whisper`](https://github.com/baileyrd/rusty_whisper) — merged one
 at a time, same process.
