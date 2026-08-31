@@ -6,6 +6,40 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Sleeping
+**2026-08-31** · PR pending · commit pending
+
+- **A body's velocity now forcibly zeroes once it's stayed below a linear
+  and an angular threshold for a sustained time**, closing the "no
+  sleeping" half of the solver's own documented gap warm-starting left
+  open. New `body::RigidBody::update_sleep_state`/`wake`.
+- **This is the actual fix for a bouncy resting contact never settling** —
+  the limitation neither split impulse nor warm-starting alone could
+  close, since restitution re-triggers off a fresh gravity-induced closing
+  velocity every frame regardless of where the solver's iteration starts
+  or how it got there.
+- **A car wakes unconditionally the instant it receives genuinely active
+  input**, before that input's own force has had a chance to move it — a
+  resultant-velocity-only wake check isn't enough, since a driving force
+  whose one-frame delta is itself smaller than the sleep threshold would
+  otherwise get zeroed right back out every frame, permanently stranding
+  an asleep car. A new `input_is_active` helper treats an unrecovered
+  analog channel (`None`) the same as a recovered-but-literally-neutral
+  one (`Some(0.0)`), so a car fed a real recorded input stream that always
+  resolves every channel doesn't get stuck permanently awake either.
+- **All three new threshold constants are uncalibrated placeholders** —
+  no public reference exists for what, if any, real Rocket League's own
+  physics engine uses internally for this purely implementation-internal
+  stabilization detail.
+- **8 new tests** (5 in `body.rs` exercising the mechanism directly, 3 in
+  `world.rs` proving it through a live `PhysicsWorld`, including a direct
+  demonstration that a nonzero-restitution resting ball now actually falls
+  asleep at exactly zero velocity instead of bouncing forever). All
+  pre-existing tests pass unchanged.
+- 8 new tests, 267 total in `rb_physics_bullet` (+8 over FR-036's 259).
+
+---
+
 ## Ball radius and ceiling height corrections
 **2026-08-31** · [PR #81](https://github.com/baileyrd/rusty_bullet/pull/81) · `ab892bf`
 

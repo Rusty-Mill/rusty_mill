@@ -61,6 +61,47 @@ impl Shape {
     }
 }
 
+/// Sleeping (`RB-PHYSICS-001-FR-037`) — a body whose linear and angular
+/// speed both stay below these thresholds for `SLEEP_TIME_THRESHOLD`
+/// consecutive seconds has its velocity forcibly zeroed every step
+/// thereafter (`RigidBody::update_sleep_state`), freezing its position
+/// instead of leaving it to a fresh per-frame gravity-vs-restitution
+/// recomputation that never quite lands on exactly zero — this is what
+/// actually fixes this crate's own documented "a bouncy resting contact
+/// never settles" limitation (see `solver`'s own module doc comment and
+/// `RB-PHYSICS-001-FR-035`'s entry, which explicitly deferred this fix to
+/// sleeping): restitution keeps re-triggering off one frame's worth of
+/// fresh gravity-induced closing velocity regardless of where the solver's
+/// own iteration starts, so nothing about warm-starting or split impulse
+/// could ever stop the residual bounce — only refusing to integrate it at
+/// all, once it's small and old enough to call "at rest," does. Mirrors
+/// real Bullet's own deactivation mechanism
+/// (`btRigidBody::updateDeactivation`/`wantsSleeping`), simplified: no
+/// separate "island" of mutually-touching bodies sleeps together (each
+/// `RigidBody` tracks its own state independently, matching how this
+/// crate's solver already treats each body rather than Bullet's own
+/// persistent-island architecture — see `solver`'s own module doc
+/// comment), and no kinematic/deactivation-disabled body concept exists to
+/// exempt (this crate has no kinematic bodies at all).
+///
+/// All three constants are this project's own uncalibrated placeholders —
+/// no public reference states what threshold, if any, real Rocket League's
+/// own physics engine uses internally for this (a purely
+/// implementation-internal stabilization detail, not something a replay or
+/// capture could ever directly reveal even if `RB-VERIFY-002` had real
+/// data). Chosen only to sit clearly above the single-frame velocity noise
+/// this crate's own resting/bouncing tests produce (gravity's default
+/// -650 uu/s² accumulates roughly 10.8 uu/s over one 1/60s frame, and a
+/// restitution-driven bounce off that is the same order of magnitude) and
+/// clearly below any deliberate motion this crate models (`drive::MAX_CAR_SPEED`
+/// 2300, `drive::JUMP_SPEED` ~292, `drive::THROTTLE_ACCELERATION` 1600
+/// uu/s² alone adding ~27 uu/s in a single 1/60s frame).
+pub const LINEAR_SLEEP_VELOCITY_THRESHOLD: f32 = 20.0;
+/// See `LINEAR_SLEEP_VELOCITY_THRESHOLD`'s own doc comment.
+pub const ANGULAR_SLEEP_VELOCITY_THRESHOLD: f32 = 0.5;
+/// See `LINEAR_SLEEP_VELOCITY_THRESHOLD`'s own doc comment.
+pub const SLEEP_TIME_THRESHOLD: f32 = 0.5;
+
 /// A dynamic rigid body: either a sphere (the ball) or a box (a car).
 /// Mirrors the subset of `bullet3/src/BulletDynamics/Dynamics/btRigidBody.h`'s
 /// fields this crate's integration and solver code actually needs.
@@ -94,6 +135,18 @@ pub struct RigidBody {
 
     total_force: Vec3,
     total_torque: Vec3,
+
+    /// `RB-PHYSICS-001-FR-037` — set by `update_sleep_state` once this
+    /// body's velocity has stayed below both sleep thresholds for
+    /// `SLEEP_TIME_THRESHOLD` seconds; cleared by `wake`. Public so a
+    /// caller (or a test) can inspect it directly, matching this crate's
+    /// convention of exposing simulation state as plain fields rather than
+    /// getters where nothing needs guarding.
+    pub is_sleeping: bool,
+    /// Consecutive seconds this body's velocity has stayed below both
+    /// sleep thresholds — private scratch state `update_sleep_state`/`wake`
+    /// alone manage, not meaningful to a caller the way `is_sleeping` is.
+    sleep_timer: f32,
 }
 
 impl RigidBody {
@@ -136,6 +189,8 @@ impl RigidBody {
             inv_inertia_world: Mat3::IDENTITY,
             total_force: Vec3::ZERO,
             total_torque: Vec3::ZERO,
+            is_sleeping: false,
+            sleep_timer: 0.0,
         };
         body.update_inertia_tensor();
         body
@@ -203,6 +258,54 @@ impl RigidBody {
 
     pub fn total_torque(&self) -> Vec3 {
         self.total_torque
+    }
+
+    /// `RB-PHYSICS-001-FR-037` — call once per step, after this body's
+    /// velocity is otherwise final for the step (every contact resolved)
+    /// but before its transform integrates, so a frame that puts it to
+    /// sleep also freezes its position that same frame instead of one
+    /// frame later. If both `linear_velocity.length()` and
+    /// `angular_velocity.length()` stay below `LINEAR_SLEEP_VELOCITY_THRESHOLD`/
+    /// `ANGULAR_SLEEP_VELOCITY_THRESHOLD` for `SLEEP_TIME_THRESHOLD`
+    /// consecutive calls' worth of `dt`, `is_sleeping` becomes `true` and
+    /// both velocities are zeroed (repeated on every subsequent call while
+    /// still under threshold, since gravity/restitution keep recomputing a
+    /// nonzero value each step otherwise — see this type's own module-level
+    /// sleeping doc comment for why that's the actual bug this fixes).
+    /// Crossing either threshold — from a real contact impulse, a driven
+    /// force, or simply falling — clears `is_sleeping` and resets the
+    /// timer immediately; see `wake` for waking independent of velocity
+    /// (e.g. `drive::apply_driven_forces` waking a car the instant it
+    /// receives active input, before that input's own force has had a
+    /// chance to move it).
+    pub fn update_sleep_state(&mut self, dt: f32) {
+        let under_threshold = self.linear_velocity.length() < LINEAR_SLEEP_VELOCITY_THRESHOLD
+            && self.angular_velocity.length() < ANGULAR_SLEEP_VELOCITY_THRESHOLD;
+        if under_threshold {
+            self.sleep_timer += dt;
+            if self.sleep_timer >= SLEEP_TIME_THRESHOLD {
+                self.is_sleeping = true;
+            }
+        } else {
+            self.sleep_timer = 0.0;
+            self.is_sleeping = false;
+        }
+        if self.is_sleeping {
+            self.linear_velocity = Vec3::ZERO;
+            self.angular_velocity = Vec3::ZERO;
+        }
+    }
+
+    /// Clears `is_sleeping` and resets the sleep timer, independent of the
+    /// body's current velocity — see `update_sleep_state`'s own doc comment
+    /// for why a velocity-only check isn't enough to wake a body a small
+    /// per-frame driving force is trying to accelerate from rest (that
+    /// force's own one-frame delta could itself be smaller than
+    /// `LINEAR_SLEEP_VELOCITY_THRESHOLD`, in which case a velocity-only
+    /// check would zero it right back out every frame, permanently stuck).
+    pub fn wake(&mut self) {
+        self.is_sleeping = false;
+        self.sleep_timer = 0.0;
     }
 }
 
@@ -1075,5 +1178,91 @@ mod tests {
         let wall = bounded_wall();
         let far_in_front = wall.bound_center + Vec3::new(-5000.0, 0.0, 0.0);
         assert!(wall.contains_in_bound(&far_in_front));
+    }
+
+    // RB-PHYSICS-001-FR-037: sleeping.
+
+    #[test]
+    fn a_body_under_threshold_does_not_sleep_before_the_time_threshold_elapses() {
+        let mut b = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        b.linear_velocity = Vec3::new(LINEAR_SLEEP_VELOCITY_THRESHOLD * 0.5, 0.0, 0.0);
+        // One call short of SLEEP_TIME_THRESHOLD's worth of dt.
+        let dt = SLEEP_TIME_THRESHOLD / 10.0;
+        for _ in 0..9 {
+            b.update_sleep_state(dt);
+        }
+        assert!(
+            !b.is_sleeping,
+            "should not sleep before the time threshold elapses"
+        );
+        assert_ne!(
+            b.linear_velocity,
+            Vec3::ZERO,
+            "still-awake velocity shouldn't be forcibly zeroed"
+        );
+    }
+
+    #[test]
+    fn a_body_sustained_under_threshold_falls_asleep_and_its_velocity_is_zeroed() {
+        let mut b = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        b.linear_velocity = Vec3::new(LINEAR_SLEEP_VELOCITY_THRESHOLD * 0.5, 0.0, 0.0);
+        b.angular_velocity = Vec3::new(0.0, 0.0, ANGULAR_SLEEP_VELOCITY_THRESHOLD * 0.5);
+        let dt = SLEEP_TIME_THRESHOLD / 10.0;
+        for _ in 0..11 {
+            b.update_sleep_state(dt);
+        }
+        assert!(b.is_sleeping);
+        assert_eq!(b.linear_velocity, Vec3::ZERO);
+        assert_eq!(b.angular_velocity, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_body_above_either_threshold_never_sleeps() {
+        let mut fast_linear = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        fast_linear.linear_velocity = Vec3::new(LINEAR_SLEEP_VELOCITY_THRESHOLD * 2.0, 0.0, 0.0);
+        let mut fast_angular = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        fast_angular.angular_velocity = Vec3::new(0.0, 0.0, ANGULAR_SLEEP_VELOCITY_THRESHOLD * 2.0);
+        for b in [&mut fast_linear, &mut fast_angular] {
+            for _ in 0..100 {
+                b.update_sleep_state(SLEEP_TIME_THRESHOLD);
+            }
+            assert!(!b.is_sleeping);
+        }
+    }
+
+    #[test]
+    fn a_sleeping_body_that_regains_speed_above_threshold_wakes_immediately() {
+        let mut b = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        for _ in 0..10 {
+            b.update_sleep_state(SLEEP_TIME_THRESHOLD);
+        }
+        assert!(
+            b.is_sleeping,
+            "a body at rest the whole time should be asleep by now"
+        );
+        b.linear_velocity = Vec3::new(LINEAR_SLEEP_VELOCITY_THRESHOLD * 2.0, 0.0, 0.0);
+        b.update_sleep_state(0.001);
+        assert!(!b.is_sleeping);
+        assert_eq!(
+            b.linear_velocity,
+            Vec3::new(LINEAR_SLEEP_VELOCITY_THRESHOLD * 2.0, 0.0, 0.0),
+            "waking shouldn't itself alter the velocity that caused it"
+        );
+    }
+
+    #[test]
+    fn wake_clears_sleeping_and_the_timer_regardless_of_velocity() {
+        let mut b = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        for _ in 0..10 {
+            b.update_sleep_state(SLEEP_TIME_THRESHOLD);
+        }
+        assert!(b.is_sleeping);
+        b.wake();
+        assert!(!b.is_sleeping);
+        // A single dt right after waking shouldn't be enough on its own to
+        // re-sleep — the timer must have actually reset to zero, not just
+        // `is_sleeping`.
+        b.update_sleep_state(SLEEP_TIME_THRESHOLD * 0.99);
+        assert!(!b.is_sleeping);
     }
 }

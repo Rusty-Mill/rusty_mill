@@ -55,8 +55,8 @@
 //! - **No SIMD.** Scalar translation of the SSE2/SSE4/FMA3 code paths —
 //!   this is a from-scratch Rust port, not a binding (see ADR-0004), and
 //!   correctness came before micro-optimization for v0.
-//! - **No warm-starting for `resolve_contacts`/`resolve_contacts_between`,
-//!   and no sleeping.** `resolve_dynamic_manifolds` gained warm-starting in
+//! - **No warm-starting for `resolve_contacts`/`resolve_contacts_between`.**
+//!   `resolve_dynamic_manifolds` gained warm-starting in
 //!   `RB-PHYSICS-001-FR-035` (see above); the other two paths still
 //!   re-derive every contact's impulses from zero each call — a difference
 //!   in *convergence speed*, not in what they converge to (projected
@@ -64,17 +64,23 @@
 //!   impulse, given enough iterations, and this port's fixed
 //!   `SOLVER_ITERATIONS` already fully converges every one-body/two-body
 //!   scenario this crate tests — see `RB-PHYSICS-001-FR-035`'s own
-//!   Non-goals). Sleeping (putting a settled body's velocity to sleep once
-//!   it's stayed below a threshold long enough) is the still-missing fix
-//!   for a different symptom: a *bouncy* resting contact (restitution > 0)
-//!   never actually settles, since each frame's fresh gravity-induced
-//!   closing velocity is solved as a new "impact" and restitution bounces
-//!   it back up indefinitely — warm-starting converges that same
-//!   wrong-looking bounce faster, it doesn't stop it from recurring. An
-//!   inelastic resting contact (restitution 0) settles fine (see
-//!   `world::tests::resting_ball_stays_at_rest`); the bouncy case is a real
-//!   limitation, tracked as follow-up work in `RB-PHYSICS-001`, not hidden
-//!   behind a loosened test.
+//!   Non-goals).
+//! - **Sleeping is now implemented** (`RB-PHYSICS-001-FR-037`,
+//!   `body::RigidBody::update_sleep_state`/`wake`), fixing the different
+//!   symptom warm-starting alone couldn't: a *bouncy* resting contact
+//!   (restitution > 0) used to never actually settle, since each frame's
+//!   fresh gravity-induced closing velocity was solved as a new "impact"
+//!   and restitution bounced it back up indefinitely — warm-starting only
+//!   converged that same wrong-looking bounce faster, it never stopped it
+//!   from recurring, since nothing about where the solver's iteration
+//!   starts changes what triggers it each frame. Sleeping fixes it by a
+//!   different mechanism entirely, outside the solver's own iteration:
+//!   once a body's velocity has stayed below both sleep thresholds for
+//!   long enough, its velocity is forcibly zeroed every subsequent step
+//!   instead of being left to a fresh solve, freezing its position for
+//!   real. An inelastic resting contact (restitution 0) already settled
+//!   fine even before this (see `world::tests::resting_ball_stays_at_rest`)
+//!   — sleeping's own value is specifically the bouncy case.
 //! - **Restitution/friction combine mode**: average of the two surfaces'
 //!   coefficients (`(a + b) * 0.5`), matching
 //!   `btManifoldResult::calculateCombinedRestitution`'s structure. Bullet's

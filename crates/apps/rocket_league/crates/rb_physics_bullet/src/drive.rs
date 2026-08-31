@@ -381,6 +381,26 @@ fn right_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0))
 }
 
+/// `RB-PHYSICS-001-FR-037` — whether `input` represents genuine driving
+/// intent, for waking a sleeping car (see `apply_driven_forces`'s own doc
+/// comment). Treats an unrecovered analog channel (`None`, from a replay
+/// that never had one) the same as a recovered-but-literally-neutral one
+/// (`Some(0.0)`, from a capture) — both mean "no analog input this tick" —
+/// rather than the simpler `*input != ControllerInput::default()` (which
+/// would treat any `Some(0.0)` as active purely because it's not `None`,
+/// keeping a car receiving a real recorded input stream that always
+/// resolves every channel — even at rest — from ever sleeping at all).
+fn input_is_active(input: &ControllerInput) -> bool {
+    input.throttle != 0.0
+        || input.steer != 0.0
+        || input.pitch.unwrap_or(0.0) != 0.0
+        || input.yaw.unwrap_or(0.0) != 0.0
+        || input.roll.unwrap_or(0.0) != 0.0
+        || input.jump
+        || input.boost
+        || input.handbrake
+}
+
 /// Applies throttle, steering, boost, handbrake, jump, double jump, wall
 /// jump, and air control as forces/torques/impulses (or, for handbrake, a
 /// temporary friction adjustment) on `car`. Throttle, steering, handbrake,
@@ -425,7 +445,12 @@ fn right_axis(car: &RigidBody) -> Vec3 {
 /// later unrelated double jump), and a further fresh press while airborne,
 /// not touching a wall, with `double_jump_available` already spent and
 /// `dodge_flip_active` still `true` cancels the flip — see the module doc
-/// comment's flip-cancel paragraph. Call once per step, before
+/// comment's flip-cancel paragraph. Since `RB-PHYSICS-001-FR-037`, any
+/// genuinely active `input` (see `input_is_active`) wakes `car`
+/// unconditionally before anything else in this call runs, regardless of
+/// whether `car` was already asleep or what velocity results this step —
+/// see this crate's own `body::RigidBody::wake` doc comment for why a
+/// velocity-only wake check isn't enough here. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
@@ -441,6 +466,20 @@ pub fn apply_driven_forces(
     base_friction: f32,
     dt: f32,
 ) {
+    // RB-PHYSICS-001-FR-037: any genuinely active input wakes the car
+    // unconditionally, before that input's own force/impulse has a chance
+    // to move it — a resultant-velocity-only wake check would zero right
+    // back out a driving force whose one-frame delta is itself smaller
+    // than `body::LINEAR_SLEEP_VELOCITY_THRESHOLD` (e.g. one frame of
+    // throttle from a dead stop at a very small `dt`), permanently
+    // stranding an asleep car that should be free to start moving. Uses
+    // `unwrap_or(0.0)` for the analog channels so a recovered-but-literally-
+    // zero `Some(0.0)` reads as neutral the same way an unrecovered `None`
+    // does — see `input_is_active`'s own doc comment.
+    if input_is_active(input) {
+        car.wake();
+    }
+
     let forward = forward_axis(car);
     let jump_pressed = input.jump && !*jump_held;
     *jump_held = input.jump;

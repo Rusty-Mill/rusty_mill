@@ -505,7 +505,12 @@ impl PhysicsWorld {
     /// manifold's converged impulses across steps, so
     /// `solver::resolve_dynamic_manifolds` warm-starts from last step's
     /// answer instead of zero — see that function's and
-    /// `solver::ContactCache`'s own doc comments.
+    /// `solver::ContactCache`'s own doc comments. Since
+    /// `RB-PHYSICS-001-FR-037`, the ball and every car have their sleep
+    /// state (`body::RigidBody::update_sleep_state`) re-evaluated once
+    /// every contact above (including the net panels) is resolved but
+    /// before the transform integrates, so a body newly asleep this step
+    /// freezes in place this same step.
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
@@ -658,6 +663,17 @@ impl PhysicsWorld {
             net.step(&mut self.ball, self.gravity, dt);
         }
 
+        // Sleeping (RB-PHYSICS-001-FR-037): evaluated once every other
+        // contact this step has already been resolved (including the net
+        // panels just above) but before the transform integrates, so a
+        // body that goes to sleep this step also freezes in place this
+        // same step instead of drifting one more frame first — see
+        // `body::RigidBody::update_sleep_state`'s own doc comment.
+        self.ball.update_sleep_state(dt);
+        for car in &mut self.cars {
+            car.update_sleep_state(dt);
+        }
+
         Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
         for car in &mut self.cars {
             Self::integrate_transform_and_refresh_inertia(car, dt);
@@ -757,14 +773,14 @@ mod tests {
     fn resting_ball_stays_at_rest() {
         let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
         // Inelastic on purpose, on *both* surfaces (combined restitution is
-        // an average of the two — see solver.rs): this port has no
-        // warm-starting or sleeping, so a *bouncy* resting contact
-        // legitimately never settles under a naive per-frame sequential
-        // impulse solve — each frame's gravity-induced velocity is a fresh
-        // "impact" that restitution bounces back up, forever. That's a
-        // real, known limitation (tracked in RB-PHYSICS-001), not covered
-        // by this test; this test checks the inelastic case actually
-        // settles, which it should regardless.
+        // an average of the two — see solver.rs): before sleeping
+        // (`RB-PHYSICS-001-FR-037`) existed, a *bouncy* resting contact
+        // legitimately never settled under a naive per-frame sequential
+        // impulse solve — each frame's gravity-induced velocity was a fresh
+        // "impact" that restitution bounced back up, forever (that's now
+        // fixed — see `a_bouncy_resting_ball_actually_settles_once_asleep`).
+        // This test only ever needed the inelastic case to settle, which it
+        // should regardless of sleeping.
         ball.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -781,6 +797,118 @@ mod tests {
             world.ball.position.z
         );
         assert!(world.ball.linear_velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn a_bouncy_resting_ball_actually_settles_once_asleep() {
+        // RB-PHYSICS-001-FR-037: this is the actual "bouncy resting contact
+        // never settles" limitation `resting_ball_stays_at_rest`'s own
+        // comment (and this module's/solver's own doc comments) describe —
+        // demonstrated directly here with a nonzero-restitution ball/ground
+        // pair, instead of only being documented as a known gap.
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+        ball.restitution = 0.5;
+        let ground = StaticPlane {
+            restitution: 0.5,
+            ..flat_ground()
+        };
+        let mut world = PhysicsWorld::new(ball, ground);
+        let dt = 1.0 / 60.0;
+        // SLEEP_TIME_THRESHOLD (0.5s) plus a generous margin for the
+        // per-frame gravity/restitution bounce to actually decay under the
+        // sleep velocity thresholds before the timer can start counting.
+        for _ in 0..300 {
+            world.step(dt);
+        }
+        assert!(
+            world.ball.is_sleeping,
+            "expected the ball to fall asleep once its bounce settled below threshold"
+        );
+        assert_eq!(
+            world.ball.linear_velocity,
+            Vec3::ZERO,
+            "a sleeping body's velocity should be forced to exactly zero"
+        );
+        assert_eq!(world.ball.angular_velocity, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_sleeping_car_wakes_up_the_instant_throttle_is_applied() {
+        // RB-PHYSICS-001-FR-037: guards against the specific bug this
+        // requirement's own design had to avoid — a velocity-only wake
+        // check would zero right back out a driving force whose one-frame
+        // delta is itself smaller than the sleep threshold, permanently
+        // stranding an asleep car. `drive::apply_driven_forces` instead
+        // wakes a car unconditionally on any genuinely active input, before
+        // that input's own force has had a chance to move it.
+        // Seeded already asleep, at rest exactly on the ground, rather than
+        // simulated into that state — this test's own claim is about the
+        // wake response to input, not about how long settling itself takes
+        // (see `dropped_car_settles_flat_on_the_ground_without_tipping_over`
+        // and the sleeping tests above for that).
+        let mut car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(0.0, 0.0, 1.0));
+        car.is_sleeping = true;
+        let mut world = PhysicsWorld::new(
+            RigidBody::sphere(1.0, 1.0, Vec3::new(10_000.0, 0.0, 1.0)),
+            flat_ground(),
+        )
+        .with_car(car);
+        let dt = 1.0 / 60.0;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                ..Default::default()
+            },
+        );
+        world.step(dt);
+        assert!(
+            !world.cars[0].is_sleeping,
+            "throttle should wake the car immediately"
+        );
+        assert!(
+            world.cars[0].linear_velocity.length() > 0.0,
+            "a woken car should actually accelerate under throttle this same step"
+        );
+    }
+
+    #[test]
+    fn a_sleeping_ball_wakes_up_when_a_moving_car_hits_it() {
+        // RB-PHYSICS-001-FR-037: no special-case wake logic exists for a
+        // contact-driven wake — the ball's own resultant velocity after
+        // the collision naturally exceeds the sleep threshold, which
+        // `update_sleep_state` reads the same as any other frame.
+        let ball = RigidBody::sphere(50.0, 1.0, Vec3::new(0.0, 0.0, 50.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        let dt = 1.0 / 60.0;
+        // Let the ball (already resting) go to sleep before the car exists
+        // at all, so the car's own approach can't be mistaken for having
+        // contributed to it.
+        for _ in 0..90 {
+            world.step(dt);
+        }
+        assert!(
+            world.ball.is_sleeping,
+            "expected the ball to be asleep before the car arrives"
+        );
+
+        let mut car = RigidBody::car_box(
+            Vec3::new(50.0, 50.0, 20.0),
+            1.0,
+            Vec3::new(-300.0, 0.0, 20.0),
+        );
+        car.linear_velocity = Vec3::new(2000.0, 0.0, 0.0);
+        world = world.with_car(car);
+        for _ in 0..60 {
+            world.step(dt);
+            if !world.ball.is_sleeping {
+                break;
+            }
+        }
+        assert!(
+            !world.ball.is_sleeping,
+            "a moving car's impact should wake the sleeping ball"
+        );
     }
 
     #[test]

@@ -462,6 +462,22 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   comments changed. `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` remain
   untouched and still genuinely uncalibrated. No new tests; all 259
   pre-existing tests pass unchanged.
+- `rb_physics_bullet::body`/`drive`/`world` (`RB-PHYSICS-001-FR-037`) —
+  sleeping, closing the "no sleeping" half of `solver`'s own documented
+  gap FR-035 left open. New `body::RigidBody` fields
+  `is_sleeping: bool`/`sleep_timer: f32` and methods
+  `update_sleep_state(&mut self, dt: f32)` (forcibly zeroes both
+  velocities once they've stayed below new
+  `LINEAR_SLEEP_VELOCITY_THRESHOLD`/`ANGULAR_SLEEP_VELOCITY_THRESHOLD`
+  constants for `SLEEP_TIME_THRESHOLD` seconds, the actual fix for a
+  bouncy resting contact never settling) and `wake(&mut self)` (the same
+  reset, unconditionally). `PhysicsWorld::step` calls
+  `update_sleep_state` for the ball and every car after every other
+  contact resolves but before the transform integrates.
+  `drive::apply_driven_forces` calls `car.wake()` unconditionally whenever
+  a new `input_is_active` helper finds the car's input genuinely active,
+  before that input's own force has had a chance to move it. 8 new tests
+  (5 in `body.rs`, 3 in `world.rs`); all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
