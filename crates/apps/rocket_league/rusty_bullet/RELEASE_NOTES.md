@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Sleeping
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #83](https://github.com/baileyrd/rusty_bullet/pull/83) · `33c4b77`
 
 - **A body's velocity now forcibly zeroes once it's stayed below a linear
   and an angular threshold for a sustained time**, closing the "no
