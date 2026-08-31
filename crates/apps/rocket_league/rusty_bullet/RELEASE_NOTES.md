@@ -6,6 +6,40 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## `integrate.rs` reference validation
+**2026-08-31** · PR pending · commit pending
+
+- **Fetched and read Bullet's real `btRigidBody.cpp`/`.h`,
+  `btTransformUtil.h`, `btQuaternion.h`, and `btScalar.h` directly** to
+  check every Bullet-reference claim `integrate.rs`'s own doc comments
+  make — the same rigor already applied to `collision.rs` (FR-042) and
+  `solver.rs` (FR-043).
+- **`apply_damping`, `integrate_velocities`, and `integrate_transform` all
+  confirmed byte-for-byte accurate.** `BT_USE_OLD_DAMPING_METHOD` is never
+  defined anywhere in the reference, so the pow-based damping branch is
+  genuinely Bullet's real default; `MAX_ANGVEL`'s value and clamp formula
+  match exactly; `integrate_transform`'s exponential-map math
+  (`ANGULAR_MOTION_THRESHOLD`, the small-angle Taylor coefficient, the
+  sinc-based rotation-axis formula) all match exactly too.
+- **One minor numeric difference found, not adopted.** This port's own
+  degenerate-quaternion guard uses `1e-12`; the reference's own
+  `SIMD_EPSILON` is `FLT_EPSILON` — roughly `1.19e-7` for `f32`, about 5
+  orders of magnitude larger. Both are far below any physically realistic
+  quaternion magnitude, so the two are behaviorally indistinguishable for
+  every reachable scenario — kept as-is.
+- **A more significant finding: the fallback branch is load-bearing, not
+  defensive theater.** This function's check-then-normalize guard exists
+  specifically to match Bullet's own real fallback choice — preserve the
+  body's prior orientation on a degenerate result, never reset to
+  identity. An unconditional call to `Quat::normalize` would have
+  silently gotten this wrong, since that function's own generic guard
+  substitutes `IDENTITY` instead — a real, observable divergence from
+  Bullet's actual reference behavior.
+- **1 new regression test** pins this exact distinction directly. All 275
+  pre-existing tests pass unchanged; 276 total.
+
+---
+
 ## Stale "split impulse" Non-goals correction
 **2026-08-31** · [PR #95](https://github.com/baileyrd/rusty_bullet/pull/95) · `45cb184`
 

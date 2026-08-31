@@ -25,10 +25,15 @@ pub fn apply_gravity(body: &mut RigidBody, gravity_accel: Vec3) {
 }
 
 /// Port of `btRigidBody::applyDamping`, exponential-decay branch (the
-/// `#else` of `BT_USE_OLD_DAMPING_METHOD`, which is Bullet's default). The
-/// `m_additionalDamping` extra-stability branch is intentionally omitted —
-/// it's an opt-in stability hack in upstream Bullet, off by default, and
-/// not part of the core algorithm this port targets.
+/// `#else` of `BT_USE_OLD_DAMPING_METHOD`). `RB-PHYSICS-001-FR-045` fetched
+/// and read the real `btRigidBody.cpp`/`.h` source directly and confirmed
+/// this claim: `BT_USE_OLD_DAMPING_METHOD` is never `#define`d anywhere in
+/// the reference, so this `#else` branch (`pow(1 - damping, dt)` for both
+/// linear and angular) is genuinely what a real, unmodified Bullet build
+/// runs, not an assumption. The `m_additionalDamping` extra-stability
+/// branch is intentionally omitted — it's an opt-in stability hack in
+/// upstream Bullet, off by default, and not part of the core algorithm
+/// this port targets.
 pub fn apply_damping(body: &mut RigidBody, dt: f32) {
     body.linear_velocity *= (1.0 - body.linear_damping).max(0.0).powf(dt);
     body.angular_velocity *= (1.0 - body.angular_damping).max(0.0).powf(dt);
@@ -36,7 +41,10 @@ pub fn apply_damping(body: &mut RigidBody, dt: f32) {
 
 /// Port of `btRigidBody::integrateVelocities`: semi-implicit Euler update
 /// of linear/angular velocity from the accumulated force/torque, with
-/// Bullet's angular-velocity clamp.
+/// Bullet's angular-velocity clamp. `RB-PHYSICS-001-FR-045` confirmed
+/// `MAX_ANGVEL`'s value and the clamp formula both directly against the
+/// real source (`#define MAX_ANGVEL SIMD_HALF_PI`, `SIMD_HALF_PI ==
+/// PI / 2`), not merely against this port's own prior claim.
 pub fn integrate_velocities(body: &mut RigidBody, dt: f32) {
     let inv_mass = body.inv_mass();
     body.linear_velocity += body.total_force() * (inv_mass * dt);
@@ -53,6 +61,42 @@ pub fn integrate_velocities(body: &mut RigidBody, dt: f32) {
 /// Rotations Using the Exponential Map") plus the linear position update.
 /// Bullet's alternative `QUATERNION_DERIVATIVE` branch is `#ifdef`'d out
 /// upstream too — the exponential map is what Bullet actually ships.
+/// `RB-PHYSICS-001-FR-045` fetched and read the real `btTransformUtil.h`
+/// source directly and confirmed `ANGULAR_MOTION_THRESHOLD`, the
+/// small-angle Taylor coefficient (`1 / 48`), and the sinc-based rotation
+/// axis formula all match byte-for-byte.
+///
+/// One genuine difference found: this function's own degenerate-quaternion
+/// guard (`length_squared() > 1e-12`, below) uses a materially different
+/// numeric threshold than the reference's `predictedOrn.length2() >
+/// SIMD_EPSILON` (`SIMD_EPSILON` is `FLT_EPSILON`, roughly `1.19e-7` for
+/// `f32` — about 5 orders of magnitude larger than `1e-12`). Not adopted as
+/// a change: both thresholds are far below any physically realistic
+/// quaternion magnitude, so the two are behaviorally indistinguishable for
+/// every scenario this port's own test suite (or any plausible real
+/// simulation state) can reach — swapping one arbitrary tiny epsilon for a
+/// different arbitrary tiny epsilon needs a concrete reason this
+/// investigation didn't find one for, the same standard
+/// `RB-PHYSICS-001-FR-031`/`FR-036`/`FR-040` already hold uncalibrated
+/// constants to.
+///
+/// More significant: this function's own check-then-normalize structure
+/// (below) is not defensive theater — it's necessary to match Bullet's own
+/// real fallback *choice*, not just guard against a crash. The reference
+/// calls `predictedOrn.safeNormalize()` (itself internally guarded: it
+/// only normalizes when `length2() > SIMD_EPSILON`, otherwise leaves the
+/// quaternion untouched) and then, only if the *result* still clears that
+/// same threshold, accepts it — otherwise it keeps the transform's
+/// pre-existing basis (`predictedTransform.setBasis(curTrans.getBasis())`),
+/// i.e. the *old* orientation. This function's own `else { orientation }`
+/// branch mirrors that exact choice. Had this function instead called
+/// `predicted.normalize()` unconditionally, `rb_domain::Quat::normalize`'s
+/// own generic internal guard would have silently substituted `IDENTITY`
+/// for a degenerate result instead — a real, observable divergence from
+/// Bullet's actual reference behavior (which never resets to identity
+/// here, only ever falls back to the orientation already in hand). See
+/// `integrate_transform_preserves_a_degenerate_orientation_instead_of_snapping_to_identity`
+/// below, which pins this distinction directly.
 pub fn integrate_transform(
     position: Vec3,
     orientation: Quat,
@@ -148,6 +192,27 @@ mod tests {
             0.5,
         );
         assert!((pos - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn integrate_transform_preserves_a_degenerate_orientation_instead_of_snapping_to_identity() {
+        // RB-PHYSICS-001-FR-045: a degenerate (zero) input orientation is an
+        // invariant violation from the caller, never produced by a healthy
+        // sim step — but this pins that `integrate_transform` still matches
+        // Bullet's own real fallback choice (preserve the orientation
+        // already in hand) rather than silently substituting `IDENTITY`,
+        // which relying on `Quat::normalize`'s own generic internal guard
+        // alone would have done.
+        let degenerate = Quat::new(0.0, 0.0, 0.0, 0.0);
+        let (_, orn) = integrate_transform(
+            Vec3::ZERO,
+            degenerate,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 1.0),
+            1.0 / 60.0,
+        );
+        assert_eq!(orn, degenerate);
+        assert_ne!(orn, Quat::IDENTITY);
     }
 
     #[test]

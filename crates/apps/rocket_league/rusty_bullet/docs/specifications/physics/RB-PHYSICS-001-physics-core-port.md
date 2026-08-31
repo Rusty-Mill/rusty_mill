@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.44.0
+- Version: 0.45.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -130,7 +130,15 @@
   implementation — corrected to match reality, matching the
   strikethrough-and-close convention already used for two other resolved
   Non-goals items in the same section — doc-only correction, no runtime
-  behavior changed; static-contact warm-starting,
+  behavior changed; and, since FR-045, `integrate.rs`'s own claims about
+  matching Bullet's real `applyDamping`/`integrateVelocities`/
+  `btTransformUtil::integrateTransform` were checked directly against that
+  fetched reference source and confirmed byte-for-byte accurate, with one
+  genuine finding: `integrate_transform`'s check-then-normalize
+  degenerate-quaternion guard isn't defensive theater, it's necessary to
+  match Bullet's real fallback choice (preserve the prior orientation, not
+  reset to identity) — pinned by a new regression test — investigated,
+  1 new test; static-contact warm-starting,
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
   of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
   selection, and real-data calibration (including which combine mode, if
@@ -2445,6 +2453,82 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     documentation-only findings being real, valuable work. All 275 of
     `rb_physics_bullet`'s pre-existing tests (as of `FR-043`) pass
     unchanged.
+- `RB-PHYSICS-001-FR-045` (`integrate.rs` reference validation,
+  investigated): `integrate.rs`'s own doc comments claim close fidelity to
+  three real Bullet functions (`btRigidBody::applyDamping`,
+  `btRigidBody::integrateVelocities`, and
+  `btTransformUtil::integrateTransform`) — this requirement fetched and
+  read all three reference files directly (`btRigidBody.cpp`/`.h`,
+  `btTransformUtil.h`, plus `btQuaternion.h`/`btScalar.h` for the
+  constants each depends on), matching `RB-PHYSICS-001-FR-036`/`FR-042`/
+  `FR-043`'s own method, and checked every specific claim against it.
+  1. **`apply_damping`'s "Bullet's default" claim.** Confirmed
+     `BT_USE_OLD_DAMPING_METHOD` is never `#define`d anywhere in the
+     fetched reference, so the `#else` branch (`pow(1 - damping, dt)` for
+     both linear and angular) is genuinely what an unmodified Bullet build
+     runs, not an assumption — the formula itself matches exactly too.
+  2. **`integrate_velocities`'s `MAX_ANGVEL` clamp.** Confirmed
+     `#define MAX_ANGVEL SIMD_HALF_PI` directly in the reference
+     (`SIMD_HALF_PI == PI / 2`, matching this port's `FRAC_PI_2`), and the
+     clamp formula (`angular_velocity *= (MAX_ANGVEL / dt) / angvel`)
+     matches byte-for-byte.
+  3. **`integrate_transform`'s exponential-map math.** Confirmed
+     `ANGULAR_MOTION_THRESHOLD` (`0.5 * SIMD_HALF_PI`), the small-angle
+     Taylor coefficient (`1 / 48`, written `0.020833333333` in the
+     reference), and the sinc-based rotation-axis formula all match
+     byte-for-byte against `btTransformUtil.h`.
+  4. **A genuine, minor numeric difference found, not adopted.** This
+     function's own degenerate-quaternion guard uses `length_squared() >
+     1e-12`; the reference's equivalent guard (inside `safeNormalize` and
+     again in the caller) compares against `SIMD_EPSILON`, which is
+     `FLT_EPSILON` — about `1.19e-7` for `f32`, roughly 5 orders of
+     magnitude larger than this port's own threshold. Not adopted: both
+     values are far below any physically realistic quaternion magnitude,
+     so the two are behaviorally indistinguishable for every scenario this
+     crate's test suite (or any plausible simulation state) can reach —
+     the same standard `RB-PHYSICS-001-FR-031`/`FR-036`/`FR-040` already
+     hold uncalibrated constants to applies here: swapping one arbitrary
+     tiny epsilon for a different arbitrary tiny epsilon needs a concrete
+     reason this investigation didn't find one for.
+  5. **A more significant finding: the fallback branch is load-bearing,
+     not defensive theater.** The reference's own `integrateTransform`
+     calls `predictedOrn.safeNormalize()` (itself internally guarded — it
+     only normalizes when `length2() > SIMD_EPSILON`, otherwise leaves the
+     quaternion untouched), then only accepts the result if it *still*
+     clears that same threshold; otherwise it keeps the transform's
+     pre-existing basis, i.e. the body's *old* orientation. This function's
+     own `else { orientation }` branch mirrors that exact choice. Had this
+     function instead called `predicted.normalize()` unconditionally,
+     `rb_domain::Quat::normalize`'s own generic internal guard would have
+     silently substituted `IDENTITY` for a degenerate result instead — a
+     real, observable divergence from Bullet's actual reference behavior,
+     which never resets to identity here, only ever falls back to the
+     orientation already in hand.
+  - **Non-goals (this requirement).** Does not change `apply_damping`'s or
+    `integrate_velocities`'s formulas or constants — both confirmed already
+    exact, nothing to change. Does not change `integrate_transform`'s
+    degenerate-quaternion epsilon threshold — kept at `1e-12` for lack of a
+    concrete reason to adopt Bullet's own `SIMD_EPSILON` value instead (see
+    finding 4 above). Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** Every Bullet-reference claim in `integrate.rs`'s
+    doc comments is now backed by a citation to the specific fetched
+    reference file and line-level behavior it was checked against, not
+    merely asserted. The distinction between this function's own
+    check-then-normalize fallback and a bare, unconditional call to
+    `Quat::normalize` is documented and pinned by a dedicated test, so a
+    future refactor that "simplifies" this function by dropping the outer
+    guard would fail a test rather than silently changing behavior. All
+    pre-existing tests pass unchanged.
+  - **Verification plan.** 1 new `integrate.rs` test:
+    `integrate_transform_preserves_a_degenerate_orientation_instead_of_snapping_to_identity`
+    passes a deliberately degenerate (all-zero) orientation as input and
+    asserts the function returns that same degenerate value back unchanged
+    — not `Quat::IDENTITY` — confirming the fallback branch's real,
+    load-bearing purpose rather than merely confirming it doesn't panic.
+    All 275 of `rb_physics_bullet`'s pre-existing tests (as of `FR-044`)
+    pass unchanged. 1 new test, bringing the crate to 276 total (+1 over
+    `FR-044`'s 275).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3823,6 +3907,31 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.45.0 (2026-08-31): FR-045 added and investigated (`integrate.rs`
+  reference validation) — fetched and read Bullet's real
+  `btRigidBody.cpp`/`.h`, `btTransformUtil.h`, `btQuaternion.h`, and
+  `btScalar.h` to check every Bullet-reference claim `integrate.rs`'s own
+  doc comments make. Confirmed `apply_damping`'s "Bullet's default"
+  claim (`BT_USE_OLD_DAMPING_METHOD` is never `#define`d anywhere in the
+  reference) and its exact formula; confirmed `integrate_velocities`'s
+  `MAX_ANGVEL` (`SIMD_HALF_PI`) and clamp formula byte-for-byte; confirmed
+  `integrate_transform`'s `ANGULAR_MOTION_THRESHOLD`, small-angle Taylor
+  coefficient (`1 / 48`), and sinc-based rotation-axis formula
+  byte-for-byte. Found one minor numeric difference (this port's
+  degenerate-quaternion guard uses `1e-12`, the reference's own
+  `SIMD_EPSILON` is `FLT_EPSILON` — about `1.19e-7` for `f32`, ~5 orders
+  of magnitude larger) — not adopted, both are far below any physically
+  realistic quaternion magnitude and behaviorally indistinguishable for
+  every reachable scenario. Found one more significant thing: this
+  function's own check-then-normalize fallback isn't defensive theater —
+  it's necessary to match Bullet's real fallback choice (preserve the
+  prior orientation on a degenerate result, never reset to identity),
+  which an unconditional `Quat::normalize` call would have silently gotten
+  wrong (that function's own generic guard substitutes `IDENTITY`
+  instead). Added 1 new `integrate.rs` test pinning this exact distinction
+  (`integrate_transform_preserves_a_degenerate_orientation_instead_of_snapping_to_identity`).
+  All 275 of `rb_physics_bullet`'s pre-existing tests (as of `FR-044`)
+  pass unchanged; 276 total (+1 over `FR-044`'s 275).
 - 0.44.0 (2026-08-31): FR-044 added and investigated (stale Non-goals
   correction) — this spec's own top-level "Non-goals (this increment)"
   section still carried a "Split impulse. This port always takes Bullet's
