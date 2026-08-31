@@ -362,6 +362,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `PhysicsWorld.bounded_walls`/`with_bounded_wall`, resolved for the ball
   and every car. Models a solid bounding volume, not a net mesh — no
   cloth/soft-body simulation added.
+- `rb_physics_bullet::solver`/`world` (`RB-PHYSICS-001-FR-030`) — a
+  combined multi-body solve: new `solver::resolve_dynamic_manifolds`
+  resolves every ball-vs-car and car-vs-car contact manifold in a step
+  together, sharing one `DeltaVelocity` accumulator per body index across
+  every manifold that body takes part in (via new helper `delta_pair_mut`),
+  instead of `PhysicsWorld::step` calling `resolve_contacts_between` once
+  per pair and fully applying each pair's own result before the next
+  pair's setup even read a body's velocity. Fixes the "3+ bodies mutually
+  touching in the same step" approximation (e.g. a car pinned between the
+  ball and another car) tracked since multi-car support was added. Static
+  contacts (ground/walls/curves/goal geometry) are unaffected — each
+  body's contact with static geometry never depended on another dynamic
+  body, so only the dynamic-vs-dynamic path needed the fix.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

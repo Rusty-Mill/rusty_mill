@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.29.0
+- Version: 0.30.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -36,9 +36,13 @@
   FR-029, a modeled bounded interior behind each goal window too — a
   solid bounding box (not a springy net mesh), stopping the ball or a car
   that passes through the window instead of letting it sail into
-  unbounded open space — implemented; a genuine net mesh, split impulse,
-  warm-starting, a combined multi-body solve, and constant calibration
-  are open follow-up work)
+  unbounded open space — implemented; and, since FR-030, every
+  ball-vs-car and car-vs-car contact touching in the same step is now
+  resolved by one shared, interleaved solve
+  (`solver::resolve_dynamic_manifolds`) instead of a sequence of fully
+  independent pairwise solves — implemented; a genuine net mesh, split
+  impulse, warm-starting, and constant calibration are open follow-up
+  work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -68,9 +72,12 @@ tangent directions) — resolving an entire ground-contact manifold together
 (`resolve_contacts`) or an entire two-dynamic-body manifold
 (`resolve_contacts_between`) — using a general 3x3 inverse inertia tensor
 (`RigidBody`/`Mat3`, see Architecture) shared by both shapes.
-`PhysicsWorld` carries `cars: Vec<RigidBody>` and resolves every
-ball-vs-car and car-vs-car pair each step, so `box_vs_box` now runs for
-real in a live scene, not just in isolation under a unit test. Each car
+`PhysicsWorld` carries `cars: Vec<RigidBody>` and, every step, collects
+every non-empty ball-vs-car and car-vs-car manifold and resolves all of
+them together in one shared, interleaved solve
+(`solver::resolve_dynamic_manifolds`, since FR-030), so `box_vs_box` now
+runs for real in a live scene, not just in isolation under a unit test.
+Each car
 also has a current `ControllerInput` (`PhysicsWorld::set_car_input`)
 driving ground throttle and steering forces/torques on it (`drive`
 module) — see FR-007 — plus a depletable boost resource
@@ -128,14 +135,6 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
 
 ## Non-goals (this increment)
 
-- **A combined multi-body solve.** Each ball-vs-car and car-vs-car pair is
-  resolved independently, one full `SOLVER_ITERATIONS` pass at a time, not
-  as a single simultaneous solve across every contact touching in the same
-  step. This is a real approximation once 3+ bodies are mutually touching
-  at once (e.g. a car pinned between the ball and another car) — Bullet's
-  actual solver interleaves constraints across an entire "island" of
-  touching bodies together. See `world::step`'s doc comment and Open
-  questions.
 - **Team structure, car limits, or any Rocket-League-specific scene
   policy.** `with_car` can be called any number of times; this crate
   itself imposes no cap (Rocket League's real max is 8, but that's a
@@ -1124,6 +1123,120 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   tangles in netting" behavior; this is a solid bounding volume standing
   in for the net's functional role (stopping the ball/car), nothing more
   (see Non-goals).
+- `RB-PHYSICS-001-FR-030` (combined multi-body solve, implemented): until
+  now, `PhysicsWorld::step` resolved every ball-vs-car and car-vs-car
+  contact manifold with its own independent call to
+  `solver::resolve_contacts_between` — each call ran its own full
+  `SOLVER_ITERATIONS` (10) Gauss-Seidel pass and applied the resulting
+  velocity change to both bodies before the next pair's setup even read a
+  body's velocity, so a body touching two others in the same step (e.g. a
+  car pinned between the ball and another car) never had both contacts
+  reasoned about together — the second-resolved pair's setup used the
+  first pair's already-finished result as if it were the honest starting
+  velocity, and could end up discarding almost all of the first contact's
+  effect (see Verification plan for the measured magnitude). This
+  requirement closes that gap with a new `solver::resolve_dynamic_manifolds(bodies: &mut [RigidBody], manifolds: &[(usize, usize,
+  Vec<Contact>)], dt: f32)`: it sets up rows for every manifold once (the
+  same per-contact `setup_two_body_rows` as before), gives every body
+  *index* that appears in at least one manifold its own `DeltaVelocity`
+  accumulator, and runs `SOLVER_ITERATIONS` iterations where *every*
+  iteration processes *every* manifold once, each manifold's rows reading
+  and updating the shared accumulators for its own two body indices —
+  only after all iterations finish does it apply each body's own
+  accumulated delta to its actual velocity, once. This is the real fix: a
+  shared, interleaved iteration budget across every dynamic-vs-dynamic
+  manifold touching in the scene that step, not a sequence of
+  fully-independent pairwise solves. A new helper,
+  `solver::delta_pair_mut(deltas: &mut [DeltaVelocity], a: usize, b:
+  usize) -> (&mut DeltaVelocity, &mut DeltaVelocity)`, is a
+  `split_at_mut`-based disjoint-borrow helper for arbitrary index pairs,
+  generalizing the `Vec::split_at_mut` trick `PhysicsWorld::step`'s
+  car-vs-car loop already used for the special case `b == a + 1`, so
+  multiple manifolds sharing a body index can also share that body's
+  single accumulator. The old `TwoBodyDelta` struct is removed:
+  `resolve_two_body_row` now takes two separate `&mut DeltaVelocity`
+  parameters (`delta_a`, `delta_b`) instead of one combined struct, which
+  is what makes sharing an accumulator across manifolds possible.
+  `resolve_contacts` (one dynamic body vs. static geometry) and
+  `resolve_contacts_between` (still present, used directly by
+  two-body-only callers and tests) are unchanged in their public
+  behavior — `resolve_contacts_between`'s internals were adjusted to use
+  two separate `DeltaVelocity`s instead of `TwoBodyDelta`, a pure refactor
+  matching the new shared-solver internals, not a behavior change. In
+  `world.rs`, `PhysicsWorld::step` no longer calls the two independent
+  loops (`for car in &mut self.cars { Self::resolve_dynamic_contact(&mut
+  self.ball, car, dt); }` then a nested car-vs-car loop, both through a
+  now-deleted private `resolve_dynamic_contact` helper); instead it builds
+  a `Vec<RigidBody>` (index 0 the ball, index `i+1` `self.cars[i]`),
+  collects every non-empty ball-vs-car and car-vs-car
+  `collision::contacts_between` result into a `Vec<(usize, usize,
+  Vec<Contact>)>`, calls `solver::resolve_dynamic_manifolds` on the whole
+  set once, then copies the resolved velocities back into `self.ball` and
+  `self.cars`.
+  - **Non-goals (this requirement).** Scoped strictly to dynamic-vs-dynamic
+    contacts. Static contacts — ground, arena walls, curves, corner
+    fillets, goal walls, and bounded walls — are deliberately *not* part
+    of this combined solve: each body's contact with static geometry only
+    depends on that one body, so resolving it independently loses no
+    cross-body information, and `resolve_contacts` is untouched. Split
+    impulse, warm-starting/sleeping, and the average-not-max
+    restitution/friction combine mode remain exactly as documented before
+    this requirement (see this spec's own Non-goals and Open questions) —
+    this requirement shares the iteration *budget* across manifolds, it
+    doesn't change what each contact row itself solves for.
+  - **Acceptance criteria.**
+    - `solver::resolve_dynamic_manifolds` runs `SOLVER_ITERATIONS`
+      iterations, each iteration visiting every manifold in the input
+      slice exactly once, before any body's velocity is updated from its
+      accumulated delta.
+    - Two (or more) manifolds that share a body index read and write that
+      body's *same* `DeltaVelocity` accumulator across iterations — never
+      a separate, independent one per manifold.
+    - `resolve_contacts` and `resolve_contacts_between`'s existing
+      public behavior (a single manifold solved against a static body, or
+      between exactly two dynamic bodies in isolation) is unchanged;
+      every pre-existing test exercising either function still passes
+      with no assertion changes.
+    - `PhysicsWorld::step` produces exactly one `solver::resolve_dynamic_manifolds` call per step covering every ball-vs-car and car-vs-car
+      manifold that step, not one call per pair.
+  - **Verification plan.** A dedicated solver-level test,
+    `solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`, and a world-level
+    end-to-end test,
+    `world::tests::a_ball_pinched_between_two_closing_cars_is_resolved_by_a_shared_multi_body_solve`, both build a left-right symmetric
+    "pinch": a ball (mass 1) exactly touching two identical cars (mass
+    180 each) closing in from opposite sides at equal (100 units/s)
+    speed, restitution zero throughout. The true simultaneous-solve
+    answer for this exact setup is all three bodies ending near zero
+    velocity (total momentum is exactly zero, and every body is mutually
+    constrained to the others). Measured results: resolving each pair
+    independently (the pre-FR-030 approach, reproduced directly by
+    calling `resolve_contacts_between` twice in sequence) leaves the ball
+    at around 98-99% of a single car's own closing speed (~98.9 units/s)
+    — as if the first-resolved contact's effect was almost entirely
+    discarded by the second; the new combined `resolve_dynamic_manifolds`,
+    at this crate's existing `SOLVER_ITERATIONS = 10`, leaves the ball
+    noticeably slower (~89.5 units/s in the isolated solver-level
+    measurement) — a real, measurable improvement, but *not* full
+    convergence to the true zero-velocity answer. This residual error at
+    only 10 iterations is a known, common limitation of projected
+    Gauss-Seidel iterative contact solvers for an extreme mass-ratio
+    "sandwiched" body configuration (a light body pinned between two much
+    heavier ones), not unique to this port. It was confirmed during test
+    design (not shipped as a change) that increasing the iteration count
+    substantially (verified manually with 300 iterations) converges the
+    combined solve's result much closer to the true zero-velocity answer,
+    while the old independent-pairwise approach's result does *not*
+    change at all no matter how many iterations each individual pairwise
+    call gets — proving the old approach's error is structural
+    (information genuinely thrown away), not an iteration-count
+    shortfall. Both tests assert the *direction and magnitude* of the
+    improvement (the combined result measurably slower/closer-to-centered
+    than the independent-pairwise result), not exact convergence to zero
+    — a deliberate, honest test-design choice, matching this project's
+    convention (see FR-025's, FR-027's, and FR-029's own entries above) of
+    not overclaiming what a test actually proves. New tests: 1 in
+    `solver.rs`, 1 in `world.rs` (net +2 tests over FR-029's 242, bringing
+    the crate to 244).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -1198,7 +1311,14 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   the static shape's actual geometry is irrelevant here, already baked into
   the caller's own `Contact` list); `resolve_contacts_between` — the same
   sequential-impulse math generalized to two dynamic bodies' shared contact
-  manifold.
+  manifold; `resolve_dynamic_manifolds` (since `RB-PHYSICS-001-FR-030`) —
+  the scene-wide entry point `PhysicsWorld::step` actually calls: every
+  ball-vs-car and car-vs-car manifold touching in a step shares one
+  interleaved `SOLVER_ITERATIONS`-iteration budget instead of each pair
+  getting its own fully independent `resolve_contacts_between`-style
+  solve, via a new `delta_pair_mut` disjoint-borrow helper letting
+  multiple manifolds that share a body index share that body's single
+  `DeltaVelocity` accumulator too.
 - `drive`: `apply_driven_forces` — couples a car's `ControllerInput` into
   ground throttle/steering forces and torques, a boost force/resource
   drain, a handbrake-driven temporary friction adjustment, a
@@ -1919,8 +2039,12 @@ ball-vs-car, or car-vs-car collision paths at all — the unit tests confirm
 internal physical consistency (a level box stays level, an anisotropic
 inertia tensor behaves correctly, a collision conserves momentum), not
 fidelity to a real car's actual resting/tumbling/hitting behavior, or to
-how many real cars are ever mutually touching at once (this port's
-one-pair-at-a-time solve, see Non-goals, is untested against that).
+how many real cars are ever mutually touching at once — this port's
+combined solve (`RB-PHYSICS-001-FR-030`) shares its iteration budget
+across every dynamic-vs-dynamic manifold touching in a step rather than
+solving each pair fully independently, but is itself only proven against
+a synthetic symmetric-pinch scenario, not real recorded multi-car
+contact data.
 `drive::apply_driven_forces`'s constants are even further from validated:
 `MAX_CAR_SPEED`, `MAX_BOOST`, `BOOST_ACCELERATION`, and `JUMP_SPEED` are
 commonly-cited community numbers, but `THROTTLE_ACCELERATION`,
@@ -2209,9 +2333,20 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 ## Open questions
 
 - A combined multi-body solve for bodies simultaneously touching more than
-  one other body (see Non-goals) — needs real recorded multi-car contact
-  data to know whether the current one-pair-at-a-time approximation
-  actually matters for fidelity, or is fine in practice; not started.
+  one other body is now implemented (see `RB-PHYSICS-001-FR-030`):
+  `solver::resolve_dynamic_manifolds` shares one interleaved
+  `SOLVER_ITERATIONS`-iteration budget across every dynamic-vs-dynamic
+  manifold touching in a step, instead of resolving each pair with its
+  own fully independent solve. What's still genuinely open: at this
+  crate's existing `SOLVER_ITERATIONS = 10`, an extreme mass-ratio
+  "sandwiched" configuration (measured directly by FR-030's own tests)
+  still doesn't fully converge to the true simultaneous-solve answer,
+  only measurably closer to it than the old independent-pairwise
+  approach — real recorded multi-car contact data would be needed to
+  know whether that residual error actually matters for fidelity in
+  practice, or whether raising `SOLVER_ITERATIONS` (confirmed manually to
+  converge much closer at 300 iterations, at obvious extra per-step cost)
+  is worth it before such data exists; not started.
 - Replicating real Rocket League's actual landing-assist trigger condition
   (proximity to the ground, via some raycast or distance query this port
   doesn't have) instead of the current continuous-whenever-airborne
@@ -2370,6 +2505,53 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.30.0 (2026-08-31): FR-030 added and implemented (combined multi-body
+  solve) — closes the "combined multi-body solve" Non-goal/Open question
+  this spec carried since FR-004: every ball-vs-car and car-vs-car
+  contact manifold touching in the same step used to be resolved by its
+  own independent call to `solver::resolve_contacts_between`, so a body
+  touching two others at once (e.g. a car pinned between the ball and
+  another car) never had both contacts reasoned about together — the
+  second-resolved pair's setup used the first pair's already-finished
+  result as its starting velocity, discarding almost all of the first
+  contact's effect. New `solver::resolve_dynamic_manifolds(bodies,
+  manifolds, dt)` shares one interleaved `SOLVER_ITERATIONS`-iteration
+  budget across every manifold at once — every iteration processes every
+  manifold once, each reading and updating the shared per-body-index
+  `DeltaVelocity` accumulator a new `solver::delta_pair_mut` helper
+  hands out (a `split_at_mut`-based disjoint-borrow generalization of the
+  `b == a + 1` trick `PhysicsWorld::step`'s car-vs-car loop already used)
+  — with velocities only applied once, after all iterations finish. The
+  old `TwoBodyDelta` struct is removed in favor of two separate
+  `DeltaVelocity` parameters on `resolve_two_body_row`, which is what
+  makes sharing an accumulator across manifolds possible;
+  `resolve_contacts`/`resolve_contacts_between`'s own public behavior is
+  unchanged (the latter's internals were adjusted to match, a pure
+  refactor). `PhysicsWorld::step` now builds one `Vec<RigidBody>` (ball
+  plus every car), collects every non-empty ball-vs-car/car-vs-car
+  manifold into one list, and resolves the whole scene's dynamic contacts
+  with a single `resolve_dynamic_manifolds` call per step, replacing the
+  two old independent loops and their now-deleted private
+  `resolve_dynamic_contact` helper. Static contacts (ground, arena walls,
+  curves, corner fillets, goal walls, bounded walls) are deliberately
+  untouched — each depends on only one body, so independent resolution
+  loses no cross-body information there. Measured via two new tests (1 in
+  `solver.rs`, 1 in `world.rs`, bringing the crate to 244 total): a
+  symmetric ball-between-two-closing-cars "pinch" whose true answer is
+  every body near zero velocity. The old independent-pairwise approach
+  left the ball at ~98-99% of a closing car's own speed (~98.9 units/s) —
+  the first contact's effect almost entirely discarded; the new combined
+  solve leaves it noticeably slower (~89.5 units/s at this crate's
+  existing `SOLVER_ITERATIONS = 10`) — a real, measurable improvement,
+  but not full convergence (confirmed, during test design only, to
+  converge much closer at 300 iterations, while the old approach's result
+  doesn't change at all regardless of iteration count — proving its error
+  is structural, not an iteration-count shortfall). Both tests
+  deliberately assert the direction/magnitude of the improvement, not
+  exact convergence to zero, matching this spec's practice of not
+  overclaiming what a test proves. Non-goals unaffected: split impulse,
+  warm-starting/sleeping, and the average-not-max restitution/friction
+  combine mode are exactly as documented before this requirement.
 - 0.29.0 (2026-08-31): FR-029 added and implemented (modeled goal
   interior) — closes the last remaining goal-cutout Non-goal repeated
   across FR-024 through FR-028: the goal-mouth window opened onto

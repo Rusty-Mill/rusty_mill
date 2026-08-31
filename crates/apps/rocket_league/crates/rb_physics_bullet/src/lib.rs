@@ -60,12 +60,19 @@
 //! 4 bounded side walls, 2 bounded roofs) so a ball or car passing through
 //! no longer sails into unbounded open space.
 //!
+//! Since `RB-PHYSICS-001-FR-030`, `world::step` resolves every
+//! ball-vs-car and car-vs-car manifold in a step together as one combined
+//! multi-body solve (`solver::resolve_dynamic_manifolds`), sharing one
+//! velocity-change accumulator per body across every manifold that body
+//! takes part in, rather than fully resolving and applying each pair
+//! independently before the next pair's setup even reads a body's velocity
+//! — the fix for a body (e.g. a car) mutually touching two others in the
+//! same step (see `world::step`'s own doc comment for what's still
+//! simplified relative to Bullet's actual interleaved-across-islands
+//! solver).
+//!
 //! Not yet in scope (tracked in `RB-PHYSICS-001`, not silently dropped):
-//! a combined multi-body solve across simultaneous contacts — `world::step`
-//! resolves each ball-vs-car and car-vs-car pair independently, one full
-//! solver pass at a time, which is an approximation once 3+ bodies are
-//! mutually touching in the same step (see `world`'s doc comment); split
-//! impulse; warm-starting/sleeping; a *net* inside the goal box beyond its
+//! split impulse; warm-starting/sleeping; a *net* inside the goal box beyond its
 //! own bounding walls (`RB-PHYSICS-001-FR-029` models the box's own solid
 //! boundary, not a springy/catching net mesh); and consuming a *recorded*
 //! input sequence — `PhysicsWorld::set_car_input` sets a car's current

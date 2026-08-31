@@ -14,6 +14,12 @@
 //!   (every constraint row carries both bodies' mass/inertia
 //!   contributions); `resolve_contacts` only got away with a one-body-only
 //!   version because a static plane's side of that math is always zero.
+//! - `resolve_dynamic_manifolds` (`RB-PHYSICS-001-FR-030`): every
+//!   dynamic-vs-dynamic manifold in the scene at once, sharing one
+//!   `DeltaVelocity` accumulator per body index across every manifold that
+//!   body takes part in — the combined multi-body solve
+//!   `resolve_contacts_between` alone can't give a body touching two others
+//!   in the same step (see its own doc comment).
 //!
 //! Deliberate, documented deviations from Bullet's actual solver (tracked
 //! as open follow-up work in `RB-PHYSICS-001`, not silently assumed away):
@@ -330,26 +336,6 @@ fn effective_mass_denom_two_body(
     )
 }
 
-/// Per-body accumulated velocity change for the two-body solver — the
-/// two-body analog of `DeltaVelocity`.
-struct TwoBodyDelta {
-    linear_a: Vec3,
-    angular_a: Vec3,
-    linear_b: Vec3,
-    angular_b: Vec3,
-}
-
-impl TwoBodyDelta {
-    fn zero() -> TwoBodyDelta {
-        TwoBodyDelta {
-            linear_a: Vec3::ZERO,
-            angular_a: Vec3::ZERO,
-            linear_b: Vec3::ZERO,
-            angular_b: Vec3::ZERO,
-        }
-    }
-}
-
 /// Two-body version of `setup_rows`. `combined_restitution` is passed in
 /// explicitly (rather than stashed on a copied body, as `resolve_contacts`
 /// does) since here there's no single "the body" to stash it on.
@@ -433,17 +419,21 @@ fn setup_two_body_rows(
 /// row's direction is body A's contribution minus body B's, and a solved
 /// impulse pushes A along `+direction` and B along `-direction` (Newton's
 /// third law) — matching `contacts_between`'s normal convention (points
-/// from B toward A).
+/// from B toward A). Takes each body's `DeltaVelocity` accumulator
+/// separately (rather than one combined struct) so `resolve_dynamic_manifolds`
+/// can share a single accumulator per body index across every manifold that
+/// body takes part in, not just the one pair currently being resolved.
 fn resolve_two_body_row(
     row: &mut TwoBodyRow,
     inv_mass_a: f32,
     inv_mass_b: f32,
-    delta: &mut TwoBodyDelta,
+    delta_a: &mut DeltaVelocity,
+    delta_b: &mut DeltaVelocity,
 ) {
-    let delta_vel_dot_n = row.direction.dot(&delta.linear_a)
-        + row.torque_axis_a.dot(&delta.angular_a)
-        - row.direction.dot(&delta.linear_b)
-        - row.torque_axis_b.dot(&delta.angular_b);
+    let delta_vel_dot_n = row.direction.dot(&delta_a.linear)
+        + row.torque_axis_a.dot(&delta_a.angular)
+        - row.direction.dot(&delta_b.linear)
+        - row.torque_axis_b.dot(&delta_b.angular);
 
     let mut delta_impulse = row.rhs - row.applied_impulse * row.cfm;
     delta_impulse -= delta_vel_dot_n * row.jac_diag_ab_inv;
@@ -459,10 +449,10 @@ fn resolve_two_body_row(
         row.applied_impulse = sum;
     }
 
-    delta.linear_a += row.direction * (inv_mass_a * delta_impulse);
-    delta.angular_a += row.angular_component_a * delta_impulse;
-    delta.linear_b -= row.direction * (inv_mass_b * delta_impulse);
-    delta.angular_b -= row.angular_component_b * delta_impulse;
+    delta_a.linear += row.direction * (inv_mass_a * delta_impulse);
+    delta_a.angular += row.angular_component_a * delta_impulse;
+    delta_b.linear -= row.direction * (inv_mass_b * delta_impulse);
+    delta_b.angular -= row.angular_component_b * delta_impulse;
 }
 
 /// Resolves an entire contact manifold (1 to 4 points — a box-vs-box face
@@ -490,13 +480,20 @@ pub fn resolve_contacts_between(
         .iter()
         .map(|c| setup_two_body_rows(a, b, c, combined_restitution, dt))
         .collect();
-    let mut delta = TwoBodyDelta::zero();
+    let mut delta_a = DeltaVelocity::zero();
+    let mut delta_b = DeltaVelocity::zero();
     let inv_mass_a = a.inv_mass();
     let inv_mass_b = b.inv_mass();
 
     for _ in 0..SOLVER_ITERATIONS {
         for rows in &mut manifold {
-            resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, &mut delta);
+            resolve_two_body_row(
+                &mut rows[0],
+                inv_mass_a,
+                inv_mass_b,
+                &mut delta_a,
+                &mut delta_b,
+            );
 
             let friction_limit = combined_friction * rows[0].applied_impulse;
             rows[1].lower_limit = -friction_limit;
@@ -504,15 +501,143 @@ pub fn resolve_contacts_between(
             rows[2].lower_limit = -friction_limit;
             rows[2].upper_limit = friction_limit;
 
-            resolve_two_body_row(&mut rows[1], inv_mass_a, inv_mass_b, &mut delta);
-            resolve_two_body_row(&mut rows[2], inv_mass_a, inv_mass_b, &mut delta);
+            resolve_two_body_row(
+                &mut rows[1],
+                inv_mass_a,
+                inv_mass_b,
+                &mut delta_a,
+                &mut delta_b,
+            );
+            resolve_two_body_row(
+                &mut rows[2],
+                inv_mass_a,
+                inv_mass_b,
+                &mut delta_a,
+                &mut delta_b,
+            );
         }
     }
 
-    a.linear_velocity += delta.linear_a;
-    a.angular_velocity += delta.angular_a;
-    b.linear_velocity += delta.linear_b;
-    b.angular_velocity += delta.angular_b;
+    a.linear_velocity += delta_a.linear;
+    a.angular_velocity += delta_a.angular;
+    b.linear_velocity += delta_b.linear;
+    b.angular_velocity += delta_b.angular;
+}
+
+/// Index of each body taking part in a `resolve_dynamic_manifolds` pair,
+/// paired with mutable access to its own `DeltaVelocity` accumulator without
+/// a duplicate-borrow error — the general (arbitrary `a`/`b`, not just
+/// `b == a + 1`) version of the `Vec::split_at_mut` trick
+/// `PhysicsWorld::step` already uses for its car-vs-car loop.
+fn delta_pair_mut(
+    deltas: &mut [DeltaVelocity],
+    a: usize,
+    b: usize,
+) -> (&mut DeltaVelocity, &mut DeltaVelocity) {
+    assert_ne!(a, b, "a body cannot form a contact manifold with itself");
+    if a < b {
+        let (left, right) = deltas.split_at_mut(b);
+        (&mut left[a], &mut right[0])
+    } else {
+        let (left, right) = deltas.split_at_mut(a);
+        (&mut right[0], &mut left[b])
+    }
+}
+
+/// Resolves every dynamic-vs-dynamic contact manifold in the scene (every
+/// ball-vs-car and car-vs-car pair with at least one contact this step) as
+/// one shared island solve, fixing `RB-PHYSICS-001-FR-030`'s "combined
+/// multi-body solve" gap: calling `resolve_contacts_between` once per pair,
+/// as `PhysicsWorld::step` did before this function existed, fully resolves
+/// and applies one pair's `SOLVER_ITERATIONS` iterations before the next
+/// pair's setup even reads a body's velocity — a body touching two others
+/// in the same step (e.g. a car pinned between the ball and another car)
+/// never has both contacts reasoned about together, only sequentially, each
+/// one seeing the other's already-*finished* correction rather than genuinely
+/// sharing the solve.
+///
+/// Here, every body index that takes part in at least one manifold gets its
+/// own `DeltaVelocity` accumulator (`deltas[i]`, indexed the same way as
+/// `bodies`), and every manifold's rows draw from and add to whichever two
+/// accumulators its own two body indices name — shared across the *whole*
+/// `SOLVER_ITERATIONS` loop, not just within one manifold's own rows, so a
+/// third body's contact genuinely participates in the same convergence as
+/// the other two, the way Bullet's real per-island solver does (see this
+/// module's own doc comment for what's still simplified relative to that:
+/// no split impulse, no warm-starting, average rather than max combine
+/// mode). `manifolds` is `(index_a, index_b, contacts)` triples indexing
+/// into `bodies`; omit a pair from `manifolds` entirely rather than passing
+/// it with an empty `contacts` (an empty manifold would still allocate a
+/// `DeltaVelocity`-touching no-op).
+///
+/// Static contacts (ground, arena walls, curves, goal geometry) are
+/// deliberately NOT part of this shared solve — each body's own contact
+/// with a *static* surface only depends on that one body, so resolving it
+/// independently (via `resolve_contacts`, unchanged) loses no cross-body
+/// information; the actual gap this function closes is specifically the
+/// dynamic-vs-dynamic case a static contact can't have.
+pub fn resolve_dynamic_manifolds(
+    bodies: &mut [RigidBody],
+    manifolds: &[(usize, usize, Vec<Contact>)],
+    dt: f32,
+) {
+    if manifolds.is_empty() {
+        return;
+    }
+
+    struct Manifold {
+        a: usize,
+        b: usize,
+        combined_friction: f32,
+        rows: Vec<[TwoBodyRow; 3]>,
+    }
+
+    let mut solved: Vec<Manifold> = manifolds
+        .iter()
+        .map(|(a, b, contacts)| {
+            let combined_restitution =
+                combine_restitution(bodies[*a].restitution, bodies[*b].restitution);
+            let combined_friction = combine_friction(bodies[*a].friction, bodies[*b].friction);
+            let rows = contacts
+                .iter()
+                .map(|c| setup_two_body_rows(&bodies[*a], &bodies[*b], c, combined_restitution, dt))
+                .collect();
+            Manifold {
+                a: *a,
+                b: *b,
+                combined_friction,
+                rows,
+            }
+        })
+        .collect();
+
+    let inv_masses: Vec<f32> = bodies.iter().map(RigidBody::inv_mass).collect();
+    let mut deltas: Vec<DeltaVelocity> = (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for m in &mut solved {
+            let inv_mass_a = inv_masses[m.a];
+            let inv_mass_b = inv_masses[m.b];
+            let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+            for rows in &mut m.rows {
+                resolve_two_body_row(&mut rows[0], inv_mass_a, inv_mass_b, delta_a, delta_b);
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+                rows[2].lower_limit = -friction_limit;
+                rows[2].upper_limit = friction_limit;
+
+                resolve_two_body_row(&mut rows[1], inv_mass_a, inv_mass_b, delta_a, delta_b);
+                resolve_two_body_row(&mut rows[2], inv_mass_a, inv_mass_b, delta_a, delta_b);
+            }
+        }
+    }
+
+    for (body, delta) in bodies.iter_mut().zip(deltas.iter()) {
+        body.linear_velocity += delta.linear;
+        body.angular_velocity += delta.angular;
+    }
 }
 
 #[cfg(test)]
@@ -728,6 +853,81 @@ mod tests {
             car.linear_velocity.x.abs() < 10.0,
             "expected the much heavier car to barely move, got {}",
             car.linear_velocity.x
+        );
+    }
+
+    /// Symmetric setup for `resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`:
+    /// a ball at the origin exactly touching two identical cars closing in
+    /// from either side at equal and opposite speed. Zero restitution and
+    /// exact (zero-penetration) contact throughout, same reasoning as
+    /// `touching_ball`, isolates the multi-body coupling this test checks
+    /// from restitution bounce and Baumgarte positional correction.
+    fn symmetric_pinch() -> (RigidBody, RigidBody, RigidBody) {
+        let half = Vec3::new(60.0, 30.0, 18.0);
+        let ball_radius = 92.75;
+        let gap = half.x + ball_radius;
+
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::ZERO);
+        ball.restitution = 0.0;
+        let mut left = RigidBody::car_box(half, 180.0, Vec3::new(-gap, 0.0, 0.0));
+        left.restitution = 0.0;
+        left.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+        let mut right = RigidBody::car_box(half, 180.0, Vec3::new(gap, 0.0, 0.0));
+        right.restitution = 0.0;
+        right.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
+        (ball, left, right)
+    }
+
+    #[test]
+    fn resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently(
+    ) {
+        // The real point of RB-PHYSICS-001-FR-030: a ball exactly, mutually
+        // touching two cars closing on it from opposite sides at equal
+        // speed is left-right symmetric, so a true simultaneous solve must
+        // leave it near stationary (both contacts equally constrain it,
+        // and total momentum is exactly zero). Resolving each pair to its
+        // own full, independent convergence — one call to
+        // `resolve_contacts_between` per pair, the pre-FR-030 shape of
+        // `PhysicsWorld::step` — can't see that: the *second* call's setup
+        // reads the ball's velocity only *after* the first pair's contact
+        // has already been fully solved and applied, so the ball ends up
+        // essentially adopting whichever car was resolved last (about 99%
+        // of that car's own closing speed), as if the first contact barely
+        // mattered. `resolve_dynamic_manifolds` shares one accumulator per
+        // body across both manifolds for the whole solve instead, so
+        // neither contact's information gets thrown away by the other —
+        // it doesn't fully converge to the true zero-velocity answer in
+        // just `SOLVER_ITERATIONS` iterations for this extreme a mass
+        // ratio (ball mass 1 vs. car mass 180 — a known, common limitation
+        // of projected Gauss-Seidel solvers for a light body sandwiched
+        // between two heavy ones, not unique to this port), but it must
+        // land measurably closer to it.
+        let (mut ball_a, mut left_a, mut right_a) = symmetric_pinch();
+        let contacts_left = contacts_between(&ball_a, &left_a);
+        resolve_contacts_between(&mut ball_a, &mut left_a, &contacts_left, 1.0 / 60.0);
+        let contacts_right = contacts_between(&ball_a, &right_a);
+        resolve_contacts_between(&mut ball_a, &mut right_a, &contacts_right, 1.0 / 60.0);
+        let independent_ball_speed = ball_a.linear_velocity.x.abs();
+
+        let (ball_b, left_b, right_b) = symmetric_pinch();
+        let mut bodies = vec![ball_b, left_b, right_b];
+        let manifolds = vec![
+            (0usize, 1usize, contacts_between(&bodies[0], &bodies[1])),
+            (0usize, 2usize, contacts_between(&bodies[0], &bodies[2])),
+        ];
+        resolve_dynamic_manifolds(&mut bodies, &manifolds, 1.0 / 60.0);
+        let combined_ball_speed = bodies[0].linear_velocity.x.abs();
+
+        assert!(
+            independent_ball_speed > 98.0,
+            "expected resolving each pair independently to leave the ball near a single car's \
+             own closing speed, got {independent_ball_speed}"
+        );
+        assert!(
+            combined_ball_speed < independent_ball_speed - 5.0,
+            "expected the combined solve to leave the ball measurably slower than resolving \
+             each pair independently, independent={independent_ball_speed}, \
+             combined={combined_ball_speed}"
         );
     }
 

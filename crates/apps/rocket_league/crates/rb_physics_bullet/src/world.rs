@@ -24,7 +24,11 @@ use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 /// every car also collides with the ball and with every other car
 /// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
-/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Each car also has a
+/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped; since
+/// `RB-PHYSICS-001-FR-030`, every such manifold in a step is resolved
+/// together as one combined multi-body solve
+/// (`solver::resolve_dynamic_manifolds`), not one independent pairwise
+/// solve per manifold (see `step`'s own doc comment). Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
 /// `ControllerInput::default()` — neutral — until set), a boost resource
 /// (`car_boost`, set via `set_car_boost`, starting full), a remembered base
@@ -434,33 +438,32 @@ impl PhysicsWorld {
         body.update_inertia_tensor();
     }
 
-    /// Detects and resolves the contact manifold, if any, between two
-    /// dynamic bodies already known not to alias — the shared step for
-    /// ball-vs-car and car-vs-car resolution.
-    fn resolve_dynamic_contact(a: &mut RigidBody, b: &mut RigidBody, dt: f32) {
-        let contacts = collision::contacts_between(a, b);
-        if !contacts.is_empty() {
-            solver::resolve_contacts_between(a, b, &contacts, dt);
-        }
-    }
-
     /// Advances the whole scene by `dt` seconds, matching
     /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
     /// every body's unconstrained velocity (for cars, including
     /// `drive::apply_driven_forces` from that car's current input), then
-    /// detect and resolve every contact (ground and wall contacts for
-    /// every body, then every ball-vs-car pair, then every car-vs-car
-    /// pair), then integrate every body's transform — never resolving one
-    /// body's transform before another body's contacts have had a chance
-    /// to affect it.
+    /// detect and resolve every contact — ground and wall contacts for
+    /// every body first (each resolved independently, since a body's
+    /// contact with static geometry never depends on another dynamic
+    /// body), then every ball-vs-car and car-vs-car manifold together in
+    /// one combined solve (`solver::resolve_dynamic_manifolds`, since
+    /// `RB-PHYSICS-001-FR-030`) — then integrate every body's transform,
+    /// never resolving one body's transform before another body's contacts
+    /// have had a chance to affect it.
     ///
-    /// Car-vs-car and ball-vs-car pairs are resolved one pair at a time
-    /// (each running its own full `SOLVER_ITERATIONS` pass), not as one
-    /// combined multi-body solve across every simultaneous contact —
-    /// simpler than Bullet's actual interleaved-across-islands solver, and
-    /// a real approximation once 3+ bodies are mutually touching in the
-    /// same step (e.g. a car pinned between the ball and another car),
-    /// tracked as open follow-up in `RB-PHYSICS-001`, not hidden.
+    /// Before `RB-PHYSICS-001-FR-030`, car-vs-car and ball-vs-car pairs
+    /// were each resolved with their own independent call to
+    /// `solver::resolve_contacts_between`, fully converged and applied
+    /// before the next pair's setup even read a body's velocity — an
+    /// approximation once 3+ bodies were mutually touching in the same
+    /// step (e.g. a car pinned between the ball and another car), since
+    /// the shared body in two pairs never had both contacts reasoned about
+    /// together. `resolve_dynamic_manifolds` fixes that by sharing one
+    /// `DeltaVelocity` accumulator per body index across every manifold
+    /// that body takes part in — still simpler than Bullet's actual
+    /// interleaved-across-islands solver architecture (no persistent
+    /// islands, no warm-starting), but a genuine combined solve for the
+    /// step it runs, not a sequence of independent pairwise ones.
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
@@ -563,15 +566,38 @@ impl PhysicsWorld {
             }
         }
 
-        for car in &mut self.cars {
-            Self::resolve_dynamic_contact(&mut self.ball, car, dt);
-        }
+        // Combined multi-body solve (RB-PHYSICS-001-FR-030): collect every
+        // ball-vs-car and car-vs-car manifold with at least one contact,
+        // then resolve them all together via `solver::resolve_dynamic_manifolds`
+        // — one shared iteration budget per body, instead of each pair
+        // running its own full `SOLVER_ITERATIONS` pass and being applied
+        // before the next pair is even set up (see that function's own doc
+        // comment). Index 0 is the ball, index `i + 1` is `self.cars[i]`.
+        let mut bodies: Vec<RigidBody> = Vec::with_capacity(1 + self.cars.len());
+        bodies.push(self.ball);
+        bodies.extend(self.cars.iter().copied());
 
+        let mut manifolds: Vec<(usize, usize, Vec<collision::Contact>)> = Vec::new();
+        for (car_index, car) in self.cars.iter().enumerate() {
+            let contacts = collision::contacts_between(&self.ball, car);
+            if !contacts.is_empty() {
+                manifolds.push((0, car_index + 1, contacts));
+            }
+        }
         for i in 0..self.cars.len() {
             for j in (i + 1)..self.cars.len() {
-                let (left, right) = self.cars.split_at_mut(j);
-                Self::resolve_dynamic_contact(&mut left[i], &mut right[0], dt);
+                let contacts = collision::contacts_between(&self.cars[i], &self.cars[j]);
+                if !contacts.is_empty() {
+                    manifolds.push((i + 1, j + 1, contacts));
+                }
             }
+        }
+
+        solver::resolve_dynamic_manifolds(&mut bodies, &manifolds, dt);
+
+        self.ball = bodies[0];
+        for (car, resolved) in self.cars.iter_mut().zip(bodies.iter().skip(1)) {
+            *car = *resolved;
         }
 
         Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
@@ -930,6 +956,70 @@ mod tests {
             b_after.linear_velocity.x > 0.0,
             "expected car b to bounce back (positive x velocity), got {}",
             b_after.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn a_ball_pinched_between_two_closing_cars_is_resolved_by_a_shared_multi_body_solve() {
+        // RB-PHYSICS-001-FR-030: two cars closing symmetrically on a ball
+        // squeezed directly between them is the exact "3+ bodies mutually
+        // touching in the same step" scenario `step`'s own doc comment
+        // calls out. Before the combined solve existed, `step` resolved
+        // ball-vs-left to its own full convergence and applied it, then
+        // resolved ball-vs-right using the ball's already-updated
+        // velocity — which, for this symmetric setup, left the ball at
+        // ~99% of the closing speed of whichever car was resolved *last*,
+        // as if the first car's contact had barely happened at all (see
+        // `solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+        // for the isolated before/after numbers this test's threshold is
+        // drawn from). All three bodies float clear of the ground with
+        // gravity zeroed, isolating the three-body contact this test
+        // checks.
+        let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let ball_radius = 92.75;
+        let gap = car_half_extents.x + ball_radius;
+
+        let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(0.0, 0.0, 500.0));
+        ball.restitution = 0.0;
+
+        let mut left = RigidBody::car_box(car_half_extents, 180.0, Vec3::new(-gap, 0.0, 500.0));
+        left.restitution = 0.0;
+        left.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+
+        let mut right = RigidBody::car_box(car_half_extents, 180.0, Vec3::new(gap, 0.0, 500.0));
+        right.restitution = 0.0;
+        right.linear_velocity = Vec3::new(-100.0, 0.0, 0.0);
+
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_car(left)
+            .with_car(right);
+        world.gravity = Vec3::ZERO;
+
+        world.step(1.0 / 60.0);
+
+        // A perfectly symmetric pinch's true simultaneous-solve answer is
+        // the ball (and both cars) ending near zero net velocity — total
+        // momentum is exactly zero and every body is mutually constrained
+        // to the others. This port's 10-iteration Gauss-Seidel solve
+        // doesn't fully converge to that in one step for such an extreme
+        // mass ratio (ball mass 1 vs. car mass 180) — a known, common
+        // limitation of projected Gauss-Seidel contact solvers for
+        // "sandwiched" configurations, not unique to this port — but it
+        // must land meaningfully closer to it than resolving each pair to
+        // full, independent convergence would (~99% of a single car's own
+        // closing speed, i.e. > 98 units/s, matching the isolated
+        // solver-level test).
+        assert!(
+            world.ball.linear_velocity.x.abs() < 95.0,
+            "expected the combined solve to leave the pinched ball noticeably slower than a \
+             single car's own closing speed, got vx={}",
+            world.ball.linear_velocity.x
+        );
+        assert!(
+            world.ball.position.x.abs() < 10.0,
+            "expected the symmetrically pinched ball to stay near-centered rather than being \
+             flung toward whichever car happened to be resolved last, got x={}",
+            world.ball.position.x
         );
     }
 

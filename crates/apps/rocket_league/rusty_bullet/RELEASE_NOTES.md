@@ -6,6 +6,64 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Combined multi-body solve
+**2026-08-31** · PR pending · commit pending
+
+- **`PhysicsWorld::step` now resolves every ball-vs-car and car-vs-car
+  contact manifold together as one combined multi-body solve**, instead of
+  resolving each pair independently and fully applying it before the next
+  pair's setup even reads a body's velocity — closing the "3+ bodies
+  mutually touching in the same step" approximation this project has
+  tracked since multi-car support first landed (e.g. a car pinned between
+  the ball and another car).
+- **New `solver::resolve_dynamic_manifolds`** takes every dynamic-vs-dynamic
+  manifold in the scene at once (`(body_index_a, body_index_b, contacts)`
+  triples into a shared `bodies` slice) and gives every body index that
+  takes part in at least one manifold its own `DeltaVelocity` accumulator,
+  shared across every manifold that body is in for the whole
+  `SOLVER_ITERATIONS` loop — a real shared island solve, not a sequence of
+  independent pairwise ones. New helper `delta_pair_mut` generalizes the
+  `Vec::split_at_mut` disjoint-borrow trick `PhysicsWorld::step`'s
+  car-vs-car loop already used (previously only for adjacent indices) to
+  arbitrary index pairs. `resolve_contacts_between`'s old `TwoBodyDelta`
+  struct is gone — `resolve_two_body_row` now takes each body's
+  `DeltaVelocity` separately, which is what makes sharing one accumulator
+  across manifolds possible.
+- **`PhysicsWorld::step` rewired**: the old per-pair `resolve_dynamic_contact`
+  helper (and its two call-site loops) is replaced with collecting every
+  non-empty ball-vs-car/car-vs-car manifold into indices against a
+  `[ball, car0, car1, ...]` body list, one call to
+  `resolve_dynamic_manifolds`, then copying the resolved velocities back
+  out. Static contacts (ground, arena walls, curves, corner fillets, goal
+  walls, bounded walls) are deliberately unchanged — a body's contact with
+  static geometry never depends on another dynamic body, so resolving it
+  independently loses no information; only the dynamic-vs-dynamic path
+  needed the fix.
+- **Measured, not just assumed, improvement**: a left-right symmetric
+  "pinch" test (a ball exactly touching two identical, much heavier cars
+  closing in from opposite sides at equal speed, restitution zero
+  throughout) has a true simultaneous-solve answer of all three bodies
+  ending near zero velocity (total momentum is exactly zero). Resolving
+  each pair independently left the ball at ~99% of a single car's own
+  closing speed — as if the first-resolved contact's effect was almost
+  entirely discarded by the second. The combined solve, at this crate's
+  existing 10 solver iterations, leaves the ball measurably slower
+  (~89.5 vs. ~98.9 units/s in the isolated measurement) but doesn't fully
+  converge to zero in that few iterations — a known, common limitation of
+  projected Gauss-Seidel solvers for a light body sandwiched between two
+  much heavier ones, confirmed (not shipped as a change) by checking that
+  many more iterations converge the combined solve's result much closer to
+  zero, while the independent-pairwise approach's result doesn't change at
+  all no matter how many iterations each individual pairwise call gets —
+  proof the old approach's error was structural, not an iteration-count
+  shortfall.
+- 2 new tests: `solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`
+  and `world::tests::a_ball_pinched_between_two_closing_cars_is_resolved_by_a_shared_multi_body_solve`.
+  244 tests total in `rb_physics_bullet` (+2 over `RB-PHYSICS-001-FR-029`'s
+  242).
+
+---
+
 ## Modeled goal interior
 **2026-08-31** · [PR #67](https://github.com/baileyrd/rusty_bullet/pull/67) · `9b69c0c`
 
