@@ -44,15 +44,10 @@ rustls = { version = "0.23", default-features = false, features = [
 # whole job is naming trust policies, not reimplemented here. Pinned to a
 # specific rev, same convention as `platform` below.
 rusty_tls = { path = "../rusty_tls", optional = true }
-# Pinned to a specific commit (rustils' PAL group v0.8.0 — CSPRNG,
-# Sandbox, and the Net raw-fd/non-blocking escape hatch have all landed
-# as of this rev) rather than tracking `main` — a bare SHA carries the
-# same guarantee as a tag, per rustils' docs/versioning.md §3, which
-# also documents this pinning rule. Bumped from v0.6.0 (05fda987);
-# nothing in this crate's own `_with_csprng`/`platform_net` code needed
-# anything past v0.6.0, but keeping the pin current avoids drifting
-# further behind before the next real need shows up.
-platform = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
+# `rustils` is now a merged sibling in this workspace -- plain path
+# dependency (previously a pinned git rev), same as every other pin
+# retired in this series.
+platform = { path = "../rustils/crates/platform", optional = true }
 rusty_wire = { path = "../rusty_wire" }
 rusty_ansder = { path = "../rusty_ansder" }
 # Test-only, despite living in [dependencies] rather than
@@ -63,7 +58,7 @@ rusty_ansder = { path = "../rusty_ansder" }
 # fetch_tgt_with_csprng/fetch_ap_req_with_csprng against a real (if
 # mock) Csprng — never re-exported, never a runtime dependency of the
 # shipped library.
-platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
+platform-mock = { path = "../rustils/crates/platform-mock", optional = true }
 # Example-only, same reasoning as platform-mock above: `[[example]]`
 # targets pull from [dependencies], not [dev-dependencies] (which can't
 # be optional), so this is how `examples/serve.rs` gets a concrete
@@ -72,7 +67,7 @@ platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "5251808971
 # non-Linux targets (`#![cfg(target_os = "linux")]` at its root) rather
 # than a compile error, so `serve`'s own non-Linux fallback path builds
 # cleanly everywhere this pin resolves.
-platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
+platform-linux = { path = "../rustils/crates/platform-linux", optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP

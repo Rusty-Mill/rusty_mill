@@ -5914,6 +5914,19 @@ name = "rusty_oauth"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_rdp"
+version = "0.1.0"
+dependencies = [
+ "platform 0.27.0",
+ "platform-linux 0.27.0",
+ "platform-mock 0.27.0",
+ "rustls",
+ "rusty_ansder",
+ "rusty_tls",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_regx"
 version = "0.5.0"
 dependencies = [
