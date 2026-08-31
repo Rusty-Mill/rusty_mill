@@ -335,6 +335,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   contact), not a full convex-vs-curved-surface narrow phase.
   `StaticGoalWall`/`contacts_vs_goal_wall` is unaffected — a goal wall
   isn't a curved fillet, so a car still can't drive into a goal.
+- `rb_physics_bullet::collision` (`RB-PHYSICS-001-FR-028`) — a car can
+  actually drive into a goal now: new `collision::box_vs_goal_wall` tests
+  each of a box's 8 corners against `StaticGoalWall`'s window (a corner
+  inside the window contributes no contact, mirroring
+  `sphere_vs_goal_wall`'s pass-through rule per corner instead of once for
+  the ball's single center point); `contacts_vs_goal_wall` now dispatches
+  a `Shape::Box` to it instead of falling straight through to an
+  unwindowed `contacts_vs_plane`. A car only partly lined up with the
+  window gets a real partial block — the corners still outside it still
+  register a contact. No `PhysicsWorld::step` changes needed, same as
+  FR-027 — `resolve_goal_wall_contact` already ran for every car. Goal
+  interior/net still not modeled — the goal opens onto open space for a
+  car too, not a bounded volume.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

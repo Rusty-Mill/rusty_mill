@@ -500,11 +500,11 @@ fn signed_pair_axis(raw_axis: Vec3, third_normal: Vec3) -> Vec3 {
 /// used. Everywhere outside the window this behaves exactly like the
 /// `plane` it wraps; inside it, `collision::contacts_vs_goal_wall`
 /// generates no contact at all for a sphere (the ball), letting it pass
-/// straight through into the goal. A box (car) is deliberately unaffected
-/// by the window — see `contacts_vs_goal_wall`'s own doc comment — so
-/// this struct carries no separate `restitution`/`friction` of its own;
-/// `plane`'s already do the job for both the windowed (ball) and
-/// unwindowed (car) cases.
+/// straight through into the goal — and, since `RB-PHYSICS-001-FR-028`,
+/// the same per-corner for a box (car), so a car can drive into the goal
+/// too. This struct carries no separate `restitution`/`friction` of its
+/// own; `plane`'s already do the job both inside and outside the window,
+/// for either shape.
 ///
 /// The window itself is defined in the plane's own local 2D coordinate
 /// system (`u_axis`/`v_axis`, both unit vectors perpendicular to `plane.

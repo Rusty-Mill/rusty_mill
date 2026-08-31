@@ -32,9 +32,10 @@
 //! a car too, approximated via the car's own 8 corners rather than a full
 //! convex-vs-curve narrow phase; see `collision::box_vs_quarter_pipe`'s own
 //! doc comment), and windowed goal walls (`with_goal_wall`, a
-//! `StaticGoalWall` each — unlike the fillets, a car sees the same solid
-//! wall it always has, only the ball can pass through the window; see
-//! `collision::contacts_vs_goal_wall`'s own doc comment); `arena` builds
+//! `StaticGoalWall` each — since `RB-PHYSICS-001-FR-028`, both the ball and
+//! a car can pass through the window, the car via the same per-corner
+//! approach FR-027 established; see `collision::contacts_vs_goal_wall`'s
+//! own doc comment); `arena` builds
 //! Rocket League's actual standard-arena octagonal footprint, a ceiling, an
 //! actual goal-mouth opening in each back wall, and all 30 edge fillets
 //! plus 20 compound-corner fillets throughout its vertical boundary from
@@ -56,12 +57,10 @@
 //! resolves each ball-vs-car and car-vs-car pair independently, one full
 //! solver pass at a time, which is an approximation once 3+ bodies are
 //! mutually touching in the same step (see `world`'s doc comment); split
-//! impulse; warm-starting/sleeping; a car actually driving into a goal
-//! (`collision::contacts_vs_goal_wall` deliberately ignores the window for a
-//! box — see its own doc comment; unlike fillet deflection, resolved by
-//! `RB-PHYSICS-001-FR-027`, a goal wall isn't a curved fillet, so that
-//! generalization doesn't touch it); a modeled goal interior/net beyond the
-//! cutout itself; and consuming a *recorded* input sequence —
+//! impulse; warm-starting/sleeping; a modeled goal interior/net beyond the
+//! cutout itself (since `RB-PHYSICS-001-FR-028`, a car can drive into a
+//! goal, just like the ball — but the goal opens onto open space, not a
+//! bounded net volume); and consuming a *recorded* input sequence —
 //! `PhysicsWorld::set_car_input` sets a car's current input (persisting
 //! until changed), but nothing yet drives that from real `RB-VERIFY-002`
 //! capture data frame-by-frame.

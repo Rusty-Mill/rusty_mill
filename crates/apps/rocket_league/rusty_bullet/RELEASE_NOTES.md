@@ -6,6 +6,46 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Car actually driving into a goal
+**2026-08-31** · PR pending · commit pending
+
+- **A car (box) can now actually drive into a goal**, closing the last
+  goal-related Non-goal repeated across `RB-PHYSICS-001-FR-024` through
+  `FR-027` — until now, `collision::contacts_vs_goal_wall` sent a car
+  straight through to an unwindowed `contacts_vs_plane`, so it always
+  collided with the full, solid back wall even though the ball already
+  passed through the goal-mouth window.
+- **New `collision::box_vs_goal_wall`** tests each of a box's 8 corners
+  individually against `StaticGoalWall::contains_in_window` — a corner
+  whose own projection falls inside the window contributes no contact at
+  all, the same pass-through rule `sphere_vs_goal_wall` already applies to
+  the ball's single center point, applied per corner instead. A corner
+  outside the window behaves exactly like an ordinary `box_vs_plane`
+  corner test.
+- **A real emergent behavior, not a separate feature**: a car only partly
+  lined up with the window (straddling one of its edges) gets a genuine
+  partial block — the corners still outside the window register contacts
+  and stop the car there, while the corners inside register none — rather
+  than the all-or-nothing result a single-point sphere test necessarily
+  produces.
+- **`contacts_vs_goal_wall` now dispatches a `Shape::Box` to
+  `box_vs_goal_wall`** instead of falling through to `contacts_vs_plane`.
+  No `PhysicsWorld::step` changes were needed — exactly like FR-027's own
+  discovery, `resolve_goal_wall_contact` was already being called for
+  every car in the scene (it always needed the wall's plain-plane
+  collision even before this fix).
+- **Still not modeled**: a modeled goal interior/net — the goal opens onto
+  open, unbounded space beyond the back wall for a car now too, not a
+  bounded volume. Tracked as separate follow-up work.
+- 3 new tests in `collision.rs` (replacing 1 obsolete "ignores the window
+  entirely" regression test) and 2 new tests in `world.rs` (replacing 1
+  obsolete "still stopped by the back wall" regression test), including a
+  live end-to-end proof that a car fired at the goal-mouth center actually
+  passes the back wall. 221 tests total in `rb_physics_bullet` (+3 over
+  `RB-PHYSICS-001-FR-027`'s 218).
+
+---
+
 ## Car deflection by curved fillets
 **2026-08-31** · [PR #63](https://github.com/baileyrd/rusty_bullet/pull/63) · `f13e5f5`
 
