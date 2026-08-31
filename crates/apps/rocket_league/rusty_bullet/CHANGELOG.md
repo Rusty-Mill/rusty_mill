@@ -431,6 +431,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   own `btSolverBody::writebackVelocity`. Wired into `resolve_contacts`,
   `resolve_contacts_between`, and `resolve_dynamic_manifolds` with zero
   call-site changes anywhere outside `solver.rs`.
+- `rb_physics_bullet::solver` (`RB-PHYSICS-001-FR-035`) — warm-starting,
+  scoped to `resolve_dynamic_manifolds` only. A new `solver::ContactCache`
+  carries a manifold's converged real-channel impulses from one call to
+  the next, matched by each contact's approximate world position. A new
+  `warm_start_two_body_row` applies each row's cached impulse directly to
+  the manifold's shared `DeltaVelocity` accumulators before iterating
+  (merely setting `applied_impulse` would do nothing on its own, since
+  `GLOBAL_CFM` is always `0.0`). `resolve_dynamic_manifolds` gained a new
+  `caches: &mut HashMap<(usize, usize), ContactCache>` parameter, rebuilt
+  from only that call's manifolds each time. `PhysicsWorld` gains one
+  persistent `dynamic_manifold_caches` field. Deliberately not wired into
+  `resolve_contacts`/`resolve_contacts_between` — see that FR's own
+  Non-goals.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
