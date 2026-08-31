@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## `collision.rs` remaining closed-form shape pairings reference validation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [#101](https://github.com/baileyrd/rusty_bullet/pull/101) · `ed8c59e`
 
 - **Fetched and read Bullet's real `btConvexPlaneCollisionAlgorithm.cpp`/
   `.h`, `btSphereBoxCollisionAlgorithm.cpp`,
