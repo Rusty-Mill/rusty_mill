@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Goal post-crossbar corner fillets
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [#61](https://github.com/baileyrd/rusty_bullet/pull/61) · `c179716`
 
 - **Rounds off the two compound corners per goal where a post's own
   vertical edge fillet meets the crossbar's own horizontal edge fillet**,
