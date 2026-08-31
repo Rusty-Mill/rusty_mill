@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Box-vs-box reference validation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #91](https://github.com/baileyrd/rusty_bullet/pull/91) · `feabc32`
 
 - **Fetched and read Bullet's own `btBoxBoxDetector::dBoxBox` reference
   source directly** to validate two "reasonable, tested choices, never
