@@ -91,6 +91,7 @@ have landed so far.
 | [`rusty_ansder`](crates/rusty_ansder) | `crates/rusty_ansder` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine and ASN.1 DER parser, built on `rusty_wire`/`rusty_simd`/`rusty_regx`/`rusty_json`/`rusty_std` |
 | [`rusty_boot`](crates/rusty_boot) | `crates/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
 | [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
+| [`rusty_rdp`](crates/rusty_rdp) | `crates/rusty_rdp` | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
 | [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
@@ -542,6 +543,15 @@ integration tests spawn a real `dbus-daemon`/`gnome-keyring-daemon`, so
 this workspace's own CI now installs both on the Linux leg, matching
 `rustils`' own CI.
 
+`rusty_rdp` depends on `rusty_wire` and `rusty_ansder` (both already
+merged siblings) unconditionally via relative `path` dependencies, plus
+`rusty_tls` (also an already-merged sibling `path` dependency) and
+`rustils`' `platform`/`platform-mock`/`platform-linux` behind optional
+features. Those three `platform*` crates were previously pinned to a
+specific `rustils` git rev; retired to plain path dependencies now that
+`rustils` is a merged sibling here, same as every other pin retired in
+this series.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -604,6 +614,7 @@ behind one nested workspace),
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
 nested workspace),
 [`rusty_ansder`](https://github.com/baileyrd/rusty_ansder),
-[`rusty_boot`](https://github.com/baileyrd/rusty_boot), and
-[`rusty_whisper`](https://github.com/baileyrd/rusty_whisper) — merged one
-at a time, same process.
+[`rusty_boot`](https://github.com/baileyrd/rusty_boot),
+[`rusty_whisper`](https://github.com/baileyrd/rusty_whisper), and
+[`rusty_rdp`](https://github.com/baileyrd/rusty_rdp) — merged one at a
+time, same process.
