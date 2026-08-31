@@ -6,6 +6,36 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Fillet-radius calibration research
+**2026-08-31** · PR pending · commit pending
+
+- **A dedicated research pass looked for a real reference for
+  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`** — the two uncalibrated
+  placeholder constants FR-036's own constant-ambiguity research left
+  untouched — searching this port's established reference tier
+  (RocketSim/RLUtilities source, the RLBot wiki, RLGym's game values).
+- **Found exactly one candidate, and deliberately didn't adopt it**: the
+  RLBot wiki's uncited "wall bottom ramp radius: approx. 256, not
+  circular". It carries no citation, doesn't distinguish `FILLET_RADIUS`
+  from the corner walls' own distinctly bigger `CORNER_ARCH_RADIUS`,
+  explicitly disclaims being a true circular arc, and shares its numeral
+  with RLGym's own unrelated `RAMP_HEIGHT` (a ramp's height from the
+  ground, not a curve's radius) — suggesting the wiki entry may conflate
+  the two rather than independently measure a radius.
+- **Both constants remain unchanged (`292.0`/`750.0`) and genuinely
+  uncalibrated.** Adopting an unreliable number would trade one honestly
+  uncalibrated placeholder for a differently-uncertain one dressed up as a
+  citation — a worse outcome than leaving it alone.
+- **Genuinely closing this needs actual extracted collision-mesh geometry**
+  (e.g. via `ZealanL/RLArenaCollisionDumper`'s real triangle-mesh dump),
+  which needs the owner's own Windows/Rocket League environment — the same
+  blocker `RB-VERIFY-002-FR-001` already documents.
+- **No new tests** — documentation-only, no runtime value changed, matching
+  FR-031/FR-036's own precedent for constant-audit findings that don't
+  change a value. All 267 pre-existing tests pass unchanged.
+
+---
+
 ## Wall-jump corner disambiguation
 **2026-08-31** · PR pending · commit pending
 

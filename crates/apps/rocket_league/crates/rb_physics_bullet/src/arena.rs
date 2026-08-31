@@ -161,10 +161,37 @@ pub const CORNER_LENGTH: f32 = 1152.0;
 
 /// Uncalibrated placeholder: the radius of the curved fillet connecting a
 /// cardinal wall to the floor or ceiling (`standard_curves`). This port has
-/// no verified reference for Rocket League's actual transition radius —
+/// no *reliable* reference for Rocket League's actual transition radius —
 /// chosen only to be small relative to the field's own dimensions (a
 /// visibly local rounding of the corner, not a wall-length-scale ramp), not
 /// measured from real field mesh data.
+///
+/// `RB-PHYSICS-001-FR-040` looked for one and came back empty-handed, not
+/// for lack of trying: the only candidate found anywhere in this port's
+/// established reference tier (RocketSim/RLUtilities source, the RLBot
+/// wiki) is the RLBot wiki's "Useful Game Values" page, which states "Wall
+/// bottom ramp radius: Aprox. 256 (but they are not circular)" with no
+/// citation, no distinction between a cardinal wall's small rounding and a
+/// corner wall's own bigger arch (`CORNER_ARCH_RADIUS`), and an explicit
+/// admission the real geometry isn't a single circular arc at all — a much
+/// weaker source than the named, source-code-level constants
+/// `RB-PHYSICS-001-FR-036` was able to confirm for the ball radius and
+/// `arena::CEILING_Z` (RocketSim's own `ARENA_HEIGHT = 2048.f`, read
+/// directly from source). Worse, that same `256` is suspiciously identical
+/// to RLGym's own documented `RAMP_HEIGHT` constant — the vertical height
+/// of the corner boost-pad ramp *from the ground*, a completely different
+/// geometric quantity from a floor-seam curve's radius — raising real doubt
+/// that the wiki's "ramp radius" entry is an independent measurement at all
+/// rather than a mixed-up cross-reference to that unrelated height value.
+/// Adopting `256` here would trade one honestly-labeled uncalibrated
+/// placeholder for a differently-uncertain number dressed up as a real
+/// citation, so this port doesn't. Genuinely closing this gap needs actual
+/// extracted collision-mesh geometry (e.g. via `ZealanL/RLArenaCollisionDumper`,
+/// which dumps Rocket League's real triangle mesh, not a parameterized
+/// radius) — the same "requires the owner's own Windows/Rocket League
+/// environment" blocker `RB-VERIFY-002-FR-001` already documents, not
+/// something a wiki search alone can resolve. See `CORNER_ARCH_RADIUS`'s
+/// own doc comment for the same finding applied to that constant.
 pub const FILLET_RADIUS: f32 = 292.0;
 
 /// Uncalibrated placeholder: the radius of the curved arch connecting a
@@ -172,7 +199,7 @@ pub const FILLET_RADIUS: f32 = 292.0;
 /// the cardinal walls' own `FILLET_RADIUS` transition, since real Rocket
 /// League's corner-boost area is a noticeably bigger, more swept curve than
 /// a cardinal wall's small rounding, not just a scaled-down version of the
-/// same shape. This port has no verified reference for the real arch's
+/// same shape. This port has no *reliable* reference for the real arch's
 /// actual radius either — chosen only to read as visibly larger than
 /// `FILLET_RADIUS` in tests, not measured from real field mesh data. Also
 /// governs the 16 compound-corner fillets (`standard_corner_fillets`),
@@ -181,6 +208,15 @@ pub const FILLET_RADIUS: f32 = 292.0;
 /// where their axes cross (see `StaticCornerFillet::between_three_planes`'s
 /// own doc comment for why a mismatched radius there wouldn't blend
 /// cleanly).
+///
+/// `RB-PHYSICS-001-FR-040`'s research (see `FILLET_RADIUS`'s own doc
+/// comment for the full finding) found no reference for this constant
+/// specifically at all — the one wiki value it did turn up doesn't even
+/// claim to describe a corner wall's own distinctly bigger arch, only "wall
+/// bottom ramp radius" undifferentiated by wall type, so it isn't even a
+/// weak candidate for this constant the way it arguably is for
+/// `FILLET_RADIUS`. Still genuinely uncalibrated; still needs real
+/// extracted mesh data to close for real.
 pub const CORNER_ARCH_RADIUS: f32 = 750.0;
 
 // The whole point of RB-PHYSICS-001-FR-025: a corner wall's own
