@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Restitution/friction combine-mode reference validation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #93](https://github.com/baileyrd/rusty_bullet/pull/93) · `aa9938d`
 
 - **This project's own spec claimed, without ever having checked, that
   Bullet's default restitution/friction combine mode is `max` for both.**
