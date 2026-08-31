@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## `body.rs`/`mat3.rs` reference validation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [#99](https://github.com/baileyrd/rusty_bullet/pull/99) · `4d3de85`
 
 - **Fetched and read Bullet's real `btSphereShape.cpp`, `btBoxShape.cpp`,
   `btRigidBody.cpp`/`.h`, and `btMatrix3x3.h` directly** to check every
