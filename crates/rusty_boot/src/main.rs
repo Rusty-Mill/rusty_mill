@@ -20,16 +20,19 @@ pub fn main() {
     }
 
     let encoded_binary = rusty_codec::serialize(b"Sovereign Payload");
-    let _decoded = rusty_codec::deserialize(&encoded_binary).context("Failed decoding payload").unwrap();
+    let _decoded = rusty_codec::deserialize(&encoded_binary)
+        .context("Failed decoding payload")
+        .unwrap();
 
     // 2. Audio & Chat Jinja Engine Demonstration
     let audio_spec = rusty_audio::AudioSpec::whisper_spec();
     let _audio_cap = rusty_audio::AudioCapture::open_default(audio_spec).unwrap();
 
     let jinja_env = rusty_jinja::TemplateEnvironment::new("<|bos|>", "<|eos|>");
-    let prompt = jinja_env.render_chat_prompt(&[
-        rusty_jinja::ChatMessage::new("user", "Run sovereign stack evaluation."),
-    ]);
+    let prompt = jinja_env.render_chat_prompt(&[rusty_jinja::ChatMessage::new(
+        "user",
+        "Run sovereign stack evaluation.",
+    )]);
 
     // 3. Level 2: Graphics & Vulkan Hardware Layer
     let _vulkan = rusty_vulkan::Instance::new().unwrap();
@@ -37,5 +40,9 @@ pub fn main() {
     fb.clear(rusty_gpu::Color::rgb(20, 20, 20));
 
     // 4. Level 3/4: Sovereign Applications & Boot Complete
-    println!("🚀 Sovereign Rusty Mill Stack fully booted! Date: {}\nPrompt template ready ({} chars)", dt.to_iso8601(), prompt.len());
+    println!(
+        "🚀 Sovereign Rusty Mill Stack fully booted! Date: {}\nPrompt template ready ({} chars)",
+        dt.to_iso8601(),
+        prompt.len()
+    );
 }

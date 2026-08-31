@@ -88,6 +88,7 @@ have landed so far.
 | [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/rusty_config) | `crates/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`rusty_jinja`](crates/rusty_jinja) | `crates/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
+| [`rusty_boot`](crates/rusty_boot) | `crates/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
 | [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
 | [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
@@ -492,6 +493,16 @@ relative `path` dependencies, all already merged as siblings under this
 workspace's `crates/` — no dependency swap needed, just the subtree add
 plus workspace wiring.
 
+`rusty_boot` depends on twenty already-merged siblings (`rusty_wire`,
+`rusty_regx`, `rusty_json`, `rusty_compress`, `rusty_std`, `rusty_sync`,
+`rusty_time`, `rusty_err`, `rusty_codec`, `rusty_audio`, `rusty_jinja`,
+`rusty_tokio`, `rusty_http`, `rusty_lines`, `rusty_font`, `rusty_gui`,
+`rusty_gpu`, `rusty_vulkan`, `rush`, `rusty_term`, plus `rusty_libc`/
+`rusty_win32` behind target-cfg'd dependencies) via relative `path`
+dependencies — no swap needed, since it demonstrates the full merged
+stack booting end to end. Not `cargo fmt`-clean under this workspace's
+`rustfmt.toml`; reformatted with `cargo fmt --all`, no behavior change.
+
 `rustils` was its own nested Cargo workspace of eight crates (`platform`,
 `platform-mock`, `platform-parity`, `platform-linux`, `platform-windows`,
 `platform-bsd`, `winargv`, `coreutils`), de-inherited the same way as
@@ -568,6 +579,8 @@ behind one nested workspace),
 [`rusty_crypto_key`](https://github.com/baileyrd/rusty_crypto_key),
 [`rusty_ansi`](https://github.com/baileyrd/rusty_ansi),
 [`rusty_config`](https://github.com/baileyrd/rusty_config),
-[`rusty_jinja`](https://github.com/baileyrd/rusty_jinja), and
+[`rusty_jinja`](https://github.com/baileyrd/rusty_jinja),
 [`rustils`](https://github.com/baileyrd/rustils) (eight crates behind one
-nested workspace) — merged one at a time, same process.
+nested workspace), and
+[`rusty_boot`](https://github.com/baileyrd/rusty_boot) — merged one at a
+time, same process.

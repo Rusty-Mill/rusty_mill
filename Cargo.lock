@@ -5719,6 +5719,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_boot"
+version = "0.1.0"
+dependencies = [
+ "rush",
+ "rusty_audio",
+ "rusty_codec",
+ "rusty_compress",
+ "rusty_err",
+ "rusty_font",
+ "rusty_gpu",
+ "rusty_gui",
+ "rusty_http",
+ "rusty_jinja",
+ "rusty_json",
+ "rusty_libc",
+ "rusty_lines",
+ "rusty_regx",
+ "rusty_std",
+ "rusty_sync",
+ "rusty_term",
+ "rusty_time",
+ "rusty_tokio",
+ "rusty_vulkan",
+ "rusty_win32",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty_codec"
 version = "0.1.0"
 dependencies = [
