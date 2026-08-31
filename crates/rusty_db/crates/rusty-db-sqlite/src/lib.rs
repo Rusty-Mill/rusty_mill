@@ -1,11 +1,12 @@
 //! SQLite `Driver` implementation for rusty_db, built on `sqlx`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use sqlx::pool::PoolConnection;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{
     Column as _, Connection as _, Row as _, Sqlite, SqlitePool, TypeInfo as _, ValueRef as _,
 };
@@ -26,10 +27,25 @@ pub struct SqliteDriver {
 }
 
 impl SqliteDriver {
+    /// A pool's connections each open their own handle onto the same SQLite
+    /// file, so two of them writing at once is an ordinary occurrence, not
+    /// a bug -- WAL lets one proceed while readers keep going, and a real
+    /// `busy_timeout` (SQLite's own default is 0: fail immediately) makes
+    /// the other wait for the lock instead of surfacing `SQLITE_BUSY` to
+    /// the caller. Applied to every connection this driver opens.
+    fn apply_concurrency_defaults(options: SqliteConnectOptions) -> SqliteConnectOptions {
+        options
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(30))
+    }
+
     /// Connect using an sqlx-style URL, e.g. `sqlite::memory:` or `sqlite://path/to.db`.
     pub async fn connect(url: &str) -> Result<Self> {
+        let connect_options: SqliteConnectOptions = url
+            .parse()
+            .map_err(|e: sqlx::Error| Error::Connection(e.to_string()))?;
         let pool = SqlitePoolOptions::new()
-            .connect(url)
+            .connect_with(Self::apply_concurrency_defaults(connect_options))
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
         Ok(Self {
@@ -73,18 +89,18 @@ impl SqliteDriver {
                 })
             });
         }
-        let pool = match config.statement_cache_capacity {
-            Some(capacity) => {
-                let connect_options: SqliteConnectOptions = url
-                    .parse()
-                    .map_err(|e: sqlx::Error| Error::Connection(e.to_string()))?;
-                options
-                    .connect_with(connect_options.statement_cache_capacity(capacity))
-                    .await
-            }
-            None => options.connect(url).await,
-        }
-        .map_err(|e| Error::Connection(e.to_string()))?;
+        let connect_options: SqliteConnectOptions = url
+            .parse()
+            .map_err(|e: sqlx::Error| Error::Connection(e.to_string()))?;
+        let connect_options = Self::apply_concurrency_defaults(connect_options);
+        let connect_options = match config.statement_cache_capacity {
+            Some(capacity) => connect_options.statement_cache_capacity(capacity),
+            None => connect_options,
+        };
+        let pool = options
+            .connect_with(connect_options)
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
         Ok(Self {
             pool,
             metrics: Arc::new(PoolMetrics::new()),
