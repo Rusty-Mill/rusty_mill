@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.42.0
+- Version: 0.43.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -114,10 +114,21 @@
   sign-selection heuristic was built and empirically tested against a
   brute-force ground truth and found genuinely mixed (better for realistic
   shallow penetration, worse for deep penetration, neither reliably
-  optimal), so not adopted — investigated; static-contact warm-starting,
+  optimal), so not adopted — investigated; and, since FR-043, this spec's
+  own prior claim that Bullet's default restitution/friction combine mode
+  is `btMax` was checked directly against `btManifoldResult`'s real source
+  and found wrong — the actual default for both is an unclamped product
+  (`a * b`), with no `max` mode anywhere in the reference — this port's own
+  choice to keep averaging instead is now justified by a different, correct
+  reason: unlike the reference's product, average preserves the identity
+  that two surfaces sharing a coefficient combine back to that same
+  coefficient, which matters given most bodies here still share the same
+  uncalibrated placeholder value — investigated, doc-only correction, no
+  runtime behavior changed; static-contact warm-starting,
   `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
   of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
-  selection, and real-data calibration are open follow-up work)
+  selection, and real-data calibration (including which combine mode, if
+  either, actually matches real Rocket League) are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -2315,6 +2326,69 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     shipped" precedent `RB-PHYSICS-001-FR-030`'s own 300-iteration
     manual check established. All 273 of `rb_physics_bullet`'s
     pre-existing tests pass unchanged, since no production code changed.
+- `RB-PHYSICS-001-FR-043` (restitution/friction combine-mode reference
+  validation, investigated): this spec's own "Restitution/friction combine
+  mode" Open Question asserted, without ever having checked, that "Bullet's
+  actual default is `btMax` for both". This requirement fetched and read
+  Bullet's real `btManifoldResult::calculateCombinedRestitution`/
+  `calculateCombinedFriction` reference source directly (matching
+  `RB-PHYSICS-001-FR-036`/`FR-042`'s own method) and found that claim
+  simply wrong: the actual default for both is an **unclamped product**
+  (`a * b`; friction's own version additionally clamps the result to
+  `[-10, 10]`), with no `max` mode, no `sqrt`/geometric-mean, and no
+  per-pair combine-mode override anywhere in the reference short of a
+  custom `gContactAddedCallback` — confirmed by reading both
+  `btManifoldResult.h` and `btManifoldResult.cpp` in full, not a partial or
+  summarized read. This port's own `solver::combine_restitution`/
+  `combine_friction` already use average (`(a + b) * 0.5`), which was
+  previously justified by the now-corrected wrong claim; this requirement
+  re-examined whether that choice still holds up now that the real default
+  is known, and found a genuine, positive reason to keep it: unlike the
+  reference's product, average preserves the identity `combine(a, a) ==
+  a` — two surfaces sharing a coefficient combine back to that same
+  coefficient (`0.5` and `0.5` average to `0.5`; the reference's own product
+  gives `0.25`). This matters specifically for this port, where every
+  `RigidBody`/`StaticPlane`/`StaticQuarterPipe`/`StaticCornerFillet`/
+  `StaticGoalWall` variant's `Default` impl currently assigns the same
+  uncalibrated placeholder `0.5` for both coefficients (see `body.rs`) —
+  under the reference's real product default, the overwhelming majority of
+  this port's own contacts today would silently combine to `0.25`, a value
+  nobody chose or reasoned about, purely as an artifact of squaring an
+  already-arbitrary placeholder twice. Average avoids that specific
+  artifact; whether either formula is what real Rocket League itself
+  actually does remains genuinely unknown either way, and stays exactly as
+  open as it was before this requirement — this requirement only corrected
+  which of the two known quantities (this port's choice, and Bullet's real
+  default) was being compared, not which one is game-truthful.
+  - **Non-goals (this requirement).** Does not change
+    `combine_restitution`/`combine_friction`'s formula — average is kept,
+    not switched to product, for the identity-preservation reason above.
+    Does not calibrate `RB-PHYSICS-001-FR-005`'s real-data question of
+    which combine mode (if either) matches real Rocket League — still
+    blocked on `PHASE-0-EXIT`, unaffected by this requirement's own
+    reference-source correction. Does not touch any other Bullet-reference
+    claim elsewhere in this spec — only the one this requirement's own Open
+    Questions bullet made about combine mode.
+  - **Acceptance criteria.** The wrong "Bullet's default is `btMax`" claim
+    is replaced everywhere it appeared (this spec's Open Questions,
+    `solver.rs`'s module doc comment, `body.rs`'s field doc comment) with
+    the verified real default (an unclamped product), cited against the
+    actual fetched reference source. This port's own choice to diverge from
+    that real default carries a positive, stated justification (identity
+    preservation) rather than a justification built on the wrong claim.
+    `combine_restitution`/`combine_friction`'s own behavior is pinned by a
+    dedicated unit test each, independent of any full contact-resolution
+    scenario. All pre-existing tests pass unchanged, since no production
+    behavior changed.
+  - **Verification plan.** 2 new `solver.rs` tests:
+    `combine_restitution_preserves_a_uniform_coefficients_identity` and
+    `combine_friction_preserves_a_uniform_coefficients_identity`, each
+    asserting `combine(0.5, 0.5) == 0.5` (and a second same-value pair) and
+    explicitly asserting the result differs from the reference's own
+    `0.5 * 0.5` product, pinning the exact property this requirement's
+    justification depends on. All 273 of `rb_physics_bullet`'s pre-existing
+    tests (as of `FR-042`) pass unchanged. 2 new tests, bringing the crate
+    to 275 total (+2 over `FR-042`'s 273).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3640,8 +3714,19 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   data exists to calibrate one.
 - FR-005 above.
 - Restitution/friction combine mode (`rb_physics_bullet::solver` currently
-  averages; Bullet's actual default is `max` for both) — revisit once real
-  data exists to calibrate against.
+  averages) — `RB-PHYSICS-001-FR-043` checked this bullet's own prior claim
+  that Bullet's actual default is `max` directly against
+  `btManifoldResult`'s real source and found it wrong: the real default for
+  both is an unclamped **product** (`a * b`), not `max`, with no `max` mode
+  anywhere in the reference. This port's average is kept anyway, now for a
+  correct reason: it preserves the identity `combine(a, a) == a`, which the
+  reference's own product does not (`0.5 * 0.5 == 0.25`), and most bodies
+  here currently share the same uncalibrated placeholder coefficient (see
+  `body.rs`'s `Default` impls) — see `RB-PHYSICS-001-FR-043`'s own entry
+  for the full finding. Which formula (if either) actually matches real
+  Rocket League itself is unchanged by this correction and still needs real
+  recorded ball/ground behavior to calibrate against — revisit once
+  `RB-VERIFY-001`/`RB-VERIFY-002` data exists.
 - Sleeping is no longer an open item — `RB-PHYSICS-001-FR-037` implemented
   it, and with it the actual fix for the *bouncy* (restitution > 0) resting
   contact that used to never settle (`RB-PHYSICS-001-FR-034`'s split
@@ -3682,6 +3767,40 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.43.0 (2026-08-31): FR-043 added and investigated (restitution/friction
+  combine-mode reference validation) — this spec's own "Restitution/
+  friction combine mode" Open Question claimed, without ever having
+  checked, that Bullet's actual default combine mode is `btMax` for both.
+  Fetched and read `btManifoldResult.h`/`btManifoldResult.cpp` in full
+  (matching FR-036/FR-042's own method) and found that claim wrong: the
+  real default for both `calculateCombinedRestitution` and
+  `calculateCombinedFriction` is an unclamped **product** (`a * b`;
+  friction additionally clamps to `[-10, 10]`), with no `max` mode, no
+  geometric mean, and no per-pair override anywhere in the reference short
+  of a custom `gContactAddedCallback`. This port's own `solver::
+  combine_restitution`/`combine_friction` already use average
+  (`(a + b) * 0.5`), previously justified by the now-corrected wrong claim;
+  re-examined against the real default and kept anyway, now for a genuine
+  reason — average preserves the identity `combine(a, a) == a`
+  (`0.5` and `0.5` average to `0.5`), which the reference's own product
+  does not (`0.5 * 0.5 == 0.25`), and most bodies in this port currently
+  share the same uncalibrated placeholder `0.5` for both coefficients (see
+  `body.rs`'s `Default` impls), so the reference's real default would
+  silently combine the overwhelming majority of this port's own contacts
+  to `0.25` — a value nobody chose. Whether either formula matches real
+  Rocket League itself is unaffected by this correction and remains
+  genuinely open, needing `RB-VERIFY-001`/`RB-VERIFY-002` data — only which
+  of the two known quantities (this port's choice, and Bullet's real
+  default) was being compared got corrected. Updated the wrong claim
+  everywhere it appeared: this spec's Open Questions, `solver.rs`'s module
+  doc comment, and `body.rs`'s field doc comment. 2 new `solver.rs` tests
+  (`combine_restitution_preserves_a_uniform_coefficients_identity`,
+  `combine_friction_preserves_a_uniform_coefficients_identity`) pin
+  `combine_restitution`/`combine_friction`'s own behavior directly,
+  independent of any full contact-resolution scenario, asserting both the
+  identity property and that it differs from the reference's own product.
+  All 273 of `rb_physics_bullet`'s pre-existing tests (as of FR-042) pass
+  unchanged; 275 total (+2 over FR-042's 273).
 - 0.42.0 (2026-08-31): FR-042 added and investigated (box-vs-box reference
   validation) — fetched and read Bullet's own `btBoxBoxDetector::dBoxBox`
   reference source directly to validate two "reasonable, tested choices,

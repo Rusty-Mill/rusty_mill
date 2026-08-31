@@ -534,6 +534,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   sign-selection heuristic was built and empirically tested but found
   genuinely mixed against a brute-force ground truth, so not adopted. No
   new tests (documentation-only); all pre-existing tests pass unchanged.
+- `solver::combine_restitution`/`combine_friction`
+  (`RB-PHYSICS-001-FR-043`) — this project's own spec claimed Bullet's
+  default combine mode is `max`, without ever having checked; fetched and
+  read `btManifoldResult`'s real source and found that wrong (the real
+  default for both is an unclamped product, `a * b`). This port's average
+  combine mode is kept, now for a correct reason: it preserves the
+  identity `combine(a, a) == a`, which the reference's real product does
+  not, and most bodies here currently share the same uncalibrated
+  placeholder coefficient. Corrected the wrong claim in the spec,
+  `solver.rs`, and `body.rs`. 2 new tests pin the identity-preserving
+  behavior directly; all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

@@ -6,6 +6,36 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Restitution/friction combine-mode reference validation
+**2026-08-31** · PR pending · commit pending
+
+- **This project's own spec claimed, without ever having checked, that
+  Bullet's default restitution/friction combine mode is `max` for both.**
+  Fetched and read `btManifoldResult.h`/`btManifoldResult.cpp` in full and
+  found that claim wrong.
+- **Bullet's real default for both is an unclamped product (`a * b`)** —
+  friction's own version additionally clamps the result to `[-10, 10]` —
+  with no `max` mode, no geometric mean, and no per-pair override anywhere
+  in the reference short of a custom `gContactAddedCallback`.
+- **This port's own average combine mode is kept anyway, now for a correct
+  reason.** Average preserves the identity `combine(a, a) == a` (two
+  surfaces sharing a coefficient combine back to that coefficient), which
+  the reference's own product does not (`0.5 * 0.5 == 0.25`) — and most
+  bodies in this port currently share the same uncalibrated placeholder
+  `0.5` for both coefficients, so the reference's real default would
+  silently combine the overwhelming majority of this port's own contacts
+  to `0.25`, a value nobody chose.
+- **Whether either formula matches real Rocket League itself is
+  unaffected by this correction** and remains genuinely open, needing real
+  recorded ball/ground behavior to calibrate against — only the wrong
+  reference-fact claim, and this port's own justification for diverging
+  from the *correct* one, changed.
+- **2 new dedicated unit tests** pin `combine_restitution`/
+  `combine_friction`'s own identity-preserving behavior directly. All 273
+  pre-existing tests pass unchanged; 275 total.
+
+---
+
 ## Box-vs-box reference validation
 **2026-08-31** · [PR #91](https://github.com/baileyrd/rusty_bullet/pull/91) · `feabc32`
 
