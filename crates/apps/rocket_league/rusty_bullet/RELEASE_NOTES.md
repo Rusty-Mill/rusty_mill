@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Curved-fillet narrow-phase investigation
-**2026-08-31** · PR pending · commit pending
+**2026-08-31** · [PR #73](https://github.com/baileyrd/rusty_bullet/pull/73) · `51e633a`
 
 - **Investigated a claimed corner-testing under-detection bug for a car vs.
   a curved fillet, found it doesn't exist — no change to the narrow phase
