@@ -275,14 +275,18 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
         let weight = match info.dtype {
             0 => Weight::Dense(Tensor::from_vec(
                 &info.shape,
-                raw.chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                raw.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes(*c))
                     .collect(),
             )),
             1 => Weight::Dense(Tensor::from_vec(
                 &info.shape,
-                raw.chunks_exact(2)
-                    .map(|c| crate::model::f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
+                raw.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| crate::model::f16_to_f32(u16::from_le_bytes(*c)))
                     .collect(),
             )),
             t => {

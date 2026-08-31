@@ -528,7 +528,10 @@ struct PackedI8 {
 fn dequant_row_scalar(dtype: i32, raw: &[u8], out: &mut [f32]) {
     let bb = block_bytes(dtype).unwrap();
     let mut q = [0i8; QK];
-    for (block, o) in raw.chunks_exact(bb).zip(out.chunks_exact_mut(QK)) {
+    for (block, o) in raw
+        .chunks_exact(bb)
+        .zip(out.as_chunks_mut::<QK>().0.iter_mut())
+    {
         let (d, m) = unpack_block(dtype, block, &mut q);
         for l in 0..QK {
             o[l] = d * q[l] as f32 + m;

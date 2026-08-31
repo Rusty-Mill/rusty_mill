@@ -74,8 +74,10 @@ fn read_f32_vec(r: &mut impl Read, n: usize) -> io::Result<Vec<f32>> {
     let mut bytes = vec![0u8; n * 4];
     r.read_exact(&mut bytes)?;
     Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect())
 }
 
@@ -145,8 +147,10 @@ pub fn load_vad_model(r: &mut impl Read) -> io::Result<VadModel> {
                 let mut bytes = vec![0u8; n_elems * 2];
                 r.read_exact(&mut bytes)?;
                 bytes
-                    .chunks_exact(2)
-                    .map(|c| crate::model::f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| crate::model::f16_to_f32(u16::from_le_bytes(*c)))
                     .collect()
             }
             t => {

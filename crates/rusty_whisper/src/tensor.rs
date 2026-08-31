@@ -109,21 +109,14 @@ const LANES: usize = 8;
 #[inline]
 pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0.0f32; LANES];
-    let mut ca = a.chunks_exact(LANES);
-    let mut cb = b.chunks_exact(LANES);
-    for (xa, xb) in (&mut ca).zip(&mut cb) {
-        let xa: &[f32; LANES] = xa.try_into().unwrap();
-        let xb: &[f32; LANES] = xb.try_into().unwrap();
+    let (ca, ca_rem) = a.as_chunks::<LANES>();
+    let (cb, cb_rem) = b.as_chunks::<LANES>();
+    for (xa, xb) in ca.iter().zip(cb.iter()) {
         for l in 0..LANES {
             acc[l] += xa[l] * xb[l];
         }
     }
-    let tail: f32 = ca
-        .remainder()
-        .iter()
-        .zip(cb.remainder())
-        .map(|(x, y)| x * y)
-        .sum();
+    let tail: f32 = ca_rem.iter().zip(cb_rem).map(|(x, y)| x * y).sum();
     acc.iter().sum::<f32>() + tail
 }
 
