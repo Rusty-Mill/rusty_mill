@@ -81,15 +81,18 @@
 //! `collision::box_vs_quarter_pipe`'s own doc comment for exactly what
 //! that does and doesn't catch.
 //!
+//! Since `RB-PHYSICS-001-FR-028`, a car can drive into a goal too —
+//! `collision::contacts_vs_goal_wall`'s box path now tests each of the
+//! box's own 8 corners against the window (the same per-corner approach
+//! FR-027 established for curved geometry), rather than falling straight
+//! through to an unwindowed plane contact the way it did through FR-027.
+//!
 //! **Still not modeled**: the goal's own interior/net structure beyond the
-//! cutout itself (the ball passes into open space, not a bounded net
-//! volume); a car actually driving into the goal at all
-//! (`contacts_vs_goal_wall` deliberately ignores the window for a box —
-//! see its own doc comment, unaffected by FR-027 since a goal wall isn't a
-//! curved fillet); and any geometry finer than a single flat plane,
-//! single-radius edge fillet, or single-radius corner fillet per boundary
-//! segment (the real field mesh's corners and transitions are more
-//! complex than this). See `RB-PHYSICS-001`'s Non-goals.
+//! cutout itself (a ball or car passes into open space, not a bounded net
+//! volume); and any geometry finer than a single flat plane, single-radius
+//! edge fillet, or single-radius corner fillet per boundary segment (the
+//! real field mesh's corners and transitions are more complex than this).
+//! See `RB-PHYSICS-001`'s Non-goals.
 
 use crate::body::{StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe};
 use rb_domain::Vec3;
@@ -271,10 +274,10 @@ fn goal_wall(sign: f32) -> StaticGoalWall {
 
 /// Both goals' windowed back walls (`RB-PHYSICS-001-FR-024`) — 2
 /// `StaticGoalWall`s, one per `+-Y` back wall, each with a `GOAL_HALF_WIDTH`
-/// by `GOAL_HEIGHT` window centered on it. Only the ball is actually let
-/// through the window; a car sees the exact same solid wall it always has
-/// (see `StaticGoalWall`'s and `collision::contacts_vs_goal_wall`'s own
-/// doc comments).
+/// by `GOAL_HEIGHT` window centered on it. Both the ball and, since
+/// `RB-PHYSICS-001-FR-028`, a car too are let through the window (see
+/// `StaticGoalWall`'s and `collision::contacts_vs_goal_wall`'s own doc
+/// comments).
 pub fn standard_goal_walls() -> Vec<StaticGoalWall> {
     vec![goal_wall(1.0), goal_wall(-1.0)]
 }

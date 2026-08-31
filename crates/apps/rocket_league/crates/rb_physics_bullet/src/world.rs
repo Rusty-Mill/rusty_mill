@@ -75,12 +75,12 @@ pub struct PhysicsWorld {
     pub corner_fillets: Vec<StaticCornerFillet>,
     /// Windowed back walls with an actual goal-mouth opening
     /// (`RB-PHYSICS-001-FR-024`), added via `with_goal_wall` — empty by
-    /// default. Unlike `curves`/`corner_fillets`, both the ball *and* every
-    /// car are resolved against these (`collision::contacts_vs_goal_wall`'s
-    /// box path falls straight through to an ordinary, unwindowed plane
-    /// contact — see its own doc comment), so a car sees exactly the same
-    /// solid wall it always has; only the ball can actually pass through
-    /// the window into the goal.
+    /// default. Both the ball and every car are resolved against these;
+    /// since `RB-PHYSICS-001-FR-028`, a car passes through the window
+    /// exactly like the ball does (`collision::contacts_vs_goal_wall`'s box
+    /// path tests each corner against the window, same as the sphere's
+    /// single center-point test — see its own doc comment), so a car can
+    /// now actually drive into a goal.
     pub goal_walls: Vec<StaticGoalWall>,
     pub gravity: Vec3,
     elapsed_secs: f32,
@@ -199,9 +199,8 @@ impl PhysicsWorld {
     /// Adds one windowed back wall to the scene (`RB-PHYSICS-001-FR-024`) —
     /// callable more than once, same pattern as `with_wall`; a scene with
     /// no goal walls added (the default) behaves exactly as before they
-    /// existed. Unlike `with_curve`/`with_corner_fillet`, this affects
-    /// every car too, not just the ball — see `goal_walls`' own doc
-    /// comment for why that's not a regression.
+    /// existed. Deflects both the ball and, since `RB-PHYSICS-001-FR-028`,
+    /// a car too.
     pub fn with_goal_wall(mut self, goal_wall: StaticGoalWall) -> PhysicsWorld {
         self.goal_walls.push(goal_wall);
         self
@@ -348,11 +347,10 @@ impl PhysicsWorld {
     }
 
     /// Like `resolve_plane_contact`, but against a windowed back wall
-    /// (`RB-PHYSICS-001-FR-024`) — unlike `resolve_curve_contact`/
-    /// `resolve_corner_fillet_contact`, this is a real contact for a box
-    /// (car) too, since `collision::contacts_vs_goal_wall`'s box path
-    /// falls straight through to an ordinary plane contact, ignoring the
-    /// window entirely (see its own doc comment).
+    /// (`RB-PHYSICS-001-FR-024`) — resolved for a box (car) exactly like a
+    /// sphere (ball) since `RB-PHYSICS-001-FR-028`, via
+    /// `collision::contacts_vs_goal_wall`'s per-corner window treatment for
+    /// a box (see its own doc comment).
     fn resolve_goal_wall_contact(body: &mut RigidBody, wall: &StaticGoalWall, dt: f32) {
         let contacts = collision::contacts_vs_goal_wall(body, wall);
         if !contacts.is_empty() {
@@ -2420,15 +2418,48 @@ mod tests {
     }
 
     #[test]
-    fn a_car_is_still_stopped_by_the_standard_arenas_back_wall_at_the_goal_mouth() {
-        // Regression guard for the documented Non-goal: a car can't drive
-        // into the goal in this port (RB-PHYSICS-001-FR-024) -- a car aimed
-        // at the exact same goal-mouth position the test above fires the
-        // ball through should still be stopped by the wall, completely
-        // unaffected by the window (see `collision::contacts_vs_goal_wall`'s
-        // own doc comment for why).
+    fn a_car_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall() {
+        // The real end-to-end proof of RB-PHYSICS-001-FR-028: a car aimed
+        // straight through the same goal-mouth center position the ball
+        // test above uses, well clear of the window's own rounded edges,
+        // keeps going past the back wall's own y position instead of being
+        // stopped by it -- proof `box_vs_goal_wall`'s per-corner window
+        // treatment is live physical geometry for a car, not just a
+        // detection hack. Same 1.8s flight-duration bound as the ball's own
+        // equivalent test, for the same reason (see that test's own doc
+        // comment) -- a car's own small half-extents relative to the goal's
+        // real dimensions (`GOAL_HALF_WIDTH`/`GOAL_HEIGHT`) mean it clears
+        // the window with room to spare either way.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, -3000.0, 1000.0));
         let mut car = some_car(Vec3::new(0.0, 0.0, crate::arena::GOAL_HEIGHT * 0.5));
+        car.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
+
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.gravity = Vec3::ZERO;
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.8 / dt) as u32 {
+            world.step(dt);
+        }
+
+        assert!(
+            world.cars[0].position.y > crate::arena::BACK_WALL_Y + 1.0,
+            "expected the car to pass through the goal mouth rather than be stopped by the back \
+             wall, got y={}",
+            world.cars[0].position.y
+        );
+    }
+
+    #[test]
+    fn a_car_aimed_away_from_the_goal_mouth_is_still_stopped_by_the_back_wall() {
+        // Regression guard alongside the pass-through proof above: a car
+        // aimed at the solid part of the back wall, well outside the
+        // goal-mouth window's own half-width, is still stopped by it --
+        // `RB-PHYSICS-001-FR-028` only opens the window itself, it doesn't
+        // make the rest of the back wall driveable-through.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, -3000.0, 1000.0));
+        let solid_x = crate::arena::GOAL_HALF_WIDTH + 500.0;
+        let mut car = some_car(Vec3::new(solid_x, 0.0, 18.0));
         car.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
 
         let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
@@ -2441,8 +2472,7 @@ mod tests {
 
         assert!(
             world.cars[0].position.y < crate::arena::BACK_WALL_Y - 1.0,
-            "expected the car to be stopped by the back wall despite aiming at the goal mouth, \
-             got y={}",
+            "expected the car to be stopped by the solid part of the back wall, got y={}",
             world.cars[0].position.y
         );
     }

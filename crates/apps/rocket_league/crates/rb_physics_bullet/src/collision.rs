@@ -122,23 +122,70 @@ fn sphere_vs_goal_wall(position: Vec3, radius: f32, wall: &StaticGoalWall) -> Op
     sphere_vs_plane(position, radius, &wall.plane)
 }
 
-/// Dispatches a `StaticGoalWall`'s contact generation by shape
-/// (`RB-PHYSICS-001-FR-024`): a sphere (the ball) gets the windowed
-/// treatment (`sphere_vs_goal_wall`), while a box (a car) falls straight
-/// through to `contacts_vs_plane` against the wrapped `plane` --
-/// deliberately ignoring the window entirely, so a car collides with
-/// exactly the same solid, full-width wall it always has. Unlike
-/// `contacts_vs_quarter_pipe`/`contacts_vs_corner_fillet` (which do deflect
-/// a car now, since `RB-PHYSICS-001-FR-027`), a goal wall isn't a curved
-/// fillet, so that generalization doesn't touch this dispatch at all -- a
-/// car actually being able to drive into the goal remains a real,
-/// not-yet-implemented capability, not an oversight.
+/// Like `box_vs_plane`, but against a `StaticGoalWall`'s window
+/// (`RB-PHYSICS-001-FR-028`): each of the box's 8 corners is tested
+/// individually against `contains_in_window` — a corner whose own
+/// projection onto the plane's `u_axis`/`v_axis` falls inside the window
+/// contributes no contact at all (that corner passes straight through),
+/// exactly `sphere_vs_goal_wall`'s pass-through rule applied once per
+/// corner instead of once for the sphere's single center point. A corner
+/// outside the window behaves exactly like an ordinary `box_vs_plane`
+/// corner. This means a car driving squarely through the goal mouth (every
+/// corner inside the window) gets no contact at all and sails through,
+/// while a car only partly lined up with the window still catches a real
+/// contact on whichever corners are still outside it — the same "some
+/// corners collide, some don't" partial-block behavior a real car easing
+/// into a goal at an angle would produce, and the same per-corner
+/// approximation technique `box_vs_quarter_pipe`/`box_vs_corner_fillet`
+/// (`RB-PHYSICS-001-FR-027`) already established for curved geometry.
+fn box_vs_goal_wall(
+    position: Vec3,
+    orientation: Quat,
+    half_extents: Vec3,
+    wall: &StaticGoalWall,
+) -> Vec<Contact> {
+    let mut contacts = Vec::with_capacity(4);
+    for &sx in &[-1.0f32, 1.0] {
+        for &sy in &[-1.0f32, 1.0] {
+            for &sz in &[-1.0f32, 1.0] {
+                let local_corner = Vec3::new(
+                    sx * half_extents.x,
+                    sy * half_extents.y,
+                    sz * half_extents.z,
+                );
+                let world_corner = position + orientation.rotate(&local_corner);
+                if wall.contains_in_window(&world_corner) {
+                    continue;
+                }
+                let gap = wall.plane.signed_distance(&world_corner);
+                if gap <= CONTACT_PROCESSING_THRESHOLD {
+                    contacts.push(Contact {
+                        normal: wall.plane.normal,
+                        point: world_corner,
+                        penetration_depth: -gap,
+                    });
+                }
+            }
+        }
+    }
+    contacts
+}
+
+/// Dispatches a `StaticGoalWall`'s contact generation by shape: a sphere
+/// (the ball) gets the windowed treatment (`sphere_vs_goal_wall`), and,
+/// since `RB-PHYSICS-001-FR-028`, a box (a car) gets the equivalent
+/// per-corner windowed treatment (`box_vs_goal_wall`) instead of falling
+/// straight through to an unwindowed `contacts_vs_plane` the way it did
+/// through FR-027 — a car can now actually drive into a goal through the
+/// same window the ball already could pass through.
 pub fn contacts_vs_goal_wall(body: &RigidBody, wall: &StaticGoalWall) -> Vec<Contact> {
     match body.shape {
         Shape::Sphere { radius } => sphere_vs_goal_wall(body.position, radius, wall)
             .into_iter()
             .collect(),
-        Shape::Box { .. } => contacts_vs_plane(body, &wall.plane),
+        Shape::Box { half_extents } => {
+            box_vs_goal_wall(body.position, body.orientation, half_extents, wall)
+        }
     }
 }
 
@@ -1399,13 +1446,45 @@ mod tests {
     }
 
     #[test]
-    fn box_vs_goal_wall_ignores_the_window_entirely() {
-        // A car straddling the window position still collides with the
-        // wall exactly as if the window weren't there -- see
-        // `contacts_vs_goal_wall`'s own doc comment for why this is a
-        // documented Non-goal, not an oversight.
+    fn box_squarely_inside_the_goal_window_has_no_contact() {
+        // A car small enough that every corner falls inside the window
+        // sails straight through, the box equivalent of
+        // `sphere_embedded_in_the_goal_window_has_no_contact` --
+        // `RB-PHYSICS-001-FR-028` closes the Non-goal `box_vs_goal_wall`'s
+        // own doc comment used to describe here.
         let wall = goal_wall();
         let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(0.0, 99.5, 30.0));
+        assert!(contacts_vs_goal_wall(&car, &wall).is_empty());
+    }
+
+    #[test]
+    fn box_straddling_the_goal_window_edge_only_collides_on_the_corners_still_outside_it() {
+        // A car centered on the window's own right edge (x=20) has half
+        // its corners (x=21) outside the window and half (x=19) inside --
+        // exactly the "some corners collide, some don't" partial block
+        // `box_vs_goal_wall`'s own doc comment describes, unlike a sphere's
+        // single all-or-nothing center-point test.
+        let wall = goal_wall();
+        let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(20.0, 99.5, 30.0));
+        let contacts = contacts_vs_goal_wall(&car, &wall);
+        assert_eq!(
+            contacts.len(),
+            2,
+            "only the two outside-the-window corners on the x=21 face should register a contact"
+        );
+        for contact in &contacts {
+            assert!(contact.point.x > 20.0);
+        }
+    }
+
+    #[test]
+    fn box_entirely_outside_the_goal_window_behaves_like_an_ordinary_plane() {
+        // A car nowhere near the window (x=60, well past the 20-wide
+        // window's own edge) collides exactly like plain `box_vs_plane`
+        // against the wrapped plane -- the box equivalent of
+        // `sphere_outside_the_goal_window_behaves_like_an_ordinary_plane`.
+        let wall = goal_wall();
+        let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(60.0, 99.5, 30.0));
         let windowed = contacts_vs_goal_wall(&car, &wall);
         let unwindowed = contacts_vs_plane(&car, &wall.plane);
         assert_eq!(windowed, unwindowed);
