@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.36.0
+- Version: 0.37.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -75,9 +75,16 @@
   point as RocketSim's `ARENA_HEIGHT`), and corrected two mis-documented
   claims that `arena::CORNER_LENGTH` and `arena::GOAL_DEPTH` were
   uncalibrated placeholders when both are in fact confirmed exact —
-  implemented; static-contact warm-starting, a car's own contact against a
-  net, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, and that
-  real-data calibration are open follow-up work)
+  implemented; and, since FR-037, sleeping
+  (`body::RigidBody::update_sleep_state`/`wake`) forcibly zeroes a body's
+  velocity once it's stayed below both a linear and an angular threshold
+  for a sustained time, fixing the "bouncy resting contact never settles"
+  limitation warm-starting alone couldn't (see FR-035's own entry) — a car
+  wakes unconditionally on any genuinely active input, before that input's
+  own force has had a chance to move it, so an asleep car can always start
+  moving again — implemented; static-contact warm-starting, a car's own
+  contact against a net, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
+  calibration, and that real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -291,11 +298,16 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
 - **Split impulse.** This port always takes Bullet's non-split contact-resolution
   branch (position and velocity correction combined into one `rhs`). See
   `rb_physics_bullet::solver`'s module doc for what this trades away.
-- **Warm-starting and sleeping.** Every contact's impulses are re-derived
-  from zero each frame. Documented consequence: a bouncy (restitution > 0)
-  resting contact never truly settles under v0's solver — see
-  `rb_physics_bullet::solver`'s module doc and
-  `world::tests::resting_ball_stays_at_rest`.
+- **Warm-starting for `resolve_contacts`/`resolve_contacts_between`.**
+  `resolve_dynamic_manifolds` gained warm-starting in
+  `RB-PHYSICS-001-FR-035`; the other two paths still re-derive every
+  contact's impulses from zero each frame — a difference in convergence
+  speed only, not correctness, since this port's fixed `SOLVER_ITERATIONS`
+  already fully converges every scenario those two paths cover (see
+  `rb_physics_bullet::solver`'s module doc). Sleeping is no longer part of
+  this gap — `RB-PHYSICS-001-FR-037` implemented it, fixing the bouncy
+  (restitution > 0) resting contact that previously never truly settled
+  (see `world::tests::a_bouncy_resting_ball_actually_settles_once_asleep`).
 - **Calibrated constants.** Gravity (-650 uu/s^2), restitution, and
   friction defaults are placeholders (commonly-cited community estimates
   or reasonable guesses), not confirmed against real Rocket League data —
@@ -1829,6 +1841,104 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `892.755` literal, which contains `92.75` as a substring but lives only
     in `arena.rs`, deliberately excluded from that substitution and edited
     by hand instead.
+- `RB-PHYSICS-001-FR-037` (sleeping, implemented): closes the "no sleeping"
+  half of `solver`'s own documented gap `RB-PHYSICS-001-FR-035` left open
+  (warm-starting closed the other half — see that entry) — the actual fix
+  for a *bouncy* resting contact (restitution > 0) never settling, since
+  restitution re-triggers off a fresh gravity-induced closing velocity
+  every frame regardless of where the solver's own iteration starts, so
+  nothing about warm-starting or split impulse could ever stop the
+  residual bounce, only refusing to integrate it at all once it's small
+  and old enough to call "at rest" does. New `body::RigidBody` fields
+  `is_sleeping: bool` (public) and `sleep_timer: f32` (private), and two
+  new methods: `update_sleep_state(&mut self, dt: f32)` — call once per
+  step, after every contact is resolved but before the transform
+  integrates — accumulates `sleep_timer` while both
+  `linear_velocity.length()` and `angular_velocity.length()` stay under
+  new constants `body::LINEAR_SLEEP_VELOCITY_THRESHOLD`/
+  `ANGULAR_SLEEP_VELOCITY_THRESHOLD`, setting `is_sleeping = true` once
+  `sleep_timer` reaches `body::SLEEP_TIME_THRESHOLD` and forcibly zeroing
+  both velocities every call thereafter (repeated every subsequent call
+  while still under threshold, since gravity/restitution would otherwise
+  recompute a fresh nonzero value each step); crossing either threshold
+  resets the timer and clears `is_sleeping` immediately — and
+  `wake(&mut self)`, which does the same reset unconditionally, independent
+  of velocity. `PhysicsWorld::step` calls `update_sleep_state` for the ball
+  and every car right after the net panels step (every other contact
+  already resolved) and right before `integrate_transform_and_refresh_inertia`,
+  so a body newly asleep this step also freezes in place this same step.
+  `drive::apply_driven_forces` calls `car.wake()` unconditionally, before
+  anything else in that call runs, whenever a new private helper
+  `input_is_active` finds `input` genuinely active (any nonzero
+  throttle/steer/analog channel, or `jump`/`boost`/`handbrake` set) —
+  necessary because a resultant-velocity-only wake check isn't enough for a
+  driven body: a car accelerating from rest under a small per-frame driving
+  force whose own one-frame velocity delta is itself smaller than
+  `LINEAR_SLEEP_VELOCITY_THRESHOLD` would otherwise have that delta zeroed
+  right back out every single frame by the still-asleep check, permanently
+  stranding it. `input_is_active` treats an unrecovered analog channel
+  (`None`) the same as a recovered-but-literally-neutral one (`Some(0.0)`)
+  — both mean "no analog input this tick" — rather than the simpler
+  `*input != ControllerInput::default()`, which would treat any `Some(0.0)`
+  as active purely because it isn't `None`, keeping a car fed a real
+  recorded input stream that always resolves every channel (even at rest)
+  from ever sleeping at all.
+  - **Non-goals (this requirement).** No persistent-island sleeping the way
+    real Bullet's own architecture does it (a body wakes or sleeps
+    independently of whatever else it's touching) — this crate's solver
+    already treats each body independently rather than via Bullet's
+    persistent islands (see `solver`'s own module doc comment), so
+    per-body sleeping is the natural fit, not a simplification of a richer
+    mechanism this crate lacks. No kinematic/deactivation-disabled body
+    concept exists to exempt from sleeping, since this crate has no
+    kinematic bodies at all. `LINEAR_SLEEP_VELOCITY_THRESHOLD`,
+    `ANGULAR_SLEEP_VELOCITY_THRESHOLD`, and `SLEEP_TIME_THRESHOLD` are this
+    project's own uncalibrated placeholders — no public reference states
+    what threshold, if any, real Rocket League's own physics engine uses
+    internally for this (a purely implementation-internal stabilization
+    detail no replay or capture could ever directly reveal, even with real
+    `RB-VERIFY-002` data); chosen only to sit clearly above this crate's own
+    single-frame gravity/restitution velocity noise and clearly below any
+    deliberate motion this crate models (see the constants' own doc
+    comment in `body.rs` for the specific numbers behind that reasoning). A
+    sleeping body waking only from a contact impulse or active input, never
+    from a sustained-but-below-threshold external push (e.g. a very slow
+    car nudging it), is a deliberate modeling choice matching real Bullet's
+    own behavior, not a bug.
+  - **Acceptance criteria.** A ball resting on the ground with nonzero
+    restitution on both surfaces eventually has its velocity forced to
+    exactly zero and `is_sleeping` set, instead of bouncing indefinitely.
+    A car seeded already asleep wakes immediately (within the same step)
+    the moment it receives genuinely active input, and actually
+    accelerates that same step. A sleeping ball wakes when a moving car's
+    contact impulse pushes its resultant velocity back above threshold,
+    with no special-case contact-wake logic required beyond the ordinary
+    `update_sleep_state` check. Every one of this crate's pre-existing
+    tests passes unchanged, confirming sleeping doesn't alter any
+    already-covered scenario's outcome within the timeframes those tests
+    already used.
+  - **Verification plan.** 5 new `body.rs` unit tests exercise
+    `update_sleep_state`/`wake` directly and in isolation: under-threshold
+    velocity doesn't sleep before the time threshold elapses; sustained
+    under-threshold velocity does sleep and zeroes both velocities;
+    velocity above either threshold alone never sleeps; a sleeping body
+    regaining speed above threshold wakes immediately without `wake()`;
+    and `wake()` itself clears both `is_sleeping` and the timer regardless
+    of velocity (checked by confirming a single further sub-threshold `dt`
+    right after waking isn't enough on its own to re-sleep). 3 new
+    `world.rs` end-to-end tests prove the same claims through a live
+    `PhysicsWorld`:
+    `a_bouncy_resting_ball_actually_settles_once_asleep` (a nonzero-restitution
+    ball/ground pair, run long enough to fall asleep, asserting both
+    `is_sleeping` and exactly-zero velocity — the direct fix for the
+    limitation `resting_ball_stays_at_rest`'s own comment, now corrected,
+    used to document instead of demonstrate), `a_sleeping_car_wakes_up_the_instant_throttle_is_applied`
+    (a car seeded already asleep via direct field assignment, not simulated
+    settling, isolating the wake-on-input claim from how long settling
+    itself takes), and `a_sleeping_ball_wakes_up_when_a_moving_car_hits_it`
+    (a ball put to sleep before the car even exists in the scene, then a
+    fast-moving car added and driven into it). 8 new tests, bringing the
+    crate to 267 total (+8 over FR-036's 259).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3119,22 +3229,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 - Restitution/friction combine mode (`rb_physics_bullet::solver` currently
   averages; Bullet's actual default is `max` for both) — revisit once real
   data exists to calibrate against.
-- No-sleeping remains a documented, deliberate gap (see Non-goals) —
-  `RB-PHYSICS-001-FR-034` closed the split-impulse half of this bullet and
-  `RB-PHYSICS-001-FR-035` closed the warm-starting half for
-  `resolve_dynamic_manifolds` specifically (static contacts and
-  `resolve_contacts`/`resolve_contacts_between` remain un-warm-started, a
-  deliberate scoping choice — see FR-035's own Non-goals), leaving only
-  sleeping open, and warm-starting doesn't substitute for it: a *bouncy*
-  resting contact (restitution > 0) still never settles, since restitution
-  re-triggers off a fresh gravity-induced closing velocity every frame
-  regardless of where the solver's iteration starts. Now that ball-vs-car
-  and car-vs-car collision are both real and actually wired into
-  `PhysicsWorld` (not just ground contact), it matters more than it did
-  before — worth revisiting once real recorded ball/car-hit behavior
-  exists to compare against, rather than only the unit tests'
-  internal-consistency checks (momentum conservation, no residual closing
-  speed).
+- Sleeping is no longer an open item — `RB-PHYSICS-001-FR-037` implemented
+  it, and with it the actual fix for the *bouncy* (restitution > 0) resting
+  contact that used to never settle (`RB-PHYSICS-001-FR-034`'s split
+  impulse and `RB-PHYSICS-001-FR-035`'s warm-starting closed adjacent gaps
+  but couldn't substitute for it, since restitution re-triggers off a fresh
+  gravity-induced closing velocity every frame regardless of where the
+  solver's iteration starts or how it got there). Warm-starting itself
+  remains scoped to `resolve_dynamic_manifolds` only (static contacts and
+  `resolve_contacts`/`resolve_contacts_between` stay un-warm-started, a
+  deliberate scoping choice — see FR-035's own Non-goals); that's a
+  genuinely separate, still-open item, tracked in this spec's own Non-goals
+  rather than here now that it no longer shares a bullet with sleeping.
+  `LINEAR_SLEEP_VELOCITY_THRESHOLD`/`ANGULAR_SLEEP_VELOCITY_THRESHOLD`/
+  `SLEEP_TIME_THRESHOLD` (`body.rs`) are FR-037's own uncalibrated
+  placeholders, worth revisiting once real recorded ball/car-hit behavior
+  exists to compare against — see FR-037's own entry.
 - `box_vs_box`'s edge-edge contact point uses the midpoint of the two
   closest points on the involved edges, and its face-contact clipping
   falls back to a single clamped-center point if clipping ever yields zero
@@ -3145,6 +3255,53 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.37.0 (2026-08-31): FR-037 added and implemented (sleeping) — closes
+  the "no sleeping" half of `solver`'s own documented gap FR-035 left open,
+  and with it the actual fix for a *bouncy* resting contact never
+  settling, since restitution re-triggers off a fresh gravity-induced
+  closing velocity every frame regardless of where the solver's iteration
+  starts, so nothing about warm-starting or split impulse could ever stop
+  the residual bounce. New `body::RigidBody` fields `is_sleeping: bool`
+  (public) and `sleep_timer: f32` (private), plus
+  `update_sleep_state(&mut self, dt: f32)` (accumulates `sleep_timer` while
+  both `linear_velocity.length()`/`angular_velocity.length()` stay under
+  new `LINEAR_SLEEP_VELOCITY_THRESHOLD`/`ANGULAR_SLEEP_VELOCITY_THRESHOLD`
+  constants, setting `is_sleeping` and forcibly zeroing both velocities
+  once `sleep_timer` reaches `SLEEP_TIME_THRESHOLD`, repeated every
+  subsequent call while still under threshold; crossing either threshold
+  resets the timer and clears `is_sleeping` immediately) and `wake(&mut
+  self)` (the same reset, unconditionally, independent of velocity).
+  `PhysicsWorld::step` calls `update_sleep_state` for the ball and every
+  car right after every other contact this step resolves but before the
+  transform integrates. `drive::apply_driven_forces` calls `car.wake()`
+  unconditionally, before anything else in that call runs, whenever a new
+  `input_is_active` helper finds the car's `ControllerInput` genuinely
+  active — necessary because a resultant-velocity-only wake check isn't
+  enough for a driven body: a car accelerating from rest under a small
+  per-frame driving force whose own one-frame velocity delta is itself
+  smaller than the sleep threshold would otherwise have that delta zeroed
+  right back out every frame, permanently stranding it.
+  `input_is_active` treats an unrecovered analog channel (`None`) the same
+  as a recovered-but-literally-neutral one (`Some(0.0)`), rather than the
+  simpler `!= ControllerInput::default()`, which would keep a car fed a
+  real recorded input stream that always resolves every channel from ever
+  sleeping at all. All three new threshold constants are this project's
+  own uncalibrated placeholders — no public reference exists for what, if
+  any, real Rocket League's own physics engine uses internally for this
+  purely implementation-internal stabilization detail. 8 new tests (5 in
+  `body.rs` exercising `update_sleep_state`/`wake` directly, 3 in
+  `world.rs` proving the fix through a live `PhysicsWorld` — a
+  nonzero-restitution ball/ground pair actually falling asleep at exactly
+  zero velocity, a car seeded already asleep waking the instant throttle
+  is applied, and a sleeping ball waking when a moving car hits it),
+  bringing the crate to 267 total (+8 over FR-036's 259). All pre-existing
+  tests pass unchanged, including `resting_ball_stays_at_rest` (whose own
+  comment, describing the bouncy-resting-contact limitation this
+  requirement fixes, was corrected to point at the new test that now
+  demonstrates the fix instead of only documenting the gap) and
+  `dropped_ball_eventually_settles_on_the_ground` (already used a bouncy
+  restitution of 0.3, unaffected since it only ever checked landing height,
+  not whether the ball kept bouncing forever).
 - 0.36.0 (2026-08-31): FR-036 added and implemented (ball radius /
   `CEILING_Z` constant-ambiguity resolution) — a dedicated follow-up to
   FR-031's own audit, using real source-level research (RocketSim's and
