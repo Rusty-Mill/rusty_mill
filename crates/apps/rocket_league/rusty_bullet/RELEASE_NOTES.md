@@ -6,6 +6,51 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Curved-fillet narrow-phase investigation
+**2026-08-31** · PR pending · commit pending
+
+- **Investigated a claimed corner-testing under-detection bug for a car vs.
+  a curved fillet, found it doesn't exist — no change to the narrow phase
+  itself.** `RB-PHYSICS-001-FR-027`'s own doc comments claimed
+  `box_vs_quarter_pipe`/`box_vs_corner_fillet`'s per-corner technique was
+  an approximation, not a full convex-vs-curved-surface narrow phase: a box
+  face resting flush against a shallow curve could have every corner still
+  clear of the fillet while the face's middle already overlapped it,
+  under-detecting that case.
+- **Built the fix, and it broke real tests.** A from-scratch GJK
+  closest-points implementation was built and wired in to replace the
+  per-corner technique — doing so broke two pre-existing, previously-passing
+  end-to-end tests, because closest-point is the wrong question for this
+  contact: a quarter-pipe/corner-fillet's contact test is a *containment*
+  question (is the box's farthest point from the axis/center at or beyond
+  radius), not a nearest-point one.
+- **The math**: distance-from-a-line/point is a convex function of
+  position, and the maximum of a convex function over a convex polytope
+  (the box) is always attained at one of its extreme points — its 8
+  corners — never a face's interior. So the original per-corner technique
+  computes the exact same answer a full narrow phase would, just via
+  enumeration instead of an iterative solver — it was never an
+  approximation for this specific question.
+- **Reverted the code, kept the finding.** `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet` are unchanged from `RB-PHYSICS-001-FR-027`; the
+  GJK module has been deleted entirely (no remaining consumer). Every doc
+  comment across the crate and its spec that had inherited FR-027's
+  unverified claim (`lib.rs`'s crate doc, `RB-PHYSICS-001`'s own scope,
+  Non-goals, Requirements, and Verification plan sections) now reflects the
+  corrected, verified understanding.
+- **The goal wall's own analogous window-edge concern remains open** — the
+  window boundary is a flat rectangle, not a curve, so it's a distinct
+  question this investigation didn't cover.
+- 1 new test:
+  `collision::tests::no_point_on_a_boxs_face_is_ever_farther_from_a_quarter_pipes_axis_than_its_own_corners`,
+  densely sampling (50×50 grid per face) all 6 faces of a car-sized box
+  positioned exactly like the two tests that broke, confirming no
+  face-interior point ever exceeds the box's own 8 corners' maximum
+  distance from the axis. 246 tests total in `rb_physics_bullet` (+1 over
+  `RB-PHYSICS-001-FR-031`'s 245).
+
+---
+
 ## Constant-calibration audit
 **2026-08-31** · [PR #71](https://github.com/baileyrd/rusty_bullet/pull/71) · `4c7b9a2`
 

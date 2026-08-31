@@ -388,6 +388,21 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `BOOST_ACCELERATION`, `MAX_BOOST`, gravity, `GOAL_DEPTH`) and explicitly
   flagged the rest as audited-but-still-uncalibrated in their own doc
   comments, rather than silently leaving them ambiguous.
+- `rb_physics_bullet::collision` (`RB-PHYSICS-001-FR-032`) — investigated a
+  claimed corner-testing under-detection bug for `box_vs_quarter_pipe`/
+  `box_vs_corner_fillet` (a box face resting flush against a shallow curve
+  could have every corner clear while the face's middle already
+  overlapped it) by building a genuine GJK closest-points replacement.
+  Wiring it in broke two real end-to-end tests, because closest-point
+  answers the wrong question for this contact — it's a containment
+  question (is the box's farthest point from the axis/center at or beyond
+  radius), and distance-from-a-line/point's maximum over a convex
+  polytope is always at a corner, so the original per-corner technique is
+  exact for this question, not an approximation. Reverted to the original
+  `RB-PHYSICS-001-FR-027` implementation and deleted the GJK module
+  entirely; corrected every doc comment across the crate and its spec
+  that had inherited the unverified claim. No production-code change to
+  the narrow phase itself.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

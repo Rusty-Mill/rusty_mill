@@ -29,9 +29,12 @@
 //! collides with the ground, curved edge fillets (`with_curve`, a
 //! `StaticQuarterPipe` each), compound-corner fillets (`with_corner_fillet`,
 //! a `StaticCornerFillet` each — since `RB-PHYSICS-001-FR-027`, both deflect
-//! a car too, approximated via the car's own 8 corners rather than a full
-//! convex-vs-curve narrow phase; see `collision::box_vs_quarter_pipe`'s own
-//! doc comment), and windowed goal walls (`with_goal_wall`, a
+//! a car too, via testing the car's own 8 corners — exact, not an
+//! approximation, for this containment-style contact
+//! (`RB-PHYSICS-001-FR-032` rigorously confirmed a once-suspected
+//! under-detection gap here doesn't actually exist; see
+//! `collision::box_vs_quarter_pipe`'s own doc comment), and windowed goal
+//! walls (`with_goal_wall`, a
 //! `StaticGoalWall` each — since `RB-PHYSICS-001-FR-028`, both the ball and
 //! a car can pass through the window, the car via the same per-corner
 //! approach FR-027 established; see `collision::contacts_vs_goal_wall`'s
