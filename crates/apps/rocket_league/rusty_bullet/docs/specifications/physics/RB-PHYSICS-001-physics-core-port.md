@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.39.0
+- Version: 0.40.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -91,7 +91,12 @@
   ball-vs-car — implemented; and, since FR-039, a wall jump at a corner
   (a car touching two walls at once) pushes off along every touched wall's
   normal summed and normalized, instead of picking whichever wall came
-  first in `PhysicsWorld.walls` — implemented; static-contact
+  first in `PhysicsWorld.walls` — implemented; and, since FR-040, a
+  dedicated research pass looked for a real reference for
+  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` and found only one uncited,
+  self-disclaimed-non-circular, likely-conflated wiki value — deliberately
+  not adopted; both constants remain genuinely uncalibrated, closing this
+  for real needs actual extracted mesh data — investigated; static-contact
   warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
   and that real-data calibration are open follow-up work)
 - Owners: baileyrd
@@ -270,7 +275,17 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   is likewise this project's own uncalibrated placeholder, chosen only to
   read as visibly larger than `FILLET_RADIUS` (enforced at compile time by
   a `const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);` check),
-  not measured against real field mesh data either.
+  not measured against real field mesh data either. `RB-PHYSICS-001-FR-040`
+  looked for a real reference for both and came back empty-handed: the
+  only candidate anywhere in this port's established reference tier is the
+  RLBot wiki's uncited "wall bottom ramp radius: approx. 256, not
+  circular", which doesn't distinguish the two constants, disclaims being
+  a true circular radius, and is suspiciously identical to RLGym's
+  unrelated `RAMP_HEIGHT` (a ramp's height, not a curve's radius) —
+  deliberately not adopted for either constant (see `FILLET_RADIUS`'s own
+  doc comment for the full finding). Both remain genuinely uncalibrated;
+  closing this for real needs actual extracted collision-mesh geometry, not
+  further wiki research.
 - ~~Disambiguating or blending a car's simultaneous contact with two walls
   at a corner, for wall-jump purposes.~~ Physical collision resolution
   already handled a car touching two walls at once correctly — `step`
@@ -2057,6 +2072,64 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     symmetric, so a true blend gives equal components), plus the same
     roughly-`JUMP_SPEED` vertical check every wall-jump test already makes.
     1 new test, bringing the crate to 268 total (+1 over FR-037's 267).
+- `RB-PHYSICS-001-FR-040` (fillet-radius calibration research, investigated):
+  a dedicated research pass, matching `RB-PHYSICS-001-FR-036`'s own method
+  (real source-level research, not guessed at), specifically targeting the
+  two remaining uncalibrated placeholder constants `RB-PHYSICS-001-FR-036`
+  itself deliberately left untouched: `arena::FILLET_RADIUS` and
+  `arena::CORNER_ARCH_RADIUS`. Searched this port's established reference
+  tier — RocketSim's and RLUtilities' own source, the RLBot wiki, and
+  RLGym's own documented game-value list — for any named constant or
+  cited measurement describing either radius. Found exactly one candidate,
+  on the RLBot wiki's "Useful Game Values" page: "Wall bottom ramp radius:
+  Aprox. 256 (but they are not circular)". This does not clear the bar
+  `RB-PHYSICS-001-FR-036` set for adopting a community value: it carries no
+  citation or attribution (unlike RocketSim's own named `ARENA_HEIGHT =
+  2048.f` constant `FR-036` read directly from source), it doesn't
+  distinguish a cardinal wall's own `FILLET_RADIUS` from a diagonal corner
+  wall's distinctly bigger `CORNER_ARCH_RADIUS` — this project's two
+  separate constants, since `RB-PHYSICS-001-FR-025` — and its own wording
+  explicitly disclaims describing a true circular arc at all. Cross-checking
+  RLGym's own documented game values surfaced a further reason for caution:
+  RLGym separately documents `RAMP_HEIGHT = 256` — the corner boost-pad
+  ramp's vertical height *from the ground*, an entirely different
+  geometric quantity from a floor-seam curve's radius — the same numeral
+  as the wiki's "ramp radius" entry, suggesting the wiki page may conflate
+  the two rather than independently measuring a radius at all. Given this,
+  `256` was deliberately NOT adopted for either constant: doing so would
+  trade one honestly-labeled uncalibrated placeholder for a
+  differently-uncertain number dressed up as a real citation, a worse
+  outcome than leaving the honest placeholder in place. Both
+  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` remain unchanged
+  (`292.0`/`750.0`) and genuinely uncalibrated. Doc comments on both
+  constants, this spec's Non-goals, and this spec's Open Questions were
+  updated to record this finding, so a future contributor doesn't
+  re-tread the same wiki search — genuinely closing this gap needs actual
+  extracted collision-mesh geometry (e.g. via
+  `ZealanL/RLArenaCollisionDumper`'s real triangle-mesh dump), which needs
+  the owner's own Windows/Rocket League environment, the same blocker
+  `RB-VERIFY-002-FR-001` already documents.
+  - **Non-goals (this requirement).** No mesh-ingestion tooling was built
+    or attempted — this requirement is a documentation-and-research-only
+    increment, matching `RB-PHYSICS-001-FR-032`'s own precedent for a
+    negative research result being real, valuable work in its own right.
+    No change to either constant's value: this requirement's entire
+    contribution is confirming that no reliable value exists yet, not
+    picking one. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`'s
+    own doc comments, this spec's Non-goals section, and this spec's Open
+    Questions section all accurately describe the current sourcing
+    status — no longer "no reference exists at all" (a claim this research
+    found to be imprecise, since one low-confidence candidate does exist),
+    but "a real candidate was found and deliberately rejected, with the
+    specific reasoning recorded" instead.
+  - **Verification plan.** No new tests: this is a documentation-only
+    correction with no new runtime behavior to characterize, the same
+    precedent `RB-PHYSICS-001-FR-031`/`FR-036` established for their own
+    constant-audit findings that didn't change a value. All 268 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-039`) pass
+    unchanged, since neither constant's value changed.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -3286,8 +3359,25 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   and normalizes the result instead of picking whichever wall comes first.
 - Sourcing or verifying `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
   against real field mesh data (see
-  FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — this port has
-  no reference for either at all. `arena::CORNER_LENGTH` no longer belongs
+  FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — still open.
+  `RB-PHYSICS-001-FR-040` looked, specifically, using this port's
+  established reference tier (RocketSim/RLUtilities source, the RLBot
+  wiki) and came back with no *reliable* reference for either constant —
+  the one candidate it found (the RLBot wiki's uncited "wall bottom ramp
+  radius: approx. 256, not circular") was deliberately not adopted: it
+  doesn't distinguish `FILLET_RADIUS` from the corner walls' own bigger
+  `CORNER_ARCH_RADIUS`, it explicitly disclaims being a true circular
+  radius at all, and its own numeral is suspiciously identical to RLGym's
+  unrelated `RAMP_HEIGHT` constant (the corner ramp's vertical height from
+  the ground, a different geometric quantity), suggesting the wiki entry
+  may be a mixed-up cross-reference rather than an independent
+  measurement. Genuinely closing this gap needs real extracted
+  collision-mesh geometry (e.g. via `ZealanL/RLArenaCollisionDumper`'s
+  triangle-mesh dump), which needs the owner's own Windows/Rocket League
+  environment — the same blocker `RB-VERIFY-002-FR-001` already documents,
+  not something further wiki research alone can resolve. See
+  `arena::FILLET_RADIUS`'s own doc comment for the full finding.
+  `arena::CORNER_LENGTH` no longer belongs
   in this bullet: `RB-PHYSICS-001-FR-036` confirmed it exact against real
   extracted collision-mesh data, the same sourcing status as `SIDE_WALL_X`/
   `BACK_WALL_Y`/`CEILING_Z` (see FR-036's own entry and FR-019's). Even a
@@ -3378,6 +3468,30 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.40.0 (2026-08-31): FR-040 added and investigated (fillet-radius
+  calibration research) — a dedicated research pass, matching FR-036's own
+  real-source-research method, specifically targeting the two remaining
+  uncalibrated placeholder constants FR-036 itself deliberately left
+  untouched: `arena::FILLET_RADIUS` and `arena::CORNER_ARCH_RADIUS`.
+  Searched this port's established reference tier (RocketSim/RLUtilities
+  source, the RLBot wiki, RLGym's game-value list) and found exactly one
+  candidate: the RLBot wiki's uncited "Wall bottom ramp radius: Aprox. 256
+  (but they are not circular)". Deliberately not adopted for either
+  constant: it carries no citation, doesn't distinguish the two constants'
+  distinctly different radii, explicitly disclaims being a true circular
+  arc, and shares its numeral with RLGym's own unrelated `RAMP_HEIGHT`
+  constant (a ramp's height from the ground, not a curve's radius),
+  suggesting the wiki entry may be a conflation rather than an independent
+  measurement. Both constants remain unchanged (`292.0`/`750.0`) and
+  genuinely uncalibrated. Doc comments on both, plus this spec's Non-goals
+  and Open Questions, updated to record the finding so a future
+  contributor doesn't re-tread the same search — genuinely closing this
+  gap needs actual extracted collision-mesh geometry (e.g. via
+  `ZealanL/RLArenaCollisionDumper`), the same "requires the owner's own
+  Windows/Rocket League environment" blocker `RB-VERIFY-002-FR-001`
+  already documents. No new tests (documentation-only, no value changed,
+  the same precedent FR-031/FR-036 established); all 271 pre-existing
+  tests pass unchanged (total unchanged from FR-038).
 - 0.39.0 (2026-08-31): FR-038 added and implemented (car-vs-net contact) —
   closes this port's own former Non-goal that a car passes straight
   through a `net::NetMesh`'s spatial footprint untouched

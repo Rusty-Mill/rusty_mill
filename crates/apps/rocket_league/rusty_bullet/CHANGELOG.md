@@ -503,6 +503,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   blending both, instead of firing along only one of them. A car touching
   exactly one wall is unaffected. No new collision code needed. 1 new
   `world.rs` test; all pre-existing tests pass unchanged.
+- `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` (`RB-PHYSICS-001-FR-040`) —
+  a dedicated research pass, matching FR-036's own real-source-research
+  method, looked for a real reference for both constants and found only
+  one uncited RLBot wiki value ("wall bottom ramp radius: approx. 256, not
+  circular") that doesn't distinguish the two constants, disclaims being
+  circular, and shares its numeral with RLGym's unrelated `RAMP_HEIGHT`
+  (a ramp's height, not a curve's radius) — deliberately not adopted. Both
+  constants remain unchanged and genuinely uncalibrated; closing this for
+  real needs actual extracted collision-mesh geometry. No new tests
+  (documentation-only); all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
