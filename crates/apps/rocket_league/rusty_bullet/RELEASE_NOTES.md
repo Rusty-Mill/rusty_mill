@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Ball radius and ceiling height corrections
+**2026-08-31** · PR pending · commit pending
+
+- **Resolved both constant ambiguities `RB-PHYSICS-001-FR-031`'s own audit
+  surfaced but deliberately didn't act on**, using real source-level
+  research (cloning and reading RocketSim's and RLUtilities' own source,
+  and the current RLBot wiki, rather than guessing from prior training-data
+  recall).
+- **Ball radius: `92.75` became `93.15`, not the previously-suspected
+  `91.25`.** FR-031 had framed this as a straight two-way choice, but the
+  real games actually split the ball into a smaller inertia radius
+  (`91.25`) and a distinctly larger collision radius (`93.15`, the mesh's
+  own collision margin) — a split this port's single unified
+  `RigidBody::sphere` radius field has no room for. Since this port has no
+  separate Bullet-style collision margin of its own, the collision radius
+  is the mathematically correct single-constant analog, so switching to
+  `91.25` would have been a regression, not a fix. Every `92.75` literal
+  across `solver.rs`/`world.rs`/`net.rs`/`collision.rs` became `93.15`.
+- **`arena::CEILING_Z`: `2044.0` became `2048.0`.** Confirmed, via both
+  RocketSim's own `ARENA_HEIGHT = 2048.f` and an independent reconstruction
+  from real extracted collision-mesh geometry, to describe the same
+  reference point this port's `CEILING_Z` does.
+- **Two mis-documented claims corrected as a low-risk byproduct**, not new
+  findings requiring their own change: `arena::CORNER_LENGTH` and
+  `arena::GOAL_DEPTH` were wrongly described (by earlier FRs) as
+  uncalibrated placeholders with no public reference — both are actually
+  confirmed exact, so only their doc comments changed, not their values.
+- **`arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` remain untouched and still
+  genuinely uncalibrated.** No analytic single-number reference exists for
+  either in the serious community sources — closing that gap for real
+  would mean ingesting an actual dumped collision mesh, a separate,
+  more involved follow-up deliberately left for later.
+- **No new tests** — a constant-only correction with no new behavior to
+  characterize, the same precedent `RB-PHYSICS-001-FR-031` established for
+  its own constant changes. All 259 pre-existing tests across the crate
+  pass unchanged (total unchanged from the warm-starting change).
+
+---
+
 ## Warm-starting
 **2026-08-31** · [PR #79](https://github.com/baileyrd/rusty_bullet/pull/79) · `a79d923`
 

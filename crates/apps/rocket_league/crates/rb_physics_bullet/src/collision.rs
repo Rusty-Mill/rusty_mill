@@ -1186,14 +1186,14 @@ mod tests {
 
     #[test]
     fn ball_far_from_car_has_no_contact() {
-        let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(1000.0, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(1000.0, 0.0, 0.0));
         assert!(contacts_between(&ball, &stationary_car()).is_empty());
     }
 
     #[test]
     fn ball_touching_car_face_has_zero_penetration() {
         // The ball's surface exactly meets the car's +X face.
-        let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 92.75, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 93.15, 0.0, 0.0));
         let contacts = contacts_between(&ball, &stationary_car());
         assert_eq!(contacts.len(), 1);
         assert!(contacts[0].penetration_depth.abs() < 1e-4);
@@ -1202,9 +1202,9 @@ mod tests {
 
     #[test]
     fn ball_overlapping_car_face_has_positive_penetration() {
-        let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
         let contacts = contacts_between(&ball, &stationary_car());
-        assert!((contacts[0].penetration_depth - (92.75 - 50.0)).abs() < 1e-4);
+        assert!((contacts[0].penetration_depth - (93.15 - 50.0)).abs() < 1e-4);
     }
 
     #[test]
@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn sphere_vs_box_contact_is_antisymmetric_in_argument_order() {
-        let ball = RigidBody::sphere(92.75, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
         let car = stationary_car();
         let ball_car = &contacts_between(&ball, &car)[0];
         let car_ball = &contacts_between(&car, &ball)[0];

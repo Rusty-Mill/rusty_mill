@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.35.0
+- Version: 0.36.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -66,8 +66,18 @@
   previous one's converged impulses instead of zero, converging measurably
   closer to the true answer for an under-converged manifold like FR-030's
   own extreme-mass-ratio example — implemented for that one call site;
-  static-contact warm-starting, a car's own contact against a net, and
-  that real-data calibration are open follow-up work)
+  and, since FR-036, real source-level research (RocketSim, RLUtilities,
+  and the RLBot wiki, read directly rather than guessed at) corrected the
+  ball's collision radius (`92.75` to `93.15`, not the real games'
+  separate, smaller inertia radius `91.25`, since this port's single
+  unified radius field has no room for that distinction) and
+  `arena::CEILING_Z` (`2044.0` to `2048.0`, confirmed the same reference
+  point as RocketSim's `ARENA_HEIGHT`), and corrected two mis-documented
+  claims that `arena::CORNER_LENGTH` and `arena::GOAL_DEPTH` were
+  uncalibrated placeholders when both are in fact confirmed exact —
+  implemented; static-contact warm-starting, a car's own contact against a
+  net, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, and that
+  real-data calibration are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -218,22 +228,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   that gap for the ball specifically with a real mass-spring `net::NetMesh`
   panel in front of that same solid back-of-net plane (a car still passes
   through the panel's own footprint, stopped by the pre-existing solid
-  volume instead — see FR-033's own entry). `FR-019`'s
-  corner-cut inset distance (`arena::CORNER_LENGTH`) and `FR-020`'s fillet
+  volume instead — see FR-033's own entry). `FR-020`'s fillet
   radius (`arena::FILLET_RADIUS`, also reused by FR-022's vertical-edge
   fillets, FR-024's goal-cutout fillets, and FR-026's goal post-crossbar
   compound-corner fillets; FR-021's corner-wall seams and
-  FR-023's compound corners instead reuse FR-025's `arena::CORNER_ARCH_RADIUS`) are both this project's own uncalibrated placeholders, not
-  measured against real field mesh data — only
-  `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z` are commonly-cited, sourced
-  dimensions; `FR-024`'s own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` are
-  commonly-cited too, but likewise not independently confirmed. `FR-029`'s
-  own `arena::GOAL_DEPTH` is a further step removed from even that: unlike
-  `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`, this port has no commonly-cited
-  reference for the real net's depth at all, so `GOAL_DEPTH` is this
-  project's own uncalibrated invention, chosen only to be a visibly real
-  interior volume comparable in scale to the goal mouth's own dimensions.
-  FR-026's 4
+  FR-023's compound corners instead reuse FR-025's `arena::CORNER_ARCH_RADIUS`) remains this project's own uncalibrated placeholder, not
+  measured against real field mesh data — `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z`
+  are commonly-cited, sourced dimensions, and, since `RB-PHYSICS-001-FR-036`,
+  so is `FR-019`'s corner-cut inset distance (`arena::CORNER_LENGTH`),
+  confirmed exact against real extracted collision-mesh data rather than
+  the uncalibrated placeholder this project previously took it for; `FR-024`'s
+  own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` are commonly-cited too, but
+  likewise not independently confirmed. `FR-029`'s own `arena::GOAL_DEPTH`,
+  by contrast, is also now confirmed against the current RLBot wiki's own
+  cited value (`RB-PHYSICS-001-FR-036`) — this project's earlier claim
+  that no reference existed for it at all, making it an uncalibrated
+  invention, was itself incorrect. FR-026's 4
   goal post-crossbar compound-corner fillets introduce no new radius
   constant at all — they reuse `FILLET_RADIUS` unchanged. `FR-025`'s
   own `arena::CORNER_ARCH_RADIUS` — the distinctly larger radius now
@@ -602,14 +612,17 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   quadrant) that cut off the true rectangular corner where a side wall
   would otherwise meet a back wall at 90 degrees — giving the field its
   real octagonal footprint instead of a plain rectangle. `SIDE_WALL_X`
-  (4096), `BACK_WALL_Y` (5120), and `CEILING_Z` (2044) are commonly-cited
+  (4096), `BACK_WALL_Y` (5120), and `CEILING_Z` (2048, corrected from an
+  earlier `2044` by `RB-PHYSICS-001-FR-036`) are commonly-cited
   community-measured field dimensions (the same sourcing convention as
   `drive::MAX_CAR_SPEED`/`JUMP_SPEED`); the corner walls' inset distance
-  (`CORNER_LENGTH`, equal along both axes, giving a 45-degree cut) is this
-  project's own uncalibrated placeholder — this port has no verified
-  reference for the real arena's actual corner-wall geometry, which isn't
-  even a single flat plane in the real field mesh (it's curved, and blends
-  into ramps this port doesn't model either). `PhysicsWorld::standard_arena`
+  (`CORNER_LENGTH`, equal along both axes, giving a 45-degree cut) is
+  likewise now confirmed exact, not the uncalibrated placeholder this
+  project once took it for (`RB-PHYSICS-001-FR-036`) — its flat corner-wall
+  plane matches real extracted collision-mesh data precisely, even though
+  the real arena's corners aren't a single flat plane all the way to the
+  floor/ceiling seam (they curve, and blend into ramps this port doesn't
+  model either). `PhysicsWorld::standard_arena`
   is a new convenience constructor — `PhysicsWorld::new(ball,
   arena::standard_ground())` followed by a `with_wall` call for each of
   `standard_walls()`'s 9 planes — offered alongside, not replacing,
@@ -1748,6 +1761,74 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     unchanged when given an empty cache, confirming this requirement is
     behavior-preserving for every case they already covered. 1 new test,
     bringing the crate to 259 total (+1 over FR-034's 258).
+- `RB-PHYSICS-001-FR-036` (constant-ambiguity resolution, implemented): a
+  dedicated follow-up to `RB-PHYSICS-001-FR-031`'s own audit, resolving the
+  two genuine ambiguities that audit surfaced but deliberately didn't act
+  on, using real source-level research (cloning and reading RocketSim's and
+  RLUtilities' own source, and the current RLBot wiki, rather than guessing
+  from prior training-data recall the way FR-031's own initial framing
+  apparently had). Ball radius: FR-031 framed this as a straight "`92.75`
+  vs. `91.25`" choice, but the real games actually split the ball into two
+  separate radii — a smaller inertia radius (`91.25`) and a distinctly
+  larger collision radius (`93.15`, the mesh's own collision margin) — a
+  distinction this port's `RigidBody::sphere` has no room for, since it
+  carries a single unified radius used for both roles and this port has no
+  separate Bullet-style collision margin of its own. The mathematically
+  correct single-constant analog for this port's unified field is therefore
+  the collision radius, so every `92.75` literal (`solver.rs`, `world.rs`,
+  `net.rs`, `collision.rs`) became `93.15`, not `91.25` — switching to
+  `91.25` would have been a regression, not a fix. `arena::CEILING_Z`:
+  confirmed, via both RocketSim's own `ARENA_HEIGHT = 2048.f` and an
+  independent reconstruction from real extracted collision-mesh geometry,
+  to describe the same reference point this port's `CEILING_Z` does, so
+  `2044.0` became `2048.0`. Two further corrections were made as a low-risk
+  byproduct of the same research pass, not new findings requiring their own
+  requirement: `arena::CORNER_LENGTH` (the octagon corner-cut inset) was
+  wrongly documented, by FR-031 and FR-019 before it, as an uncalibrated
+  placeholder with no public reference at all — it's actually confirmed
+  exact against real extracted collision-mesh data, so only its doc
+  comments changed, not its value (`1152.0`, already correct); likewise
+  `arena::GOAL_DEPTH` was wrongly documented, by FR-029, as an uncalibrated
+  invention with no reference — it's confirmed against the current RLBot
+  wiki's own cited value, so again only its doc comments changed
+  (`880.0`, already correct).
+  - **Non-goals (this requirement).** `arena::FILLET_RADIUS` and
+    `arena::CORNER_ARCH_RADIUS` remain untouched and still genuinely
+    uncalibrated — the research this requirement relied on found no
+    analytic single-number reference for either anywhere in the serious
+    community sources (the real corner/transition geometry is a
+    triangulated collision mesh, not a mathematical arc), the same
+    conclusion FR-031's own audit already reached; closing that gap for
+    real would mean ingesting an actual dumped mesh, a genuinely different
+    and more involved follow-up this requirement's research explicitly
+    recommended treating separately rather than folding in here. No new
+    behavioral bug motivated this requirement — like FR-031 before it, it's
+    a constant-correctness change with no associated fix to solver or
+    collision logic, so (matching FR-031's own precedent) no new test was
+    added; the fix is proven by the existing suite still passing unchanged.
+    This requirement does not touch `RB-VERIFY-002` real-data calibration,
+    still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `arena::CEILING_Z` reads `2048.0` and every
+    ball-radius literal in `solver.rs`/`world.rs`/`net.rs`/`collision.rs`
+    reads `93.15` (not `91.25`); `arena::CORNER_LENGTH` and
+    `arena::GOAL_DEPTH` keep their existing values, with doc comments no
+    longer misdescribing either as uncalibrated. All 259 pre-existing tests
+    across the crate pass unchanged, since every affected test used the
+    ball-radius/`CEILING_Z` constants themselves rather than a hardcoded
+    duplicate of the old values, so the correction is transparent to them.
+  - **Verification plan.** No new tests: this is a constant-only correction
+    with no new behavior to characterize, the same precedent FR-031
+    established for its own constant changes. `cargo test --workspace`
+    re-run clean at 259 total (unchanged from FR-035) confirms the four
+    source-file substitutions and the two `arena.rs` constant/doc-comment
+    edits are behavior-preserving everywhere the old values were previously
+    exercised. A targeted `grep -c "892\.75"` across the four
+    non-`arena.rs` files, run before the substitution, confirmed zero
+    matches in each — ruling out any risk of the mechanical `92.75` →
+    `93.15` substitution corrupting `arena::GOAL_HALF_WIDTH`'s unrelated
+    `892.755` literal, which contains `92.75` as a substring but lives only
+    in `arena.rs`, deliberately excluded from that substitution and edited
+    by hand instead.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -2622,20 +2703,27 @@ full order of magnitude smaller), since this port has no public reference
 for real Rocket League's actual landing-assist strength or trigger
 condition either; unlike every other jump-family constant, this one also
 has no ground-proximity signal behind its trigger at all (see FR-018 and
-Open questions). The modeled arena footprint's `SIDE_WALL_X`/`BACK_WALL_Y`/
-`CEILING_Z` are, like `MAX_CAR_SPEED`/`JUMP_SPEED`, commonly-cited
-community-measured field dimensions this project hasn't independently
-confirmed; `CORNER_LENGTH` (the octagon corner-cut inset) is this port's
-own uncalibrated invention with no public reference at all, and unlike
-every other constant in this crate, the real quantity it approximates
-(the field mesh's actual corner geometry) isn't even a single flat plane
-to begin with — so this one constant can't converge toward a "correct"
-value through calibration alone the way a scalar speed or torque could;
-matching the real corner shape would need genuinely different (curved)
-collision geometry, not just a better number (see FR-019 and Open
-questions). FR-020's `arena::FILLET_RADIUS` has exactly the same status as
-`CORNER_LENGTH` — this port's own invention, no public reference, and only
-governed the ball through FR-026 (see FR-020's own Non-goals). Since
+Open questions). The modeled arena footprint's `SIDE_WALL_X`/`BACK_WALL_Y`
+are, like `MAX_CAR_SPEED`/`JUMP_SPEED`, commonly-cited community-measured
+field dimensions; `CEILING_Z` was one too, until `RB-PHYSICS-001-FR-036`
+independently confirmed it (correcting its value from an earlier `2044`
+to `2048` in the process) by directly reading RocketSim's and RLUtilities'
+own source and by reconstructing it from real extracted collision-mesh
+geometry, rather than merely citing another community project's constant
+— the same FR-036 pass cross-confirmed `SIDE_WALL_X`/`BACK_WALL_Y` too.
+`CORNER_LENGTH` (the octagon corner-cut inset) is, since
+`RB-PHYSICS-001-FR-036`, confirmed exact against real extracted
+collision-mesh data — this project's earlier claim that it was an
+uncalibrated invention with no public reference at all was itself
+incorrect (see FR-036's own entry). The flat corner-wall plane
+`CORNER_LENGTH` positions is exact; what remains unmodeled is only the
+real field mesh's own curved blend from that flat plane into the
+floor/ceiling ramps this port doesn't model either, a genuinely different
+(curved) collision geometry question, not a "better number" one (see
+Open questions). FR-020's `arena::FILLET_RADIUS` does NOT share
+`CORNER_LENGTH`'s newly-confirmed status — it remains this port's own
+invention, no public reference, and only governed the ball through FR-026
+(see FR-020's own Non-goals). Since
 FR-027, `FILLET_RADIUS` also governs a car's own corner-testing
 approximation — no real recorded car-vs-curve data has exercised either
 the ball's or the car's response to it, so the constant's validation
@@ -2697,10 +2785,11 @@ unit-tested against a synthetic fixture (a perpendicular floor combined
 with the same 45-degree non-perpendicular wall pair `between_planes`'s own
 fixture uses), not just proven out against the arena's own 4 corner-wall
 quadrants. `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` (FR-024) are
-commonly-cited community numbers, same sourcing status as `SIDE_WALL_X`/
-`BACK_WALL_Y`/`CEILING_Z` — not independently confirmed by this project,
-and only govern the ball, same as `FILLET_RADIUS` (a car can't drive
-into a goal in this port at all — see FR-024's Non-goals).
+commonly-cited community numbers, not independently confirmed by this
+project — unlike `SIDE_WALL_X`/`BACK_WALL_Y`/`CEILING_Z`, which
+`RB-PHYSICS-001-FR-036` did independently confirm — and only govern the
+ball, same as `FILLET_RADIUS` (a car can't drive into a goal in this port
+at all — see FR-024's Non-goals).
 `StaticGoalWall::contains_in_window`'s own containment logic is
 independently unit-tested against a synthetic fixture (not the arena's
 own goal dimensions), the same "prove the general mechanism, not just
@@ -2847,20 +2936,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Open questions
 
-- Two genuine ambiguities `RB-PHYSICS-001-FR-031`'s constant-calibration
-  audit surfaced but deliberately didn't act on, for lack of strong enough
-  confidence to justify the ripple effect of changing them: (1) this
-  port's ball radius (`92.75`) is an older, casually-cited figure, while
-  RocketSim, RLUtilities, and the current RLBot wiki all instead converge
-  on `91.25` as the real simulation collision radius — not changed since
-  `92.75` is load-bearing across a large fraction of this crate's existing
-  tests as a magic number, and medium-confidence evidence alone isn't
-  enough justification within an audit whose own scope explicitly
-  excludes wholesale recalibration; (2) `arena::CEILING_Z` (`2044.0`) vs.
-  RocketSim's `ARENA_HEIGHT = 2048.f` — unclear whether the two numbers
-  describe the same reference point without deeper investigation. Both
-  need a deliberate, scoped follow-up (or real `RB-VERIFY-002` data) before
-  acting, not a guess.
+- Both genuine ambiguities `RB-PHYSICS-001-FR-031`'s constant-calibration
+  audit surfaced but deliberately didn't act on for lack of confidence are
+  now resolved by `RB-PHYSICS-001-FR-036`'s own dedicated follow-up (real
+  source-level research, not a guess) — see its own Requirements entry for
+  the full reasoning: (1) the ball radius question was itself reframed, not
+  simply "92.75 is wrong, use 91.25" — real Rocket League splits an inertia
+  radius (`91.25`) from a separately larger collision radius (`93.15`, the
+  mesh's own collision margin), and since this port has no Bullet-style
+  collision margin of its own, its single unified radius field's correct
+  analog is the collision radius, so `92.75` became `93.15`, not `91.25`;
+  (2) `arena::CEILING_Z` (`2044.0`) is now confirmed to share the same
+  reference point as RocketSim's `ARENA_HEIGHT = 2048.f`, corrected to
+  `2048.0`. Neither used real `RB-VERIFY-002` data (still blocked); both
+  instead used direct RocketSim/RLUtilities source-code reading plus an
+  independent real-mesh geometric reconstruction, which this project
+  judged sufficient confidence to act on without waiting further.
 - A combined multi-body solve for bodies simultaneously touching more than
   one other body is now implemented (see `RB-PHYSICS-001-FR-030`):
   `solver::resolve_dynamic_manifolds` shares one interleaved
@@ -2960,12 +3051,15 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   "first wall in `self.walls`" rule) isn't. FR-019's corner walls make this
   case reachable in the standard arena for the first time; still not
   exercised by any test here. Not started.
-- Sourcing or verifying `arena::CORNER_LENGTH`/`FILLET_RADIUS`/
-  `CORNER_ARCH_RADIUS` against real field mesh data (see
-  FR-019/FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — this
-  port has no reference for any of the three at all, unlike `SIDE_WALL_X`/
-  `BACK_WALL_Y`/`CEILING_Z`; even a sourced value would only approximate
-  the real corner/transition, which isn't a single flat plane,
+- Sourcing or verifying `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
+  against real field mesh data (see
+  FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — this port has
+  no reference for either at all. `arena::CORNER_LENGTH` no longer belongs
+  in this bullet: `RB-PHYSICS-001-FR-036` confirmed it exact against real
+  extracted collision-mesh data, the same sourcing status as `SIDE_WALL_X`/
+  `BACK_WALL_Y`/`CEILING_Z` (see FR-036's own entry and FR-019's). Even a
+  sourced value for `FILLET_RADIUS`/`CORNER_ARCH_RADIUS` would only
+  approximate the real corner/transition, which isn't a single flat plane,
   single-radius edge fillet, or single-radius corner fillet in the actual
   game. `FILLET_RADIUS` governs the 4 cardinal walls'
   floor/ceiling-seam fillets (FR-020), all 8 vertical-edge fillets
@@ -3051,6 +3145,39 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.36.0 (2026-08-31): FR-036 added and implemented (ball radius /
+  `CEILING_Z` constant-ambiguity resolution) — a dedicated follow-up to
+  FR-031's own audit, using real source-level research (RocketSim's and
+  RLUtilities' own source, and the current RLBot wiki, read directly rather
+  than guessed at) instead of leaving both ambiguities open indefinitely.
+  Ball radius: FR-031 had framed this as "`92.75` vs. `91.25`", but the
+  real games actually split the ball into a smaller inertia radius
+  (`91.25`) and a distinctly larger collision radius (`93.15`, the mesh's
+  own collision margin) — a split this port's single unified radius field
+  can't represent, and since this port has no separate Bullet-style
+  collision margin, the collision radius is the correct single-constant
+  analog, not the inertia radius. Every `92.75` literal across
+  `solver.rs`/`world.rs`/`net.rs`/`collision.rs` became `93.15`, not
+  `91.25`. `arena::CEILING_Z`: confirmed, via both RocketSim's
+  `ARENA_HEIGHT = 2048.f` and an independent reconstruction from real
+  extracted collision-mesh geometry, to share the same reference point,
+  so `2044.0` became `2048.0`. Two mis-documented claims were also
+  corrected as a low-risk byproduct: `arena::CORNER_LENGTH` and
+  `arena::GOAL_DEPTH` were wrongly described (by FR-019/FR-031 and FR-029
+  respectively) as uncalibrated placeholders with no public reference —
+  both are actually confirmed exact, so only their doc comments changed,
+  not their values. `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` remain
+  untouched and still genuinely uncalibrated — no analytic reference exists
+  for either, a separate, more involved mesh-ingestion follow-up
+  deliberately left for later. Before the mechanical substitution, a
+  targeted `grep -c "892\.75"` across the four non-`arena.rs` files
+  confirmed zero matches in each, ruling out corruption of
+  `arena::GOAL_HALF_WIDTH`'s unrelated `892.755` literal (edited by hand in
+  `arena.rs` instead, which was excluded from the substitution). No new
+  tests: a constant-only correction with no new behavior to characterize,
+  the same precedent FR-031 established; `cargo test --workspace` re-run
+  clean at 259 total (unchanged from FR-035), confirming the change is
+  behavior-preserving everywhere the old values were exercised.
 - 0.35.0 (2026-08-31): FR-035 added and implemented (warm-starting,
   `resolve_dynamic_manifolds` only) — a new `solver::ContactCache` carries
   a manifold's converged real-channel impulses (normal plus both friction

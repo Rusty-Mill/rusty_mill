@@ -130,18 +130,33 @@ pub const SIDE_WALL_X: f32 = 4096.0;
 /// caveat as `SIDE_WALL_X`.
 pub const BACK_WALL_Y: f32 = 5120.0;
 
-/// Ceiling height along Z — same sourcing caveat as `SIDE_WALL_X`.
-pub const CEILING_Z: f32 = 2044.0;
+/// Ceiling height along Z (`RB-PHYSICS-001-FR-036`). Confirmed against
+/// RocketSim's own `ARENA_HEIGHT` constant (`src/RLConst.h`), used the same
+/// way this port uses `CEILING_Z` — as the ceiling collision plane's
+/// position measured from the same floor-at-zero datum, not a different
+/// reference point — and independently cross-checked by fitting a circle to
+/// RLUtilities' own extracted real-game collision-mesh vertices for the
+/// wall-to-ceiling ramp, which lands within 0.25 units of `2048.0` (the
+/// same fitting method reproduces the already-known floor and side-wall
+/// positions to within 0.05 units, validating it). This port previously
+/// used `2044.0`, an unrelated older community figure (the RLBot wiki's own
+/// commit history traces it to a since-superseded pre-2018 measurement);
+/// `2048.0` is the correct value, not a different convention.
+pub const CEILING_Z: f32 = 2048.0;
 
-/// Uncalibrated placeholder: how far back from the true rectangular corner
-/// (where a side wall would meet a back wall at 90 degrees) each of the
-/// four diagonal corner walls is inset, along both axes equally. This port
-/// has no verified reference for Rocket League's actual corner-wall
-/// geometry — the real arena's corners aren't a single flat 45-degree cut
-/// at all (they're curved, and blend into the ramps/curves this port
-/// doesn't model either) — this value was chosen only to produce a
-/// recognizably octagonal footprint for testing, not measured from real
-/// field mesh data.
+/// How far back from the true rectangular corner (where a side wall would
+/// meet a back wall at 90 degrees) each of the four diagonal corner walls
+/// is inset, along both axes equally. Confirmed correct, not a placeholder
+/// (`RB-PHYSICS-001-FR-036`): `SIDE_WALL_X - CORNER_LENGTH = 2944.0`, and
+/// `2944.0 + BACK_WALL_Y = 8064.0` matches the diagonal-corner-plane
+/// intercept `RB-PHYSICS-001-FR-036`'s research independently measured
+/// from RLUtilities' real extracted collision-mesh vertices (a flat
+/// diagonal plane at 45 degrees intersecting both axes at ±8064) — this
+/// project's earlier claim that it was an uncalibrated placeholder chosen
+/// only for a "recognizably octagonal" look was itself incorrect. The real
+/// arena's corners aren't a single flat 45-degree cut all the way to the
+/// floor/ceiling seam (they curve, and blend into ramps this port doesn't
+/// model either), but the flat corner-wall plane itself is exact.
 pub const CORNER_LENGTH: f32 = 1152.0;
 
 /// Uncalibrated placeholder: the radius of the curved fillet connecting a
@@ -185,12 +200,11 @@ pub const GOAL_HALF_WIDTH: f32 = 892.755;
 /// `GOAL_HALF_WIDTH`.
 pub const GOAL_HEIGHT: f32 = 642.775;
 
-/// Uncalibrated placeholder: how far behind the back wall the goal box's
-/// own interior extends (`RB-PHYSICS-001-FR-029`) — this port has no
-/// verified reference for Rocket League's actual net depth at all, unlike
-/// `GOAL_HALF_WIDTH`/`GOAL_HEIGHT`; chosen only to be a visibly real
-/// interior volume (comparable in scale to the goal mouth's own
-/// dimensions), not measured from real field mesh data.
+/// How far behind the back wall the goal box's own interior extends
+/// (`RB-PHYSICS-001-FR-029`). Confirmed against the current RLBot wiki's
+/// own cited goal depth (`RB-PHYSICS-001-FR-036`'s research) — not an
+/// uncalibrated placeholder, despite this project's earlier claim (from
+/// `RB-PHYSICS-001-FR-031`) that no reference existed for it at all.
 pub const GOAL_DEPTH: f32 = 880.0;
 
 /// How far behind the real back wall a goal's `net::NetMesh` panel sits

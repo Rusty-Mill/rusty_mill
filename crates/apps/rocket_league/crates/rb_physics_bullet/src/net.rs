@@ -379,7 +379,7 @@ mod tests {
             .map(|i| net.points[i].position)
             .collect();
 
-        let mut ball = RigidBody::sphere(92.75, 1.0, Vec3::new(5000.0, 5000.0, 5000.0));
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(5000.0, 5000.0, 5000.0));
         let gravity = Vec3::new(0.0, 0.0, -650.0);
         for _ in 0..120 {
             net.step(&mut ball, gravity, 1.0 / 60.0);
@@ -402,7 +402,7 @@ mod tests {
         // indefinitely — the mass-spring analog of
         // `world::tests::resting_ball_stays_at_rest`.
         let mut net = flat_net(5, 4);
-        let mut ball = RigidBody::sphere(92.75, 1.0, Vec3::new(5000.0, 5000.0, 5000.0));
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(5000.0, 5000.0, 5000.0));
         let gravity = Vec3::new(0.0, 0.0, -650.0);
         for _ in 0..600 {
             net.step(&mut ball, gravity, 1.0 / 60.0);
@@ -446,7 +446,7 @@ mod tests {
             5,
             5,
         );
-        let mut ball = RigidBody::sphere(92.75, 1.0, start);
+        let mut ball = RigidBody::sphere(93.15, 1.0, start);
         ball.linear_velocity = Vec3::new(0.0, ball_speed, 0.0);
         let gravity = Vec3::ZERO; // isolate the net's own catching effect from gravity's fall
 
