@@ -93,7 +93,13 @@
 //! ratios and `dodge_pitch_is_backward`'s for the backward classification.
 //! A dodge is purely horizontal (no vertical component, unlike the plain double
 //! jump) — real Rocket League's dodge impulse does have a small upward
-//! component too, not modeled here. Below `DODGE_DEADZONE` on both axes,
+//! component too, not modeled here. Since `RB-PHYSICS-001-FR-069`, real
+//! Rocket League's own dodge spin is confirmed to be a continuous torque
+//! applied every step for `FLIP_TORQUE_TIME` (0.65s) with no decay, not
+//! this port's own single instantaneous `DODGE_ANGULAR_SPEED` kick, and
+//! the real torque also genuinely differs between pitch and roll — see
+//! `DODGE_ANGULAR_SPEED`'s own doc comment for the full finding and why
+//! it isn't adopted. Below `DODGE_DEADZONE` on both axes,
 //! the plain vertical double jump fires exactly as before dodge existed.
 //! Either way, the press still spends the one `double_jump_available` per
 //! airborne period — a dodge and a plain double jump share the same
@@ -266,11 +272,11 @@
 //! League applies a genuinely anisotropic (direction-dependent) reduction,
 //! not this port's one isotropic factor — see that requirement's own
 //! entry and `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc comment for the
-//! full finding. `DODGE_ANGULAR_SPEED`, and
-//! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
-//! only to produce a visibly responsive spin/flip for
-//! this car's mass/inertia in tests — `LANDING_AUTO_UPRIGHT_TORQUE` in
-//! particular isn't a simplification of one real system at all, since
+//! full finding. `LANDING_AUTO_UPRIGHT_TORQUE`
+//! remains an uncalibrated placeholder chosen
+//! only to produce a visibly responsive flip for
+//! this car's mass/inertia in tests — in
+//! particular it isn't a simplification of one real system at all, since
 //! `RB-PHYSICS-001-FR-060` found real Rocket League's two closest systems
 //! (auto-flip, auto-roll) are both grounded and input-gated, unlike this
 //! port's own airborne, input-free nudge — see that module doc section's
@@ -289,12 +295,24 @@
 //! this port already models, unlike those other three findings' own
 //! architecture mismatches — see that requirement's own entry and
 //! `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full finding.
+//! `DODGE_ANGULAR_SPEED` itself remains an uncalibrated placeholder too,
+//! but since `RB-PHYSICS-001-FR-069` real Rocket League's own dodge spin
+//! is confirmed to be a continuous per-axis torque over a fixed 0.65s
+//! window, not this port's own single instantaneous shared kick — a
+//! confirmed-but-not-adopted finding in the same category as
+//! `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/`WALL_JUMP_HORIZONTAL_SPEED`,
+//! since adopting the real shape would mean new per-car elapsed-flip-time
+//! state, a substantially larger redesign `RB-PHYSICS-001-FR-059`'s own
+//! Non-goals already flagged as out of scope — see that requirement's own
+//! entry and `DODGE_ANGULAR_SPEED`'s own doc comment for the full finding.
 //! `RB-PHYSICS-001-FR-031`'s audit
 //! found real reference numbers for some of these (a dodge's real ~500
 //! uu/s base impulse; a wall jump reusing the plain jump impulse rather
 //! than its own faster speed, confirmed exact by `RB-PHYSICS-001-FR-067`;
 //! real air-control torque/damping coefficients, whose per-axis ratio
-//! `RB-PHYSICS-001-FR-068` later confirmed and adopted), but none of the
+//! `RB-PHYSICS-001-FR-068` later confirmed and adopted; a dodge's real
+//! spin torque and duration, whose exact mechanism `RB-PHYSICS-001-FR-069`
+//! later confirmed), but none of the
 //! remaining raw absolute values port directly: they're expressed as
 //! torques or velocity-dependent curves calibrated against real Rocket
 //! League's own specific car mass/inertia tensor and mechanic shape,
@@ -752,15 +770,43 @@ fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> bool {
 /// Uncalibrated placeholder dodge spin speed (rad/s), added directly to
 /// `RigidBody.angular_velocity` as an instantaneous change (mirroring how
 /// `apply_impulse` directly changes `linear_velocity`, rather than
-/// `apply_torque`'s continuous accumulation, since a dodge's flip is a
-/// single instantaneous kick, not a sustained torque) — chosen only to
-/// produce a visibly fast flip in tests, not derived from any measured or
-/// documented Rocket League value. Numerically equal to
-/// `MAX_CAR_ANGULAR_SPEED` above, confirmed only since
-/// `RB-PHYSICS-001-FR-057` — a coincidence, not a shared derivation: this
-/// constant predates that cap and was picked independently, so a dodge
-/// kick landing exactly at the cap rather than comfortably under or over
-/// it isn't a deliberate design choice either way.
+/// `apply_torque`'s continuous accumulation, since this port models a
+/// dodge's flip as a single instantaneous kick, not a sustained torque) —
+/// chosen only to produce a visibly fast flip in tests, not derived from
+/// any measured or documented Rocket League value in its own magnitude.
+/// Numerically equal to `MAX_CAR_ANGULAR_SPEED` above, confirmed only
+/// since `RB-PHYSICS-001-FR-057` — a coincidence, not a shared derivation:
+/// this constant predates that cap and was picked independently, so a
+/// dodge kick landing exactly at the cap rather than comfortably under or
+/// over it isn't a deliberate design choice either way.
+///
+/// `RB-PHYSICS-001-FR-069` continued `RB-PHYSICS-001-FR-031`'s own
+/// original audit (which had already found the real mechanism is a
+/// *torque*, not a flat kick, via `RLConst.h`'s `FLIP_TORQUE_X = 260.f`/
+/// `FLIP_TORQUE_Y = 224.f` for `FLIP_TORQUE_TIME = 0.65f` seconds) with a
+/// fresh fetch of RocketSim's real `Car.cpp` to confirm the exact
+/// mechanism, not just the constants' existence. `_UpdateDoubleJumpOrFlip`
+/// stores a per-dodge relative torque direction (`flipRelTorque`) at the
+/// moment a flip begins; `_UpdateAirTorque` then applies
+/// `flipRelTorque * Vec(FLIP_TORQUE_X, FLIP_TORQUE_Y, 0)` as a continuous
+/// torque every step, gated by `isFlipping = hasFlipped && flipTime <
+/// FLIP_TORQUE_TIME` — a hard cutoff at exactly `0.65` seconds, with no
+/// decay or ramp beforehand (constant magnitude the whole window, then an
+/// abrupt stop). `FLIP_TORQUE_X` (roll/left-right) and `FLIP_TORQUE_Y`
+/// (pitch/forward-backward) also genuinely differ from each other — a
+/// second axis-shaped divergence this port's own single shared
+/// `DODGE_ANGULAR_SPEED` doesn't model, on top of the instant-kick-vs-
+/// continuous-torque one `FR-031` already found. Not adopted: still the
+/// same "false precision" reasoning `FR-031` already established (the
+/// resulting spin rate depends on real Rocket League's own specific
+/// hitbox inertia tensor, which this port's placeholder car body doesn't
+/// match); adopting the real continuous-torque-over-`FLIP_TORQUE_TIME`
+/// shape for real, not just its constants, would also mean threading new
+/// per-car elapsed-flip-time state through `PhysicsWorld` the way
+/// `jump_hold_time_remaining` already does for the ground jump — a
+/// substantially larger redesign than a single documentation-audit
+/// requirement should take on, matching `RB-PHYSICS-001-FR-059`'s own
+/// Non-goals, which already flagged this exact redesign as out of scope.
 const DODGE_ANGULAR_SPEED: f32 = 5.5;
 
 /// Maximum duration (seconds) that continuing to hold `jump` after a fresh
