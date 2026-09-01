@@ -3,6 +3,17 @@
 version = 3
 
 [[package]]
+name = "a2a-agent-server"
+version = "0.1.0"
+dependencies = [
+ "adk-a2a",
+ "axum 0.7.9",
+ "rusty-adk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,6 +135,171 @@ dependencies = [
  "accesskit_windows",
  "raw-window-handle",
  "winit",
+]
+
+[[package]]
+name = "adk-a2a"
+version = "0.1.0"
+dependencies = [
+ "adk-agents",
+ "adk-core",
+ "adk-graph",
+ "adk-models",
+ "adk-runner",
+ "adk-sessions",
+ "adk-tools",
+ "async-stream",
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "futures",
+ "rusty_a2a",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-agents"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "adk-graph",
+ "adk-models",
+ "adk-sessions",
+ "adk-tools",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "adk-graph"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "adk-sessions",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-macros"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "adk-sessions",
+ "adk-tools",
+ "async-trait",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.119",
+ "tokio",
+]
+
+[[package]]
+name = "adk-mcp"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "adk-sessions",
+ "adk-tools",
+ "async-trait",
+ "axum 0.8.9",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-models"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "async-trait",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-runner"
+version = "0.1.0"
+dependencies = [
+ "adk-agents",
+ "adk-core",
+ "adk-graph",
+ "adk-models",
+ "adk-sessions",
+ "adk-tools",
+ "async-stream",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-sessions"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "async-trait",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "adk-tools"
+version = "0.1.0"
+dependencies = [
+ "adk-core",
+ "adk-sessions",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5189,6 +5365,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
+name = "mcp-tool-server"
+version = "0.1.0"
+dependencies = [
+ "rusty-adk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8330,6 +8515,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-adk"
+version = "0.1.0"
+dependencies = [
+ "adk-a2a",
+ "adk-agents",
+ "adk-core",
+ "adk-graph",
+ "adk-macros",
+ "adk-mcp",
+ "adk-models",
+ "adk-runner",
+ "adk-sessions",
+ "adk-tools",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+]
+
+[[package]]
 name = "rusty-croc"
 version = "0.1.0"
 dependencies = [
@@ -11217,6 +11422,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-test"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
+dependencies = [
+ "futures-core",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12308,6 +12524,16 @@ dependencies = [
  "log",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "weather-agent"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "rusty-adk",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

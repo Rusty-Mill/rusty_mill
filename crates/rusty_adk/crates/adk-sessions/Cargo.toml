@@ -1,10 +1,10 @@
 [package]
 name = "adk-sessions"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_adk"
 description = "Session, artifact, and memory service implementations for the Rust ADK"
 
 [features]
@@ -22,7 +22,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 # Held at 0.37: newer libsqlite3-sys build scripts need `cfg_select!`, which is
 # not stable on this workspace's MSRV.
-rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+rusqlite = { workspace = true, features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

@@ -152,6 +152,20 @@ same way; this row set reflects whichever of those have landed so far.
 | [`ts-daemon`](crates/rusty_tailscale/crates/ts-daemon) | `crates/rusty_tailscale/crates/ts-daemon` | `ts-daemon`: the long-running node daemon |
 | [`ts-cli`](crates/rusty_tailscale/crates/ts-cli) | `crates/rusty_tailscale/crates/ts-cli` | `ts-cli`: the LocalAPI-driven command line client |
 | [`xtask`](crates/rusty_tailscale/xtask) | `crates/rusty_tailscale/xtask` | `rusty_tailscale`'s integration harness: Headscale in a container, multi-node NAT simulation |
+| [`adk-core`](crates/rusty_adk/crates/adk-core) | `crates/rusty_adk/crates/adk-core` | ADK 2.0's data model: events, content, state, and the tool/callback contracts |
+| [`adk-macros`](crates/rusty_adk/crates/adk-macros) | `crates/rusty_adk/crates/adk-macros` | `#[tool]` and friends: `adk-core`'s derive/attribute macros |
+| [`adk-tools`](crates/rusty_adk/crates/adk-tools) | `crates/rusty_adk/crates/adk-tools` | Built-in tool implementations and the tool registry |
+| [`adk-models`](crates/rusty_adk/crates/adk-models) | `crates/rusty_adk/crates/adk-models` | LLM provider adapters for the ADK runtime |
+| [`adk-sessions`](crates/rusty_adk/crates/adk-sessions) | `crates/rusty_adk/crates/adk-sessions` | Session and event persistence (in-memory and SQLite stores) |
+| [`adk-graph`](crates/rusty_adk/crates/adk-graph) | `crates/rusty_adk/crates/adk-graph` | ADK 2.0's graph-based execution engine |
+| [`adk-agents`](crates/rusty_adk/crates/adk-agents) | `crates/rusty_adk/crates/adk-agents` | Agent types built on the graph engine: LLM, sequential, parallel, loop |
+| [`adk-runner`](crates/rusty_adk/crates/adk-runner) | `crates/rusty_adk/crates/adk-runner` | The runner: drives an agent over a session and streams its events |
+| [`adk-mcp`](crates/rusty_adk/crates/adk-mcp) | `crates/rusty_adk/crates/adk-mcp` | MCP bridge: consume MCP servers as ADK tools, and serve ADK tools over MCP |
+| [`adk-a2a`](crates/rusty_adk/crates/adk-a2a) | `crates/rusty_adk/crates/adk-a2a` | A2A bridge: serve a Rust ADK agent over the Agent2Agent protocol |
+| [`rusty-adk`](crates/rusty_adk/crates/rusty-adk) | `crates/rusty_adk/crates/rusty-adk` | The `rusty-adk` facade crate re-exporting the ADK stack |
+| [`weather-agent`](crates/rusty_adk/examples/weather-agent) | `crates/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
+| [`mcp-tool-server`](crates/rusty_adk/examples/mcp-tool-server) | `crates/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
+| [`a2a-agent-server`](crates/rusty_adk/examples/a2a-agent-server) | `crates/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -879,6 +893,47 @@ Linux-specific paths are `cfg`-gated internally and `platform-linux`
 self-gates its whole body — so, unlike `rusty_stream`, it needs no
 `windows-exclude` in CI.
 
+`rusty_adk` is fourteen crates behind one nested workspace — eleven library
+crates plus three runnable examples, all of which its own `members` list
+carried, so all fourteen join this root's. Its `[workspace.package]`
+collided on `rust-version` (1.85), `license` (Apache-2.0) and `repository`,
+so its crates carry literal `[package]` fields; only its dependencies were
+hoisted.
+
+Three hoists needed widening rather than a straight copy — the same
+"widen, don't split" call made for `rusty_db`'s and `rusty_skillopt`'s:
+`tokio` gained `io-std`, `uuid` gained `serde`, and `serde_json` gained
+`float_roundtrip`. That last one is worth naming: `rusty_adk` needs it
+because its SQLite session store holds events as JSON and round-trips an
+f64 timestamp through them, and without it `serde_json`'s fast float path
+can land a ULP away. Since Cargo unifies features across a single crate
+version, enabling it in one member enables it everywhere regardless — so it
+is declared at the root, where it is visible, rather than buried in a member
+manifest where it would look local and not be. Two hoists were declined:
+`thiserror` (`"2"` against this root's `"1"`, the recurring split) and
+`schemars` (`"0.8"` against `rusty_key`'s `"1.0.4"`) both stay literal on
+the `adk-*` crates that use them.
+
+`adk-sessions` hit exactly the `rusty_inventrory` constraint again — an
+optional `rusqlite = "0.37"`, and Cargo's `links` uniqueness check counts
+optional dependencies it never activates — so it now uses this root's
+`rusqlite = "0.32.1"` entry, unifying on `libsqlite3-sys 0.30.1` with
+`rusty_sqlite` and `inventory-core`.
+
+The pin it retires is `adk-a2a`'s `rusty_a2a` — a *branch-tracking* git
+dependency (no `rev`), unlike every other pin retired in this series, so
+what it actually resolved to was whatever `baileyrd/rusty_a2a`'s default
+branch pointed at when its lockfile was last written: `983d9810`. That is
+42 commits behind the commit this workspace's `crates/rusty_a2a` was
+imported from (9,729 insertions / 344 deletions across 66 files), and three
+commits behind current `main` on top of that — one of which, boxing
+`require_auth`'s error for `clippy::result_large_err`, is a real signature
+change. Swapped to a `path` dependency and verified the way
+`rusty_request`'s three-pin retirement was: by running `adk-a2a`'s own
+suite against the swap — 13 unit tests, 8 end-to-end and 10 remote-transport
+tests, all passing unmodified — rather than by reading the diff. Full group:
+278 tests pass, 2 ignored.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -961,8 +1016,9 @@ a third) and [`rusty_key`](https://github.com/baileyrd/rusty_key) (eight
 behind a fourth) and
 [`rusty_llama`](https://github.com/baileyrd/rusty_llama) and
 [`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale) (sixteen
-crates behind a fifth nested workspace) — and continuing with
-[`rusty_adk`](https://github.com/baileyrd/rusty_adk),
+crates behind a fifth nested workspace) and
+[`rusty_adk`](https://github.com/baileyrd/rusty_adk) (fourteen behind a
+sixth) — and continuing with
 [`rusty_provider`](https://github.com/baileyrd/rusty_provider),
 [`rusty_yirp`](https://github.com/baileyrd/rusty_yirp), and
 [`rusty_agent_gateway`](https://github.com/baileyrd/rusty_agent_gateway) —

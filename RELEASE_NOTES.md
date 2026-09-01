@@ -13,6 +13,36 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_adk`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_adk` — a Rust port of the Agent Development Kit
+  (ADK) 2.0 architecture: the same data model, graph execution engine, and
+  tool/callback contracts, plus MCP and A2A bridges. Eleven library crates
+  and three runnable examples behind one nested workspace, merged via
+  `git subtree` with full history.
+- **Changed:** `adk-a2a`'s `rusty_a2a` dependency retired from a
+  *branch-tracking* git dependency (no `rev`, unlike every other pin in
+  this series) to a `path` dependency on the merged sibling. What it had
+  actually resolved to was 42 commits behind the commit this workspace
+  imported — 9,729 insertions across 66 files — plus three commits since,
+  one of which changed `require_auth`'s error type. Verified by running
+  `adk-a2a`'s own suite against the swap (13 unit, 8 end-to-end, 10
+  remote-transport tests), not by reading the diff.
+- **Changed:** `[workspace.package]` collided on `rust-version`, `license`
+  and `repository`, so its crates carry literal `[package]` fields. Root
+  `tokio` gained `io-std`, `uuid` gained `serde`, and `serde_json` gained
+  `float_roundtrip` (which `rusty_adk`'s SQLite session store needs for
+  exact f64 round-trips, and which Cargo unifies globally anyway, so it is
+  declared where it is visible). `thiserror` and `schemars` stay literal on
+  the `adk-*` crates — `"2"` and `"0.8"` against this root's `"1"` and
+  `rusty_key`'s `"1.0.4"`.
+- **Fixed:** `adk-sessions`' optional `rusqlite = "0.37"` moved to this
+  root's `"0.32.1"` — the same `libsqlite3-sys` `links` conflict
+  `inventory-core` hit, since Cargo's uniqueness check counts optional
+  dependencies it never activates.
+- 278 tests pass, 2 ignored. No lint or format fixes were needed.
+
 ## Fourth-wave merge — `rusty_tailscale`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

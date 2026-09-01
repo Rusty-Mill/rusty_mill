@@ -1,9 +1,9 @@
 [package]
 name = "mcp-tool-server"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
 publish = false
 description = "Serves Rust ADK tools over MCP, so ADK agents in any language can call them"
 

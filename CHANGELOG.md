@@ -32,14 +32,20 @@ Removed / Fixed / Security, newest first.
   (fourth wave) — fifteen `ts-*` crates plus `xtask` behind one nested
   workspace; its `platform`/`platform-linux` git pins retired to this
   root's `rustils` path dependencies
+- `rusty_adk` merged into `crates/rusty_adk` via `git subtree` (fourth
+  wave) — eleven `adk-*`/`rusty-adk` crates plus three examples behind one
+  nested workspace; `adk-a2a`'s branch-tracking `rusty_a2a` git dependency
+  retired to a path dependency on the merged sibling
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
 
 ### Changed
 - Root `[workspace.dependencies]`: `tokio`'s feature list widened to the
-  union `rusty_search`/`rusty_db`/`rusty_skillopt` need (`fs`, `process`,
-  `io-util`); `chrono` gained `serde` for `skillopt-core`
+  union `rusty_search`/`rusty_db`/`rusty_skillopt`/`rusty_adk` need (`fs`,
+  `process`, `io-util`, `io-std`); `chrono` gained `serde` for
+  `skillopt-core`; `uuid` gained `serde` and `serde_json` gained
+  `float_roundtrip` for `rusty_adk`
 
 ### Fixed
 - `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce
@@ -78,6 +84,9 @@ Removed / Fixed / Security, newest first.
   pre-existing break
 - Four more `generic-array` 0.14.9 deprecations across `ts-control`,
   `ts-disco` and `ts-derp`; `crates/rusty_tailscale` reformatted
+- `adk-sessions` moved from `rusqlite = "0.37"` to this root's `"0.32.1"`
+  entry — the same `libsqlite3-sys` `links` conflict `inventory-core` hit,
+  and the same resolution
 
 ## [workspace] - 2026-09-01
 ### Fixed

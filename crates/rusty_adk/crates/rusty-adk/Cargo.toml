@@ -1,14 +1,14 @@
 [package]
 name = "rusty-adk"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_adk"
+homepage = "https://github.com/baileyrd/rusty_adk"
 description = "A Rust implementation of the Agent Development Kit (ADK) 2.0 architecture"
-keywords.workspace = true
-categories.workspace = true
+keywords = ["adk", "agent", "llm", "ai", "workflow"]
+categories = ["asynchronous", "api-bindings"]
 readme = "../../README.md"
 
 [features]

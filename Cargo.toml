@@ -137,6 +137,20 @@ members = [
     "crates/rusty_tailscale/crates/ts-daemon",
     "crates/rusty_tailscale/crates/ts-cli",
     "crates/rusty_tailscale/xtask",
+    "crates/rusty_adk/crates/adk-core",
+    "crates/rusty_adk/crates/adk-macros",
+    "crates/rusty_adk/crates/adk-tools",
+    "crates/rusty_adk/crates/adk-models",
+    "crates/rusty_adk/crates/adk-sessions",
+    "crates/rusty_adk/crates/adk-graph",
+    "crates/rusty_adk/crates/adk-agents",
+    "crates/rusty_adk/crates/adk-runner",
+    "crates/rusty_adk/crates/adk-mcp",
+    "crates/rusty_adk/crates/adk-a2a",
+    "crates/rusty_adk/crates/rusty-adk",
+    "crates/rusty_adk/examples/weather-agent",
+    "crates/rusty_adk/examples/mcp-tool-server",
+    "crates/rusty_adk/examples/a2a-agent-server",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -202,7 +216,11 @@ rusty-search-azure-search = { path = "crates/rusty_search/crates/rusty-search-az
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is rusty_adk's requirement (its SQLite session store
+# holds events as JSON and round-trips an f64 timestamp through them);
+# serde_json feature unification makes it global anyway, so it is declared
+# here rather than hidden in one member.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # rusty_serde is now a sibling in this same workspace -- plain path
 # dependency (previously a pinned git rev, matching the pattern used for
 # every other pin retired in this series).
@@ -217,6 +235,7 @@ tokio = { version = "1", features = [
     "fs",
     "process",
     "io-util",
+    "io-std",
 ] }
 tantivy = "0.26"
 
@@ -242,7 +261,7 @@ quote = "1"
 proc-macro2 = "1"
 heck = "0.5"
 proc-macro-crate = "3"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 bigdecimal = "0.4"
 # `serde` is rusty_skillopt's requirement; rusty_db only needs the base crate.
 chrono = { version = "0.4", features = ["serde"] }
@@ -360,6 +379,27 @@ h2 = "0.4"
 http = "1"
 crypto_box = { version = "0.9", features = ["salsa20"] }
 boringtun = "0.7"
+
+# Hoisted from rusty_adk's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `rust-version` (1.85), `license`
+# (Apache-2.0) and `repository`, so its fourteen crates carry literal
+# `[package]` fields -- rusty_db treatment. `thiserror` ("2") and `schemars`
+# ("0.8", against rusty_key's "1.0.4") both stay literal on the crates that
+# use them rather than displacing this root's existing entries.
+adk-core = { path = "crates/rusty_adk/crates/adk-core", version = "0.1.0" }
+adk-macros = { path = "crates/rusty_adk/crates/adk-macros", version = "0.1.0" }
+adk-tools = { path = "crates/rusty_adk/crates/adk-tools", version = "0.1.0" }
+adk-models = { path = "crates/rusty_adk/crates/adk-models", version = "0.1.0", default-features = false }
+adk-sessions = { path = "crates/rusty_adk/crates/adk-sessions", version = "0.1.0" }
+adk-graph = { path = "crates/rusty_adk/crates/adk-graph", version = "0.1.0" }
+adk-agents = { path = "crates/rusty_adk/crates/adk-agents", version = "0.1.0" }
+adk-runner = { path = "crates/rusty_adk/crates/adk-runner", version = "0.1.0" }
+adk-mcp = { path = "crates/rusty_adk/crates/adk-mcp", version = "0.1.0" }
+adk-a2a = { path = "crates/rusty_adk/crates/adk-a2a", version = "0.1.0" }
+futures = "0.3"
+tokio-test = "0.4"
+# rusty_a2a is a merged sibling -- retiring adk-a2a's git dependency on it.
+rusty_a2a = { path = "crates/rusty_a2a" }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

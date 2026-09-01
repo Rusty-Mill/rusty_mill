@@ -1,9 +1,9 @@
 [package]
 name = "weather-agent"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
 publish = false
 description = "End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop"
 

@@ -1,10 +1,10 @@
 [package]
 name = "adk-core"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_adk"
 description = "Core ADK 2.0 data model: Content, Event, EventActions, State, Session, InvocationContext"
 
 [dependencies]
@@ -12,7 +12,7 @@ async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
+thiserror = "2"
 tokio = { workspace = true }
 uuid.workspace = true
 
