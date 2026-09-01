@@ -73,7 +73,9 @@ fn mock_server() -> String {
     path.pop(); // deps/
     path.pop(); // <profile>/
     path.push("examples");
-    path.push("mock_mcp_server");
+    // Windows names the built example `mock_mcp_server.exe`; `EXE_SUFFIX` is
+    // empty everywhere else.
+    path.push(format!("mock_mcp_server{}", std::env::consts::EXE_SUFFIX));
     assert!(path.exists(), "fixture not built at {}", path.display());
     path.display().to_string()
 }
