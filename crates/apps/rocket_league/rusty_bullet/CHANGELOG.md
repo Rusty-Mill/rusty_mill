@@ -724,6 +724,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   decided to keep; `combine_restitution` stays unclamped, matching the
   reference's own choice. 1 new test; all pre-existing tests pass
   unchanged.
+- `collision::box_vs_goal_wall`'s corner-testing overlap question
+  (`RB-PHYSICS-001-FR-054`) — `RB-PHYSICS-001-FR-028`'s own doc comment
+  left open whether a car's face resting flush against the goal window's
+  own edge, every corner just clear of it while the face's middle already
+  overlapped it, could be under-detected the way `RB-PHYSICS-001-FR-032`
+  once suspected for a curved fillet. Resolved via a convex-hull
+  argument: "every corner outside the (convex) window" is exactly
+  equivalent to "the face doesn't fully fit through it," the correct
+  block condition — no bug. The same investigation found the mirror image
+  for `collision::box_vs_bounded_wall` *is* a genuine, currently
+  unreachable under-detection gap (confirmed against this project's own
+  car/ball sizes vs. the standard arena's own bound sizes) and documented
+  it as a Non-goals item rather than fixing it. 2 new tests; all
+  pre-existing tests pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

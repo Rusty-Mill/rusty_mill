@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.53.0
+- Version: 0.54.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -245,11 +245,22 @@
   examine; currently inert for every friction coefficient this crate
   itself ever sets, adopted for reference conformance against every
   static/dynamic body's own unvalidated public `friction` field; 1 new
-  test; static-contact warm-starting, `arena::FILLET_RADIUS`/
+  test; and, since FR-054, a car face bigger than the goal window and
+  centered on it (every corner outside the window while the window itself
+  sits entirely inside the face) was confirmed, by a convex-hull argument
+  distinct from FR-032's own, to collide exactly like an unwindowed plane
+  — a genuine resolution, not a doc-only correction, of the one
+  `box_vs_goal_wall` question FR-032's own finding didn't cover; the same
+  investigation found the mirror-image case for `box_vs_bounded_wall` (a
+  face bigger than a bound and centered on it) *is* a real under-detection
+  gap, confirmed unreachable given this project's own car/ball sizes
+  against the standard arena's own bound sizes and left open rather than
+  fixed; 2 new tests; static-contact warm-starting, `arena::FILLET_RADIUS`/
   `CORNER_ARCH_RADIUS` calibration, full convergence of the sandwiched
-  case, a rigorous (non-heuristic) edge-edge nearest-pair selection, and
-  real-data calibration (including which combine mode, if either, actually
-  matches real Rocket League) are open follow-up work)
+  case, a rigorous (non-heuristic) edge-edge nearest-pair selection,
+  `box_vs_bounded_wall`'s own under-detection gap, and real-data
+  calibration (including which combine mode, if either, actually matches
+  real Rocket League) are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -499,6 +510,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   friction defaults are placeholders (commonly-cited community estimates
   or reasonable guesses), not confirmed against real Rocket League data —
   see `RB-PHYSICS-001-FR-005`.
+- **`collision::box_vs_bounded_wall`'s corner-only overlap test can
+  under-detect a face larger than the bound, centered on it.**
+  `RB-PHYSICS-001-FR-054` found this while resolving a related, older
+  open question about `box_vs_goal_wall` (see FR-054's own entry for both
+  findings): a face whose every corner falls outside a
+  `body::StaticBoundedWall`'s own bound, while the bound's rectangle sits
+  entirely within that face's interior, has no corner touching solid
+  material anywhere — `box_vs_bounded_wall` reports zero contacts even
+  though the middle of the face is genuinely resting on real bound
+  material. Deliberately not fixed: this project's only two
+  `StaticBoundedWall`s (`arena::goal_side_wall`/`goal_roof`, both hundreds
+  of units on their shortest side) are always far larger than this
+  project's own established car or ball dimensions, so no scene this
+  port's own public API can currently construct reaches it — closing it
+  for real needs a proper 2D convex-polygon overlap test, not just
+  corner-in/corner-out sampling.
 
 ## Context and terminology
 
@@ -3268,6 +3295,92 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `rb_physics_bullet`'s pre-existing tests (as of `FR-052`) pass
     unchanged. 1 new test, bringing the crate to 289 total (+1 over
     `FR-052`'s 288).
+- `RB-PHYSICS-001-FR-054` (goal-wall/bounded-wall corner-testing overlap
+  investigation, implemented): `RB-PHYSICS-001-FR-028`'s own doc comment
+  left one question genuinely open: could `collision::box_vs_goal_wall`'s
+  per-corner window test under-detect a car's face resting flush against
+  the window's own edge, with every corner just clear of it while the
+  face's middle already overlapped the window — the same category of
+  concern `RB-PHYSICS-001-FR-032` investigated and resolved for a curved
+  fillet, but explicitly not covered by that finding since a goal
+  window's boundary is a flat rectangle, not a curve. This requirement
+  investigated that question directly, and its structurally-identical
+  sibling `collision::box_vs_bounded_wall` (`RB-PHYSICS-001-FR-029`)
+  alongside it, since both share the same "test each of the box's 8
+  corners against a 2D rectangle in the plane's own `u_axis`/`v_axis`
+  frame" technique — one gating contact on being *outside* a rectangle
+  (the goal window), the other on being *inside* one (a bound).
+  1. **`box_vs_goal_wall`: resolved, no bug.** A convex-hull argument
+     closes this one cleanly. The window is a convex 2D region; a box's
+     touching face is the convex hull of whichever corners individually
+     penetrate the plane. If every one of those corners lies outside the
+     window (a convex region), the window cannot contain the whole face
+     either — full containment of a convex hull requires every one of its
+     extreme points (the corners) to already be inside, so "some corner
+     outside" is exactly equivalent to "the face doesn't fully fit
+     through the window," the correct condition for treating it as
+     blocked. And since a flat rigid face resting on a flat surface only
+     ever needs its own corner points to determine the contact response
+     in this port at all (the same precondition `box_vs_plane` itself
+     already relies on for an *un*-windowed plane), a hole sitting
+     strictly inside that face's interior — never touching a corner —
+     changes nothing about which corners are individually on solid
+     material. Corner-only testing is exact here, distinct from but
+     analogous to FR-032's own convex-*maximum* argument for a curved
+     fillet (this one is a convex-*containment* argument for a flat
+     rectangle instead).
+  2. **`box_vs_bounded_wall`: a genuine, currently-unreachable gap.** The
+     mirror image does *not* resolve the same way, because a bound is
+     solid *inside*, not outside — the safe condition would need "some
+     corner inside the bound," not "some corner outside of anything." A
+     face *larger* than the bound and centered on it (every corner
+     outside the bound, while the bound's own rectangle sits entirely
+     within the face's interior) has no corner touching solid material
+     anywhere, so `box_vs_bounded_wall` returns zero contacts even though
+     the middle of the face is genuinely resting on real bound material —
+     a true under-detection letting a large-enough body pass straight
+     through a wall it should be blocked by. Confirmed this project's own
+     two `StaticBoundedWall`s (`arena::goal_side_wall`'s
+     `GOAL_DEPTH * 0.5`-by-`GOAL_HEIGHT * 0.5` bound, `arena::goal_roof`'s
+     `GOAL_HALF_WIDTH`-by-`GOAL_DEPTH * 0.5` one — hundreds of units on
+     their shortest side) are always far larger than this project's own
+     established car (`60x30x18` half-extents) or ball (`93.15` radius),
+     so this gap is unreachable in `arena::standard_arena` as built today
+     — deliberately left open rather than fixed, since closing it for
+     real needs a proper 2D convex-polygon overlap test (the box's own
+     touching-corner footprint against the bound's rectangle), not just
+     corner-in/corner-out sampling, and no scene this project's own public
+     API can currently construct can trigger it.
+  - **Non-goals (this requirement).** Does not change either function's
+    contact-generation algorithm — `box_vs_goal_wall` needed no change at
+    all (confirmed exact as written); `box_vs_bounded_wall`'s own gap is
+    documented, not fixed, since a real fix (2D convex-polygon overlap)
+    is more machinery than any currently-constructible scene justifies.
+    Does not touch `box_vs_quarter_pipe`/`box_vs_corner_fillet` (FR-027/
+    FR-032's own curved-geometry functions) — this requirement is scoped
+    to the two flat-rectangle-windowed shapes only. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `box_vs_goal_wall`'s doc comment states and
+    justifies the convex-hull argument closing FR-028's own open
+    question, with a passing test confirming a face bigger than the
+    window and centered on it collides bit-for-bit identically to an
+    unwindowed plane. `box_vs_bounded_wall`'s doc comment documents its
+    own mirror-image gap, with a passing test confirming the current
+    (undesirable but deliberately-not-fixed) zero-contact result for a
+    synthetic oversized face, plus the concrete numeric argument for why
+    no body this project actually constructs can reach it.
+  - **Verification plan.** 2 new `collision.rs` tests:
+    `box_bigger_than_the_goal_window_and_centered_on_it_collides_on_all_four_corners_matching_an_unwindowed_plane`
+    (a `25x1x35` half-extent face centered on the `20`-wide/`30`-tall
+    `goal_wall()` fixture's own window collides identically to
+    `contacts_vs_plane` against the same wrapped plane, 4 contacts) and
+    `box_much_bigger_than_the_bound_and_centered_on_it_is_missed_entirely_a_known_gap`
+    (a `1x15x35` half-extent face centered on the `10`-wide/`30`-tall
+    `bounded_wall()` fixture's own bound reports zero contacts, the known
+    gap made concrete). All 289 of `rb_physics_bullet`'s pre-existing
+    tests (as of `FR-053`) pass unchanged. 2 new tests, bringing the crate
+    to 291 total (+2 over `FR-053`'s 289).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4295,11 +4408,15 @@ block, a car outside the window is unaffected), not that it matches a
 real car's actual goal-line-crossing behavior; whether a car's face
 resting flush against the window's own edge, with every corner still just
 clear of it while the face's middle already overlaps it, can actually
-occur is a distinct question from the curved-fillet containment question
+occur was a distinct question from the curved-fillet containment question
 `RB-PHYSICS-001-FR-032` investigated and resolved (the window's boundary
-is a flat rectangle, not a curve) — this concern remains open and
-unverified for the goal wall specifically, not covered by FR-032's
-finding. The live end-to-end `world.rs` proof,
+is a flat rectangle, not a curve) — left open and unverified for the goal
+wall specifically at the time, not covered by FR-032's own finding.
+`RB-PHYSICS-001-FR-054` has since closed it: see that entry's own convex-hull
+argument for why it collides exactly like an unwindowed plane, and its
+own `box_vs_bounded_wall` finding for the one place this same question's
+mirror image turned out to be a genuine, if currently unreachable, gap.
+The live end-to-end `world.rs` proof,
 `a_car_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`,
 mirrors the pre-existing ball test's own live-physics proof directly (a
 car fired at the same goal-mouth-center position/velocity ends up past
@@ -4646,6 +4763,34 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.54.0 (2026-09-01): FR-054 added and implemented (goal-wall/
+  bounded-wall corner-testing overlap investigation) — closes the one
+  question `RB-PHYSICS-001-FR-028`'s own doc comment left open: whether
+  `collision::box_vs_goal_wall`'s per-corner window test could
+  under-detect a car's face resting flush against the window's own edge,
+  every corner just clear of it while the face's middle already
+  overlapped it, the same category of concern `RB-PHYSICS-001-FR-032`
+  investigated for a curved fillet but explicitly didn't cover for a flat
+  rectangle. Resolved via a convex-hull argument: a box's touching face is
+  the convex hull of whichever corners penetrate the plane, so "every
+  corner outside the (convex) window" is exactly equivalent to "the face
+  doesn't fully fit through it," the correct block condition — no bug,
+  matching FR-032's own "further investigation found the suspected gap
+  doesn't exist" precedent, via a distinct argument (convex containment,
+  not a convex scalar maximum). Investigating `box_vs_bounded_wall`
+  (`RB-PHYSICS-001-FR-029`) alongside it, since it shares the identical
+  corner-testing technique with the opposite gate, found the mirror image
+  is a genuine gap this time: a face larger than a bound and centered on
+  it has no corner touching solid material even though the bound's own
+  rectangle sits entirely within the face's interior, so it reports zero
+  contacts despite genuinely resting on real material — confirmed
+  unreachable given this project's own car (`60x30x18` half-extents) and
+  ball (`93.15` radius) against the standard arena's own two
+  `StaticBoundedWall`s (hundreds of units on their shortest side), so
+  documented as an explicit Non-goals item rather than fixed with a
+  heavier 2D convex-polygon overlap test no constructible scene needs. 2
+  new `collision.rs` tests, bringing the crate to 291 total (+2 over
+  `FR-053`'s 289).
 - 0.53.0 (2026-09-01): FR-053 added and implemented (`combine_friction`
   defensive clamp) — `RB-PHYSICS-001-FR-043` fetched and read real
   Bullet's own `btManifoldResult::calculateCombinedFriction`/
