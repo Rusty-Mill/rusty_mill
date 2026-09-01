@@ -1,0 +1,23 @@
+[package]
+name = "adk-graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The ADK 2.0 workflow graph engine: nodes, edges, routes, joins, and interrupts"
+
+[dependencies]
+adk-core.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-test.workspace = true
+adk-sessions.workspace = true
