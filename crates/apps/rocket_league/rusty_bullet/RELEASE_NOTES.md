@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real dodge spin is a continuous per-axis torque over a fixed window, not an instantaneous kick (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#145](https://github.com/baileyrd/rusty_bullet/pull/145) · `46053ce`
 
 - **`drive::DODGE_ANGULAR_SPEED` (`5.5` rad/s) applies a flat angular-velocity
   kick at flip start** — `RB-PHYSICS-001-FR-031`'s original audit had
