@@ -194,9 +194,24 @@ jobs:
       # live CI run: see the terminated `ctrl_d_on_empty_line_is_eof`
       # timeout). Excluded here and run separately below via `cargo test`,
       # the harness this suite was actually designed and verified against.
+      #
+      # Separately, on windows-latest specifically: two live CI runs (with
+      # nextest's own `retries` already absorbing ordinary transient
+      # flakiness -- see .config/nextest.toml) still hit failures that
+      # trace back to rusty_tokio's own scheduler under heavy concurrent
+      # load -- rusty_tokio::tracing_instrumentation's spawn_blocking span
+      # never getting entered, and a real async TLS client/server test
+      # (built on rusty_tokio) hanging the full 10-minute slow-timeout.
+      # Both are plausibly CPU-contention-triggered starvation in
+      # rusty_tokio's own scheduler, not a bug in either test -- a real
+      # issue in that crate worth its own investigation, not something to
+      # patch here. Capping nextest's own test-thread concurrency on
+      # windows-latest is a mitigation for the suspected trigger (less
+      # contention among concurrently-running nextest processes), not a
+      # confirmed fix for the underlying rusty_tokio behavior.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
 
       - name: Test rusty_lines' Windows raw-mode suite (cargo test)
         if: runner.os == 'Windows' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_lines'))
