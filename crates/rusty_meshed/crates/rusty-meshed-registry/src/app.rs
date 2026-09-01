@@ -4,13 +4,13 @@
 //!
 //! What this covers: app metadata, DB path wiring, the
 //! `create_all`-on-startup step, CORS, and a `get_session`/`get_config`
-//! dependency pair -- but not yet the nine per-resource routers
-//! (`data_products`, `ports`, `contracts`, `access_grants`, `metrics`,
-//! `governance`, `lineage`, `monitor`, `transformation`, REG-006):
-//! those don't have HTTP handlers of their own yet (see the tracking
-//! issues for REG-034 onward), so [`build_router`] only mounts the two
-//! framework-level endpoints below. As each resource router gains real
-//! handlers, mount it here via [`crate::http::Router::merge`] --
+//! dependency pair. [`build_router`] mounts `data_products` and
+//! `governance` (see `crate::routers`) plus `/openapi.json` and
+//! `/docs`; the remaining seven per-resource routers (`ports`,
+//! `contracts`, `access_grants`, `metrics`, `lineage`, `monitor`,
+//! `transformation`, REG-006) don't have HTTP handlers of their own
+//! yet (see the tracking issues for REG-059 onward). As each one
+//! lands, mount it the same way via [`crate::http::Router::merge`] --
 //! [`openapi_json`] already reflects whatever the router table
 //! contains, so no separate bookkeeping is needed when that happens.
 
@@ -86,7 +86,14 @@ impl AppState {
             .db_path
             .as_deref()
             .ok_or(SessionError::NotInitialized)?;
-        Connection::open(db_path).map_err(|err| SessionError::Sql(err.to_string()))
+        let conn = Connection::open(db_path).map_err(|err| SessionError::Sql(err.to_string()))?;
+        // SQLite disables FK enforcement by default per connection --
+        // re-enable it on every session, not just at ensure_schema
+        // time, so the ON DELETE CASCADE clauses (REG-018..020) fire
+        // for every request, not just the one that created the tables.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|err| SessionError::Sql(err.to_string()))?;
+        Ok(conn)
     }
 }
 
@@ -148,11 +155,14 @@ window.onload = () => {{
     )
 }
 
-/// Builds the app's route table: `/openapi.json` and `/docs` today
-/// (REG-136, REG-137); future resource routers merge in here (see the
-/// module doc).
-pub fn build_router() -> Router {
-    let business_router = Router::new();
+/// Builds the app's route table: the data-products CRUD router and the
+/// governance dry-run endpoint today, plus `/openapi.json` and `/docs`
+/// (REG-136, REG-137); the remaining seven per-resource routers merge
+/// in here as they're built (see the module doc). `state` is shared
+/// across every resource router that needs DB access.
+pub fn build_router(state: Arc<AppState>) -> Router {
+    let business_router =
+        crate::routers::data_products::router(state).merge(crate::routers::governance::router());
     let mut route_table = business_router.routes();
     route_table.push((rusty_http::Method::Get, "/openapi.json".to_string()));
     route_table.push((rusty_http::Method::Get, "/docs".to_string()));
@@ -293,7 +303,7 @@ mod tests {
 
     #[rusty_tokio::test]
     async fn build_router_serves_openapi_json_and_docs() {
-        let router = build_router();
+        let router = build_router(Arc::new(AppState::new()));
 
         let openapi_response = router
             .dispatch(crate::http::request::Request {
@@ -331,7 +341,7 @@ mod tests {
     async fn serve_answers_a_real_http_request_over_tcp() {
         let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
-        let router = Arc::new(build_router());
+        let router = Arc::new(build_router(Arc::new(AppState::new())));
         rusty_tokio::spawn(async move {
             let _ = crate::http::server::serve(listener, router).await;
         });

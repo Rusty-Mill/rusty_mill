@@ -11,6 +11,7 @@
 pub mod app;
 pub mod http;
 pub mod models;
+pub mod routers;
 pub mod transformation;
 
 pub use app::{AppState, SessionError};

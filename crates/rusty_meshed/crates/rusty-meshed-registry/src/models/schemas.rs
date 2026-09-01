@@ -8,6 +8,8 @@ use super::enums::MaturityTier;
 use super::{DataContract, InputPort, OutputPort};
 use rusty_err::Error;
 use rusty_meshed_core::EventType;
+use rusty_meshed_governance::{GovernanceEngine, GovernedProduct};
+use std::sync::OnceLock;
 
 /// Request body for registering a data product (REG-026's sibling --
 /// the Create side). `maturity_tier` defaults to
@@ -52,6 +54,26 @@ impl DataProductCreate {
         self.tags = tags.into();
         self
     }
+}
+
+impl GovernedProduct for DataProductCreate {
+    fn description(&self) -> Option<&str> {
+        Some(self.description.as_str())
+    }
+    fn version(&self) -> Option<&str> {
+        Some(self.version.as_str())
+    }
+    fn domain(&self) -> Option<&str> {
+        Some(self.domain.as_str())
+    }
+}
+
+/// The module-level `_DEFAULT_ENGINE` singleton (REG-043): the same
+/// governance engine instance gates both `POST /data-products` and
+/// `POST /governance/evaluate`, built once on first use.
+pub fn default_governance_engine() -> &'static GovernanceEngine<DataProductCreate> {
+    static ENGINE: OnceLock<GovernanceEngine<DataProductCreate>> = OnceLock::new();
+    ENGINE.get_or_init(rusty_meshed_governance::default_engine)
 }
 
 /// Partial update body for a data product (REG-026). Every field is
@@ -265,6 +287,29 @@ mod tests {
                 .with_tags(r#"["finance","audit"]"#);
         assert_eq!(create.maturity_tier, MaturityTier::Mature);
         assert_eq!(create.tags, r#"["finance","audit"]"#);
+    }
+
+    #[test]
+    fn data_product_create_exposes_governed_product_fields() {
+        let create =
+            DataProductCreate::new("orders", "team-a", "1.0.0", "commerce", "Order events");
+        assert_eq!(create.description(), Some("Order events"));
+        assert_eq!(create.version(), Some("1.0.0"));
+        assert_eq!(create.domain(), Some("commerce"));
+    }
+
+    #[test]
+    fn default_governance_engine_runs_the_three_built_in_policies() {
+        let create = DataProductCreate::new("orders", "team-a", "bad-version", "Commerce", "short");
+        let violations = default_governance_engine().evaluate(&create);
+        assert_eq!(violations.len(), 3);
+    }
+
+    #[test]
+    fn default_governance_engine_is_the_same_instance_across_calls() {
+        let first: *const _ = default_governance_engine();
+        let second: *const _ = default_governance_engine();
+        assert_eq!(first, second);
     }
 
     #[test]
