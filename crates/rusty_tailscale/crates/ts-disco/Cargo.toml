@@ -1,0 +1,16 @@
+[package]
+name = "ts-disco"
+description = "Disco NAT-traversal message codec: ping/pong/call-me-maybe over NaCl box"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ts-types.workspace = true
+ts-key.workspace = true
+crypto_box.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

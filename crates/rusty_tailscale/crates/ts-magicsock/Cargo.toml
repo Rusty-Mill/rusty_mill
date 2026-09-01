@@ -1,0 +1,24 @@
+[package]
+name = "ts-magicsock"
+description = "Path multiplexer: direct UDP and DERP, path upgrade and live migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ts-types.workspace = true
+ts-key.workspace = true
+ts-disco.workspace = true
+ts-derp.workspace = true
+ts-stun.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+rand_core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# rustils' D16 Net surface (rustils#41/#42) — justified in DESIGN.md:
+platform = { git = "https://github.com/baileyrd/rustils", rev = "b8bf992f689e1f1fccc5f4147886a75c25c671dc" }
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "b8bf992f689e1f1fccc5f4147886a75c25c671dc" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

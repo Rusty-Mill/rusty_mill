@@ -1,0 +1,24 @@
+[package]
+name = "ts-net"
+description = "Embeddable node: smoltcp userspace netstack, no TUN, no root"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ts-types.workspace = true
+ts-key.workspace = true
+ts-engine.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
+smoltcp = { version = "0.13", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+] }
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util", "net"] }

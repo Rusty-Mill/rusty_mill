@@ -1,0 +1,16 @@
+[package]
+name = "ts-key"
+description = "Node, disco, and machine key generation, persistence, and rotation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ts-types.workspace = true
+x25519-dalek.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusty_crypto_key.workspace = true
