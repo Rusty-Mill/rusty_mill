@@ -105,6 +105,9 @@ members = [
     "crates/rusty_test/tools/stat-tool",
     "crates/rusty_test/tools/proc-runner",
     "crates/rusty_test/tools/pty-shell",
+    "crates/rusty_inventrory/crates/inventory-core",
+    "crates/rusty_inventrory/crates/inventory-cli",
+    "crates/rusty_inventrory/crates/inventory-tauri",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -234,6 +237,18 @@ cap-std = "4.0"
 portable-pty = "0.9"
 dirs = "6.0"
 anyhow = "1.0"
+
+# Hoisted from rusty_inventrory's own former `[workspace.dependencies]`.
+# Its `[workspace.package]` collided with this root's (rust-version 1.82 vs
+# 1.75, license MIT vs "MIT OR Apache-2.0", its own repository URL), so its
+# three crates carry literal `[package]` fields instead -- the rusty_db
+# treatment, not rusty_search's. `anyhow`/`serde`/`serde_json` above already
+# cover its requirements; `thiserror` is the same "2" vs "1" split as
+# rusty_test's, so inventory-core keeps a literal one of its own.
+inventory-core = { path = "crates/rusty_inventrory/crates/inventory-core" }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tracing = "0.1"
+rusqlite = "0.32.1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

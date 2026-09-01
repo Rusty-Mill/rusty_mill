@@ -13,6 +13,37 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_inventrory`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_inventrory` — a local-first encrypted index over
+  the conversation history Claude Code, Codex, Cursor, Zed, Kiro and
+  Antigravity write to disk, plus its `inv` CLI and a Tauri menu-bar shell.
+  Three crates behind one nested workspace, merged via `git subtree` with
+  full history.
+- **Changed:** its `[workspace.package]` collided with this root's on
+  `rust-version`, `license` and `repository`, so its three crates carry
+  literal `[package]` fields (the `rusty_db` treatment); only its
+  dependencies were hoisted. `thiserror` stays literal on `inventory-core`
+  for the same `"2"`-vs-`"1"` reason as `rusty_test`'s `contract`.
+- **Changed:** CI's Linux leg installs `libwebkit2gtk-4.1-dev`,
+  `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev` (the Tauri
+  shell) and `libdbus-1-dev` (`inventory-core`'s Secret Service keyring),
+  matching what `rusty_inventrory`'s own CI installed. Windows and macOS
+  use OS-native APIs for both.
+- **Fixed:** `inventory-core`'s `rusqlite = "0.37"` needs
+  `libsqlite3-sys ^0.35`, which cannot coexist with `sqlx-sqlite`'s
+  `^0.30.1` — `libsqlite3-sys` sets `links = "sqlite3"`, so exactly one
+  version may exist per graph. Moving *up* would mean `sqlx 0.9` across
+  `rusty_db` and `rusty-search-sqlite-fts5`, so `inventory-core` came down
+  to `rusqlite = "0.32.1"`, unifying with `rusty_sqlite`. Verified by
+  running its suite, not by reading changelogs: 79 tests pass unmodified.
+- **Fixed:** three deprecated `GenericArray::from_slice` calls in `db.rs`'s
+  sealed-index code — same `generic-array` 0.14.9 cause as `rusty_croc`'s,
+  same behavior-preserving rewrite.
+- No dependency swaps: nothing in `rusty_inventrory` depended on a sibling
+  in this workspace.
+
 ## Fourth-wave merge — `rusty_test`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

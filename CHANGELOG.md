@@ -14,6 +14,12 @@ Removed / Fixed / Security, newest first.
 - `rusty_test` merged into `crates/rusty_test` via `git subtree` (fourth
   wave) — six crates (`contract`, `compat`, `conformance`, `stat-tool`,
   `proc-runner`, `pty-shell`) behind one nested workspace
+- `rusty_inventrory` merged into `crates/rusty_inventrory` via `git subtree`
+  (fourth wave) — three crates (`inventory-core`, `inventory-cli`,
+  `inventory-tauri`) behind one nested workspace
+- CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
+  `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
+  `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
 
 ### Changed
 ### Fixed
@@ -25,6 +31,12 @@ Removed / Fixed / Security, newest first.
   monorepo root and scoped to `crates/rusty_test/` — it had located the
   workspace manifest two directories up and demanded a layer assignment for
   every member it found
+- `inventory-core` pinned to `rusqlite = "0.32.1"` (from `"0.37"`): its
+  `libsqlite3-sys ^0.35` requirement conflicts with `sqlx-sqlite`'s
+  `^0.30.1` on the `sqlite3` `links` key, the same constraint `rusty_sqlite`
+  hit; 79 tests pass unmodified against the pin
+- `inventory-core`'s three deprecated `GenericArray::from_slice` calls in
+  `db.rs` rewritten, same `generic-array` 0.14.9 cause as `rusty_croc`'s
 
 ## [workspace] - 2026-09-01
 ### Fixed

@@ -120,6 +120,9 @@ same way; this row set reflects whichever of those have landed so far.
 | [`stat-tool`](crates/rusty_test/tools/stat-tool) | `crates/rusty_test/tools/stat-tool` | Reference tool over `contract`: scoped filesystem primitive |
 | [`proc-runner`](crates/rusty_test/tools/proc-runner) | `crates/rusty_test/tools/proc-runner` | Reference tool over `contract`: process spawn + stdio capture primitive |
 | [`pty-shell`](crates/rusty_test/tools/pty-shell) | `crates/rusty_test/tools/pty-shell` | Reference tool over `contract`: interactive PTY primitive (manual, not CI) |
+| [`inventory-core`](crates/rusty_inventrory/crates/inventory-core) | `crates/rusty_inventrory/crates/inventory-core` | Local-first encrypted index over the conversation history AI coding tools write to disk |
+| [`inventory-cli`](crates/rusty_inventrory/crates/inventory-cli) | `crates/rusty_inventrory/crates/inventory-cli` | `inv`: search every AI agent and IDE conversation on your machine, from the terminal |
+| [`inventory-tauri`](crates/rusty_inventrory/crates/inventory-tauri) | `crates/rusty_inventrory/crates/inventory-tauri` | Menu-bar app over `inventory-core`: one keystroke to every AI conversation on your machine |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -133,9 +136,10 @@ cargo test --workspace
 ```
 
 Some `rusty_term` features (`gui`, `gui-gpu`) and `rusty_gui`'s Linux
-backend link against X11/Wayland directly; see
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the system
-packages a Linux build needs. `rusty_win32` and parts of `rusty_gui`/
+backend link against X11/Wayland directly, `inventory-tauri` needs
+WebKitGTK/GTK3, and `inventory-core`'s Linux keyring backend needs libdbus;
+see [`.github/actions/setup-build-env/action.yml`](.github/actions/setup-build-env/action.yml)
+for the system packages a Linux build needs. `rusty_win32` and parts of `rusty_gui`/
 `rusty_gpu` are Windows-only (`cfg(windows)`-gated) and are exercised by
 the workflow's `windows-latest` matrix leg.
 
@@ -652,6 +656,56 @@ its deliberate refusal to skip dependency lines it cannot parse — and all
 four of its tests pass again, alongside the rest of the group's suite (31
 tests).
 
+`rusty_inventrory` is three crates behind one nested workspace —
+`inventory-core` (the encrypted SQLite index and the per-tool readers),
+`inventory-cli` (the `inv` binary), and `inventory-tauri` (the menu-bar
+shell). None of them depends on a sibling in this workspace, so there were
+no pins to retire; the interesting parts of the merge were all collisions.
+Its `[workspace.package]` collided three ways with this root's
+(`rust-version = "1.82"` vs. `"1.75"`, `license = "MIT"` vs.
+`"MIT OR Apache-2.0"`, and its own `repository` URL), so its three crates
+were converted to literal `[package]` fields — the `rusty_db`/`rustils`
+treatment, not `rusty_search`'s — and only its dependencies were hoisted.
+`thiserror` is the same `"2"`-vs-`"1"` split `rusty_test` hit, resolved the
+same way (a literal `thiserror = "2"` on `inventory-core`).
+
+The real collision was `rusqlite`. `inventory-core` asked for `"0.37"`,
+which needs `libsqlite3-sys ^0.35`, and `libsqlite3-sys` is a `links =
+"sqlite3"` crate: exactly one version of it may exist in a build graph.
+This workspace already pins the other end of that constraint — `sqlx 0.8`'s
+`sqlx-sqlite` requires `libsqlite3-sys ^0.30.1`, which is why `rusty_sqlite`
+was itself bumped to `rusqlite = "0.32.1"` when it merged (see above). There
+is no version of `rusqlite` that satisfies both, and the only way *up* would
+be `sqlx 0.9` (whose `sqlx-sqlite` widens to `>=0.30.1, <0.38`) — a major
+upgrade of a dependency shared by `rusty_db`'s five crates and
+`rusty-search-sqlite-fts5`, far outside this merge's blast radius. So
+`inventory-core` came *down* to `rusqlite = "0.32.1"` instead, unifying all
+three consumers on `libsqlite3-sys 0.30.1`. Five minor versions backward is
+more API risk than any pin retired in this series so far, so it was verified
+by running the crate's own suite rather than by reading the changelog: 79
+tests pass unmodified, and `inventory-core`'s usage turns out to be the
+stable core of the API (`Connection`, `OpenFlags`, `params!`,
+`prepare`/`execute`/`query_map`, `rusqlite::Error`) throughout.
+
+Joining this workspace's dependency resolution also surfaced the same
+`generic-array` deprecation `rusty_croc` hit — the standalone lockfile
+pinned 0.14.7, this workspace resolves 0.14.9 — as three `-D warnings`
+errors in `db.rs`'s sealed-index code (`Nonce::from_slice`, and
+`Key::<Aes256Gcm>::from_slice` twice). Rewritten to the same
+`From<&[T]> for &GenericArray` conversion, no behavior change.
+
+`inventory-tauri` is the first Tauri shell in this workspace. Unlike
+`rusty_key`'s desktop shell (which its own repo kept out of its workspace
+entirely) it is a full workspace member here, so this workspace's CI now
+installs the toolkit its own CI already did — `libwebkit2gtk-4.1-dev`,
+`libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev` — plus
+`libdbus-1-dev`, which `inventory-core`'s Linux keyring backend
+(Secret Service, deliberately not the kernel keyring: keyutils does not
+survive a reboot and would silently orphan an existing index) needs
+regardless of the shell. Windows and macOS use OS-native APIs for both and
+need nothing extra. Its frontend is a checked-in static `ui/index.html`,
+not an npm build, so `cargo build -p inventory-tauri` is the whole build.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -726,8 +780,9 @@ A fourth wave finishes the consolidation, merging the last eleven
 standalone repos the same way, starting with
 [`rusty_croc`](https://github.com/baileyrd/rusty_croc) and
 [`rusty_test`](https://github.com/baileyrd/rusty_test) (six crates behind
-one nested workspace) — and continuing with
-[`rusty_inventrory`](https://github.com/baileyrd/rusty_inventrory),
+one nested workspace) and
+[`rusty_inventrory`](https://github.com/baileyrd/rusty_inventrory) (three
+crates behind another) — and continuing with
 [`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt),
 [`rusty_key`](https://github.com/baileyrd/rusty_key),
 [`rusty_llama`](https://github.com/baileyrd/rusty_llama),

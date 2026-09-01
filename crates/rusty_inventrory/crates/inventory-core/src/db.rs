@@ -13,8 +13,8 @@
 
 use crate::keychain::KeyProvider;
 use crate::{Error, Result};
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit, Nonce, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, Key};
 use rusqlite::Connection;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -114,9 +114,10 @@ fn unseal(sealed: &[u8], key: &[u8; 32], path: &Path) -> Result<Vec<u8>> {
             path: path.to_path_buf(),
         });
     }
-    let nonce = Nonce::from_slice(&sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN]);
+    let nonce: &Nonce<Aes256Gcm> = (&sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN]).into();
     let ciphertext = &sealed[MAGIC.len() + NONCE_LEN..];
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let key: &Key<Aes256Gcm> = (&key[..]).into();
+    let cipher = Aes256Gcm::new(key);
     cipher.decrypt(nonce, ciphertext).map_err(|_| {
         Error::KeyMismatch(format!(
             "{} exists but the key does not open it",
@@ -129,7 +130,8 @@ fn unseal(sealed: &[u8], key: &[u8; 32], path: &Path) -> Result<Vec<u8>> {
 /// Written to a staging file and renamed into place, so an interruption
 /// mid-write never corrupts the existing sealed file.
 pub fn seal_to(dest: &Path, plaintext: &[u8], key: &[u8; 32]) -> Result<()> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let key: &Key<Aes256Gcm> = (&key[..]).into();
+    let cipher = Aes256Gcm::new(key);
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)

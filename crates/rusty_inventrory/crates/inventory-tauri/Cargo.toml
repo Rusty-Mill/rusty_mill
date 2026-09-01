@@ -1,11 +1,11 @@
 [package]
 name = "inventory-tauri"
 description = "Menu bar app: one keystroke to every AI conversation on your machine"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/baileyrd/rusty_inventrory"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
