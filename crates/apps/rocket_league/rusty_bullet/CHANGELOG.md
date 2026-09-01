@@ -650,6 +650,21 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   wall, failing the assertion. Shortened the test's flight duration to
   1.8s — still comfortably past the wall, short of the infinite-fillet
   zone.
+- `rb_physics_bullet::solver`'s friction-direction selection
+  (`RB-PHYSICS-001-FR-049`) — closes the divergence
+  `RB-PHYSICS-001-FR-048` found and left open: both friction directions
+  were always derived from a fixed, velocity-independent `plane_space`
+  basis, where real Bullet's actual default aligns friction direction 1
+  with the tangential component of the current relative sliding velocity.
+  A new `friction_directions` helper now does the latter, falling back to
+  `plane_space` both for negligible tangential velocity (matching real
+  Bullet's own `SIMD_EPSILON` threshold) and for a newly-found near-head-on
+  catastrophic-cancellation edge case this crate's own panic-free
+  `Vec3::normalize()` needed to handle but real Bullet's unguarded one
+  doesn't. Wired into both `setup_rows` and `setup_two_body_rows`. 3 new
+  tests, including a dedicated isotropic-friction regression test verified
+  to fail under the old fixed-basis behavior; all pre-existing tests pass
+  unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
