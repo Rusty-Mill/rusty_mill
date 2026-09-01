@@ -6,6 +6,50 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real handbrake friction reduction is anisotropic, not a single uniform multiplier (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`drive::HANDBRAKE_FRICTION_MULTIPLIER` had no public reference at
+  all** — this port multiplies the car's own single isotropic
+  `RigidBody.friction` by this factor while `handbrake` is held and
+  grounded.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateWheels`, continuing
+  `RB-PHYSICS-001-FR-065`'s own investigation) and found real Rocket
+  League's handbrake friction reduction is genuinely anisotropic: two
+  separate confirmed real curves, `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE`
+  (`RLConst.h`, a constant `0.1` factor at every speed) and
+  `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill, `0.9` at
+  and above 1 uu/s — effectively a near-constant, barely-reduced `0.9`
+  for any real driving speed), are applied to lateral and longitudinal
+  tire friction independently, not one shared multiplier.
+- **A striking coincidence, not a confirmation**: this port's own
+  pre-existing `HANDBRAKE_FRICTION_MULTIPLIER = 0.1` happens to match the
+  real *lateral-only* factor exactly. But this port applies that same
+  `0.1` to its single isotropic friction scalar, which the ground-contact
+  solver reads identically for every direction — so it also wrongly
+  crushes longitudinal grip to a tenth, where real Rocket League keeps it
+  near `0.9`. This port's own handbrake understates real forward-momentum
+  retention during a drift.
+- **Not adopted as a fix**: `solver::friction_directions` already
+  computes two separate tangent directions per contact (since
+  `RB-PHYSICS-001-FR-049`), but both directions currently read the same
+  single combined-friction scalar when their row limits are computed.
+  Giving handbrake a genuinely different lateral-vs-longitudinal factor
+  would mean threading a second, direction-specific friction coefficient
+  through every one of `solver.rs`'s several row-limit call sites
+  (`resolve_contacts`, `resolve_contacts_between`,
+  `resolve_static_manifolds`, `resolve_dynamic_manifolds`,
+  `resolve_manifolds`) plus a way for those call sites to know a specific
+  body is currently handbraking — the same architecture-mismatch category
+  `RB-PHYSICS-001-FR-063`/`FR-065` already established.
+- Also fixed while here: adjacent stale text in the spec's own Open
+  Questions section that still framed `HANDBRAKE_FRICTION_MULTIPLIER` as
+  having no public reference at all.
+- Zero production code changed, no new tests. All 312 pre-existing
+  `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real steering is a wheeled-vehicle raycast model, not a torque (audit finding)
 **2026-09-01** · [#137](https://github.com/baileyrd/rusty_bullet/pull/137) · `8a967c1`
 
