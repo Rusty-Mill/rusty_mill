@@ -67,16 +67,28 @@ fn permitted_dependencies(layer: Layer) -> &'static [&'static str] {
     }
 }
 
+/// This crate group's prefix within the Rusty Mill monorepo's `members` list.
+///
+/// Before the monorepo merge these crates were their own Cargo workspace and
+/// `members` held exactly the six of them. They are now six members among
+/// ~100, so every member path is filtered through this prefix: the layer
+/// model below is a claim about *this* group, not about crates that were
+/// never part of it. Without the filter, `every_workspace_member_is_assigned_a_layer`
+/// would demand a layer for every unrelated crate in the monorepo.
+const GROUP_PREFIX: &str = "crates/rusty_test/";
+
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR is crates/conformance; the workspace is two up.
+    // CARGO_MANIFEST_DIR is crates/rusty_test/crates/conformance; the
+    // monorepo workspace root is four up (it was two up when this crate
+    // group was its own standalone workspace).
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root is two levels above this crate")
+        .ancestors()
+        .nth(4)
+        .expect("workspace root is four levels above this crate")
         .to_path_buf()
 }
 
-/// Reads `members` out of the workspace manifest.
+/// Reads this crate group's `members` out of the workspace manifest.
 ///
 /// Panics rather than returning an empty list if the array cannot be found:
 /// a check that silently examines zero crates is worse than no check, since
@@ -95,14 +107,14 @@ fn workspace_members(root: &Path) -> Vec<String> {
         .skip(1)
         .filter_map(|line| {
             let trimmed = line.trim().trim_end_matches(',').trim_matches('"');
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            (!trimmed.is_empty() && trimmed.starts_with(GROUP_PREFIX)).then(|| trimmed.to_string())
         })
         .collect();
 
     assert!(
         !members.is_empty(),
-        "parsed zero workspace members — the manifest format changed and this \
-         check would otherwise pass vacuously"
+        "parsed zero workspace members under {GROUP_PREFIX:?} — the manifest \
+         format changed and this check would otherwise pass vacuously"
     );
     members
 }
@@ -242,7 +254,7 @@ fn the_contract_is_the_bottom_of_the_graph() {
     // workspace dependency, every layer above it inherits that dependency and
     // the boundary stops meaning anything.
     let root = workspace_root();
-    let deps = runtime_dependencies(&root.join("crates/contract/Cargo.toml"));
+    let deps = runtime_dependencies(&root.join(GROUP_PREFIX).join("crates/contract/Cargo.toml"));
     let siblings: BTreeSet<String> = workspace_members(&root)
         .iter()
         .map(|m| crate_name(&root.join(m).join("Cargo.toml")))

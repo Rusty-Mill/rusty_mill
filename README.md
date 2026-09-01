@@ -114,6 +114,12 @@ same way; this row set reflects whichever of those have landed so far.
 | [`winargv`](crates/rustils/crates/winargv) | `crates/rustils/crates/winargv` | Windows argv → command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable) |
 | [`coreutils`](crates/rustils/crates/coreutils) | `crates/rustils/crates/coreutils` | Modular pure-Rust implementation of core GNU/POSIX utilities (`rcat`, `rls`, `rrun`, `rgrep`, and more) |
 | [`rusty-croc`](crates/rusty_croc) | `crates/rusty_croc` | Rust port of [croc](https://github.com/schollz/croc): wire-compatible secure peer-to-peer file transfer (PAKE, relay, resume) |
+| [`contract`](crates/rusty_test/crates/contract) | `crates/rusty_test/crates/contract` | Portable tool-runtime trait boundary: one execution contract, no OS-specific code |
+| [`compat`](crates/rusty_test/crates/compat) | `crates/rusty_test/crates/compat` | Per-host adapter implementing `contract` over `cap-std`/`portable-pty`/`dirs` plus `std`'s file locking |
+| [`conformance`](crates/rusty_test/crates/conformance) | `crates/rusty_test/crates/conformance` | Cross-cutting verification of `contract`/`compat`: probe suite and conformance report |
+| [`stat-tool`](crates/rusty_test/tools/stat-tool) | `crates/rusty_test/tools/stat-tool` | Reference tool over `contract`: scoped filesystem primitive |
+| [`proc-runner`](crates/rusty_test/tools/proc-runner) | `crates/rusty_test/tools/proc-runner` | Reference tool over `contract`: process spawn + stdio capture primitive |
+| [`pty-shell`](crates/rusty_test/tools/pty-shell) | `crates/rusty_test/tools/pty-shell` | Reference tool over `contract`: interactive PTY primitive (manual, not CI) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -610,6 +616,42 @@ contract, same wire format, no behavior change — verified by its full
 49-test suite (including the vectors checked against the real Go croc)
 passing unmodified.
 
+`rusty_test` (the `portable-runtime-contract` spike) is six crates behind
+one nested workspace: `contract` (the trait boundary), `compat` (the
+per-host adapter), `conformance` (the verification layer), and three
+reference tools — `stat-tool`, `proc-runner`, `pty-shell`. None of them
+depend on anything already in this repo; their dependencies are all
+crates.io crates (`cap-std`, `portable-pty`, `dirs`, `thiserror`,
+`anyhow`), so nothing needed swapping. Its own `[workspace.package]` did
+**not** collide — `edition = "2021"` and `license = "MIT OR Apache-2.0"`
+are the values this root already carries — so, unlike `rusty_db`/`rustils`,
+its six crates keep inheriting via `field.workspace = true` (the
+`rusty_search` treatment); only its `publish = false` was new and was added
+to this root's `[workspace.package]`, opted into by those six alone. Its
+`[workspace.dependencies]` were hoisted the same way, with one exception:
+`thiserror`. `rusty_test` asked for `"2.0"` while this root already pins
+`"1"` for `rusty_db`/`rustils`, so `contract` keeps a literal
+`thiserror = "2"` of its own rather than forcing a major bump on unrelated
+crates — the two majors coexist in the graph, which is exactly what
+Cargo's semver-compatibility rules allow.
+
+The one thing this merge genuinely broke, and had to fix, is
+`conformance`'s `tests/layering.rs` — a manifest-reading test that enforces
+the layer model (`contract` depends on nothing in-workspace; adapters may
+see `contract`; tools may see `contract`+`compat`; nothing reaches upward
+or sideways) precisely because "nothing in the Rust toolchain enforces
+this". It located the workspace manifest two directories above its own
+`CARGO_MANIFEST_DIR` and demanded a declared layer for *every* member it
+found there. After the merge that manifest is this monorepo's root, four
+levels up and ~100 members wide, so all three of its manifest-driven tests
+panicked. Repointed at the real root and filtered through a
+`GROUP_PREFIX = "crates/rusty_test/"` constant, so the layer model stays a
+claim about this crate group rather than silently becoming an unanswerable
+claim about the whole monorepo. The check itself is unchanged — including
+its deliberate refusal to skip dependency lines it cannot parse — and all
+four of its tests pass again, alongside the rest of the group's suite (31
+tests).
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -682,8 +724,9 @@ a time, same process.
 
 A fourth wave finishes the consolidation, merging the last eleven
 standalone repos the same way, starting with
-[`rusty_croc`](https://github.com/baileyrd/rusty_croc) — and continuing
-with [`rusty_test`](https://github.com/baileyrd/rusty_test),
+[`rusty_croc`](https://github.com/baileyrd/rusty_croc) and
+[`rusty_test`](https://github.com/baileyrd/rusty_test) (six crates behind
+one nested workspace) — and continuing with
 [`rusty_inventrory`](https://github.com/baileyrd/rusty_inventrory),
 [`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt),
 [`rusty_key`](https://github.com/baileyrd/rusty_key),

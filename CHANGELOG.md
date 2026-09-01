@@ -11,6 +11,9 @@ Removed / Fixed / Security, newest first.
 ### Added
 - `rusty_croc` merged into `crates/rusty_croc` via `git subtree` (fourth
   wave), full history preserved
+- `rusty_test` merged into `crates/rusty_test` via `git subtree` (fourth
+  wave) — six crates (`contract`, `compat`, `conformance`, `stat-tool`,
+  `proc-runner`, `pty-shell`) behind one nested workspace
 
 ### Changed
 ### Fixed
@@ -18,6 +21,10 @@ Removed / Fixed / Security, newest first.
   constructions rewritten to the equivalent `From<&[T]>` conversion — the
   workspace resolves `generic-array` 0.14.9, where they fail this repo's
   `-D warnings` clippy gate
+- `conformance`'s `layering.rs` layer-boundary check repointed at the
+  monorepo root and scoped to `crates/rusty_test/` — it had located the
+  workspace manifest two directories up and demanded a layer assignment for
+  every member it found
 
 ## [workspace] - 2026-09-01
 ### Fixed

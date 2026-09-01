@@ -13,6 +13,32 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_test`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_test` — the `portable-runtime-contract` spike:
+  one execution contract (`contract`), a per-host adapter (`compat`), a
+  verification layer (`conformance`), and three reference tools
+  (`stat-tool`, `proc-runner`, `pty-shell`). Merged via `git subtree` with
+  full history; its nested `[workspace]` table removed and its six crates
+  added to this root's `members`.
+- **Changed:** its `[workspace.package]` didn't collide with this root's
+  (same edition, same license), so its crates keep inheriting via
+  `field.workspace = true` — the `rusty_search` treatment, not
+  `rusty_db`'s. Only `publish = false` was new here. `thiserror` was
+  deliberately left un-hoisted: `rusty_test` wanted `"2.0"`, this root
+  pins `"1"` for `rusty_db`/`rustils`, so `contract` keeps a literal
+  `thiserror = "2"` instead of forcing a major bump on unrelated crates.
+- **Fixed:** `conformance`'s `tests/layering.rs` reads the workspace
+  manifest to enforce the layer model, resolving it two directories above
+  its own crate and requiring a declared layer for every member found.
+  Post-merge that is this monorepo's root — four levels up, ~100 members —
+  so three of its four tests panicked. Repointed and filtered through a
+  `GROUP_PREFIX` constant; the check's logic is otherwise untouched and all
+  four tests pass, alongside the group's other 27.
+- No dependency swaps: nothing in `rusty_test` depended on a sibling in
+  this workspace.
+
 ## Fourth-wave merge — `rusty_croc`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 
