@@ -199,9 +199,14 @@
 //! `MAX_CAR_ANGULAR_SPEED` are commonly-cited, multi-source-confirmed
 //! community-reverse-engineered approximations (the same body of public
 //! research `PhysicsWorld::new`'s gravity constant comes from);
-//! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
-//! constants standing in for Rocket League's real speed-dependent throttle
-//! curve and boost-drain behavior; `STEER_TORQUE`,
+//! `BOOST_CONSUMPTION_RATE` is a simplified constant standing in for Rocket
+//! League's real boost-drain behavior; `THROTTLE_ACCELERATION`'s own peak
+//! magnitude is likewise a simplified, uncalibrated placeholder, but since
+//! `RB-PHYSICS-001-FR-058` it's no longer applied flat — `drive_speed_taper`
+//! scales it by RocketSim's own confirmed real curve shape as speed rises,
+//! tapering smoothly to zero at `UNBOOSTED_MAX_CAR_SPEED` instead of a hard
+//! cutoff (see that function's own doc comment for why the curve's shape,
+//! unlike its peak magnitude, transfers cleanly). `STEER_TORQUE`,
 //! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
 //! `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
@@ -280,12 +285,65 @@ pub const MAX_CAR_ANGULAR_SPEED: f32 = 5.5;
 /// here instead.
 pub const UNBOOSTED_MAX_CAR_SPEED: f32 = 1410.0;
 
-/// Simplified constant throttle acceleration (uu/s^2). Rocket League's
-/// real throttle curve tapers off nonlinearly as speed rises toward
-/// `UNBOOSTED_MAX_CAR_SPEED`; this port uses one constant instead, a real
-/// simplification (not a taper), pending calibration against recorded
-/// data.
+/// Peak throttle acceleration (uu/s^2), at a standing start — still an
+/// uncalibrated placeholder pending calibration against recorded data
+/// (unlike the taper shape it's scaled by, see `drive_speed_taper` below,
+/// this magnitude itself has no confirmed real-world source). Since
+/// `RB-PHYSICS-001-FR-058`, this is no longer applied flat: it's scaled by
+/// `drive_speed_taper`'s own real curve as speed rises, tapering smoothly
+/// to zero at `UNBOOSTED_MAX_CAR_SPEED` instead of applying at full
+/// strength right up to a hard cutoff.
 const THROTTLE_ACCELERATION: f32 = 1600.0;
+
+/// Real Rocket League's own speed-dependent drive-force taper —
+/// RocketSim's `DRIVE_SPEED_TORQUE_FACTOR_CURVE`, a 3-point piecewise-
+/// linear curve confirmed exact against its own `RLConst.h` during
+/// `RB-PHYSICS-001-FR-058`'s audit: full torque from a standing start
+/// (`(0, 1.0)`), tapering linearly down to 10% by `1400` uu/s
+/// (`(1400, 0.1)`), then a final, much steeper linear drop to exactly
+/// zero at `UNBOOSTED_MAX_CAR_SPEED` (`(1410, 0.0)`). Fetching RocketSim's
+/// own `Car.cpp` confirmed this curve is looked up by the car's *signed*
+/// forward speed (`abs()`'d there, since real RocketSim's own throttle
+/// gate isn't direction-aware) and multiplied directly against the drive
+/// force applied to each wheel — a pure, unitless ratio, unlike
+/// `THROTTLE_TORQUE_AMOUNT` (RocketSim's own name for this project's
+/// `THROTTLE_ACCELERATION`), which is expressed in Bullet's own internal
+/// mass/distance units and doesn't transfer to this port's own
+/// differently-calibrated car body the same clean way — see
+/// `RB-PHYSICS-001-FR-031`'s and `FR-057`'s own "false precision" findings
+/// for absolute torque/force magnitudes. Only the curve's *shape* is
+/// adopted here, not a new peak magnitude.
+const DRIVE_SPEED_TAPER_BREAKPOINTS: [(f32, f32); 3] =
+    [(0.0, 1.0), (1400.0, 0.1), (UNBOOSTED_MAX_CAR_SPEED, 0.0)];
+
+/// Linearly interpolates `DRIVE_SPEED_TAPER_BREAKPOINTS` at
+/// `signed_speed_in_throttle_direction` (the same
+/// `throttle.signum() * forward_speed` quantity `apply_driven_forces`'s
+/// own throttle gate already computes) — `1.0` (full acceleration) at or
+/// below the first breakpoint, `0.0` at or beyond the last. Deliberately
+/// evaluated against this port's own pre-existing *signed*,
+/// direction-aware speed (clamped to non-negative here, since a negative
+/// value means "not yet moving this way," which should read as a
+/// standing start, not an out-of-range lookup) rather than switching to
+/// real RocketSim's own direction-agnostic `abs(forward speed)` — that
+/// would be a second, independent behavioral change (whether accelerating
+/// against your own current motion tapers too) this requirement doesn't
+/// take on; see its own Non-goals.
+fn drive_speed_taper(signed_speed_in_throttle_direction: f32) -> f32 {
+    let speed = signed_speed_in_throttle_direction.max(0.0);
+    let points = DRIVE_SPEED_TAPER_BREAKPOINTS;
+    if speed <= points[0].0 {
+        return points[0].1;
+    }
+    for window in points.windows(2) {
+        let (x0, y0) = window[0];
+        let (x1, y1) = window[1];
+        if speed <= x1 {
+            return y0 + (y1 - y0) * (speed - x0) / (x1 - x0);
+        }
+    }
+    points[points.len() - 1].1
+}
 
 /// Uncalibrated placeholder steering torque magnitude (about the car's
 /// local up axis, at full `steer` input and at/above `MAX_CAR_SPEED`) —
@@ -586,8 +644,13 @@ pub fn apply_driven_forces(
 
         let forward_speed = car.linear_velocity.dot(&forward);
         let throttle = input.throttle.clamp(-1.0, 1.0);
-        if throttle != 0.0 && throttle.signum() * forward_speed < UNBOOSTED_MAX_CAR_SPEED {
-            car.apply_central_force(forward * (throttle * THROTTLE_ACCELERATION * car.mass()));
+        if throttle != 0.0 {
+            let taper = drive_speed_taper(throttle.signum() * forward_speed);
+            if taper > 0.0 {
+                car.apply_central_force(
+                    forward * (throttle * THROTTLE_ACCELERATION * taper * car.mass()),
+                );
+            }
         }
 
         let steer = input.steer.clamp(-1.0, 1.0);
@@ -1096,10 +1159,12 @@ mod tests {
             step_with_input(&mut c, &full_throttle(), true, &mut boost, dt);
         }
         assert!(
-            // A per-step check, not a hard clamp: the last step before the
-            // cap can still add one full THROTTLE_ACCELERATION*dt (~26.7
-            // uu/s at this test's dt) worth of overshoot before the next
-            // step's check catches it.
+            // Since RB-PHYSICS-001-FR-058, this is a genuine taper rather
+            // than a hard per-step cutoff — acceleration tapers smoothly to
+            // zero over the last 10 uu/s below UNBOOSTED_MAX_CAR_SPEED, so
+            // overshoot here should in practice be far smaller than a full
+            // THROTTLE_ACCELERATION*dt step; the generous +30.0 margin is
+            // kept only to avoid a brittle exact-value assertion.
             c.linear_velocity.x <= UNBOOSTED_MAX_CAR_SPEED + 30.0,
             "expected throttle alone to cap out at UNBOOSTED_MAX_CAR_SPEED, got {}",
             c.linear_velocity.x
@@ -1108,6 +1173,68 @@ mod tests {
             c.linear_velocity.x < MAX_CAR_SPEED - 1.0,
             "expected throttle alone to stay well short of the boosted MAX_CAR_SPEED, got {}",
             c.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn drive_speed_taper_matches_the_real_curve_breakpoints_exactly() {
+        // RB-PHYSICS-001-FR-058: RocketSim's own DRIVE_SPEED_TORQUE_FACTOR_CURVE
+        // is (0, 1.0), (1400, 0.1), (1410, 0.0) — confirmed exact against
+        // its own RLConst.h.
+        assert_eq!(drive_speed_taper(0.0), 1.0);
+        assert!(
+            (drive_speed_taper(1400.0) - 0.1).abs() < 1e-6,
+            "expected the 1400 uu/s breakpoint to be 0.1, got {}",
+            drive_speed_taper(1400.0)
+        );
+        assert_eq!(drive_speed_taper(UNBOOSTED_MAX_CAR_SPEED), 0.0);
+        // Linear interpolation partway along each segment.
+        assert!(
+            (drive_speed_taper(700.0) - 0.55).abs() < 1e-4,
+            "expected the midpoint of the first segment (0, 1.0)-(1400, 0.1) \
+             to interpolate to 0.55, got {}",
+            drive_speed_taper(700.0)
+        );
+        assert!(
+            (drive_speed_taper(1405.0) - 0.05).abs() < 1e-4,
+            "expected the midpoint of the final segment (1400, 0.1)-(1410, 0.0) \
+             to interpolate to 0.05, got {}",
+            drive_speed_taper(1405.0)
+        );
+        // Clamped outside the curve's own domain in both directions.
+        assert_eq!(
+            drive_speed_taper(-100.0),
+            1.0,
+            "expected a negative (not-yet-moving-this-way) input to clamp to full torque"
+        );
+        assert_eq!(
+            drive_speed_taper(2000.0),
+            0.0,
+            "expected a speed past the curve's own domain to clamp to zero"
+        );
+    }
+
+    #[test]
+    fn throttle_acceleration_tapers_well_before_reaching_unboosted_max_speed() {
+        // RB-PHYSICS-001-FR-058: before this requirement, throttle applied
+        // THROTTLE_ACCELERATION at full strength right up to a hard cutoff
+        // at UNBOOSTED_MAX_CAR_SPEED. Real Rocket League's own curve is
+        // already down to 10% strength at 1400 uu/s (10 short of the cap)
+        // — this test would fail (see a ~1600 uu/s^2-scale delta instead)
+        // without the taper.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let dt = 1.0 / 60.0;
+        c.linear_velocity = Vec3::new(1400.0, 0.0, 0.0);
+        step_with_input(&mut c, &full_throttle(), true, &mut boost, dt);
+        let delta = c.linear_velocity.x - 1400.0;
+        let expected_full_strength_delta = THROTTLE_ACCELERATION * dt;
+        assert!(
+            (delta - 0.1 * expected_full_strength_delta).abs() < 1e-3,
+            "expected the delta at 1400 uu/s to be ~10% of a full-strength step \
+             ({}), got {}",
+            0.1 * expected_full_strength_delta,
+            delta
         );
     }
 

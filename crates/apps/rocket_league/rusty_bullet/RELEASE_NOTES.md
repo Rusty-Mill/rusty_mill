@@ -6,6 +6,41 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real speed-dependent throttle taper
+**2026-09-01** · PR pending · commit pending
+
+- **`THROTTLE_ACCELERATION`'s own doc comment had named this exact gap
+  since it was introduced**: full flat acceleration right up to a hard
+  cutoff at `UNBOOSTED_MAX_CAR_SPEED`, not a genuine taper — "a real
+  simplification (not a taper)."
+- **Fetched RocketSim's own `Car.cpp`** (not just `RLConst.h`'s
+  constants this time) to find exactly how its own
+  `THROTTLE_TORQUE_AMOUNT` is used, surfacing the real mechanism: drive
+  force is scaled by `DRIVE_SPEED_TORQUE_FACTOR_CURVE`, a confirmed
+  3-point piecewise-linear curve (`{0, 1.0}, {1400, 0.1}, {1410, 0.0}`),
+  not applied flat.
+- **`THROTTLE_TORQUE_AMOUNT` itself doesn't transfer cleanly** — it's
+  expressed in Bullet-internal units calibrated against RocketSim's own
+  car body, repeating `RB-PHYSICS-001-FR-031`'s/`FR-057`'s own "false
+  precision" finding — but the curve's *shape* is a pure, unitless ratio
+  that does transfer, the same reasoning `FR-057` used to adopt
+  `MAX_CAR_ANGULAR_SPEED`.
+- **Added `drive::DRIVE_SPEED_TAPER_BREAKPOINTS`/`drive_speed_taper`**
+  and replaced the hard cutoff with the real taper, evaluated against
+  this port's own pre-existing signed, direction-aware speed (not
+  RocketSim's own direction-agnostic `abs(forward speed)` — a separate
+  behavioral question left out of scope).
+- **`THROTTLE_ACCELERATION`'s own peak magnitude (`1600.0`) is
+  unchanged**, still an uncalibrated placeholder — only the curve's real
+  shape is now confirmed and modeled.
+- 2 new `drive.rs` tests (a direct unit test of the interpolator at both
+  breakpoints and both segment midpoints; a regression test confirming a
+  car at 1400 uu/s now gains only ~10% of a full-strength step's
+  velocity delta). All pre-existing tests pass unchanged. 297 total in
+  `rb_physics_bullet` (+2 over FR-057's 295).
+
+---
+
 ## Hard cap on car angular speed
 **2026-09-01** · [#121](https://github.com/baileyrd/rusty_bullet/pull/121) · `65c35e9`
 

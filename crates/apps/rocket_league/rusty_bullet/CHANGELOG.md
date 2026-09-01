@@ -776,6 +776,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `integrate::integrate_velocities` in both `world.rs`'s production path
   and `drive.rs`'s own test helper. 3 new tests; all pre-existing tests
   pass unchanged.
+- Missing real speed-dependent throttle taper (`RB-PHYSICS-001-FR-058`)
+  — `THROTTLE_ACCELERATION`'s own doc comment had named this exact gap
+  since it was introduced: full flat acceleration right up to a hard
+  cutoff at `UNBOOSTED_MAX_CAR_SPEED`, not a genuine taper. Fetching
+  RocketSim's own `Car.cpp` (not just `RLConst.h`'s constants) surfaced
+  the real mechanism: drive force is scaled by a confirmed 3-point
+  piecewise-linear curve (`{0, 1.0}, {1400, 0.1}, {1410, 0.0}`), not
+  applied flat. Added `drive::DRIVE_SPEED_TAPER_BREAKPOINTS`/
+  `drive_speed_taper` and replaced the hard cutoff with the real taper —
+  `THROTTLE_ACCELERATION`'s own peak magnitude remains an uncalibrated
+  placeholder, only the curve's shape is now confirmed and modeled. 2
+  new tests; all pre-existing tests pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
