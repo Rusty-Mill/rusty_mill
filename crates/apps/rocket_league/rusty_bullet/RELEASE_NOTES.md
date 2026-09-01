@@ -6,6 +6,50 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real per-axis air-control torque ratio (pitch/yaw/roll)
+**2026-09-01** · PR pending · commit pending
+
+- **All three axes shared one flat `AIR_CONTROL_TORQUE` magnitude** —
+  `RB-PHYSICS-001-FR-031`'s original audit had already found real
+  air-control torque coefficients exist but didn't adopt them, since
+  they're absolute torques calibrated against real Rocket League's own
+  specific car mass/inertia tensor — the same "false precision" reasoning
+  that kept `AIR_CONTROL_TORQUE` a placeholder.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateAirTorque`, matching
+  `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/`FR-065`/`FR-066`/`FR-067`'s
+  own real-implementation-file method) and found the real mechanism —
+  `torque = pitch * CAR_AIR_CONTROL_TORQUE.x + yaw *
+  CAR_AIR_CONTROL_TORQUE.y + roll * CAR_AIR_CONTROL_TORQUE.z` — is
+  structurally *identical* to this port's own: a direct per-axis torque
+  scaled by analog stick input, not a wheeled-vehicle raycast/tire-slip
+  model like steering (`FR-065`) or a friction split like handbrake
+  (`FR-066`) turned out to need. `RLConst.h` confirms
+  `CAR_AIR_CONTROL_TORQUE = Vec(130, 95, 400)` ("Angle order is PYR").
+- **Because the mechanism matches, the confirmed per-axis *ratio* — unlike
+  the real *absolute* torque values, which the pre-existing "false
+  precision" finding already ruled out — is adoptable** the same way
+  `RB-PHYSICS-001-FR-058`'s throttle taper and `FR-059`'s dodge scale
+  ratios are: a direct multiplier on a torque this port already applies
+  the same way real Rocket League does.
+- **Added `drive::AIR_CONTROL_YAW_SCALE = 95.0 / 130.0` and
+  `AIR_CONTROL_ROLL_SCALE = 400.0 / 130.0`**, and redefined
+  `AIR_CONTROL_TORQUE` (value unchanged, `1_000_000.0`) as *pitch's own*
+  magnitude specifically rather than a flat value shared by all three
+  axes. Wired both scales into `apply_driven_forces`'s yaw/roll torque
+  application; pitch is unchanged.
+- A genuine behavioral change, not a doc correction: yaw now produces
+  measurably less angular velocity than pitch for equal analog input, and
+  roll measurably more. 2 new tests
+  (`yaw_air_control_is_scaled_down_from_pitch_by_the_confirmed_real_ratio`,
+  `roll_air_control_is_scaled_up_from_pitch_by_the_confirmed_real_ratio`)
+  compute the exact expected angular velocity in closed form from
+  `AIR_CONTROL_TORQUE`/the new scale constant/`car().inv_inertia_world()`
+  and assert the actual post-step value matches within `1e-3`. All 312
+  pre-existing tests pass unchanged (none asserted cross-axis magnitude
+  equality), bringing the crate to 314.
+
+---
+
 ## Real Rocket League has no distinct wall-jump mechanic or constant at all (audit finding)
 **2026-09-01** · [#141](https://github.com/baileyrd/rusty_bullet/pull/141) · `98f587a`
 

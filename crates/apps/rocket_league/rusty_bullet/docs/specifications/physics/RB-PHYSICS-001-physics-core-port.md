@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.67.0
+- Version: 0.68.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4367,6 +4367,75 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`/`FR-065`/`FR-066`'s own
     precedent); all 312 of `rb_physics_bullet`'s pre-existing tests (as of
     `FR-066`) pass unchanged, confirming zero behavioral change.
+- `RB-PHYSICS-001-FR-068` (real per-axis air-control torque ratio,
+  implemented): `RB-PHYSICS-001-FR-031`'s own audit had already found real
+  air-control torque/damping coefficients exist but didn't adopt them,
+  since they're expressed as absolute torques calibrated against real
+  Rocket League's own specific car mass/inertia tensor — the same "false
+  precision" reasoning that kept `AIR_CONTROL_TORQUE`'s own magnitude a
+  placeholder. This requirement fetched RocketSim's own `Car.cpp`
+  (`_UpdateAirTorque`, the same file/technique
+  `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/`FR-065`/`FR-066`/`FR-067`
+  used) and found the real mechanism: `torque = pitch * dirPitch_right *
+  CAR_AIR_CONTROL_TORQUE.x + yaw * dirYaw_up * CAR_AIR_CONTROL_TORQUE.y +
+  roll * dirRoll_forward * CAR_AIR_CONTROL_TORQUE.z`, with `RLConst.h`
+  confirming `CAR_AIR_CONTROL_TORQUE = Vec(130, 95, 400)` ("Angle order is
+  PYR").
+  1. **Confirmed the real mechanism is structurally identical to this
+     port's own** — a direct per-axis torque scaled by analog stick input,
+     unlike steering (`RB-PHYSICS-001-FR-065`, a wheeled-vehicle
+     raycast/tire-slip model) or handbrake (`FR-066`, a friction split this
+     port's architecture can't represent). Because the mechanism itself
+     matches, the confirmed per-axis *ratio* — unlike the real *absolute*
+     torque values, which the pre-existing "false precision" finding
+     already ruled out — is adoptable the same way `RB-PHYSICS-001-FR-058`'s
+     throttle taper and `FR-059`'s dodge scale ratios are: a direct
+     multiplier on a torque this port already applies the same way real
+     Rocket League does.
+  2. **Adopted the confirmed real ratios (`95/130`, `400/130`), not the
+     real absolute magnitudes.** Added `AIR_CONTROL_YAW_SCALE = 95.0 /
+     130.0` and `AIR_CONTROL_ROLL_SCALE = 400.0 / 130.0`;
+     `AIR_CONTROL_TORQUE` itself is redefined as *pitch's own* magnitude
+     specifically (unchanged value, `1_000_000.0`, still an uncalibrated
+     placeholder) rather than a flat value shared by all three axes.
+  3. **Wired the scales into `apply_driven_forces`'s air-control block.**
+     Yaw's torque is now `AIR_CONTROL_TORQUE * AIR_CONTROL_YAW_SCALE`; roll's
+     is `AIR_CONTROL_TORQUE * AIR_CONTROL_ROLL_SCALE`. Pitch is unchanged.
+  4. **Corrected doc comments** (the module-level air-control paragraph and
+     "commonly-cited constants" paragraph, `AIR_CONTROL_TORQUE`'s own doc
+     comment) that previously described the three axes as sharing one flat
+     magnitude with no ratio modeled.
+  - **Non-goals (this requirement).** Does not adopt RocketSim's own real
+    absolute torque magnitudes (`130`, `95`, `400`) for this port's own
+    axes — still independently uncalibrated, per the "ratio confirmed,
+    magnitude not" split above, the same reasoning `RB-PHYSICS-001-FR-058`/
+    `FR-059` already established. Does not adopt RocketSim's own
+    `CAR_AIR_CONTROL_DAMPING` (`Vec(30, 20, 50)`) — this port has no
+    per-axis air-control damping term at all, a separate, independent
+    addition left for a future requirement. Does not adopt RocketSim's own
+    `pitchTorqueScale` factor applied only to the pitch component in
+    `_UpdateAirTorque` (an additional speed- or state-dependent scale this
+    requirement's own fetch surfaced but didn't fully characterize) —
+    scoped out to keep this requirement to the confirmed, fully-characterized
+    per-axis ratio alone. Does not touch `RB-PHYSICS-001-FR-005`'s
+    real-data calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`'s
+    own doc comments state the exact RocketSim citations. Full yaw input
+    produces measurably less angular velocity than full pitch input (scaled
+    by `95/130`, further modulated by this port's own per-axis moment of
+    inertia); full roll input produces measurably more (scaled by
+    `400/130`). All 312 pre-existing tests pass unchanged — none asserts
+    cross-axis magnitude equality, only per-axis nonzero response and sign,
+    an explicit zero-regression-risk property confirmed by inspection
+    before implementation, not merely by the suite passing afterward.
+  - **Verification plan.** 2 new `drive.rs` tests:
+    `yaw_air_control_is_scaled_down_from_pitch_by_the_confirmed_real_ratio`
+    and `roll_air_control_is_scaled_up_from_pitch_by_the_confirmed_real_ratio`,
+    each computing the exact expected angular velocity in closed form from
+    `AIR_CONTROL_TORQUE`/the new scale constant/`car().inv_inertia_world()`
+    and asserting the actual post-step value matches within `1e-3`. All 314
+    of `rb_physics_bullet`'s tests (312 pre-existing plus these 2 new ones)
+    pass.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5851,6 +5920,35 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.68.0 (2026-09-01): FR-068 added and implemented (real per-axis
+  air-control torque ratio) — `FR-031`'s own audit had found real
+  air-control torque coefficients exist but didn't adopt them (absolute
+  torques calibrated against real Rocket League's own specific
+  mass/inertia, the same "false precision" reasoning that kept
+  `AIR_CONTROL_TORQUE` a placeholder). Fetched RocketSim's own `Car.cpp`
+  (`_UpdateAirTorque`, matching `FR-058`/`FR-059`/`FR-064`/`FR-065`/
+  `FR-066`/`FR-067`'s own method) and found the real mechanism —
+  `torque = pitch * CAR_AIR_CONTROL_TORQUE.x + yaw *
+  CAR_AIR_CONTROL_TORQUE.y + roll * CAR_AIR_CONTROL_TORQUE.z` — is
+  structurally identical to this port's own (a direct per-axis torque
+  scaled by analog input), unlike steering or handbrake's own architecture
+  mismatches. `RLConst.h` confirms `CAR_AIR_CONTROL_TORQUE = Vec(130, 95,
+  400)` (pitch-yaw-roll order). Because the mechanism matches, the
+  confirmed per-axis *ratio* (unlike the real absolute values) is
+  adoptable the same way `FR-058`'s throttle taper and `FR-059`'s dodge
+  scale ratios are: added `AIR_CONTROL_YAW_SCALE = 95.0/130.0` and
+  `AIR_CONTROL_ROLL_SCALE = 400.0/130.0`, redefined `AIR_CONTROL_TORQUE`
+  (value unchanged) as pitch's own magnitude specifically, and wired both
+  scales into `apply_driven_forces`'s yaw/roll torque application. A
+  genuine behavioral change, not a doc correction: yaw is now measurably
+  weaker and roll measurably stronger than pitch for equal analog input.
+  Corrected the module doc's air-control paragraph, the "commonly-cited
+  constants" paragraph, and `AIR_CONTROL_TORQUE`'s own doc comment. 2 new
+  tests (`yaw_air_control_is_scaled_down_from_pitch_by_the_confirmed_real_ratio`,
+  `roll_air_control_is_scaled_up_from_pitch_by_the_confirmed_real_ratio`)
+  pin the exact expected angular velocity in closed form; all 312
+  pre-existing tests pass unchanged (none asserted cross-axis magnitude
+  equality), bringing the crate to 314.
 - 0.67.0 (2026-09-01): FR-067 added and implemented (real Rocket League has
   no distinct wall-jump mechanic or constant at all — audit finding,
   documentation only) — `drive::WALL_JUMP_HORIZONTAL_SPEED` had no public
