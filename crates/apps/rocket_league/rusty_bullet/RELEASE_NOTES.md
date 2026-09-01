@@ -6,6 +6,47 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real Rocket League uses per-contact-pair-type restitution/friction (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`RB-PHYSICS-001-FR-043` had left open** which formula matches real
+  Rocket League for `solver::combine_restitution`/`combine_friction`
+  (this port's own average, kept over Bullet's real unclamped-product
+  default).
+- **Fetched RocketSim's own `RLConst.h`** (matching
+  `RB-PHYSICS-001-FR-057`/`FR-060`/`FR-061`/`FR-062`'s own method) and
+  found the real answer isn't a different formula at all: real Rocket
+  League hardcodes a distinct restitution/friction value per named
+  contact-pair type, overriding whatever a generic per-body combine would
+  produce — `CARWORLD_COLLISION_FRICTION/RESTITUTION = 0.3f`/`0.3f`,
+  `CARCAR_COLLISION_FRICTION/RESTITUTION = 0.09f`/`0.1f`, and
+  `CARBALL_COLLISION_FRICTION/RESTITUTION = 2.0f`/`0.0f`.
+- **Two findings stand out**: a car hitting the ball has **zero**
+  restitution-driven bounce in real Rocket League regardless of either
+  body's own material (this port's own combine currently averages the
+  ball's confirmed real `0.6` against the car's generic `0.5` to `~0.55`
+  for that exact pairing); and car-vs-ball friction is **above `1.0`**, a
+  value no combine of two bodies' own sane per-material values could ever
+  produce.
+- **Corrected `combine_restitution`/`combine_friction`'s own doc
+  comments** and this spec's stale Open Questions bullet to state this
+  finding directly.
+- **Explicitly not adopted**: implementing real per-pair-type overrides
+  — `combine_restitution`/`combine_friction`'s own two-`f32`-in-one-out
+  signature has no way to know which kind of pair produced its inputs;
+  doing so for real would mean threading body/shape identity into every
+  one of `solver.rs`'s several call sites, left for a future, dedicated
+  requirement. Also not adopted: setting the car's own generic default
+  restitution/friction to any of these values (mirroring
+  `RB-PHYSICS-001-FR-062`'s `RigidBody::ball`) — unlike the ball, every
+  real value found here is contact-pair-specific, so picking one for a
+  generic default would be arbitrary.
+- No behavioral change and no new tests (documentation-only, matching
+  `RB-PHYSICS-001-FR-044`/`FR-060`'s own precedent); all 309 pre-existing
+  `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real ball material properties via a new `RigidBody::ball` constructor
 **2026-09-01** · [#131](https://github.com/baileyrd/rusty_bullet/pull/131) · `a1a0812`
 

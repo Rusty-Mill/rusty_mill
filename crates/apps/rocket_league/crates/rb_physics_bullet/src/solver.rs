@@ -174,6 +174,23 @@ const UPPER_LIMIT: f32 = 1e10;
 /// "Restitution/friction combine mode" bullet (`RB-PHYSICS-001-FR-043`) for
 /// why. Preserves the identity `combine(a, a) == a`, which the reference's
 /// own product does not.
+///
+/// `RB-PHYSICS-001-FR-063` found this whole per-body-combine *model* — not
+/// just which formula it uses — doesn't match real Rocket League's own
+/// gameplay layer at all: RocketSim's own `RLConst.h` hardcodes distinct
+/// restitution constants per *contact-pair type*, overriding whatever a
+/// generic combine of the two bodies' own properties would produce —
+/// `CARWORLD_COLLISION_RESTITUTION = 0.3f` (car vs. any static geometry),
+/// `CARCAR_COLLISION_RESTITUTION = 0.1f`, and, most strikingly,
+/// `CARBALL_COLLISION_RESTITUTION = 0.0f` — a car hitting the ball has
+/// *zero* restitution-driven bounce in real Rocket League, regardless of
+/// either body's own material, a sharp contrast with this port's own
+/// `combine_restitution(ball.restitution, car.restitution)` (currently
+/// averaging `RB-PHYSICS-001-FR-062`'s confirmed real `0.6` against the
+/// car's still-generic `0.5`, a real `~0.55` bounce this specific pairing
+/// shouldn't have at all per the reference). Not adopted here — see that
+/// requirement's own Non-goals for why a per-pair override doesn't fit
+/// this function's own per-body-argument signature.
 fn combine_restitution(a: f32, b: f32) -> f32 {
     (a + b) * 0.5
 }
@@ -193,6 +210,15 @@ fn combine_restitution(a: f32, b: f32) -> f32 {
 /// reference's own defensive bound costs nothing and closes a genuinely
 /// uninvestigated gap rather than leaving this port silently more
 /// permissive than the reference it's ported from.
+///
+/// `RB-PHYSICS-001-FR-063` found the same per-pair-type override pattern
+/// `combine_restitution`'s own doc comment describes also applies to
+/// friction, and more starkly: `CARWORLD_COLLISION_FRICTION = 0.3f`,
+/// `CARCAR_COLLISION_FRICTION = 0.09f`, and
+/// `CARBALL_COLLISION_FRICTION = 2.0f` — a car-vs-ball friction coefficient
+/// *above* `1.0`, something no combine of two bodies' own per-material
+/// friction values bounded to a sane range could ever produce. Not
+/// adopted, same reason as `combine_restitution`'s own finding.
 fn combine_friction(a: f32, b: f32) -> f32 {
     ((a + b) * 0.5).clamp(-10.0, 10.0)
 }
