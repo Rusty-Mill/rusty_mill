@@ -53,36 +53,21 @@ impl Backoff {
         }
     }
 
+    /// Delegates to [`rusty_retry::Backoff`], which reproduces this exact
+    /// behavior: `jitter: false`/`true` map to `rusty_retry`'s `0.0`/`1.0`
+    /// jitter fraction, its two endpoints.
     fn delay_for(&self, attempt: usize) -> Duration {
+        let attempt = u32::try_from(attempt).unwrap_or(u32::MAX);
         match *self {
-            Backoff::Fixed(d) => d,
-            Backoff::Exponential { base, max, jitter } => {
-                // Exponent capped well below where `1u32 << exp` could
-                // overflow -- the `.min(max)` below makes any exponent
-                // past a handful of attempts equivalent anyway.
-                let factor = 1u32 << attempt.min(20);
-                let capped = base.checked_mul(factor).unwrap_or(max).min(max);
-                if jitter {
-                    jittered(capped)
-                } else {
-                    capped
-                }
+            Backoff::Fixed(d) => rusty_retry::Backoff::Fixed(d).delay_for(attempt),
+            Backoff::Exponential { base, max, jitter } => rusty_retry::Backoff::Exponential {
+                base,
+                max,
+                jitter: if jitter { 1.0 } else { 0.0 },
             }
+            .delay_for(attempt),
         }
     }
-}
-
-/// A uniform random duration in `[0, max)`. Backoff jitter only needs to
-/// avoid a thundering herd, not resist an adversary -- see
-/// `crate::rand` for why this isn't a CSPRNG.
-fn jittered(max: Duration) -> Duration {
-    if max.is_zero() {
-        return max;
-    }
-    let r = crate::rand::next_u64();
-    let max_nanos = max.as_nanos().min(u64::MAX as u128) as u64;
-    let scaled = ((r as u128 * max_nanos as u128) >> 64) as u64;
-    Duration::from_nanos(scaled)
 }
 
 /// A configurable retry policy. Opt-in via
@@ -204,11 +189,10 @@ impl RetryPolicy {
 /// 9110 §10.2.3. Reuses the same IMF-fixdate parser `Set-Cookie`'s
 /// `Expires` attribute needs rather than hand-rolling a second one.
 fn parse_retry_after(value: &str) -> Option<Duration> {
-    let value = value.trim();
-    if let Ok(secs) = value.parse::<u64>() {
-        return Some(Duration::from_secs(secs));
+    if let Some(delay) = rusty_retry::retry_after_seconds(value) {
+        return Some(delay);
     }
-    let deadline = parse_http_date(value)?;
+    let deadline = parse_http_date(value.trim())?;
     Some(
         deadline
             .duration_since(SystemTime::now())

@@ -14,7 +14,7 @@ categories = ["web-programming", "api-bindings", "asynchronous"]
 
 [features]
 default = ["client", "server"]
-client = ["dep:reqwest", "dep:eventsource-stream", "dep:futures-util", "dep:tokio"]
+client = ["dep:reqwest", "dep:eventsource-stream", "dep:futures-util", "dep:tokio", "dep:rusty_retry"]
 server = [
     "dep:axum",
     "dep:tokio",
@@ -69,6 +69,9 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
     "rustls",
 ] }
 eventsource-stream = { version = "0.2", optional = true }
+# Exponential backoff math, shared with rusty_request's own RetryPolicy.
+# Retry *eligibility* (which statuses, which request types) stays here.
+rusty_retry = { path = "../rusty_retry", optional = true }
 
 # well-known
 serde_norway = { version = "0.9", optional = true }
