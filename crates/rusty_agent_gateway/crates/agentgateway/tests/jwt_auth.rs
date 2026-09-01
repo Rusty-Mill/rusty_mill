@@ -69,7 +69,11 @@ fn mock_server() -> String {
     // Windows names the built example `mock_mcp_server.exe`; `EXE_SUFFIX` is
     // empty everywhere else.
     path.push(format!("mock_mcp_server{}", std::env::consts::EXE_SUFFIX));
-    path.display().to_string()
+    // The caller splices this into a double-quoted YAML scalar (`cmd:
+    // "{server}"`), and a Windows path is all backslashes -- unescaped, the
+    // YAML scanner reads `\a`, `\t`, ... as escape sequences and rejects the
+    // document. A no-op on a Unix path.
+    path.display().to_string().replace('\\', "\\\\")
 }
 
 mod common;

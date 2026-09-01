@@ -34,7 +34,11 @@ fn mock_server() -> String {
          the example failed to compile",
         path.display()
     );
-    path.display().to_string()
+    // The caller splices this into a double-quoted YAML scalar (`cmd:
+    // "{server}"`), and a Windows path is all backslashes -- unescaped, the
+    // YAML scanner reads `\a`, `\t`, ... as escape sequences and rejects the
+    // document. A no-op on a Unix path.
+    path.display().to_string().replace('\\', "\\\\")
 }
 
 mod common;

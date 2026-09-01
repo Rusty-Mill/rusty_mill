@@ -77,7 +77,11 @@ fn mock_server() -> String {
     // empty everywhere else.
     path.push(format!("mock_mcp_server{}", std::env::consts::EXE_SUFFIX));
     assert!(path.exists(), "fixture not built at {}", path.display());
-    path.display().to_string()
+    // The caller splices this into a double-quoted YAML scalar (`cmd:
+    // "{server}"`), and a Windows path is all backslashes -- unescaped, the
+    // YAML scanner reads `\a`, `\t`, ... as escape sequences and rejects the
+    // document. A no-op on a Unix path.
+    path.display().to_string().replace('\\', "\\\\")
 }
 
 mod common;
