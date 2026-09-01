@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Diagonal dodges are no longer faster than axis-aligned ones
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#151](https://github.com/baileyrd/rusty_bullet/pull/151) · `8f3fcd2`
 
 - **This port summed each dodge axis' own full-strength `(pitch, roll)`
   contribution independently** — `RB-PHYSICS-001-FR-059`'s own Non-goals
