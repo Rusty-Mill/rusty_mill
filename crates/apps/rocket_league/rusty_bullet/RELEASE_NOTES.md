@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Hard caps on ball linear/angular speed
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#129](https://github.com/baileyrd/rusty_bullet/pull/129) · `b5eefa6`
 
 - **The ball had no linear or angular speed cap of any kind** — unlike the
   car, which has had a hard angular-speed ceiling since
