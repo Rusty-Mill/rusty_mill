@@ -48,7 +48,12 @@
 //! air, since there's no wheel grip to require momentum for. All three
 //! axes share one `AIR_CONTROL_TORQUE` constant — a real simplification,
 //! since Rocket League's actual pitch/yaw/roll rates differ from each
-//! other; this port doesn't model that difference.
+//! other; this port doesn't model that difference. Since
+//! `RB-PHYSICS-001-FR-057`, sustained air control (or a dodge's own kick,
+//! or the landing-orientation assist) can no longer spin a car arbitrarily
+//! fast, though: `clamp_angular_speed` caps the result at
+//! `MAX_CAR_ANGULAR_SPEED`, a real confirmed Rocket League limit, once per
+//! step, the same way `MAX_CAR_SPEED` already bounds linear speed.
 //!
 //! Double jump reuses the ground jump's own rising-edge detection
 //! (`jump_pressed`) rather than a second edge-detector: the same fresh
@@ -189,8 +194,9 @@
 //! `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR` (since
 //! `RB-PHYSICS-001-FR-056` split the single flat `BOOST_ACCELERATION` this
 //! bullet used to name into the two distinct values the same sources
-//! actually cite), `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`, and
-//! `JUMP_HOLD_ACCELERATION` are commonly-cited, multi-source-confirmed
+//! actually cite), `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`,
+//! `JUMP_HOLD_ACCELERATION`, and (since `RB-PHYSICS-001-FR-057`)
+//! `MAX_CAR_ANGULAR_SPEED` are commonly-cited, multi-source-confirmed
 //! community-reverse-engineered approximations (the same body of public
 //! research `PhysicsWorld::new`'s gravity constant comes from);
 //! `THROTTLE_ACCELERATION` and `BOOST_CONSUMPTION_RATE` are simplified
@@ -211,8 +217,15 @@
 //! placeholder car body or simplified single-impulse mechanics are
 //! calibrated to match, so adopting the raw numbers here would be false
 //! precision, not a real fix — see the audit's own findings for detail.
-//! None of these are independently confirmed by this project — see
-//! `RB-PHYSICS-001-FR-005`/`FR-031`.
+//! `MAX_CAR_ANGULAR_SPEED` doesn't have that problem even though it also
+//! bounds rotation: it caps the *result* (angular velocity, in rad/s)
+//! rather than prescribing the torque that produces it, so it transfers
+//! cleanly regardless of this port's own car body/inertia tensor not
+//! matching real Rocket League's — see `RB-PHYSICS-001-FR-057`'s own
+//! findings for why that distinction let this one constant clear the bar
+//! the torque-based placeholders above couldn't. Aside from that one
+//! exception, none of these are independently confirmed by this project —
+//! see `RB-PHYSICS-001-FR-005`/`FR-031`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -226,6 +239,35 @@ use rb_domain::{ControllerInput, Vec3};
 /// below — an arbitrary normalization choice, not a claim that a car's
 /// actual turning grip caps out at boosted speed specifically.
 pub const MAX_CAR_SPEED: f32 = 2300.0;
+
+/// Hard cap (rad/s) on a car's angular speed, enforced by
+/// `clamp_angular_speed` once per step, right after
+/// `integrate::integrate_velocities` — a genuine clamp that scales
+/// `angular_velocity` back down if it's exceeded, unlike `MAX_CAR_SPEED`/
+/// `UNBOOSTED_MAX_CAR_SPEED` above (which only gate *new* throttle/boost
+/// force, never reduce velocity already past the cap). Confirmed exact
+/// against RocketSim's own `RLConst.h` during `RB-PHYSICS-001-FR-057`'s
+/// audit: `CAR_MAX_ANG_SPEED = 5.5f, // Car can never exceed this angular
+/// velocity (radians/s)`.
+///
+/// Coincidentally equal to this port's own pre-existing
+/// `DODGE_ANGULAR_SPEED` placeholder further below — chosen independently,
+/// before this cap existed, only to look visibly fast in tests, not
+/// derived from this same real value (see that constant's own doc
+/// comment). The two serve different purposes (an instantaneous kick
+/// magnitude vs. a continuous hard ceiling on the result); nothing here
+/// depends on them staying numerically equal.
+///
+/// Only covers this port's own driven-forces sources (continuous air
+/// control torque integrated this step, plus any single-step direct
+/// `angular_velocity` write like a dodge's kick or the landing-orientation
+/// assist) — a same-step contact-solver impulse (e.g. a hard collision
+/// imparting spin) isn't re-clamped until the *next* step's call, so it
+/// could in principle transiently exceed this for one step, unlike
+/// RocketSim's own "can never exceed" phrasing suggests for its engine.
+/// Closing that remaining gap would mean clamping again after the solver
+/// too, which this port doesn't do — out of scope for FR-057.
+pub const MAX_CAR_ANGULAR_SPEED: f32 = 5.5;
 
 /// Commonly-cited *unboosted* top speed (uu/s) — throttle's own speed cap,
 /// distinct from `MAX_CAR_SPEED`. Before `RB-PHYSICS-001-FR-031`'s audit,
@@ -357,7 +399,12 @@ pub const DODGE_SPEED: f32 = 1400.0;
 /// `apply_torque`'s continuous accumulation, since a dodge's flip is a
 /// single instantaneous kick, not a sustained torque) — chosen only to
 /// produce a visibly fast flip in tests, not derived from any measured or
-/// documented Rocket League value.
+/// documented Rocket League value. Numerically equal to
+/// `MAX_CAR_ANGULAR_SPEED` above, confirmed only since
+/// `RB-PHYSICS-001-FR-057` — a coincidence, not a shared derivation: this
+/// constant predates that cap and was picked independently, so a dodge
+/// kick landing exactly at the cap rather than comfortably under or over
+/// it isn't a deliberate design choice either way.
 const DODGE_ANGULAR_SPEED: f32 = 5.5;
 
 /// Maximum duration (seconds) that continuing to hold `jump` after a fresh
@@ -483,7 +530,10 @@ fn input_is_active(input: &ControllerInput) -> bool {
 /// whether `car` was already asleep or what velocity results this step —
 /// see this crate's own `body::RigidBody::wake` doc comment for why a
 /// velocity-only wake check isn't enough here. Call once per step, before
-/// `integrate::integrate_velocities`, alongside `apply_gravity`.
+/// `integrate::integrate_velocities`, alongside `apply_gravity`; follow it
+/// with `clamp_angular_speed` right *after* that same
+/// `integrate_velocities` call, so `MAX_CAR_ANGULAR_SPEED` sees this step's
+/// fully-integrated angular velocity, torque contributions included.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
     car: &mut RigidBody,
@@ -748,6 +798,20 @@ pub fn apply_driven_forces(
     }
 }
 
+/// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if
+/// its length exceeds it, preserving direction — a no-op otherwise. Call
+/// once per step, right after `integrate::integrate_velocities`, so it
+/// sees this step's fully-integrated angular velocity (this function's own
+/// caller, and `apply_driven_forces`'s doc comment, cover why the ordering
+/// matters: torque applied by `apply_driven_forces` isn't reflected in
+/// `angular_velocity` until `integrate_velocities` runs).
+pub fn clamp_angular_speed(car: &mut RigidBody) {
+    let speed = car.angular_velocity.length();
+    if speed > MAX_CAR_ANGULAR_SPEED {
+        car.angular_velocity *= MAX_CAR_ANGULAR_SPEED / speed;
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -892,6 +956,7 @@ mod tests {
             dt,
         );
         integrate::integrate_velocities(car, dt);
+        clamp_angular_speed(car);
     }
 
     fn full_throttle() -> ControllerInput {
@@ -2817,6 +2882,78 @@ mod tests {
             "expected active pitch input to suppress landing-orientation assistance entirely, \
              got {:?}",
             with_pitch.angular_velocity
+        );
+    }
+
+    #[test]
+    fn clamp_angular_speed_is_a_no_op_below_the_cap() {
+        let mut c = car();
+        c.angular_velocity = Vec3::new(1.0, 2.0, 0.0);
+        clamp_angular_speed(&mut c);
+        assert_eq!(
+            c.angular_velocity,
+            Vec3::new(1.0, 2.0, 0.0),
+            "expected an already-under-cap angular velocity to pass through unchanged, got {:?}",
+            c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn clamp_angular_speed_scales_an_over_cap_velocity_down_to_the_cap_preserving_direction() {
+        let mut c = car();
+        c.angular_velocity = Vec3::new(0.0, 0.0, 20.0);
+        clamp_angular_speed(&mut c);
+        assert!(
+            (c.angular_velocity.length() - MAX_CAR_ANGULAR_SPEED).abs() < 1e-4,
+            "expected the clamp to scale magnitude down to exactly MAX_CAR_ANGULAR_SPEED, got \
+             {:?}",
+            c.angular_velocity
+        );
+        assert_eq!(
+            c.angular_velocity.x, 0.0,
+            "expected the clamp to preserve direction (x), got {:?}",
+            c.angular_velocity
+        );
+        assert_eq!(
+            c.angular_velocity.y, 0.0,
+            "expected the clamp to preserve direction (y), got {:?}",
+            c.angular_velocity
+        );
+        assert!(
+            c.angular_velocity.z > 0.0,
+            "expected the clamp to preserve direction (z), got {:?}",
+            c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn sustained_full_roll_input_never_exceeds_the_hard_angular_speed_cap() {
+        // RB-PHYSICS-001-FR-057: before this cap existed, nothing bounded
+        // the continuous AIR_CONTROL_TORQUE contribution air control adds
+        // every step, so holding full roll input indefinitely spun a car
+        // arbitrarily fast. Two real seconds of full roll at this car's own
+        // mass/inertia gains far more than MAX_CAR_ANGULAR_SPEED (5.5
+        // rad/s) worth of angular velocity if nothing clamps it, so this
+        // test would fail without `clamp_angular_speed` in `step_with_input`'s
+        // own step helper.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let dt = 1.0 / 60.0;
+        for _ in 0..(2.0 / dt) as u32 {
+            step_with_input(&mut c, &full_roll(), false, &mut boost, dt);
+        }
+        assert!(
+            c.angular_velocity.length() <= MAX_CAR_ANGULAR_SPEED + 1e-3,
+            "expected sustained full roll input to cap out at MAX_CAR_ANGULAR_SPEED, got {:?} \
+             (length {})",
+            c.angular_velocity,
+            c.angular_velocity.length()
+        );
+        assert!(
+            c.angular_velocity.length() > MAX_CAR_ANGULAR_SPEED - 0.5,
+            "expected sustained full roll input to actually reach the cap, not merely stay under \
+             it, got {:?}",
+            c.angular_velocity
         );
     }
 }
