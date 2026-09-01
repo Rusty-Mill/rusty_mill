@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.48.0
+- Version: 0.49.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -184,12 +184,28 @@
   (a fixed two-axis friction limit can over- or under-estimate the true
   circular friction cone by up to `sqrt(2)` relative to the actual slide
   direction) left open for a dedicated future FR rather than folded into
-  this reference-validation pass — investigated, 1 new test; static-contact
-  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
-  full convergence of the sandwiched case, a rigorous (non-heuristic)
-  edge-edge nearest-pair selection, velocity-aligned friction direction
-  selection, and real-data calibration (including which combine mode, if
-  either, actually matches real Rocket League) are open follow-up work)
+  this reference-validation pass — investigated, 1 new test; and, since
+  FR-049, that divergence was closed: a new `friction_directions` helper in
+  `solver.rs` aligns friction direction 1 with the tangential component of
+  the current relative sliding velocity (`relative_velocity` minus its own
+  component along `normal`), matching real Bullet's own default, and
+  direction 2 completes a right-handed basis via `dir1.cross(normal)`,
+  matching real Bullet's own `lateralFrictionDir1.cross(normalWorldOnB)` —
+  falling back to `plane_space`'s fixed basis both when tangential velocity
+  is negligible (matching real Bullet's own `SIMD_EPSILON` threshold) and,
+  found empirically fixing this crate's own test suite rather than
+  something real Bullet's unguarded `normalize()` needs to handle, when a
+  near-head-on collision's catastrophic floating-point cancellation leaves
+  a residual tangential vector whose direction is dominated by rounding
+  error rather than the true (near-zero) tangential velocity, occasionally
+  landing degenerate relative to `normal`; confirmed via a dedicated
+  isotropic-friction regression test verified to fail under the old fixed
+  `plane_space`-only basis — investigated and adopted, 3 new tests;
+  static-contact warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
+  calibration, full convergence of the sandwiched case, a rigorous
+  (non-heuristic) edge-edge nearest-pair selection, and real-data
+  calibration (including which combine mode, if either, actually matches
+  real Rocket League) are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -2830,6 +2846,89 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     test — no need for a second one.) All 278 of `rb_physics_bullet`'s
     pre-existing tests (as of `FR-047`) pass unchanged. 1 new test,
     bringing the crate to 279 total (+1 over `FR-047`'s 278).
+- `RB-PHYSICS-001-FR-049` (velocity-aligned friction direction selection,
+  implemented): `RB-PHYSICS-001-FR-048` found and explicitly left open a
+  genuine, significant divergence — this port's `setup_rows` and
+  `setup_two_body_rows` always derived both friction directions from a
+  fixed, velocity-independent `plane_space(&contact.normal)` basis, where
+  real Bullet's actual default (in `convertContact`) aligns friction
+  direction 1 with the tangential component of the current relative
+  sliding velocity itself, falling back to `btPlaneSpace1` only when that
+  velocity is negligible. This requirement closes that divergence.
+  1. **A new `friction_directions` helper implements real Bullet's actual
+     default.** `let tangential = relative_velocity - normal * rel_vel;`
+     (the component of relative velocity perpendicular to `normal`)
+     becomes direction 1 when normalizable and not negligible, matching
+     real Bullet's own `cp.m_lateralFrictionDir1 = vel - normal * rel_vel`;
+     direction 2 completes a right-handed orthonormal basis via
+     `dir1.cross(normal)`, matching real Bullet's own
+     `lateralFrictionDir1.cross(normalWorldOnB)`. Falls back to
+     `plane_space`'s fixed basis when `tangential.length_squared()` is at
+     or below `f32::EPSILON`, matching real Bullet's own `SIMD_EPSILON`
+     threshold for negligible sliding (e.g. a body resting with zero
+     tangential velocity).
+  2. **A second, genuinely new fallback case was found and fixed: near-
+     head-on catastrophic cancellation.** When `relative_velocity` is
+     almost entirely along `normal` (a near-head-on collision), subtracting
+     two nearly-equal-magnitude vectors (`relative_velocity` and
+     `normal * rel_vel`) is a textbook catastrophic cancellation: the tiny
+     residual `tangential` can pass the length-squared check while its
+     *direction* is dominated by rounding error rather than the true
+     (near-zero) tangential velocity, occasionally landing close enough to
+     `normal` itself that `dir1.cross(normal)` comes out degenerate and
+     fails to normalize. This is a real theoretical vulnerability in real
+     Bullet's own algorithm too, but real Bullet's unguarded `normalize()`
+     doesn't panic on it (it silently produces `NaN`/`Inf`), whereas this
+     crate's own `Vec3::normalize()` returns `Option<Vec3>` — so
+     `friction_directions` falls back to `plane_space` gracefully whenever
+     either normalize step fails, rather than panicking. `plane_space`
+     never subtracts two comparable vectors, so it is immune to this
+     cancellation and always well-defined for any nonzero `normal`. This
+     case was found empirically, by running the full test suite against
+     the initial `.expect()`-based implementation and observing a real
+     panic in `world::tests::a_ball_shot_through_the_goal_mouth_passes_the_standard_arenas_back_wall`.
+  3. **Both one-body and two-body contact setup were updated.** `setup_rows`
+     now hoists `body.velocity_at_point(&rel_pos)` into a shared
+     `relative_velocity` local (previously only used inline for `rel_vel`)
+     and passes it to `friction_directions`. `setup_two_body_rows`
+     similarly hoists what was a per-call
+     `a.velocity_at_point(&rel_pos_a) - b.velocity_at_point(&rel_pos_b)`
+     closure recomputation into a single shared `relative_velocity` local,
+     reused both by `friction_directions` and by the existing
+     `relative_velocity_along` closure.
+  - **Non-goals (this requirement).** Does not touch `restitution_curve`,
+    `resolve_row`, or any of the `btContactSolverInfo` defaults — all
+    already confirmed exact by `RB-PHYSICS-001-FR-048`. Does not change
+    `plane_space` itself, which remains exact and is now `friction_directions`'s
+    documented fallback rather than `setup_rows`/`setup_two_body_rows`'s
+    unconditional choice. Does not touch `RB-PHYSICS-001-FR-005`'s
+    real-data calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** Friction direction 1 aligns with the
+    tangential component of relative sliding velocity whenever that
+    velocity is non-negligible and the resulting basis is well-defined;
+    falls back to `plane_space` otherwise (negligible tangential velocity,
+    or the near-head-on catastrophic-cancellation case). Both fallback
+    cases are covered by tests. A dedicated isotropic-friction test proves
+    the fix has real behavioral bite: it was verified to fail when
+    `friction_directions` is reverted to unconditionally call
+    `plane_space` (discarding velocity alignment), confirming this is a
+    genuine regression test and not one that trivially passes regardless
+    of the fix. All pre-existing tests pass unchanged.
+  - **Verification plan.** 3 new `solver.rs` tests:
+    `friction_directions_aligns_with_the_tangential_component_of_relative_velocity`
+    asserts direction 1 matches the normalized tangential component of a
+    known relative velocity and that both directions remain an orthonormal
+    basis perpendicular to `normal`;
+    `friction_directions_falls_back_to_plane_space_with_no_tangential_velocity`
+    asserts purely-normal relative velocity reproduces `plane_space`'s own
+    output exactly; `friction_deceleration_is_isotropic_regardless_of_slide_direction`
+    asserts a sliding sphere loses the same fraction of tangential speed to
+    friction regardless of slide direction (axis-aligned vs. diagonal) —
+    a property the old fixed-basis approach could not guarantee, and
+    confirmed (per the acceptance criteria above) to fail under it. All
+    279 of `rb_physics_bullet`'s pre-existing tests (as of `FR-048`) pass
+    unchanged. 3 new tests, bringing the crate to 282 total (+3 over
+    `FR-048`'s 279).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4208,6 +4307,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.49.0 (2026-09-01): FR-049 added and implemented (velocity-aligned
+  friction direction selection) — closes the genuine, significant
+  divergence `RB-PHYSICS-001-FR-048` found and explicitly left open: a new
+  `friction_directions` helper in `solver.rs` now aligns friction
+  direction 1 with the tangential component of the current relative
+  sliding velocity, matching real Bullet's actual default, with direction
+  2 completing a right-handed basis via `dir1.cross(normal)`. Falls back
+  to `plane_space`'s fixed basis both for negligible tangential velocity
+  (matching real Bullet's own `SIMD_EPSILON` threshold) and for a
+  second, genuinely new case found while implementing this: near-head-on
+  collisions where catastrophic floating-point cancellation can leave a
+  degenerate tangential residual that real Bullet's own unguarded
+  `normalize()` would silently mishandle but this crate's own
+  `Option`-returning `Vec3::normalize()` instead falls back gracefully
+  from. Wired into both `setup_rows` and `setup_two_body_rows`. Confirmed
+  via a dedicated isotropic-friction regression test, verified to fail
+  under the old fixed-basis behavior. 3 new tests, bringing
+  `rb_physics_bullet` to 282 tests (+3 over FR-048's 279).
 - 0.48.0 (2026-08-31): FR-048 added and investigated (`solver.rs`
   constraint-row setup/resolve reference validation) — fetched and read
   Bullet's real `btSequentialImpulseConstraintSolver.cpp`/`.h`,

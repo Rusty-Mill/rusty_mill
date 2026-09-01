@@ -6,6 +6,43 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Velocity-aligned friction direction selection
+**2026-09-01** · PR pending · commit pending
+
+- **Closes the genuine, significant divergence `RB-PHYSICS-001-FR-048`
+  found and explicitly left open**: this port's `setup_rows` and
+  `setup_two_body_rows` always derived both friction directions from a
+  fixed, velocity-independent `plane_space(&contact.normal)` basis, where
+  real Bullet's actual default aligns friction direction 1 with the
+  tangential component of the current relative sliding velocity.
+- **A new `friction_directions` helper implements real Bullet's actual
+  default.** Direction 1 becomes the normalized tangential component of
+  relative velocity (`relative_velocity - normal * rel_vel`) whenever it's
+  non-negligible and normalizable; direction 2 completes a right-handed
+  orthonormal basis via `dir1.cross(normal)`. Falls back to
+  `plane_space`'s fixed basis when tangential velocity is negligible,
+  matching real Bullet's own `SIMD_EPSILON` threshold.
+- **A second, genuinely new fallback case was found and fixed: near-
+  head-on catastrophic cancellation.** When relative velocity is almost
+  entirely along the normal, subtracting two nearly-equal-magnitude
+  vectors can leave a degenerate residual whose direction is dominated by
+  rounding error rather than the true (near-zero) tangential velocity —
+  occasionally landing close enough to `normal` that `dir1.cross(normal)`
+  fails to normalize. Real Bullet's own unguarded `normalize()` would
+  silently mishandle this; this crate's own `Option`-returning
+  `Vec3::normalize()` instead falls back to `plane_space` gracefully.
+  Found empirically via a real panic surfaced by the full test suite.
+- **Both one-body and two-body contact setup were updated** (`setup_rows`
+  and `setup_two_body_rows`), each hoisting its own relative-velocity
+  computation into a shared local reused by `friction_directions`.
+- **A dedicated isotropic-friction regression test proves the fix has
+  real bite**: verified to fail when `friction_directions` is reverted to
+  unconditionally call `plane_space`, confirming this isn't a test that
+  trivially passes regardless of the fix.
+- **3 new tests.** All 279 pre-existing tests pass unchanged; 282 total.
+
+---
+
 ## `solver.rs` constraint-row setup/resolve reference validation
 **2026-08-31** · [#103](https://github.com/baileyrd/rusty_bullet/pull/103) · `69c07b9`
 

@@ -113,42 +113,41 @@
 //!   (`RB-VERIFY-001`/`RB-VERIFY-002` data) — this remains an open item in
 //!   `RB-PHYSICS-001`, not asserted as settled; only the reference-fact
 //!   claim and this port's own justification for diverging from it changed.
-//! - **Fixed friction-direction basis, not velocity-aligned**
-//!   (`RB-PHYSICS-001-FR-048`). `RB-PHYSICS-001-FR-048` fetched and read
-//!   Bullet's real `btSequentialImpulseConstraintSolver::convertContact`
-//!   directly (matching `RB-PHYSICS-001-FR-036`/`FR-042`/`FR-043`/`FR-045`/
-//!   `FR-046`/`FR-047`'s own method) and found this crate's own
-//!   `setup_rows` always derives both friction directions from
-//!   `plane_space(&contact.normal)` (`RB-PHYSICS-001-FR-048` confirmed this
-//!   *function* byte-for-byte accurate against real `btPlaneSpace1` — see
-//!   its own doc comment) — a fixed, velocity-independent orthonormal
-//!   basis of the contact normal's tangent plane. Real Bullet's actual
-//!   default instead derives friction direction 1 from the tangential
-//!   component of the *current relative sliding velocity itself*
-//!   (`cp.m_lateralFrictionDir1 = vel - normal * rel_vel`, normalized),
-//!   falling back to `btPlaneSpace1`'s own fixed basis only when that
-//!   tangential velocity is negligible (`lat_rel_vel <= SIMD_EPSILON`) —
-//!   i.e. `btPlaneSpace1` is Bullet's own *degenerate-case fallback*, not
-//!   its everyday default, contrary to what this crate's own doc comments
-//!   previously implied by only ever citing it as "the" friction-basis
-//!   port. This is a real, physically meaningful difference, not a cosmetic
-//!   one: each friction row is independently clamped to
+//! - **Friction-direction selection is now velocity-aligned**
+//!   (`RB-PHYSICS-001-FR-049`, closing the divergence
+//!   `RB-PHYSICS-001-FR-048` found and left open). `RB-PHYSICS-001-FR-048`
+//!   fetched and read Bullet's real
+//!   `btSequentialImpulseConstraintSolver::convertContact` directly and
+//!   found this crate's own `setup_rows` always derived both friction
+//!   directions from `plane_space(&contact.normal)` — a fixed,
+//!   velocity-independent orthonormal basis of the contact normal's
+//!   tangent plane — while real Bullet's actual default derives friction
+//!   direction 1 from the tangential component of the *current relative
+//!   sliding velocity itself* (`cp.m_lateralFrictionDir1 = vel - normal *
+//!   rel_vel`, normalized), falling back to `btPlaneSpace1`'s own fixed
+//!   basis only when that tangential velocity is negligible
+//!   (`lat_rel_vel <= SIMD_EPSILON`). This mattered physically, not just
+//!   cosmetically: each friction row is independently clamped to
 //!   `[-mu * N, +mu * N]`, so two *fixed* orthogonal rows approximate the
 //!   true circular friction cone with a square in tangent space — for a
 //!   body sliding along neither fixed axis, up to `sqrt(2)` times the
-//!   correct friction magnitude is achievable at the square's diagonal.
-//!   Aligning friction direction 1 with the actual slide direction (real
-//!   Bullet's approach) keeps direction 2 orthogonal to the slide (so it
-//!   naturally solves near zero) and lets direction 1 alone reproduce the
-//!   textbook single-direction-sliding friction result exactly. Not
-//!   adopted in `RB-PHYSICS-001-FR-048`: implementing velocity-aligned
-//!   friction direction selection (plus its own degenerate-velocity
-//!   fallback) is a real, testable behavioral change in its own right,
-//!   deserving a dedicated follow-up FR with its own before/after tests
-//!   (the same scoping this port already used for `RB-PHYSICS-001-FR-030`/
-//!   `FR-034`/`FR-035`/`FR-037`, each one dedicated solver feature) rather
-//!   than folding it into a reference-validation pass — tracked as an open
-//!   item in `RB-PHYSICS-001`.
+//!   correct friction magnitude was achievable at the square's diagonal.
+//!   `RB-PHYSICS-001-FR-049` implements `friction_directions` (see its own
+//!   doc comment) to reproduce Bullet's real velocity-aligned selection —
+//!   direction 1 now aligns with the actual slide direction, keeping
+//!   direction 2 orthogonal to it (so it naturally solves near zero) and
+//!   letting direction 1 alone reproduce the textbook
+//!   single-direction-sliding friction result exactly, with the same
+//!   degenerate-velocity fallback to `plane_space` real Bullet itself uses
+//!   (plus one additional, empirically-found fallback case — a
+//!   catastrophic-cancellation edge case in the near-head-on-collision
+//!   direction computation that real Bullet's own unguarded `normalize()`
+//!   doesn't need to handle but this crate's own panic-free
+//!   `Vec3::normalize()` does — see `friction_directions`'s own doc
+//!   comment). Confirmed the fix makes friction deceleration isotropic
+//!   (independent of which way a body happens to be sliding in world
+//!   space) via a dedicated regression test that fails under the old
+//!   fixed-basis behavior.
 
 use crate::body::RigidBody;
 use crate::collision::Contact;
@@ -209,15 +208,14 @@ fn restitution_curve(rel_vel: f32, restitution: f32, velocity_threshold: f32) ->
 /// each other), used as the two friction directions in the tangent plane.
 /// Confirmed byte-for-byte accurate against real `btPlaneSpace1`
 /// (`RB-PHYSICS-001-FR-048`), including its `|n.z| > 1/sqrt(2)` branch
-/// threshold — but real Bullet only calls this as its own *fallback*, when
-/// a contact's tangential relative velocity is too small to derive a
+/// threshold. Real Bullet only calls this as its own *fallback*, when a
+/// contact's tangential relative velocity is too small to derive a
 /// direction from (or `SOLVER_DISABLE_VELOCITY_DEPENDENT_FRICTION_DIRECTION`
-/// is set); its actual default derives friction direction 1 from the
-/// tangential component of the real relative sliding velocity instead. This
-/// crate's own `setup_rows` always uses this function, unconditionally —
-/// see the module doc comment's own "Fixed friction-direction basis" bullet
-/// for why that's a real, deliberately-not-adopted divergence, not confirmed
-/// equivalent to Bullet's actual default the way this function itself is.
+/// is set) — `friction_directions` (below) now reproduces that same
+/// fallback structure, since `RB-PHYSICS-001-FR-049` (previously this
+/// crate's own `setup_rows` used this function unconditionally, the
+/// deliberately-not-adopted divergence `RB-PHYSICS-001-FR-048` found and
+/// flagged for a dedicated follow-up).
 fn plane_space(n: &Vec3) -> (Vec3, Vec3) {
     if n.z.abs() > std::f32::consts::FRAC_1_SQRT_2 {
         let a = n.y * n.y + n.z * n.z;
@@ -232,6 +230,46 @@ fn plane_space(n: &Vec3) -> (Vec3, Vec3) {
         let q = Vec3::new(-n.z * p.y, n.z * p.x, a * k);
         (p, q)
     }
+}
+
+/// Picks the two friction-tangent directions for one contact, matching real
+/// Bullet's actual default friction-direction selection
+/// (`RB-PHYSICS-001-FR-049`, adopting the divergence
+/// `RB-PHYSICS-001-FR-048` found and left open): direction 1 aligns with
+/// the tangential component of the current relative sliding velocity
+/// (`relative_velocity` minus its own component along `normal`), so a
+/// friction row's own `[-mu * N, +mu * N]` clamp acts along the body's
+/// actual slide direction instead of an arbitrary fixed axis — direction 2
+/// completes a right-handed orthonormal basis via `dir1.cross(normal)`,
+/// matching real Bullet's own `lateralFrictionDir1.cross(normalWorldOnB)`.
+///
+/// Falls back to `plane_space`'s own fixed basis whenever that tangential
+/// direction can't be trusted: either its squared length is at or below
+/// `f32::EPSILON` (matching real Bullet's own `SIMD_EPSILON` threshold —
+/// negligible sliding to align with, e.g. a body resting with zero
+/// tangential velocity), or — found empirically fixing this crate's own
+/// test suite, not something real Bullet's unguarded `normalize()` needs to
+/// handle — the near-head-on case where `relative_velocity` is almost
+/// entirely along `normal`: subtracting two nearly-equal-magnitude vectors
+/// (`relative_velocity` and `normal * rel_vel`) is a textbook catastrophic
+/// cancellation, so the tiny residual `tangential` can pass the length
+/// check while its *direction* is dominated by rounding error rather than
+/// the true (near-zero) tangential velocity, occasionally landing close
+/// enough to `normal` itself that `dir1.cross(normal)` comes out
+/// degenerate. `plane_space` never subtracts two comparable vectors, so
+/// it's immune to that cancellation and always well-defined for any
+/// nonzero `normal`.
+fn friction_directions(normal: &Vec3, relative_velocity: &Vec3) -> (Vec3, Vec3) {
+    let rel_vel = normal.dot(relative_velocity);
+    let tangential = *relative_velocity - *normal * rel_vel;
+    if tangential.length_squared() > f32::EPSILON {
+        if let Some(dir1) = tangential.normalize() {
+            if let Some(dir2) = dir1.cross(normal).normalize() {
+                return (dir1, dir2);
+            }
+        }
+    }
+    plane_space(normal)
 }
 
 /// One constraint row: a contact normal or a friction direction, solved
@@ -320,7 +358,8 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
         effective_mass_denom(body, &rel_pos, &contact.normal);
     let jac_diag_ab_inv = RELAXATION / (denom + GLOBAL_CFM);
 
-    let rel_vel = contact.normal.dot(&body.velocity_at_point(&rel_pos));
+    let relative_velocity = body.velocity_at_point(&rel_pos);
+    let rel_vel = contact.normal.dot(&relative_velocity);
     let restitution = restitution_curve(rel_vel, body.restitution, RESTITUTION_VELOCITY_THRESHOLD);
 
     let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
@@ -344,7 +383,7 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
         applied_push_impulse: 0.0,
     };
 
-    let (t1, t2) = plane_space(&contact.normal);
+    let (t1, t2) = friction_directions(&contact.normal, &relative_velocity);
     // Port of `setupFrictionConstraint`: target zero relative velocity
     // along the tangent direction (Bullet's `desiredVelocity` parameter is
     // 0 in the default no-conveyor-belt case) — a friction row needs a
@@ -597,9 +636,8 @@ fn setup_two_body_rows(
     let rel_pos_b = contact.point - b.position;
     let inv_dt = 1.0 / dt;
 
-    let relative_velocity_along = |dir: &Vec3| -> f32 {
-        dir.dot(&(a.velocity_at_point(&rel_pos_a) - b.velocity_at_point(&rel_pos_b)))
-    };
+    let relative_velocity = a.velocity_at_point(&rel_pos_a) - b.velocity_at_point(&rel_pos_b);
+    let relative_velocity_along = |dir: &Vec3| -> f32 { dir.dot(&relative_velocity) };
 
     let (
         normal_torque_axis_a,
@@ -640,7 +678,7 @@ fn setup_two_body_rows(
         applied_push_impulse: 0.0,
     };
 
-    let (t1, t2) = plane_space(&contact.normal);
+    let (t1, t2) = friction_directions(&contact.normal, &relative_velocity);
     let friction_row = |dir: Vec3| -> TwoBodyRow {
         let (torque_axis_a, angular_component_a, torque_axis_b, angular_component_b, denom) =
             effective_mass_denom_two_body(a, b, &rel_pos_a, &rel_pos_b, &dir);
@@ -1323,6 +1361,78 @@ mod tests {
         );
         // Friction couples into spin for a sphere in contact.
         assert!(s.angular_velocity.length() > 0.0);
+    }
+
+    #[test]
+    fn friction_directions_aligns_with_the_tangential_component_of_relative_velocity() {
+        // RB-PHYSICS-001-FR-049: direction 1 must equal the normalized
+        // tangential (non-normal) component of the sliding velocity, not
+        // one of `plane_space`'s own fixed axes.
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let velocity = Vec3::new(3.0, 4.0, -2.0); // tangential component: (3, 4, 0)
+        let (dir1, dir2) = friction_directions(&normal, &velocity);
+        let expected_dir1 = Vec3::new(3.0, 4.0, 0.0).normalize().unwrap();
+        assert!(
+            (dir1 - expected_dir1).length() < 1e-5,
+            "expected dir1 aligned with the tangential velocity, got {dir1:?}"
+        );
+        assert!((dir1.length() - 1.0).abs() < 1e-5);
+        assert!((dir2.length() - 1.0).abs() < 1e-5);
+        assert!(dir1.dot(&normal).abs() < 1e-5);
+        assert!(dir2.dot(&normal).abs() < 1e-5);
+        assert!(dir1.dot(&dir2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn friction_directions_falls_back_to_plane_space_with_no_tangential_velocity() {
+        // RB-PHYSICS-001-FR-049: a purely normal-direction relative velocity
+        // (no sliding to align with) must reproduce `plane_space`'s own
+        // fixed basis exactly, matching real Bullet's own degenerate-case
+        // fallback.
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let velocity = Vec3::new(0.0, 0.0, -5.0);
+        let (dir1, dir2) = friction_directions(&normal, &velocity);
+        let (expected1, expected2) = plane_space(&normal);
+        assert_eq!(dir1, expected1);
+        assert_eq!(dir2, expected2);
+    }
+
+    #[test]
+    fn friction_deceleration_is_isotropic_regardless_of_slide_direction() {
+        // RB-PHYSICS-001-FR-049: with a fixed friction basis
+        // (RB-PHYSICS-001-FR-048's own not-yet-adopted finding), two
+        // independently-clamped fixed axes approximate the true circular
+        // friction cone with a square in tangent space — a slide direction
+        // that doesn't line up with either axis could be decelerated
+        // differently (up to `sqrt(2)` times more) than one that does.
+        // Aligning friction direction 1 with the actual slide direction
+        // (this FR's own fix) makes the fractional tangential-speed loss
+        // from one resolve call the same regardless of which way the body
+        // happens to be sliding in world space.
+        let fraction_lost = |direction: Vec3| -> f32 {
+            let mut s = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1.0));
+            s.restitution = 0.0;
+            s.friction = 0.5;
+            let speed = 5.0;
+            s.linear_velocity = direction * speed + Vec3::new(0.0, 0.0, -1.0);
+            let ground = ground();
+            resolve_single(&mut s, &ground, 1.0 / 60.0);
+            let remaining = Vec3::new(s.linear_velocity.x, s.linear_velocity.y, 0.0).length();
+            (speed - remaining) / speed
+        };
+
+        // One direction exactly aligned with `plane_space(normal)`'s own t2
+        // axis (see that function's own doc comment for the derivation),
+        // one at 45 degrees between it and t1 — the case a fixed-basis
+        // approach would have split unevenly across two clamped rows.
+        let axis_aligned = fraction_lost(Vec3::new(1.0, 0.0, 0.0));
+        let diagonal = fraction_lost(Vec3::new(1.0, 1.0, 0.0).normalize().unwrap());
+
+        assert!(
+            (axis_aligned - diagonal).abs() < 1e-3,
+            "expected isotropic friction deceleration: axis-aligned lost \
+             {axis_aligned}, diagonal lost {diagonal}"
+        );
     }
 
     #[test]
