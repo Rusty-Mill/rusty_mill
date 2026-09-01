@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.57.0
+- Version: 0.58.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3640,6 +3640,92 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     292 of `rb_physics_bullet`'s pre-existing tests (as of `FR-056`) pass
     unchanged (net +3 tests over `FR-056`'s 292, bringing the crate to
     295).
+- `RB-PHYSICS-001-FR-058` (real speed-dependent throttle taper,
+  implemented): `drive::THROTTLE_ACCELERATION`'s own doc comment had
+  named this exact gap since it was first introduced — "Rocket League's
+  real throttle curve tapers off nonlinearly as speed rises toward
+  `UNBOOSTED_MAX_CAR_SPEED`; this port uses one constant instead, a real
+  simplification (not a taper)" — applying the full flat acceleration
+  right up to a hard cutoff at `UNBOOSTED_MAX_CAR_SPEED` instead of a
+  genuine taper. Fetching RocketSim's own `Car.cpp` (not just its
+  `RLConst.h` constants, this time) to find exactly how its own
+  `THROTTLE_TORQUE_AMOUNT` was actually used surfaced the real mechanism:
+  `driveEngineForce = engineThrottle * (THROTTLE_TORQUE_AMOUNT * UU_TO_BT)
+  * driveSpeedScale`, where `driveSpeedScale` is
+  `DRIVE_SPEED_TORQUE_FACTOR_CURVE.GetOutput(abs(forwardSpeed_UU))` — a
+  genuine 3-point piecewise-linear curve
+  (`{0, 1.0}, {1400, 0.1}, {1410, 0.0}`, confirmed exact against
+  `RLConst.h`), not a flat value. `THROTTLE_TORQUE_AMOUNT` itself
+  (`CAR_MASS_BT * 400.f`) is expressed in Bullet's own internal units and
+  doesn't transfer to this port's own differently-calibrated car body the
+  same clean way real acceleration constants like `BOOST_ACCEL_GROUND`/
+  `AIR` do (`RB-PHYSICS-001-FR-031`'s and `FR-057`'s own "false precision"
+  findings apply to it too) — but the taper *curve itself* is a pure,
+  unitless ratio multiplying whatever peak acceleration applies at a
+  standing start, so it transfers cleanly regardless of that mismatch,
+  the same reasoning `FR-057` used to distinguish `MAX_CAR_ANGULAR_SPEED`
+  (adoptable) from `AIR_CONTROL_TORQUE`'s own real per-axis split
+  (not adoptable).
+  1. **Added `drive::DRIVE_SPEED_TAPER_BREAKPOINTS`** (the 3 confirmed
+     breakpoints, the last reusing the pre-existing `UNBOOSTED_MAX_CAR_SPEED`
+     constant rather than a second literal `1410.0`) and
+     **`drive::drive_speed_taper`**, a small piecewise-linear interpolator
+     evaluated against this port's own pre-existing *signed*
+     `throttle.signum() * forward_speed` quantity (the same value
+     `apply_driven_forces`'s throttle gate already computed), clamped to
+     non-negative before lookup — full torque (`1.0`) below the curve's
+     domain, zero beyond it.
+  2. **Replaced the hard cutoff with the taper.** `apply_driven_forces`'s
+     throttle block no longer gates on
+     `throttle.signum() * forward_speed < UNBOOSTED_MAX_CAR_SPEED`;
+     instead it always computes `drive_speed_taper(...)` and scales
+     `THROTTLE_ACCELERATION` by it, applying nothing once the taper
+     reaches exactly zero (still exactly at `UNBOOSTED_MAX_CAR_SPEED`,
+     the curve's own last breakpoint, so the effective cap is unchanged —
+     only how acceleration approaches it changed).
+  3. **Corrected the doc comments that described this as "not a
+     taper".** `THROTTLE_ACCELERATION`'s own doc comment, and the
+     module-level "commonly-cited constants" paragraph's claim that it
+     "stands in for Rocket League's real speed-dependent throttle curve,"
+     both previously described the curve itself as unmodeled — now only
+     the peak magnitude remains an uncalibrated placeholder; the curve
+     shape is confirmed and modeled.
+  - **Non-goals (this requirement).** Does not adopt real RocketSim's own
+    direction-agnostic `abs(forward speed)` curve input — this port's own
+    pre-existing throttle gate was already direction-aware
+    (`throttle.signum() * forward_speed`, treating "not yet moving this
+    way" as a standing start), and switching to direction-agnostic input
+    (tapering even when accelerating against current motion) would be a
+    second, independent behavioral change this requirement doesn't take
+    on. Does not change `THROTTLE_ACCELERATION`'s own peak magnitude
+    (`1600.0`), still an uncalibrated placeholder — only the curve's real
+    shape is adopted. Does not touch `BOOST_ACCELERATION_GROUND`/`AIR`,
+    `MAX_CAR_SPEED`, `MAX_CAR_ANGULAR_SPEED`, or any other `drive.rs`
+    constant. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `drive_speed_taper`'s own doc comment states
+    the exact RocketSim citation, its 3 confirmed breakpoints, and why
+    the shape (not the magnitude) transfers cleanly. Throttle acceleration
+    now measurably tapers before reaching `UNBOOSTED_MAX_CAR_SPEED`
+    (10% strength at `1400` uu/s, down from full strength) rather than
+    applying at full strength until a hard cutoff. The effective top
+    speed throttle alone can reach is unchanged (`UNBOOSTED_MAX_CAR_SPEED`
+    remains the taper's own last breakpoint). All pre-existing tests pass
+    unchanged — none of them exercised the gap between `1400` and `1410`
+    uu/s closely enough to distinguish the old hard cutoff from the new
+    taper.
+  - **Verification plan.** 2 new `drive.rs` tests:
+    `drive_speed_taper_matches_the_real_curve_breakpoints_exactly`
+    unit-tests the interpolator directly at both breakpoints, both
+    segment midpoints, and both out-of-domain clamps;
+    `throttle_acceleration_tapers_well_before_reaching_unboosted_max_speed`
+    confirms a car at exactly `1400` uu/s gains only ~10% of a
+    full-strength step's velocity delta from one step of full throttle —
+    the exact regression this requirement closes (this test would see a
+    full-strength delta instead, on the old flat-then-cutoff code). All
+    295 of `rb_physics_bullet`'s pre-existing tests (as of `FR-057`) pass
+    unchanged (net +2 tests over `FR-057`'s 295, bringing the crate to
+    297).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4969,7 +5055,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   grounded one, per RocketSim's own fetched source) and fixed it — a real
   behavioral change, not merely a confirmation, closing that half of this
   bullet's own scope; `MAX_CAR_SPEED`/`JUMP_SPEED` remain merely
-  commonly-cited pending real recorded data. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  commonly-cited pending real recorded data. `RB-PHYSICS-001-FR-058`
+  did the same for `THROTTLE_ACCELERATION`'s own *shape*: fetching
+  RocketSim's own `Car.cpp` found its real throttle force is scaled by a
+  confirmed piecewise-linear speed-taper curve, not applied flat, and
+  modeled that curve directly (`drive::drive_speed_taper`) — but
+  `THROTTLE_ACCELERATION`'s own peak magnitude (`1600.0`) remains
+  uncalibrated, since the real reference constant it would otherwise
+  come from (`THROTTLE_TORQUE_AMOUNT`) is expressed in Bullet-internal
+  units that don't transfer to this port's own car body the same clean
+  way the curve's unitless shape does — see FR-058's own entry for the
+  full finding. That peak magnitude is still fully in scope for this
+  bullet. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
   `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
   `JUMP_HOLD_ACCELERATION`, and `LANDING_AUTO_UPRIGHT_TORQUE` in particular
@@ -5057,6 +5154,31 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.58.0 (2026-09-01): FR-058 added and implemented (real speed-dependent
+  throttle taper) — `THROTTLE_ACCELERATION`'s own doc comment had named
+  this exact gap since it was introduced: applying full flat acceleration
+  right up to a hard cutoff at `UNBOOSTED_MAX_CAR_SPEED`, not a genuine
+  taper. Fetched RocketSim's own `Car.cpp` (not just `RLConst.h`'s
+  constants) to find exactly how its own `THROTTLE_TORQUE_AMOUNT` is
+  used, surfacing the real mechanism: drive force is scaled by
+  `DRIVE_SPEED_TORQUE_FACTOR_CURVE`, a confirmed 3-point piecewise-linear
+  curve (`{0, 1.0}, {1400, 0.1}, {1410, 0.0}`), not applied flat.
+  `THROTTLE_TORQUE_AMOUNT` itself is expressed in Bullet-internal units
+  that don't transfer to this port's own car body the same clean way
+  (repeating `FR-031`'s/`FR-057`'s own "false precision" finding), but
+  the curve's *shape* is a pure, unitless ratio that transfers regardless
+  — the same reasoning `FR-057` used for `MAX_CAR_ANGULAR_SPEED`. Added
+  `drive::DRIVE_SPEED_TAPER_BREAKPOINTS`/`drive_speed_taper`, replaced the
+  hard cutoff with the real taper (evaluated against this port's own
+  pre-existing signed, direction-aware speed quantity — not RocketSim's
+  own direction-agnostic `abs(forward speed)`, a separate behavioral
+  question left out of scope), and corrected doc comments describing this
+  as unmodeled. `THROTTLE_ACCELERATION`'s own peak magnitude remains an
+  uncalibrated placeholder — only the curve's shape is now confirmed and
+  modeled. 2 new `drive.rs` tests (a direct unit test of the interpolator,
+  and a regression test confirming a car at 1400 uu/s now gains only ~10%
+  of a full-strength step's velocity delta); bringing the crate to 297
+  total (+2 over `FR-057`'s 295).
 - 0.57.0 (2026-09-01): FR-057 added and implemented (hard cap on car
   angular speed) — nothing in this port previously bounded how fast
   sustained air control torque (or a dodge's own kick, or the
