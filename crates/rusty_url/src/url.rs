@@ -1159,6 +1159,12 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_with_query_and_fragment() {
+        let s = "https://example.net/path?a=1&b=2#section";
+        assert_eq!(Url::parse(s).unwrap().as_str(), s);
+    }
+
+    #[test]
     fn scheme_is_lowercased() {
         assert_eq!(Url::parse("HTTP://example.com/").unwrap().scheme(), "http");
     }
