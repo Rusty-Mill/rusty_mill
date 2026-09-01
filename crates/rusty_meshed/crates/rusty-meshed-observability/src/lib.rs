@@ -20,4 +20,4 @@ pub use metrics::{
     ensure_schema as ensure_metrics_schema, get_violation_count, record_violation,
     MetricsCollector, MetricsError, ProductMetrics,
 };
-pub use slo::{SLOMonitor, SLOResult, SLOViolationPayload};
+pub use slo::{PublishError, SLOMonitor, SLOResult, SLOViolationPayload, SLOViolationPublisher};

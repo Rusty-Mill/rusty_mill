@@ -1,14 +1,7 @@
-//! SLO evaluation -- the Rust port of `meshed.observability.slo`'s
-//! `SLOResult`, `SLOViolationPayload`, and `SLOMonitor` (GOV-041..046).
-//!
-//! `SLOViolationPublisher` (GOV-047..049, publishing violation events
-//! to Kafka) is **not** ported here yet -- it needs a Kafka `Produce`
-//! request, which `rusty_kafka` doesn't implement (see that crate's
-//! own module doc: the record-batch v2 wire format is complex enough,
-//! and unverifiable without a live broker in this environment, that
-//! it's deliberately deferred). [`SLOViolationPayload`] itself -- the
-//! plain data the publisher would serialize -- is still fully ported,
-//! since it needs no Kafka client at all.
+//! SLO evaluation and violation publishing -- the Rust port of
+//! `meshed.observability.slo`'s `SLOResult`, `SLOViolationPayload`,
+//! `SLOMonitor` (GOV-041..046), and `SLOViolationPublisher`
+//! (GOV-047..049).
 //!
 //! Freshness and completeness both read the same signal --
 //! `_get_latest_timestamp_seconds_ago`'s high-watermark timestamp, via
@@ -16,11 +9,22 @@
 //! this and [`crate::MetricsCollector`]) -- and, per the source's own
 //! docstring, completeness is a v1 liveness proxy (a stalled partition
 //! counts as incomplete), not a true expected-vs-actual record count.
+//!
+//! [`SLOViolationPublisher`] is built on `rusty_kafka`'s `Produce`
+//! support -- see that crate's own module doc for the caveat this
+//! inherits (no live broker to validate the record-batch v2 wire
+//! format against in this environment).
 
 use crate::metrics::get_violation_count;
+use rusty_err::Error;
+use rusty_json::json;
 use rusty_kafka::protocol::list_offsets::{
     ListOffsetsPartitionRequest, ListOffsetsRequest, ListOffsetsTopicRequest, LATEST_TIMESTAMP,
 };
+use rusty_kafka::protocol::produce::{
+    ProducePartitionRequest, ProduceRequest, ProduceTopicRequest,
+};
+use rusty_kafka::record_batch::Record;
 use rusty_kafka::{ClientError, KafkaClient};
 use rusty_sqlite::rusqlite::{Connection, Result as SqlResult};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
@@ -36,11 +40,11 @@ pub struct SLOResult {
     pub message: String,
 }
 
-/// A governance event payload for an SLO violation, published (once
-/// [`crate`]'s module doc's `SLOViolationPublisher` gap is filled) to
-/// `mesh.governance.slo-violations` as plain JSON, not Avro -- SLO
-/// violations are platform infrastructure, not a domain data product
-/// (GOV-05, per the source's own design note) (GOV-042).
+/// A governance event payload for an SLO violation, published by
+/// [`SLOViolationPublisher`] to `mesh.governance.slo-violations` as
+/// plain JSON, not Avro -- SLO violations are platform infrastructure,
+/// not a domain data product (GOV-05, per the source's own design
+/// note) (GOV-042).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SLOViolationPayload {
     pub product_name: String,
@@ -246,6 +250,136 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
             message,
         })
     }
+}
+
+/// Errors from a [`SLOViolationPublisher`] Kafka call -- same shape as
+/// [`crate::MetricsError`], this crate family's established pattern for
+/// a `rusty_kafka`-backed struct's error type.
+#[derive(Debug, Error)]
+pub enum PublishError {
+    /// The underlying Kafka request itself failed (connection, framing,
+    /// correlation mismatch, ...).
+    #[error("Kafka client error: {0}")]
+    Kafka(#[from] ClientError),
+    /// The broker's response didn't include a result for the
+    /// topic/partition produced to.
+    #[error("no result for the requested topic/partition in the broker's response")]
+    MissingPartitionResult,
+    /// The broker returned a non-zero error code for the produce
+    /// (e.g. `UNKNOWN_TOPIC_OR_PARTITION`).
+    #[error("broker returned Kafka error code {0}")]
+    KafkaErrorCode(i16),
+}
+
+/// Publishes [`SLOViolationPayload`]s to `mesh.governance.slo-violations`,
+/// backed by a single [`rusty_kafka::KafkaClient`] connection (GOV-047).
+pub struct SLOViolationPublisher<S> {
+    client: KafkaClient<S>,
+}
+
+impl SLOViolationPublisher<TcpStream> {
+    /// Connects to the Kafka broker at `bootstrap_servers`.
+    pub async fn connect(bootstrap_servers: &str) -> Result<Self, ClientError> {
+        let client = KafkaClient::connect(
+            bootstrap_servers,
+            Some("rusty_meshed_slo_publisher".to_string()),
+        )
+        .await?;
+        Ok(SLOViolationPublisher { client })
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOViolationPublisher<S> {
+    /// The topic every violation is published to -- fixed, matching the
+    /// source's `TOPIC` class attribute.
+    pub const TOPIC: &'static str = "mesh.governance.slo-violations";
+
+    /// Wraps an already-connected [`rusty_kafka::KafkaClient`] -- the
+    /// seam this crate's own tests use (an in-memory
+    /// `rusty_tokio::io::duplex` pair standing in for a broker) instead
+    /// of a real TCP connection.
+    pub fn with_client(client: KafkaClient<S>) -> Self {
+        SLOViolationPublisher { client }
+    }
+
+    /// Publishes `violation` to [`Self::TOPIC`] (GOV-048): the value is
+    /// `violation` JSON-encoded (field set and value encoding matching
+    /// the source's `json.dumps(asdict(violation))`; object key order
+    /// is *not* reproduced -- `rusty_json::Map` is `BTreeMap`-backed and
+    /// always serializes keys alphabetically, never in declaration
+    /// order like Python's `dict`, and nothing here or in the source
+    /// depends on key order, per the JSON spec itself), the key is
+    /// `product_name`'s UTF-8 bytes, and `event_id`/`correlation_id`
+    /// are carried as UTF-8 headers, single record, partition 0 --
+    /// this client has no partition-count/`Metadata`-based partitioner
+    /// (unlike `librdkafka`'s default one the source relies on), so
+    /// this deliberately assumes a single-partition topic, matching the
+    /// platform's own local-dev deployment.
+    pub async fn publish(&mut self, violation: &SLOViolationPayload) -> Result<(), PublishError> {
+        let value = rusty_json::to_string(&violation_json(violation)).unwrap_or_default();
+        let request = ProduceRequest {
+            acks: -1,
+            timeout_ms: 5000,
+            base_timestamp_ms: now_millis() as i64,
+            topics: vec![ProduceTopicRequest {
+                name: Self::TOPIC.to_string(),
+                partitions: vec![ProducePartitionRequest {
+                    partition_index: 0,
+                    records: vec![Record {
+                        key: Some(violation.product_name.clone().into_bytes()),
+                        value: Some(value.into_bytes()),
+                        headers: vec![
+                            (
+                                "event_id".to_string(),
+                                Some(violation.event_id.clone().into_bytes()),
+                            ),
+                            (
+                                "correlation_id".to_string(),
+                                Some(violation.correlation_id.clone().into_bytes()),
+                            ),
+                        ],
+                    }],
+                }],
+            }],
+        };
+        let response = self.client.produce(&request).await?;
+        let result = response
+            .topics
+            .first()
+            .and_then(|t| t.partitions.first())
+            .ok_or(PublishError::MissingPartitionResult)?;
+        if result.error_code != 0 {
+            return Err(PublishError::KafkaErrorCode(result.error_code));
+        }
+        Ok(())
+    }
+
+    /// A documented no-op (GOV-049). The source's `Producer.flush()`
+    /// waits out `librdkafka`'s asynchronous send buffer; there's
+    /// nothing to wait for here since [`publish`](Self::publish)
+    /// already synchronously awaits the full `Produce` request/response
+    /// before returning -- a stronger delivery guarantee at that point,
+    /// not a weaker one, so `timeout_seconds` is accepted for call-site
+    /// parity but unused.
+    pub fn flush(&mut self, _timeout_seconds: f64) {}
+}
+
+/// `violation`'s fields as a [`rusty_json::Value`] object, in the same
+/// field set as the source's `asdict(violation)` -- see
+/// [`SLOViolationPublisher::publish`]'s doc for why the *order* those
+/// keys serialize in doesn't match Python's `dict` order.
+fn violation_json(violation: &SLOViolationPayload) -> rusty_json::Value {
+    json!({
+        "product_name": violation.product_name.as_str(),
+        "port_name": violation.port_name.as_str(),
+        "slo_type": violation.slo_type.as_str(),
+        "threshold": violation.threshold,
+        "actual_value": violation.actual_value,
+        "violation_message": violation.violation_message.as_str(),
+        "event_id": violation.event_id.as_str(),
+        "timestamp": violation.timestamp.as_str(),
+        "correlation_id": violation.correlation_id.as_str(),
+    })
 }
 
 fn now_millis() -> f64 {
@@ -498,5 +632,129 @@ mod tests {
             SLOViolationPayload::new("orders", "commerce.orders", "freshness", 60.0, 125.4, "x");
         assert_ne!(payload.event_id, second.event_id);
         assert_ne!(payload.correlation_id, second.correlation_id);
+    }
+
+    fn sample_violation() -> SLOViolationPayload {
+        SLOViolationPayload::new(
+            "orders",
+            "commerce.orders",
+            "freshness",
+            60.0,
+            125.4,
+            "Freshness violated: last message 125.4s ago (threshold=60s)",
+        )
+    }
+
+    async fn respond_to_produce(
+        peer: &mut (impl rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin + Send),
+        error_code: i16,
+    ) -> rusty_kafka::protocol::produce::ProduceRequest {
+        use rusty_kafka::protocol::produce::{
+            ProducePartitionResponse, ProduceRequest, ProduceResponse, ProduceTopicResponse,
+        };
+
+        let (header, body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, rusty_kafka::protocol::api_key::PRODUCE);
+        let mut reader = rusty_wire::Reader::new(&body);
+        let request = ProduceRequest::decode(&mut reader).unwrap();
+
+        let response = ProduceResponse {
+            topics: vec![ProduceTopicResponse {
+                name: SLOViolationPublisher::<rusty_tokio::io::DuplexStream>::TOPIC.to_string(),
+                partitions: vec![ProducePartitionResponse {
+                    partition_index: 0,
+                    error_code,
+                    base_offset: 7,
+                    log_append_time: -1,
+                }],
+            }],
+            throttle_time_ms: 0,
+        };
+        let mut writer = Writer::new();
+        response.encode(&mut writer);
+        send_response(peer, header.correlation_id, &writer.into_vec())
+            .await
+            .unwrap();
+        request
+    }
+
+    #[rusty_tokio::test]
+    async fn publish_sends_the_violation_as_a_single_record_to_partition_zero() {
+        let (client_io, mut peer) = duplex(4096);
+        let client = KafkaClient::new(client_io, None);
+        let mut publisher = SLOViolationPublisher::with_client(client);
+        let violation = sample_violation();
+        let expected_key = violation.product_name.clone().into_bytes();
+        let expected_event_id = violation.event_id.clone();
+        let expected_correlation_id = violation.correlation_id.clone();
+
+        let server = rusty_tokio::spawn(async move { respond_to_produce(&mut peer, 0).await });
+
+        publisher.publish(&violation).await.unwrap();
+        let sent = server.await.unwrap();
+
+        assert_eq!(sent.topics.len(), 1);
+        assert_eq!(
+            sent.topics[0].name,
+            SLOViolationPublisher::<rusty_tokio::io::DuplexStream>::TOPIC
+        );
+        assert_eq!(sent.topics[0].partitions.len(), 1);
+        let partition = &sent.topics[0].partitions[0];
+        assert_eq!(partition.partition_index, 0);
+        assert_eq!(partition.records.len(), 1);
+        let record = &partition.records[0];
+        assert_eq!(record.key, Some(expected_key));
+        assert_eq!(
+            record.headers,
+            vec![
+                ("event_id".to_string(), Some(expected_event_id.into_bytes())),
+                (
+                    "correlation_id".to_string(),
+                    Some(expected_correlation_id.into_bytes())
+                ),
+            ]
+        );
+
+        let value = record.value.as_ref().unwrap();
+        let parsed: rusty_json::Value = rusty_json::from_str(std::str::from_utf8(value).unwrap())
+            .expect("value must be valid JSON");
+        let object = parsed.as_object().expect("value must be a JSON object");
+        assert_eq!(
+            object.get("product_name").and_then(|v| v.as_str()),
+            Some("orders")
+        );
+        assert_eq!(
+            object.get("slo_type").and_then(|v| v.as_str()),
+            Some("freshness")
+        );
+        assert_eq!(object.get("threshold").and_then(|v| v.as_f64()), Some(60.0));
+        assert_eq!(
+            object.get("actual_value").and_then(|v| v.as_f64()),
+            Some(125.4)
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn publish_returns_a_kafka_error_code_when_the_broker_rejects_it() {
+        let (client_io, mut peer) = duplex(4096);
+        let client = KafkaClient::new(client_io, None);
+        let mut publisher = SLOViolationPublisher::with_client(client);
+        let violation = sample_violation();
+
+        let server = rusty_tokio::spawn(async move {
+            respond_to_produce(&mut peer, 3 /* UNKNOWN_TOPIC_OR_PARTITION */).await
+        });
+
+        let err = publisher.publish(&violation).await.unwrap_err();
+        server.await.unwrap();
+
+        assert!(matches!(err, PublishError::KafkaErrorCode(3)));
+    }
+
+    #[test]
+    fn flush_is_a_documented_no_op() {
+        let (client_io, _peer) = duplex(4096);
+        let mut publisher = SLOViolationPublisher::with_client(KafkaClient::new(client_io, None));
+        publisher.flush(5.0);
     }
 }
