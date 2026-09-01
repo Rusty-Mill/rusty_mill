@@ -3,5 +3,9 @@
 //! grants, governance/lineage/metrics endpoints, the monitor topology +
 //! SSE event feed, and the transformation-maturity endpoints).
 //!
-//! Scaffolding only so far; see `../../capability-manifest.md` (rows
-//! REG-001..139, XFM-001..040) for the capabilities this crate covers.
+//! See `../../capability-manifest.md` (rows REG-001..139, XFM-001..040)
+//! for the capabilities this crate covers; most of the HTTP surface is
+//! still open, see the crate's module list below for what's
+//! implemented so far.
+
+pub mod transformation;
