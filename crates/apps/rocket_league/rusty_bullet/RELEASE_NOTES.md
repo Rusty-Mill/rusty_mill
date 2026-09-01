@@ -6,6 +6,38 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## `combine_friction` defensive clamp
+**2026-09-01** · PR pending · commit pending
+
+- **`RB-PHYSICS-001-FR-043` fetched and read real Bullet's own
+  `btManifoldResult::calculateCombinedFriction`/`calculateCombinedRestitution`
+  source** to correct this spec's wrong claim about the reference's
+  default combine mode, but never separately examined one more detail
+  visible in that same source: real Bullet's own `calculateCombinedFriction`
+  additionally clamps its product result to `[-10.0, 10.0]`
+  (`calculateCombinedRestitution` has no such clamp).
+- **Re-fetched and re-read `btManifoldResult.cpp` directly** to confirm
+  the clamp's exact mechanics (a plain `if` clamp, not `btClamped`,
+  applied only to friction).
+- **Confirmed the clamp is currently inert for this crate's own actual
+  material-property values** — every `RigidBody`/`StaticPlane`/
+  `StaticQuarterPipe`/`StaticCornerFillet`/`StaticGoalWall`/
+  `StaticBoundedWall` this crate itself ever constructs uses a friction
+  coefficient in `0.1..=0.9`, nowhere near either bound.
+- **Adopted the clamp anyway, for reference conformance against a
+  genuinely unvalidated boundary**: every one of those types' own
+  `friction` field is a public, unvalidated `f32`, so a future caller (or
+  a bug elsewhere) setting an extreme or negative value would hit
+  `combine_friction` with no defense today, unlike real Bullet.
+  `solver::combine_friction` now clamps its own average result to
+  `[-10.0, 10.0]`, keeping the average formula
+  `RB-PHYSICS-001-FR-043` already decided to keep — this only adds the
+  clamp, not a formula change. `combine_restitution` is left unclamped,
+  matching the reference's own choice not to clamp restitution either.
+- **1 new test.** All 288 pre-existing tests pass unchanged; 289 total.
+
+---
+
 ## Static-vs-dynamic combined-solve ordering investigation
 **2026-09-01** · [#111](https://github.com/baileyrd/rusty_bullet/pull/111) · `524b593`
 
