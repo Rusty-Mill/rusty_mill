@@ -1,9 +1,9 @@
 //! `Message`, `Part` and `Role` (spec Section 4.1.4-4.1.6 / proto `Message`,
 //! `Part`, `Role`).
 
+use rusty_uuid::Uuid;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
-use uuid::Uuid;
 
 /// Identifies the sender of a [`Message`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -178,15 +178,18 @@ impl RetryPolicy {
     }
 
     /// The delay after `attempt` consecutive failures, jitter included.
+    ///
+    /// Delegates to [`rusty_retry::Backoff`], shared with `rusty_request`'s
+    /// own retry backoff -- see that crate's docs for why `jitter` is a
+    /// fraction rather than a bool here: it's the more general form, and
+    /// `0.5` (this policy's default) needs it.
     fn backoff_for(&self, attempt: u32) -> Duration {
-        let factor = 2u32.saturating_pow(attempt.min(16));
-        let base = self.initial_backoff.saturating_mul(factor).min(self.max_backoff);
-        let jitter = self.jitter.clamp(0.0, 1.0);
-        if jitter == 0.0 {
-            return base;
+        rusty_retry::Backoff::Exponential {
+            base: self.initial_backoff,
+            max: self.max_backoff,
+            jitter: self.jitter,
         }
-        let fixed = base.mul_f64(1.0 - jitter);
-        fixed.saturating_add(base.mul_f64(jitter * random_fraction()))
+        .delay_for(attempt)
     }
 }
 
@@ -200,19 +203,6 @@ impl Default for RetryPolicy {
             retry_run_submission: false,
         }
     }
-}
-
-/// A random fraction in `[0, 1]`.
-///
-/// Drawn from the random bytes of a v4 UUID rather than from `rand`: `uuid` is
-/// already a required dependency and generates v4s from the platform RNG, so
-/// this buys decorrelated backoff without adding a crate for four bytes of
-/// entropy. Bytes 9 onward are used because 6 and 8 carry the version and
-/// variant bits and are not random.
-fn random_fraction() -> f64 {
-    let bytes = uuid::Uuid::new_v4().into_bytes();
-    let raw = u32::from_le_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]);
-    f64::from(raw) / f64::from(u32::MAX)
 }
 
 /// Whether a request can be sent again after a failure.
@@ -248,11 +238,11 @@ fn retryable_transport(error: &reqwest::Error) -> bool {
 /// A date already in the past yields `None`, which falls back to the policy's
 /// own backoff rather than retrying instantly.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if let Some(delay) = rusty_retry::retry_after_seconds(value) {
+        return Some(delay);
     }
-    let when = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let when = chrono::DateTime::parse_from_rfc2822(value.trim()).ok()?;
     (when.with_timezone(&chrono::Utc) - chrono::Utc::now()).to_std().ok()
 }
 

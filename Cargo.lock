@@ -5664,6 +5664,7 @@ dependencies = [
  "metrics-util",
  "redis",
  "reqwest 0.13.4",
+ "rusty_retry",
  "serde",
  "serde_json",
  "serde_norway",
@@ -5774,6 +5775,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rsa",
+ "rusty_url",
  "schemars",
  "serde",
  "serde_json",
@@ -5785,7 +5787,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -5987,6 +5988,7 @@ dependencies = [
  "prost",
  "prost-types",
  "reqwest 0.12.28",
+ "rusty_uuid",
  "serde",
  "serde_json",
  "signature 3.0.0",
@@ -5999,7 +6001,6 @@ dependencies = [
  "tonic-prost-build",
  "tonic-types",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -6224,6 +6225,9 @@ dependencies = [
 [[package]]
 name = "rusty_oauth"
 version = "0.1.0"
+dependencies = [
+ "rusty_rsa",
+]
 
 [[package]]
 name = "rusty_opnsense"
@@ -6262,6 +6266,7 @@ dependencies = [
  "platform-linux 0.27.0",
  "platform-mock 0.27.0",
  "rustls",
+ "rusty_rsa",
  "rusty_tls",
  "rusty_wire",
 ]
@@ -6281,10 +6286,19 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rusty_http",
+ "rusty_retry",
  "rusty_tls",
  "rusty_tokio",
  "tokio",
 ]
+
+[[package]]
+name = "rusty_retry"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_rsa"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_rusqlite"

@@ -32,6 +32,10 @@ rusty_http = { path = "../rusty_http", features = [
 # dependency, already present in the build graph at a compatible version
 # via `rusty_tls`/the `rustls` dev-dependency below.
 rustls-pki-types = "1"
+# Exponential backoff math + Retry-After delta-seconds parsing, shared
+# with rusty-acp's own RetryPolicy. Retry *eligibility* (which statuses,
+# methods, errors) stays here -- only the delay computation moved.
+rusty_retry = { path = "../rusty_retry" }
 # Optional (see the `tokio` feature below): drives the connector over
 # real crates.io `tokio`'s `AsyncRead`/`AsyncWrite` instead of
 # `rusty_tokio`'s, for a consumer (e.g. `rusty_search`) already running
