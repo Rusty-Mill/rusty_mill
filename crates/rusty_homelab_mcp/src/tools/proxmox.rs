@@ -109,6 +109,78 @@ pub struct GuestPowerArgs {
     pub action: PowerActionArg,
 }
 
+/// Arguments for updating a guest's configuration.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateGuestConfigArgs {
+    /// Node name, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// Which kind of guest `vmid` is.
+    pub kind: GuestKindArg,
+    /// The guest's VMID, as returned by `proxmox_list_guests`.
+    pub vmid: u32,
+    /// The fields to update, in the same shape Proxmox's own config API
+    /// takes (`cores`, `memory`, `net0`, `scsi0`, ...). Call
+    /// `proxmox_guest_config` first to see the guest's current fields.
+    pub config: serde_json::Value,
+}
+
+/// Arguments for creating a guest.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateGuestArgs {
+    /// Node to create the guest on, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// Which kind of guest to create.
+    pub kind: GuestKindArg,
+    /// The new guest's fields. Must include `vmid`; the rest is the same
+    /// field set Proxmox's own create-guest API takes, and differs between
+    /// QEMU (`ostype`, `scsi0`, `net0`, ...) and LXC (`ostemplate`,
+    /// `rootfs`, ...).
+    pub config: serde_json::Value,
+}
+
+/// Arguments for cloning a guest.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CloneGuestArgs {
+    /// Node name, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// Which kind of guest `vmid` is.
+    pub kind: GuestKindArg,
+    /// The source guest's VMID, as returned by `proxmox_list_guests`.
+    pub vmid: u32,
+    /// The clone's fields. Must include `newid`; common optional fields are
+    /// `name`, `full` (full vs. linked clone), `target` (a different
+    /// destination node), and `storage`.
+    pub config: serde_json::Value,
+}
+
+/// Arguments naming one snapshot of a guest.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SnapshotArgs {
+    /// Node name, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// Which kind of guest `vmid` is.
+    pub kind: GuestKindArg,
+    /// The guest's VMID, as returned by `proxmox_list_guests`.
+    pub vmid: u32,
+    /// The snapshot's name, as returned by `proxmox_list_snapshots`.
+    pub snapname: String,
+}
+
+/// Arguments for creating a snapshot.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateSnapshotArgs {
+    /// Node name, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// Which kind of guest `vmid` is.
+    pub kind: GuestKindArg,
+    /// The guest's VMID, as returned by `proxmox_list_guests`.
+    pub vmid: u32,
+    /// The snapshot's fields. Must include `snapname`; optional
+    /// `description`, and for QEMU guests `vmstate` (also capture RAM
+    /// state).
+    pub snapshot: serde_json::Value,
+}
+
 #[tool_router(router = proxmox_tools, vis = "pub(crate)")]
 impl HomelabServer {
     /// List Proxmox cluster nodes and their status.
@@ -228,6 +300,166 @@ impl HomelabServer {
                 .map_err(proxmox_error)?
                 .into(),
         ))
+    }
+
+    /// One guest's current configuration.
+    #[tool(
+        description = "Get one Proxmox guest's current configuration: CPU, memory, disks, network interfaces, boot order, and everything else Proxmox stores per-guest. Call proxmox_list_guests first to find VMIDs."
+    )]
+    pub async fn proxmox_guest_config(
+        &self,
+        Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .guest_config(&node, kind.into(), vmid)
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Update a guest's configuration.
+    #[tool(
+        description = "Update a Proxmox guest's configuration (CPU, memory, disks, network interfaces, ...). Usually takes effect immediately, but some fields (e.g. a disk resize) run as a background task instead -- check whether the result looks like a UPID string."
+    )]
+    pub async fn proxmox_update_guest_config(
+        &self,
+        Parameters(UpdateGuestConfigArgs {
+            node,
+            kind,
+            vmid,
+            config,
+        }): Parameters<UpdateGuestConfigArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .update_guest_config(&node, kind.into(), vmid, config)
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Create a new guest.
+    #[tool(
+        description = "Create a new Proxmox QEMU virtual machine or LXC container. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish."
+    )]
+    pub async fn proxmox_create_guest(
+        &self,
+        Parameters(CreateGuestArgs { node, kind, config }): Parameters<CreateGuestArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .create_guest(&node, kind.into(), config)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Delete a guest.
+    #[tool(
+        description = "Delete a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find VMIDs."
+    )]
+    pub async fn proxmox_delete_guest(
+        &self,
+        Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .delete_guest(&node, kind.into(), vmid)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Clone a guest.
+    #[tool(
+        description = "Clone a Proxmox guest into a new one. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find the source VMID."
+    )]
+    pub async fn proxmox_clone_guest(
+        &self,
+        Parameters(CloneGuestArgs {
+            node,
+            kind,
+            vmid,
+            config,
+        }): Parameters<CloneGuestArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .clone_guest(&node, kind.into(), vmid, config)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Every snapshot of a guest.
+    #[tool(
+        description = "List every snapshot taken of a Proxmox guest, with its creation time and description. Call proxmox_list_guests first to find VMIDs."
+    )]
+    pub async fn proxmox_list_snapshots(
+        &self,
+        Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .list_snapshots(&node, kind.into(), vmid)
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Create a snapshot.
+    #[tool(
+        description = "Create a snapshot of a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish."
+    )]
+    pub async fn proxmox_create_snapshot(
+        &self,
+        Parameters(CreateSnapshotArgs {
+            node,
+            kind,
+            vmid,
+            snapshot,
+        }): Parameters<CreateSnapshotArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .create_snapshot(&node, kind.into(), vmid, snapshot)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Delete a snapshot.
+    #[tool(
+        description = "Delete a snapshot of a Proxmox guest. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_snapshots first to find snapshot names."
+    )]
+    pub async fn proxmox_delete_snapshot(
+        &self,
+        Parameters(SnapshotArgs {
+            node,
+            kind,
+            vmid,
+            snapname,
+        }): Parameters<SnapshotArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .delete_snapshot(&node, kind.into(), vmid, &snapname)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Roll a guest back to a snapshot.
+    #[tool(
+        description = "Roll a Proxmox guest back to a previous snapshot, discarding any changes made since. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_snapshots first to find snapshot names."
+    )]
+    pub async fn proxmox_rollback_snapshot(
+        &self,
+        Parameters(SnapshotArgs {
+            node,
+            kind,
+            vmid,
+            snapname,
+        }): Parameters<SnapshotArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .rollback_snapshot(&node, kind.into(), vmid, &snapname)
+            .await
+            .map_err(proxmox_error)
     }
 }
 
