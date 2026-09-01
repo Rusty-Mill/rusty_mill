@@ -7,11 +7,15 @@
 //! capabilities this crate covers; most are still open, see the crate's
 //! module list below for what's implemented so far.
 
+mod error;
 mod topic_config;
 mod topic_manager;
+mod types;
 
+pub use error::{ContractVersionMismatch, RegistryError};
 pub use topic_config::{TopicSpec, TopicType};
 pub use topic_manager::{
     validate_topic_name, CreateTopicError, TopicManager, TopicNameError, TopicStatus,
     WELL_KNOWN_STREAM_TYPES,
 };
+pub use types::OutputPortSpec;

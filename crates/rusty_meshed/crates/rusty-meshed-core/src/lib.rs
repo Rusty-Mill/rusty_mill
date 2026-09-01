@@ -9,6 +9,9 @@
 
 use rusty_err::Error;
 
+mod event_type;
+pub use event_type::EventType;
+
 /// Environment-variable prefix every [`PlatformConfig`] field is read
 /// under, matching `meshed.core.config.PlatformConfig`'s
 /// `SettingsConfigDict(env_prefix="MESHED_")` (XFM-048).
