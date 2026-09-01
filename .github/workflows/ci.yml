@@ -218,10 +218,34 @@ jobs:
         run: cargo test --test windows_raw_mode -p rusty_lines --all-features
 
       # nextest doesn't execute doctests -- run those separately so this
-      # switch doesn't quietly drop doctest coverage.
+      # switch doesn't quietly drop doctest coverage. `cargo test --doc`
+      # explicitly scoped via `-p` hard-errors on a package with no library
+      # target ("no library targets found in package X") instead of quietly
+      # skipping it the way `--doc --workspace` does -- a bin-only crate
+      # (e.g. rusty_homelab_mcp) touched by a PR would otherwise fail this
+      # step for having nothing to doc-test. Filter the scoped package list
+      # down to crates that actually declare a `lib` target first.
       - name: Test (doctests)
         if: steps.scope.outputs.args != ''
-        run: cargo test --doc ${{ steps.scope.outputs.args }} --all-features
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.plan.outputs.full }}" = "true" ]; then
+            cargo test --doc --workspace --all-features
+          else
+            lib_pkgs="$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.targets[]?.kind[]? == "lib") | .name')"
+            args=""
+            for p in ${{ needs.plan.outputs.packages }}; do
+              if echo "$lib_pkgs" | grep -qx "$p"; then
+                args="$args -p $p"
+              fi
+            done
+            if [ -n "$args" ]; then
+              cargo test --doc $args --all-features
+            else
+              echo "No affected package declares a library target -- nothing to doc-test."
+            fi
+          fi
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/rusty_win32/Cargo.toml) — this mirrors its own CI's
