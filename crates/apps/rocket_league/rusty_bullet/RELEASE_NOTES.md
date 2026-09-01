@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real per-axis air-control torque ratio (pitch/yaw/roll)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#143](https://github.com/baileyrd/rusty_bullet/pull/143) · `77b047d`
 
 - **All three axes shared one flat `AIR_CONTROL_TORQUE` magnitude** —
   `RB-PHYSICS-001-FR-031`'s original audit had already found real
