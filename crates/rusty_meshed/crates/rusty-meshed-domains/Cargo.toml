@@ -11,6 +11,7 @@ publish = false
 rusty_err = { path = "../../../rusty_err" }
 rusty_uuid = { path = "../../../rusty_uuid" }
 rusty_time = { path = "../../../rusty_time" }
+rusty_json = { path = "../../../rusty_json" }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-sdk = { path = "../rusty-meshed-sdk" }
 

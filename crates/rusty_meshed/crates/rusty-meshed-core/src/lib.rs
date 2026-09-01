@@ -10,9 +10,11 @@
 
 use rusty_err::Error;
 
+pub mod avro;
 mod base_event;
 mod event_type;
-pub use base_event::{AvroDecodeError, BaseEvent};
+pub use avro::AvroDecodeError;
+pub use base_event::BaseEvent;
 pub use event_type::EventType;
 
 /// Environment-variable prefix every [`PlatformConfig`] field is read

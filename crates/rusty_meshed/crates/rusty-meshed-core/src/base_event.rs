@@ -8,7 +8,7 @@
 //! `rusty-meshed-domains` (every domain event) need it, and they're
 //! sibling crates with no dependency edge between them.
 //!
-//! # Scope of this pass
+//! # Extending `BaseEvent` with subclass fields
 //!
 //! The source's `BaseEvent` is a `pydantic`/`dataclasses_avroschema`
 //! base class: subclassing it and adding fields is enough for
@@ -16,28 +16,27 @@
 //! reflect over *all* fields, base and subclass alike, at runtime.
 //! Rust has no runtime reflection, and this workspace has no
 //! procedural-macro crate to generate the equivalent from a
-//! `#[derive(...)]`, so this pass ports `BaseEvent` itself as a
-//! complete, standalone unit -- its own four fields' schema and binary
-//! codec, fully round-trip-tested -- without deciding how a concrete
-//! domain event (`rusty-meshed-domains`, DOM-002 onward) extends it
-//! with its own fields. That's a real design question (a hand-written
-//! trait per event? a future derive macro?) worth deciding when a
-//! domain event actually needs to answer it, not speculatively here.
+//! `#[derive(...)]`.
 //!
-//! # Avro encoding
-//!
-//! No Avro crate exists anywhere in this workspace, so the binary
-//! codec below is a minimal, from-scratch implementation of exactly
-//! the two Avro primitives `BaseEvent`'s fields need: `string`
-//! (zigzag-varint byte-length prefix + UTF-8 bytes) and `array<string>`
-//! (Avro's block encoding: a positive item-count varint, that many
-//! encoded items, terminated by a zero-count block -- this codec
-//! always emits/expects exactly one block, which is valid per the
-//! Avro spec, not a simplification of it; decoding also accepts the
-//! spec's negative-count-with-byte-size block variant for robustness,
-//! even though this codec never emits one itself).
+//! `rusty-meshed-domains`' nine domain events (DOM-002..010) answer
+//! this by composition, not inheritance: each event struct embeds a
+//! `base: BaseEvent` field plus its own typed fields, and hand-builds
+//! its own `avro_schema()`/`serialize()`/`deserialize()` using
+//! [`BaseEvent::encode_into`]/[`BaseEvent::decode_from`] (position-
+//! flexible, unlike [`serialize`](BaseEvent::serialize)/
+//! [`deserialize`](BaseEvent::deserialize), which are self-contained
+//! for `BaseEvent` used standalone) to fold the four lineage fields in
+//! at the front, followed by their own fields encoded via
+//! [`crate::avro`]'s primitives directly. See
+//! `rusty-meshed-domains::events`'s own module doc for why this crate
+//! doesn't try to generalize that pattern into a shared trait: with
+//! only nine concrete cases and no polymorphic dispatch over them yet,
+//! a trait would be premature abstraction over data that doesn't need
+//! one yet.
 
-use rusty_err::Error;
+use crate::avro::{
+    decode_string, decode_string_array, encode_string, encode_string_array, AvroDecodeError,
+};
 use rusty_json::json;
 
 /// The lineage contract every meshed platform event carries (SDK-001,
@@ -79,43 +78,70 @@ impl BaseEvent {
         }
     }
 
+    /// The four lineage fields' Avro schema entries, in wire order --
+    /// what a domain event's own `avro_schema()` prepends to its own
+    /// fields' entries.
+    pub fn avro_schema_fields() -> rusty_json::Value {
+        json!([
+            {"name": "event_id", "type": "string"},
+            {"name": "correlation_id", "type": "string"},
+            {"name": "source_event_ids", "type": {"type": "array", "items": "string"}},
+            {"name": "timestamp", "type": "string"}
+        ])
+    }
+
     /// The Avro record schema for `BaseEvent`'s own four fields, as a
     /// JSON-parseable string (SDK-007).
     pub fn avro_schema() -> String {
+        Self::avro_record_schema("BaseEvent", Self::NAMESPACE, json!([]))
+    }
+
+    /// Builds a full Avro record schema string for a domain event: the
+    /// four lineage fields (in [`avro_schema_fields`](Self::avro_schema_fields)'s
+    /// order) followed by `own_fields`, matching the source's own field
+    /// ordering (`BaseEvent`'s fields first, then subclass fields in
+    /// declaration order) -- what every `rusty-meshed-domains` event's
+    /// `avro_schema()` is built from, so the four-lineage-field prefix
+    /// only needs to be assembled correctly once.
+    pub fn avro_record_schema(
+        name: &str,
+        namespace: &str,
+        own_fields: rusty_json::Value,
+    ) -> String {
+        let mut fields = Self::avro_schema_fields();
+        if let (Some(base_fields), Some(extra)) = (fields.as_array_mut(), own_fields.as_array()) {
+            base_fields.extend(extra.iter().cloned());
+        }
         let schema = json!({
             "type": "record",
-            "name": "BaseEvent",
-            "namespace": Self::NAMESPACE,
-            "fields": [
-                {"name": "event_id", "type": "string"},
-                {"name": "correlation_id", "type": "string"},
-                {"name": "source_event_ids", "type": {"type": "array", "items": "string"}},
-                {"name": "timestamp", "type": "string"}
-            ]
+            "name": name,
+            "namespace": namespace,
+            "fields": fields
         });
         rusty_json::to_string(&schema)
             .expect("a schema built from string literals always serializes")
     }
 
-    /// Encodes this event as Avro binary, field order matching
-    /// [`avro_schema`](Self::avro_schema) (SDK-008).
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_string(&self.event_id, &mut out);
-        encode_string(&self.correlation_id, &mut out);
-        encode_string_array(&self.source_event_ids, &mut out);
-        encode_string(&self.timestamp, &mut out);
-        out
+    /// Appends this event's four lineage fields to `out`, in the same
+    /// order [`avro_schema_fields`](Self::avro_schema_fields) declares
+    /// them -- the position-flexible primitive a domain event's own
+    /// `serialize()` calls before encoding its own fields.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        encode_string(&self.event_id, out);
+        encode_string(&self.correlation_id, out);
+        encode_string_array(&self.source_event_ids, out);
+        encode_string(&self.timestamp, out);
     }
 
-    /// Decodes Avro binary produced by [`serialize`](Self::serialize),
-    /// preserving all fields (SDK-008).
-    pub fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
-        let mut pos = 0;
-        let event_id = decode_string(bytes, &mut pos)?;
-        let correlation_id = decode_string(bytes, &mut pos)?;
-        let source_event_ids = decode_string_array(bytes, &mut pos)?;
-        let timestamp = decode_string(bytes, &mut pos)?;
+    /// Decodes this event's four lineage fields starting at `*pos`,
+    /// advancing it past the bytes consumed -- the position-flexible
+    /// primitive a domain event's own `deserialize()` calls before
+    /// decoding its own fields.
+    pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self, AvroDecodeError> {
+        let event_id = decode_string(bytes, pos)?;
+        let correlation_id = decode_string(bytes, pos)?;
+        let source_event_ids = decode_string_array(bytes, pos)?;
+        let timestamp = decode_string(bytes, pos)?;
         Ok(BaseEvent {
             event_id,
             correlation_id,
@@ -123,107 +149,24 @@ impl BaseEvent {
             timestamp,
         })
     }
-}
 
-/// Errors from [`BaseEvent::deserialize`].
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum AvroDecodeError {
-    #[error("unexpected end of input decoding an Avro long")]
-    UnexpectedEofInLong,
-    #[error("unexpected end of input decoding an Avro string/bytes payload")]
-    UnexpectedEofInPayload,
-    #[error("Avro string/bytes length must be non-negative, got {0}")]
-    NegativeLength(i64),
-    #[error("invalid UTF-8 in an Avro string field")]
-    InvalidUtf8,
-}
-
-// ---------------------------------------------------------------------
-// Avro binary primitives (`long` zigzag-varint, `string`, `array<string>`)
-// ---------------------------------------------------------------------
-
-fn encode_long(value: i64, out: &mut Vec<u8>) {
-    let mut n = ((value << 1) ^ (value >> 63)) as u64;
-    loop {
-        let byte = (n & 0x7f) as u8;
-        n >>= 7;
-        if n == 0 {
-            out.push(byte);
-            break;
-        }
-        out.push(byte | 0x80);
+    /// Encodes this event as Avro binary (SDK-008). A thin wrapper
+    /// over [`encode_into`](Self::encode_into) for `BaseEvent` used
+    /// standalone, not embedded in a domain event.
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out);
+        out
     }
-}
 
-fn decode_long(bytes: &[u8], pos: &mut usize) -> Result<i64, AvroDecodeError> {
-    let mut result: u64 = 0;
-    let mut shift = 0u32;
-    loop {
-        let byte = *bytes
-            .get(*pos)
-            .ok_or(AvroDecodeError::UnexpectedEofInLong)?;
-        *pos += 1;
-        result |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
+    /// Decodes Avro binary produced by [`serialize`](Self::serialize),
+    /// preserving all fields (SDK-008). A thin wrapper over
+    /// [`decode_from`](Self::decode_from) requiring the entire input
+    /// be one `BaseEvent`.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
+        let mut pos = 0;
+        Self::decode_from(bytes, &mut pos)
     }
-    Ok(((result >> 1) as i64) ^ -((result & 1) as i64))
-}
-
-fn encode_string(s: &str, out: &mut Vec<u8>) {
-    encode_long(s.len() as i64, out);
-    out.extend_from_slice(s.as_bytes());
-}
-
-fn decode_string(bytes: &[u8], pos: &mut usize) -> Result<String, AvroDecodeError> {
-    let len = decode_long(bytes, pos)?;
-    if len < 0 {
-        return Err(AvroDecodeError::NegativeLength(len));
-    }
-    let end = *pos + len as usize;
-    let slice = bytes
-        .get(*pos..end)
-        .ok_or(AvroDecodeError::UnexpectedEofInPayload)?;
-    let s = std::str::from_utf8(slice)
-        .map_err(|_| AvroDecodeError::InvalidUtf8)?
-        .to_string();
-    *pos = end;
-    Ok(s)
-}
-
-fn encode_string_array(items: &[String], out: &mut Vec<u8>) {
-    if !items.is_empty() {
-        encode_long(items.len() as i64, out);
-        for item in items {
-            encode_string(item, out);
-        }
-    }
-    encode_long(0, out);
-}
-
-fn decode_string_array(bytes: &[u8], pos: &mut usize) -> Result<Vec<String>, AvroDecodeError> {
-    let mut result = Vec::new();
-    loop {
-        let count = decode_long(bytes, pos)?;
-        if count == 0 {
-            break;
-        }
-        let item_count = if count < 0 {
-            // Negative block count: followed by the block's total
-            // byte size (which we don't need to interpret item-by-item
-            // decoding, so it's just consumed and discarded).
-            decode_long(bytes, pos)?;
-            -count
-        } else {
-            count
-        };
-        for _ in 0..item_count {
-            result.push(decode_string(bytes, pos)?);
-        }
-    }
-    Ok(result)
 }
 
 /// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
@@ -331,16 +274,5 @@ mod tests {
         let bytes = event.serialize();
         let truncated = &bytes[..bytes.len() - 1];
         assert!(BaseEvent::deserialize(truncated).is_err());
-    }
-
-    #[test]
-    fn long_round_trips_negative_zero_and_positive_values() {
-        for value in [i64::MIN, -1_000_000, -1, 0, 1, 1_000_000, i64::MAX] {
-            let mut buf = Vec::new();
-            encode_long(value, &mut buf);
-            let mut pos = 0;
-            assert_eq!(decode_long(&buf, &mut pos).unwrap(), value);
-            assert_eq!(pos, buf.len());
-        }
     }
 }

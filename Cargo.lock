@@ -5829,6 +5829,7 @@ dependencies = [
  "rusty-meshed-core",
  "rusty-meshed-sdk",
  "rusty_err",
+ "rusty_json",
  "rusty_time",
  "rusty_uuid",
 ]
