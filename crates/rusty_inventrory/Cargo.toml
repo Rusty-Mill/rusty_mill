@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/inventory-core", "crates/inventory-cli", "crates/inventory-tauri"]
+
+# The Tauri shell needs system webkit2gtk/gtk development packages on Linux.
+# Keeping it out of the default set means `cargo build` and `cargo test` work
+# on a bare toolchain; build it explicitly with `-p inventory-tauri`.
+default-members = ["crates/inventory-core", "crates/inventory-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/baileyrd/rusty_inventrory"
+
+[workspace.dependencies]
+inventory-core = { path = "crates/inventory-core" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = "0.37"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tracing = "0.1"

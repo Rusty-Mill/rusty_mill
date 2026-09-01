@@ -1,0 +1,30 @@
+[package]
+name = "inventory-tauri"
+description = "Menu bar app: one keystroke to every AI conversation on your machine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+inventory-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+# `macos-private-api` is what makes a transparent window legal on macOS —
+# `WebviewWindowBuilder::transparent` does not even exist without it there,
+# though it is unconditional on Windows and Linux. It rules out Mac App Store
+# distribution, which is not a constraint for a product sold direct, and the
+# panel's translucent blurred card is its whole visual identity.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+
+[features]
+# Ships with the standard Tauri custom-protocol setup in release builds.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
