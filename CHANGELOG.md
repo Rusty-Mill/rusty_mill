@@ -9,8 +9,15 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty_croc` merged into `crates/rusty_croc` via `git subtree` (fourth
+  wave), full history preserved
+
 ### Changed
 ### Fixed
+- `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce
+  constructions rewritten to the equivalent `From<&[T]>` conversion — the
+  workspace resolves `generic-array` 0.14.9, where they fail this repo's
+  `-D warnings` clippy gate
 
 ## [workspace] - 2026-09-01
 ### Fixed

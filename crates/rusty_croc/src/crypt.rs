@@ -6,8 +6,8 @@
 //! * `new_argon2` + `encrypt_chacha`/`decrypt_chacha`: Argon2id (t=1, m=64 MiB, p=4)
 //!   keyed XChaCha20-Poly1305, output is `24-byte nonce || ciphertext || tag`.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::aead::{Aead, KeyInit, Nonce, Payload};
+use aes_gcm::Aes256Gcm;
 use chacha20poly1305::XChaCha20Poly1305;
 use rand::RngCore;
 use sha2::Sha256;
@@ -61,8 +61,9 @@ pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptError> {
     let mut iv = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut iv);
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptError::KeyDerivation)?;
+    let nonce: &Nonce<Aes256Gcm> = (&iv[..]).into();
     let ct = cipher
-        .encrypt(Nonce::from_slice(&iv), Payload::from(plaintext))
+        .encrypt(nonce, Payload::from(plaintext))
         .map_err(|_| CryptError::Decryption)?;
     let mut out = iv.to_vec();
     out.extend_from_slice(&ct);
@@ -75,11 +76,9 @@ pub fn decrypt(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptError> {
         return Err(CryptError::TooShort);
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptError::KeyDerivation)?;
+    let nonce: &Nonce<Aes256Gcm> = (&encrypted[..12]).into();
     cipher
-        .decrypt(
-            Nonce::from_slice(&encrypted[..12]),
-            Payload::from(&encrypted[12..]),
-        )
+        .decrypt(nonce, Payload::from(&encrypted[12..]))
         .map_err(|_| CryptError::Decryption)
 }
 
@@ -116,11 +115,9 @@ pub fn new_argon2(
 pub fn encrypt_chacha(plaintext: &[u8], cipher: &XChaCha20Poly1305) -> Result<Vec<u8>, CryptError> {
     let mut nonce = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut nonce);
+    let xnonce: &chacha20poly1305::XNonce = (&nonce[..]).into();
     let ct = cipher
-        .encrypt(
-            chacha20poly1305::XNonce::from_slice(&nonce),
-            Payload::from(plaintext),
-        )
+        .encrypt(xnonce, Payload::from(plaintext))
         .map_err(|_| CryptError::Decryption)?;
     let mut out = nonce.to_vec();
     out.extend_from_slice(&ct);
@@ -132,11 +129,9 @@ pub fn decrypt_chacha(encrypted: &[u8], cipher: &XChaCha20Poly1305) -> Result<Ve
     if encrypted.len() < 24 {
         return Err(CryptError::TooShort);
     }
+    let xnonce: &chacha20poly1305::XNonce = (&encrypted[..24]).into();
     cipher
-        .decrypt(
-            chacha20poly1305::XNonce::from_slice(&encrypted[..24]),
-            Payload::from(&encrypted[24..]),
-        )
+        .decrypt(xnonce, Payload::from(&encrypted[24..]))
         .map_err(|_| CryptError::Decryption)
 }
 

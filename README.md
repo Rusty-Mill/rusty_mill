@@ -6,12 +6,14 @@ pipeline. Each crate keeps its full original commit history, merged in via
 `git subtree` under `crates/`.
 
 A first wave merged fourteen crates (below the `rusty_term` row through
-`rusty_text`). A second wave, in progress, is merging fifteen more —
-`rusty_tokio`, `rusty_rusqlite`, `rusty_libc`, `rusty_acp`, `rusty_tls`,
-`rusty_serde`, `rusty_lsp`, `rusty_a2a`, `rusty_mcp`, `rusty_stream`,
-`rusty_url`, `rusty_http`, `rusty_json`, `rusty_oauth`, and `rustils_async`
-— one crate per pull request; this row set reflects whichever of those
-have landed so far.
+`rusty_text`). A second wave added fifteen more (`rusty_tokio` through
+`rustils_async`), and a third wave twenty-six more (`rusty_wire` through
+`rusty_voice`); both are complete. A fourth wave, in progress, is merging
+the eleven remaining standalone `baileyrd/*` repos — `rusty_croc`,
+`rusty_test`, `rusty_inventrory`, `rusty_skillopt`, `rusty_key`,
+`rusty_llama`, `rusty_tailscale`, `rusty_adk`, `rusty_provider`,
+`rusty_yirp`, and `rusty_agent_gateway` — merged one crate at a time, the
+same way; this row set reflects whichever of those have landed so far.
 
 ## Crates
 
@@ -111,6 +113,7 @@ have landed so far.
 | [`platform-bsd`](crates/rustils/crates/platform-bsd) | `crates/rustils/crates/platform-bsd` | BSD backend for `platform` (net-only slice): macOS, FreeBSD, OpenBSD, NetBSD, DragonFly |
 | [`winargv`](crates/rustils/crates/winargv) | `crates/rustils/crates/winargv` | Windows argv → command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable) |
 | [`coreutils`](crates/rustils/crates/coreutils) | `crates/rustils/crates/coreutils` | Modular pure-Rust implementation of core GNU/POSIX utilities (`rcat`, `rls`, `rrun`, `rgrep`, and more) |
+| [`rusty-croc`](crates/rusty_croc) | `crates/rusty_croc` | Rust port of [croc](https://github.com/schollz/croc): wire-compatible secure peer-to-peer file transfer (PAKE, relay, resume) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -587,6 +590,26 @@ this series.
 `../rusty_whisper`-style siblings, so nothing needed rewiring — the
 subtree add plus the workspace member entry was the whole job.
 
+`rusty_croc` has no dependency relationship with anything already in this
+repo — its dependencies are all crates.io crates (RustCrypto's `aes-gcm`,
+`chacha20poly1305`, `argon2`, `p256`/`p384`/`p521`, plus `zip`, `ignore`,
+`socket2`, ...), no sibling `baileyrd/*` repos — so nothing needed
+swapping. Its `crates/rusty_croc/fuzz` is the same standalone-`[workspace]`
+shape as `rusty_tls/fuzz`/`rusty_lsp/fuzz` (nightly-only libFuzzer harnesses
+over its wire parsers) — excluded from this workspace the same way.
+Joining the workspace's single dependency resolution did surface one real
+`-D warnings` failure the standalone repo's own CI never hit, because its
+committed lockfile pinned `generic-array` at 0.14.7 while this workspace
+already resolves 0.14.9 — the release that deprecates the whole crate,
+`GenericArray::from_slice` included ("please upgrade to generic-array
+1.x"). Four calls in `crypt.rs` (the AES-256-GCM and XChaCha20-Poly1305
+nonce constructions) therefore became hard errors under this workspace's
+clippy gate. Rewritten to the `From<&[T]> for &GenericArray` conversion
+that `from_slice` itself delegates to — same panic-on-wrong-length
+contract, same wire format, no behavior change — verified by its full
+49-test suite (including the vectors checked against the real Go croc)
+passing unmodified.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -656,3 +679,18 @@ nested workspace),
 [`rusty_rdp`](https://github.com/baileyrd/rusty_rdp), and
 [`rusty_voice`](https://github.com/baileyrd/rusty_voice) — merged one at
 a time, same process.
+
+A fourth wave finishes the consolidation, merging the last eleven
+standalone repos the same way, starting with
+[`rusty_croc`](https://github.com/baileyrd/rusty_croc) — and continuing
+with [`rusty_test`](https://github.com/baileyrd/rusty_test),
+[`rusty_inventrory`](https://github.com/baileyrd/rusty_inventrory),
+[`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt),
+[`rusty_key`](https://github.com/baileyrd/rusty_key),
+[`rusty_llama`](https://github.com/baileyrd/rusty_llama),
+[`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale),
+[`rusty_adk`](https://github.com/baileyrd/rusty_adk),
+[`rusty_provider`](https://github.com/baileyrd/rusty_provider),
+[`rusty_yirp`](https://github.com/baileyrd/rusty_yirp), and
+[`rusty_agent_gateway`](https://github.com/baileyrd/rusty_agent_gateway) —
+one crate at a time, same process.

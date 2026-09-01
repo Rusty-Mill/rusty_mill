@@ -98,6 +98,7 @@ members = [
     "crates/rustils/crates/platform-bsd",
     "crates/rustils/crates/winargv",
     "crates/rustils/crates/coreutils",
+    "crates/rusty_croc",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -116,6 +117,7 @@ exclude = [
     "crates/rusty_tls/fuzz",
     "crates/rusty_lsp/fuzz",
     "crates/rustils/fuzz",
+    "crates/rusty_croc/fuzz",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/

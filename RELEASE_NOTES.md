@@ -13,6 +13,25 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_croc`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_croc` — a Rust port of
+  [croc](https://github.com/schollz/croc), wire-compatible with stock croc
+  v10 (PAKE code phrases, relay, local-network hand-off, resume). Merged
+  via `git subtree` with its full commit history, as with every prior
+  crate import.
+- **Fixed:** four `GenericArray::from_slice` calls in `crypt.rs` (AES-256-GCM
+  and XChaCha20-Poly1305 nonces). The standalone repo's lockfile pinned
+  `generic-array` 0.14.7; this workspace resolves 0.14.9, which deprecates
+  the crate wholesale, so `-D warnings` turned them into errors. Rewritten
+  to the `From<&[T]> for &GenericArray` conversion `from_slice` delegates
+  to — no behavior change, 49 tests pass unmodified.
+- No dependency swaps: `rusty_croc` depends only on crates.io crates, not
+  on any sibling in this workspace. Its nightly-only `fuzz/` harness keeps
+  its own `[workspace]` table and is excluded from this one, same as
+  `rusty_tls/fuzz` and `rusty_lsp/fuzz`.
+
 ## PR #65 — Deduplicate `rusty_rdp`'s byte cursor and split `rusty_ansder`'s two crates
 **2026-09-01** · [#65](https://github.com/Rusty-Mill/rusty_mill/pull/65)
 
