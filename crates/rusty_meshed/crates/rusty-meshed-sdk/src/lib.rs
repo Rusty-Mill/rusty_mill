@@ -8,11 +8,13 @@
 //! module list below for what's implemented so far.
 
 mod error;
+mod registry_client;
 mod topic_config;
 mod topic_manager;
 mod types;
 
 pub use error::{ContractVersionMismatch, RegistryError};
+pub use registry_client::RegistryClient;
 pub use topic_config::{TopicSpec, TopicType};
 pub use topic_manager::{
     validate_topic_name, CreateTopicError, TopicManager, TopicNameError, TopicStatus,

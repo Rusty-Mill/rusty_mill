@@ -16,8 +16,15 @@ rusty_sqlite = { path = "../../../rusty_sqlite" }
 rusty_json = { path = "../../../rusty_json" }
 rusty_uuid = { path = "../../../rusty_uuid" }
 rusty_time = { path = "../../../rusty_time" }
+rusty_request = { path = "../../../rusty_request" }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 rusty-meshed-observability = { path = "../rusty-meshed-observability" }
 
 [dev-dependencies]
+# Test-only: stands in as a fake registry HTTP server (no network
+# access to a real one in this environment); rusty_tokio is already a
+# normal dependency above. "rusty-tokio" feature gates rusty_http's
+# AsyncTransport, used to read/write raw HTTP/1.1 messages over a
+# local rusty_tokio TcpListener.
+rusty_http = { path = "../../../rusty_http", features = ["rusty-tokio"] }
