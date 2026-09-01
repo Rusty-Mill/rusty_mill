@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Net-point contact combined-solve investigation
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#107](https://github.com/baileyrd/rusty_bullet/pull/107) · `4d1a4b8`
 
 - **`net::NetMesh::step` resolved every body-vs-net-point contact
   independently and sequentially**, one pair at a time via
