@@ -54,6 +54,41 @@ async fn guest_power_returns_the_task_upid() {
 }
 
 #[tokio::test]
+async fn task_status_reports_a_finished_task() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#,
+    )]);
+
+    let status = client(base_url)
+        .task_status(
+            "pve",
+            "UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:",
+        )
+        .await
+        .expect("task_status");
+
+    assert_eq!(status["status"], "stopped");
+    assert_eq!(status["exitstatus"], "OK");
+}
+
+#[tokio::test]
+async fn task_log_returns_the_log_lines() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"n":1,"t":"TASK OK"}]}"#,
+    )]);
+
+    let log = client(base_url)
+        .task_log(
+            "pve",
+            "UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:",
+        )
+        .await
+        .expect("task_log");
+
+    assert_eq!(log[0]["t"], "TASK OK");
+}
+
+#[tokio::test]
 async fn a_4xx_status_becomes_an_api_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         401,
