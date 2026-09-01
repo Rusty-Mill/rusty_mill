@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.61.0
+- Version: 0.62.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3958,6 +3958,68 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     API. All 302 of `rb_physics_bullet`'s pre-existing tests (as of
     `FR-060`) pass unchanged (net +4 tests over `FR-060`'s 302, bringing
     the crate to 306).
+- `RB-PHYSICS-001-FR-062` (real ball material properties via a new
+  `RigidBody::ball` constructor, implemented): `RB-PHYSICS-001-FR-061`'s
+  own Non-goals had explicitly deferred adopting RocketSim's own
+  `BALL_DRAG` (a per-match mutator-config default in the reference, not a
+  hardcoded system invariant), noting this port's `RigidBody::sphere`
+  constructor takes no opinion on a "real" ball's own damping default —
+  the ball is caller-constructed, and every sphere (ball or otherwise)
+  gets an identical generic `restitution = 0.5`/`friction = 0.5`/
+  `linear_damping = 0.0` placeholder, with no way to say "this one is a
+  real ball." This requirement resolves that exact gap.
+  1. **Fetched RocketSim's own `RLConst.h`** (matching
+     `RB-PHYSICS-001-FR-057`/`FR-060`/`FR-061`'s own method) and confirmed
+     three real material-property constants: `BALL_RESTITUTION = 0.6f`
+     ("Bounce factor"), `BALL_FRICTION = 0.35f`, and `BALL_DRAG = 0.03f`
+     ("Net-velocity drag multiplier"). None of the three is a torque or
+     force calibrated against a specific mass/inertia (the "false
+     precision" category `RB-PHYSICS-001-FR-031` ruled out) — restitution
+     and friction are dimensionless coefficients combined at contact time
+     (`solver::combine_restitution`/`combine_friction`), and drag is a
+     pure per-second decay rate (`integrate::apply_damping`) — so all
+     three transfer cleanly regardless of this port's own ball not being
+     calibrated to real Rocket League's, the same category
+     `RB-PHYSICS-001-FR-061`'s own speed caps cleared.
+  2. **Added `body::RigidBody::ball(radius, mass, position)`**, a new,
+     additive constructor alongside the existing generic `sphere` and
+     `car_box`: identical to `sphere` for `radius`/`mass`/`position`, but
+     sets `restitution = 0.6`, `friction = 0.35`, and `linear_damping =
+     0.03` instead of the generic placeholders. `sphere` itself is
+     unchanged — every existing test's own non-ball spheres, and any test
+     that deliberately wants a non-real ball (e.g. an inelastic
+     `restitution = 0.0` one for a settling test), keep working exactly
+     as before.
+  - **Non-goals (this requirement).** Does not adopt `BALL_MASS_BT =
+    CAR_MASS_BT / 6.f` — unlike the three constants above, this is an
+    absolute mass expressed in Bullet's own internal units, and while the
+    `1:6` ratio between car and ball mass is in principle a portable,
+    dimensionless quantity the same way `RB-PHYSICS-001-FR-059`'s dodge
+    scale ratios are, this project has no canonical "real" car
+    construction site yet (no game binary consumes this crate; every
+    `car_box` call site today is test-only) to normalize that ratio
+    against, so there is nothing yet to keep a `1:6` ratio with — left for
+    a future requirement once a canonical car exists. Does not change
+    `sphere`'s own generic default, or retrofit any existing test to call
+    `ball` instead — this is new API surface, not a migration. Does not
+    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked
+    on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `RigidBody::ball(radius, mass, position)`
+    returns a body with `restitution == 0.6`, `friction == 0.35`, and
+    `linear_damping == 0.03`, otherwise identical to
+    `RigidBody::sphere(radius, mass, position)` (same shape, position,
+    mass, inertia tensor). `RigidBody::sphere`'s own defaults
+    (`restitution == 0.5`, `friction == 0.5`, `linear_damping == 0.0`)
+    are unchanged. All pre-existing tests pass unchanged.
+  - **Verification plan.** 3 new `body.rs` tests:
+    `ball_sets_confirmed_real_material_properties` and
+    `ball_otherwise_behaves_identically_to_sphere` pin the new
+    constructor's own exact behavior directly;
+    `sphere_still_defaults_to_the_generic_placeholder_material_properties`
+    is a regression pin confirming `sphere`'s own generic default stayed
+    untouched. All 306 of `rb_physics_bullet`'s pre-existing tests (as of
+    `FR-061`) pass unchanged (net +3 tests over `FR-061`'s 306, bringing
+    the crate to 309).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5406,6 +5468,29 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.62.0 (2026-09-01): FR-062 added and implemented (real ball material
+  properties via a new `RigidBody::ball` constructor) —
+  `RB-PHYSICS-001-FR-061`'s own Non-goals had explicitly deferred adopting
+  `BALL_DRAG` for lack of a dedicated ball-construction API: `sphere`
+  gives every caller an identical generic `0.5`/`0.5`/`0.0` placeholder
+  with no way to say "this one is a real ball." Fetched RocketSim's own
+  `RLConst.h` (matching `FR-057`/`FR-060`/`FR-061`'s own method) and
+  confirmed `BALL_RESTITUTION = 0.6f`, `BALL_FRICTION = 0.35f`, and
+  `BALL_DRAG = 0.03f` — none a torque/force calibrated against a specific
+  mass/inertia, so all three transfer cleanly the same way `FR-061`'s
+  speed caps did. Added `body::RigidBody::ball(radius, mass, position)`,
+  new additive API alongside the existing `sphere`/`car_box`: identical
+  for `radius`/`mass`/`position`, but sets `restitution = 0.6`, `friction
+  = 0.35`, `linear_damping = 0.03` instead of the generic defaults;
+  `sphere` itself unchanged. Deliberately not adopted: `BALL_MASS_BT =
+  CAR_MASS_BT / 6.f`, since this project has no canonical "real" car
+  construction site yet to keep a `1:6` ratio against (every `car_box`
+  call site today is test-only) — left for a future requirement. 3 new
+  tests (`ball_sets_confirmed_real_material_properties`,
+  `ball_otherwise_behaves_identically_to_sphere`, and a regression pin
+  confirming `sphere`'s own default stayed untouched); all 306
+  pre-existing tests pass unchanged; bringing the crate to 309 total (+3
+  over `FR-061`'s 306).
 - 0.61.0 (2026-09-01): FR-061 added and implemented (hard caps on ball
   linear/angular speed) — the ball had no linear or angular speed cap of
   any kind (`RigidBody.linear_damping`/`angular_damping` both default to

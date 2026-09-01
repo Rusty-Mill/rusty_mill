@@ -6,6 +6,42 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real ball material properties via a new `RigidBody::ball` constructor
+**2026-09-01** · PR pending · commit pending
+
+- **`RB-PHYSICS-001-FR-061`'s own Non-goals had deferred adopting
+  `BALL_DRAG`** for lack of a dedicated ball-construction API — `sphere`
+  gives every caller an identical generic `restitution = 0.5`/`friction =
+  0.5`/`linear_damping = 0.0` placeholder, with no way to say "this one
+  is a real ball."
+- **Fetched RocketSim's own `RLConst.h`** (matching
+  `RB-PHYSICS-001-FR-057`/`FR-060`/`FR-061`'s own method) and confirmed
+  three real material-property constants: `BALL_RESTITUTION = 0.6f`
+  ("Bounce factor"), `BALL_FRICTION = 0.35f`, and `BALL_DRAG = 0.03f`
+  ("Net-velocity drag multiplier") — none a torque or force calibrated
+  against a specific mass/inertia, so all three transfer cleanly the same
+  way `FR-061`'s speed caps did.
+- **Added `body::RigidBody::ball(radius, mass, position)`**, new,
+  additive API alongside the existing `sphere`/`car_box`: identical for
+  `radius`/`mass`/`position`, but sets `restitution = 0.6`, `friction =
+  0.35`, and `linear_damping = 0.03` instead of the generic placeholders.
+  `sphere` itself is unchanged — every existing test's own non-ball
+  spheres, and any test that deliberately wants a non-real ball, keep
+  working exactly as before.
+- **Explicitly not adopted**: `BALL_MASS_BT = CAR_MASS_BT / 6.f` — while
+  the `1:6` ratio is in principle a portable, dimensionless quantity, this
+  project has no canonical "real" car construction site yet (no game
+  binary consumes this crate; every `car_box` call site today is
+  test-only) to normalize that ratio against — left for a future
+  requirement.
+- 3 new tests (`ball_sets_confirmed_real_material_properties`,
+  `ball_otherwise_behaves_identically_to_sphere`, and a regression pin
+  confirming `sphere`'s own default stayed untouched). All pre-existing
+  tests pass unchanged. 309 total in `rb_physics_bullet` (+3 over
+  FR-061's 306).
+
+---
+
 ## Hard caps on ball linear/angular speed
 **2026-09-01** · [#129](https://github.com/baileyrd/rusty_bullet/pull/129) · `b5eefa6`
 

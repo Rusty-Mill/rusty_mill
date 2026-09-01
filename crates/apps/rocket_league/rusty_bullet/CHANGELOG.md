@@ -620,6 +620,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   still describing `GOAL_DEPTH` as an unconfirmed "uncalibrated
   invention", contradicting FR-036's own already-shipped Requirements
   entry. No new tests; all pre-existing tests pass unchanged.
+- `body::RigidBody::ball` (`RB-PHYSICS-001-FR-062`) — a new, additive
+  constructor alongside the existing `sphere`/`car_box`, setting real
+  Rocket League's own confirmed ball material properties instead of
+  `sphere`'s generic `0.5`/`0.5`/`0.0` placeholders. Fetched RocketSim's
+  own `RLConst.h` (matching FR-057/FR-060/FR-061's own method) and
+  confirmed `BALL_RESTITUTION = 0.6f`, `BALL_FRICTION = 0.35f`, and
+  `BALL_DRAG = 0.03f` — the same `BALL_DRAG` `RB-PHYSICS-001-FR-061`'s own
+  Non-goals had deferred for lack of a dedicated ball-construction API.
+  `sphere` itself unchanged. `BALL_MASS_BT = CAR_MASS_BT / 6.f`
+  deliberately not adopted, since this project has no canonical "real"
+  car construction site yet to keep that ratio against. 3 new tests; all
+  pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

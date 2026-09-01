@@ -208,6 +208,42 @@ impl RigidBody {
         RigidBody::new(Shape::Sphere { radius }, mass, position)
     }
 
+    /// A sphere with real Rocket League's own confirmed ball material
+    /// properties, instead of `sphere`'s generic `0.5`/`0.5`/`0.0`
+    /// placeholders — `RB-PHYSICS-001-FR-062` fetched RocketSim's own
+    /// `RLConst.h` (matching `RB-PHYSICS-001-FR-057`/`FR-060`/`FR-061`'s
+    /// own method) and confirmed `BALL_RESTITUTION = 0.6f` ("Bounce
+    /// factor"), `BALL_FRICTION = 0.35f`, and `BALL_DRAG = 0.03f`
+    /// ("Net-velocity drag multiplier") — the same constant
+    /// `RB-PHYSICS-001-FR-061`'s own Non-goals had explicitly deferred
+    /// adopting for lack of a dedicated ball-construction API, since
+    /// `sphere` alone gives every caller (ball or otherwise) an identical
+    /// generic placeholder with no way to say "this one is a real ball."
+    /// This constructor is that API: `radius`/`mass`/`position` behave
+    /// identically to `sphere`, but `restitution`, `friction`, and
+    /// `linear_damping` are set to these three confirmed real values
+    /// instead of the generic defaults. Unlike `BALL_MAX_SPEED`/
+    /// `BALL_MAX_ANG_SPEED` (`RB-PHYSICS-001-FR-061`, pure velocity caps
+    /// that transfer regardless of body calibration), these three are
+    /// dimensionless material coefficients read and combined at contact
+    /// time (`solver::combine_restitution`/`combine_friction`) or as a
+    /// pure per-second decay rate (`integrate::apply_damping`) — none is
+    /// a torque or force calibrated against a specific mass/inertia the
+    /// way `RB-PHYSICS-001-FR-031`'s "false precision" findings ruled
+    /// out, so all three transfer cleanly the same way the speed caps do.
+    /// `sphere` itself is unchanged (still generic, still used by every
+    /// existing test's own non-ball spheres and by tests that
+    /// deliberately want a non-real ball, e.g. an inelastic
+    /// `restitution = 0.0` one) — this is new, additive API surface, not
+    /// a changed default.
+    pub fn ball(radius: f32, mass: f32, position: Vec3) -> RigidBody {
+        let mut body = RigidBody::sphere(radius, mass, position);
+        body.restitution = 0.6;
+        body.friction = 0.35;
+        body.linear_damping = 0.03;
+        body
+    }
+
     pub fn car_box(half_extents: Vec3, mass: f32, position: Vec3) -> RigidBody {
         RigidBody::new(Shape::Box { half_extents }, mass, position)
     }
@@ -733,6 +769,54 @@ mod tests {
         // I = 2/5 * m * r^2 = 0.4 * 2.0 * 1.0 = 0.8
         let v = s.inv_inertia_world().mul_vec3(&Vec3::new(1.0, 0.0, 0.0));
         assert!((v.x - 1.0 / 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ball_sets_confirmed_real_material_properties() {
+        let b = RigidBody::ball(93.15, 1.0, Vec3::ZERO);
+        assert_eq!(
+            b.restitution, 0.6,
+            "expected RigidBody::ball to set the confirmed real BALL_RESTITUTION, got {}",
+            b.restitution
+        );
+        assert_eq!(
+            b.friction, 0.35,
+            "expected RigidBody::ball to set the confirmed real BALL_FRICTION, got {}",
+            b.friction
+        );
+        assert_eq!(
+            b.linear_damping, 0.03,
+            "expected RigidBody::ball to set the confirmed real BALL_DRAG as linear_damping, got {}",
+            b.linear_damping
+        );
+        assert_eq!(
+            b.angular_damping, 0.0,
+            "expected RigidBody::ball to leave angular_damping at the generic default (no real \
+             angular-drag constant was adopted), got {}",
+            b.angular_damping
+        );
+    }
+
+    #[test]
+    fn ball_otherwise_behaves_identically_to_sphere() {
+        let position = Vec3::new(1.0, 2.0, 3.0);
+        let ball = RigidBody::ball(93.15, 5.0, position);
+        let sphere = RigidBody::sphere(93.15, 5.0, position);
+        assert_eq!(ball.shape, sphere.shape);
+        assert_eq!(ball.position, sphere.position);
+        assert_eq!(ball.mass(), sphere.mass());
+        assert_eq!(ball.inv_inertia_world(), sphere.inv_inertia_world());
+    }
+
+    #[test]
+    fn sphere_still_defaults_to_the_generic_placeholder_material_properties() {
+        // RigidBody::ball is new, additive API surface -- sphere's own
+        // generic default must stay unchanged for every existing caller
+        // that isn't asking for a real ball (RB-PHYSICS-001-FR-062).
+        let s = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        assert_eq!(s.restitution, 0.5);
+        assert_eq!(s.friction, 0.5);
+        assert_eq!(s.linear_damping, 0.0);
     }
 
     #[test]
