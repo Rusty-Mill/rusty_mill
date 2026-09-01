@@ -177,7 +177,7 @@ impl DerpClient {
             .map_err(|_| DerpError::BadServerInfo)?;
         let mut client_info = Vec::with_capacity(KEY_LEN + NONCE_LEN + boxed.len());
         client_info.extend_from_slice(&node_key.public().0);
-        client_info.extend_from_slice(nonce.as_slice());
+        client_info.extend_from_slice(&nonce[..]);
         client_info.extend_from_slice(&boxed);
         frame::write_frame(&mut write_half, FrameType::ClientInfo, &client_info).await?;
 

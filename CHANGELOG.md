@@ -28,6 +28,10 @@ Removed / Fixed / Security, newest first.
 - `rusty_llama` merged into `crates/rusty_llama` via `git subtree` (fourth
   wave) — a single crate; its `rusty_simd`/`rusty_std` path dependencies
   already resolved to merged siblings
+- `rusty_tailscale` merged into `crates/rusty_tailscale` via `git subtree`
+  (fourth wave) — fifteen `ts-*` crates plus `xtask` behind one nested
+  workspace; its `platform`/`platform-linux` git pins retired to this
+  root's `rustils` path dependencies
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
@@ -65,6 +69,15 @@ Removed / Fixed / Security, newest first.
   for Jinja2 compatibility, and this workspace resolves 2.24 where the
   standalone lockfile pinned 2.21
 - `crates/rusty_llama` reformatted with `cargo fmt --all`
+- `ts-magicsock` now imports `platform::net::UdpSocket`, without which
+  `send_to`/`recv_from`/`local_addr` do not resolve — a pre-existing break
+  in `rusty_tailscale`'s own `main` (it has no CI), confirmed against the
+  standalone repo
+- `ts-cli`'s `localapi::Error::Status(StatusCode)` replaced with the
+  `Api { status, body }` variant `request()` actually constructs — the same
+  pre-existing break
+- Four more `generic-array` 0.14.9 deprecations across `ts-control`,
+  `ts-disco` and `ts-derp`; `crates/rusty_tailscale` reformatted
 
 ## [workspace] - 2026-09-01
 ### Fixed

@@ -136,6 +136,22 @@ same way; this row set reflects whichever of those have landed so far.
 | [`rk-compose`](crates/rusty_key/crates/compose) | `crates/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
 | [`rk-app`](crates/rusty_key/crates/app) | `crates/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
 | [`rusty_llama`](crates/rusty_llama) | `crates/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
+| [`ts-types`](crates/rusty_tailscale/crates/ts-types) | `crates/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
+| [`ts-key`](crates/rusty_tailscale/crates/ts-key) | `crates/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
+| [`ts-control`](crates/rusty_tailscale/crates/ts-control) | `crates/rusty_tailscale/crates/ts-control` | ts2021 control-plane client: Noise (control base) handshake and the map session |
+| [`ts-derp`](crates/rusty_tailscale/crates/ts-derp) | `crates/rusty_tailscale/crates/ts-derp` | DERP relay client: the always-available fallback data path |
+| [`ts-stun`](crates/rusty_tailscale/crates/ts-stun) | `crates/rusty_tailscale/crates/ts-stun` | STUN client for discovering the server-reflexive endpoint |
+| [`ts-disco`](crates/rusty_tailscale/crates/ts-disco) | `crates/rusty_tailscale/crates/ts-disco` | Disco protocol: ping/pong/call-me-maybe path probing |
+| [`ts-magicsock`](crates/rusty_tailscale/crates/ts-magicsock) | `crates/rusty_tailscale/crates/ts-magicsock` | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
+| [`ts-wg`](crates/rusty_tailscale/crates/ts-wg) | `crates/rusty_tailscale/crates/ts-wg` | WireGuard data plane over the magicsock transport |
+| [`ts-tun`](crates/rusty_tailscale/crates/ts-tun) | `crates/rusty_tailscale/crates/ts-tun` | TUN device, routes, and DNS platform adapters |
+| [`ts-filter`](crates/rusty_tailscale/crates/ts-filter) | `crates/rusty_tailscale/crates/ts-filter` | Packet filter evaluating the tailnet ACL rules the control plane hands down |
+| [`ts-engine`](crates/rusty_tailscale/crates/ts-engine) | `crates/rusty_tailscale/crates/ts-engine` | The node engine wiring control, magicsock, WireGuard, TUN and filter together |
+| [`ts-localapi`](crates/rusty_tailscale/crates/ts-localapi) | `crates/rusty_tailscale/crates/ts-localapi` | LocalAPI server: the daemon's Unix-socket control surface |
+| [`ts-net`](crates/rusty_tailscale/crates/ts-net) | `crates/rusty_tailscale/crates/ts-net` | Userspace TCP/IP stack (smoltcp) on the tailnet — a tailnet service with no TUN and no root |
+| [`ts-daemon`](crates/rusty_tailscale/crates/ts-daemon) | `crates/rusty_tailscale/crates/ts-daemon` | `ts-daemon`: the long-running node daemon |
+| [`ts-cli`](crates/rusty_tailscale/crates/ts-cli) | `crates/rusty_tailscale/crates/ts-cli` | `ts-cli`: the LocalAPI-driven command line client |
+| [`xtask`](crates/rusty_tailscale/xtask) | `crates/rusty_tailscale/xtask` | `rusty_tailscale`'s integration harness: Headscale in a container, multi-node NAT simulation |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -817,6 +833,52 @@ by grep, not assumed), and chat templates overwhelmingly branch on
 design). Not `cargo fmt`-clean under this workspace's settings; reformatted
 with `cargo fmt --all`.
 
+`rusty_tailscale` (tailscale-rs / `rusty_tail`) is the largest crate group
+in this wave: fifteen `ts-*` crates plus its `xtask` harness, and the first
+whose `members` list was a `crates/*` glob rather than an explicit set —
+expanded to sixteen literal entries here, since this root's `members` names
+every crate individually. Its `[workspace.package]` collided on `version`
+(0.0.1), `edition` (2024 — the first edition-2024 crates in this workspace)
+and `repository`, so its crates carry literal `[package]` fields; only its
+dependencies were hoisted, with `rusty_http` and `rusty_crypto_key`
+re-pathed from `../rusty_http`-style (relative to its own former root) to
+this root's `crates/` layout.
+
+It retires two pins: `ts-magicsock` and `ts-tun` each pinned `platform` and
+`platform-linux` to a `rustils` git rev (`b8bf992f`), for rustils' D16 Net
+and D14 Tun surfaces respectively. `rustils` is already a merged sibling,
+so both became `{ workspace = true }` against this root's existing
+`platform`/`platform-linux` path entries — the same retirement `rusty_rdp`
+made for its own `platform*` pins.
+
+Verifying that swap turned up something worth stating plainly: `rusty_tail`
+has **no CI of its own** (no `.github/` directory at all), and its `main`
+does not compile on Linux. Two independent breaks, both confirmed against
+the standalone repo before touching anything here, so neither is a
+merge artifact:
+
+* `ts-magicsock`'s `MagicUdp` calls `send_to`/`recv_from`/`local_addr` on a
+  `LinuxUdpSocket` without `platform::net::UdpSocket` in scope. Those three
+  are trait methods (only `bind` and `set_nonblocking` are inherent), at
+  the pinned rev exactly as much as on current `rustils` — checked both, so
+  this is not drift the pin was hiding. Fixed with the trait import.
+* `ts-cli`'s `localapi::Error` declares `Status(StatusCode)`, which nothing
+  constructs, while `request()` constructs `Error::Api { status, body }`,
+  which does not exist. The definition was left behind when the call site
+  grew a response body. Replaced the dead variant with the one the code
+  actually builds — the body is what makes a LocalAPI failure diagnosable.
+
+Beyond that, the usual `-D warnings` sweep: the `generic-array` 0.14.9
+deprecation again (`Key::from_slice` in `ts-control`'s Noise handshake and
+frame codec, `nonce.as_slice()` in `ts-disco` and `ts-derp`), all rewritten
+to the non-deprecated equivalents with no behavior change, plus a
+`cargo fmt --all` pass. Its 93 tests pass. Despite being a Linux-first
+design (TUN devices, netns integration tests, `platform-linux`), all
+sixteen crates cross-compile cleanly for `x86_64-pc-windows-gnu` — the
+Linux-specific paths are `cfg`-gated internally and `platform-linux`
+self-gates its whole body — so, unlike `rusty_stream`, it needs no
+`windows-exclude` in CI.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -897,8 +959,9 @@ crates behind another) and
 [`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt) (four behind
 a third) and [`rusty_key`](https://github.com/baileyrd/rusty_key) (eight
 behind a fourth) and
-[`rusty_llama`](https://github.com/baileyrd/rusty_llama) — and continuing
-with [`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale),
+[`rusty_llama`](https://github.com/baileyrd/rusty_llama) and
+[`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale) (sixteen
+crates behind a fifth nested workspace) — and continuing with
 [`rusty_adk`](https://github.com/baileyrd/rusty_adk),
 [`rusty_provider`](https://github.com/baileyrd/rusty_provider),
 [`rusty_yirp`](https://github.com/baileyrd/rusty_yirp), and

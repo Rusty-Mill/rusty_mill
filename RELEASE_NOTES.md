@@ -13,6 +13,37 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_tailscale`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_tailscale` — a sovereign pure-Rust Tailscale
+  client: ts2021 control plane, WireGuard data plane, DERP/STUN/disco NAT
+  traversal, a userspace smoltcp stack, a daemon and a CLI. Fifteen `ts-*`
+  crates plus `xtask` behind one nested workspace (whose `members` was a
+  `crates/*` glob, expanded to literal entries here), merged via
+  `git subtree` with full history.
+- **Changed:** `[workspace.package]` collided on `version`, `edition`
+  (2024 — the first edition-2024 crates here) and `repository`, so its
+  crates carry literal `[package]` fields; only its dependencies were
+  hoisted, with `rusty_http`/`rusty_crypto_key` re-pathed to this root's
+  `crates/` layout.
+- **Changed:** `ts-magicsock` and `ts-tun`'s pinned `rustils` git
+  dependencies (`platform`, `platform-linux`, rev `b8bf992f`) retired to
+  this root's path entries, same as `rusty_rdp`'s.
+- **Fixed:** two pre-existing breaks in `rusty_tailscale`'s own `main` —
+  it has no CI of its own and does not compile on Linux. `ts-magicsock`
+  called three `platform::net::UdpSocket` trait methods without the trait
+  in scope (true at the pinned rev too, so not drift the pin was hiding),
+  and `ts-cli`'s `localapi::Error` declared a `Status(StatusCode)` variant
+  nothing constructs while `request()` constructed a nonexistent
+  `Api { status, body }`. Both confirmed against the standalone repo first.
+- **Fixed:** four more `generic-array` 0.14.9 deprecations (`ts-control`'s
+  Noise handshake and frame codec, `ts-disco`, `ts-derp`), plus a
+  `cargo fmt --all` pass.
+- 93 tests pass. All sixteen crates also cross-compile for
+  `x86_64-pc-windows-gnu` despite the Linux-first design, so — unlike
+  `rusty_stream` — no `windows-exclude` was needed.
+
 ## Fourth-wave merge — `rusty_llama`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

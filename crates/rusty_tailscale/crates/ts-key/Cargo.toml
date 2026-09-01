@@ -1,10 +1,10 @@
 [package]
 name = "ts-key"
 description = "Node, disco, and machine key generation, persistence, and rotation"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_tailscale"
 
 [dependencies]
 ts-types.workspace = true

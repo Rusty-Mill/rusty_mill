@@ -36,8 +36,11 @@ pub enum Error {
     Http(#[from] rusty_http::TransportError),
     #[error("LocalAPI request construction error: {0}")]
     Request(#[from] rusty_http::Error),
-    #[error("LocalAPI HTTP status {0}")]
-    Status(StatusCode),
+    // Constructed in `request` below with the response body attached; the
+    // body is what makes a LocalAPI failure diagnosable ("not logged in",
+    // "permission denied"), so a bare status is not enough.
+    #[error("LocalAPI HTTP status {status}: {body}")]
+    Api { status: StatusCode, body: String },
     #[error("LocalAPI JSON decode error: {0}")]
     Decode(#[from] serde_json::Error),
 }

@@ -33,7 +33,7 @@ struct DirectionState {
 impl DirectionState {
     fn new(key: &[u8; 32]) -> Self {
         Self {
-            cipher: Some(ChaCha20Poly1305::new(Key::from_slice(key))),
+            cipher: Some(ChaCha20Poly1305::new(<&Key>::from(&key[..]))),
             counter: 0,
         }
     }

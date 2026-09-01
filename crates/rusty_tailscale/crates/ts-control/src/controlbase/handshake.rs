@@ -165,7 +165,7 @@ impl SymmetricState {
     /// Seals `plaintext` with a single-use key (all-zero nonce, AAD = h) and
     /// mixes the ciphertext into `h`.
     fn encrypt_and_hash(&mut self, k: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(k));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(&k[..]));
         let ct = cipher
             .encrypt(
                 &Nonce::default(),
@@ -183,7 +183,7 @@ impl SymmetricState {
     /// ciphertext into `h`. Only used for the empty-payload tag on the
     /// client side.
     fn decrypt_and_hash(&mut self, k: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(k));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(&k[..]));
         let pt = cipher
             .decrypt(
                 &Nonce::default(),

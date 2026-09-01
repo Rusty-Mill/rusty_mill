@@ -121,6 +121,22 @@ members = [
     "crates/rusty_key/crates/compose",
     "crates/rusty_key/crates/app",
     "crates/rusty_llama",
+    "crates/rusty_tailscale/crates/ts-types",
+    "crates/rusty_tailscale/crates/ts-key",
+    "crates/rusty_tailscale/crates/ts-control",
+    "crates/rusty_tailscale/crates/ts-derp",
+    "crates/rusty_tailscale/crates/ts-stun",
+    "crates/rusty_tailscale/crates/ts-disco",
+    "crates/rusty_tailscale/crates/ts-magicsock",
+    "crates/rusty_tailscale/crates/ts-wg",
+    "crates/rusty_tailscale/crates/ts-tun",
+    "crates/rusty_tailscale/crates/ts-filter",
+    "crates/rusty_tailscale/crates/ts-engine",
+    "crates/rusty_tailscale/crates/ts-localapi",
+    "crates/rusty_tailscale/crates/ts-net",
+    "crates/rusty_tailscale/crates/ts-daemon",
+    "crates/rusty_tailscale/crates/ts-cli",
+    "crates/rusty_tailscale/xtask",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -307,6 +323,43 @@ rk-compose = { path = "crates/rusty_key/crates/compose" }
 aisdk = "0.5.2"
 schemars = "1.0.4"
 toml = "0.8"
+
+# Hoisted from rusty_tailscale's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `version` (0.0.1), `edition` (2024) and
+# `repository`, so its sixteen crates carry literal `[package]` fields --
+# rusty_db treatment. Its two sibling `path` dependencies are re-pathed
+# from `../rusty_http`-style (relative to its own former root) to this
+# root's `crates/` layout; `platform`/`platform-linux` above already cover
+# the pins its ts-magicsock/ts-tun crates used to carry.
+ts-types = { path = "crates/rusty_tailscale/crates/ts-types" }
+ts-key = { path = "crates/rusty_tailscale/crates/ts-key" }
+ts-control = { path = "crates/rusty_tailscale/crates/ts-control" }
+ts-derp = { path = "crates/rusty_tailscale/crates/ts-derp" }
+ts-stun = { path = "crates/rusty_tailscale/crates/ts-stun" }
+ts-disco = { path = "crates/rusty_tailscale/crates/ts-disco" }
+ts-magicsock = { path = "crates/rusty_tailscale/crates/ts-magicsock" }
+ts-wg = { path = "crates/rusty_tailscale/crates/ts-wg" }
+ts-tun = { path = "crates/rusty_tailscale/crates/ts-tun" }
+ts-filter = { path = "crates/rusty_tailscale/crates/ts-filter" }
+ts-engine = { path = "crates/rusty_tailscale/crates/ts-engine" }
+ts-localapi = { path = "crates/rusty_tailscale/crates/ts-localapi" }
+ts-net = { path = "crates/rusty_tailscale/crates/ts-net" }
+rusty_http = { path = "crates/rusty_http" }
+rusty_crypto_key = { path = "crates/rusty_crypto_key" }
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+http-body-util = "0.1"
+bytes = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+blake2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+h2 = "0.4"
+http = "1"
+crypto_box = { version = "0.9", features = ["salsa20"] }
+boringtun = "0.7"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

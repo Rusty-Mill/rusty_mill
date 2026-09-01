@@ -101,7 +101,7 @@ pub fn seal(sender: &DiscoPrivate, receiver_disco: &DiscoPublic, msg: &Message) 
     let mut pkt = Vec::with_capacity(6 + KEY_LEN + NONCE_LEN + ciphertext.len());
     pkt.extend_from_slice(MAGIC);
     pkt.extend_from_slice(&sender.public().0);
-    pkt.extend_from_slice(nonce.as_slice());
+    pkt.extend_from_slice(&nonce[..]);
     pkt.extend_from_slice(&ciphertext);
     pkt
 }

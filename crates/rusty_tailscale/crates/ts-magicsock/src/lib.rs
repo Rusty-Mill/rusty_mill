@@ -420,6 +420,12 @@ fn primary_local_ip(dst: IpAddr) -> Option<IpAddr> {
 
 #[cfg(target_os = "linux")]
 use platform_linux::LinuxUdpSocket;
+// `send_to`/`recv_from`/`local_addr` live on rustils' `platform::net::UdpSocket`
+// trait, not as inherent methods on `LinuxUdpSocket` (only `bind` and
+// `set_nonblocking` are inherent), so the trait has to be in scope for the
+// calls below to resolve.
+#[cfg(target_os = "linux")]
+use platform::net::UdpSocket as _;
 #[cfg(target_os = "linux")]
 use tokio::io::unix::AsyncFd;
 
