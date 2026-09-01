@@ -1,0 +1,24 @@
+[package]
+name = "agentgateway-config"
+version = "0.1.0"
+description = "Configuration model for rusty_agent_gateway, wire-compatible with agentgateway's local config"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+http = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
