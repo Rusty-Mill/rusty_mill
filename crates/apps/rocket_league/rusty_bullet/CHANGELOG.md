@@ -723,6 +723,27 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   port's own model, so its own two-component composite substitute remains
   deliberate and necessary. No new tests; all pre-existing tests pass
   unchanged.
+- `drive::DODGE_ANGULAR_SPEED` real-Rocket-League mechanism finding
+  (`RB-PHYSICS-001-FR-069`) — continuing the investigation FR-031's own
+  audit first opened (which already found real reference constants,
+  `FLIP_TORQUE_X=260`/`FLIP_TORQUE_Y=224`/`0.65`s, but not the mechanism
+  behind them). Fetched RocketSim's own `Car.cpp` and found a flip's spin
+  is a *continuous per-axis torque*, not an instantaneous angular-velocity
+  kick: `_UpdateDoubleJumpOrFlip` records a per-axis `flipRelTorque` once,
+  at flip start, and a separate, later step, `_UpdateAirTorque`, applies
+  `flipRelTorque * Vec(FLIP_TORQUE_X, FLIP_TORQUE_Y, 0)` every physics tick
+  for as long as `isFlipping = hasFlipped && flipTime < FLIP_TORQUE_TIME`
+  holds, with no decay or ramp before that hard `0.65`s cutoff. Corrected
+  `DODGE_ANGULAR_SPEED`'s own doc comment, the module doc's dodge section,
+  and the "commonly-cited constants" paragraph; also corrected the
+  adjacent stale Open Questions bullet. Not adopted as a fix: real
+  Rocket League's spin rate depends on its own specific hitbox inertia
+  tensor, which this port's placeholder car body doesn't match (the same
+  "false precision" reasoning FR-031 already applied), and reproducing the
+  real timed-torque shape (rather than just its magnitude) would need new
+  per-car elapsed-flip-time state threaded through `PhysicsWorld` — a
+  redesign FR-059's own Non-goals already flagged as out of scope. No new
+  tests; all 314 pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

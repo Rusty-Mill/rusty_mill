@@ -6,6 +6,40 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real dodge spin is a continuous per-axis torque over a fixed window, not an instantaneous kick (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`drive::DODGE_ANGULAR_SPEED` (`5.5` rad/s) applies a flat angular-velocity
+  kick at flip start** — `RB-PHYSICS-001-FR-031`'s original audit had
+  already found real reference constants (`FLIP_TORQUE_X=260`,
+  `FLIP_TORQUE_Y=224`, `0.65`s) but not the mechanism behind them.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateDoubleJumpOrFlip` and
+  `_UpdateAirTorque`, matching this port's own established
+  real-implementation-file investigation method) and found real Rocket
+  League's flip spin is a *continuous per-axis torque*, not an
+  instantaneous kick: `_UpdateDoubleJumpOrFlip` records a per-axis
+  `flipRelTorque` once, at flip start; a separate, later step,
+  `_UpdateAirTorque`, then applies `flipRelTorque * Vec(FLIP_TORQUE_X,
+  FLIP_TORQUE_Y, 0)` every physics tick for as long as `isFlipping =
+  hasFlipped && flipTime < FLIP_TORQUE_TIME` holds — a hard `0.65`s
+  cutoff, with no decay or ramp before it.
+- **Not adopted as a fix.** Real Rocket League's resulting spin rate
+  depends on its own specific hitbox inertia tensor, which this port's
+  placeholder car body doesn't match — the same "false precision"
+  reasoning that already kept the constant a placeholder. Reproducing the
+  real timed-torque *shape* (rather than just its magnitude) would also
+  need new per-car elapsed-flip-time state threaded through
+  `PhysicsWorld`, a redesign `RB-PHYSICS-001-FR-059`'s own Non-goals
+  already flagged as out of scope.
+- Corrected `DODGE_ANGULAR_SPEED`'s own doc comment (which had gone stale
+  against this port's already-established spec-level finding), the module
+  doc's dodge section, the "commonly-cited constants" paragraph, and the
+  adjacent stale Open Questions bullet.
+- A pure documentation/audit finding: zero production behavior changed, no
+  new tests; all 314 pre-existing `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real per-axis air-control torque ratio (pitch/yaw/roll)
 **2026-09-01** · [#143](https://github.com/baileyrd/rusty_bullet/pull/143) · `77b047d`
 
