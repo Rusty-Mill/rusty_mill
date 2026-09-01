@@ -79,17 +79,17 @@ Source: baileyrd/meshed (Python, v1.0 shipped) → Rusty-Mill/rusty_mill, crates
 | REG-073 | `DELETE .../output-ports/{port_id}` returns 204 on success | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_output_port`, test `delete_output_port_returns_204` |
 | REG-074 | `DELETE .../output-ports/{port_id}` returns 404 if parent product doesn't exist | interface | code | — | DONE | | `rusty-meshed-registry::routers::ports::delete_output_port` (same `product_exists` guard as `delete_input_port`, REG-065) |
 | REG-075 | `DELETE .../output-ports/{port_id}` returns 404 if port doesn't exist or belongs to a different product | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_output_port`, test `delete_output_port_returns_404_for_a_port_on_a_different_product` |
-| REG-076 | `POST .../output-ports/{port_id}/contract` returns 201 when product+port exist and no contract yet | interface | code+test | — | REQUIRED | | |
-| REG-077 | `POST .../contract` returns 404 `"Data product {id} not found."` if product missing | interface | code+test | — | REQUIRED | | |
-| REG-078 | `POST .../contract` returns 404 `"Output port {id} not found on data product {id}."` if port missing/mismatched | interface | code+test | — | REQUIRED | | |
-| REG-079 | `POST .../contract` returns 409 `"...already has a registered data contract."` if contract exists | interface | code+test | — | REQUIRED | | |
-| REG-080 | `POST .../contract` stores `quality_assertions` as `json.dumps(list)` | behavior | code | — | REQUIRED | | |
-| REG-081 | `GET .../contract` returns 200 with `quality_assertions` decoded to `list[str]` | interface | code+test | — | REQUIRED | | |
-| REG-082 | `GET .../contract` returns 404 `"No data contract found for output port {id}."` when none exists | interface | code+test | — | REQUIRED | | |
-| REG-083 | `GET .../contract` returns 404 if product or port missing/mismatched | interface | code | — | REQUIRED | | |
-| REG-084 | `DELETE .../contract` returns 204, removes `DataContract` row | interface | code+test | — | REQUIRED | | |
-| REG-085 | `DELETE .../contract` returns 404 when no contract exists | interface | code+test | — | REQUIRED | | |
-| REG-086 | `DELETE .../contract` returns 404 if product or port missing/mismatched | interface | code | — | REQUIRED | | |
+| REG-076 | `POST .../output-ports/{port_id}/contract` returns 201 when product+port exist and no contract yet | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::create`, test `create_returns_201_when_product_and_port_exist_with_no_contract` |
+| REG-077 | `POST .../contract` returns 404 `"Data product {id} not found."` if product missing | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::guard_product_and_port`, test `create_returns_404_when_product_missing` |
+| REG-078 | `POST .../contract` returns 404 `"Output port {id} not found on data product {id}."` if port missing/mismatched | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::guard_product_and_port`, test `create_returns_404_when_port_missing_or_mismatched` |
+| REG-079 | `POST .../contract` returns 409 `"...already has a registered data contract."` if contract exists | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::create`, test `create_returns_409_when_contract_already_exists` |
+| REG-080 | `POST .../contract` stores `quality_assertions` as `json.dumps(list)` | behavior | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::create` (`rusty_json::to_string`), test `create_returns_201_when_product_and_port_exist_with_no_contract` |
+| REG-081 | `GET .../contract` returns 200 with `quality_assertions` decoded to `list[str]` | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::to_public_json` (`rusty_json::from_str`), test `get_returns_the_contract_with_decoded_quality_assertions` |
+| REG-082 | `GET .../contract` returns 404 `"No data contract found for output port {id}."` when none exists | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::contract_not_found`, test `get_returns_404_when_no_contract_exists` |
+| REG-083 | `GET .../contract` returns 404 if product or port missing/mismatched | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::guard_product_and_port`, test `get_returns_404_when_product_or_port_missing` |
+| REG-084 | `DELETE .../contract` returns 204, removes `DataContract` row | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::delete`, test `delete_returns_204_and_removes_the_contract` |
+| REG-085 | `DELETE .../contract` returns 404 when no contract exists | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::delete`, test `delete_returns_404_when_no_contract_exists` |
+| REG-086 | `DELETE .../contract` returns 404 if product or port missing/mismatched | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::contracts::guard_product_and_port`, test `delete_returns_404_when_product_or_port_missing` |
 | REG-087 | `POST /access-grants` returns 201 with assigned `id` and server-generated `granted_at` (ISO-8601 UTC) | interface | code+test | — | REQUIRED | | |
 | REG-088 | `POST /access-grants` returns 404 `"Output port {id} not found."` if port missing | interface | code+test | — | REQUIRED | | |
 | REG-089 | `POST /access-grants` returns 409 if grant exists for same `(output_port_id, consumer_group_id)` | interface | code+test | — | REQUIRED | | |

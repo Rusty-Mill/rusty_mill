@@ -5,14 +5,14 @@
 //! What this covers: app metadata, DB path wiring, the
 //! `create_all`-on-startup step, CORS, and a `get_session`/`get_config`
 //! dependency pair. [`build_router`] mounts `data_products`, `ports`,
-//! and `governance` (see `crate::routers`) plus `/openapi.json` and
-//! `/docs`; the remaining six per-resource routers (`contracts`,
-//! `access_grants`, `metrics`, `lineage`, `monitor`, `transformation`,
-//! REG-006) don't have HTTP handlers of their own yet (see the
-//! tracking issues for REG-076 onward). As each one lands, mount it
-//! the same way via [`crate::http::Router::merge`] -- [`openapi_json`]
-//! already reflects whatever the router table contains, so no separate
-//! bookkeeping is needed when that happens.
+//! `contracts`, and `governance` (see `crate::routers`) plus
+//! `/openapi.json` and `/docs`; the remaining five per-resource
+//! routers (`access_grants`, `metrics`, `lineage`, `monitor`,
+//! `transformation`, REG-006) don't have HTTP handlers of their own
+//! yet (see the tracking issues for REG-087 onward). As each one
+//! lands, mount it the same way via [`crate::http::Router::merge`] --
+//! [`openapi_json`] already reflects whatever the router table
+//! contains, so no separate bookkeeping is needed when that happens.
 
 use crate::http::response::Response;
 use crate::http::router::Router;
@@ -155,15 +155,16 @@ window.onload = () => {{
     )
 }
 
-/// Builds the app's route table: the data-products and ports CRUD
-/// routers and the governance dry-run endpoint today, plus
-/// `/openapi.json` and `/docs` (REG-136, REG-137); the remaining six
-/// per-resource routers merge in here as they're built (see the
+/// Builds the app's route table: the data-products, ports, and
+/// contracts CRUD routers and the governance dry-run endpoint today,
+/// plus `/openapi.json` and `/docs` (REG-136, REG-137); the remaining
+/// five per-resource routers merge in here as they're built (see the
 /// module doc). `state` is shared across every resource router that
 /// needs DB access.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let business_router = crate::routers::data_products::router(state.clone())
-        .merge(crate::routers::ports::router(state))
+        .merge(crate::routers::ports::router(state.clone()))
+        .merge(crate::routers::contracts::router(state))
         .merge(crate::routers::governance::router());
     let mut route_table = business_router.routes();
     route_table.push((rusty_http::Method::Get, "/openapi.json".to_string()));
