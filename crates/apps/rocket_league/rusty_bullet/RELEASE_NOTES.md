@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## `combine_friction` defensive clamp
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#113](https://github.com/baileyrd/rusty_bullet/pull/113) · `310f588`
 
 - **`RB-PHYSICS-001-FR-043` fetched and read real Bullet's own
   `btManifoldResult::calculateCombinedFriction`/`calculateCombinedRestitution`
