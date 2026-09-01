@@ -100,10 +100,16 @@ fn arg_str(args: &Value, key: &str) -> Result<String, ToolError> {
 }
 
 fn rel(root: &Path, p: &Path) -> String {
+    // Every caller is building text for the model -- a glob listing, a grep
+    // hit, "wrote N bytes to ...". The model addresses these tools with `/`
+    // (that is what `pattern` and `path` take), so answer in the same
+    // separator rather than handing back `src\a.rs` on Windows and `src/a.rs`
+    // everywhere else. Replacing `MAIN_SEPARATOR` rather than `\` leaves a
+    // backslash in a Unix filename alone, and is a no-op on Unix anyway.
     p.strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()
-        .into_owned()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 async fn write_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
