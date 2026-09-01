@@ -10,6 +10,7 @@ pub mod data_products;
 pub mod governance;
 pub mod lineage;
 pub mod metrics;
+pub mod monitor;
 pub mod ports;
 pub mod transformation;
 

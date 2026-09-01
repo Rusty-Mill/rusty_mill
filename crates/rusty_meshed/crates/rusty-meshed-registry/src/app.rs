@@ -4,15 +4,11 @@
 //!
 //! What this covers: app metadata, DB path wiring, the
 //! `create_all`-on-startup step, CORS, and a `get_session`/`get_config`
-//! dependency pair. [`build_router`] mounts `data_products`, `ports`,
-//! `contracts`, `access_grants`, `governance`, `lineage`,
-//! `transformation`, and `metrics` (see `crate::routers`) plus
-//! `/openapi.json` and `/docs`; the remaining per-resource router
-//! (`monitor`, REG-006) doesn't have HTTP handlers of its own yet (see
-//! the tracking issues for REG-118 onward). As it lands, mount it the
-//! same way via [`crate::http::Router::merge`] -- [`openapi_json`]
-//! already reflects whatever the router table contains, so no separate
-//! bookkeeping is needed when that happens.
+//! dependency pair. [`build_router`] mounts every per-resource router
+//! this crate has (`data_products`, `ports`, `contracts`,
+//! `access_grants`, `governance`, `lineage`, `transformation`,
+//! `metrics`, and `monitor` -- see `crate::routers`) plus
+//! `/openapi.json` and `/docs`.
 
 use crate::http::response::Response;
 use crate::http::router::Router;
@@ -112,15 +108,16 @@ pub fn get_config() -> Result<PlatformConfig, ConfigError> {
 /// The source additionally imports `observability.metrics`,
 /// `governance.rbac`, and `infrastructure.outbox` purely for their
 /// side effect of registering more tables before `create_all` runs
-/// (REG-004); none of those three have a persistent SQLite store of
-/// their own yet in this crate family (`MetricsCollector`'s
-/// `SchemaViolation` table, RBAC, and the transactional outbox are
-/// all still open capabilities), so there is nothing to call for them
-/// today. Add their `ensure_schema` calls here as each one lands,
-/// same as `models`/`transformation` below.
+/// (REG-004); `observability.metrics`'s `SchemaViolation` table now has
+/// a Rust equivalent (`rusty_meshed_observability::ensure_metrics_schema`,
+/// called below) -- `monitor::get_metrics` (REG-133) needs it. RBAC and
+/// the transactional outbox are still open capabilities with no
+/// persistent store of their own yet; add their `ensure_schema` calls
+/// here as each one lands, same as the three below.
 pub fn create_all(conn: &Connection) -> SqlResult<()> {
     crate::models::ensure_schema(conn)?;
     crate::transformation::ensure_schema(conn)?;
+    rusty_meshed_observability::ensure_metrics_schema(conn)?;
     Ok(())
 }
 
@@ -172,7 +169,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(crate::routers::governance::router())
         .merge(crate::routers::lineage::router())
         .merge(crate::routers::transformation::router(state.clone()))
-        .merge(crate::routers::metrics::router(state));
+        .merge(crate::routers::metrics::router(state.clone()))
+        .merge(crate::routers::monitor::router(state));
     let mut route_table = business_router.routes();
     route_table.push((rusty_http::Method::Get, "/openapi.json".to_string()));
     route_table.push((rusty_http::Method::Get, "/docs".to_string()));
@@ -277,12 +275,12 @@ mod tests {
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
                  ('data_products', 'input_ports', 'output_ports', 'data_contracts', \
                  'transformation_clock', 'legacy_systems', 'capability_scores', \
-                 'transformation_decisions', 'transformation_events')",
+                 'transformation_decisions', 'transformation_events', 'schema_violations')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 9);
+        assert_eq!(count, 10);
     }
 
     #[test]
