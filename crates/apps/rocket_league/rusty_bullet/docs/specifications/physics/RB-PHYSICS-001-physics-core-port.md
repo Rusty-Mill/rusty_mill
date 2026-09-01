@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.55.0
+- Version: 0.56.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -611,7 +611,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   `ControllerInput.boost` is set and the car has boost remaining, capped at
   the same `MAX_CAR_SPEED` ceiling as throttle. Unlike throttle and
   steering, boost is *not* gated on ground contact — it's modeled as a
-  rocket, not an engine, so it works identically airborne. Boost is a
+  rocket, not an engine, so it works airborne too (this requirement's own
+  original claim that it works "identically" airborne was itself wrong —
+  `RB-PHYSICS-001-FR-056` found and corrected it: the *gating* is
+  identical, not the acceleration magnitude, which real Rocket League
+  genuinely varies by ground contact). Boost is a
   depletable resource: `PhysicsWorld` gains a parallel `car_boost: Vec<f32>`
   (initialized to a full tank, `drive::MAX_BOOST`, by `with_car`) and
   `set_car_boost` to set it directly; holding boost input drains the tank
@@ -3455,6 +3459,70 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     constant/doc-only corrections — proven by the existing suite passing
     unchanged. `cargo test --workspace` re-run clean at 291 total
     (unchanged from `FR-054`).
+- `RB-PHYSICS-001-FR-056` (boost acceleration ground/air split, implemented):
+  `drive::BOOST_ACCELERATION` was a single flat constant (`991.667`)
+  applied identically whether `apply_driven_forces`'s own `on_ground`
+  parameter was `true` or `false` — this requirement's own doc comment
+  and `RB-PHYSICS-001-FR-008`'s own Requirements entry both explicitly
+  claimed boost "works identically airborne", framing that as a settled
+  fact rather than an unverified assumption. Fetching RocketSim's own
+  `RLConst.h` directly (`https://raw.githubusercontent.com/ZealanL/RocketSim/main/src/RLConst.h`)
+  found that claim was itself wrong: the reference defines two distinct
+  boost-acceleration constants, `BOOST_ACCEL_GROUND = 2975.f / 3.f`
+  (≈991.667, exactly matching this port's own existing flat value) and
+  `BOOST_ACCEL_AIR = 3175.f / 3.f` (≈1058.333, about 6.5% higher) — a
+  genuine ground/air split this port's own single-constant model didn't
+  capture, meaning every airborne boost this crate ever applied
+  understated real Rocket League's own airborne boost strength.
+  1. **Split the constant.** `BOOST_ACCELERATION` became two:
+     `BOOST_ACCELERATION_GROUND` (unchanged value, rewritten as the exact
+     `2975.0 / 3.0` fraction the reference uses, matching `JUMP_SPEED`'s
+     own existing precedent for writing a sourced value as its own
+     fraction rather than a rounded decimal) and `BOOST_ACCELERATION_AIR`
+     (`3175.0 / 3.0`, new).
+  2. **Wired the split into `apply_driven_forces`.** The boost force's
+     own magnitude now selects `BOOST_ACCELERATION_GROUND` or
+     `BOOST_ACCELERATION_AIR` by the same `on_ground` parameter every
+     other grounded/airborne behavior in this function already reads —
+     no new parameter, no new gating logic, since boost already applied
+     in both cases; only which magnitude it uses changed.
+  3. **Corrected every doc comment that claimed "identical".** This
+     module's own doc comment, `RB-PHYSICS-001-FR-008`'s own Requirements
+     entry, and this spec's own Non-goals/Open-questions mentions of
+     `BOOST_ACCELERATION` all previously said or implied boost's
+     magnitude (not just its ground-contact gating) was the same
+     everywhere — corrected to state the gating is identical (boost
+     always applies) while the magnitude genuinely isn't.
+  - **Non-goals (this requirement).** Does not touch `BOOST_CONSUMPTION_RATE`
+    (drain rate) or `MAX_BOOST` (tank size) — RocketSim's own
+    `BOOST_USED_PER_SECOND = BOOST_MAX / 3` already matches this port's
+    existing `BOOST_CONSUMPTION_RATE`/`MAX_BOOST` pair, confirmed as a
+    byproduct of this same fetch but not a new finding requiring its own
+    fix. Does not touch `MAX_CAR_SPEED`, `JUMP_SPEED`, or any other
+    `drive.rs` constant — this requirement is scoped to the boost
+    acceleration split specifically. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** A grounded car's own boost acceleration is
+    unchanged (`BOOST_ACCELERATION_GROUND` matches the old
+    `BOOST_ACCELERATION` value exactly). An airborne car's own boost
+    acceleration is measurably higher, in the exact ratio RocketSim's own
+    `BOOST_ACCEL_AIR`/`BOOST_ACCEL_GROUND` cites. No doc comment anywhere
+    in this crate or spec still claims boost's magnitude is identical
+    grounded and airborne. All pre-existing tests pass unchanged, since
+    every one of them already either tests only grounded boost, only
+    checks a sign/direction (not an exact magnitude) for airborne boost,
+    or doesn't exercise boost at all.
+  - **Verification plan.** 1 new `drive.rs` test:
+    `boost_accelerates_an_airborne_car_faster_than_a_grounded_one` — one
+    step of full boost from a dead stop, grounded vs. airborne, confirms
+    the airborne velocity delta is strictly greater and its ratio to the
+    grounded delta matches `BOOST_ACCELERATION_AIR / BOOST_ACCELERATION_GROUND`
+    to within `1e-4` (the force scaling by mass cancels exactly on
+    integration, making the ratio directly checkable without needing a
+    specific car mass). All 291 of `rb_physics_bullet`'s pre-existing
+    tests (as of `FR-055`) pass unchanged (net +1 test over `FR-055`'s
+    291, bringing the crate to 292).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4265,7 +4333,11 @@ solving each pair fully independently, but is itself only proven against
 a synthetic symmetric-pinch scenario, not real recorded multi-car
 contact data.
 `drive::apply_driven_forces`'s constants are even further from validated:
-`MAX_CAR_SPEED`, `MAX_BOOST`, `BOOST_ACCELERATION`, and `JUMP_SPEED` are
+`MAX_CAR_SPEED`, `MAX_BOOST`,
+`BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR` (the single flat
+`BOOST_ACCELERATION` this bullet used to name, split by
+`RB-PHYSICS-001-FR-056` into the two distinct values RocketSim's own
+source actually cites), and `JUMP_SPEED` are
 commonly-cited community numbers, but `THROTTLE_ACCELERATION`,
 `BOOST_CONSUMPTION_RATE`, `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
 `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`,
@@ -4770,9 +4842,17 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
   `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
   `JUMP_HOLD_ACCELERATION`, `LANDING_AUTO_UPRIGHT_TORQUE`, and re-checking
-  `MAX_CAR_SPEED`/`MAX_BOOST`/`BOOST_ACCELERATION`/`JUMP_SPEED`) against
+  `MAX_CAR_SPEED`/`MAX_BOOST`/`BOOST_ACCELERATION_GROUND`/
+  `BOOST_ACCELERATION_AIR`/`JUMP_SPEED`) against
   real recorded driving data — needs `RB-VERIFY-002` capture data; not
-  started. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  started. `RB-PHYSICS-001-FR-056` already went further than a
+  re-check for the boost pair specifically: it found the single flat
+  `BOOST_ACCELERATION` this bullet used to name was itself wrong (real
+  Rocket League's own airborne value is distinctly higher than its
+  grounded one, per RocketSim's own fetched source) and fixed it — a real
+  behavioral change, not merely a confirmation, closing that half of this
+  bullet's own scope; `MAX_CAR_SPEED`/`JUMP_SPEED` remain merely
+  commonly-cited pending real recorded data. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
   `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
   `JUMP_HOLD_ACCELERATION`, and `LANDING_AUTO_UPRIGHT_TORQUE` in particular
@@ -4851,6 +4931,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.56.0 (2026-09-01): FR-056 added and implemented (boost acceleration
+  ground/air split) — `drive::BOOST_ACCELERATION` was a single flat
+  constant applied identically whether a car was grounded or airborne,
+  and this port's own doc comments (including `RB-PHYSICS-001-FR-008`'s
+  own Requirements entry) explicitly claimed boost "works identically
+  airborne". Fetched RocketSim's own `RLConst.h` directly and found that
+  claim wrong: the reference defines `BOOST_ACCEL_GROUND = 2975.f / 3.f`
+  (≈991.667, exactly matching this port's own existing value) and a
+  distinctly higher `BOOST_ACCEL_AIR = 3175.f / 3.f` (≈1058.333, about
+  6.5% more) — a genuine ground/air split this port didn't model, so
+  every airborne boost this crate ever applied understated real boost
+  strength. Split into `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR`,
+  wired `apply_driven_forces`'s existing `on_ground` parameter to select
+  between them (no new gating logic — boost already applied in both
+  cases, only the magnitude changed), and corrected every doc comment
+  that claimed the two were identical. Also confirmed, as a byproduct of
+  the same fetch, that `BOOST_CONSUMPTION_RATE`/`MAX_BOOST` already match
+  RocketSim's own `BOOST_USED_PER_SECOND = BOOST_MAX / 3` — no change
+  needed there. 1 new `drive.rs` test confirming the exact ratio between
+  grounded and airborne boost acceleration matches the reference's own
+  ratio; bringing the crate to 292 total (+1 over `FR-055`'s 291).
 - 0.55.0 (2026-09-01): FR-055 added and implemented
   (`GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation, stale doc
   correction) — `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` carried a

@@ -6,6 +6,34 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Boost acceleration ground/air split
+**2026-09-01** · PR pending · commit pending
+
+- **Fetched RocketSim's own `RLConst.h` directly** and found this port's
+  own single flat `drive::BOOST_ACCELERATION` constant collapsed two
+  genuinely distinct reference values into one: `BOOST_ACCEL_GROUND =
+  2975/3` (≈991.667, exactly matching this port's existing value) and a
+  distinctly higher `BOOST_ACCEL_AIR = 3175/3` (≈1058.333, about 6.5%
+  more).
+- **This port's own doc comments had explicitly (and wrongly) claimed**
+  boost "works identically airborne" — true for the *gating* (it always
+  applies, unlike throttle/steering), false for the *magnitude*, which
+  real Rocket League genuinely varies by ground contact.
+- **Split into `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR`** and
+  wired `apply_driven_forces`'s existing `on_ground` parameter to select
+  between them — no new gating logic, only the applied magnitude changed.
+  Every airborne boost this crate ever applied previously understated
+  real airborne boost strength by about 6.5%.
+- **Confirmed as a byproduct, not a new finding**: `BOOST_CONSUMPTION_RATE`/
+  `MAX_BOOST` already match RocketSim's own `BOOST_USED_PER_SECOND =
+  BOOST_MAX / 3` — no change needed there.
+- 1 new `drive.rs` test confirming the exact ratio between grounded and
+  airborne boost acceleration matches the reference's own ratio. All 291
+  pre-existing tests pass unchanged. 292 total in `rb_physics_bullet` (+1
+  over FR-055's 291).
+
+---
+
 ## `GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation
 **2026-09-01** · [#117](https://github.com/baileyrd/rusty_bullet/pull/117) · `fd53770`
 
