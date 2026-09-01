@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Boost acceleration ground/air split
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#119](https://github.com/baileyrd/rusty_bullet/pull/119) · `4eafed3`
 
 - **Fetched RocketSim's own `RLConst.h` directly** and found this port's
   own single flat `drive::BOOST_ACCELERATION` constant collapsed two
