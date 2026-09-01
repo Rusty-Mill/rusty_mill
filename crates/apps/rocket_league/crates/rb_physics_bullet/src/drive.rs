@@ -84,8 +84,14 @@
 //! perpendicular axis (`right_axis` for pitch, `forward_axis` for roll) —
 //! the same axis/sign conventions air control's own pitch/roll torque
 //! already uses, so a forward dodge looks like a fast version of a forward
-//! air-control pitch. Both pitch and roll can contribute at once (a
-//! diagonal dodge): since `RB-PHYSICS-001-FR-072`, their combined
+//! air-control pitch. Since `RB-PHYSICS-001-FR-073`, the roll axis's own
+//! stick value also includes `yaw` input (`roll + yaw`, each clamped to
+//! `[-1.0, 1.0]` individually first) — matching RocketSim's own confirmed
+//! `dodgeDir = (-pitch, yaw + roll, 0)`, so a yaw-only press (no roll held)
+//! now fires a sideways dodge too, the same as a real Rocket League player
+//! nudging the right stick purely left/right. Both pitch and the combined
+//! roll/yaw can contribute at once (a diagonal dodge): since
+//! `RB-PHYSICS-001-FR-072`, their combined
 //! `(pitch, roll)` direction is normalized to unit length before scaling —
 //! matching RocketSim's own confirmed real `dodgeDir.safeNormalized()`
 //! step — so a diagonal dodge has the same total magnitude as an
@@ -840,14 +846,22 @@ fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> bool {
 /// of `DODGE_SPEED`'s own uncalibrated base value, the same way
 /// `FR-058`/`FR-059`/`FR-068`'s own adopted ratios do.
 ///
-/// Two things are deliberately *not* adopted here, both already documented
+/// One thing is deliberately *not* adopted here, already documented
 /// elsewhere: this port's own sign convention is kept (`dodge_pitch`
 /// positive means forward, matching `dodge_pitch_is_backward`'s own doc
-/// comment) rather than the reference's own negated `-controls.pitch`; and
-/// real yaw input's own contribution to `dodgeDir` (`controls.yaw +
-/// controls.roll`) isn't folded in — this port's dodge direction stays
-/// pitch/roll only, `RB-PHYSICS-001-FR-059`'s own Non-goals' own
-/// pre-existing, separate simplification.
+/// comment) rather than the reference's own negated `-controls.pitch`.
+///
+/// Real yaw input's own contribution to `dodgeDir` (`controls.yaw +
+/// controls.roll`) *is* folded in, though not by this function itself:
+/// since `RB-PHYSICS-001-FR-073`, both call sites in `apply_driven_forces`
+/// pass `roll + yaw` (each individually clamped to `[-1.0, 1.0]` first,
+/// matching how `apply_driven_forces` already clamps pitch/yaw/roll
+/// separately for air control) as this function's `roll` argument — this
+/// port already reads `input.yaw` in this same function for air control, so
+/// no new input plumbing was needed, just combining an already-available
+/// value the same way the reference does. `RB-PHYSICS-001-FR-059`'s own
+/// Non-goals had flagged this exact gap ("this port's dodge direction is
+/// pitch/roll only").
 fn normalize_dodge_direction(pitch: f32, roll: f32) -> (f32, f32) {
     let magnitude = (pitch * pitch + roll * roll).sqrt();
     if magnitude > 0.0 {
@@ -1230,7 +1244,8 @@ pub fn apply_driven_forces(
                 // press: push off outward along the wall's normal, plus
                 // the same upward JUMP_SPEED every jump variant uses.
                 let wall_pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
-                let wall_roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
+                let wall_roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0)
+                    + input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
                 if wall_pitch.abs() > DODGE_DEADZONE || wall_roll.abs() > DODGE_DEADZONE {
                     // Wall-jump dodge: the same outward-plus-upward push
                     // combined with a directional DODGE_SPEED impulse and
@@ -1283,7 +1298,8 @@ pub fn apply_driven_forces(
                 }
             } else if *double_jump_available {
                 let dodge_pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
-                let dodge_roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
+                let dodge_roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0)
+                    + input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
                 if dodge_pitch.abs() > DODGE_DEADZONE || dodge_roll.abs() > DODGE_DEADZONE {
                     // Dodge: a directional flip instead of a plain vertical
                     // double jump, reusing the same axis/sign conventions
@@ -2465,6 +2481,78 @@ mod tests {
     }
 
     #[test]
+    fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
+        // RB-PHYSICS-001-FR-073: real Rocket League's dodgeDir.y combines
+        // yaw + roll, so a pure yaw stick nudge (no roll held) fires the
+        // same sideways dodge a roll-only press would.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            yaw: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
+            "expected roughly DODGE_SPEED lateral velocity from yaw alone, got {}",
+            c.linear_velocity.y
+        );
+        assert!(
+            (c.angular_velocity.x - DODGE_ANGULAR_SPEED).abs() < 1.0,
+            "expected roughly DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
+            c.angular_velocity.x
+        );
+    }
+
+    #[test]
+    fn yaw_and_roll_combine_in_the_dodge_direction() {
+        // RB-PHYSICS-001-FR-073: yaw and roll both feed the same combined
+        // roll-axis stick value (roll + yaw) before normalization, so equal
+        // opposite yaw and roll cancel out to no sideways dodge at all.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            roll: Some(1.0),
+            yaw: Some(-1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            c.linear_velocity.y, 0.0,
+            "expected equal-and-opposite roll and yaw to cancel out, got {}",
+            c.linear_velocity.y
+        );
+        assert!(
+            (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+            "expected a plain double jump instead, since combined roll+yaw \
+             and pitch are both below DODGE_DEADZONE, got {}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
     fn normalize_dodge_direction_preserves_a_single_axis() {
         // A pure axis-aligned dodge (the other axis exactly zero) is
         // unaffected: normalizing (1.0, 0.0) or (0.0, 1.0) yields the same
@@ -2959,6 +3047,36 @@ mod tests {
         assert!(
             (c.linear_velocity.y - expected_dodge_component).abs() < 1.0,
             "expected the lateral dodge component, got {}",
+            c.linear_velocity.y
+        );
+    }
+
+    #[test]
+    fn a_yaw_only_press_fires_a_sideways_wall_jump_dodge_like_roll() {
+        // RB-PHYSICS-001-FR-073: the wall-jump-dodge path folds yaw into
+        // the same combined roll-axis stick value as the ground dodge.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let input = ControllerInput {
+            jump: true,
+            yaw: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_wall(
+            &mut c,
+            &input,
+            false,
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
+            "expected roughly DODGE_SPEED lateral dodge velocity from yaw alone, got {}",
             c.linear_velocity.y
         );
     }

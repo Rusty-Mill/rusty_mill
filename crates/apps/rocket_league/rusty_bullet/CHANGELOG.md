@@ -1047,6 +1047,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   diagonal-dodge tests to assert the corrected magnitude and added 3 new
   tests for `normalize_dodge_direction` directly; all pre-existing tests
   pass unchanged, bringing the crate to 317.
+- Dodge/wall-jump-dodge direction never read yaw input
+  (`RB-PHYSICS-001-FR-073`) — `RB-PHYSICS-001-FR-059`'s own Non-goals (and
+  `FR-072`'s own doc comment) had already found and flagged this gap: real
+  Rocket League's own `dodgeDir` combines `yaw + roll` for its horizontal
+  component, but this port's dodge read `roll` alone. Fetching RocketSim's
+  own `Car.cpp` (`_UpdateDoubleJumpOrFlip`) confirmed `controls.yaw` feeds
+  nowhere else in the function — only `dodgeDir`'s own combined axis — and
+  that this port already reads `input.yaw` in the same function for air
+  control, so folding it into the dodge's roll-axis stick value
+  (`roll + yaw`, each clamped individually first) needed no new machinery,
+  the same "pure operation, no new architecture" transfer
+  `FR-058`/`FR-059`/`FR-068`/`FR-072`'s own adopted findings share.
+  Changed both dodge call sites in `apply_driven_forces`; the existing
+  `DODGE_DEADZONE` trigger, `normalize_dodge_direction`, and speed scaling
+  are otherwise unchanged. Added 3 new tests (a yaw-only dodge, a
+  yaw-and-roll cancellation, and a yaw-only wall-jump-dodge); all
+  pre-existing tests pass unchanged, bringing the crate to 320.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
