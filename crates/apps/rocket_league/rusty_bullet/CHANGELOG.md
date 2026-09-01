@@ -676,6 +676,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   reducing that residual roughly 15-fold to ~0.016 units/s; warm-starting
   deliberately left out of scope. 2 new tests; all pre-existing tests pass
   unchanged.
+- `PhysicsWorld::step`'s static multi-surface contact resolution
+  (`RB-PHYSICS-001-FR-051`) — resolved a body's contact against each
+  static shape type (ground, wall, curve, corner fillet, goal wall,
+  bounded wall) independently and sequentially, the same
+  independent-pairwise gap `RB-PHYSICS-001-FR-030`/`RB-PHYSICS-001-FR-050`
+  already proved under-converges. A dedicated test confirmed a ball wedged
+  into a symmetric two-wall corner is genuinely order-dependent
+  (mirror-image results depending on which wall resolves first). A new
+  `solver::resolve_static_manifolds` generalizes `resolve_contacts` to
+  combine every static-shape manifold a body touches into one shared
+  solve; `step` was rewired to use it via a new `resolve_static_contacts`,
+  replacing the old five-function-per-body call sequence
+  (`resolve_plane_contact`/`resolve_curve_contact`/
+  `resolve_corner_fillet_contact`/`resolve_goal_wall_contact`/
+  `resolve_bounded_wall_contact`, all removed). 2 new tests, one confirmed
+  to fail under the old sequential loop; all pre-existing tests pass
+  unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

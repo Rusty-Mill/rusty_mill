@@ -6,6 +6,51 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Static multi-surface contact combined-solve investigation
+**2026-09-01** · PR pending · commit pending
+
+- **`PhysicsWorld::step` resolved a body's contact against each static
+  shape type independently and sequentially** — the ground, then every
+  wall, then every curve, then every corner fillet, then every goal wall,
+  then every bounded wall, one independent `solver::resolve_contacts` call
+  per shape — the exact independent-pairwise shape `RB-PHYSICS-001-FR-030`/
+  `RB-PHYSICS-001-FR-050` already proved under-converges (and can be
+  genuinely order-dependent) for a shared body touched by 2+ others in the
+  same step. This port's own module doc comment had claimed resolving each
+  independently was safe "since a body's contact with static geometry
+  never depends on another dynamic body" — true, but silent on a body
+  touching two different *static* surfaces at once.
+- **A dedicated single-shot test confirmed the mechanism is genuinely
+  order-dependent, not merely slow to converge.** A ball wedged
+  symmetrically into a corner formed by two static walls (perpendicular
+  normals, identical restitution/friction), moving diagonally into both at
+  once: resolving each wall fully independently in one order left the ball
+  biased toward whichever wall was resolved last; the opposite order gave
+  the exact mirror image.
+- **A new `solver::resolve_static_manifolds` generalizes `resolve_contacts`
+  to combine every static-shape manifold a body touches into one shared
+  solve**, sharing one accumulator across every group for the whole
+  `SOLVER_ITERATIONS` loop — the same fix `resolve_dynamic_manifolds`
+  (`FR-030`) and `net::NetMesh::step` (`FR-050`) already made for their own
+  independent-pairwise gaps.
+- **`PhysicsWorld::step` was rewired to use it**: a new
+  `resolve_static_contacts` (bundling the six static-shape slices into a
+  `StaticScene` to stay under clippy's argument-count limit) gathers every
+  one of a body's contacts across every static shape into one manifold
+  list, resolving them all together — replacing the old
+  five-function-per-body call sequence
+  (`resolve_plane_contact`/`resolve_curve_contact`/
+  `resolve_corner_fillet_contact`/`resolve_goal_wall_contact`/
+  `resolve_bounded_wall_contact`, all removed).
+- **A `PhysicsWorld::step`-level test proves the fix at the real public
+  API**: a ball fired diagonally into a symmetric two-wall corner via an
+  actual `PhysicsWorld` settles with nearly equal x/y velocity components
+  after one real `step` call — confirmed to fail under the old sequential
+  per-shape loop before the rewire.
+- **2 new tests.** All 284 pre-existing tests pass unchanged; 286 total.
+
+---
+
 ## Net-point contact combined-solve investigation
 **2026-09-01** · [#107](https://github.com/baileyrd/rusty_bullet/pull/107) · `4d1a4b8`
 

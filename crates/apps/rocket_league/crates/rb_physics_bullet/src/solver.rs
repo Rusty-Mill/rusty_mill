@@ -571,6 +571,94 @@ pub fn resolve_contacts(
     apply_push_delta(body, &push_delta, dt);
 }
 
+/// Resolves every one of `body`'s contact manifolds against *every* static
+/// surface it touches this step together, as one combined solve
+/// (`RB-PHYSICS-001-FR-051`), instead of the old `PhysicsWorld::step`
+/// pattern of one independent `resolve_contacts` call per static shape
+/// (ground, each wall, each curve, each corner fillet, each goal wall, each
+/// bounded wall) — fully resolved and applied before the next shape's setup
+/// even reads `body`'s velocity. `manifolds` is `(static_restitution,
+/// static_friction, contacts)` triples, one per static shape `body`
+/// currently touches; omit a shape from `manifolds` entirely rather than
+/// passing it with an empty `contacts` (an empty manifold would still
+/// allocate a `DeltaVelocity`-touching no-op, the same convention
+/// `resolve_dynamic_manifolds`'s own doc comment already establishes).
+///
+/// Mirrors `resolve_contacts`'s own per-manifold combined-restitution setup
+/// (each manifold group computes its own `combine_restitution`/
+/// `combine_friction` against `body`'s single restitution/friction, since
+/// different static shapes can have different material properties), but
+/// shares one `DeltaVelocity`/push-delta accumulator across every group for
+/// the whole `SOLVER_ITERATIONS` loop — the same "one shared accumulator
+/// instead of independent sequential passes" fix
+/// `resolve_dynamic_manifolds` (`RB-PHYSICS-001-FR-030`) and
+/// `net::NetMesh::step` (`RB-PHYSICS-001-FR-050`) already made for their own
+/// independent-pairwise gaps. See
+/// `tests::resolving_a_two_wall_corner_together_avoids_the_order_dependent_bias_sequential_resolution_has`
+/// for the exact mechanism this closes: a ball wedged into a symmetric
+/// two-wall corner, resolved wall-by-wall sequentially, ends up biased
+/// toward whichever wall was resolved last (a purely arbitrary artifact of
+/// iteration order with no physical basis), where this function lands close
+/// to the true symmetric answer instead.
+pub fn resolve_static_manifolds(
+    body: &mut RigidBody,
+    manifolds: &[(f32, f32, Vec<Contact>)],
+    dt: f32,
+) {
+    if manifolds.is_empty() {
+        return;
+    }
+
+    struct Manifold {
+        combined_friction: f32,
+        rows: Vec<[ConstraintRow; 3]>,
+    }
+
+    let mut solved: Vec<Manifold> = manifolds
+        .iter()
+        .map(|(static_restitution, static_friction, contacts)| {
+            let combined_restitution = combine_restitution(body.restitution, *static_restitution);
+            let combined_friction = combine_friction(body.friction, *static_friction);
+            let mut effective_body = *body;
+            effective_body.restitution = combined_restitution;
+            let rows = contacts
+                .iter()
+                .map(|c| setup_rows(&effective_body, c, dt))
+                .collect();
+            Manifold {
+                combined_friction,
+                rows,
+            }
+        })
+        .collect();
+
+    let mut delta = DeltaVelocity::zero();
+    let mut push_delta = DeltaVelocity::zero();
+    let inv_mass = body.inv_mass();
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for m in &mut solved {
+            for rows in &mut m.rows {
+                resolve_row(&mut rows[0], inv_mass, &mut delta);
+                resolve_push_row(&mut rows[0], inv_mass, &mut push_delta);
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+                rows[2].lower_limit = -friction_limit;
+                rows[2].upper_limit = friction_limit;
+
+                resolve_row(&mut rows[1], inv_mass, &mut delta);
+                resolve_row(&mut rows[2], inv_mass, &mut delta);
+            }
+        }
+    }
+
+    body.linear_velocity += delta.linear;
+    body.angular_velocity += delta.angular;
+    apply_push_delta(body, &push_delta, dt);
+}
+
 /// Like `ConstraintRow`, but carrying both bodies' torque axis/angular
 /// component (`_a`/`_b`) instead of assuming one side is static.
 struct TwoBodyRow {
@@ -1263,6 +1351,98 @@ mod tests {
     use super::*;
     use crate::body::StaticPlane;
     use crate::collision::{contacts_between, contacts_vs_plane};
+
+    /// `RB-PHYSICS-001-FR-051`'s own root-cause proof: a ball wedged
+    /// symmetrically into a corner formed by two static walls (planes with
+    /// normals `(1,0,0)` and `(0,1,0)`, identical restitution/friction),
+    /// moving diagonally into both at once. By symmetry, the true answer
+    /// has equal `x`/`y` final velocity components. Resolving each wall
+    /// fully independently — the pre-FR-051 shape of `PhysicsWorld::step`'s
+    /// own per-static-shape contact loop — instead leaves the ball biased
+    /// toward whichever wall was resolved *last*: order A (`x` then `y`)
+    /// and order B (`y` then `x`) are exact mirror images of each other,
+    /// neither matching the true symmetric answer.
+    /// `solver::resolve_static_manifolds`'s combined solve — sharing one
+    /// accumulator across both walls' contacts instead of fully resolving
+    /// and applying one before the other's setup even reads the ball's
+    /// velocity — lands much closer to the true symmetric answer instead.
+    #[test]
+    fn sequential_wall_resolution_is_order_dependent_but_the_combined_solve_is_not() {
+        let make_scene = || {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(93.15, 93.15, 0.0));
+            ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+            let plane_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+            let plane_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
+            (ball, plane_x, plane_y)
+        };
+        let dt = 1.0 / 60.0;
+
+        let (mut ball_a, plane_x_a, plane_y_a) = make_scene();
+        let cx = contacts_vs_plane(&ball_a, &plane_x_a);
+        resolve_contacts(
+            &mut ball_a,
+            plane_x_a.restitution,
+            plane_x_a.friction,
+            &cx,
+            dt,
+        );
+        let cy = contacts_vs_plane(&ball_a, &plane_y_a);
+        resolve_contacts(
+            &mut ball_a,
+            plane_y_a.restitution,
+            plane_y_a.friction,
+            &cy,
+            dt,
+        );
+        let order_a = ball_a.linear_velocity;
+
+        let (mut ball_b, plane_x_b, plane_y_b) = make_scene();
+        let cyb = contacts_vs_plane(&ball_b, &plane_y_b);
+        resolve_contacts(
+            &mut ball_b,
+            plane_y_b.restitution,
+            plane_y_b.friction,
+            &cyb,
+            dt,
+        );
+        let cxb = contacts_vs_plane(&ball_b, &plane_x_b);
+        resolve_contacts(
+            &mut ball_b,
+            plane_x_b.restitution,
+            plane_x_b.friction,
+            &cxb,
+            dt,
+        );
+        let order_b = ball_b.linear_velocity;
+
+        let (mut ball_c, plane_x_c, plane_y_c) = make_scene();
+        let cxc = contacts_vs_plane(&ball_c, &plane_x_c);
+        let cyc = contacts_vs_plane(&ball_c, &plane_y_c);
+        let manifolds = vec![
+            (plane_x_c.restitution, plane_x_c.friction, cxc),
+            (plane_y_c.restitution, plane_y_c.friction, cyc),
+        ];
+        resolve_static_manifolds(&mut ball_c, &manifolds, dt);
+        let combined = ball_c.linear_velocity;
+
+        assert!(
+            (order_a.x - order_b.y).abs() < 1e-3 && (order_a.y - order_b.x).abs() < 1e-3,
+            "expected resolving the two symmetric walls sequentially, in opposite orders, to \
+             leave the ball with exactly mirror-image (x/y swapped) velocities, got \
+             order_a={order_a:?}, order_b={order_b:?}"
+        );
+        assert!(
+            (order_a.x - order_a.y).abs() > 15.0,
+            "expected one sequential order to leave the ball measurably asymmetric (biased \
+             toward whichever wall was resolved last), got order_a={order_a:?}"
+        );
+        assert!(
+            (combined.x - combined.y).abs() < (order_a.x - order_a.y).abs() * 0.2,
+            "expected the combined solve to leave the ball's x/y velocity components much \
+             closer to each other (the true symmetric answer) than either sequential order, \
+             got combined={combined:?}, order_a={order_a:?}"
+        );
+    }
 
     fn ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
