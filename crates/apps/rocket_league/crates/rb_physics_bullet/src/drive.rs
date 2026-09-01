@@ -58,7 +58,10 @@
 //! 400)` in pitch-yaw-roll order) — real Rocket League's pitch/yaw/roll
 //! rates still differ in absolute magnitude too, not just this ratio, but
 //! only the ratio transfers cleanly onto this port's own uncalibrated
-//! pitch baseline (see `AIR_CONTROL_TORQUE`'s own doc comment). Since
+//! pitch baseline (see `AIR_CONTROL_TORQUE`'s own doc comment). Real air
+//! control also applies a per-axis angular-velocity damping torque this
+//! port has no equivalent for at all — see `AIR_CONTROL_ROLL_SCALE`'s own
+//! doc comment for `RB-PHYSICS-001-FR-071`'s full finding. Since
 //! `RB-PHYSICS-001-FR-057`, sustained air control (or a dodge's own kick,
 //! or the landing-orientation assist) can no longer spin a car arbitrarily
 //! fast, though: `clamp_angular_speed` caps the result at
@@ -645,6 +648,29 @@ const AIR_CONTROL_YAW_SCALE: f32 = 95.0 / 130.0;
 /// pitch's — see `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full
 /// finding and reasoning. Same source: `CAR_AIR_CONTROL_TORQUE.z /
 /// CAR_AIR_CONTROL_TORQUE.x` = `400.0 / 130.0`.
+///
+/// `RB-PHYSICS-001-FR-071` closes a thread `RB-PHYSICS-001-FR-068`'s own
+/// Non-goals left open — RocketSim's `CAR_AIR_CONTROL_DAMPING = Vec(30, 20,
+/// 50)`, which that requirement's own fetch of `_UpdateAirTorque` found but
+/// didn't examine. The full mechanism: for each axis, real air control
+/// subtracts a damping torque `(angular velocity along that axis) *
+/// CAR_AIR_CONTROL_DAMPING[axis] * (1 - abs(analog input on that axis))`
+/// from the applied torque *before* scaling by inertia — pitch's own input
+/// term additionally multiplies by `pitchTorqueScale`
+/// (`RB-PHYSICS-001-FR-070`). Releasing the stick on an axis (input `0`)
+/// gives full damping strength on that axis, continuously bleeding off any
+/// existing spin; holding it fully (input `±1`) zeroes the damping,
+/// granting full torque authority with no resistance. Not adopted: unlike
+/// the pitch/yaw/roll *ratio* above, this port has no existing damping
+/// quantity to apply a ratio to — this is a wholly new torque contribution,
+/// not a multiplier on one this port already computes the same way, so it
+/// doesn't transfer the way `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-068`'s own
+/// ratios did. Its real absolute coefficients are also calibrated against
+/// real Rocket League's own specific inertia tensor, the same "false
+/// precision" reasoning that already keeps `AIR_CONTROL_TORQUE` itself a
+/// placeholder. Introducing this mechanism for real remains a candidate for
+/// a future, dedicated requirement, exactly as `FR-068`'s own Non-goals
+/// already flagged.
 const AIR_CONTROL_ROLL_SCALE: f32 = 400.0 / 130.0;
 
 /// Uncalibrated placeholder wall-jump horizontal push-off speed (uu/s),

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.70.0
+- Version: 0.71.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4429,12 +4429,15 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `FR-059` already established. Does not adopt RocketSim's own
     `CAR_AIR_CONTROL_DAMPING` (`Vec(30, 20, 50)`) — this port has no
     per-axis air-control damping term at all, a separate, independent
-    addition left for a future requirement. Does not adopt RocketSim's own
+    addition left for a future requirement (`RB-PHYSICS-001-FR-071` later
+    characterized the full mechanism and confirmed it stays unadopted).
+    Does not adopt RocketSim's own
     `pitchTorqueScale` factor applied only to the pitch component in
     `_UpdateAirTorque` (an additional speed- or state-dependent scale this
     requirement's own fetch surfaced but didn't fully characterize) —
     scoped out to keep this requirement to the confirmed, fully-characterized
-    per-axis ratio alone. Does not touch `RB-PHYSICS-001-FR-005`'s
+    per-axis ratio alone (`RB-PHYSICS-001-FR-070` later closed this thread).
+    Does not touch `RB-PHYSICS-001-FR-005`'s
     real-data calibration, still blocked on `PHASE-0-EXIT`.
   - **Acceptance criteria.** `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`'s
     own doc comments state the exact RocketSim citations. Full yaw input
@@ -4571,6 +4574,51 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `FR-069`'s own precedent); all 314 of `rb_physics_bullet`'s pre-existing
     tests (as of `FR-069`) pass unchanged, confirming zero behavioral
     change.
+- `RB-PHYSICS-001-FR-071` (real air-control damping mechanism, documentation
+  only): `RB-PHYSICS-001-FR-068`'s own Non-goals had already found
+  RocketSim's `CAR_AIR_CONTROL_DAMPING = Vec(30, 20, 50)` exists but left it
+  as "a separate, independent addition left for a future requirement"
+  without examining the mechanism behind it. This requirement closes that
+  thread by reading the rest of `_UpdateAirTorque` (the same fetch
+  `RB-PHYSICS-001-FR-070` used to characterize `pitchTorqueScale`).
+  1. **Found the full mechanism**: for each axis, real air control computes
+     a damping term `(angular velocity along that axis) *
+     CAR_AIR_CONTROL_DAMPING[axis] * (1 - abs(analog input on that axis))`
+     — pitch's own input term additionally multiplies by `pitchTorqueScale`
+     (`RB-PHYSICS-001-FR-070`) — and subtracts the combined damping vector
+     from the applied torque before scaling by inverse inertia. Releasing
+     the stick on an axis gives full damping strength there, continuously
+     bleeding off any existing spin; holding it fully zeroes the damping,
+     granting full torque authority with no resistance.
+  2. **Confirmed this is a genuinely new mechanism, not a ratio on an
+     existing quantity**: unlike `AIR_CONTROL_TORQUE`'s own pitch/yaw/roll
+     ratio (`FR-068`), which scaled a torque this port already applies the
+     same way, this port has no existing damping term at all to apply a
+     ratio to — introducing one is an independent feature addition, not a
+     multiplier transfer.
+  3. **Corrected the `drive` module's air-control doc comment and
+     `AIR_CONTROL_ROLL_SCALE`'s own doc comment** with the confirmed
+     mechanism and why it isn't adopted, and added a forward citation from
+     `RB-PHYSICS-001-FR-068`'s own Non-goals.
+  - **Non-goals (this requirement).** Does not implement the real damping
+    mechanism: its absolute coefficients are calibrated against real Rocket
+    League's own specific inertia tensor, the same "false precision"
+    reasoning that already keeps `AIR_CONTROL_TORQUE` itself a placeholder,
+    and — unlike a ratio transfer — there is no existing quantity in this
+    port's own model to scale, making this a wholly new mechanism rather
+    than a documentation-scoped tweak. Remains a candidate for a future,
+    dedicated requirement, exactly as `RB-PHYSICS-001-FR-068`'s own
+    Non-goals already flagged. Does not touch `RB-PHYSICS-001-FR-005`'s
+    real-data calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** The `drive` module's air-control doc comment and
+    `AIR_CONTROL_ROLL_SCALE`'s own doc comment state the confirmed real
+    damping mechanism and why it isn't adopted; `RB-PHYSICS-001-FR-068`'s
+    own Non-goals carries a forward citation to this requirement.
+  - **Verification plan.** No new tests (documentation-only, matching
+    `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`/`FR-065`/`FR-066`/`FR-067`/
+    `FR-069`/`FR-070`'s own precedent); all 314 of `rb_physics_bullet`'s
+    pre-existing tests (as of `FR-070`) pass unchanged, confirming zero
+    behavioral change.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6055,6 +6103,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.71.0 (2026-09-01): FR-071 added and implemented (real air-control
+  damping mechanism — audit finding, documentation only) — `FR-068`'s own
+  Non-goals had already found RocketSim's `CAR_AIR_CONTROL_DAMPING =
+  Vec(30, 20, 50)` exists but left it as "a separate, independent addition
+  left for a future requirement" without examining the mechanism. Fetched
+  RocketSim's own `Car.cpp` again (the same fetch `FR-070` used for
+  `pitchTorqueScale`) and found the full mechanism: for each axis, real air
+  control subtracts a damping torque `(angular velocity along that axis) *
+  CAR_AIR_CONTROL_DAMPING[axis] * (1 - abs(analog input on that axis))`
+  from the applied torque before scaling by inertia — releasing the stick
+  gives full damping strength, continuously bleeding off spin; holding it
+  fully zeroes the damping, granting full torque authority. Corrected the
+  `drive` module's air-control doc comment and `AIR_CONTROL_ROLL_SCALE`'s
+  own doc comment, and added a forward citation from `FR-068`'s own
+  Non-goals. Not adopted: unlike `AIR_CONTROL_TORQUE`'s own pitch/yaw/roll
+  ratio, this port has no existing damping quantity to apply a ratio to —
+  introducing one is a genuinely new mechanism, not a multiplier transfer —
+  and its absolute coefficients are calibrated against real Rocket League's
+  own specific inertia tensor, the same "false precision" reasoning that
+  already keeps `AIR_CONTROL_TORQUE` a placeholder. Zero production behavior
+  changed, no new tests; all 314 pre-existing tests pass unchanged.
 - 0.70.0 (2026-09-01): FR-070 added and implemented (real flip-cancel is
   continuous, pitch-stick-driven, and pitch-axis-only, not
   jump-press-triggered and all-axis — audit finding, documentation only) —
