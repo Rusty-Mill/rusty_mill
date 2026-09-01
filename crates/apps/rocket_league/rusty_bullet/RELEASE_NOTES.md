@@ -6,6 +6,56 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real Rocket League has no distinct wall-jump mechanic or constant at all (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`drive::WALL_JUMP_HORIZONTAL_SPEED` had no public reference at
+  all** — this port pushes a wall-jumping car outward along the touched
+  wall's normal by this fixed speed, on top of the same vertical
+  `JUMP_SPEED` every other jump variant uses.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateJump`, matching
+  `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/`FR-065`/`FR-066`'s own
+  method) and found real Rocket League has no separate wall-jump
+  mechanic — or constant — at all. `_UpdateJump` applies exactly one
+  impulse, `GetUpDir() * mutatorConfig.jumpImmediateForce` (the same
+  real value this port's own `JUMP_SPEED` already matches), gated only
+  on `isOnGround`, itself defined purely by wheel-contact count
+  (`numWheelsInContact >= 3`) with no floor-vs-wall distinction at all.
+  A dedicated search of `RLConst.h` for any `WALL`-named constant found
+  only an unrelated Heatseeker-mode threshold.
+- **Confirmed why the same impulse still ends up horizontal on a
+  wall**: since `RB-PHYSICS-001-FR-065` already established real cars
+  ride Bullet's own raycast vehicle system (`btVehicleRL`), a car
+  driving on a wall has its own orientation continuously tipped to
+  match that wall by ordinary wheel/suspension contact forces, the same
+  way a real car tilts to match a ramp — so `GetUpDir()` (the car's own
+  local up axis) already points along the wall's outward normal by the
+  time a wall jump fires. Real Rocket League's "wall jump" is thus the
+  *identical* single grounded-jump impulse, never a distinct
+  horizontal-plus-vertical composite with its own separate magnitude —
+  closing a thread `RB-PHYSICS-001-FR-031`'s original audit only briefly
+  noted ("a wall jump reusing the plain jump impulse rather than its
+  own faster speed") without confirming the exact mechanism.
+- **Not adopted as a fix**: this port's car has no wheels, raycasting,
+  or surface-tracking orientation system at all (the same architecture
+  gap `RB-PHYSICS-001-FR-065` found for steering) — its own orientation
+  doesn't automatically tip to match a touched wall. Applying only
+  `JUMP_SPEED` straight up on a wall touch, as the confirmed real
+  mechanism would otherwise suggest, would produce no push-off from the
+  wall at all in this port's own model, defeating the entire point of a
+  wall jump. This port's own two-component composite remains a
+  deliberate, necessary substitute for the missing orientation
+  mechanism, not an unfilled calibration gap.
+- Also fixed while here: adjacent stale text in the spec's own Open
+  Questions section that still framed `WALL_JUMP_HORIZONTAL_SPEED` as
+  having no public reference at all, and a "commonly-cited constants"
+  paragraph that had only briefly noted the underlying fact since
+  `RB-PHYSICS-001-FR-031` without the exact mechanism.
+- Zero production code changed, no new tests. All 312 pre-existing
+  `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real handbrake friction reduction is anisotropic, not a single uniform multiplier (audit finding)
 **2026-09-01** · [#139](https://github.com/baileyrd/rusty_bullet/pull/139) · `45b107f`
 
