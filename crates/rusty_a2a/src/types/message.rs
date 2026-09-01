@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
-use uuid::Uuid;
+use rusty_uuid::Uuid;
 
 /// Identifies the sender of a [`Message`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

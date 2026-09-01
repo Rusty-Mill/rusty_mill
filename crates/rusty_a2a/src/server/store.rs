@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
-use uuid::Uuid;
+use rusty_uuid::Uuid;
 
 use crate::types::{ListTasksRequest, Task, TaskPushNotificationConfig};
 
