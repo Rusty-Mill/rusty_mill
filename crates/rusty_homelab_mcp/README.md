@@ -81,7 +81,11 @@ and other asynchronous actions return).
 **OPNsense** (`rusty_opnsense`): `opnsense_system_status`,
 `opnsense_list_services`, `opnsense_service_control` (start/stop/restart),
 `opnsense_list_interfaces`, `opnsense_list_firewall_aliases`,
-`opnsense_list_gateways`.
+`opnsense_list_gateways`, `opnsense_list_firewall_rules`/
+`opnsense_get_firewall_rule`/`opnsense_create_firewall_rule`/
+`opnsense_update_firewall_rule`/`opnsense_delete_firewall_rule`/
+`opnsense_toggle_firewall_rule` (firewall rule CRUD -- none of these take
+effect until `opnsense_apply_firewall_changes` is called).
 
 Most tools return the backend's own JSON as structured content under a
 `result` field (`{"result": ...}`), unopinionated about the shape of `result`

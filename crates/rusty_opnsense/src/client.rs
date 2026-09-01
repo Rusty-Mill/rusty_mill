@@ -38,6 +38,11 @@ pub struct OpnsenseConfig {
 /// unwrapping a field that isn't consistently present. Cheap to clone -- it
 /// shares the same underlying `rusty_request::Client` (connection pool
 /// included).
+///
+/// Firewall rule writes (`create_firewall_rule`/`update_firewall_rule`/
+/// `delete_firewall_rule`/`toggle_firewall_rule`) don't take effect on their
+/// own -- OPNsense buffers rule changes until [`OpnsenseClient::apply_firewall_changes`]
+/// is called, the same way the web UI's "Apply changes" banner implies.
 #[derive(Debug, Clone)]
 pub struct OpnsenseClient {
     http: Client,
@@ -107,6 +112,78 @@ impl OpnsenseClient {
         self.get("/api/routes/gateway/status").await
     }
 
+    /// `GET /firewall/filter/searchRule` -- every firewall rule currently
+    /// configured (a `{"rows": [...], "rowCount": N, ...}` search envelope,
+    /// same shape as [`OpnsenseClient::list_services`]).
+    pub async fn list_firewall_rules(&self) -> Result<Value> {
+        self.get("/api/firewall/filter/searchRule").await
+    }
+
+    /// `GET /firewall/filter/getRule/{uuid}` -- one rule's full field set.
+    pub async fn get_firewall_rule(&self, uuid: &str) -> Result<Value> {
+        self.get(&format!("/api/firewall/filter/getRule/{uuid}"))
+            .await
+    }
+
+    /// `POST /firewall/filter/addRule` -- create a rule. `fields` is the
+    /// field set OPNsense's own rule form submits (`action`, `interface`,
+    /// `direction`, `protocol`, `source_net`, `destination_net`,
+    /// `description`, ...) -- passed through as-is rather than modeled,
+    /// since the valid field set depends on the rule's own
+    /// `ipprotocol`/`protocol` rather than being one fixed schema. Doesn't
+    /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
+    /// called.
+    pub async fn create_firewall_rule(&self, fields: Value) -> Result<Value> {
+        self.post_json(
+            "/api/firewall/filter/addRule",
+            &serde_json::json!({ "rule": fields }),
+        )
+        .await
+    }
+
+    /// `POST /firewall/filter/setRule/{uuid}` -- update a rule. Same
+    /// passthrough field set as [`OpnsenseClient::create_firewall_rule`];
+    /// OPNsense replaces the rule with exactly what's sent, so read
+    /// [`OpnsenseClient::get_firewall_rule`] first and send back its full
+    /// field set unless clearing the fields you omit is intended. Doesn't
+    /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
+    /// called.
+    pub async fn update_firewall_rule(&self, uuid: &str, fields: Value) -> Result<Value> {
+        self.post_json(
+            &format!("/api/firewall/filter/setRule/{uuid}"),
+            &serde_json::json!({ "rule": fields }),
+        )
+        .await
+    }
+
+    /// `POST /firewall/filter/delRule/{uuid}` -- delete a rule. Doesn't take
+    /// effect until [`OpnsenseClient::apply_firewall_changes`] is called.
+    pub async fn delete_firewall_rule(&self, uuid: &str) -> Result<Value> {
+        self.post(&format!("/api/firewall/filter/delRule/{uuid}"))
+            .await
+    }
+
+    /// `POST /firewall/filter/toggleRule/{uuid}[/{0,1}]` -- flip a rule's
+    /// enabled state, or set it explicitly when `enabled` is given. Doesn't
+    /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
+    /// called.
+    pub async fn toggle_firewall_rule(&self, uuid: &str, enabled: Option<bool>) -> Result<Value> {
+        let path = match enabled {
+            Some(true) => format!("/api/firewall/filter/toggleRule/{uuid}/1"),
+            Some(false) => format!("/api/firewall/filter/toggleRule/{uuid}/0"),
+            None => format!("/api/firewall/filter/toggleRule/{uuid}"),
+        };
+        self.post(&path).await
+    }
+
+    /// `POST /firewall/filter/apply` -- apply every pending rule change
+    /// (reloads the live ruleset). OPNsense buffers create/update/delete/
+    /// toggle above until this is called -- none of them take effect on
+    /// their own.
+    pub async fn apply_firewall_changes(&self) -> Result<Value> {
+        self.post("/api/firewall/filter/apply").await
+    }
+
     async fn get(&self, path: &str) -> Result<Value> {
         let response = self
             .http
@@ -122,6 +199,18 @@ impl OpnsenseClient {
             .http
             .post(&format!("{}{path}", self.base_url))?
             .basic_auth(&self.key, &self.secret)?
+            .send()
+            .await?;
+        Self::parse(response).await
+    }
+
+    async fn post_json(&self, path: &str, payload: &Value) -> Result<Value> {
+        let response = self
+            .http
+            .post(&format!("{}{path}", self.base_url))?
+            .basic_auth(&self.key, &self.secret)?
+            .header("Content-Type", "application/json")?
+            .body(serde_json::to_string(payload)?)
             .send()
             .await?;
         Self::parse(response).await
