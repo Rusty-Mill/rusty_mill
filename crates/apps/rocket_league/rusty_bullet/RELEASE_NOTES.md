@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Velocity-aligned friction direction selection
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#105](https://github.com/baileyrd/rusty_bullet/pull/105) · `1954adf`
 
 - **Closes the genuine, significant divergence `RB-PHYSICS-001-FR-048`
   found and explicitly left open**: this port's `setup_rows` and
