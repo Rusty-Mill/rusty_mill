@@ -37,8 +37,22 @@ The `data-mesh-monitor` Vite/React dashboard from the source repo is
 explicitly out of scope for this migration (2026-09-01, user decision) —
 it continues to run unmodified against whichever backend is live.
 
+## Local dev
+
+[`compose.yaml`](./compose.yaml) brings up the same Kafka broker, Schema
+Registry, and Kafka UI the source repo's own `compose.yaml` does (`docker
+compose up -d` / `podman-compose up -d`, from this directory). Once it's up,
+`cargo run -p rusty-meshed-cli --bin init_registry` sets the registry's
+global compatibility to `FULL_TRANSITIVE`, and
+`MESHED_COMPOSE_UP=1 cargo test -p rusty-meshed-cli --test compose_smoke`
+verifies all three services are reachable.
+
 ## Status
 
-Scaffolding stage: crates are registered in the workspace with their
-dependency graph wired, but implementation has not started. See
-`capability-manifest.md` for row-by-row status.
+Most rows across `REG`/`XFM`/`GOV`/`SDK`/`DOM`/`CLI` are `DONE` -- see
+`capability-manifest.md` for row-by-row status. The main thing blocking full
+parity is `rusty_kafka` having no `Produce` request implementation yet (its
+own module doc explains why); everything downstream of publishing to
+Kafka -- `SLOViolationPublisher`, the domain producers/consumers,
+`OutboxRelay`, the CLI `slo` subcommand -- is tracked but not yet built for
+that reason.

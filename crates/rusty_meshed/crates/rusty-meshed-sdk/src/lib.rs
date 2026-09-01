@@ -8,12 +8,14 @@
 //! module list below for what's implemented so far.
 
 mod error;
+pub mod outbox;
 mod registry_client;
 mod topic_config;
 mod topic_manager;
 mod types;
 
 pub use error::{ContractVersionMismatch, RegistryError};
+pub use outbox::{ensure_schema as ensure_outbox_schema, write_outbox_entry, OutboxEntry};
 pub use registry_client::RegistryClient;
 pub use topic_config::{TopicSpec, TopicType};
 pub use topic_manager::{

@@ -5810,8 +5810,12 @@ dependencies = [
  "rusty-meshed-core",
  "rusty-meshed-observability",
  "rusty-meshed-registry",
+ "rusty-meshed-schema-registry",
+ "rusty-meshed-sdk",
  "rusty_err",
  "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
  "rusty_sqlite",
  "rusty_tokio",
 ]
