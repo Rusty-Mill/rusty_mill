@@ -6,6 +6,48 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Hard cap on car angular speed
+**2026-09-01** · PR pending · commit pending
+
+- **Nothing previously bounded how fast sustained air control torque
+  (or a dodge's own kick, or the landing-orientation assist) could spin
+  a car** — holding full pitch/yaw/roll indefinitely spun a car
+  arbitrarily fast, unlike real Rocket League.
+- **Fetched RocketSim's own `RLConst.h` a second time** (the first fetch,
+  for `RB-PHYSICS-001-FR-056`, proved the technique could surface genuine
+  findings), this time targeting every `drive.rs` constant this port's
+  own doc comments flagged as having "no public reference at all"
+  (`STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
+  `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`,
+  `JUMP_HOLD_MAX_DURATION`, `JUMP_HOLD_ACCELERATION`,
+  `LANDING_AUTO_UPRIGHT_TORQUE`) — surfaced `CAR_MAX_ANG_SPEED = 5.5f`
+  (rad/s), a hard "can never exceed" ceiling this port had no equivalent
+  for.
+- **Several other real constants the same fetch surfaced were considered
+  and explicitly not adopted** (dodge per-direction impulse scaling,
+  auto-flip thresholds, a ramping powerslide model, a steering-torque
+  mapping, and RocketSim's own per-axis `CAR_AIR_CONTROL_TORQUE`) — the
+  torque-based ones repeat `RB-PHYSICS-001-FR-031`'s own "false
+  precision" finding (calibrated against RocketSim's own car
+  mass/inertia tensor, which this port's placeholder body doesn't
+  match), while `CAR_MAX_ANG_SPEED` bounds the *result* (a rad/s
+  quantity) rather than the torque producing it, so it transfers
+  cleanly regardless.
+- **Added `drive::MAX_CAR_ANGULAR_SPEED`/`drive::clamp_angular_speed`**
+  (a genuine clamp, unlike `MAX_CAR_SPEED`'s force-gating), wired in
+  right after `integrate::integrate_velocities` in both `world.rs`'s
+  production path and `drive.rs`'s own test helper.
+- **Also noted, as a coincidence**: the pre-existing uncalibrated
+  `drive::DODGE_ANGULAR_SPEED` placeholder is numerically equal to this
+  same `5.5` value — flagged in both constants' own doc comments, not
+  treated as a second confirmation.
+- 3 new `drive.rs` tests (two unit tests for the clamp function, one
+  proving sustained full roll input caps out rather than growing
+  unbounded). All 292 pre-existing tests pass unchanged. 295 total in
+  `rb_physics_bullet` (+3 over FR-056's 292).
+
+---
+
 ## Boost acceleration ground/air split
 **2026-09-01** · [#119](https://github.com/baileyrd/rusty_bullet/pull/119) · `4eafed3`
 

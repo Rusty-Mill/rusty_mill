@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.56.0
+- Version: 0.57.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3523,6 +3523,123 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     specific car mass). All 291 of `rb_physics_bullet`'s pre-existing
     tests (as of `FR-055`) pass unchanged (net +1 test over `FR-055`'s
     291, bringing the crate to 292).
+- `RB-PHYSICS-001-FR-057` (hard cap on car angular speed, implemented):
+  `RB-PHYSICS-001-FR-056`'s fetch of RocketSim's `RLConst.h` proved a
+  richer, previously-unsuspected level of detail than this port assumed
+  existed for one constant (the boost ground/air split); this requirement
+  fetched the same reference a second time, targeting the constants this
+  crate's own module doc comment already listed as having "no public
+  reference at all" for (`STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`,
+  `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
+  `JUMP_HOLD_ACCELERATION`, `LANDING_AUTO_UPRIGHT_TORQUE`), to check
+  whether any of them had a genuine real counterpart after all. The
+  fetch surfaced `CAR_MAX_ANG_SPEED = 5.5f, // Car can never exceed this
+  angular velocity (radians/s)` — a hard ceiling on a car's angular
+  speed that this port had never modeled at all: nothing previously
+  bounded how fast sustained air control torque (or a dodge's own kick,
+  or the landing-orientation assist) could spin a car, so holding full
+  pitch/yaw/roll indefinitely spun it arbitrarily fast, unlike real
+  Rocket League.
+
+  Several other real constants the same fetch surfaced (dodge
+  per-direction impulse scaling, auto-flip/landing-assistance thresholds,
+  a ramping powerslide model, a steering-torque mapping) were considered
+  and explicitly not adopted here — see this requirement's own Non-goals
+  below and `RB-PHYSICS-001-FR-031`'s own "false precision" finding, which
+  already worked through why porting a *torque* magnitude from
+  RocketSim's engine doesn't transfer soundly to this port's own
+  differently-calibrated car body/inertia tensor. `CAR_MAX_ANG_SPEED`
+  is different in kind from those: it bounds the *result* (angular
+  velocity, a rad/s quantity independent of whatever torque and inertia
+  combination produced it), not the torque that produces it, so it
+  transfers cleanly regardless of this port's own car body/inertia
+  mismatch — the one candidate this fetch surfaced that actually cleared
+  `RB-PHYSICS-001-FR-031`'s own bar.
+
+  Also incidentally confirmed: `drive::DODGE_ANGULAR_SPEED` (an existing,
+  explicitly uncalibrated placeholder for a dodge's own instantaneous
+  spin kick) is numerically equal to `5.5`, the same value this
+  requirement confirms for an unrelated purpose. That's flagged as a
+  coincidence in both constants' own doc comments, not treated as a
+  second confirmation of `DODGE_ANGULAR_SPEED` itself — it predates this
+  cap, was chosen independently only to "look visibly fast" per its own
+  doc comment, and nothing about a dodge's real kick strength was
+  actually checked against RocketSim by this requirement.
+  1. **Added `drive::MAX_CAR_ANGULAR_SPEED = 5.5`** (rad/s), doc-commented
+     with the exact RocketSim citation above and its scope caveats (only
+     covers this port's own driven-forces sources, once per step — not a
+     universal post-solver clamp against every velocity source, matching
+     this port's own existing precedent for its linear-speed caps rather
+     than promising a stricter guarantee than this port's architecture
+     actually enforces).
+  2. **Added `drive::clamp_angular_speed`**, a small function that scales
+     `RigidBody.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if
+     exceeded, preserving direction — a genuine clamp, unlike
+     `MAX_CAR_SPEED`/`UNBOOSTED_MAX_CAR_SPEED`, which only ever gate
+     *new* throttle/boost force and never reduce velocity already past
+     their own cap.
+  3. **Wired the clamp in after integration, in both places driven forces
+     are integrated**: `world.rs`'s `drive_and_integrate_velocities`
+     (production) and `drive.rs`'s own test helper
+     `step_with_input_and_dodge_flip` (so `drive.rs`'s own unit tests
+     exercise the identical ordering) — both call `clamp_angular_speed`
+     immediately after `integrate::integrate_velocities`, since torque
+     `apply_driven_forces` applies isn't reflected in `angular_velocity`
+     until that integration call runs; clamping any earlier would miss
+     this step's own torque contribution entirely.
+  - **Non-goals (this requirement).** Does not adopt RocketSim's dodge
+    per-direction impulse-scaling constants
+    (`FLIP_FORWARD/SIDE/BACKWARD_IMPULSE_MAX_SPEED_SCALE`,
+    `FLIP_TORQUE_X/Y`, `FLIP_INITIAL_VEL_SCALE`) — a real, larger
+    divergence from this port's own flat `DODGE_SPEED`/
+    `DODGE_ANGULAR_SPEED`, but understanding the exact formula these
+    constants combine into needs reading RocketSim's actual dodge
+    implementation, not just its constant declarations; left as a
+    candidate for a later, more careful requirement. Does not adopt
+    RocketSim's auto-flip constants
+    (`CAR_AUTOFLIP_IMPULSE/TORQUE/TIME/NORMZ_THRESH/ROLL_THRESH`) as a
+    reference for `drive::LANDING_AUTO_UPRIGHT_TORQUE` — real Rocket
+    League's auto-flip appears to be conditional/threshold-driven, which
+    may not map onto this port's own continuous-torque assist model
+    without further investigation. Does not adopt RocketSim's powerslide
+    constants (`POWERSLIDE_RISE_RATE`/`FALL_RATE`) for
+    `drive::HANDBRAKE_FRICTION_MULTIPLIER` — those imply a ramping state
+    variable, a different model shape than this port's own flat
+    multiplier, too large a change to fold into this requirement. Does
+    not adopt RocketSim's `THROTTLE_TORQUE_AMOUNT` for `drive::STEER_TORQUE`
+    — confirming that mapping needs the actual usage-site source, not
+    just the constant declaration. Does not split `AIR_CONTROL_TORQUE`
+    into distinct per-axis constants, despite RocketSim defining exactly
+    that (`CAR_AIR_CONTROL_TORQUE`, a per-axis pitch/yaw/roll vector) —
+    see this requirement's own findings above for why a torque constant,
+    unlike an angular-speed cap, doesn't clear `RB-PHYSICS-001-FR-031`'s
+    "false precision" bar. Does not touch `RB-PHYSICS-001-FR-005`'s
+    real-data calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `drive::MAX_CAR_ANGULAR_SPEED`'s own doc
+    comment states the exact RocketSim citation and its enforcement
+    scope. Sustained full-axis air control input can no longer drive a
+    car's angular speed past `MAX_CAR_ANGULAR_SPEED`, in production
+    (`world.rs`) and in `drive.rs`'s own test helper alike. All
+    pre-existing tests pass unchanged — none of them sustain full-axis
+    air control input for long enough, in a single call, to have
+    approached the cap before this requirement (confirmed by inspection:
+    every existing air-control test is a single `step_with_input` call at
+    this crate's own test car's mass/inertia, well under the cap in one
+    step).
+  - **Verification plan.** 3 new `drive.rs` tests:
+    `clamp_angular_speed_is_a_no_op_below_the_cap` and
+    `clamp_angular_speed_scales_an_over_cap_velocity_down_to_the_cap_preserving_direction`
+    unit-test the clamp function directly; `sustained_full_roll_input_never_exceeds_the_hard_angular_speed_cap`
+    holds full roll for 2 simulated seconds (120 steps at this test
+    module's usual `1/60` `dt`) — far more than enough torque-time to
+    exceed `MAX_CAR_ANGULAR_SPEED` without the clamp, given this test
+    car's own mass/inertia — and asserts the resulting angular speed both
+    stays at or under the cap and actually reaches near it (ruling out a
+    vacuous pass from `AIR_CONTROL_TORQUE` being too weak to matter). All
+    292 of `rb_physics_bullet`'s pre-existing tests (as of `FR-056`) pass
+    unchanged (net +3 tests over `FR-056`'s 292, bringing the crate to
+    295).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4863,7 +4980,16 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   yaw, roll) once real recorded air-control data exists to calibrate them
   separately — real Rocket League's three rates genuinely differ (roll
   fastest); sharing one constant is a documented simplification, not a
-  claim they're actually equal.
+  claim they're actually equal. `RB-PHYSICS-001-FR-057`'s own fetch of
+  RocketSim's `RLConst.h` confirmed RocketSim does define exactly such a
+  split (`CAR_AIR_CONTROL_TORQUE`, a per-axis pitch/yaw/roll vector) —
+  but explicitly didn't adopt it, since a torque constant (unlike
+  `MAX_CAR_ANGULAR_SPEED`, the one constant that same fetch did adopt)
+  is calibrated against RocketSim's own specific car mass/inertia tensor,
+  which this port's placeholder car body doesn't match, the same "false
+  precision" problem `RB-PHYSICS-001-FR-031`'s audit already found for
+  this constant. Real recorded air-control data (not just RocketSim's own
+  torque numbers) is still the real path to closing this one.
 - Handbrake's real mechanic (reduced rear-wheel grip enabling a
   steering-assisted drift) doesn't map cleanly onto this port's one-box,
   uniform-friction car model (see Non-goals) — worth revisiting whether a
@@ -4931,6 +5057,39 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.57.0 (2026-09-01): FR-057 added and implemented (hard cap on car
+  angular speed) — nothing in this port previously bounded how fast
+  sustained air control torque (or a dodge's own kick, or the
+  landing-orientation assist) could spin a car; holding full pitch/yaw/roll
+  indefinitely spun a car arbitrarily fast, unlike real Rocket League.
+  Fetched RocketSim's own `RLConst.h` a second time (`FR-056` proved the
+  first fetch's technique — targeting this port's own "no public
+  reference at all" constants — could surface genuine findings), this
+  time targeting `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
+  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`,
+  `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
+  `JUMP_HOLD_ACCELERATION`, and `LANDING_AUTO_UPRIGHT_TORQUE`. Found
+  `CAR_MAX_ANG_SPEED = 5.5f` (rad/s), a hard "can never exceed" ceiling
+  this port had no equivalent for. Several other real constants the same
+  fetch surfaced (dodge per-direction impulse scaling, auto-flip
+  thresholds, a ramping powerslide model, a steering-torque mapping, and
+  RocketSim's own per-axis `CAR_AIR_CONTROL_TORQUE`) were considered and
+  explicitly not adopted — the torque-based ones repeat
+  `RB-PHYSICS-001-FR-031`'s own "false precision" finding (a torque
+  constant is calibrated against RocketSim's own car mass/inertia tensor,
+  which this port's placeholder body doesn't match), while
+  `CAR_MAX_ANG_SPEED` bounds the *result* (a rad/s quantity) rather than
+  the torque producing it, so it transfers cleanly regardless. Added
+  `drive::MAX_CAR_ANGULAR_SPEED` and `drive::clamp_angular_speed` (a
+  genuine clamp, unlike `MAX_CAR_SPEED`'s force-gating), wired in right
+  after `integrate::integrate_velocities` in both `world.rs`'s production
+  path and `drive.rs`'s own test helper. Also noted, as a coincidence, that
+  the pre-existing uncalibrated `DODGE_ANGULAR_SPEED` placeholder is
+  numerically equal to this same 5.5 value — flagged in both constants'
+  own doc comments, not treated as a second confirmation. 3 new `drive.rs`
+  tests (two unit tests for the clamp function, one proving sustained full
+  roll input caps out rather than growing unbounded); bringing the crate
+  to 295 total (+3 over `FR-056`'s 292).
 - 0.56.0 (2026-09-01): FR-056 added and implemented (boost acceleration
   ground/air split) — `drive::BOOST_ACCELERATION` was a single flat
   constant applied identically whether a car was grounded or airborne,

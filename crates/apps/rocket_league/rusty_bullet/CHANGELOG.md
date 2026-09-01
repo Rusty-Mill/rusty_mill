@@ -762,6 +762,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `apply_driven_forces`'s existing `on_ground` parameter to select
   between them, and corrected every doc comment claiming the two were
   identical. 1 new test; all pre-existing tests pass unchanged.
+- Missing hard cap on a car's angular speed (`RB-PHYSICS-001-FR-057`) —
+  nothing previously bounded how fast sustained air control torque (or a
+  dodge's own kick, or the landing-orientation assist) could spin a car,
+  so holding full pitch/yaw/roll indefinitely spun it arbitrarily fast,
+  unlike real Rocket League. A second fetch of RocketSim's own
+  `RLConst.h`, targeting every `drive.rs` constant this port's own doc
+  comments flagged as having no public reference at all, surfaced
+  `CAR_MAX_ANG_SPEED = 5.5f` (rad/s), a hard "can never exceed" ceiling
+  this port had no equivalent for. Added `drive::MAX_CAR_ANGULAR_SPEED`
+  and `drive::clamp_angular_speed` (a genuine clamp, unlike
+  `MAX_CAR_SPEED`'s force-gating), wired in right after
+  `integrate::integrate_velocities` in both `world.rs`'s production path
+  and `drive.rs`'s own test helper. 3 new tests; all pre-existing tests
+  pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

@@ -373,7 +373,11 @@ impl PhysicsWorld {
     /// dodge's spin flip-canceled by a further press, driven by
     /// `dodge_flip_active`) alongside gravity, so `input`'s forces/impulses
     /// (and friction adjustment) are part of the same velocity-prediction
-    /// phase.
+    /// phase. Since `RB-PHYSICS-001-FR-057`, also calls
+    /// `drive::clamp_angular_speed` right after `integrate_velocities`, so
+    /// this step's angular velocity — air control torque and any direct
+    /// writes (a dodge's kick, the landing-orientation assist) alike —
+    /// never leaves this function above `drive::MAX_CAR_ANGULAR_SPEED`.
     #[allow(clippy::too_many_arguments)]
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
@@ -406,6 +410,7 @@ impl PhysicsWorld {
         );
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
+        drive::clamp_angular_speed(car);
     }
 
     /// Detects every one of `body`'s contacts against every static surface
