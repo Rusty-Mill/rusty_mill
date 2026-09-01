@@ -650,6 +650,29 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   those functions' own signature can't know which kind of pair produced
   their inputs — left for a future requirement. No new tests; all
   pre-existing tests pass unchanged.
+- `drive::STEER_TORQUE` real-Rocket-League reference finding
+  (`RB-PHYSICS-001-FR-065`) — `STEER_TORQUE` had no public reference at
+  all. Fetched RocketSim's own `Car.cpp` (`_UpdateWheels`, matching
+  FR-058/FR-059/FR-064's own method) and found real Rocket League's
+  steering isn't a direct yaw-torque model: a wheel's steer angle (from a
+  confirmed `STEER_ANGLE_FROM_SPEED_CURVE`) feeds Bullet's own raycast
+  vehicle system (`btVehicleRL`), whose per-wheel lateral tire friction
+  is what actually turns the car — an architecture this port's
+  single-rigid-box car has no way to represent, the same category
+  FR-063 already established. The confirmed curve's own shape is also
+  the opposite of this port's own `speed_factor`: real turning ability is
+  highest at a standstill and decreases with speed, while this port's
+  `speed_factor` is zero at a standstill and scales up with speed.
+  Corrected `STEER_TORQUE`'s and `MAX_CAR_SPEED`'s own doc comments and
+  the `speed_factor` call site's comment; also fixed adjacent stale text
+  in the spec's own Open Questions section that still claimed
+  `AIR_CONTROL_TORQUE`/`JUMP_HOLD_MAX_DURATION`/`JUMP_HOLD_ACCELERATION`
+  had no public reference, contradicting FR-057's and FR-031's own
+  already-shipped findings. Not adopted as a fix: the real curve maps
+  speed to a wheel angle whose translation to yaw torque depends on
+  tire-slip friction this port doesn't model, leaving no principled way
+  to carry even the curve's shape onto this port's own direct-torque
+  model. No new tests; all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

@@ -238,7 +238,11 @@
 //! opposing current motion, or any side dodge, growing stronger as current
 //! speed rises) matches RocketSim's own confirmed real ratios via
 //! `dodge_speed_scale` — the same "shape confirmed, magnitude not" split
-//! `THROTTLE_ACCELERATION` already has. `STEER_TORQUE`,
+//! `THROTTLE_ACCELERATION` already has. `STEER_TORQUE` itself remains an
+//! uncalibrated placeholder, but since `RB-PHYSICS-001-FR-065` its own
+//! `speed_factor` scale-up is confirmed to have the wrong *shape*, not
+//! merely an uncalibrated magnitude — see that requirement's own entry and
+//! `STEER_TORQUE`'s own doc comment for the full finding.
 //! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
 //! `WALL_JUMP_HORIZONTAL_SPEED`, and `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
@@ -281,6 +285,9 @@ use rb_domain::{ControllerInput, Vec3};
 /// Also used as the turning-torque scale-up reference in `speed_factor`
 /// below — an arbitrary normalization choice, not a claim that a car's
 /// actual turning grip caps out at boosted speed specifically.
+/// `RB-PHYSICS-001-FR-065` found `speed_factor`'s own scale-up *direction*
+/// against this reference doesn't match real Rocket League's own steering
+/// model at all — see `STEER_TORQUE`'s own doc comment for the finding.
 pub const MAX_CAR_SPEED: f32 = 2300.0;
 
 /// Hard cap (rad/s) on a car's angular speed, enforced by
@@ -388,6 +395,45 @@ fn drive_speed_taper(signed_speed_in_throttle_direction: f32) -> f32 {
 /// chosen only so a full-lock turn is visibly responsive for this car's
 /// mass/inertia in tests, not derived from any measured or documented
 /// Rocket League value.
+///
+/// `RB-PHYSICS-001-FR-065` fetched RocketSim's real `Car.cpp` (`_UpdateWheels`,
+/// matching `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`'s own
+/// real-implementation-file method) and found real Rocket League's
+/// steering isn't a direct yaw-torque model at all: a wheel's *steer
+/// angle* (not a torque) is set from a confirmed real
+/// `STEER_ANGLE_FROM_SPEED_CURVE` (`RLConst.h`, radians), and that angled
+/// wheel's lateral tire friction — computed per-wheel by `btVehicleRL`, a
+/// custom extension of Bullet's own raycast vehicle system
+/// (`btDefaultVehicleRaycaster`), through a further confirmed
+/// `LAT_FRICTION_CURVE` slip-friction curve — is what actually turns the
+/// car. This port has no wheels, raycasting, or tire-slip model at all
+/// (the car is one rigid box), so this real mechanism can't be ported
+/// without a substantially larger architecture change, the same category
+/// `RB-PHYSICS-001-FR-063` already established for per-contact-pair-type
+/// restitution/friction.
+///
+/// One finding is still directly actionable even without that larger
+/// change: the confirmed real curve's own *shape* is the opposite of this
+/// port's own `speed_factor` below. Real Rocket League's maximum steering
+/// angle is highest at a standstill (`0.53356` rad ≈ 30.6° at 0 uu/s) and
+/// decreases sharply as speed rises (down to `0.03454` rad ≈ 2° at 3000
+/// uu/s) — a car can turn tightest from a stop, only gently at speed. This
+/// port's own `speed_factor` does the opposite: zero torque at a
+/// standstill, scaling *up* to full `STEER_TORQUE` at `MAX_CAR_SPEED`.
+/// Not adopted as a fix: unlike `RB-PHYSICS-001-FR-058`'s throttle taper
+/// or `FR-059`'s dodge scale (direct multipliers on a force/impulse this
+/// port already applies the same way real Rocket League does), the real
+/// curve maps speed to a *wheel angle*, which real Rocket League then
+/// feeds through nonlinear tire-slip friction (dependent on wheelbase
+/// geometry and friction curves this port doesn't model at all) to
+/// produce the actual turning force — there's no principled way to carry
+/// even the curve's normalized shape onto this port's own direct-torque
+/// model. Reversing `speed_factor`'s direction without that transfer
+/// function would substitute one unconfirmed guess for another, not adopt
+/// a confirmed real value — the same reasoning that kept
+/// `RB-PHYSICS-001-FR-057`'s `AIR_CONTROL_TORQUE` and `FR-059`'s
+/// `DODGE_SPEED` base magnitude as placeholders despite a real reference
+/// existing for each.
 const STEER_TORQUE: f32 = 1_500_000.0;
 
 /// Boost acceleration while grounded (uu/s^2) — unlike throttle, boost
@@ -817,6 +863,11 @@ pub fn apply_driven_forces(
         if steer != 0.0 {
             // A stationary car can't carve a turn — scale the available
             // torque by how fast it's already going, up to MAX_CAR_SPEED.
+            // RB-PHYSICS-001-FR-065: real Rocket League's own confirmed
+            // steering curve has this backwards — maximum turning ability
+            // is highest at a standstill and decreases with speed — but
+            // that curve doesn't transfer onto this port's own
+            // direct-torque model; see STEER_TORQUE's own doc comment.
             let speed_factor = (car.linear_velocity.length() / MAX_CAR_SPEED).min(1.0);
             if speed_factor > 0.0 {
                 car.apply_torque(up_axis(car) * (steer * STEER_TORQUE * speed_factor));
