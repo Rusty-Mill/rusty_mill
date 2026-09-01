@@ -14,6 +14,52 @@ use crate::{drive, integrate, solver};
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
 use std::collections::HashMap;
 
+/// Hard cap (uu/s) on the ball's linear speed — confirmed exact against
+/// RocketSim's own `RLConst.h` during `RB-PHYSICS-001-FR-061`'s audit:
+/// `BALL_MAX_SPEED = 6000.f`. A pure velocity cap, not a torque or force
+/// constant, so — like `drive::MAX_CAR_ANGULAR_SPEED` before it (see
+/// `RB-PHYSICS-001-FR-057`'s own findings) — it transfers cleanly
+/// regardless of this port's ball not being calibrated to real Rocket
+/// League's own mass/inertia. Enforced by `clamp_ball_velocity`, called
+/// once per step in `PhysicsWorld::step`.
+pub const BALL_MAX_SPEED: f32 = 6000.0;
+
+/// Hard cap (rad/s) on the ball's angular speed — confirmed exact against
+/// RocketSim's own `RLConst.h` during `RB-PHYSICS-001-FR-061`'s audit:
+/// `BALL_MAX_ANG_SPEED = 6.f, // Ball can never exceed this angular
+/// velocity (radians/s)`. Enforced by `clamp_ball_velocity`, the same way
+/// `BALL_MAX_SPEED` is.
+pub const BALL_MAX_ANG_SPEED: f32 = 6.0;
+
+/// Scales `ball.linear_velocity`/`ball.angular_velocity` back down to
+/// `BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` (preserving direction) if either is
+/// exceeded — a genuine clamp, the same kind `drive::clamp_angular_speed`
+/// already applies to a car's own angular speed, generalized here to both
+/// linear and angular speed since the ball has no drive-input-gated
+/// mechanic of its own to house a car-specific version of this in
+/// `drive.rs`. Called once per step in `PhysicsWorld::step`, right after
+/// this step's contact resolution (including any net) but before the
+/// transform integrates — matching real RocketSim's own `_FinishPhysicsTick`
+/// placement (fetched and confirmed during `RB-PHYSICS-001-FR-061`'s
+/// audit: enforced after collision resolution, at the end of the physics
+/// tick) more precisely than `drive::clamp_angular_speed`'s own placement
+/// managed for the car (mid-pipeline, before this step's own contact
+/// resolution — see that function's own doc comment for why). Like that
+/// function, a same-step contact-solver impulse is clamped this same call
+/// (not deferred to next step), but a later force/impulse applied after
+/// this call within the same step (none currently exists for the ball)
+/// wouldn't be re-clamped until the next step's call.
+fn clamp_ball_velocity(ball: &mut RigidBody) {
+    let speed = ball.linear_velocity.length();
+    if speed > BALL_MAX_SPEED {
+        ball.linear_velocity *= BALL_MAX_SPEED / speed;
+    }
+    let angular_speed = ball.angular_velocity.length();
+    if angular_speed > BALL_MAX_ANG_SPEED {
+        ball.angular_velocity *= BALL_MAX_ANG_SPEED / angular_speed;
+    }
+}
+
 /// The whole simulated scene: one ball-like sphere, zero or more car-like
 /// boxes, one ground plane, zero or more arena walls (`walls`, added via
 /// `with_wall` — a plain flat `StaticPlane` each, typically with a
@@ -564,7 +610,11 @@ impl PhysicsWorld {
     /// state (`body::RigidBody::update_sleep_state`) re-evaluated once
     /// every contact above (including the net panels) is resolved but
     /// before the transform integrates, so a body newly asleep this step
-    /// freezes in place this same step.
+    /// freezes in place this same step. Since `RB-PHYSICS-001-FR-061`, the
+    /// ball's own linear and angular speed are hard-capped
+    /// (`clamp_ball_velocity`) at that same point — after contact
+    /// resolution, before sleep evaluation and transform integration —
+    /// matching real RocketSim's own placement for this same clamp.
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
@@ -728,6 +778,12 @@ impl PhysicsWorld {
             *car = *resolved;
         }
 
+        // Hard ball speed/angular-speed caps (RB-PHYSICS-001-FR-061):
+        // applied right after this step's contact resolution (including
+        // any net, just above), matching real RocketSim's own placement —
+        // see `clamp_ball_velocity`'s own doc comment.
+        clamp_ball_velocity(&mut self.ball);
+
         // Sleeping (RB-PHYSICS-001-FR-037): evaluated once every other
         // contact this step has already been resolved (including the net
         // panels just above) but before the transform integrates, so a
@@ -862,6 +918,75 @@ mod tests {
             world.ball.position.z
         );
         assert!(world.ball.linear_velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn clamp_ball_velocity_is_a_no_op_below_both_caps() {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        ball.linear_velocity = Vec3::new(100.0, 200.0, 0.0);
+        ball.angular_velocity = Vec3::new(1.0, 2.0, 0.0);
+        clamp_ball_velocity(&mut ball);
+        assert_eq!(
+            ball.linear_velocity,
+            Vec3::new(100.0, 200.0, 0.0),
+            "expected an already-under-cap linear velocity to pass through unchanged, got {:?}",
+            ball.linear_velocity
+        );
+        assert_eq!(
+            ball.angular_velocity,
+            Vec3::new(1.0, 2.0, 0.0),
+            "expected an already-under-cap angular velocity to pass through unchanged, got {:?}",
+            ball.angular_velocity
+        );
+    }
+
+    #[test]
+    fn clamp_ball_velocity_scales_an_over_cap_linear_velocity_down_to_the_cap_preserving_direction()
+    {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        ball.linear_velocity = Vec3::new(20_000.0, 0.0, 0.0);
+        clamp_ball_velocity(&mut ball);
+        assert!(
+            (ball.linear_velocity.length() - BALL_MAX_SPEED).abs() < 1e-3,
+            "expected the clamp to scale magnitude down to exactly BALL_MAX_SPEED, got {:?}",
+            ball.linear_velocity
+        );
+        assert!(
+            ball.linear_velocity.y == 0.0 && ball.linear_velocity.z == 0.0,
+            "expected the clamp to preserve direction, got {:?}",
+            ball.linear_velocity
+        );
+    }
+
+    #[test]
+    fn clamp_ball_velocity_scales_an_over_cap_angular_velocity_down_to_the_cap_preserving_direction(
+    ) {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
+        ball.angular_velocity = Vec3::new(0.0, 0.0, 50.0);
+        clamp_ball_velocity(&mut ball);
+        assert!(
+            (ball.angular_velocity.length() - BALL_MAX_ANG_SPEED).abs() < 1e-4,
+            "expected the clamp to scale magnitude down to exactly BALL_MAX_ANG_SPEED, got {:?}",
+            ball.angular_velocity
+        );
+        assert!(
+            ball.angular_velocity.x == 0.0 && ball.angular_velocity.y == 0.0,
+            "expected the clamp to preserve direction, got {:?}",
+            ball.angular_velocity
+        );
+    }
+
+    #[test]
+    fn a_ball_launched_far_past_ball_max_speed_never_exceeds_it_after_a_step() {
+        let mut ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1000.0));
+        ball.linear_velocity = Vec3::new(50_000.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground());
+        world.step(1.0 / 60.0);
+        assert!(
+            world.ball.linear_velocity.length() <= BALL_MAX_SPEED + 1e-3,
+            "expected the ball's speed to never exceed BALL_MAX_SPEED after a step, got {}",
+            world.ball.linear_velocity.length()
+        );
     }
 
     #[test]

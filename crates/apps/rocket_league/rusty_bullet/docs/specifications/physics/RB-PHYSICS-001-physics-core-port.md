@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.60.0
+- Version: 0.61.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3881,6 +3881,83 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `RB-PHYSICS-001-FR-044`'s own precedent); all 302 of `rb_physics_bullet`'s
     pre-existing tests (as of `FR-059`) pass unchanged, confirming zero
     behavioral change.
+- `RB-PHYSICS-001-FR-061` (hard caps on ball linear/angular speed,
+  implemented): unlike a car, which has had a hard angular-speed ceiling
+  since `RB-PHYSICS-001-FR-057`, the ball had no linear or angular speed
+  cap of any kind — its `RigidBody.linear_damping`/`angular_damping` both
+  default to `0.0` and nothing else ever bounds its velocity, so a large
+  enough impact (or an accumulating chain of them) could in principle push
+  it to an arbitrarily high speed, unlike real Rocket League's own ball.
+  This requirement fetched RocketSim's own `RLConst.h` a third time
+  (matching `RB-PHYSICS-001-FR-057`/`FR-060`'s own method) and found two
+  confirmed real hard caps: `BALL_MAX_SPEED = 6000.f` and
+  `BALL_MAX_ANG_SPEED = 6.f, // Ball can never exceed this angular
+  velocity (radians/s)`. Both are pure velocity caps (not a torque or
+  force constant calibrated against a specific mass/inertia), the same
+  category `RB-PHYSICS-001-FR-057`'s own findings established as
+  transferring cleanly regardless of this port's own ball not being
+  calibrated to real Rocket League's — see that requirement's own
+  reasoning for why a *result* cap clears the bar a torque-based
+  placeholder can't.
+  1. **Fetched RocketSim's own `Ball.cpp`** to confirm the exact
+     enforcement mechanism and placement, not just the constant
+     declarations: `BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` are enforced via
+     `if (vel.length2() > maxSpeedBT * maxSpeedBT) vel =
+     vel.normalized() * maxSpeedBT` (and the same shape for angular
+     velocity) inside `_FinishPhysicsTick()`, called after collision
+     resolution, at the end of the physics tick — a hard clamp, not a
+     force/torque that merely opposes exceeding it.
+  2. **Added `world::BALL_MAX_SPEED = 6000.0` and
+     `world::BALL_MAX_ANG_SPEED = 6.0`, plus a new `world::clamp_ball_velocity`**
+     that scales `RigidBody.linear_velocity`/`angular_velocity` back down
+     to each cap (preserving direction) if exceeded — the same shape
+     `drive::clamp_angular_speed` already uses for the car, generalized
+     to both linear and angular speed here since the ball has no
+     drive-input-gated mechanic of its own to house a car-specific
+     version of this in `drive.rs`. Placed in `world.rs` rather than
+     `drive.rs` for that reason.
+  3. **Wired `clamp_ball_velocity` into `PhysicsWorld::step`** right
+     after this step's contact resolution (including any net) — the same
+     point `self.ball = bodies[0]` already syncs the resolved ball back —
+     and before sleep evaluation or transform integration. This matches
+     real RocketSim's own "after collision resolution, end of tick"
+     placement more precisely than `drive::clamp_angular_speed`'s own
+     placement for the car (mid-pipeline, right after `integrate_velocities`
+     but *before* that same step's own contact resolution — see that
+     function's own doc comment for why it couldn't do the same).
+  - **Non-goals (this requirement).** Does not adopt `BALL_DRAG = 0.03f`
+    ("net-velocity drag multiplier") — fetching `Ball.cpp` found this is
+    set once at ball construction (`constructionInfo.m_linearDamping =
+    mutatorConfig.ballDrag`), a per-match mutator-config default, not a
+    hardcoded system invariant like the two speed caps above. This port's
+    own `RigidBody::sphere` constructor takes no opinion on what a "real"
+    ball's own `linear_damping` should default to — the ball is
+    caller-constructed, not owned by this crate — so adopting `BALL_DRAG`
+    would mean either changing that constructor's own default (a
+    separate, deliberate design decision this requirement doesn't take
+    on) or introducing a new dedicated ball-construction helper, both out
+    of scope for a narrow constant-adoption requirement; left as a
+    candidate for a future, dedicated requirement. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** A ball launched far past `BALL_MAX_SPEED`
+    never exceeds it after a step; `clamp_ball_velocity` scales down an
+    over-cap linear or angular velocity while preserving direction, and
+    is a no-op below both caps. All pre-existing tests pass unchanged —
+    no existing test ever set the ball's speed anywhere close to `6000.0`
+    uu/s or its angular speed anywhere close to `6.0` rad/s (the highest
+    directly-assigned ball speed in the crate's own tests is `3000.0`
+    uu/s; no test assigns the ball's angular velocity directly at all),
+    an explicit zero-regression-risk property confirmed by inspection
+    before implementation.
+  - **Verification plan.** 4 new tests: `clamp_ball_velocity_is_a_no_op_below_both_caps`
+    and the two `..._scales_an_over_cap_..._velocity_down_to_the_cap_preserving_direction`
+    tests unit-test `clamp_ball_velocity` directly (linear and angular,
+    separately); `a_ball_launched_far_past_ball_max_speed_never_exceeds_it_after_a_step`
+    is an integration test through the real `PhysicsWorld::step` public
+    API. All 302 of `rb_physics_bullet`'s pre-existing tests (as of
+    `FR-060`) pass unchanged (net +4 tests over `FR-060`'s 302, bringing
+    the crate to 306).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5329,6 +5406,46 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.61.0 (2026-09-01): FR-061 added and implemented (hard caps on ball
+  linear/angular speed) — the ball had no linear or angular speed cap of
+  any kind (`RigidBody.linear_damping`/`angular_damping` both default to
+  `0.0`, and nothing else ever bounded its velocity), unlike a car, which
+  has had a hard angular-speed ceiling since `FR-057`. Fetched RocketSim's
+  own `RLConst.h` and `Ball.cpp` (matching `FR-057`/`FR-060`'s own method)
+  and found two confirmed real hard caps — `BALL_MAX_SPEED = 6000.f` and
+  `BALL_MAX_ANG_SPEED = 6.f` — enforced via a hard clamp
+  (`if (vel.length2() > max*max) vel = vel.normalized() * max`) inside
+  `_FinishPhysicsTick()`, after collision resolution, at the end of the
+  physics tick. Both are pure velocity caps, not torque/force constants
+  calibrated against a specific mass/inertia, so they transfer cleanly
+  regardless of this port's own ball not being calibrated to real Rocket
+  League's — the same category `FR-057` established. Added
+  `world::BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` and a new
+  `world::clamp_ball_velocity`, generalizing `drive::clamp_angular_speed`'s
+  own shape to both linear and angular speed (placed in `world.rs` rather
+  than `drive.rs` since the ball has no drive-input-gated mechanic of its
+  own), wired into `PhysicsWorld::step` right after this step's contact
+  resolution (including any net) and before sleep evaluation or transform
+  integration — matching real RocketSim's own placement more precisely
+  than `drive::clamp_angular_speed`'s own placement for the car (which
+  runs *before* that same step's own contact resolution, an earlier point
+  in this port's own pipeline). Deliberately not adopted: `BALL_DRAG =
+  0.03f`, since real RocketSim sets it once at ball construction as a
+  per-match mutator-config default (`constructionInfo.m_linearDamping =
+  mutatorConfig.ballDrag`), not a hardcoded system invariant like the two
+  speed caps — this port's own `RigidBody::sphere` constructor takes no
+  opinion on a "real" ball's own damping default, and changing that is a
+  separate, deliberate design decision left for a future requirement. 4
+  new tests (2 unit tests of `clamp_ball_velocity` directly, one each for
+  linear and angular; 1 integration test through `PhysicsWorld::step`
+  confirming a ball launched far past `BALL_MAX_SPEED` never exceeds it
+  after a step; 1 no-op-below-both-caps test); no existing test ever set
+  the ball's speed or angular speed anywhere near either cap (highest
+  directly-assigned ball speed in the crate's own tests: `3000.0` uu/s;
+  no test assigns ball angular velocity directly at all), an explicit
+  zero-regression-risk property confirmed by inspection before
+  implementation and by all 302 pre-existing tests passing unchanged
+  afterward; bringing the crate to 306 total (+4 over `FR-060`'s 302).
 - 0.60.0 (2026-09-01): FR-060 added and implemented (landing
   auto-orientation vs. real auto-flip/auto-roll — audit finding,
   documentation only) — `RB-PHYSICS-001-FR-057`'s own Non-goals had
