@@ -16,7 +16,7 @@ dependencies, and every per-dependency "used by" crate list matches exactly).
 Section 2 (sovereignty) is carried forward unchanged after re-verification —
 nothing there needed a correction.
 
-**Section 1 needed one.** The report format's own guidance
+**Section 1 needed two.** The report format's own guidance
 (`references/repo-inspector-report-format.md`) explicitly warns against
 folding several of `find_clusters.py`'s mechanically-distinct clusters into
 one narrative row, using this exact scenario as its cautionary example: "a
@@ -24,11 +24,26 @@ report once combined three unrelated clusters — an HMAC construction, an RSA
 key type, and a `BigUint` type — under one row labeled 'hand-rolled crypto
 primitives'... `implementation-merge` had to split that row back into three
 separate merge candidates itself." PR #69's report did precisely that (its
-row 1), and in re-deriving the clusters this run also found a **fourth**
-distinct cluster in the same family — a hand-rolled SHA-256 (FIPS 180-4) in
-both `rusty_oauth` and `rusty_rdp` — that the folded row omitted entirely.
-Section 1 below splits that row into its four constituent clusters (rows
-1a–1d); everything else from PR #69's report is otherwise unchanged, restated
+row 1). Splitting it open in this run surfaced a second problem underneath
+the first: **the "HMAC construction" claim in that fold was never actually
+true.** `rusty_oauth`'s `src/crypto/hmac.rs` is HMAC-SHA256; `rusty_rdp`'s
+same-named `src/crypto/hmac.rs` is HMAC-MD5 and HMAC-SHA1 (for NTLMv2 and
+Kerberos respectively) — different algorithms entirely, clustered by
+`find_clusters.py` purely because both files share a module *path*, not
+because they share content. An initial pass at this correction re-verified
+the claim with a grep pattern loose enough (`fn hmac`) to match `fn
+hmac_md5`/`fn hmac_sha1` too, so it passed a spot-check that should have
+caught it — worth remembering that the skill's own mandatory grep check
+needs the exact symbol, not a substring. A **fourth**, genuine cluster in
+the same family was also found and had been silently dropped by the
+original fold entirely: a hand-rolled SHA-256 (FIPS 180-4) duplicated
+between `rusty_oauth` and `rusty_rdp`, for real this time (both files
+literally share the same round-constant table). Section 1 below reflects
+both corrections: the RSA-key and `BigUint` clusters from the original fold
+(now rows 1a/1b), the real SHA-256 duplicate (row 1c), and the false
+HMAC-SHA256 claim logged as investigated-and-rejected rather than silently
+dropped, so neither this run's mistake nor the original one resurfaces as
+new. Everything else from PR #69's report is otherwise unchanged, restated
 here rather than diffed since this is the whole deliverable.
 
 ## Before you read this: three prior duplication passes already ran here
@@ -73,10 +88,10 @@ named file this run, per the skill's own mandatory check.
 
 | # | Cluster | Candidate crates | Classification | What each candidate does / completeness | Recommended extraction |
 | --- | --- | --- | --- | --- | --- |
-| 1a | `HMAC-SHA256` (`module: src/crypto/hmac.rs`) | `rusty_oauth` (`src/crypto/hmac.rs`), `rusty_rdp` (`src/crypto/hmac.rs`) | **exact/near-duplicate** | Both hand-rolled, dependency-free HMAC-SHA256 (RFC 2104 / FIPS 198-1). `rusty_oauth`'s backs RS256 JWT verification; `rusty_rdp`'s backs NTLMv2 (MS-NLMP). Same construction, different call sites. Both have working call sites in their own test suites. | Extract into a shared crate (e.g. `rusty_rsa` or fold into `rusty_crypto_key`, which already exists for key *storage* but not this math). |
-| 1b | `SHA-256` (`module: src/crypto/sha256.rs`, `fn: sha256`) | `rusty_oauth` (`src/crypto/sha256.rs`), `rusty_rdp` (`src/crypto/sha256.rs`) | **exact/near-duplicate** | Both hand-rolled, dependency-free SHA-256 (FIPS 180-4) — same `K` round-constant table, same compression-function structure. `rusty_rdp`'s own doc comment is explicit about why it's hand-rolled despite not being a broken algorithm: "SHA-256 is not broken, but it is still implemented by hand to keep the crate dependency-free." `rusty_oauth`'s backs its own hash chain for JWT verification. Not in PR #69's report — surfaced independently this run. | Same host as 1a — a single shared crypto crate naturally covers both hash primitives together. |
-| 1c | `RsaPublicKey` (`struct: rsa_public_key`) | `rusty_oauth` (`src/jwt/rsa.rs::RsaPublicKey`), `rusty_rdp` (`src/security.rs::RsaPublicKey`) | **exact/near-duplicate** | Same RSA public-key verification math, different call sites: verifying an RS256-signed JWT (`rusty_oauth`) vs. an RDP server certificate's signature (`rusty_rdp`). Neither crate depends on the other or on a shared crypto crate; each looks complete for its own use. | Same host as 1a/1b. `rusty_oauth`'s version looks marginally more complete (more surrounding JWT-specific tests) but neither is obviously canonical — worth a closer read before picking which becomes the host. |
-| 1d | `BigUint` (`struct: big_uint`) | `rusty_oauth` (`src/crypto/bigint.rs::BigUint`), `rusty_rdp` (`src/crypto/bignum.rs::BigUint`) | **exact/near-duplicate** | Both little-endian, base-2³² limb arbitrary-precision unsigned integers — same representation, independently implemented. This is the primitive `1c`'s RSA verification is built on in both crates. | Same host as 1a–1c. Together, 1a–1d form the strongest exact/near-duplicate finding in this pass: four independently-reimplemented primitives shared by exactly the same two crates, not one — a strong signal a single extraction (not four separate ones) is the right shape. |
+| 1a | `RsaPublicKey` (`struct: rsa_public_key`) | `rusty_oauth` (`src/jwt/rsa.rs::RsaPublicKey`), `rusty_rdp` (`src/security.rs::RsaPublicKey`) | **exact/near-duplicate** | Same RSA public-key verification math, different call sites: verifying an RS256-signed JWT (`rusty_oauth`) vs. an RDP server certificate's signature (`rusty_rdp`). Neither crate depends on the other or on a shared crypto crate; each looks complete for its own use. | Extract into a shared crate (e.g. `rusty_rsa` or fold into `rusty_crypto_key`, which already exists for key *storage* but not this math). `rusty_oauth`'s version looks marginally more complete (more surrounding JWT-specific tests) but neither is obviously canonical — worth a closer read before picking which becomes the host. |
+| 1b | `BigUint` (`struct: big_uint`) | `rusty_oauth` (`src/crypto/bigint.rs::BigUint`), `rusty_rdp` (`src/crypto/bignum.rs::BigUint`) | **exact/near-duplicate** | Both little-endian, base-2³² limb arbitrary-precision unsigned integers — same representation, independently implemented. This is the primitive `1a`'s RSA verification is built on in both crates. | Same host as 1a — the natural pairing, since `1a`'s RSA math is built directly on this type in both crates. |
+| 1c | `SHA-256` (`module: src/crypto/sha256.rs`, `fn: sha256`) | `rusty_oauth` (`src/crypto/sha256.rs`), `rusty_rdp` (`src/crypto/sha256.rs`) | **exact/near-duplicate** | Both hand-rolled, dependency-free SHA-256 (FIPS 180-4) — same `K` round-constant table, same compression-function structure. `rusty_rdp`'s own doc comment is explicit about why it's hand-rolled despite not being a broken algorithm: "SHA-256 is not broken, but it is still implemented by hand to keep the crate dependency-free." `rusty_oauth`'s backs its own hash chain for JWT verification. Not in PR #69's report — surfaced independently this run. | Candidate for the same host as 1a/1b, though it's a genuinely separate primitive from the RSA/`BigUint` pair (RSA verification doesn't need SHA-256 directly in either crate — `rusty_oauth`'s JWT hash chain and `rusty_rdp`'s CredSSP public-key binding are the actual callers) — worth confirming during extraction whether it belongs in the same crate or a smaller sibling. |
+| 1d | ~~`HMAC-SHA256`~~ — investigated, not real | `rusty_oauth` (`src/crypto/hmac.rs`), `rusty_rdp` (`src/crypto/hmac.rs`) | **coincidental-similarity** | PR #69's original fold (and this report's own first correction pass) claimed this as exact/near-duplicate HMAC-SHA256 in both crates. False: `rusty_oauth`'s `hmac.rs` is HMAC-SHA256 (backs RS256 JWT verification), but `rusty_rdp`'s same-named `hmac.rs` is HMAC-MD5 and HMAC-SHA1 (NTLMv2 and Kerberos respectively) — different algorithms, matched by `find_clusters.py` purely on module *path*, not content. Confirmed via `grep -c 'fn hmac_sha256' crates/rusty_rdp/src/crypto/hmac.rs` → 0. | None — logged here (rather than silently dropped) so this specific false claim, seen twice now across two report versions, doesn't get re-proposed a third time. |
 | 2 | `f16_to_f32` (IEEE 754 half→single precision float conversion) | `rusty_simd` (`src/lib.rs`), `rusty_whisper` (`src/model.rs`) | **exact/near-duplicate** | Both implement full IEEE 754 semantics including the subnormal case (bit-shift normalization). `rusty_simd`'s own crate description is literally "for LLM and Whisper inference" — it exists for exactly `rusty_whisper`'s use case. Both look algorithmically complete and correct (same edge cases handled, just different code shape — a loop vs. a `leading_zeros()` trick). | **`rusty_whisper` should depend on `rusty_simd::f16_to_f32` directly** rather than reimplement it — this is the cleanest case in the report: the "shared crate" already exists and is already a workspace member, this is purely an unused-dependency situation. |
 | 3 | `RetryPolicy` (retry/backoff configuration) | `rusty-acp` (`src/client/mod.rs`), `rusty_request` (`src/retry.rs`) | **convergent-but-diverged** | `rusty_request`'s is a general HTTP client feature (opt-in via `ClientBuilder::retry`). `rusty-acp`'s is scoped to "the deployment this crate is aimed at" (its own doc comment) — likely narrower, agent-RPC-specific assumptions about what's retriable. Didn't fully diff the retry/backoff algorithm itself (exponential? jitter? which status codes retry?) — that's the open behavioral question. | Candidate for extraction (usage count 2), but the behavioral question needs a human answer first per repo-inspector's own process — this is the "mechanism vs. policy" split `dedupe-loop`/ADR-011 exists for: does `rusty-acp` adopt `rusty_request`'s retry mechanism with its own policy layered on top, or does it have a real reason (agent-RPC semantics) to stay separate? |
 | 4 | `AnsiParser` | `rusty_ansi` (`src/lib.rs`), `rusty_term` (`src/core/parser.rs`) | **coincidental-similarity** (independently confirms PR #65's finding) | `rusty_term`'s turns a shell's output byte stream into `Grid` mutations — coupled to its own terminal-state model. `rusty_ansi`'s is a zero-allocation, streaming ANSI escape iterator over a string slice with no `Grid` coupling at all — a general-purpose parsing library. Genuinely different layers (terminal emulator internals vs. a reusable escape-sequence parser), same name. | None — re-checked PR #65's deferral independently and it holds. Logged here so a future re-scan doesn't re-surface it as new. |
@@ -120,23 +135,34 @@ section is unchanged.
 
 ## Tool notes (repo-inspector's own behavior on this run)
 
-- **Section 1's row-folding bug (see "This is a re-run" above) is this
-  run's one finding about the process itself**, not the workspace: the
-  format reference already documents the failure mode and names the
-  downstream cost (`implementation-merge` having to un-fold a row before it
-  could act), but the previous run on this same workspace made the mistake
-  anyway. Splitting `rusty_oauth`/`rusty_rdp`'s crypto cluster into rows
-  1a–1d here, and surfacing the SHA-256 pair that folding had caused to be
-  dropped entirely, is the correction.
+- **Section 1's crypto cluster took two corrections, not one, and this
+  report's own first attempt at the first correction is what surfaced the
+  second.** The format reference already documents the row-folding failure
+  mode and names the downstream cost (`implementation-merge` having to
+  un-fold a row before it could act), but the run that produced PR #69's
+  report made the mistake anyway (folding an HMAC claim, an RSA key type,
+  and a `BigUint` type into one row). Splitting that fold open in this
+  report's *first* pass correctly separated the three claims but re-verified
+  each with a grep pattern loose enough (`fn hmac`) to match `fn
+  hmac_md5`/`fn hmac_sha1` as well as `fn hmac_sha256` — so it reported all
+  three (plus a genuinely new fourth, SHA-256) as confirmed when the HMAC
+  one was actually false. A second pass, re-verifying with the exact symbol
+  (`fn hmac_sha256`) rather than a substring, caught it: `rusty_rdp` has no
+  HMAC-SHA256 at all. Both corrections are folded into Section 1 above (rows
+  1a–1d) rather than left implicit. The lesson for this skill generically:
+  the mandatory grep spot-check needs an exact-symbol pattern, not a
+  substring loose enough to match a same-prefixed sibling function.
 - `index_workspace_capabilities.sh`'s nested-workspace-member pruning (fixed
   in v1.0.1) was re-confirmed live on this run: `reactor-core`
   (`crates/rustils_async/crates/reactor-core`) is a real, separately nested
   workspace member and appears correctly as its own crate in row 6, not
   double-tagged into `rustils_async`.
-- Every specific-symbol claim in Section 1 (`HMAC-SHA256`, `SHA-256`,
-  `RsaPublicKey`, `BigUint`, `f16_to_f32`, `SystemClock`) was re-verified
-  this run with `grep -c '<symbol>' <file>` against the actual candidate
-  files — all non-zero, none of the claims needed correction.
+- Every specific-symbol claim in Section 1 (`RsaPublicKey`, `BigUint`,
+  `SHA-256`, `f16_to_f32`, `SystemClock`, and — this time with an
+  exact-symbol pattern — `HMAC-SHA256`) was re-verified this run with
+  `grep -c '<exact symbol>' <file>` against the actual candidate files. All
+  came back non-zero except `rusty_rdp`'s `fn hmac_sha256`, which is the
+  correction above.
 - `repo-config`'s governance file set (CONTRIBUTING, SECURITY, ARCHITECTURE,
   ADR log, templates) is already present at the workspace root from PR #69
   — reconfirmed present, not re-applied.
