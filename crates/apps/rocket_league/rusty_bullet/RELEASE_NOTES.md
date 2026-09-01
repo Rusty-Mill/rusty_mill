@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real Rocket League uses per-contact-pair-type restitution/friction (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#133](https://github.com/baileyrd/rusty_bullet/pull/133) · `0483b46`
 
 - **`RB-PHYSICS-001-FR-043` had left open** which formula matches real
   Rocket League for `solver::combine_restitution`/`combine_friction`
