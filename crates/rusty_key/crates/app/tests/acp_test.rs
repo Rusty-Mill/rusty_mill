@@ -288,7 +288,10 @@ async fn fs_read_bridges_to_client_capability() {
             break;
         }
     }
-    assert!(bridged, "expected an fs/read_text_file request to the client");
+    assert!(
+        bridged,
+        "expected an fs/read_text_file request to the client"
+    );
 
     drop(cw);
     task.abort();

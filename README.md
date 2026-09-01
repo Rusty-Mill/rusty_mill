@@ -127,6 +127,14 @@ same way; this row set reflects whichever of those have landed so far.
 | [`skillopt-model`](crates/rusty_skillopt/crates/skillopt-model) | `crates/rusty_skillopt/crates/skillopt-model` | LLM provider adapters for `skillopt-core` |
 | [`skillopt-envs`](crates/rusty_skillopt/crates/skillopt-envs) | `crates/rusty_skillopt/crates/skillopt-envs` | Task environments and benchmark adapters `skillopt-core` optimizes against |
 | [`skillopt-cli`](crates/rusty_skillopt/crates/skillopt-cli) | `crates/rusty_skillopt/crates/skillopt-cli` | `skillopt`: the training-loop command line front end |
+| [`rk-config`](crates/rusty_key/crates/config) | `crates/rusty_key/crates/config` | Rusty Keys' configuration layer: typed settings, env overrides, workspace discovery |
+| [`rk-observe`](crates/rusty_key/crates/observe) | `crates/rusty_key/crates/observe` | Rusty Keys' *observe* pillar: structured attribution and turn-level observation records |
+| [`rk-constrain`](crates/rusty_key/crates/constrain) | `crates/rusty_key/crates/constrain` | Rusty Keys' *constrain* pillar: policy enforcement around tool dispatch |
+| [`rk-feed`](crates/rusty_key/crates/feed) | `crates/rusty_key/crates/feed` | Rusty Keys' *feed* pillar: guides, memory, recall, and the built-in tool set |
+| [`rk-kernel`](crates/rusty_key/crates/kernel) | `crates/rusty_key/crates/kernel` | Rusty Keys' kernel: the model's agent loop (turn, stream, complete) |
+| [`rk-mcp`](crates/rusty_key/crates/mcp) | `crates/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
+| [`rk-compose`](crates/rusty_key/crates/compose) | `crates/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
+| [`rk-app`](crates/rusty_key/crates/app) | `crates/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -735,6 +743,49 @@ alone; the duplication is a build-size cost, not a correctness one.
 The full suite (68 tests, 2 environment-gated ones ignored) passes
 unmodified.
 
+`rusty_key` (Rusty Keys) is eight crates behind one nested workspace —
+`rk-config`, `rk-observe`, `rk-constrain`, `rk-feed`, `rk-kernel`,
+`rk-mcp`, `rk-compose`, and the `rk-app` binary — none of which depends on
+a sibling already in this workspace, so there were no pins to retire. Its
+`[workspace.package]` collided on `rust-version` (1.88 vs. this root's
+1.75) and `license` (`"MIT"`), so its crates carry literal `[package]`
+fields and only its dependencies were hoisted — `rusty_db` treatment, for
+the fourth time in this wave.
+
+It is the first merged crate group to have had its own
+`[workspace.lints]`, and that table *did* collide: this root's is
+`rustils`' (`unsafe_code = "warn"`, `undocumented_unsafe_blocks = "deny"`),
+while `rusty_key`'s is `unsafe_code = "forbid"` — strictly stronger.
+Leaving `[lints] workspace = true` in place would have silently downgraded
+eight crates from `forbid` to `warn`, which is exactly the kind of quiet
+policy loss a mechanical merge should not cause, so each crate got a
+literal `[lints.rust] unsafe_code = "forbid"` instead. `rustils`' eight
+crates keep inheriting the root table unchanged.
+
+Its `crates/rusty_key/desktop/src-tauri` is a Tauri 2 shell that its own
+repo deliberately kept out of its core workspace (`exclude = ["desktop"]`,
+with a `[workspace]` table of its own) so `cargo build --workspace` stays
+lean — the same standalone shape as `rusty_libc/bench` and the various
+`fuzz` directories, and excluded here the same way. Note this is the
+*opposite* call from `inventory-tauri` above, which is a full member: the
+difference is upstream's own, and preserving each repo's own decision keeps
+`cargo build --workspace` honest in both directions. Verified that the
+excluded shell still builds across the boundary after the merge — its
+`../../crates/app`-style path dependencies now resolve their
+`field.workspace = true` inheritance against *this* root, which is exactly
+what the de-inheritance above makes correct.
+
+Two more duplicate-major pairs entered the graph with it, both benign for
+the same reason as `rusty_skillopt`'s `reqwest` split: `rmcp` 0.9.1
+(`rk-app`/`rk-mcp`'s optional `rmcp` feature) alongside 3.1.4
+(`rusty-mcp`, `rusty_homelab_mcp`, `rusty_provider`), and `axum` 0.7.9
+(`rk-app`'s optional `gateway` feature) alongside 0.8.9. Nothing passes
+types between the two groups, and upgrading either would be an API change
+to a crate this merge is not otherwise touching. Its full suite (194 tests
+across the eight crates) passes unmodified; it was not `cargo fmt`-clean
+under this workspace's settings and was reformatted with `cargo fmt --all`,
+same as `rusty_ansder`/`rusty_boot` before it.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -813,8 +864,8 @@ one nested workspace) and
 [`rusty_inventrory`](https://github.com/baileyrd/rusty_inventrory) (three
 crates behind another) and
 [`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt) (four behind
-a third) — and continuing with
-[`rusty_key`](https://github.com/baileyrd/rusty_key),
+a third) and [`rusty_key`](https://github.com/baileyrd/rusty_key) (eight
+behind a fourth) — and continuing with
 [`rusty_llama`](https://github.com/baileyrd/rusty_llama),
 [`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale),
 [`rusty_adk`](https://github.com/baileyrd/rusty_adk),

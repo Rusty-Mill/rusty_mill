@@ -137,7 +137,12 @@ mod tests {
     #[test]
     fn managed_only_when_no_files() {
         let ws = tmp("managed");
-        let g = GuideLoader::load_layers(MANAGED_GUIDE, None, &ws.join("AGENT_GUIDE.md"), &ws.join(".rustykeys/AGENT_GUIDE.md"));
+        let g = GuideLoader::load_layers(
+            MANAGED_GUIDE,
+            None,
+            &ws.join("AGENT_GUIDE.md"),
+            &ws.join(".rustykeys/AGENT_GUIDE.md"),
+        );
         assert!(g.block.contains("## Project guidance"));
         assert!(g.block.contains("Operating guidance"));
         assert_eq!(g.entries.len(), 1);
@@ -157,7 +162,10 @@ mod tests {
         let g = GuideLoader::load_layers(MANAGED_GUIDE, None, &project, &local);
         let pi = g.block.find("PROJECT-RULE").unwrap();
         let li = g.block.find("LOCAL-RULE").unwrap();
-        assert!(li > pi, "local must render after project (higher precedence last)");
+        assert!(
+            li > pi,
+            "local must render after project (higher precedence last)"
+        );
         // managed + project + local = 3 consulted layers.
         assert_eq!(g.entries.len(), 3);
         assert!(g.entries.iter().all(|e| e.contribution == "guide"));
@@ -181,7 +189,10 @@ mod tests {
         let ui = g.block.find("USER-RULE").unwrap();
         let pi = g.block.find("PROJECT-RULE").unwrap();
         assert!(ui < pi, "user precedes project");
-        assert!(g.entries.iter().any(|e| e.artifact.contains("user-guide.md")));
+        assert!(g
+            .entries
+            .iter()
+            .any(|e| e.artifact.contains("user-guide.md")));
         let _ = std::fs::remove_dir_all(&ws);
     }
 

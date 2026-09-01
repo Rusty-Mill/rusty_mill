@@ -20,6 +20,11 @@ Removed / Fixed / Security, newest first.
 - `rusty_skillopt` merged into `crates/rusty_skillopt` via `git subtree`
   (fourth wave) — four crates (`skillopt-core`, `skillopt-model`,
   `skillopt-envs`, `skillopt-cli`) behind one nested workspace
+- `rusty_key` merged into `crates/rusty_key` via `git subtree` (fourth
+  wave) — eight crates (`rk-config`, `rk-observe`, `rk-constrain`,
+  `rk-feed`, `rk-kernel`, `rk-mcp`, `rk-compose`, `rk-app`) behind one
+  nested workspace; its Tauri desktop shell stays excluded, as upstream
+  had it
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
@@ -44,6 +49,12 @@ Removed / Fixed / Security, newest first.
   hit; 79 tests pass unmodified against the pin
 - `inventory-core`'s three deprecated `GenericArray::from_slice` calls in
   `db.rs` rewritten, same `generic-array` 0.14.9 cause as `rusty_croc`'s
+- `rusty_key`'s eight crates keep a literal `[lints.rust] unsafe_code =
+  "forbid"` instead of inheriting this root's `[workspace.lints]`, which is
+  `rustils`' weaker `"warn"` — inheriting would have silently downgraded
+  the policy
+- `crates/rusty_key` reformatted with `cargo fmt --all` (it was not
+  fmt-clean under this workspace's settings)
 
 ## [workspace] - 2026-09-01
 ### Fixed

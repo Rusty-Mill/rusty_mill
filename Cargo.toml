@@ -112,6 +112,14 @@ members = [
     "crates/rusty_skillopt/crates/skillopt-model",
     "crates/rusty_skillopt/crates/skillopt-envs",
     "crates/rusty_skillopt/crates/skillopt-cli",
+    "crates/rusty_key/crates/config",
+    "crates/rusty_key/crates/observe",
+    "crates/rusty_key/crates/constrain",
+    "crates/rusty_key/crates/feed",
+    "crates/rusty_key/crates/kernel",
+    "crates/rusty_key/crates/mcp",
+    "crates/rusty_key/crates/compose",
+    "crates/rusty_key/crates/app",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -131,6 +139,7 @@ exclude = [
     "crates/rusty_lsp/fuzz",
     "crates/rustils/fuzz",
     "crates/rusty_croc/fuzz",
+    "crates/rusty_key/desktop/src-tauri",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/
@@ -280,6 +289,23 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
+
+# Hoisted from rusty_key's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `rust-version` (1.88 vs. 1.75) and
+# `license` ("MIT"), so its eight crates carry literal `[package]` fields --
+# rusty_db treatment. `async-trait`/`serde`/`serde_json`/`tokio` above cover
+# the rest; `thiserror` is the recurring "2"-vs-"1" split, kept literal on
+# the seven rk-* crates that use it.
+rk-config = { path = "crates/rusty_key/crates/config" }
+rk-observe = { path = "crates/rusty_key/crates/observe" }
+rk-constrain = { path = "crates/rusty_key/crates/constrain" }
+rk-feed = { path = "crates/rusty_key/crates/feed" }
+rk-kernel = { path = "crates/rusty_key/crates/kernel" }
+rk-mcp = { path = "crates/rusty_key/crates/mcp" }
+rk-compose = { path = "crates/rusty_key/crates/compose" }
+aisdk = "0.5.2"
+schemars = "1.0.4"
+toml = "0.8"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

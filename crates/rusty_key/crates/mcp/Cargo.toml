@@ -1,9 +1,9 @@
 [package]
 name = "rk-mcp"
 version = "0.0.0"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
 publish = false
 
 [dependencies]
@@ -14,7 +14,7 @@ rk-feed.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-thiserror.workspace = true
+thiserror = "2"
 toml.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "process"] }
 rmcp = { version = "0.9", features = [
@@ -33,5 +33,8 @@ fake = []
 # core builds without the external SDK; CI/release builds enable it.
 rmcp = ["dep:rmcp"]
 
-[lints]
-workspace = true
+# De-inherited from rusty_key's own former `[workspace.lints]`: this
+# workspace root's `[workspace.lints]` is rustils' (`unsafe_code = "warn"`),
+# which is weaker than rusty_key's own `"forbid"`.
+[lints.rust]
+unsafe_code = "forbid"

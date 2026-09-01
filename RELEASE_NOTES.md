@@ -13,6 +13,37 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_key`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_key` — Rusty Keys, an AI-native application
+  skeleton where the model's agent loop is the kernel and the application
+  is the harness around it (constrain / feed / observe / compose). Eight
+  crates behind one nested workspace, merged via `git subtree` with full
+  history.
+- **Changed:** its `[workspace.package]` collided on `rust-version` and
+  `license`, so its crates carry literal `[package]` fields and only its
+  dependencies were hoisted (`aisdk`, `schemars`, `toml`, and the `rk-*`
+  path entries).
+- **Fixed:** `rusty_key`'s `[workspace.lints]` (`unsafe_code = "forbid"`)
+  is strictly stronger than this root's, which is `rustils`'
+  (`unsafe_code = "warn"`). Leaving `[lints] workspace = true` in place
+  would have silently downgraded all eight crates, so each carries a
+  literal `[lints.rust] unsafe_code = "forbid"`; `rustils`' crates keep
+  inheriting the root table unchanged.
+- **Changed:** `crates/rusty_key` reformatted with `cargo fmt --all` — it
+  was not fmt-clean under this workspace's settings, same as
+  `rusty_ansder`/`rusty_boot` when they merged. No behavior change.
+- **Known limitation:** its Tauri desktop shell
+  (`crates/rusty_key/desktop/src-tauri`) stays a standalone workspace and
+  is excluded here, exactly as its own repo had it — the opposite call from
+  `inventory-tauri`, and deliberately so, since each is upstream's own.
+  Verified it still builds across the boundary post-merge.
+- **Known limitation:** two more duplicate-major pairs now resolve —
+  `rmcp` 0.9.1 alongside 3.1.4, and `axum` 0.7.9 alongside 0.8.9. Cargo
+  keeps them as unrelated crates and no type crosses between the groups.
+- No dependency swaps. Full suite (194 tests) passes unmodified.
+
 ## Fourth-wave merge — `rusty_skillopt`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

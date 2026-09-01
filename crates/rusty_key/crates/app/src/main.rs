@@ -83,8 +83,8 @@ async fn main() -> Result<()> {
     // (folded in from the legacy `mcp.toml` — P1). Connecting them through the
     // real stdio/SSE transports needs the `rmcp` feature; the default CLI build
     // does not bundle it, so surface a hint rather than silently ignoring them.
-    let mcp_config = rk_mcp::load_mcp_config_for_workspace(&config.workspace)
-        .context("loading MCP config")?;
+    let mcp_config =
+        rk_mcp::load_mcp_config_for_workspace(&config.workspace).context("loading MCP config")?;
     if !mcp_config.servers.is_empty() {
         eprintln!(
             "note: {} MCP server(s) declared in .rustykeys/config.toml, but this \

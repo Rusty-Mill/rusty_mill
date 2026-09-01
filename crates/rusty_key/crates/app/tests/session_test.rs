@@ -128,7 +128,10 @@ async fn failed_turns_feed_the_ratchet_and_recurrence_proposes_a_check() {
     let report = session.ratchet_report().unwrap();
     assert!(report.contains("recurring failures"));
     assert!(report.contains("permission_block"));
-    assert!(report.contains("[[check]]"), "a recurring failure proposes a check");
+    assert!(
+        report.contains("[[check]]"),
+        "a recurring failure proposes a check"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -142,8 +145,8 @@ async fn real_provider_usage_drives_the_cost_budget() {
 
     // A provider that reports 4242 real input tokens (P4) — far from any char/4
     // estimate of this tiny turn, so we can tell which one the budget recorded.
-    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]])
-        .with_usage(4242, 17);
+    let model =
+        FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]]).with_usage(4242, 17);
     let session = Session::new(&config, model).unwrap();
     session.send("hello").await.unwrap();
 

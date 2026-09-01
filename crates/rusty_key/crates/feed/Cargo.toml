@@ -1,9 +1,9 @@
 [package]
 name = "rk-feed"
 version = "0.0.0"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
 publish = false
 
 [dependencies]
@@ -22,7 +22,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
+thiserror = "2"
 tokio.workspace = true
 
 [features]
@@ -34,5 +34,8 @@ fake-embed = []
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 
-[lints]
-workspace = true
+# De-inherited from rusty_key's own former `[workspace.lints]`: this
+# workspace root's `[workspace.lints]` is rustils' (`unsafe_code = "warn"`),
+# which is weaker than rusty_key's own `"forbid"`.
+[lints.rust]
+unsafe_code = "forbid"

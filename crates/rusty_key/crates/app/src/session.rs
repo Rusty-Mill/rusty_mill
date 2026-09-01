@@ -28,9 +28,8 @@ use rk_feed::{
     register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
     BackgroundTaskStore, BashStream, ConsolidationScope, ConsolidationStats, Embedder,
     ExploreStrategy, GuideLoader, Isolation, Memory, Observation, SandboxLauncher, SessionFactory,
-    SqliteStore, SqliteStream,
-    Store, Stream, TaskState, TaskStore, ToolError, ToolFn, ToolRegistry, COMPACTION_SYSTEM,
-    DEFAULT_RECALL_K,
+    SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore, ToolError, ToolFn,
+    ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn, stream_turn};
 use rk_mcp::{McpManager, McpPolicy};
@@ -1062,7 +1061,8 @@ where
             let budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
             // Decide on calibration-corrected tokens (P4): the raw char/4 estimate
             // is scaled by the factor learned from real provider usage.
-            let used = budget.calibrated(budget.line_items(&self.system, recall, task, schemas, &history));
+            let used =
+                budget.calibrated(budget.line_items(&self.system, recall, task, schemas, &history));
             (budget.tier_for(used), used, budget.context_limit)
         };
 

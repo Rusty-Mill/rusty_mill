@@ -186,9 +186,7 @@ impl Config {
     /// The workspace root: `RUSTYKEYS_WORKSPACE` if set, else the process cwd.
     /// Resolved before the project file is read (the file lives inside it) and is
     /// never overridable by the file.
-    fn resolve_workspace(
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<PathBuf, ConfigError> {
+    fn resolve_workspace(get: &impl Fn(&str) -> Option<String>) -> Result<PathBuf, ConfigError> {
         match get("RUSTYKEYS_WORKSPACE") {
             Some(p) if !p.trim().is_empty() => Ok(PathBuf::from(p)),
             _ => std::env::current_dir().map_err(|e| ConfigError::Workspace(e.to_string())),
@@ -249,17 +247,8 @@ impl Config {
             .or_else(|| file.isolation.filter(|s| !s.trim().is_empty()))
             .unwrap_or_else(|| "none".to_string());
 
-        let num = |key: &'static str, file_val: Option<f64>, default: f64| -> Result<f64, ConfigError> {
-            match get(key) {
-                Some(s) if !s.trim().is_empty() => s
-                    .trim()
-                    .parse()
-                    .map_err(|_| ConfigError::Invalid { key, value: s }),
-                _ => Ok(file_val.unwrap_or(default)),
-            }
-        };
-        let usize_or =
-            |key: &'static str, file_val: Option<usize>, default: usize| -> Result<usize, ConfigError> {
+        let num =
+            |key: &'static str, file_val: Option<f64>, default: f64| -> Result<f64, ConfigError> {
                 match get(key) {
                     Some(s) if !s.trim().is_empty() => s
                         .trim()
@@ -268,6 +257,18 @@ impl Config {
                     _ => Ok(file_val.unwrap_or(default)),
                 }
             };
+        let usize_or = |key: &'static str,
+                        file_val: Option<usize>,
+                        default: usize|
+         -> Result<usize, ConfigError> {
+            match get(key) {
+                Some(s) if !s.trim().is_empty() => s
+                    .trim()
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid { key, value: s }),
+                _ => Ok(file_val.unwrap_or(default)),
+            }
+        };
         let context_limit = usize_or("RUSTYKEYS_CONTEXT_LIMIT", file.context_limit, 200_000)?;
         let compact_micro = num("RUSTYKEYS_COMPACT_MICRO", file.compact_micro, 0.80)?;
         let compact_session = num("RUSTYKEYS_COMPACT_SESSION", file.compact_session, 0.90)?;
@@ -431,10 +432,7 @@ mod tests {
     fn env_invalid_value_rejected_even_with_file_present() {
         let file = parse_file("[settings]\nmodel = \"m\"\nmax_steps = 10\n");
         assert!(matches!(
-            Config::resolve_with_file(
-                env(&[("RUSTYKEYS_MAX_STEPS", "lots")]),
-                file.settings
-            ),
+            Config::resolve_with_file(env(&[("RUSTYKEYS_MAX_STEPS", "lots")]), file.settings),
             Err(ConfigError::Invalid {
                 key: "RUSTYKEYS_MAX_STEPS",
                 ..

@@ -126,8 +126,8 @@ async fn run_turn_surfaces_provider_usage() {
     let dispatch = Arc::new(RecordingDispatch {
         calls: Default::default(),
     });
-    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]])
-        .with_usage(1234, 56);
+    let model =
+        FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]]).with_usage(1234, 56);
 
     let (reply, usage) = run_turn(model, "sys", "hi", dispatch, 10).await.unwrap();
     assert_eq!(reply, "done");

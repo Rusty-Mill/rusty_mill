@@ -86,7 +86,9 @@ pub async fn client_from_spec(spec: &ServerSpec) -> Result<Arc<dyn McpClient>, M
             let command = spec.command.as_deref().ok_or_else(|| {
                 McpError::Connect(format!("stdio server '{}' has no command", spec.name))
             })?;
-            Ok(Arc::new(StdioMcpClient::connect(command, &spec.args).await?))
+            Ok(Arc::new(
+                StdioMcpClient::connect(command, &spec.args).await?,
+            ))
         }
         Transport::Sse => {
             let url = spec.url.as_deref().ok_or_else(|| {
@@ -123,10 +125,7 @@ impl StdioMcpClient {
         cmd.args(&self.args);
         let transport =
             TokioChildProcess::new(cmd).map_err(|e| McpError::Connect(e.to_string()))?;
-        let running = ()
-            .serve(transport)
-            .await
-            .map_err(|e| McpError::Connect(e.to_string()))?;
+        let running = ().serve(transport).await.map_err(|e| McpError::Connect(e.to_string()))?;
         *self.running.lock().await = Some(running);
         Ok(())
     }
@@ -188,10 +187,7 @@ impl HttpMcpClient {
             config = config.auth_header(token.clone());
         }
         let transport = StreamableHttpClientTransport::from_config(config);
-        let running = ()
-            .serve(transport)
-            .await
-            .map_err(|e| McpError::Connect(e.to_string()))?;
+        let running = ().serve(transport).await.map_err(|e| McpError::Connect(e.to_string()))?;
         *self.running.lock().await = Some(running);
         Ok(())
     }

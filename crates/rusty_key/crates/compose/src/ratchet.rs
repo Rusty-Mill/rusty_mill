@@ -182,7 +182,10 @@ pub struct ProposedCheck {
 /// Propose `checks.toml` stanzas for the aggregates that recur at least
 /// `min_occurrences` times. Derives entirely from `aggregates` (the log), so an
 /// empty log yields no proposals — the "zero aspirational rules" guarantee.
-pub fn propose_checks(aggregates: &[RatchetAggregate], min_occurrences: usize) -> Vec<ProposedCheck> {
+pub fn propose_checks(
+    aggregates: &[RatchetAggregate],
+    min_occurrences: usize,
+) -> Vec<ProposedCheck> {
     aggregates
         .iter()
         .filter(|a| a.count >= min_occurrences)
@@ -323,12 +326,21 @@ mod tests {
     #[test]
     fn aggregates_by_failure_type_and_category() {
         let (rl, dir) = log("agg");
-        rl.record("t1", &attr(FailureType::FTool, "build", "feed/tools", "unit", "boom"))
-            .unwrap();
-        rl.record("t2", &attr(FailureType::FTool, "build", "feed/exec", "lint", "kaboom"))
-            .unwrap();
-        rl.record("t3", &attr(FailureType::FVerify, "missing", "compose", "vfy", "no test"))
-            .unwrap();
+        rl.record(
+            "t1",
+            &attr(FailureType::FTool, "build", "feed/tools", "unit", "boom"),
+        )
+        .unwrap();
+        rl.record(
+            "t2",
+            &attr(FailureType::FTool, "build", "feed/exec", "lint", "kaboom"),
+        )
+        .unwrap();
+        rl.record(
+            "t3",
+            &attr(FailureType::FVerify, "missing", "compose", "vfy", "no test"),
+        )
+        .unwrap();
 
         let aggs = rl.aggregate().unwrap();
         assert_eq!(aggs.len(), 2);
@@ -346,12 +358,21 @@ mod tests {
     fn proposes_only_recurring_failures() {
         let (rl, dir) = log("propose");
         // f_tool/build twice (recurs) ; f_verify/missing once (one-off).
-        rl.record("t1", &attr(FailureType::FTool, "build", "feed", "unit", "x"))
-            .unwrap();
-        rl.record("t2", &attr(FailureType::FTool, "build", "feed", "unit", "y"))
-            .unwrap();
-        rl.record("t3", &attr(FailureType::FVerify, "missing", "compose", "v", "z"))
-            .unwrap();
+        rl.record(
+            "t1",
+            &attr(FailureType::FTool, "build", "feed", "unit", "x"),
+        )
+        .unwrap();
+        rl.record(
+            "t2",
+            &attr(FailureType::FTool, "build", "feed", "unit", "y"),
+        )
+        .unwrap();
+        rl.record(
+            "t3",
+            &attr(FailureType::FVerify, "missing", "compose", "v", "z"),
+        )
+        .unwrap();
 
         let aggs = rl.aggregate().unwrap();
         let proposals = propose_checks(&aggs, RATCHET_MIN_OCCURRENCES);
@@ -368,10 +389,16 @@ mod tests {
     #[test]
     fn render_includes_summary_and_stanzas() {
         let (rl, dir) = log("render");
-        rl.record("t1", &attr(FailureType::FTool, "build", "feed", "unit", "x"))
-            .unwrap();
-        rl.record("t2", &attr(FailureType::FTool, "build", "feed", "unit", "y"))
-            .unwrap();
+        rl.record(
+            "t1",
+            &attr(FailureType::FTool, "build", "feed", "unit", "x"),
+        )
+        .unwrap();
+        rl.record(
+            "t2",
+            &attr(FailureType::FTool, "build", "feed", "unit", "y"),
+        )
+        .unwrap();
         let aggs = rl.aggregate().unwrap();
         let proposals = propose_checks(&aggs, RATCHET_MIN_OCCURRENCES);
         let out = render_ratchet(&aggs, &proposals);
@@ -384,8 +411,11 @@ mod tests {
     #[test]
     fn render_notes_when_nothing_recurs() {
         let (rl, dir) = log("norecur");
-        rl.record("t1", &attr(FailureType::FTool, "build", "feed", "unit", "x"))
-            .unwrap();
+        rl.record(
+            "t1",
+            &attr(FailureType::FTool, "build", "feed", "unit", "x"),
+        )
+        .unwrap();
         let aggs = rl.aggregate().unwrap();
         let proposals = propose_checks(&aggs, RATCHET_MIN_OCCURRENCES);
         let out = render_ratchet(&aggs, &proposals);

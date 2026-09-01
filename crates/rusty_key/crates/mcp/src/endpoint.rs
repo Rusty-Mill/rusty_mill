@@ -64,7 +64,11 @@ fn host_of(authority_and_path: &str) -> String {
     if let Some(rest) = authority.strip_prefix('[') {
         return rest.split(']').next().unwrap_or("").to_ascii_lowercase();
     }
-    authority.split(':').next().unwrap_or("").to_ascii_lowercase()
+    authority
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 fn is_loopback_host(host: &str) -> bool {

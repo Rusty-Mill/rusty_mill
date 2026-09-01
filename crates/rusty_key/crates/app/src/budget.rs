@@ -282,7 +282,11 @@ mod tests {
         assert_eq!(b.calibration, 1.0);
         // Provider reports 2× our estimate → calibration rises toward 2.0.
         b.observe_turn(100, Some(200));
-        assert!(b.calibration > 1.0, "calibration should rise: {}", b.calibration);
+        assert!(
+            b.calibration > 1.0,
+            "calibration should rise: {}",
+            b.calibration
+        );
         // used_tokens is the real count when known.
         assert_eq!(b.used_tokens, 200);
         // A subsequent estimate is scaled up by the learned factor.
