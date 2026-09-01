@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real mandatory minimum-hold window for a ground jump's variable-height acceleration
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#135](https://github.com/baileyrd/rusty_bullet/pull/135) · `e201222`
 
 - **`drive::JUMP_HOLD_MAX_DURATION`'s own doc comment had named this exact
   gap** since `RB-PHYSICS-001-FR-031`'s original audit: real Rocket League
