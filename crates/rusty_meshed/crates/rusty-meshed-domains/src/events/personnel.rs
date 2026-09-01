@@ -360,6 +360,39 @@ impl DomainEvent for PersonnelAssigned {
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
     }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "person_id".to_string(),
+            rusty_json::Value::from(self.person_id.as_str()),
+        );
+        fields.insert(
+            "position_id".to_string(),
+            rusty_json::Value::from(self.position_id.as_str()),
+        );
+        fields.insert(
+            "unit_uic".to_string(),
+            rusty_json::Value::from(self.unit_uic.as_str()),
+        );
+        fields.insert(
+            "duty_title".to_string(),
+            rusty_json::Value::from(self.duty_title.as_str()),
+        );
+        fields.insert(
+            "grade".to_string(),
+            rusty_json::Value::from(self.grade.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
+    }
 }
 
 impl DomainEvent for PersonnelPromoted {
@@ -379,6 +412,31 @@ impl DomainEvent for PersonnelPromoted {
 
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
+    }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "person_id".to_string(),
+            rusty_json::Value::from(self.person_id.as_str()),
+        );
+        fields.insert(
+            "from_grade".to_string(),
+            rusty_json::Value::from(self.from_grade.as_str()),
+        );
+        fields.insert(
+            "to_grade".to_string(),
+            rusty_json::Value::from(self.to_grade.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
     }
 }
 
@@ -400,6 +458,27 @@ impl DomainEvent for PersonnelSeparated {
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
     }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "person_id".to_string(),
+            rusty_json::Value::from(self.person_id.as_str()),
+        );
+        fields.insert(
+            "separation_reason".to_string(),
+            rusty_json::Value::from(self.separation_reason.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
+    }
 }
 
 impl DomainEvent for StatusChanged {
@@ -419,6 +498,31 @@ impl DomainEvent for StatusChanged {
 
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
+    }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "person_id".to_string(),
+            rusty_json::Value::from(self.person_id.as_str()),
+        );
+        fields.insert(
+            "previous_status".to_string(),
+            rusty_json::Value::from(self.previous_status.as_str()),
+        );
+        fields.insert(
+            "new_status".to_string(),
+            rusty_json::Value::from(self.new_status.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
     }
 }
 
@@ -457,6 +561,46 @@ mod tests {
                 "effective_date",
                 "transaction_date",
             ]
+        );
+    }
+
+    #[test]
+    fn personnel_assigned_to_json_includes_lineage_and_own_fields() {
+        let mut event = PersonnelAssigned::new(
+            "req-1",
+            "p-1",
+            "pos-1",
+            "UIC-1",
+            "Rifleman",
+            "E4",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        event.base.source_event_ids = vec!["upstream-1".to_string()];
+        let json = event.to_json();
+        let object = json.as_object().unwrap();
+        assert_eq!(
+            object.get("event_id").unwrap().as_str(),
+            Some(event.base.event_id.as_str())
+        );
+        assert_eq!(
+            object.get("correlation_id").unwrap().as_str(),
+            Some("req-1")
+        );
+        assert_eq!(
+            object
+                .get("source_event_ids")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(object.get("person_id").unwrap().as_str(), Some("p-1"));
+        assert_eq!(object.get("grade").unwrap().as_str(), Some("E4"));
+        assert_eq!(
+            object.get("transaction_date").unwrap().as_str(),
+            Some("2026-01-02")
         );
     }
 

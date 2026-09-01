@@ -5834,11 +5834,19 @@ name = "rusty-meshed-domains"
 version = "0.1.0"
 dependencies = [
  "rusty-meshed-core",
+ "rusty-meshed-observability",
+ "rusty-meshed-schema-registry",
  "rusty-meshed-sdk",
  "rusty_err",
+ "rusty_http",
  "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
+ "rusty_sqlite",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
+ "rusty_wire",
 ]
 
 [[package]]

@@ -300,6 +300,40 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> DataProductProducerBase<S> {
         Ok(())
     }
 
+    /// This producer's declared `product_name`.
+    pub fn product_name(&self) -> &str {
+        &self.product_name
+    }
+
+    /// Read-only access to this producer's `LineageTracker` -- exposed
+    /// for `rusty-meshed-domains`' `PersonnelLifecycleProducer`, whose
+    /// outbox-writing `publish()` override still calls
+    /// `LineageTracker::record_event` itself (DOM-016), the same way
+    /// this type's own [`publish`](Self::publish) does.
+    pub fn lineage_tracker(&self) -> &LineageTracker {
+        &self.lineage_tracker
+    }
+
+    /// Whether `topic` was declared and started via
+    /// [`startup`](Self::startup) -- exposed for
+    /// `PersonnelLifecycleProducer`, which overrides
+    /// [`publish`](Self::publish) entirely (writes to the outbox
+    /// instead of producing directly, DOM-014) but still needs the
+    /// same SDK-023 validation this type's own `publish` performs.
+    pub fn is_declared_topic(&self, topic: &str) -> bool {
+        self.started_topics.contains(topic)
+    }
+
+    /// Every topic [`startup`](Self::startup) declared, for
+    /// [`PublishError::UndeclaredTopic`]'s topic listing --- exposed
+    /// for the same cross-crate override [`is_declared_topic`](Self::is_declared_topic)
+    /// serves.
+    pub fn declared_topics(&self) -> Vec<String> {
+        let mut declared: Vec<String> = self.started_topics.iter().cloned().collect();
+        declared.sort();
+        declared
+    }
+
     /// Publishes `event` to `topic` with lineage headers (SDK-024),
     /// then records record-level lineage once the broker has confirmed
     /// the produce succeeded (SDK-026) -- see the module doc for why
@@ -437,6 +471,10 @@ mod tests {
             Ok(TestEvent {
                 base: BaseEvent::deserialize(bytes)?,
             })
+        }
+
+        fn to_json(&self) -> rusty_json::Value {
+            rusty_json::Value::Object(self.base.to_json_fields())
         }
     }
 

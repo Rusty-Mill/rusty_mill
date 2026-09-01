@@ -237,6 +237,10 @@ mod tests {
                 base: BaseEvent::deserialize(bytes)?,
             })
         }
+
+        fn to_json(&self) -> rusty_json::Value {
+            rusty_json::Value::Object(self.base.to_json_fields())
+        }
     }
 
     fn temp_db_path(name: &str) -> String {

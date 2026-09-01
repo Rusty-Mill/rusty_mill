@@ -68,4 +68,25 @@ pub trait DomainEvent {
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError>
     where
         Self: Sized;
+
+    /// This event as a JSON object -- the field set Python's
+    /// `model_dump()` returns for a `BaseEvent` subclass (base fields
+    /// via [`BaseEvent::to_json_fields`], plus this type's own).
+    ///
+    /// Used only by `rusty-meshed-domains`'
+    /// `PersonnelLifecycleProducer::publish` (DOM-014), which writes
+    /// to the transactional outbox instead of producing to Kafka
+    /// directly. That is a **faithfully-reproduced quirk of the
+    /// source, not something introduced or corrected here**: the
+    /// source's outbox write uses `event.model_dump()` (plain JSON),
+    /// while `startup()` registers this same event type's *Avro*
+    /// schema with the Schema Registry (`avro_schema()`) -- and
+    /// `OutboxRelay`/`relay_pending` forward `entry.payload` to Kafka
+    /// verbatim, meaning the bytes actually produced for an
+    /// outbox-relayed topic are JSON, not the Avro the registered
+    /// schema describes. Every other producer path (direct `publish`)
+    /// uses [`serialize`](Self::serialize)'s real Avro bytes, matching
+    /// its own registered schema; this mismatch is specific to the
+    /// outbox route.
+    fn to_json(&self) -> rusty_json::Value;
 }

@@ -116,6 +116,31 @@ impl DomainEvent for UnitReadinessAssessed {
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
     }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "unit_uic".to_string(),
+            rusty_json::Value::from(self.unit_uic.as_str()),
+        );
+        fields.insert(
+            "readiness_pct".to_string(),
+            rusty_json::Value::from(self.readiness_pct),
+        );
+        fields.insert(
+            "assessed_at".to_string(),
+            rusty_json::Value::from(self.assessed_at.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +159,26 @@ mod tests {
         );
         let bytes = event.serialize();
         assert_eq!(UnitReadinessAssessed::deserialize(&bytes).unwrap(), event);
+    }
+
+    #[test]
+    fn to_json_includes_lineage_and_own_fields_with_readiness_pct_as_a_number() {
+        let event = UnitReadinessAssessed::new(
+            "req-1",
+            "UIC-1",
+            75.5,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        let json = event.to_json();
+        let object = json.as_object().unwrap();
+        assert_eq!(
+            object.get("correlation_id").unwrap().as_str(),
+            Some("req-1")
+        );
+        assert_eq!(object.get("unit_uic").unwrap().as_str(), Some("UIC-1"));
+        assert_eq!(object.get("readiness_pct").unwrap().as_f64(), Some(75.5));
     }
 
     #[test]

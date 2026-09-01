@@ -379,6 +379,39 @@ impl DomainEvent for PositionAuthorizationChanged {
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
     }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "position_id".to_string(),
+            rusty_json::Value::from(self.position_id.as_str()),
+        );
+        fields.insert(
+            "unit_uic".to_string(),
+            rusty_json::Value::from(self.unit_uic.as_str()),
+        );
+        fields.insert(
+            "authorized_grade".to_string(),
+            rusty_json::Value::from(self.authorized_grade.as_str()),
+        );
+        fields.insert(
+            "duty_title".to_string(),
+            rusty_json::Value::from(self.duty_title.as_str()),
+        );
+        fields.insert(
+            "authorization_status".to_string(),
+            rusty_json::Value::from(self.authorization_status.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
+    }
 }
 
 impl DomainEvent for PositionFilled {
@@ -398,6 +431,31 @@ impl DomainEvent for PositionFilled {
 
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
+    }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "position_id".to_string(),
+            rusty_json::Value::from(self.position_id.as_str()),
+        );
+        fields.insert(
+            "person_id".to_string(),
+            rusty_json::Value::from(self.person_id.as_str()),
+        );
+        fields.insert(
+            "unit_uic".to_string(),
+            rusty_json::Value::from(self.unit_uic.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
     }
 }
 
@@ -419,6 +477,35 @@ impl DomainEvent for PositionVacated {
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
     }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "position_id".to_string(),
+            rusty_json::Value::from(self.position_id.as_str()),
+        );
+        fields.insert(
+            "person_id".to_string(),
+            rusty_json::Value::from(self.person_id.as_str()),
+        );
+        fields.insert(
+            "unit_uic".to_string(),
+            rusty_json::Value::from(self.unit_uic.as_str()),
+        );
+        fields.insert(
+            "vacancy_reason".to_string(),
+            rusty_json::Value::from(self.vacancy_reason.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
+    }
 }
 
 impl DomainEvent for PositionModified {
@@ -438,6 +525,39 @@ impl DomainEvent for PositionModified {
 
     fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
         Self::deserialize(bytes)
+    }
+
+    fn to_json(&self) -> rusty_json::Value {
+        let mut fields = self.base.to_json_fields();
+        fields.insert(
+            "position_id".to_string(),
+            rusty_json::Value::from(self.position_id.as_str()),
+        );
+        fields.insert(
+            "unit_uic".to_string(),
+            rusty_json::Value::from(self.unit_uic.as_str()),
+        );
+        fields.insert(
+            "field_changed".to_string(),
+            rusty_json::Value::from(self.field_changed.as_str()),
+        );
+        fields.insert(
+            "old_value".to_string(),
+            rusty_json::Value::from(self.old_value.as_str()),
+        );
+        fields.insert(
+            "new_value".to_string(),
+            rusty_json::Value::from(self.new_value.as_str()),
+        );
+        fields.insert(
+            "effective_date".to_string(),
+            rusty_json::Value::from(self.effective_date.as_str()),
+        );
+        fields.insert(
+            "transaction_date".to_string(),
+            rusty_json::Value::from(self.transaction_date.as_str()),
+        );
+        rusty_json::Value::Object(fields)
     }
 }
 

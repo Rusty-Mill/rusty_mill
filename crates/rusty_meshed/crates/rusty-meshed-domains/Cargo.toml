@@ -12,7 +12,25 @@ rusty_err = { path = "../../../rusty_err" }
 rusty_uuid = { path = "../../../rusty_uuid" }
 rusty_time = { path = "../../../rusty_time" }
 rusty_json = { path = "../../../rusty_json" }
+rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_tokio = { path = "../../../rusty_tokio" }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-sdk = { path = "../rusty-meshed-sdk" }
 
 [dev-dependencies]
+# Test-only DI seam: rusty-meshed-domains' own products never name
+# these types in non-test code (DataProductProducerBase::connect/
+# DataProductConsumerBase::connect build them internally from
+# PlatformConfig) -- only these crates' own tests, wiring up
+# DataProductProducerBase::new/DataProductConsumerBase::new directly
+# against fake servers/brokers, need to name them.
+rusty_kafka = { path = "../../../rusty_kafka" }
+rusty_wire = { path = "../../../rusty_wire" }
+rusty_request = { path = "../../../rusty_request" }
+rusty-meshed-observability = { path = "../rusty-meshed-observability" }
+rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
+# "rusty-tokio" feature gates rusty_http's AsyncTransport, used to
+# read/write raw HTTP/1.1 messages over a local rusty_tokio
+# TcpListener -- same fake-HTTP-server seam
+# rusty-meshed-sdk::registry_client's own tests use.
+rusty_http = { path = "../../../rusty_http", features = ["rusty-tokio"] }

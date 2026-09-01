@@ -165,6 +165,42 @@ impl BaseEvent {
         let mut pos = 0;
         Self::decode_from(bytes, &mut pos)
     }
+
+    /// This event's four lineage fields as JSON key/value pairs -- the
+    /// same four fields every `model_dump()` call includes for a
+    /// `BaseEvent` subclass in the source. Used only by
+    /// [`crate::DomainEvent::to_json`] (see that method's own doc for
+    /// why plain JSON, not this type's own Avro
+    /// [`serialize`](Self::serialize), is what a domain event's
+    /// `to_json()` builds on) -- what a domain event's own `to_json()`
+    /// extends with its own fields, the same "base contributes first,
+    /// subclass extends" shape [`avro_schema_fields`](Self::avro_schema_fields)
+    /// already uses for Avro.
+    pub fn to_json_fields(&self) -> rusty_json::Map {
+        let mut fields = rusty_json::Map::new();
+        fields.insert(
+            "event_id".to_string(),
+            rusty_json::Value::from(self.event_id.as_str()),
+        );
+        fields.insert(
+            "correlation_id".to_string(),
+            rusty_json::Value::from(self.correlation_id.as_str()),
+        );
+        fields.insert(
+            "source_event_ids".to_string(),
+            rusty_json::Value::Array(
+                self.source_event_ids
+                    .iter()
+                    .map(|id| rusty_json::Value::from(id.as_str()))
+                    .collect(),
+            ),
+        );
+        fields.insert(
+            "timestamp".to_string(),
+            rusty_json::Value::from(self.timestamp.as_str()),
+        );
+        fields
+    }
 }
 
 /// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled

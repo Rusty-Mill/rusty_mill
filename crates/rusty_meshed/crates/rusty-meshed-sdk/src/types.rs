@@ -160,6 +160,10 @@ mod tests {
         fn deserialize(_bytes: &[u8]) -> Result<Self, rusty_meshed_core::AvroDecodeError> {
             unimplemented!("describe() never calls this")
         }
+
+        fn to_json(&self) -> rusty_json::Value {
+            unimplemented!("describe() never calls this")
+        }
     }
 
     #[test]
