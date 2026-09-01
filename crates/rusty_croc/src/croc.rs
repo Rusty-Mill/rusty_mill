@@ -2038,6 +2038,13 @@ impl Client {
     }
 }
 
+#[cfg_attr(
+    not(unix),
+    allow(
+        unused_variables,
+        reason = "`target` is only read by the `cfg(unix)` symlink call below"
+    )
+)]
 fn make_symlink(target: &str, dest: &Path) -> Result<()> {
     if std::fs::symlink_metadata(dest).is_ok() {
         std::fs::remove_file(dest)?;
