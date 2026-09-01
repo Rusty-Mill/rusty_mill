@@ -180,8 +180,21 @@ fn combine_restitution(a: f32, b: f32) -> f32 {
 
 /// See `combine_restitution`'s own doc comment — same rationale, same
 /// identity-preservation property, same `RB-PHYSICS-001-FR-043` finding.
+/// Since `RB-PHYSICS-001-FR-053`, also clamps the result to `[-10.0, 10.0]`
+/// — real Bullet's own `calculateCombinedFriction` applies this exact bound
+/// to its own product result (confirmed against real fetched
+/// `btManifoldResult.cpp`), and `RB-PHYSICS-001-FR-043` corrected which
+/// formula the reference uses but never examined this separate clamp.
+/// Inert for every material-property value this crate itself currently
+/// ever sets (all positive placeholders in `0.1..=0.9`, nowhere near
+/// either bound) — but every `RigidBody`/`StaticPlane`/`StaticQuarterPipe`/
+/// `StaticCornerFillet`/`StaticGoalWall`/`StaticBoundedWall`'s own
+/// `friction` field is a public, unvalidated `f32`, so adopting the
+/// reference's own defensive bound costs nothing and closes a genuinely
+/// uninvestigated gap rather than leaving this port silently more
+/// permissive than the reference it's ported from.
 fn combine_friction(a: f32, b: f32) -> f32 {
-    (a + b) * 0.5
+    ((a + b) * 0.5).clamp(-10.0, 10.0)
 }
 
 /// Port of `btSequentialImpulseConstraintSolver::restitutionCurve`, with its
@@ -2069,6 +2082,22 @@ mod tests {
         assert_eq!(combine_friction(0.5, 0.5), 0.5);
         assert_eq!(combine_friction(0.9, 0.9), 0.9);
         assert_ne!(combine_friction(0.5, 0.5), 0.5 * 0.5);
+    }
+
+    #[test]
+    fn combine_friction_clamps_to_the_same_bound_real_bullet_uses() {
+        // RB-PHYSICS-001-FR-053: real Bullet's own `calculateCombinedFriction`
+        // clamps its product result to [-10.0, 10.0] -- confirmed against
+        // real fetched `btManifoldResult.cpp`. This crate's own average
+        // never produces a value this large from any friction coefficient
+        // this crate itself actually sets (all positive placeholders in
+        // 0.1..=0.9), but the clamp still has real bite for an
+        // out-of-that-range input, proving it's genuinely wired in rather
+        // than a doc-comment-only claim.
+        assert_eq!(combine_friction(15.0, 15.0), 10.0);
+        assert_eq!(combine_friction(-15.0, -15.0), -10.0);
+        // Within bounds: unaffected, still the plain average.
+        assert_eq!(combine_friction(9.0, 9.0), 9.0);
     }
 
     fn car_at_origin() -> RigidBody {

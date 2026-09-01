@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.52.0
+- Version: 0.53.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -238,7 +238,14 @@
   wall replaced by a very-heavy dynamic body; a new
   `solver::resolve_manifolds` folds a step's static and dynamic manifolds
   into one shared solve, replacing `step`'s two separate calls with one;
-  2 new tests; static-contact warm-starting, `arena::FILLET_RADIUS`/
+  2 new tests; and, since FR-053, `solver::combine_friction`'s own result
+  now clamps to `[-10.0, 10.0]`, matching real Bullet's own
+  `calculateCombinedFriction` (confirmed by re-fetching `btManifoldResult.cpp`)
+  — a detail FR-043's own reference read surfaced but didn't separately
+  examine; currently inert for every friction coefficient this crate
+  itself ever sets, adopted for reference conformance against every
+  static/dynamic body's own unvalidated public `friction` field; 1 new
+  test; static-contact warm-starting, `arena::FILLET_RADIUS`/
   `CORNER_ARCH_RADIUS` calibration, full convergence of the sandwiched
   case, a rigorous (non-heuristic) edge-edge nearest-pair selection, and
   real-data calibration (including which combine mode, if either, actually
@@ -3202,6 +3209,65 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `rb_physics_bullet`'s pre-existing tests (as of `FR-051`) pass
     unchanged. 2 new tests, bringing the crate to 288 total (+2 over
     `FR-051`'s 286).
+- `RB-PHYSICS-001-FR-053` (`combine_friction` defensive clamp, implemented):
+  `RB-PHYSICS-001-FR-043` fetched and read real Bullet's own
+  `btManifoldResult::calculateCombinedFriction`/`calculateCombinedRestitution`
+  source and corrected this spec's wrong claim about the reference's
+  default combine mode (an unclamped product, not `btMax`), but its own
+  investigation stopped at the formula question and never separately
+  examined one more detail visible in that same fetched source: real
+  Bullet's own `calculateCombinedFriction` additionally clamps its product
+  result to `[-10.0, 10.0]` (`calculateCombinedRestitution` has no such
+  clamp). This requirement re-fetched and re-read
+  `btManifoldResult.cpp` directly to confirm that clamp's exact mechanics
+  (a plain `if` clamp, not `btClamped`, applied only to friction) and
+  closed the gap.
+  1. **Confirmed the clamp is currently inert for this crate's own actual
+     material-property values.** Every `RigidBody`/`StaticPlane`/
+     `StaticQuarterPipe`/`StaticCornerFillet`/`StaticGoalWall`/
+     `StaticBoundedWall` this crate itself ever constructs uses a friction
+     coefficient in `0.1..=0.9` (uncalibrated placeholders and
+     `net::NET_FRICTION`/`drive::HANDBRAKE_FRICTION_MULTIPLIER`-scaled
+     values alike) — averaging any two of those never approaches `±10`, so
+     adopting the clamp changes zero behavior for any scene this port's
+     own public API can currently construct.
+  2. **Adopted the clamp anyway, for reference conformance against a
+     genuinely unvalidated boundary.** Every one of those types' own
+     `friction` field is a public, unvalidated `f32` — nothing in this
+     crate enforces a range on it today, so a future caller (or a bug
+     elsewhere) setting an extreme or negative value would hit
+     `combine_friction` with no defense at all, unlike real Bullet, which
+     always has this clamp regardless of caller-supplied values.
+     `solver::combine_friction` now clamps its own average result to the
+     same `[-10.0, 10.0]` bound, keeping the average formula
+     `RB-PHYSICS-001-FR-043` already decided to keep (this requirement
+     only adds the clamp, not a formula change). `combine_restitution` is
+     left unclamped, matching the reference's own choice not to clamp
+     restitution either.
+  - **Non-goals (this requirement).** Does not change
+    `combine_friction`'s own average formula (kept per
+    `RB-PHYSICS-001-FR-043`'s own identity-preservation reasoning). Does
+    not add any clamp to `combine_restitution` (the reference itself has
+    none). Does not add range validation to `RigidBody`/`StaticPlane`/etc's
+    own `friction`/`restitution` fields themselves — the clamp lives only
+    at the point of combining two coefficients, matching exactly where
+    real Bullet's own clamp lives. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `solver::combine_friction`'s result is
+    clamped to `[-10.0, 10.0]`, matching real Bullet's own
+    `calculateCombinedFriction` exactly. A dedicated test confirms the
+    clamp has real bite for an out-of-range input pair, not just a
+    doc-comment claim. All pre-existing tests pass unchanged, since no
+    value this crate itself ever produces crosses either bound.
+  - **Verification plan.** 1 new `solver.rs` test:
+    `combine_friction_clamps_to_the_same_bound_real_bullet_uses` asserts
+    `combine_friction(15.0, 15.0) == 10.0`,
+    `combine_friction(-15.0, -15.0) == -10.0`, and an in-range pair
+    (`9.0, 9.0`) stays the plain average, unaffected. All 288 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-052`) pass
+    unchanged. 1 new test, bringing the crate to 289 total (+1 over
+    `FR-052`'s 288).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4580,6 +4646,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.53.0 (2026-09-01): FR-053 added and implemented (`combine_friction`
+  defensive clamp) — `RB-PHYSICS-001-FR-043` fetched and read real
+  Bullet's own `btManifoldResult::calculateCombinedFriction`/
+  `calculateCombinedRestitution` source to correct this spec's wrong
+  claim that the reference's default combine mode is `btMax`, but never
+  separately examined one more detail in that same source: real Bullet's
+  own `calculateCombinedFriction` additionally clamps its product result
+  to `[-10.0, 10.0]` (`calculateCombinedRestitution` has no such clamp).
+  This requirement re-fetched and re-read `btManifoldResult.cpp` directly
+  to confirm the clamp's exact mechanics, found it currently inert for
+  every friction coefficient this crate itself ever sets (all positive
+  placeholders in `0.1..=0.9`), and adopted it anyway for reference
+  conformance — every `RigidBody`/`StaticPlane`/`StaticQuarterPipe`/
+  `StaticCornerFillet`/`StaticGoalWall`/`StaticBoundedWall`'s own
+  `friction` field is a public, unvalidated `f32`, so the clamp costs
+  nothing and closes a genuinely uninvestigated gap. `combine_friction`
+  now clamps its average result to `[-10.0, 10.0]`, keeping the average
+  formula `FR-043` already decided to keep; `combine_restitution` stays
+  unclamped, matching the reference's own choice. 1 new test
+  (`combine_friction_clamps_to_the_same_bound_real_bullet_uses`), bringing
+  `rb_physics_bullet` to 289 tests (+1 over FR-052's 288).
 - 0.52.0 (2026-09-01): FR-052 added and implemented (static-vs-dynamic
   combined-solve ordering investigation) — `PhysicsWorld::step` resolved a
   body's now-combined static contacts (FR-051) and its combined dynamic

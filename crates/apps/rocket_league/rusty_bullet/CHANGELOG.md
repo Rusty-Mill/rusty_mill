@@ -707,6 +707,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   it, replacing the two separate calls with one. 2 new tests, one
   confirmed to fail under the old two-call sequence; all pre-existing
   tests pass unchanged.
+- `solver::combine_friction`'s missing defensive clamp
+  (`RB-PHYSICS-001-FR-053`) — `RB-PHYSICS-001-FR-043` fetched and read
+  real Bullet's own `btManifoldResult::calculateCombinedFriction`/
+  `calculateCombinedRestitution` source to correct this spec's wrong
+  claim about the reference's default combine mode, but never separately
+  examined one more detail in that same source: real Bullet's own
+  `calculateCombinedFriction` additionally clamps its product result to
+  `[-10.0, 10.0]`. Re-fetched and re-read `btManifoldResult.cpp` directly
+  to confirm the clamp's exact mechanics, found it currently inert for
+  every friction coefficient this crate itself ever sets (all positive
+  placeholders in `0.1..=0.9`), and adopted it anyway for reference
+  conformance since every static/dynamic body's own `friction` field is a
+  public, unvalidated `f32`. `combine_friction` now clamps its average
+  result to `[-10.0, 10.0]`, keeping the average formula FR-043 already
+  decided to keep; `combine_restitution` stays unclamped, matching the
+  reference's own choice. 1 new test; all pre-existing tests pass
+  unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
