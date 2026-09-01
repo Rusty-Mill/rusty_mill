@@ -5664,6 +5664,7 @@ dependencies = [
  "metrics-util",
  "redis",
  "reqwest 0.13.4",
+ "rusty_retry",
  "serde",
  "serde_json",
  "serde_norway",
@@ -6281,10 +6282,15 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rusty_http",
+ "rusty_retry",
  "rusty_tls",
  "rusty_tokio",
  "tokio",
 ]
+
+[[package]]
+name = "rusty_retry"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_rusqlite"
