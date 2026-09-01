@@ -6,6 +6,33 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Landing auto-orientation vs. real auto-flip/auto-roll (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`RB-PHYSICS-001-FR-057`'s own Non-goals had left open** whether real
+  Rocket League's auto-flip (`CAR_AUTOFLIP_IMPULSE/TORQUE/TIME/
+  NORMZ_THRESH/ROLL_THRESH`) could map onto this port's own
+  `drive::LANDING_AUTO_UPRIGHT_TORQUE` "without further investigation."
+- **Fetched and read RocketSim's real `Car.cpp`** (the same technique
+  `RB-PHYSICS-001-FR-058`/`FR-059` used) and resolved that investigation:
+  real Rocket League has no mechanic matching "continuously nudge an
+  airborne car upright with no player input" at all.
+- **Found two distinct, real, grounded, input-gated systems instead**:
+  **auto-flip** — a turtle-recovery flip firing only on a jump press while
+  grounded on a roughly-horizontal surface with roll past a threshold,
+  timed over `CAR_AUTOFLIP_TIME` — and **auto-roll** — a continuous
+  ground-alignment torque active only while throttle is held with wheel
+  contact. Neither is airborne or input-free, the opposite shape from this
+  port's own placeholder.
+- **Corrected the `drive` module's doc comments**, this spec's stale Open
+  Questions bullet, and `FR-057`'s own Non-goals bullet to state this
+  finding directly instead of leaving it an open question.
+- No behavioral change and no new tests (documentation-only, matching
+  `RB-PHYSICS-001-FR-044`'s own precedent); all 302 pre-existing
+  `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real forward-speed-dependent dodge impulse scaling
 **2026-09-01** · [#125](https://github.com/baileyrd/rusty_bullet/pull/125) · `5f20ac4`
 

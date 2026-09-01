@@ -802,6 +802,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (RocketSim's real `500.0` base was deliberately not substituted, since
   the confirmed forward-dodge scale is exactly `1.0`). 5 new tests; all
   pre-existing tests pass unchanged.
+- `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md` and
+  `drive.rs`'s own doc comments (`RB-PHYSICS-001-FR-060`) — `FR-057`'s own
+  Non-goals had left open whether real Rocket League's auto-flip could map
+  onto `drive::LANDING_AUTO_UPRIGHT_TORQUE` "without further
+  investigation." Fetched and read RocketSim's real `Car.cpp` (the same
+  technique FR-058/FR-059 used) and resolved it: real Rocket League has no
+  mechanic matching "continuously nudge an airborne car upright with no
+  player input" at all — it has two distinct, real, grounded, input-gated
+  systems instead (auto-flip: a jump-triggered turtle-recovery flip past a
+  roll threshold; auto-roll: a throttle-triggered ground-alignment
+  torque), neither airborne nor input-free. Corrected the stale Open
+  Questions bullet, `FR-057`'s own Non-goals bullet, and the `drive`
+  module's doc comments accordingly. Zero production code changed; no new
+  tests.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

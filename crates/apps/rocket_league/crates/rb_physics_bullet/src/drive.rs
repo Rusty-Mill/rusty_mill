@@ -175,15 +175,27 @@
 //! local up axis toward world up: `up_axis(car).cross(&world_up)` gives
 //! both the correction axis and, since both are unit vectors, a magnitude
 //! already proportional to the sine of the tilt angle — a level car earns
-//! no correction, a heavily tilted one earns a stronger nudge. Real Rocket
-//! League likely gates this on actual proximity to the ground; this port
-//! has no raycast/distance-to-ground query to do that, so it applies
-//! continuously whenever airborne and the player isn't actively
-//! air-controlling instead — a documented simplification. A car resting
-//! *exactly* upside-down (`up` antiparallel to world up) is a singularity
-//! this simple scheme doesn't resolve (the cross product is exactly zero,
-//! any perpendicular axis would do, but none is chosen) — an unlikely
-//! exact case, not addressed here.
+//! no correction, a heavily tilted one earns a stronger nudge. This isn't a
+//! simplification of one specific real system: `RB-PHYSICS-001-FR-060`
+//! fetched RocketSim's real `Car.cpp` and found real Rocket League has no
+//! single mechanic matching "continuously nudge an airborne car upright
+//! with no player input." It instead has two distinct, real, *grounded*,
+//! input-gated systems — **auto-flip** (a turtle-recovery flip, firing only
+//! on an actual jump press while touching a mostly-upright surface
+//! (`CAR_AUTOFLIP_NORMZ_THRESH`) with roll already past a threshold
+//! (`CAR_AUTOFLIP_ROLL_THRESH`), timed over `CAR_AUTOFLIP_TIME`) and
+//! **auto-roll** (a continuous torque aligning the car to the ground's
+//! surface normal, but only while throttle is held and at least one wheel
+//! has contact) — neither of which is this port's own airborne, input-free
+//! nudge. This port's `LANDING_AUTO_UPRIGHT_TORQUE` remains its own
+//! invented placeholder for "eventually right yourself before landing," not
+//! a documented simplification of either real system; implementing either
+//! for real would mean adding new grounded, input-gated state machinery
+//! this port doesn't have, out of scope here — see `RB-PHYSICS-001-FR-060`'s
+//! own Non-goals. A car resting *exactly* upside-down (`up` antiparallel to
+//! world up) is a singularity this simple scheme doesn't resolve (the cross
+//! product is exactly zero, any perpendicular axis would do, but none is
+//! chosen) — an unlikely exact case, not addressed here.
 //!
 //! A car with no input set (or all-neutral `ControllerInput::default()`)
 //! behaves exactly as a free rigid box always has — this module only ever
@@ -223,7 +235,12 @@
 //! `WALL_JUMP_HORIZONTAL_SPEED`, and `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
 //! only to produce a visibly responsive turn/slide/spin/push-off/flip for
-//! this car's mass/inertia in tests — `RB-PHYSICS-001-FR-031`'s audit
+//! this car's mass/inertia in tests — `LANDING_AUTO_UPRIGHT_TORQUE` in
+//! particular isn't a simplification of one real system at all, since
+//! `RB-PHYSICS-001-FR-060` found real Rocket League's two closest systems
+//! (auto-flip, auto-roll) are both grounded and input-gated, unlike this
+//! port's own airborne, input-free nudge — see that module doc section's
+//! own detail. `RB-PHYSICS-001-FR-031`'s audit
 //! found real reference numbers for some of these (a dodge's real ~500
 //! uu/s base impulse; a wall jump reusing the plain jump impulse rather
 //! than its own faster speed; real air-control torque/damping

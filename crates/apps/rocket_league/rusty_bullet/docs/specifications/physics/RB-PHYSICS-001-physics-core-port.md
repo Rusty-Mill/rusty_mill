@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.59.0
+- Version: 0.60.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3602,7 +3602,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     reference for `drive::LANDING_AUTO_UPRIGHT_TORQUE` — real Rocket
     League's auto-flip appears to be conditional/threshold-driven, which
     may not map onto this port's own continuous-torque assist model
-    without further investigation. Does not adopt RocketSim's powerslide
+    without further investigation. **Resolved by
+    `RB-PHYSICS-001-FR-060`:** confirmed it doesn't map at all — real
+    auto-flip is a grounded, jump-triggered turtle-recovery mechanic, a
+    different shape entirely from this port's airborne, input-free nudge;
+    see that requirement's own entry. Does not adopt RocketSim's powerslide
     constants (`POWERSLIDE_RISE_RATE`/`FALL_RATE`) for
     `drive::HANDBRAKE_FRICTION_MULTIPLIER` — those imply a ramping state
     variable, a different model shape than this port's own flat
@@ -3817,6 +3821,66 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     297 of `rb_physics_bullet`'s pre-existing tests (as of `FR-058`) pass
     unchanged (net +5 tests over `FR-058`'s 297, bringing the crate to
     302).
+- `RB-PHYSICS-001-FR-060` (landing auto-orientation vs. real auto-flip/
+  auto-roll — audit finding, documentation only): `RB-PHYSICS-001-FR-057`'s
+  own Non-goals had flagged RocketSim's auto-flip constants
+  (`CAR_AUTOFLIP_IMPULSE/TORQUE/TIME/NORMZ_THRESH/ROLL_THRESH`) as a
+  possible reference for `drive::LANDING_AUTO_UPRIGHT_TORQUE`, but noted
+  auto-flip "appears to be conditional/threshold-driven, which may not map
+  onto this port's own continuous-torque assist model without further
+  investigation." This requirement resolves that open investigation by
+  fetching and reading RocketSim's actual `Car.cpp` implementation (the
+  same technique `RB-PHYSICS-001-FR-058`/`FR-059` used).
+  1. **Found real Rocket League has no single mechanic matching this
+     port's own "landing auto-orientation assistance."** It instead has two
+     distinct, real, *grounded*, input-gated systems: **auto-flip** — a
+     turtle-recovery flip, firing only when the player presses jump while
+     `worldContact.hasContact` is true and the contact normal's Z exceeds
+     `CAR_AUTOFLIP_NORMZ_THRESH` (roughly horizontal ground) and the car's
+     current roll exceeds `CAR_AUTOFLIP_ROLL_THRESH` — it then applies a
+     downward impulse (`CAR_AUTOFLIP_IMPULSE`, pinning the car against the
+     ground as a pivot) plus a forward-axis torque (`CAR_AUTOFLIP_TORQUE`,
+     signed by roll direction) sustained over a timer that starts at
+     `CAR_AUTOFLIP_TIME * (absRoll / PI)`; and **auto-roll** — a continuous
+     torque aligning the car's right/forward axes to the ground's surface
+     normal, active only while `throttle` is held and the car has partial
+     or full wheel contact, combined with a downward `CAR_AUTOROLL_FORCE`
+     toward the ground. Neither is airborne, and neither fires without a
+     specific player input (jump, or throttle) — both are the opposite
+     shape from this port's own continuous, input-free, airborne-only
+     nudge.
+  2. **Corrected the `drive` module's doc comments** (the "Landing
+     auto-orientation assistance" section and the "commonly-cited
+     constants" paragraph) to state this finding directly, replacing the
+     prior speculation that real Rocket League "likely gates this on
+     actual proximity to the ground" — that speculation is now known to be
+     the wrong shape of guess entirely, not merely unconfirmed.
+  3. **Corrected the stale Open Questions bullet and `RB-PHYSICS-001-FR-057`'s
+     own Non-goals bullet** that had left this an open "may not map...
+     without further investigation" question — now resolved with a
+     concrete negative/clarifying answer.
+  - **Non-goals (this requirement).** Does not implement either real
+    auto-flip or real auto-roll — both need new grounded, input-gated state
+    machinery (a per-car timer and roll-direction sign for auto-flip; a
+    ground-alignment torque computed from the contact surface normal for
+    auto-roll) this port doesn't have, a substantially larger feature than
+    a documentation correction; left as a candidate for a future,
+    dedicated requirement if this port ever adds a wheel/tire-contact model
+    fine-grained enough to support it. Does not change
+    `LANDING_AUTO_UPRIGHT_TORQUE`'s value, trigger condition, or any other
+    behavior — this is a pure audit/documentation finding, not a behavioral
+    fix. Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration,
+    still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** The `drive` module's doc comments and this
+    spec's Open Questions/FR-057 Non-goals no longer describe real Rocket
+    League's landing-assist trigger condition as an open "may not map...
+    without further investigation" question or a ground-proximity guess —
+    both now state the confirmed real auto-flip/auto-roll trigger
+    conditions and why neither corresponds to this port's own mechanic.
+  - **Verification plan.** No new tests (documentation-only, matching
+    `RB-PHYSICS-001-FR-044`'s own precedent); all 302 of `rb_physics_bullet`'s
+    pre-existing tests (as of `FR-059`) pass unchanged, confirming zero
+    behavioral change.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4978,12 +5042,21 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   itself (confirmed manually to converge much closer at 300 iterations,
   at obvious extra per-step cost — a real cost/benefit trade-off `1 / k`
   is not) is worth it before such data exists; not started.
-- Replicating real Rocket League's actual landing-assist trigger condition
-  (proximity to the ground, via some raycast or distance query this port
-  doesn't have) instead of the current continuous-whenever-airborne
-  stand-in (see FR-018) — needs a concrete reason (e.g. real recorded
-  landing-assist behavior to compare against) before it's worth adding a
-  ground-distance query solely for this. (The double jump's own dodge — a
+- ~~Replicating real Rocket League's actual landing-assist trigger
+  condition (proximity to the ground, via some raycast or distance query
+  this port doesn't have) instead of the current continuous-whenever-
+  airborne stand-in (see FR-018)~~ — resolved by `RB-PHYSICS-001-FR-060`:
+  fetching RocketSim's real `Car.cpp` found there is no real "landing
+  assist" gated on ground proximity to replicate in the first place. Real
+  Rocket League's two closest systems, auto-flip and auto-roll, are both
+  grounded and input-gated (a jump press past a roll threshold; a held
+  throttle with wheel contact), not an airborne proximity check — a
+  different shape of mechanic this port's own placeholder doesn't
+  correspond to, not merely an unconfirmed guess about its distance
+  threshold. Implementing either real system for real remains open, now a
+  substantially larger feature (new grounded state machinery) rather than
+  a stand-in to compare against — see FR-060's own Non-goals. (The double
+  jump's own dodge — a
   directional flip off the ground/air, no wall involved — is now
   implemented as FR-014; variable jump height for the ground jump is now
   implemented as FR-015; canceling a dodge's rotation early — flip-cancel —
@@ -5256,6 +5329,31 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.60.0 (2026-09-01): FR-060 added and implemented (landing
+  auto-orientation vs. real auto-flip/auto-roll — audit finding,
+  documentation only) — `RB-PHYSICS-001-FR-057`'s own Non-goals had
+  flagged RocketSim's auto-flip constants
+  (`CAR_AUTOFLIP_IMPULSE/TORQUE/TIME/NORMZ_THRESH/ROLL_THRESH`) as a
+  possible reference for `drive::LANDING_AUTO_UPRIGHT_TORQUE`, but left
+  open whether real auto-flip's conditional/threshold shape could map onto
+  this port's continuous-torque assist "without further investigation."
+  Fetched and read RocketSim's real `Car.cpp` (the same technique
+  `FR-058`/`FR-059` used) and found the answer is no: real Rocket League
+  has no mechanic matching "continuously nudge an airborne car upright
+  with no player input" at all. It has two distinct, real, grounded,
+  input-gated systems instead — auto-flip (a turtle-recovery flip firing
+  only on a jump press while grounded on a roughly-horizontal surface
+  (`CAR_AUTOFLIP_NORMZ_THRESH`) with roll already past a threshold
+  (`CAR_AUTOFLIP_ROLL_THRESH`), timed over `CAR_AUTOFLIP_TIME`) and
+  auto-roll (a continuous ground-alignment torque active only while
+  throttle is held with wheel contact) — neither airborne nor input-free,
+  the opposite shape from this port's own placeholder. Corrected the
+  `drive` module's doc comments, this spec's stale Open Questions bullet,
+  and `FR-057`'s own Non-goals bullet to state this finding directly
+  rather than leave it an open "may not map... without further
+  investigation" question. No behavioral change and no new tests
+  (documentation-only, matching `RB-PHYSICS-001-FR-044`'s own precedent);
+  all 302 of `rb_physics_bullet`'s pre-existing tests pass unchanged.
 - 0.59.0 (2026-09-01): FR-059 added and implemented (real
   forward-speed-dependent dodge impulse scaling) — `RB-PHYSICS-001-FR-031`'s
   own audit had already found real Rocket League's dodge impulse has
