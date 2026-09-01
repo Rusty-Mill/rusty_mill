@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Yaw input now contributes to a dodge's direction, matching real Rocket League
+**2026-09-01** · PR pending · commit pending
+
+- **This port's dodge/wall-jump-dodge direction read `pitch`/`roll` stick
+  input only, never `yaw`** — `RB-PHYSICS-001-FR-059`'s own Non-goals (and
+  `FR-072`'s own doc comment) had already found and flagged this gap: real
+  Rocket League's own `dodgeDir` combines `yaw + roll` for its horizontal
+  component, so a yaw-only stick nudge (no roll held) should fire a
+  sideways dodge, but this port's own dodge stayed silent.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateDoubleJumpOrFlip`) and
+  confirmed `controls.yaw` feeds nowhere else in the function — it only
+  ever contributes to `dodgeDir`'s own combined axis, alongside `roll`.
+- **Confirmed this needed no new machinery**: this port already reads
+  `input.yaw` in the very same function, for air control — folding it into
+  the dodge's own roll-axis stick value is a pure additive combination of
+  an already-available input, the same "pure operation, no new
+  architecture" transfer `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-068`/`FR-072`'s
+  own adopted findings share.
+- **Changed both dodge call sites** in `apply_driven_forces`: the combined
+  roll-axis stick value is now `input.roll.unwrap_or(0.0).clamp(-1.0, 1.0)
+  + input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0)`, feeding the existing
+  `DODGE_DEADZONE` trigger, `normalize_dodge_direction`, and
+  `DODGE_SPEED`/`DODGE_ANGULAR_SPEED` scaling unchanged.
+  `dodge_pitch_is_backward`'s own sign check still reads raw `pitch` only.
+- **A genuine behavioral fix, not a doc correction**: a yaw-only stick
+  press now fires the same sideways dodge a roll-only press would; equal
+  and opposite yaw and roll cancel to no sideways contribution. Added 3
+  new tests (a yaw-only dodge, a yaw-and-roll cancellation, and a
+  yaw-only wall-jump-dodge); all 317 pre-existing tests pass unchanged,
+  bringing the crate to 320.
+- **Not adopted**: RocketSim's own all-or-nothing cancellation check and
+  its post-normalization small-component zeroing — both separate
+  architectural differences left open, documented in
+  `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
+  (`RB-PHYSICS-001-FR-073`).
+
+---
+
 ## Diagonal dodges are no longer faster than axis-aligned ones
 **2026-09-01** · [#151](https://github.com/baileyrd/rusty_bullet/pull/151) · `8f3fcd2`
 

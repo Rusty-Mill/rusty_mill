@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.72.0
+- Version: 0.73.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3812,9 +3812,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     one-requirement) redesign left for a future requirement. Does not
     adopt real yaw input's contribution to dodge direction (RocketSim's
     own `dodgeDir` combines `yaw + roll`; this port's dodge direction is
-    pitch/roll only, matching its own pre-existing convention). Does not
-    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked
-    on `PHASE-0-EXIT`.
+    pitch/roll only, matching its own pre-existing convention) —
+    (`RB-PHYSICS-001-FR-073` later closed this thread with a genuine fix).
+    Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still
+    blocked on `PHASE-0-EXIT`.
   - **Acceptance criteria.** `dodge_speed_scale`/`dodge_pitch_is_backward`'s
     own doc comments state the exact RocketSim citations and their scope
     caveats. A backward pitch-dodge or a side (roll) dodge made at
@@ -4690,6 +4691,73 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `normalize_dodge_direction`'s own behavior directly. All 314
     pre-existing tests (as of `FR-071`) pass with these 2 updated plus 3
     new, bringing the crate to 317.
+- `RB-PHYSICS-001-FR-073` (fold yaw into the dodge direction, implemented):
+  `RB-PHYSICS-001-FR-059`'s own Non-goals (and `FR-072`'s own doc comment)
+  had already found and flagged a genuine behavioral gap — this port's
+  dodge/wall-jump-dodge direction reads only `pitch`/`roll` stick input,
+  never `yaw`, even though real Rocket League's own `dodgeDir` combines
+  `yaw + roll` for its horizontal-axis component.
+  1. **Confirmed real RocketSim's exact mechanism** (`Car.cpp`,
+     `_UpdateDoubleJumpOrFlip`): `dodgeDir = btVector3(-controls.pitch,
+     controls.yaw + controls.roll, 0)`, normalized as `FR-072` already
+     found; a dodge is cancelled entirely only when *both*
+     `abs(controls.yaw + controls.roll) < 0.1` and `abs(controls.pitch) <
+     0.1` (not adopted here — see Non-goals below). `controls.yaw` appears
+     nowhere else in the function; it only ever feeds `dodgeDir`.
+  2. **Confirmed this needs no new machinery**: unlike a wheeled-vehicle
+     model or a continuous-torque timing state, this port already reads
+     `input.yaw` in the same function, for air control (see
+     `apply_driven_forces`'s existing `let yaw = input.yaw.unwrap_or(0.0)…`
+     line) — folding it into the dodge's own roll-axis stick value is a
+     pure additive combination of an already-available input, not a new
+     capability, the same kind of "pure operation, no new architecture"
+     transfer `FR-058`/`FR-059`/`FR-068`/`FR-072`'s own adopted findings
+     share.
+  3. **Changed both dodge call sites** in `apply_driven_forces` (the ground
+     double-jump-dodge branch and the wall-jump-dodge branch): `dodge_roll`/
+     `wall_roll` are now `input.roll.unwrap_or(0.0).clamp(-1.0, 1.0) +
+     input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0)` (each individually clamped
+     first, matching how air control already clamps pitch/yaw/roll
+     separately), rather than `input.roll` alone. This combined value feeds
+     the existing `DODGE_DEADZONE` trigger check, `normalize_dodge_direction`,
+     and the `DODGE_SPEED`/`DODGE_ANGULAR_SPEED` scaling — all unchanged
+     otherwise. `dodge_pitch_is_backward`'s own sign check still reads raw
+     `pitch` only, unaffected.
+  4. **Updated `normalize_dodge_direction`'s own doc comment** (its "not
+     adopted: yaw isn't folded in" note was now stale) and the module doc's
+     dodge paragraph to state the finding, and added a forward citation from
+     `RB-PHYSICS-001-FR-059`'s own Non-goals bullet.
+  5. **Added 3 new tests**: `a_yaw_only_press_fires_a_sideways_dodge_like_roll`
+     (a pure yaw stick nudge, no roll held, fires the same sideways dodge a
+     roll-only press would), `yaw_and_roll_combine_in_the_dodge_direction`
+     (equal-and-opposite yaw and roll cancel to no sideways dodge, falling
+     back to a plain double jump), and
+     `a_yaw_only_press_fires_a_sideways_wall_jump_dodge_like_roll` (the same
+     fold-in on the wall-jump-dodge path).
+  - **Non-goals (this requirement).** Does not adopt RocketSim's own
+    all-or-nothing cancellation check (`abs(yaw + roll) < 0.1 &&
+    abs(pitch) < 0.1` zeroes the *entire* dodge direction) in place of this
+    port's own independent per-axis `DODGE_DEADZONE` trigger — a real but
+    separate architectural difference (independent per-axis firing vs. one
+    combined gate) left for a future requirement if it turns out to matter.
+    Does not adopt RocketSim's own post-normalization small-component
+    zeroing (`abs(x) < 0.1` on each *normalized* direction component,
+    confirmed during `FR-072`'s own investigation) — a separate, independent
+    simplification. Does not adopt `DODGE_SPEED`'s own real base magnitude,
+    still independently uncalibrated. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** A dodge or wall-jump-dodge press with only
+    `yaw` held (no `roll`) fires the same sideways dodge a roll-only press
+    would. Equal-and-opposite `yaw` and `roll` cancel to no sideways
+    contribution. A pitch-only dodge (no `roll`/`yaw`) is bit-for-bit
+    unaffected.
+  - **Verification plan.** 3 new tests
+    (`a_yaw_only_press_fires_a_sideways_dodge_like_roll`,
+    `yaw_and_roll_combine_in_the_dodge_direction`,
+    `a_yaw_only_press_fires_a_sideways_wall_jump_dodge_like_roll`) added;
+    all 317 pre-existing tests (as of `FR-072`) pass unchanged, bringing the
+    crate to 320.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6175,6 +6243,29 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.73.0 (2026-09-01): FR-073 added and implemented (fold yaw input into
+  the dodge/wall-jump-dodge direction, genuine behavioral fix) —
+  `FR-059`'s own Non-goals (and `FR-072`'s own doc comment) had already
+  found and flagged that this port's dodge direction reads `pitch`/`roll`
+  only, never `yaw`, unlike real Rocket League's own `dodgeDir = (-pitch,
+  yaw + roll, 0)`. Confirmed via RocketSim's `Car.cpp`
+  (`_UpdateDoubleJumpOrFlip`) that `controls.yaw` feeds nowhere else in the
+  function — only `dodgeDir`'s own combined axis. Unlike a wheeled-vehicle
+  model or a continuous-torque timing state, this needed no new machinery:
+  this port already reads `input.yaw` in this same function for air
+  control, so folding it into the dodge's roll-axis stick value
+  (`roll + yaw`, each clamped to `[-1.0, 1.0]` individually first) at both
+  the ground-dodge and wall-jump-dodge call sites was a pure additive
+  combination of an already-available input. The existing
+  `DODGE_DEADZONE` trigger, `normalize_dodge_direction`, and speed scaling
+  are otherwise unchanged; `dodge_pitch_is_backward` still reads raw pitch
+  only. Not adopted: RocketSim's own all-or-nothing cancellation check
+  (combined `yaw + roll` and `pitch` both under `0.1` zeroes the whole
+  direction, vs. this port's independent per-axis trigger) and its
+  post-normalization small-component zeroing — both separate architectural
+  differences left open. Added 3 new tests exercising a yaw-only dodge, a
+  yaw-and-roll cancellation, and a yaw-only wall-jump-dodge; crate grows
+  from 317 to 320, all passing.
 - 0.72.0 (2026-09-01): FR-072 added and implemented (normalized
   diagonal-dodge direction, genuine behavioral fix) — `FR-059`'s own
   Non-goals had already found and flagged that this port sums each dodge
