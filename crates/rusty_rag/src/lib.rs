@@ -1,6 +1,9 @@
 //! Sovereign AI Retrieval-Augmented Generation (RAG) & Question-Answering Engine.
 //!
 //! Connects search indexing, SIMD vector embedding retrieval, and LLM inference for sovereign Q&A.
+//!
+//! Split out of `rusty_ansder`, which used to bundle this RAG engine together
+//! with an unrelated ASN.1 DER parser under one portmanteau crate name.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

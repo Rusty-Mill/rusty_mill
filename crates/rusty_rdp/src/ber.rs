@@ -125,7 +125,7 @@ pub fn read_enumerated(r: &mut Reader<'_>) -> Result<u8> {
             length: len,
         });
     }
-    r.read_u8()
+    Ok(r.read_u8()?)
 }
 
 /// Write an ENUMERATED byte.
@@ -158,7 +158,7 @@ pub fn write_octet_string(w: &mut Writer, bytes: &[u8]) {
 /// Read an OCTET STRING, borrowing the content bytes.
 pub fn read_octet_string<'a>(r: &mut Reader<'a>) -> Result<&'a [u8]> {
     let len = expect_tag(r, TAG_OCTET_STRING)?;
-    r.read_bytes(len)
+    Ok(r.read_bytes(len)?)
 }
 
 fn read_uint_contents(r: &mut Reader<'_>, len: usize, field: &'static str) -> Result<u32> {

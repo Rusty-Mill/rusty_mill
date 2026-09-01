@@ -6006,10 +6006,6 @@ dependencies = [
 name = "rusty_ansder"
 version = "0.1.0"
 dependencies = [
- "rusty_json",
- "rusty_regx",
- "rusty_simd 0.1.0",
- "rusty_std",
  "rusty_wire",
 ]
 
@@ -6214,6 +6210,13 @@ name = "rusty_oauth"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_rag"
+version = "0.1.0"
+dependencies = [
+ "rusty_simd 0.1.0",
+]
+
+[[package]]
 name = "rusty_rdp"
 version = "0.1.0"
 dependencies = [
@@ -6222,7 +6225,6 @@ dependencies = [
  "platform-linux 0.27.0",
  "platform-mock 0.27.0",
  "rustls",
- "rusty_ansder",
  "rusty_tls",
  "rusty_wire",
 ]

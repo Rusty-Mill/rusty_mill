@@ -979,7 +979,7 @@ const CBT_REGION: u16 = 0xCAC1;
 /// constants).
 pub fn peek_block_type(buf: &[u8]) -> Result<u16> {
     let mut r = Reader::new(buf);
-    r.read_u16_le()
+    Ok(r.read_u16_le()?)
 }
 
 /// Validate and consume a `TS_RFX_BLOCKT` header: `blockType` (checked

@@ -352,7 +352,7 @@ fn read_run_length(r: &mut Reader<'_>, first: u32) -> Result<u32> {
     if ext16 < 0xFFFF {
         return Ok(ext16);
     }
-    r.read_u32_le()
+    Ok(r.read_u32_le()?)
 }
 
 /// Decode `residualData`: a flat run-length-encoded fill covering the
