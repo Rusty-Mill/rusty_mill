@@ -6,6 +6,40 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real air-control damping mechanism (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`RB-PHYSICS-001-FR-068`'s own Non-goals had already found RocketSim's
+  `CAR_AIR_CONTROL_DAMPING = Vec(30, 20, 50)` exists** but left it as "a
+  separate, independent addition left for a future requirement" without
+  examining the mechanism behind it.
+- **Fetched RocketSim's own `Car.cpp` again** (the same fetch
+  `RB-PHYSICS-001-FR-070` used to characterize `pitchTorqueScale`) and
+  found the full mechanism: for each axis, real air control subtracts a
+  damping torque `(angular velocity along that axis) *
+  CAR_AIR_CONTROL_DAMPING[axis] * (1 - abs(analog input on that axis))`
+  from the applied torque before scaling by inertia — pitch's own input
+  term additionally multiplies by `pitchTorqueScale`. Releasing the stick
+  on an axis gives full damping strength there, continuously bleeding off
+  any existing spin; holding it fully zeroes the damping, granting full
+  torque authority with no resistance.
+- **Not adopted as a fix.** Unlike `AIR_CONTROL_TORQUE`'s own pitch/yaw/roll
+  ratio (`RB-PHYSICS-001-FR-068`), which scaled a torque this port already
+  applies the same way, this port has no existing damping term at all to
+  apply a ratio to — introducing one is a genuinely new mechanism, not a
+  multiplier transfer. Its absolute coefficients are also calibrated
+  against real Rocket League's own specific inertia tensor, the same
+  "false precision" reasoning that already keeps `AIR_CONTROL_TORQUE`
+  itself a placeholder.
+- Corrected the `drive` module's air-control doc comment and
+  `AIR_CONTROL_ROLL_SCALE`'s own doc comment with the confirmed mechanism,
+  and added a forward citation from `RB-PHYSICS-001-FR-068`'s own
+  Non-goals.
+- A pure documentation/audit finding: zero production behavior changed, no
+  new tests; all 314 pre-existing `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real flip-cancel is continuous, pitch-stick-driven, and pitch-axis-only (audit finding)
 **2026-09-01** · [#147](https://github.com/baileyrd/rusty_bullet/pull/147) · `be2b755`
 

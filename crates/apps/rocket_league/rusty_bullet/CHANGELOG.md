@@ -763,6 +763,27 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   need the same per-axis torque and elapsed-flip-time state `FR-059`'s own
   Non-goals already flagged as out of scope. No new tests; all 314
   pre-existing tests pass unchanged.
+- Real air-control damping mechanism finding (`RB-PHYSICS-001-FR-071`) —
+  `RB-PHYSICS-001-FR-068`'s own Non-goals had already found RocketSim's
+  `CAR_AIR_CONTROL_DAMPING = Vec(30, 20, 50)` exists but left it as "a
+  separate, independent addition left for a future requirement" without
+  examining the mechanism. Fetched RocketSim's own `Car.cpp` again (the
+  same fetch `FR-070` used for `pitchTorqueScale`) and found the full
+  mechanism: for each axis, real air control subtracts a damping torque
+  `(angular velocity along that axis) * CAR_AIR_CONTROL_DAMPING[axis] *
+  (1 - abs(analog input on that axis))` from the applied torque before
+  scaling by inertia — releasing the stick gives full damping strength,
+  continuously bleeding off spin; holding it fully zeroes the damping,
+  granting full torque authority. Corrected the `drive` module's
+  air-control doc comment and `AIR_CONTROL_ROLL_SCALE`'s own doc comment,
+  and added a forward citation from `FR-068`'s own Non-goals. Not adopted:
+  unlike `AIR_CONTROL_TORQUE`'s own pitch/yaw/roll ratio, this port has no
+  existing damping quantity to apply a ratio to — introducing one is a
+  genuinely new mechanism, not a multiplier transfer — and its absolute
+  coefficients are calibrated against real Rocket League's own specific
+  inertia tensor, the same "false precision" reasoning that already keeps
+  `AIR_CONTROL_TORQUE` a placeholder. No new tests; all 314 pre-existing
+  tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
