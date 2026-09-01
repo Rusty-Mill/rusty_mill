@@ -12,9 +12,8 @@ use crate::backend::Backend;
 use crate::math::silu;
 use crate::quant::{
     dequant_block, dequantize_into, f32_axpy_decay, f32_dot, quantize_activation_q8,
-    quantize_activation_q8k, vec_dot_q4_0,
-    vec_dot_q4_k, vec_dot_q4_k_tiled, vec_dot_q6_k, vec_dot_q6_k_tiled, vec_dot_q8_0, GgmlType,
-    Q8Activation, Q8KActivation, MAX_BLOCK,
+    quantize_activation_q8k, vec_dot_q4_0, vec_dot_q4_k, vec_dot_q4_k_tiled, vec_dot_q6_k,
+    vec_dot_q6_k_tiled, vec_dot_q8_0, GgmlType, Q8Activation, Q8KActivation, MAX_BLOCK,
 };
 use crate::tensor::QMatrix;
 
@@ -147,8 +146,14 @@ impl Backend for CpuBackend {
         debug_assert!(ws.iter().all(|w| w.cols() == x.len()));
         // 1 = Q8_K activation (Q4_K/Q6_K); 2 = Q8 activation (Q8_0/Q4_0); 0 = other.
         let act_kind = |w: &QMatrix| match w {
-            QMatrix::Quant { ty: GgmlType::Q4_K | GgmlType::Q6_K, .. } => 1u8,
-            QMatrix::Quant { ty: GgmlType::Q8_0 | GgmlType::Q4_0, .. } => 2u8,
+            QMatrix::Quant {
+                ty: GgmlType::Q4_K | GgmlType::Q6_K,
+                ..
+            } => 1u8,
+            QMatrix::Quant {
+                ty: GgmlType::Q8_0 | GgmlType::Q4_0,
+                ..
+            } => 2u8,
             _ => 0u8,
         };
         let kind = ws.first().map_or(0, |w| act_kind(w));
@@ -255,15 +260,17 @@ impl Backend for CpuBackend {
                             GgmlType::Q4_K => vec_dot_q4_k_tiled,
                             _ => vec_dot_q6_k_tiled,
                         };
-                        tmp.par_chunks_mut(4 * rows).enumerate().for_each(|(blk, out_block)| {
-                            let i0 = blk * 4;
-                            let nr = out_block.len() / rows;
-                            let mut wrows: [&[u8]; 4] = [&[]; 4];
-                            for (r, wr) in wrows[..nr].iter_mut().enumerate() {
-                                *wr = row(i0 + r);
-                            }
-                            tiled(&wrows[..nr], &acts, out_block);
-                        });
+                        tmp.par_chunks_mut(4 * rows)
+                            .enumerate()
+                            .for_each(|(blk, out_block)| {
+                                let i0 = blk * 4;
+                                let nr = out_block.len() / rows;
+                                let mut wrows: [&[u8]; 4] = [&[]; 4];
+                                for (r, wr) in wrows[..nr].iter_mut().enumerate() {
+                                    *wr = row(i0 + r);
+                                }
+                                tiled(&wrows[..nr], &acts, out_block);
+                            });
                     }
                     // F16 (block size 1): dequantize each weight row once and
                     // reuse it. A sequential dot over the dequantized row is
@@ -287,19 +294,21 @@ impl Backend for CpuBackend {
         // cache line across the tile instead of thrashing the 11 MB scratch;
         // parallel over output-row tiles (each owns a disjoint contiguous block).
         const T: usize = 32;
-        out.par_chunks_mut(T * oc).enumerate().for_each(|(blk, oblk)| {
-            let r0 = blk * T;
-            let rb = oblk.len() / oc; // T, or the final remainder
-            for i0 in (0..oc).step_by(T) {
-                let iend = (i0 + T).min(oc);
-                for rl in 0..rb {
-                    let dst = &mut oblk[rl * oc + i0..rl * oc + iend];
-                    for (k, o) in dst.iter_mut().enumerate() {
-                        *o = tmp[(i0 + k) * rows + r0 + rl];
+        out.par_chunks_mut(T * oc)
+            .enumerate()
+            .for_each(|(blk, oblk)| {
+                let r0 = blk * T;
+                let rb = oblk.len() / oc; // T, or the final remainder
+                for i0 in (0..oc).step_by(T) {
+                    let iend = (i0 + T).min(oc);
+                    for rl in 0..rb {
+                        let dst = &mut oblk[rl * oc + i0..rl * oc + iend];
+                        for (k, o) in dst.iter_mut().enumerate() {
+                            *o = tmp[(i0 + k) * rows + r0 + rl];
+                        }
                     }
                 }
-            }
-        });
+            });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -621,7 +630,9 @@ mod tests {
         let wv = QMatrix::quant(GgmlType::Q6_K, q6k_rows.into(), 2, 256).unwrap();
 
         // Q8_0 weights from real f32 (the other shared-activation format).
-        let wf: Vec<f32> = (0..2 * 256).map(|i| ((i % 23) as f32 - 11.0) * 0.07).collect();
+        let wf: Vec<f32> = (0..2 * 256)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.07)
+            .collect();
         let w80 = QMatrix::quant(GgmlType::Q8_0, quantize_q8_0(&wf).into(), 2, 256).unwrap();
 
         // `matmul_shared` must be byte-for-byte identical to a `matmul` per weight.
@@ -636,12 +647,17 @@ mod tests {
                 .collect();
             let mut shared: Vec<Vec<f32>> = ws.iter().map(|w| vec![0.0f32; w.rows()]).collect();
             {
-                let mut outs: Vec<&mut [f32]> = shared.iter_mut().map(|v| v.as_mut_slice()).collect();
+                let mut outs: Vec<&mut [f32]> =
+                    shared.iter_mut().map(|v| v.as_mut_slice()).collect();
                 b.matmul_shared(&mut outs, &x, ws);
             }
             for (r, s) in refs.iter().zip(&shared) {
                 for (a, c) in r.iter().zip(s) {
-                    assert_eq!(a.to_bits(), c.to_bits(), "matmul_shared diverged from matmul");
+                    assert_eq!(
+                        a.to_bits(),
+                        c.to_bits(),
+                        "matmul_shared diverged from matmul"
+                    );
                 }
             }
         };
@@ -878,30 +894,39 @@ mod tests {
     fn rope_precompute_bit_identical_to_per_head() {
         // Reference = the per-head recompute (pre-precompute path): identical
         // `pos as f32 * inv_freq[pair]` then cos/sin·mscale, recomputed per pair.
-        let reference =
-            |q: &mut [f32], k: &mut [f32], pos: usize, hs: usize, kvd: usize, inv: &[f32], ms: f32| {
-                let dim = q.len();
-                let mut i = 0;
-                while i < dim {
-                    let pair = (i % hs) / 2;
-                    if pair < inv.len() {
-                        let val = pos as f32 * inv[pair];
-                        let (fcr, fci) = (val.cos() * ms, val.sin() * ms);
-                        let (q0, q1) = (q[i], q[i + 1]);
-                        q[i] = q0 * fcr - q1 * fci;
-                        q[i + 1] = q0 * fci + q1 * fcr;
-                        if i < kvd {
-                            let (k0, k1) = (k[i], k[i + 1]);
-                            k[i] = k0 * fcr - k1 * fci;
-                            k[i + 1] = k0 * fci + k1 * fcr;
-                        }
+        let reference = |q: &mut [f32],
+                         k: &mut [f32],
+                         pos: usize,
+                         hs: usize,
+                         kvd: usize,
+                         inv: &[f32],
+                         ms: f32| {
+            let dim = q.len();
+            let mut i = 0;
+            while i < dim {
+                let pair = (i % hs) / 2;
+                if pair < inv.len() {
+                    let val = pos as f32 * inv[pair];
+                    let (fcr, fci) = (val.cos() * ms, val.sin() * ms);
+                    let (q0, q1) = (q[i], q[i + 1]);
+                    q[i] = q0 * fcr - q1 * fci;
+                    q[i + 1] = q0 * fci + q1 * fcr;
+                    if i < kvd {
+                        let (k0, k1) = (k[i], k[i + 1]);
+                        k[i] = k0 * fcr - k1 * fci;
+                        k[i + 1] = k0 * fci + k1 * fcr;
                     }
-                    i += 2;
                 }
-            };
+                i += 2;
+            }
+        };
         let b = CpuBackend::new();
         // (head_size, kv_heads, n_heads, rotary_pairs) — full and partial rotary.
-        let shapes = [(64usize, 2usize, 32usize, 32usize), (128, 4, 32, 64), (64, 1, 8, 16)];
+        let shapes = [
+            (64usize, 2usize, 32usize, 32usize),
+            (128, 4, 32, 64),
+            (64, 1, 8, 16),
+        ];
         for (hs, kvh, nh, pairs) in shapes {
             let (dim, kvd) = (nh * hs, kvh * hs);
             let inv: Vec<f32> = (0..pairs)
@@ -974,17 +999,43 @@ mod tests {
         // Full causal (window 0): value[0] dominates the output.
         let mut out_full = [0.0f32; 1];
         CpuBackend.attention(
-            &mut out_full, &q, &key_cache, &value_cache, &mut att, pos, 1, 1, hs, seq_len, kv_dim,
-            0.0, 0,
+            &mut out_full,
+            &q,
+            &key_cache,
+            &value_cache,
+            &mut att,
+            pos,
+            1,
+            1,
+            hs,
+            seq_len,
+            kv_dim,
+            0.0,
+            0,
         );
-        assert!(out_full[0] > 100.0, "full attention should see value[0]: {}", out_full[0]);
+        assert!(
+            out_full[0] > 100.0,
+            "full attention should see value[0]: {}",
+            out_full[0]
+        );
 
         // Sliding window 3: keys 3..=5 only (their scores are 0 -> uniform), so the
         // output is mean(7, 8, 9) = 8 — value[0] is masked out.
         let mut out_win = [0.0f32; 1];
         CpuBackend.attention(
-            &mut out_win, &q, &key_cache, &value_cache, &mut att, pos, 1, 1, hs, seq_len, kv_dim,
-            0.0, 3,
+            &mut out_win,
+            &q,
+            &key_cache,
+            &value_cache,
+            &mut att,
+            pos,
+            1,
+            1,
+            hs,
+            seq_len,
+            kv_dim,
+            0.0,
+            3,
         );
         approx(out_win[0], 8.0);
     }
@@ -1028,7 +1079,8 @@ mod tests {
         let kv_mul = n_heads / n_kv_heads;
         let dim = n_heads * head_size;
         // Deterministic pseudo-random fills in [-0.5, 0.5).
-        let r = |i: usize| ((i.wrapping_mul(2654435761) >> 8) as f32 / (1u32 << 24) as f32) % 1.0 - 0.5;
+        let r =
+            |i: usize| ((i.wrapping_mul(2654435761) >> 8) as f32 / (1u32 << 24) as f32) % 1.0 - 0.5;
         let q: Vec<f32> = (0..dim).map(r).collect();
         let key_cache: Vec<f32> = (0..seq_len * kv_dim).map(|i| r(i + 7)).collect();
         let value_cache: Vec<f32> = (0..seq_len * kv_dim).map(|i| r(i + 99)).collect();
@@ -1086,7 +1138,10 @@ mod tests {
                     0,
                 );
                 for (o, w) in out.iter().zip(&reference(pos, softcap)) {
-                    assert!((o - w).abs() < 1e-6, "flash {o} vs classic {w} (pos {pos} cap {softcap})");
+                    assert!(
+                        (o - w).abs() < 1e-6,
+                        "flash {o} vs classic {w} (pos {pos} cap {softcap})"
+                    );
                 }
             }
         }

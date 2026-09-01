@@ -13,6 +13,31 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_llama`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_llama` — a from-scratch Llama/GGUF inference
+  engine: CPU SIMD kernels, optional `wgpu` and CUDA backends, an
+  OpenAI-compatible server, and GGUF-embedded Jinja chat templating. Merged
+  via `git subtree` with full history.
+- No dependency swaps: its `rusty_simd`/`rusty_std` path dependencies
+  already pointed at siblings under `crates/`.
+- **Fixed:** two `unnecessary_cast` lints in `backend/cuda.rs`'s test
+  fixtures. They only appear with the `cuda` feature on, which this
+  workspace's `--all-features` clippy gate does and the crate's own CI
+  never did.
+- **Fixed:** `render_jinja_threads_context_variables` asserted a bool
+  interpolates as `true`. `minijinja` 2.22 deliberately changed
+  none/bool rendering to `None`/`True`/`False` for Jinja2 compatibility;
+  the standalone lockfile pinned 2.21, this workspace resolves 2.24. Since
+  the code path exists to render templates authored for Python Jinja2, the
+  new rendering is the correct one — assertion updated, reason recorded
+  inline. Nothing else in the crate interpolates a bare boolean.
+- **Changed:** reformatted with `cargo fmt --all` (not fmt-clean under this
+  workspace's settings).
+- 248 tests pass; 49 stay ignored because they need real model weights on
+  disk, by the crate's own design.
+
 ## Fourth-wave merge — `rusty_key`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

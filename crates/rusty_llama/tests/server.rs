@@ -59,7 +59,10 @@ fn server_serves_openai_endpoints() {
         r#"{"prompt":"Hello,","max_tokens":4,"temperature":0}"#,
     );
     assert!(resp.contains("200 OK"), "completions status: {resp}");
-    assert!(resp.contains("text_completion"), "completions object: {resp}");
+    assert!(
+        resp.contains("text_completion"),
+        "completions object: {resp}"
+    );
     let json = resp.split("\r\n\r\n").nth(1).unwrap_or("");
     let v: serde_json::Value = serde_json::from_str(json).expect("valid completion JSON");
     assert!(v["choices"][0]["text"].is_string());
@@ -75,9 +78,7 @@ fn server_serves_openai_endpoints() {
         .map(|i| {
             let addr = addr.clone();
             thread::spawn(move || {
-                let body = format!(
-                    r#"{{"prompt":"Item {i}:","max_tokens":6,"temperature":0}}"#
-                );
+                let body = format!(r#"{{"prompt":"Item {i}:","max_tokens":6,"temperature":0}}"#);
                 post(&addr, "/v1/completions", &body)
             })
         })
@@ -99,5 +100,8 @@ fn server_serves_openai_endpoints() {
     let json = resp.split("\r\n\r\n").nth(1).unwrap_or("");
     let v: serde_json::Value = serde_json::from_str(json).expect("valid grammar JSON");
     let text = v["choices"][0]["text"].as_str().unwrap_or("");
-    assert!(text == "yes" || text == "no", "grammar-constrained output: {text:?}");
+    assert!(
+        text == "yes" || text == "no",
+        "grammar-constrained output: {text:?}"
+    );
 }

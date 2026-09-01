@@ -255,7 +255,9 @@ impl<'a> Model<'a> {
             1.0
         };
         let attn_logit_softcap = gguf.meta_f32(&key("attn_logit_softcapping")).unwrap_or(0.0);
-        let final_logit_softcap = gguf.meta_f32(&key("final_logit_softcapping")).unwrap_or(0.0);
+        let final_logit_softcap = gguf
+            .meta_f32(&key("final_logit_softcapping"))
+            .unwrap_or(0.0);
 
         // Gemma2 interleaved sliding-window attention: even layers attend only to
         // the last `sliding_window` keys. Read from GGUF `attention.sliding_window`;
@@ -265,7 +267,11 @@ impl<'a> Model<'a> {
         let sliding_window = gguf
             .meta_u64(&key("attention.sliding_window"))
             .map(|v| v as usize)
-            .unwrap_or(if matches!(arch, Arch::Gemma2) { 4096 } else { 0 });
+            .unwrap_or(if matches!(arch, Arch::Gemma2) {
+                4096
+            } else {
+                0
+            });
 
         // Gemma2 divides the attention scores by sqrt(query_pre_attn_scalar),
         // which differs from sqrt(head_size) on Gemma2-27B (144 vs 128). The
@@ -367,7 +373,11 @@ impl<'a> Model<'a> {
             }
             (wq, wk, wv)
         } else {
-            (layers(names.attn_q)?, layers(names.attn_k)?, layers(names.attn_v)?)
+            (
+                layers(names.attn_q)?,
+                layers(names.attn_k)?,
+                layers(names.attn_v)?,
+            )
         };
 
         // FFN weights. A dense model has per-layer gate/up/down (Phi-3's fused
@@ -460,7 +470,10 @@ impl<'a> Model<'a> {
         };
 
         let (rms_attn_post, rms_ffn_post) = if arch.sandwich_norm() {
-            (concat_norm(names.attn_post_norm)?, concat_norm(names.ffn_post_norm)?)
+            (
+                concat_norm(names.attn_post_norm)?,
+                concat_norm(names.ffn_post_norm)?,
+            )
         } else {
             (Vec::new(), Vec::new())
         };
@@ -519,9 +532,7 @@ fn read_rope_scaling(gguf: &Gguf, arch: &str) -> Result<RopeScaling> {
         Err(_) => return Ok(RopeScaling::None),
     };
     let factor = gguf.meta_f32(&key("factor")).unwrap_or(1.0);
-    let orig_ctx = gguf
-        .meta_u64(&key("original_context_length"))
-        .unwrap_or(0) as usize;
+    let orig_ctx = gguf.meta_u64(&key("original_context_length")).unwrap_or(0) as usize;
     Ok(match ty.as_str() {
         "none" => RopeScaling::None,
         "linear" => RopeScaling::Linear { factor },
@@ -551,7 +562,13 @@ fn read_rope_scaling(gguf: &Gguf, arch: &str) -> Result<RopeScaling> {
 fn f32_layers(big: &[f32], n_layers: usize, rows: usize, cols: usize) -> Result<Vec<QMatrix<'_>>> {
     let stride = rows * cols;
     (0..n_layers)
-        .map(|i| QMatrix::f32(Cow::Borrowed(&big[i * stride..i * stride + stride]), rows, cols))
+        .map(|i| {
+            QMatrix::f32(
+                Cow::Borrowed(&big[i * stride..i * stride + stride]),
+                rows,
+                cols,
+            )
+        })
         .collect()
 }
 
@@ -907,17 +924,17 @@ impl KvCache {
 
 /// Mutable scratch space reused across forward passes, including the KV cache.
 pub struct RunState {
-    x: Vec<f32>,           // residual stream (dim)
-    xb: Vec<f32>,          // general scratch (dim)
-    xb2: Vec<f32>,         // general scratch (dim)
-    hb: Vec<f32>,          // FFN scratch (hidden_dim)
-    hb2: Vec<f32>,         // FFN scratch (hidden_dim)
-    q: Vec<f32>,           // query (dim)
-    att: Vec<f32>,         // attention scores (n_heads * seq_len)
-    logits: Vec<f32>,      // output logits (vocab_size)
-    router: Vec<f32>,      // MoE router logits/probs (n_expert; empty if dense)
-    moe_tmp: Vec<f32>,     // MoE per-expert FFN output (dim; empty if dense)
-    kv: KvCache, // single sequence; flat (n_layers, seq_len, kv_dim)
+    x: Vec<f32>,       // residual stream (dim)
+    xb: Vec<f32>,      // general scratch (dim)
+    xb2: Vec<f32>,     // general scratch (dim)
+    hb: Vec<f32>,      // FFN scratch (hidden_dim)
+    hb2: Vec<f32>,     // FFN scratch (hidden_dim)
+    q: Vec<f32>,       // query (dim)
+    att: Vec<f32>,     // attention scores (n_heads * seq_len)
+    logits: Vec<f32>,  // output logits (vocab_size)
+    router: Vec<f32>,  // MoE router logits/probs (n_expert; empty if dense)
+    moe_tmp: Vec<f32>, // MoE per-expert FFN output (dim; empty if dense)
+    kv: KvCache,       // single sequence; flat (n_layers, seq_len, kv_dim)
 }
 
 impl RunState {
@@ -1104,14 +1121,50 @@ impl Batch {
 
         for layer in 0..p.n_layers {
             // --- Attention: matmuls batch; rope/KV-write/attention loop per slot.
-            backend.rmsnorm_batch(&mut self.xb[..n * dim], &self.x[..n * dim], slice(&w.rms_att_weight, layer, dim), eps, n);
-            backend.matmul_batch(&mut self.q[..n * q_dim], &self.xb[..n * dim], &w.wq[layer], n);
-            backend.matmul_batch(&mut self.kbuf[..n * kv_dim], &self.xb[..n * dim], &w.wk[layer], n);
-            backend.matmul_batch(&mut self.vbuf[..n * kv_dim], &self.xb[..n * dim], &w.wv[layer], n);
+            backend.rmsnorm_batch(
+                &mut self.xb[..n * dim],
+                &self.x[..n * dim],
+                slice(&w.rms_att_weight, layer, dim),
+                eps,
+                n,
+            );
+            backend.matmul_batch(
+                &mut self.q[..n * q_dim],
+                &self.xb[..n * dim],
+                &w.wq[layer],
+                n,
+            );
+            backend.matmul_batch(
+                &mut self.kbuf[..n * kv_dim],
+                &self.xb[..n * dim],
+                &w.wk[layer],
+                n,
+            );
+            backend.matmul_batch(
+                &mut self.vbuf[..n * kv_dim],
+                &self.xb[..n * dim],
+                &w.wv[layer],
+                n,
+            );
             if bias {
-                add_bias_batch(&mut self.q[..n * q_dim], slice(&w.bq, layer, q_dim), q_dim, n);
-                add_bias_batch(&mut self.kbuf[..n * kv_dim], slice(&w.bk, layer, kv_dim), kv_dim, n);
-                add_bias_batch(&mut self.vbuf[..n * kv_dim], slice(&w.bv, layer, kv_dim), kv_dim, n);
+                add_bias_batch(
+                    &mut self.q[..n * q_dim],
+                    slice(&w.bq, layer, q_dim),
+                    q_dim,
+                    n,
+                );
+                add_bias_batch(
+                    &mut self.kbuf[..n * kv_dim],
+                    slice(&w.bk, layer, kv_dim),
+                    kv_dim,
+                    n,
+                );
+                add_bias_batch(
+                    &mut self.vbuf[..n * kv_dim],
+                    slice(&w.bv, layer, kv_dim),
+                    kv_dim,
+                    n,
+                );
             }
             for r in 0..n {
                 let pos = positions[r];
@@ -1153,16 +1206,33 @@ impl Batch {
                     p.attn_window(layer),
                 );
             }
-            backend.matmul_batch(&mut self.xb2[..n * dim], &self.ao[..n * q_dim], &w.wo[layer], n);
+            backend.matmul_batch(
+                &mut self.xb2[..n * dim],
+                &self.ao[..n * q_dim],
+                &w.wo[layer],
+                n,
+            );
             if sandwich {
-                backend.rmsnorm_batch(&mut self.xb[..n * dim], &self.xb2[..n * dim], slice(&w.rms_attn_post, layer, dim), eps, n);
+                backend.rmsnorm_batch(
+                    &mut self.xb[..n * dim],
+                    &self.xb2[..n * dim],
+                    slice(&w.rms_attn_post, layer, dim),
+                    eps,
+                    n,
+                );
                 backend.add(&mut self.x[..n * dim], &self.xb[..n * dim]);
             } else {
                 backend.add(&mut self.x[..n * dim], &self.xb2[..n * dim]);
             }
 
             // --- Feed-forward ---
-            backend.rmsnorm_batch(&mut self.xb[..n * dim], &self.x[..n * dim], slice(&w.rms_ffn_weight, layer, dim), eps, n);
+            backend.rmsnorm_batch(
+                &mut self.xb[..n * dim],
+                &self.x[..n * dim],
+                slice(&w.rms_ffn_weight, layer, dim),
+                eps,
+                n,
+            );
             if is_moe {
                 // Per-token routing: the FFN runs row-by-row (no batch GEMM).
                 for r in 0..n {
@@ -1179,25 +1249,61 @@ impl Batch {
                     );
                 }
             } else {
-                backend.matmul_batch(&mut self.hb[..n * hidden], &self.xb[..n * dim], &w.w1[layer], n);
-                backend.matmul_batch(&mut self.hb2[..n * hidden], &self.xb[..n * dim], &w.w3[layer], n);
+                backend.matmul_batch(
+                    &mut self.hb[..n * hidden],
+                    &self.xb[..n * dim],
+                    &w.w1[layer],
+                    n,
+                );
+                backend.matmul_batch(
+                    &mut self.hb2[..n * hidden],
+                    &self.xb[..n * dim],
+                    &w.w3[layer],
+                    n,
+                );
                 match act {
-                    FfnActivation::SwiGlu => backend.swiglu(&mut self.hb[..n * hidden], &self.hb2[..n * hidden]),
-                    FfnActivation::GeGlu => backend.geglu(&mut self.hb[..n * hidden], &self.hb2[..n * hidden]),
+                    FfnActivation::SwiGlu => {
+                        backend.swiglu(&mut self.hb[..n * hidden], &self.hb2[..n * hidden])
+                    }
+                    FfnActivation::GeGlu => {
+                        backend.geglu(&mut self.hb[..n * hidden], &self.hb2[..n * hidden])
+                    }
                 }
-                backend.matmul_batch(&mut self.xb2[..n * dim], &self.hb[..n * hidden], &w.w2[layer], n);
+                backend.matmul_batch(
+                    &mut self.xb2[..n * dim],
+                    &self.hb[..n * hidden],
+                    &w.w2[layer],
+                    n,
+                );
             }
             // The FFN output now lives in `xb2` for both the dense and MoE paths.
             if sandwich {
-                backend.rmsnorm_batch(&mut self.xb[..n * dim], &self.xb2[..n * dim], slice(&w.rms_ffn_post, layer, dim), eps, n);
+                backend.rmsnorm_batch(
+                    &mut self.xb[..n * dim],
+                    &self.xb2[..n * dim],
+                    slice(&w.rms_ffn_post, layer, dim),
+                    eps,
+                    n,
+                );
                 backend.add(&mut self.x[..n * dim], &self.xb[..n * dim]);
             } else {
                 backend.add(&mut self.x[..n * dim], &self.xb2[..n * dim]);
             }
         }
 
-        backend.rmsnorm_batch(&mut self.xb[..n * dim], &self.x[..n * dim], &w.rms_final_weight, eps, n);
-        backend.matmul_batch(&mut self.logits[..n * vocab], &self.xb[..n * dim], &w.wcls, n);
+        backend.rmsnorm_batch(
+            &mut self.xb[..n * dim],
+            &self.x[..n * dim],
+            &w.rms_final_weight,
+            eps,
+            n,
+        );
+        backend.matmul_batch(
+            &mut self.logits[..n * vocab],
+            &self.xb[..n * dim],
+            &w.wcls,
+            n,
+        );
         softcap(&mut self.logits[..n * vocab], p.final_logit_softcap);
         &self.logits[..n * vocab]
     }
@@ -1207,7 +1313,13 @@ impl Batch {
 ///
 /// Reads/writes the KV cache in `state` and leaves the next-token logits in
 /// `state.logits()`. Mirrors the reference llama2.c `forward()` op-for-op.
-pub fn forward(model: &Model, state: &mut RunState, backend: &dyn Backend, token: usize, pos: usize) {
+pub fn forward(
+    model: &Model,
+    state: &mut RunState,
+    backend: &dyn Backend,
+    token: usize,
+    pos: usize,
+) {
     forward_with(model, state, backend, token, pos, None);
 }
 
@@ -1362,7 +1474,12 @@ pub fn forward_with(
     }
 
     // Final norm (written into `xb` to avoid aliasing `x`) then classifier.
-    backend.rmsnorm(&mut state.xb[..dim], &state.x, &w.rms_final_weight, p.rms_eps);
+    backend.rmsnorm(
+        &mut state.xb[..dim],
+        &state.x,
+        &w.rms_final_weight,
+        p.rms_eps,
+    );
     backend.matmul(&mut state.logits, &state.xb[..dim], &w.wcls);
     softcap(&mut state.logits, p.final_logit_softcap);
 }
@@ -1471,15 +1588,41 @@ fn prefill_residual<B: Backend + ?Sized>(
 
     for layer in 0..p.n_layers {
         // --- Attention --------------------------------------------------
-        backend.rmsnorm_batch(&mut xb, &x, slice(&w.rms_att_weight, layer, dim), p.rms_eps, n);
+        backend.rmsnorm_batch(
+            &mut xb,
+            &x,
+            slice(&w.rms_att_weight, layer, dim),
+            p.rms_eps,
+            n,
+        );
 
         backend.matmul_batch(&mut q, &xb, &w.wq[layer], n);
-        backend.matmul_batch(state.kv.k_span_mut(layer, pos_base, n), &xb, &w.wk[layer], n);
-        backend.matmul_batch(state.kv.v_span_mut(layer, pos_base, n), &xb, &w.wv[layer], n);
+        backend.matmul_batch(
+            state.kv.k_span_mut(layer, pos_base, n),
+            &xb,
+            &w.wk[layer],
+            n,
+        );
+        backend.matmul_batch(
+            state.kv.v_span_mut(layer, pos_base, n),
+            &xb,
+            &w.wv[layer],
+            n,
+        );
         if bias {
             add_bias_batch(&mut q, slice(&w.bq, layer, q_dim), q_dim, n);
-            add_bias_batch(state.kv.k_span_mut(layer, pos_base, n), slice(&w.bk, layer, kv_dim), kv_dim, n);
-            add_bias_batch(state.kv.v_span_mut(layer, pos_base, n), slice(&w.bv, layer, kv_dim), kv_dim, n);
+            add_bias_batch(
+                state.kv.k_span_mut(layer, pos_base, n),
+                slice(&w.bk, layer, kv_dim),
+                kv_dim,
+                n,
+            );
+            add_bias_batch(
+                state.kv.v_span_mut(layer, pos_base, n),
+                slice(&w.bv, layer, kv_dim),
+                kv_dim,
+                n,
+            );
         }
 
         backend.rope_batch(
@@ -1520,14 +1663,26 @@ fn prefill_residual<B: Backend + ?Sized>(
 
         backend.matmul_batch(&mut xb2, &ao, &w.wo[layer], n);
         if sandwich {
-            backend.rmsnorm_batch(&mut xb, &xb2, slice(&w.rms_attn_post, layer, dim), p.rms_eps, n);
+            backend.rmsnorm_batch(
+                &mut xb,
+                &xb2,
+                slice(&w.rms_attn_post, layer, dim),
+                p.rms_eps,
+                n,
+            );
             backend.add(&mut x, &xb);
         } else {
             backend.add(&mut x, &xb2);
         }
 
         // --- Feed-forward -----------------------------------------------
-        backend.rmsnorm_batch(&mut xb, &x, slice(&w.rms_ffn_weight, layer, dim), p.rms_eps, n);
+        backend.rmsnorm_batch(
+            &mut xb,
+            &x,
+            slice(&w.rms_ffn_weight, layer, dim),
+            p.rms_eps,
+            n,
+        );
         if is_moe {
             // Routing is per-token, so the FFN runs row-by-row (no batch GEMM).
             for r in 0..n {
@@ -1554,7 +1709,13 @@ fn prefill_residual<B: Backend + ?Sized>(
         }
         // The FFN output now lives in `xb2` for both the dense and MoE paths.
         if sandwich {
-            backend.rmsnorm_batch(&mut xb, &xb2, slice(&w.rms_ffn_post, layer, dim), p.rms_eps, n);
+            backend.rmsnorm_batch(
+                &mut xb,
+                &xb2,
+                slice(&w.rms_ffn_post, layer, dim),
+                p.rms_eps,
+                n,
+            );
             backend.add(&mut x, &xb);
         } else {
             backend.add(&mut x, &xb2);
@@ -1648,7 +1809,16 @@ pub fn generate(
     on_piece: impl FnMut(&[u8]),
 ) -> usize {
     let prompt_tokens = tokenizer.encode(prompt, tokenizer.add_bos(), false);
-    generate_tokens(model, state, backend, tokenizer, sampler, &prompt_tokens, steps, on_piece)
+    generate_tokens(
+        model,
+        state,
+        backend,
+        tokenizer,
+        sampler,
+        &prompt_tokens,
+        steps,
+        on_piece,
+    )
 }
 
 /// Autoregressively generate from already-encoded `prompt_tokens`, streaming
@@ -1914,7 +2084,11 @@ fn split_rows<'a>(m: QMatrix<'a>, row_counts: &[usize]) -> Result<Vec<QMatrix<'a
         QMatrix::F32 { data, .. } => match data {
             Cow::Borrowed(d) => {
                 for (lo, hi) in ranges() {
-                    out.push(QMatrix::f32(Cow::Borrowed(&d[lo * cols..hi * cols]), hi - lo, cols)?);
+                    out.push(QMatrix::f32(
+                        Cow::Borrowed(&d[lo * cols..hi * cols]),
+                        hi - lo,
+                        cols,
+                    )?);
                 }
             }
             Cow::Owned(d) => {
@@ -1931,13 +2105,23 @@ fn split_rows<'a>(m: QMatrix<'a>, row_counts: &[usize]) -> Result<Vec<QMatrix<'a
             Cow::Borrowed(d) => {
                 for (lo, hi) in ranges() {
                     let (b0, b1) = (ty.bytes_for(lo * cols), ty.bytes_for(hi * cols));
-                    out.push(QMatrix::quant(ty, Cow::Borrowed(&d[b0..b1]), hi - lo, cols)?);
+                    out.push(QMatrix::quant(
+                        ty,
+                        Cow::Borrowed(&d[b0..b1]),
+                        hi - lo,
+                        cols,
+                    )?);
                 }
             }
             Cow::Owned(d) => {
                 for (lo, hi) in ranges() {
                     let (b0, b1) = (ty.bytes_for(lo * cols), ty.bytes_for(hi * cols));
-                    out.push(QMatrix::quant(ty, Cow::Owned(d[b0..b1].to_vec()), hi - lo, cols)?);
+                    out.push(QMatrix::quant(
+                        ty,
+                        Cow::Owned(d[b0..b1].to_vec()),
+                        hi - lo,
+                        cols,
+                    )?);
                 }
             }
         },
@@ -1992,7 +2176,13 @@ fn permute_neox<'a>(m: QMatrix<'_>, head_size: usize, rot: usize) -> Result<QMat
 
 /// Permute the per-layer Q/K bias vectors (flattened `(n_layers, width)`) the same
 /// NeoX→interleaved way as [`permute_neox`]. No-op on an empty (bias-less) vec.
-fn permute_neox_bias(bias: &mut [f32], n_layers: usize, width: usize, head_size: usize, rot: usize) {
+fn permute_neox_bias(
+    bias: &mut [f32],
+    n_layers: usize,
+    width: usize,
+    head_size: usize,
+    rot: usize,
+) {
     if bias.is_empty() {
         return;
     }
@@ -2220,9 +2410,23 @@ mod tests {
         let xn: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.3 - 1.0).sin()).collect();
 
         let mut out = vec![0.0; dim];
-        let (mut g, mut u, mut tmp, mut router) =
-            (vec![0.0; hidden], vec![0.0; hidden], vec![0.0; dim], vec![0.0; ne]);
-        moe_ffn_row(&m, &backend, 0, &xn, &mut out, &mut g, &mut u, &mut tmp, &mut router);
+        let (mut g, mut u, mut tmp, mut router) = (
+            vec![0.0; hidden],
+            vec![0.0; hidden],
+            vec![0.0; dim],
+            vec![0.0; ne],
+        );
+        moe_ffn_row(
+            &m,
+            &backend,
+            0,
+            &xn,
+            &mut out,
+            &mut g,
+            &mut u,
+            &mut tmp,
+            &mut router,
+        );
 
         let mut probs = vec![0.0; ne];
         backend.matmul(&mut probs, &xn, &m.weights.ffn_gate_inp[0]);
@@ -2256,9 +2460,23 @@ mod tests {
         let xn: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.7 + 0.2).cos()).collect();
 
         let mut out = vec![0.0; dim];
-        let (mut g, mut u, mut tmp, mut router) =
-            (vec![0.0; hidden], vec![0.0; hidden], vec![0.0; dim], vec![0.0; ne]);
-        moe_ffn_row(&m, &backend, 0, &xn, &mut out, &mut g, &mut u, &mut tmp, &mut router);
+        let (mut g, mut u, mut tmp, mut router) = (
+            vec![0.0; hidden],
+            vec![0.0; hidden],
+            vec![0.0; dim],
+            vec![0.0; ne],
+        );
+        moe_ffn_row(
+            &m,
+            &backend,
+            0,
+            &xn,
+            &mut out,
+            &mut g,
+            &mut u,
+            &mut tmp,
+            &mut router,
+        );
 
         let mut logits = vec![0.0; ne];
         backend.matmul(&mut logits, &xn, &m.weights.ffn_gate_inp[0]);
@@ -2312,7 +2530,17 @@ mod tests {
         let w = nfe.max(nfs);
         let (mut g, mut u, mut tmp, mut router) =
             (vec![0.0; w], vec![0.0; w], vec![0.0; dim], vec![0.0; ne]);
-        moe_ffn_row(&m, &backend, 0, &xn, &mut out, &mut g, &mut u, &mut tmp, &mut router);
+        moe_ffn_row(
+            &m,
+            &backend,
+            0,
+            &xn,
+            &mut out,
+            &mut g,
+            &mut u,
+            &mut tmp,
+            &mut router,
+        );
 
         // Reference. Routed: softmax over all experts, top-k by prob (ties → lower
         // index), weights = RAW probs (NOT renormalized — the Qwen2-MoE delta).

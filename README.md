@@ -135,6 +135,7 @@ same way; this row set reflects whichever of those have landed so far.
 | [`rk-mcp`](crates/rusty_key/crates/mcp) | `crates/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
 | [`rk-compose`](crates/rusty_key/crates/compose) | `crates/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
 | [`rk-app`](crates/rusty_key/crates/app) | `crates/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
+| [`rusty_llama`](crates/rusty_llama) | `crates/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -786,6 +787,36 @@ across the eight crates) passes unmodified; it was not `cargo fmt`-clean
 under this workspace's settings and was reformatted with `cargo fmt --all`,
 same as `rusty_ansder`/`rusty_boot` before it.
 
+`rusty_llama` depends on `rusty_simd` and `rusty_std` via relative `path`
+dependencies (`../rusty_simd`, `../rusty_std`), both already merged
+siblings under this workspace's `crates/`, so the paths resolved unchanged
+— no swap needed, the same situation `rusty_codec` and `rusty_voice` were
+in. Two things did need fixing, both of them things the standalone repo's
+own CI could not have caught.
+
+First, `--all-features` here means the `cuda` feature is on, and this
+workspace's `-D warnings` clippy gate found two `unnecessary_cast`s
+(`(i % 7) as i32` where `i` is already `i32`) in `backend/cuda.rs`'s test
+fixtures — dead code to any build that doesn't opt into `cudarc`. Removed;
+no behavior change.
+
+Second, and more interesting: `chat::tests::render_jinja_threads_context_variables`
+started failing on a boolean. `rusty_llama` renders a GGUF's embedded
+`tokenizer.chat_template` through `minijinja`, and its standalone lockfile
+pinned 2.21.0; unified against this workspace, `minijinja` resolves to
+2.24.0, and 2.22.0 deliberately changed none/bool rendering to
+`None`/`True`/`False` "for Jinja2 compatibility" (upstream #913). The test
+asserted Rust's `true`. Since the entire point of that code path is to
+render templates *authored for Python Jinja2*, the new rendering is the
+correct one and the assertion was the stale half — updated to `True`, with
+the reason recorded at the assertion rather than left as a mystery for the
+next reader. Nothing else in the crate interpolates a bare boolean (checked
+by grep, not assumed), and chat templates overwhelmingly branch on
+`add_generation_prompt` rather than print it. Full suite: 248 tests pass,
+49 ignored (those need real model weights on disk, by the crate's own
+design). Not `cargo fmt`-clean under this workspace's settings; reformatted
+with `cargo fmt --all`.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -865,9 +896,9 @@ one nested workspace) and
 crates behind another) and
 [`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt) (four behind
 a third) and [`rusty_key`](https://github.com/baileyrd/rusty_key) (eight
-behind a fourth) — and continuing with
-[`rusty_llama`](https://github.com/baileyrd/rusty_llama),
-[`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale),
+behind a fourth) and
+[`rusty_llama`](https://github.com/baileyrd/rusty_llama) — and continuing
+with [`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale),
 [`rusty_adk`](https://github.com/baileyrd/rusty_adk),
 [`rusty_provider`](https://github.com/baileyrd/rusty_provider),
 [`rusty_yirp`](https://github.com/baileyrd/rusty_yirp), and

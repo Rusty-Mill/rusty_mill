@@ -23,17 +23,17 @@ pub fn synthetic_checkpoint(config: &Config) -> Vec<u8> {
     // Element counts in the same order `Model::parse` reads them, including the
     // two skipped (legacy RoPE) tables.
     let mut counts = vec![
-        p.vocab_size * p.dim,    // token_embedding_table
-        l * p.dim,               // rms_att_weight
-        l * p.dim * p.dim,       // wq
-        l * p.dim * kv_dim,      // wk
-        l * p.dim * kv_dim,      // wv
-        l * p.dim * p.dim,       // wo
-        l * p.dim,               // rms_ffn_weight
-        l * p.dim * p.hidden_dim, // w1
-        l * p.hidden_dim * p.dim, // w2
-        l * p.dim * p.hidden_dim, // w3
-        p.dim,                   // rms_final_weight
+        p.vocab_size * p.dim,      // token_embedding_table
+        l * p.dim,                 // rms_att_weight
+        l * p.dim * p.dim,         // wq
+        l * p.dim * kv_dim,        // wk
+        l * p.dim * kv_dim,        // wv
+        l * p.dim * p.dim,         // wo
+        l * p.dim,                 // rms_ffn_weight
+        l * p.dim * p.hidden_dim,  // w1
+        l * p.hidden_dim * p.dim,  // w2
+        l * p.dim * p.hidden_dim,  // w3
+        p.dim,                     // rms_final_weight
         p.seq_len * head_size / 2, // freq_cis_real (skipped)
         p.seq_len * head_size / 2, // freq_cis_imag (skipped)
     ];
@@ -269,7 +269,10 @@ fn build_gguf(
     // (name, ggml dims) for every tensor, in file order. ggml dims put the
     // fastest-varying (input) axis first.
     let mut tensors: Vec<(String, Vec<u64>)> = vec![
-        ("token_embd.weight".into(), vec![c.dim as u64, c.vocab_size as u64]),
+        (
+            "token_embd.weight".into(),
+            vec![c.dim as u64, c.vocab_size as u64],
+        ),
         ("output_norm.weight".into(), vec![c.dim as u64]),
     ];
     if !c.shared_weights {
@@ -281,14 +284,35 @@ fn build_gguf(
     for i in 0..c.n_layers {
         let p = format!("blk.{i}.");
         tensors.push((format!("{p}attn_norm.weight"), vec![c.dim as u64]));
-        tensors.push((format!("{p}attn_q.weight"), vec![c.dim as u64, c.dim as u64]));
-        tensors.push((format!("{p}attn_k.weight"), vec![c.dim as u64, kv_dim as u64]));
-        tensors.push((format!("{p}attn_v.weight"), vec![c.dim as u64, kv_dim as u64]));
-        tensors.push((format!("{p}attn_output.weight"), vec![c.dim as u64, c.dim as u64]));
+        tensors.push((
+            format!("{p}attn_q.weight"),
+            vec![c.dim as u64, c.dim as u64],
+        ));
+        tensors.push((
+            format!("{p}attn_k.weight"),
+            vec![c.dim as u64, kv_dim as u64],
+        ));
+        tensors.push((
+            format!("{p}attn_v.weight"),
+            vec![c.dim as u64, kv_dim as u64],
+        ));
+        tensors.push((
+            format!("{p}attn_output.weight"),
+            vec![c.dim as u64, c.dim as u64],
+        ));
         tensors.push((format!("{p}ffn_norm.weight"), vec![c.dim as u64]));
-        tensors.push((format!("{p}ffn_gate.weight"), vec![c.dim as u64, c.hidden_dim as u64]));
-        tensors.push((format!("{p}ffn_down.weight"), vec![c.hidden_dim as u64, c.dim as u64]));
-        tensors.push((format!("{p}ffn_up.weight"), vec![c.dim as u64, c.hidden_dim as u64]));
+        tensors.push((
+            format!("{p}ffn_gate.weight"),
+            vec![c.dim as u64, c.hidden_dim as u64],
+        ));
+        tensors.push((
+            format!("{p}ffn_down.weight"),
+            vec![c.hidden_dim as u64, c.dim as u64],
+        ));
+        tensors.push((
+            format!("{p}ffn_up.weight"),
+            vec![c.dim as u64, c.hidden_dim as u64],
+        ));
     }
 
     // Build the (aligned) tensor-data section, recording each tensor's offset.
@@ -307,7 +331,10 @@ fn build_gguf(
             vals.push((u as f32 / (1u32 << 24) as f32 - 0.5) * 0.2);
         }
         let encoded = match tensor_type(dims) {
-            GgmlType::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>(),
+            GgmlType::F32 => vals
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
             GgmlType::Q8_0 => crate::quant::quantize_q8_0(&vals),
             other => panic!("synthetic_gguf_typed does not support {other:?} yet"),
         };
@@ -412,7 +439,10 @@ pub fn synthetic_gguf_arch(config: &Config, arch: &str) -> Vec<u8> {
     // (name, ggml dims) in file order. ggml dims are [cols, rows] = input axis
     // first, output axis second — exactly as [`build_gguf`] lays them out.
     let mut tensors: Vec<(String, Vec<u64>)> = vec![
-        ("token_embd.weight".into(), vec![c.dim as u64, c.vocab_size as u64]),
+        (
+            "token_embd.weight".into(),
+            vec![c.dim as u64, c.vocab_size as u64],
+        ),
         ("output_norm.weight".into(), vec![c.dim as u64]),
     ];
     if !c.shared_weights {
@@ -431,9 +461,18 @@ pub fn synthetic_gguf_arch(config: &Config, arch: &str) -> Vec<u8> {
                 vec![c.dim as u64, (q_dim + 2 * kv_dim) as u64],
             ));
         } else {
-            tensors.push((format!("{p}attn_q.weight"), vec![c.dim as u64, q_dim as u64]));
-            tensors.push((format!("{p}attn_k.weight"), vec![c.dim as u64, kv_dim as u64]));
-            tensors.push((format!("{p}attn_v.weight"), vec![c.dim as u64, kv_dim as u64]));
+            tensors.push((
+                format!("{p}attn_q.weight"),
+                vec![c.dim as u64, q_dim as u64],
+            ));
+            tensors.push((
+                format!("{p}attn_k.weight"),
+                vec![c.dim as u64, kv_dim as u64],
+            ));
+            tensors.push((
+                format!("{p}attn_v.weight"),
+                vec![c.dim as u64, kv_dim as u64],
+            ));
         }
         if a.has_qkv_bias() {
             // Qwen2: additive Q/K/V projection biases (1-D).
@@ -441,7 +480,10 @@ pub fn synthetic_gguf_arch(config: &Config, arch: &str) -> Vec<u8> {
             tensors.push((format!("{p}attn_k.bias"), vec![kv_dim as u64]));
             tensors.push((format!("{p}attn_v.bias"), vec![kv_dim as u64]));
         }
-        tensors.push((format!("{p}attn_output.weight"), vec![q_dim as u64, c.dim as u64]));
+        tensors.push((
+            format!("{p}attn_output.weight"),
+            vec![q_dim as u64, c.dim as u64],
+        ));
         tensors.push((format!("{p}ffn_norm.weight"), vec![c.dim as u64]));
         if a.fused_gate_up() {
             // Phi-3: fused gate+up in `ffn_up` (rows = 2*hidden_dim), split at load.
@@ -450,10 +492,19 @@ pub fn synthetic_gguf_arch(config: &Config, arch: &str) -> Vec<u8> {
                 vec![c.dim as u64, (2 * c.hidden_dim) as u64],
             ));
         } else {
-            tensors.push((format!("{p}ffn_gate.weight"), vec![c.dim as u64, c.hidden_dim as u64]));
-            tensors.push((format!("{p}ffn_up.weight"), vec![c.dim as u64, c.hidden_dim as u64]));
+            tensors.push((
+                format!("{p}ffn_gate.weight"),
+                vec![c.dim as u64, c.hidden_dim as u64],
+            ));
+            tensors.push((
+                format!("{p}ffn_up.weight"),
+                vec![c.dim as u64, c.hidden_dim as u64],
+            ));
         }
-        tensors.push((format!("{p}ffn_down.weight"), vec![c.hidden_dim as u64, c.dim as u64]));
+        tensors.push((
+            format!("{p}ffn_down.weight"),
+            vec![c.hidden_dim as u64, c.dim as u64],
+        ));
         if a.sandwich_norm() {
             // Gemma2: post-attention / post-FFN "sandwich" norms (1-D).
             tensors.push((format!("{p}post_attention_norm.weight"), vec![c.dim as u64]));
@@ -490,12 +541,21 @@ pub fn synthetic_gguf_arch(config: &Config, arch: &str) -> Vec<u8> {
     meta.kv_u32(&format!("{arch}.embedding_length"), c.dim as u32);
     meta.kv_u32(&format!("{arch}.block_count"), c.n_layers as u32);
     meta.kv_u32(&format!("{arch}.attention.head_count"), c.n_heads as u32);
-    meta.kv_u32(&format!("{arch}.attention.head_count_kv"), c.n_kv_heads as u32);
+    meta.kv_u32(
+        &format!("{arch}.attention.head_count_kv"),
+        c.n_kv_heads as u32,
+    );
     meta.kv_u32(&format!("{arch}.feed_forward_length"), c.hidden_dim as u32);
     meta.kv_u32(&format!("{arch}.context_length"), c.seq_len as u32);
-    meta.kv_f32(&format!("{arch}.attention.layer_norm_rms_epsilon"), c.rms_eps);
+    meta.kv_f32(
+        &format!("{arch}.attention.layer_norm_rms_epsilon"),
+        c.rms_eps,
+    );
     meta.kv_f32(&format!("{arch}.rope.freq_base"), c.rope_freq_base);
-    meta.kv_u32(&format!("{arch}.rope.dimension_count"), c.rotary_dim() as u32);
+    meta.kv_u32(
+        &format!("{arch}.rope.dimension_count"),
+        c.rotary_dim() as u32,
+    );
     // Explicit attention head dim (drives q_dim != dim); emitted only when set.
     if c.head_dim != 0 {
         meta.kv_u32(&format!("{arch}.attention.key_length"), c.head_dim as u32);
@@ -719,7 +779,10 @@ pub fn synthetic_gguf_qwen2moe(
     meta.kv_u32("qwen2moe.expert_count", n_expert as u32);
     meta.kv_u32("qwen2moe.expert_used_count", n_expert_used as u32);
     meta.kv_u32("qwen2moe.expert_feed_forward_length", n_ff_exp as u32);
-    meta.kv_u32("qwen2moe.expert_shared_feed_forward_length", n_ff_shexp as u32);
+    meta.kv_u32(
+        "qwen2moe.expert_shared_feed_forward_length",
+        n_ff_shexp as u32,
+    );
     meta.kv_str("tokenizer.ggml.model", "llama");
     meta.kv_str_array("tokenizer.ggml.tokens", &dummy_tokens(c.vocab_size));
     meta.kv_f32_array("tokenizer.ggml.scores", &vec![0.0; c.vocab_size]);

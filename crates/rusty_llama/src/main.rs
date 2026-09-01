@@ -16,9 +16,9 @@ use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rusty_llama::{
-    forward_embed, generate_tokens, AdapterBackend, Backend, ChatRenderer, ChatTemplate, Checkpoint,
-    ControlVector, CpuBackend, Gguf, GrammarStage, LoraAdapter, Message, Model, Pooling, Role,
-    RunState, SamplerChain, SamplerConfig, Tokenizer,
+    forward_embed, generate_tokens, AdapterBackend, Backend, ChatRenderer, ChatTemplate,
+    Checkpoint, ControlVector, CpuBackend, Gguf, GrammarStage, LoraAdapter, Message, Model,
+    Pooling, Role, RunState, SamplerChain, SamplerConfig, Tokenizer,
 };
 
 const USAGE: &str = "\
@@ -190,16 +190,21 @@ fn resolve_chat_template(
             return Ok(Some(r));
         }
     }
-    Err("could not detect a chat template; pass --chat-template (chatml|llama3|qwen2|gemma|phi3)".into())
+    Err(
+        "could not detect a chat template; pass --chat-template (chatml|llama3|qwen2|gemma|phi3)"
+            .into(),
+    )
 }
 
 /// The GBNF grammar source for constrained decoding: `--grammar-file` (read from
 /// disk) wins, else inline `--grammar`, else `None`.
 fn resolve_grammar(args: &Args) -> Result<Option<String>, Box<dyn Error>> {
     if !args.grammar_file.is_empty() {
-        return std::fs::read_to_string(&args.grammar_file).map(Some).map_err(|e| {
-            format!("failed to read grammar file '{}': {e}", args.grammar_file).into()
-        });
+        return std::fs::read_to_string(&args.grammar_file)
+            .map(Some)
+            .map_err(|e| {
+                format!("failed to read grammar file '{}': {e}", args.grammar_file).into()
+            });
     }
     if !args.grammar.is_empty() {
         return Ok(Some(args.grammar.clone()));
@@ -318,17 +323,23 @@ fn stream_generation(
     let cv_cp = if args.control_vector.is_empty() {
         None
     } else {
-        Some(
-            Checkpoint::open(&args.control_vector)
-                .map_err(|e| format!("failed to open control vector '{}': {e}", args.control_vector))?,
-        )
+        Some(Checkpoint::open(&args.control_vector).map_err(|e| {
+            format!(
+                "failed to open control vector '{}': {e}",
+                args.control_vector
+            )
+        })?)
     };
     let cv_gguf = match &cv_cp {
         Some(cp) => Some(cp.gguf()?),
         None => None,
     };
     let control = match &cv_gguf {
-        Some(g) => Some(ControlVector::from_gguf(g, model, args.control_vector_scale)?),
+        Some(g) => Some(ControlVector::from_gguf(
+            g,
+            model,
+            args.control_vector_scale,
+        )?),
         None => None,
     };
     let adapter_backend = if lora.is_some() || control.is_some() {
@@ -409,7 +420,10 @@ fn stream_generation(
     let _ = writeln!(out);
     let secs = start.elapsed().as_secs_f64();
     if generated > 0 && secs > 0.0 {
-        eprintln!("\n[{generated} tokens, {:.1} tok/s]", generated as f64 / secs);
+        eprintln!(
+            "\n[{generated} tokens, {:.1} tok/s]",
+            generated as f64 / secs
+        );
     }
     Ok(())
 }

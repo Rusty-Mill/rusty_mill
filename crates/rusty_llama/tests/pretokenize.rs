@@ -29,7 +29,10 @@ fn pretokenizer_matches_reference_chunking() {
         }
     }
     // Guard against an empty/garbled fixture silently passing.
-    assert!(cases >= 90, "expected a substantial corpus, ran {cases} cases");
+    assert!(
+        cases >= 90,
+        "expected a substantial corpus, ran {cases} cases"
+    );
 }
 
 #[test]
@@ -39,7 +42,10 @@ fn pretokenizer_chunks_reassemble_input() {
     for (pre, samples) in PRETOKENIZE_GOLDEN {
         for (input, _) in *samples {
             let joined: String = pretokenize(pre, input).concat();
-            assert_eq!(&joined, input, "pre={pre:?} input={input:?} did not reassemble");
+            assert_eq!(
+                &joined, input,
+                "pre={pre:?} input={input:?} did not reassemble"
+            );
         }
     }
 }

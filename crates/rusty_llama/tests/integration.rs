@@ -137,7 +137,14 @@ fn embed_mean_equals_mean_of_prefix_last() {
     let mut manual = vec![0.0f32; dim];
     for k in 1..=tokens.len() {
         let mut sk = RunState::new(&config);
-        let last = forward_embed(&model, &mut sk, &backend, &tokens[..k], Pooling::Last, false);
+        let last = forward_embed(
+            &model,
+            &mut sk,
+            &backend,
+            &tokens[..k],
+            Pooling::Last,
+            false,
+        );
         for (m, &v) in manual.iter_mut().zip(&last) {
             *m += v;
         }
@@ -162,7 +169,10 @@ fn embed_l2_normalizes() {
     let mut s = RunState::new(&config);
     let normed = forward_embed(&model, &mut s, &backend, &tokens, Pooling::Mean, true);
     let norm: f32 = normed.iter().map(|v| v * v).sum::<f32>().sqrt();
-    assert!((norm - 1.0).abs() < 1e-4, "L2 embedding must be unit-norm, got {norm}");
+    assert!(
+        (norm - 1.0).abs() < 1e-4,
+        "L2 embedding must be unit-norm, got {norm}"
+    );
 
     let mut s2 = RunState::new(&config);
     let raw = forward_embed(&model, &mut s2, &backend, &tokens, Pooling::Mean, false);
@@ -210,7 +220,11 @@ fn control_vector_shifts_logits() {
     let ab = AdapterBackend::new(&cpu, None, Some(&cv));
     let mut s1 = RunState::new(&config);
     ab.forward_step(&model, &mut s1, 1, 0);
-    assert_ne!(plain, s1.logits().to_vec(), "control vector must change logits");
+    assert_ne!(
+        plain,
+        s1.logits().to_vec(),
+        "control vector must change logits"
+    );
 
     // scale = 0 ⇒ byte-identical to the baseline.
     let mut dirs0 = vec![None; config.n_layers];
@@ -281,6 +295,9 @@ fn batched_decode_matches_independent_sequences() {
         }
     }
 
-    assert_eq!(batched, reference, "batched decode must match independent runs");
+    assert_eq!(
+        batched, reference,
+        "batched decode must match independent runs"
+    );
     let _ = std::fs::remove_file(path);
 }

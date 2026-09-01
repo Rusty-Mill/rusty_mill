@@ -94,9 +94,7 @@ impl<'a> LoraAdapter<'a> {
             pairs.insert(ptr, LoraPair { a, b });
         }
         if pairs.is_empty() {
-            return Err(Error::Format(
-                "LoRA adapter matched no base weights".into(),
-            ));
+            return Err(Error::Format("LoRA adapter matched no base weights".into()));
         }
         Ok(Self::from_pairs(pairs, alpha, user_scale))
     }
@@ -249,7 +247,11 @@ impl<'a> AdapterBackend<'a> {
         lora: Option<&'a LoraAdapter<'a>>,
         control: Option<&'a ControlVector>,
     ) -> Self {
-        AdapterBackend { inner, lora, control }
+        AdapterBackend {
+            inner,
+            lora,
+            control,
+        }
     }
 }
 
@@ -298,8 +300,19 @@ impl Backend for AdapterBackend<'_> {
         window: usize,
     ) {
         self.inner.attention(
-            out, q, key_cache, value_cache, att, pos, n_heads, n_kv_heads, head_size, seq_len,
-            kv_dim, logit_softcap, window,
+            out,
+            q,
+            key_cache,
+            value_cache,
+            att,
+            pos,
+            n_heads,
+            n_kv_heads,
+            head_size,
+            seq_len,
+            kv_dim,
+            logit_softcap,
+            window,
         );
     }
 

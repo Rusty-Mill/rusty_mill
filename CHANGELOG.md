@@ -25,6 +25,9 @@ Removed / Fixed / Security, newest first.
   `rk-feed`, `rk-kernel`, `rk-mcp`, `rk-compose`, `rk-app`) behind one
   nested workspace; its Tauri desktop shell stays excluded, as upstream
   had it
+- `rusty_llama` merged into `crates/rusty_llama` via `git subtree` (fourth
+  wave) — a single crate; its `rusty_simd`/`rusty_std` path dependencies
+  already resolved to merged siblings
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
@@ -55,6 +58,13 @@ Removed / Fixed / Security, newest first.
   the policy
 - `crates/rusty_key` reformatted with `cargo fmt --all` (it was not
   fmt-clean under this workspace's settings)
+- `rusty_llama`'s two `unnecessary_cast` lints in `backend/cuda.rs`'s test
+  fixtures, only visible with `--all-features`
+- `rusty_llama`'s `render_jinja_threads_context_variables` expectation
+  updated from `true` to `True`: `minijinja` 2.22 changed bool rendering
+  for Jinja2 compatibility, and this workspace resolves 2.24 where the
+  standalone lockfile pinned 2.21
+- `crates/rusty_llama` reformatted with `cargo fmt --all`
 
 ## [workspace] - 2026-09-01
 ### Fixed

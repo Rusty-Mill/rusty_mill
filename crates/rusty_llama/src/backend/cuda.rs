@@ -685,7 +685,10 @@ impl CudaBackend {
             .expect("alloc gemm output");
         self.gemm_dev(&mut c_dev, &x_dev, w, rows);
         self.stream.synchronize().expect("stream synchronize");
-        let c_host: Vec<f32> = self.stream.clone_dtoh(&c_dev).expect("download gemm output");
+        let c_host: Vec<f32> = self
+            .stream
+            .clone_dtoh(&c_dev)
+            .expect("download gemm output");
         out.copy_from_slice(&c_host);
     }
 
@@ -841,7 +844,13 @@ impl CudaBackend {
             shared_mem_bytes: 0,
         };
         let mut b = self.stream.launch_builder(&self.kernels.gemv_q4_k);
-        b.arg(out).arg(w).arg(aq).arg(ad).arg(absums).arg(&oc_i).arg(&nsb_i);
+        b.arg(out)
+            .arg(w)
+            .arg(aq)
+            .arg(ad)
+            .arg(absums)
+            .arg(&oc_i)
+            .arg(&nsb_i);
         unsafe { b.launch(cfg) }.expect("launch gemv_q4_k");
     }
 
@@ -867,7 +876,13 @@ impl CudaBackend {
             shared_mem_bytes: 0,
         };
         let mut b = self.stream.launch_builder(&self.kernels.gemv_q6_k);
-        b.arg(out).arg(w).arg(aq).arg(ad).arg(absums).arg(&oc_i).arg(&nsb_i);
+        b.arg(out)
+            .arg(w)
+            .arg(aq)
+            .arg(ad)
+            .arg(absums)
+            .arg(&oc_i)
+            .arg(&nsb_i);
         unsafe { b.launch(cfg) }.expect("launch gemv_q6_k");
     }
 
@@ -899,8 +914,18 @@ impl CudaBackend {
             shared_mem_bytes: 0,
         };
         let mut b = self.stream.launch_builder(&self.kernels.gemv_qkv);
-        b.arg(out_q).arg(out_k).arg(out_v).arg(wq).arg(wk).arg(wv).arg(aq).arg(ad).arg(absums)
-            .arg(&q_i).arg(&kv_i).arg(&nsb_i);
+        b.arg(out_q)
+            .arg(out_k)
+            .arg(out_v)
+            .arg(wq)
+            .arg(wk)
+            .arg(wv)
+            .arg(aq)
+            .arg(ad)
+            .arg(absums)
+            .arg(&q_i)
+            .arg(&kv_i)
+            .arg(&nsb_i);
         unsafe { b.launch(cfg) }.expect("launch gemv_qkv");
     }
 
@@ -1080,12 +1105,25 @@ impl CudaBackend {
         // custom capturable kernel: every matmul weight must be k-quant (the only
         // types the packed dp4a GEMV handles; anything else falls to cuBLASLt,
         // which we don't capture). The qgemv/dim conditions are re-checked per step.
-        let kq = |w: &QMatrix| matches!(w, QMatrix::Quant { ty: GgmlType::Q4_K | GgmlType::Q6_K, .. });
+        let kq = |w: &QMatrix| {
+            matches!(
+                w,
+                QMatrix::Quant {
+                    ty: GgmlType::Q4_K | GgmlType::Q6_K,
+                    ..
+                }
+            )
+        };
         let wts = &model.weights;
         let graphable = kq(&wts.wcls)
             && (0..p.n_layers).all(|l| {
-                kq(&wts.wq[l]) && kq(&wts.wk[l]) && kq(&wts.wv[l]) && kq(&wts.wo[l])
-                    && kq(&wts.w1[l]) && kq(&wts.w2[l]) && kq(&wts.w3[l])
+                kq(&wts.wq[l])
+                    && kq(&wts.wk[l])
+                    && kq(&wts.wv[l])
+                    && kq(&wts.wo[l])
+                    && kq(&wts.w1[l])
+                    && kq(&wts.w2[l])
+                    && kq(&wts.w3[l])
             });
         DecodeCuda {
             dim,
@@ -1162,9 +1200,27 @@ impl CudaBackend {
             // the three separate GEMVs. Absorbs the small k/v grids into q's.
             if q_dim_ok
                 && qkv_fuse_enabled()
-                && matches!(&w.wq[layer], QMatrix::Quant { ty: GgmlType::Q4_K, .. })
-                && matches!(&w.wk[layer], QMatrix::Quant { ty: GgmlType::Q4_K, .. })
-                && matches!(&w.wv[layer], QMatrix::Quant { ty: GgmlType::Q6_K, .. })
+                && matches!(
+                    &w.wq[layer],
+                    QMatrix::Quant {
+                        ty: GgmlType::Q4_K,
+                        ..
+                    }
+                )
+                && matches!(
+                    &w.wk[layer],
+                    QMatrix::Quant {
+                        ty: GgmlType::Q4_K,
+                        ..
+                    }
+                )
+                && matches!(
+                    &w.wv[layer],
+                    QMatrix::Quant {
+                        ty: GgmlType::Q6_K,
+                        ..
+                    }
+                )
             {
                 let (wqp, wkp, wvp) = (
                     self.weight_packed(&w.wq[layer]),
@@ -1172,28 +1228,86 @@ impl CudaBackend {
                     self.weight_packed(&w.wv[layer]),
                 );
                 self.dev_gemv_qkv(
-                    &mut d.q, &mut d.k_row, &mut d.v_row, &wqp, &wkp, &wvp, &d.aq, &d.ad,
-                    &d.absums, n_heads * head_size, kv_dim, dim / 256,
+                    &mut d.q,
+                    &mut d.k_row,
+                    &mut d.v_row,
+                    &wqp,
+                    &wkp,
+                    &wvp,
+                    &d.aq,
+                    &d.ad,
+                    &d.absums,
+                    n_heads * head_size,
+                    kv_dim,
+                    dim / 256,
                 );
             } else {
-                self.gemv_decode(&mut d.q, &d.xb, &d.aq, &d.ad, &d.absums, &w.wq[layer], q_dim_ok);
-                self.gemv_decode(&mut d.k_row, &d.xb, &d.aq, &d.ad, &d.absums, &w.wk[layer], q_dim_ok);
-                self.gemv_decode(&mut d.v_row, &d.xb, &d.aq, &d.ad, &d.absums, &w.wv[layer], q_dim_ok);
+                self.gemv_decode(
+                    &mut d.q,
+                    &d.xb,
+                    &d.aq,
+                    &d.ad,
+                    &d.absums,
+                    &w.wq[layer],
+                    q_dim_ok,
+                );
+                self.gemv_decode(
+                    &mut d.k_row,
+                    &d.xb,
+                    &d.aq,
+                    &d.ad,
+                    &d.absums,
+                    &w.wk[layer],
+                    q_dim_ok,
+                );
+                self.gemv_decode(
+                    &mut d.v_row,
+                    &d.xb,
+                    &d.aq,
+                    &d.ad,
+                    &d.absums,
+                    &w.wv[layer],
+                    q_dim_ok,
+                );
             }
             self.dev_rope(
-                &mut d.q, &mut d.k_row, &d.inv, 1, &d.pos_dev, head_size, kv_dim, dim, n_freqs,
+                &mut d.q,
+                &mut d.k_row,
+                &d.inv,
+                1,
+                &d.pos_dev,
+                head_size,
+                kv_dim,
+                dim,
+                n_freqs,
                 mscale,
             );
             self.dev_kv_append(&mut d.key[layer], &d.k_row, &d.pos_dev, kv_dim);
             self.dev_kv_append(&mut d.value[layer], &d.v_row, &d.pos_dev, kv_dim);
             self.dev_attention(
-                &mut d.xb, &d.q, &d.key[layer], &d.value[layer], 1, &d.pos_dev, n_heads, kv_mul,
-                head_size, kv_dim,
+                &mut d.xb,
+                &d.q,
+                &d.key[layer],
+                &d.value[layer],
+                1,
+                &d.pos_dev,
+                n_heads,
+                kv_mul,
+                head_size,
+                kv_dim,
             );
             if q_dim_ok {
                 self.dev_quantize_q8k(&mut d.aq, &mut d.ad, &mut d.absums, &d.xb, dim);
             }
-            self.gemv_decode(&mut d.xb2, &d.xb, &d.aq, &d.ad, &d.absums, &w.wo[layer], q_dim_ok);
+            self.gemv_decode(
+                &mut d.xb2,
+                &d.xb,
+                &d.aq,
+                &d.ad,
+                &d.absums,
+                &w.wo[layer],
+                q_dim_ok,
+            );
             self.dev_add(&mut d.x, &d.xb2, dim);
 
             // --- Feed-forward (SwiGLU) ---
@@ -1201,13 +1315,37 @@ impl CudaBackend {
             if q_dim_ok {
                 self.dev_quantize_q8k(&mut d.aq, &mut d.ad, &mut d.absums, &d.xb, dim);
             }
-            self.gemv_decode(&mut d.hb, &d.xb, &d.aq, &d.ad, &d.absums, &w.w1[layer], q_dim_ok);
-            self.gemv_decode(&mut d.hb2, &d.xb, &d.aq, &d.ad, &d.absums, &w.w3[layer], q_dim_ok);
+            self.gemv_decode(
+                &mut d.hb,
+                &d.xb,
+                &d.aq,
+                &d.ad,
+                &d.absums,
+                &w.w1[layer],
+                q_dim_ok,
+            );
+            self.gemv_decode(
+                &mut d.hb2,
+                &d.xb,
+                &d.aq,
+                &d.ad,
+                &d.absums,
+                &w.w3[layer],
+                q_dim_ok,
+            );
             self.dev_swiglu(&mut d.hb, &d.hb2, hidden);
             if q_hid_ok {
                 self.dev_quantize_q8k(&mut d.aq, &mut d.ad, &mut d.absums, &d.hb, hidden);
             }
-            self.gemv_decode(&mut d.xb, &d.hb, &d.aq, &d.ad, &d.absums, &w.w2[layer], q_hid_ok);
+            self.gemv_decode(
+                &mut d.xb,
+                &d.hb,
+                &d.aq,
+                &d.ad,
+                &d.absums,
+                &w.w2[layer],
+                q_hid_ok,
+            );
             self.dev_add(&mut d.x, &d.xb, dim);
         }
         // Final RMSNorm + classifier → logits.
@@ -1215,7 +1353,15 @@ impl CudaBackend {
         if q_dim_ok {
             self.dev_quantize_q8k(&mut d.aq, &mut d.ad, &mut d.absums, &d.xb, dim);
         }
-        self.gemv_decode(&mut d.logits, &d.xb, &d.aq, &d.ad, &d.absums, &w.wcls, q_dim_ok);
+        self.gemv_decode(
+            &mut d.logits,
+            &d.xb,
+            &d.aq,
+            &d.ad,
+            &d.absums,
+            &w.wcls,
+            q_dim_ok,
+        );
     }
 }
 
@@ -1279,7 +1425,8 @@ impl Backend for CudaBackend {
         inv_freq: &[f32],
         mscale: f32,
     ) {
-        self.cpu.rope(q, k, pos, head_size, kv_dim, inv_freq, mscale);
+        self.cpu
+            .rope(q, k, pos, head_size, kv_dim, inv_freq, mscale);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1300,8 +1447,19 @@ impl Backend for CudaBackend {
         window: usize,
     ) {
         self.cpu.attention(
-            out, q, key_cache, value_cache, att, pos, n_heads, n_kv_heads, head_size, seq_len,
-            kv_dim, logit_softcap, window,
+            out,
+            q,
+            key_cache,
+            value_cache,
+            att,
+            pos,
+            n_heads,
+            n_kv_heads,
+            head_size,
+            seq_len,
+            kv_dim,
+            logit_softcap,
+            window,
         );
     }
 
@@ -1381,10 +1539,12 @@ impl Backend for CudaBackend {
 
         // This token's embedding → resident x.
         w.token_embedding_table.dequant_row(token, &mut d.embed);
-        st.memcpy_htod(&d.embed, &mut d.x).expect("upload embedding");
+        st.memcpy_htod(&d.embed, &mut d.x)
+            .expect("upload embedding");
         // The absolute position, device-resident so rope/attention/kv-append read
         // it at run time — lets the per-step kernel sequence be captured once.
-        st.memcpy_htod(&[pos as i32], &mut d.pos_dev).expect("upload pos");
+        st.memcpy_htod(&[pos as i32], &mut d.pos_dev)
+            .expect("upload pos");
 
         d.kv_filled = pos + 1;
         // Collapse the ~445 per-step kernel launches into one CUDA-graph replay —
@@ -1394,15 +1554,25 @@ impl Backend for CudaBackend {
         let use_graph = d.graphable && q_dim_ok && q_hid_ok && graph_enabled();
         let replay = use_graph && d.graph.is_some();
         if replay {
-            d.graph.as_ref().unwrap().0.launch().expect("decode graph replay");
+            d.graph
+                .as_ref()
+                .unwrap()
+                .0
+                .launch()
+                .expect("decode graph replay");
         } else {
             if use_graph {
                 // Warm the packed-weight cache so its one-time host->device uploads
                 // are NOT recorded into the graph; flush them before capture.
                 for layer in 0..d.n_layers {
                     for wt in [
-                        &w.wq[layer], &w.wk[layer], &w.wv[layer], &w.wo[layer], &w.w1[layer],
-                        &w.w2[layer], &w.w3[layer],
+                        &w.wq[layer],
+                        &w.wk[layer],
+                        &w.wv[layer],
+                        &w.wo[layer],
+                        &w.w1[layer],
+                        &w.w2[layer],
+                        &w.w3[layer],
                     ] {
                         self.weight_packed(wt);
                     }
@@ -1424,7 +1594,12 @@ impl Backend for CudaBackend {
                     .expect("end capture")
                     .expect("captured graph is non-null");
                 d.graph = Some(SendGraph(g));
-                d.graph.as_ref().unwrap().0.launch().expect("decode graph first launch");
+                d.graph
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .launch()
+                    .expect("decode graph first launch");
             }
         }
         st.synchronize().expect("stream synchronize");
@@ -1501,7 +1676,8 @@ impl Backend for CudaBackend {
         let mut xb16 = unsafe { st.alloc::<f16>(n * dim) }.expect("alloc xb16");
         // Prefill positions are `0 + row` (rows 0..n at base 0); rope/attention now
         // read the base from device memory, so set it once.
-        st.memcpy_htod(&[0i32], &mut d.pos_dev).expect("upload pos_base=0");
+        st.memcpy_htod(&[0i32], &mut d.pos_dev)
+            .expect("upload pos_base=0");
 
         for layer in 0..p.n_layers {
             // --- Attention ---
@@ -1511,12 +1687,28 @@ impl Backend for CudaBackend {
             self.gemm_dev_f16(&mut d.key[layer], &xb16, &w.wk[layer], n);
             self.gemm_dev_f16(&mut d.value[layer], &xb16, &w.wv[layer], n);
             self.dev_rope(
-                &mut q, &mut d.key[layer], &d.inv, n, &d.pos_dev, head_size, kv_dim, dim, n_freqs,
+                &mut q,
+                &mut d.key[layer],
+                &d.inv,
+                n,
+                &d.pos_dev,
+                head_size,
+                kv_dim,
+                dim,
+                n_freqs,
                 mscale,
             );
             self.dev_attention(
-                &mut xb, &q, &d.key[layer], &d.value[layer], n, &d.pos_dev, n_heads, kv_mul,
-                head_size, kv_dim,
+                &mut xb,
+                &q,
+                &d.key[layer],
+                &d.value[layer],
+                n,
+                &d.pos_dev,
+                n_heads,
+                kv_mul,
+                head_size,
+                kv_dim,
             );
             self.gemm_dev(&mut xb2, &xb, &w.wo[layer], n);
             self.dev_add(&mut x, &xb2, n * dim);
@@ -1554,7 +1746,15 @@ impl Backend for CudaBackend {
         if q_dim_ok {
             self.dev_quantize_q8k(&mut d.aq, &mut d.ad, &mut d.absums, &xbn, dim);
         }
-        self.gemv_decode(&mut d.logits, &xbn, &d.aq, &d.ad, &d.absums, &w.wcls, q_dim_ok);
+        self.gemv_decode(
+            &mut d.logits,
+            &xbn,
+            &d.aq,
+            &d.ad,
+            &d.absums,
+            &w.wcls,
+            q_dim_ok,
+        );
         let logits_host: Vec<f32> = st.clone_dtoh(&d.logits).expect("download logits");
         state.logits_mut().copy_from_slice(&logits_host);
     }
@@ -1818,7 +2018,11 @@ mod tests {
         let model = crate::Model::from_gguf(&gguf).expect("build model");
         let cpu = CpuBackend::new();
         let argmax = |v: &[f32]| {
-            v.iter().enumerate().max_by(|a, x| a.1.partial_cmp(x.1).unwrap()).unwrap().0
+            v.iter()
+                .enumerate()
+                .max_by(|a, x| a.1.partial_cmp(x.1).unwrap())
+                .unwrap()
+                .0
         };
         let mut sc = crate::RunState::new(&model.config);
         let mut sg = crate::RunState::new(&model.config);
@@ -1839,7 +2043,10 @@ mod tests {
             // int8 decode differs from the CPU oracle by small amounts that can
             // flip a near-tie argmax (cf. the coherent CLI run); rel L2 is the
             // meaningful coherence metric, matching the other coherence tests.
-            assert!(rel < 0.1, "step {pos}: cuda-graph decode diverged from CPU, rel L2 {rel}");
+            assert!(
+                rel < 0.1,
+                "step {pos}: cuda-graph decode diverged from CPU, rel L2 {rel}"
+            );
             tok = argmax(lc);
         }
         eprintln!("graph decode coherent over {steps} greedy steps (max rel L2 {maxrel:.4})");
@@ -1894,7 +2101,11 @@ mod tests {
             let num: f32 = cu.iter().zip(cp).map(|(a, b)| (a - b) * (a - b)).sum();
             let den: f32 = cp.iter().map(|v| v * v).sum();
             let rel = (num / den).sqrt();
-            eprintln!("decode step {pos}: argmax cuda={} cpu={}, rel L2 {rel:.4}", argmax(cu), argmax(cp));
+            eprintln!(
+                "decode step {pos}: argmax cuda={} cpu={}, rel L2 {rel:.4}",
+                argmax(cu),
+                argmax(cp)
+            );
             assert_eq!(argmax(cu), argmax(cp), "step {pos}: top token diverged");
             assert!(rel < 0.1, "step {pos}: logits diverged: rel L2 {rel}");
         }
@@ -1942,13 +2153,17 @@ mod tests {
         // state + weight cache on device), then `-r` timed reps as mean ± stddev.
         let reps = crate::bench_util::bench_reps();
         let mut state = crate::RunState::new(&model.config);
-        let (cuda_tps, cuda_sd) = crate::bench_util::bench_stat(
-            steps, reps, std::time::Duration::from_secs(6), || decode(&b, &mut state));
+        let (cuda_tps, cuda_sd) =
+            crate::bench_util::bench_stat(steps, reps, std::time::Duration::from_secs(6), || {
+                decode(&b, &mut state)
+            });
 
         let cpu_backend = CpuBackend::new();
         let mut cpu_state = crate::RunState::new(&model.config);
-        let (cpu_tps, _) = crate::bench_util::bench_stat(
-            steps, 1, std::time::Duration::ZERO, || decode(&cpu_backend, &mut cpu_state));
+        let (cpu_tps, _) =
+            crate::bench_util::bench_stat(steps, 1, std::time::Duration::ZERO, || {
+                decode(&cpu_backend, &mut cpu_state)
+            });
 
         eprintln!(
             "real decode tg{steps} (r={reps}): cuda {cuda_tps:.0} ± {cuda_sd:.0} tok/s  \
@@ -2062,13 +2277,16 @@ mod tests {
         // make them resident), then `-r` timed reps as mean ± stddev.
         let reps = crate::bench_util::bench_reps();
         let mut state = crate::RunState::new(&model.config);
-        let (cuda_tps, cuda_sd) = crate::bench_util::bench_stat(
-            n, reps, std::time::Duration::from_secs(6), || prefill(&b, &mut state));
+        let (cuda_tps, cuda_sd) =
+            crate::bench_util::bench_stat(n, reps, std::time::Duration::from_secs(6), || {
+                prefill(&b, &mut state)
+            });
 
         let cpu_backend = CpuBackend::new();
         let mut cpu_state = crate::RunState::new(&model.config);
-        let (cpu_tps, _) = crate::bench_util::bench_stat(
-            n, 1, std::time::Duration::ZERO, || prefill(&cpu_backend, &mut cpu_state));
+        let (cpu_tps, _) = crate::bench_util::bench_stat(n, 1, std::time::Duration::ZERO, || {
+            prefill(&cpu_backend, &mut cpu_state)
+        });
 
         eprintln!(
             "real prefill pp{n} (r={reps}): cuda {cuda_tps:.0} ± {cuda_sd:.0} tok/s  \
@@ -2087,7 +2305,10 @@ mod tests {
         for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
             let d = (g - w).abs();
             maxdiff = maxdiff.max(d);
-            assert!(d <= atol + rtol * w.abs(), "idx {i}: cuda {g} vs cpu {w} (diff {d})");
+            assert!(
+                d <= atol + rtol * w.abs(),
+                "idx {i}: cuda {g} vs cpu {w} (diff {d})"
+            );
         }
         eprintln!("  ok: maxdiff {maxdiff:.2e}");
     }
@@ -2178,7 +2399,18 @@ mod tests {
         let mut kd = b.stream.clone_htod(&k).unwrap();
         let invd = b.stream.clone_htod(&inv).unwrap();
         let posd = b.stream.clone_htod(&[3i32]).unwrap();
-        b.dev_rope(&mut qd, &mut kd, &invd, n, &posd, head_size, kv_dim, q_dim, inv.len(), 1.0);
+        b.dev_rope(
+            &mut qd,
+            &mut kd,
+            &invd,
+            n,
+            &posd,
+            head_size,
+            kv_dim,
+            q_dim,
+            inv.len(),
+            1.0,
+        );
         b.stream.synchronize().unwrap();
         let gq = b.stream.clone_dtoh(&qd).unwrap();
         let gk = b.stream.clone_dtoh(&kd).unwrap();
@@ -2205,7 +2437,15 @@ mod tests {
         let mut outd = b.stream.alloc_zeros::<f32>(n * dim).unwrap();
         let posd = b.stream.clone_htod(&[0i32]).unwrap();
         b.dev_attention(
-            &mut outd, &qd, &kcd, &vcd, n, &posd, n_heads, n_heads / n_kv_heads, head_size,
+            &mut outd,
+            &qd,
+            &kcd,
+            &vcd,
+            n,
+            &posd,
+            n_heads,
+            n_heads / n_kv_heads,
+            head_size,
             kv_dim,
         );
         b.stream.synchronize().unwrap();
@@ -2214,7 +2454,8 @@ mod tests {
         let mut want = vec![0.0; n * dim];
         let mut att = vec![0.0; n_heads * seq_len];
         CpuBackend.attention_batch(
-            &mut want, &q, &kc, &vc, &mut att, 0, n, n_heads, n_kv_heads, head_size, seq_len, kv_dim, 0.0, 0,
+            &mut want, &q, &kc, &vc, &mut att, 0, n, n_heads, n_kv_heads, head_size, seq_len,
+            kv_dim, 0.0, 0,
         );
         close_approx(&got, &want, 1e-4, 1e-4);
     }
@@ -2241,7 +2482,15 @@ mod tests {
         let mut outd = b.stream.alloc_zeros::<f32>(rows * dim).unwrap();
         let posd = b.stream.clone_htod(&[pos_base as i32]).unwrap();
         b.dev_attention(
-            &mut outd, &qd, &kcd, &vcd, rows, &posd, n_heads, n_heads / n_kv_heads, head_size,
+            &mut outd,
+            &qd,
+            &kcd,
+            &vcd,
+            rows,
+            &posd,
+            n_heads,
+            n_heads / n_kv_heads,
+            head_size,
             kv_dim,
         );
         b.stream.synchronize().unwrap();
@@ -2430,9 +2679,15 @@ mod tests {
         let gv: Vec<f32> = st.clone_dtoh(&v_d).unwrap();
 
         let (rb4, rb6) = (nsb * 144, nsb * 210);
-        let wantq: Vec<f32> = (0..q_oc).map(|r| vec_dot_q4_k(&wq[r * rb4..r * rb4 + rb4], &act)).collect();
-        let wantk: Vec<f32> = (0..kv_oc).map(|r| vec_dot_q4_k(&wk[r * rb4..r * rb4 + rb4], &act)).collect();
-        let wantv: Vec<f32> = (0..kv_oc).map(|r| vec_dot_q6_k(&wv[r * rb6..r * rb6 + rb6], &act)).collect();
+        let wantq: Vec<f32> = (0..q_oc)
+            .map(|r| vec_dot_q4_k(&wq[r * rb4..r * rb4 + rb4], &act))
+            .collect();
+        let wantk: Vec<f32> = (0..kv_oc)
+            .map(|r| vec_dot_q4_k(&wk[r * rb4..r * rb4 + rb4], &act))
+            .collect();
+        let wantv: Vec<f32> = (0..kv_oc)
+            .map(|r| vec_dot_q6_k(&wv[r * rb6..r * rb6 + rb6], &act))
+            .collect();
         close_approx(&gq, &wantq, 1e-2, 2e-3);
         close_approx(&gk, &wantk, 1e-2, 2e-3);
         close_approx(&gv, &wantv, 1e-2, 2e-3);
@@ -2538,8 +2793,8 @@ extern "C" __global__ void mma_i8(const signed char* A, const signed char* B, in
         let st = &b.stream;
         let m = b.ctx.load_module(ptx).expect("load module");
         let f = m.load_function("mma_i8").expect("load fn");
-        let ah: Vec<i8> = (0..512).map(|i| ((i % 7) as i32 - 3) as i8).collect(); // 16x32
-        let bh: Vec<i8> = (0..256).map(|i| ((i % 5) as i32 - 2) as i8).collect(); // 32x8
+        let ah: Vec<i8> = (0..512).map(|i| (i % 7 - 3) as i8).collect(); // 16x32
+        let bh: Vec<i8> = (0..256).map(|i| (i % 5 - 2) as i8).collect(); // 32x8
         let ad = st.clone_htod(&ah).unwrap();
         let bd = st.clone_htod(&bh).unwrap();
         let mut dd = st.alloc_zeros::<i32>(128).unwrap(); // 16x8
@@ -2639,14 +2894,22 @@ extern "C" __global__ void mmq_a(
         let (mm, nn, kk) = (32usize, 16usize, 64usize);
         let scale = 0.0125f32;
         let ah: Vec<i8> = (0..mm * kk).map(|i| ((i % 11) as i32 - 5) as i8).collect();
-        let bh: Vec<i8> = (0..nn * kk).map(|i| ((i * 3 % 13) as i32 - 6) as i8).collect();
+        let bh: Vec<i8> = (0..nn * kk)
+            .map(|i| ((i * 3 % 13) as i32 - 6) as i8)
+            .collect();
         let ad = st.clone_htod(&ah).unwrap();
         let bd = st.clone_htod(&bh).unwrap();
         let mut cd = st.alloc_zeros::<f32>(mm * nn).unwrap();
         {
             let mut lb = st.launch_builder(&f);
             let (mi, ni, ki) = (mm as i32, nn as i32, kk as i32);
-            lb.arg(&ad).arg(&bd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki).arg(&scale);
+            lb.arg(&ad)
+                .arg(&bd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki)
+                .arg(&scale);
             let cfg = LaunchConfig {
                 grid_dim: ((nn / 8) as u32, (mm / 16) as u32, 1),
                 block_dim: (32, 1, 1),
@@ -2674,7 +2937,12 @@ extern "C" __global__ void mmq_a(
                 }
             }
         }
-        assert_eq!(bad, 0, "tiled int8 GEMM mismatch in {bad}/{} cells", mm * nn);
+        assert_eq!(
+            bad,
+            0,
+            "tiled int8 GEMM mismatch in {bad}/{} cells",
+            mm * nn
+        );
         eprintln!("STAGE A PASSED: tiled int8 mma GEMM {mm}x{nn}x{kk} exact (maxerr {maxerr:.2e})");
     }
 
@@ -2770,8 +3038,12 @@ extern "C" __global__ void mmq_q8_0(
         let (mm, nn, kk) = (32usize, 16usize, 128usize); // 4 Q8_0 blocks per row
         let nblk = kk / 32;
         // Pseudo-random f32 activation and weight (deterministic, no rng dep).
-        let af: Vec<f32> = (0..mm * kk).map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.21).collect();
-        let wf: Vec<f32> = (0..nn * kk).map(|i| ((i * 5 % 19) as f32 - 9.0) * 0.17).collect();
+        let af: Vec<f32> = (0..mm * kk)
+            .map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.21)
+            .collect();
+        let wf: Vec<f32> = (0..nn * kk)
+            .map(|i| ((i * 5 % 19) as f32 - 9.0) * 0.17)
+            .collect();
         let (mut qa, mut da) = (vec![0i8; mm * kk], vec![0f32; mm * nblk]);
         for r in 0..mm {
             let (q, d) = quant_q8_0(&af[r * kk..r * kk + kk], kk);
@@ -2793,7 +3065,14 @@ extern "C" __global__ void mmq_q8_0(
         {
             let mut lb = st.launch_builder(&f);
             let (mi, ni, ki) = (mm as i32, nn as i32, kk as i32);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             let cfg = LaunchConfig {
                 grid_dim: ((nn / 8) as u32, (mm / 16) as u32, 1),
                 block_dim: (32, 1, 1),
@@ -2839,8 +3118,14 @@ extern "C" __global__ void mmq_q8_0(
             }
         }
         let rel_l2 = (err2 / ref2).sqrt();
-        assert_eq!(bad, 0, "Q8_0 MMQ disagrees with host Q8_0 oracle in {bad} cells");
-        assert!(rel_l2 < 0.05, "Q8_0 MMQ vs true f32 aggregate rel L2 too high: {rel_l2}");
+        assert_eq!(
+            bad, 0,
+            "Q8_0 MMQ disagrees with host Q8_0 oracle in {bad} cells"
+        );
+        assert!(
+            rel_l2 < 0.05,
+            "Q8_0 MMQ vs true f32 aggregate rel L2 too high: {rel_l2}"
+        );
         eprintln!(
             "STAGE B PASSED: Q8_0 MMQ {mm}x{nn}x{kk} matches host Q8_0 (max rel {maxrel_q:.2e}), \
              aggregate rel L2 vs true f32 {rel_l2:.4}"
@@ -2955,8 +3240,12 @@ extern "C" __global__ void mmq_q8_0_tiled(
 
         let (mm, nn, kk) = (64usize, 64usize, 128usize); // 2x2 block-tiles, 4 K-blocks
         let nblk = kk / 32;
-        let af: Vec<f32> = (0..mm * kk).map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.21).collect();
-        let wf: Vec<f32> = (0..nn * kk).map(|i| ((i * 5 % 19) as f32 - 9.0) * 0.17).collect();
+        let af: Vec<f32> = (0..mm * kk)
+            .map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.21)
+            .collect();
+        let wf: Vec<f32> = (0..nn * kk)
+            .map(|i| ((i * 5 % 19) as f32 - 9.0) * 0.17)
+            .collect();
         let (qa, da) = quant_rows_q8_0(&af, mm, kk);
         let (qw, dw) = quant_rows_q8_0(&wf, nn, kk);
 
@@ -2968,7 +3257,14 @@ extern "C" __global__ void mmq_q8_0_tiled(
         {
             let mut lb = st.launch_builder(&f);
             let (mi, ni, ki) = (mm as i32, nn as i32, kk as i32);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             let cfg = LaunchConfig {
                 grid_dim: ((nn / 32) as u32, (mm / 32) as u32, 1),
                 block_dim: (256, 1, 1),
@@ -2998,8 +3294,13 @@ extern "C" __global__ void mmq_q8_0_tiled(
                 }
             }
         }
-        assert_eq!(bad, 0, "tiled Q8_0 MMQ disagrees with host oracle in {bad} cells");
-        eprintln!("STAGE B (tiled) PASSED: {mm}x{nn}x{kk} matches host Q8_0 (max rel {maxrel:.2e})");
+        assert_eq!(
+            bad, 0,
+            "tiled Q8_0 MMQ disagrees with host oracle in {bad} cells"
+        );
+        eprintln!(
+            "STAGE B (tiled) PASSED: {mm}x{nn}x{kk} matches host Q8_0 (max rel {maxrel:.2e})"
+        );
     }
 
     /// Phase 7 / Stage B (tuning pass v2): the same Q8_0 MMQ with the three big
@@ -3123,8 +3424,12 @@ extern "C" __global__ void mmq_q8_0_v2(
 
         let (mm, nn, kk) = (128usize, 128usize, 256usize); // 2x2 blocks, 2 K-tiles
         let nblk = kk / 32;
-        let af: Vec<f32> = (0..mm * kk).map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.21).collect();
-        let wf: Vec<f32> = (0..nn * kk).map(|i| ((i * 5 % 19) as f32 - 9.0) * 0.17).collect();
+        let af: Vec<f32> = (0..mm * kk)
+            .map(|i| ((i * 7 % 23) as f32 - 11.0) * 0.21)
+            .collect();
+        let wf: Vec<f32> = (0..nn * kk)
+            .map(|i| ((i * 5 % 19) as f32 - 9.0) * 0.17)
+            .collect();
         let (qa, da) = quant_rows_q8_0(&af, mm, kk);
         let (qw, dw) = quant_rows_q8_0(&wf, nn, kk);
         let qad = st.clone_htod(&qa).unwrap();
@@ -3135,7 +3440,14 @@ extern "C" __global__ void mmq_q8_0_v2(
         {
             let mut lb = st.launch_builder(&f);
             let (mi, ni, ki) = (mm as i32, nn as i32, kk as i32);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             let cfg = LaunchConfig {
                 grid_dim: ((nn / 64) as u32, (mm / 64) as u32, 1),
                 block_dim: (256, 1, 1),
@@ -3164,7 +3476,10 @@ extern "C" __global__ void mmq_q8_0_v2(
                 }
             }
         }
-        assert_eq!(bad, 0, "v2 Q8_0 MMQ disagrees with host oracle in {bad} cells");
+        assert_eq!(
+            bad, 0,
+            "v2 Q8_0 MMQ disagrees with host oracle in {bad} cells"
+        );
         eprintln!("STAGE B (v2) PASSED: {mm}x{nn}x{kk} matches host Q8_0 (max rel {maxrel:.2e})");
     }
 
@@ -3185,10 +3500,12 @@ extern "C" __global__ void mmq_q8_0_v2(
         let st = &b.stream;
 
         // Deterministic f32 weight (oc×ic) and activation (rows×ic).
-        let wf: Vec<f32> =
-            (0..oc * ic).map(|i| ((i.wrapping_mul(2654435761) >> 8) % 255) as f32 * 0.01 - 1.27).collect();
-        let af: Vec<f32> =
-            (0..rows * ic).map(|i| ((i.wrapping_mul(40503) >> 7) % 255) as f32 * 0.01 - 1.27).collect();
+        let wf: Vec<f32> = (0..oc * ic)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 8) % 255) as f32 * 0.01 - 1.27)
+            .collect();
+        let af: Vec<f32> = (0..rows * ic)
+            .map(|i| ((i.wrapping_mul(40503) >> 7) % 255) as f32 * 0.01 - 1.27)
+            .collect();
 
         // --- MMQ inputs (separated int8 + per-block scales) ---
         let (qa, da) = quant_rows_q8_0(&af, rows, ic);
@@ -3217,7 +3534,8 @@ extern "C" __global__ void mmq_q8_0_v2(
             arch: Some("compute_120"),
             ..Default::default()
         };
-        let ptx2 = cudarc::nvrtc::compile_ptx_with_opts(MMQ_Q8_0_V2_SRC, opts2).expect("compile v2");
+        let ptx2 =
+            cudarc::nvrtc::compile_ptx_with_opts(MMQ_Q8_0_V2_SRC, opts2).expect("compile v2");
         let module2 = b.ctx.load_module(ptx2).expect("module2");
         let f2 = module2.load_function("mmq_q8_0_v2").expect("fn2");
         let cfg2 = LaunchConfig {
@@ -3248,7 +3566,14 @@ extern "C" __global__ void mmq_q8_0_v2(
         // Correctness cross-check (one launch each) before timing.
         {
             let mut lb = st.launch_builder(&f);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             unsafe { lb.launch(cfg) }.expect("launch");
         }
         b.gemm_dev_f16(&mut cf, &x16, &qmat, rows);
@@ -3267,14 +3592,28 @@ extern "C" __global__ void mmq_q8_0_v2(
         let reps = 50;
         for _ in 0..5 {
             let mut lb = st.launch_builder(&f);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             unsafe { lb.launch(cfg) }.expect("launch");
         }
         st.synchronize().unwrap();
         let t = Instant::now();
         for _ in 0..reps {
             let mut lb = st.launch_builder(&f);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             unsafe { lb.launch(cfg) }.expect("launch");
         }
         st.synchronize().unwrap();
@@ -3294,7 +3633,14 @@ extern "C" __global__ void mmq_q8_0_v2(
         // v2: correctness cross-check vs f16, then time.
         {
             let mut lb = st.launch_builder(&f2);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd2).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd2)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             unsafe { lb.launch(cfg2) }.expect("launch");
         }
         st.synchronize().unwrap();
@@ -3308,14 +3654,28 @@ extern "C" __global__ void mmq_q8_0_v2(
         assert!(rel2 < 0.05, "v2 MMQ vs f16 diverge: rel L2 {rel2}");
         for _ in 0..5 {
             let mut lb = st.launch_builder(&f2);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd2).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd2)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             unsafe { lb.launch(cfg2) }.expect("launch");
         }
         st.synchronize().unwrap();
         let t = Instant::now();
         for _ in 0..reps {
             let mut lb = st.launch_builder(&f2);
-            lb.arg(&qad).arg(&dad).arg(&qwd).arg(&dwd).arg(&mut cd2).arg(&mi).arg(&ni).arg(&ki);
+            lb.arg(&qad)
+                .arg(&dad)
+                .arg(&qwd)
+                .arg(&dwd)
+                .arg(&mut cd2)
+                .arg(&mi)
+                .arg(&ni)
+                .arg(&ki);
             unsafe { lb.launch(cfg2) }.expect("launch");
         }
         st.synchronize().unwrap();
@@ -3380,9 +3740,12 @@ extern "C" __global__ void mmq_q8_0_v2(
             )
             .unwrap();
         }
-        let a_l = result::create_matrix_layout(sys::cudaDataType_t::CUDA_R_8I, k, m, ic as i64).unwrap();
-        let b_l = result::create_matrix_layout(sys::cudaDataType_t::CUDA_R_8I, k, n, ic as i64).unwrap();
-        let c_l = result::create_matrix_layout(sys::cudaDataType_t::CUDA_R_32I, m, n, oc as i64).unwrap();
+        let a_l =
+            result::create_matrix_layout(sys::cudaDataType_t::CUDA_R_8I, k, m, ic as i64).unwrap();
+        let b_l =
+            result::create_matrix_layout(sys::cudaDataType_t::CUDA_R_8I, k, n, ic as i64).unwrap();
+        let c_l =
+            result::create_matrix_layout(sys::cudaDataType_t::CUDA_R_32I, m, n, oc as i64).unwrap();
         let pref = result::create_matmul_pref().unwrap();
         unsafe {
             result::set_matmul_pref_attribute(
@@ -3406,17 +3769,32 @@ extern "C" __global__ void mmq_q8_0_v2(
 
         let (alpha, beta): (i32, i32) = (1, 0);
         macro_rules! i8gemm {
-            () => {unsafe {
-                let (pa, _a) = a8.device_ptr(st);
-                let (pb, _b) = b8.device_ptr(st);
-                let (pc, _c) = c32.device_ptr_mut(st);
-                let (pw, _w) = ws.device_ptr(st);
-                result::matmul(handle, desc,
-                    (&alpha) as *const _ as *const c_void, (&beta) as *const _ as *const c_void,
-                    pa as *const c_void, a_l, pb as *const c_void, b_l,
-                    pc as *const c_void, c_l, pc as *mut c_void, c_l,
-                    (&heur.algo) as *const _, pw as *mut c_void, ws_size, st.cu_stream() as *mut _)
-            }};
+            () => {
+                unsafe {
+                    let (pa, _a) = a8.device_ptr(st);
+                    let (pb, _b) = b8.device_ptr(st);
+                    let (pc, _c) = c32.device_ptr_mut(st);
+                    let (pw, _w) = ws.device_ptr(st);
+                    result::matmul(
+                        handle,
+                        desc,
+                        (&alpha) as *const _ as *const c_void,
+                        (&beta) as *const _ as *const c_void,
+                        pa as *const c_void,
+                        a_l,
+                        pb as *const c_void,
+                        b_l,
+                        pc as *const c_void,
+                        c_l,
+                        pc as *mut c_void,
+                        c_l,
+                        (&heur.algo) as *const _,
+                        pw as *mut c_void,
+                        ws_size,
+                        st.cu_stream() as *mut _,
+                    )
+                }
+            };
         }
         if let Err(e) = i8gemm!() {
             eprintln!("INT8 SPIKE: matmul failed (scale/layout): {e:?} -> KILL");
@@ -3435,15 +3813,36 @@ extern "C" __global__ void mmq_q8_0_v2(
         let b16 = st.alloc_zeros::<f16>(ic * rows).unwrap();
         let mut c16 = st.alloc_zeros::<f16>(oc * rows).unwrap();
         let cfg = MatmulConfig {
-            transa: true, transb: false, transc: false, m, n, k, alpha: 1.0,
-            lda: ic as i64, ldb: ic as i64, beta: 0.0, ldc: oc as i64,
-            stride_a: None, stride_b: None, stride_c: None, stride_bias: None, batch_size: None,
+            transa: true,
+            transb: false,
+            transc: false,
+            m,
+            n,
+            k,
+            alpha: 1.0,
+            lda: ic as i64,
+            ldb: ic as i64,
+            beta: 0.0,
+            ldc: oc as i64,
+            stride_a: None,
+            stride_b: None,
+            stride_c: None,
+            stride_bias: None,
+            batch_size: None,
         };
-        unsafe { b.blas.matmul(cfg, &a16, &b16, &mut c16, None, None).unwrap() };
+        unsafe {
+            b.blas
+                .matmul(cfg, &a16, &b16, &mut c16, None, None)
+                .unwrap()
+        };
         st.synchronize().unwrap();
         let t1 = Instant::now();
         for _ in 0..iters {
-            unsafe { b.blas.matmul(cfg, &a16, &b16, &mut c16, None, None).unwrap() };
+            unsafe {
+                b.blas
+                    .matmul(cfg, &a16, &b16, &mut c16, None, None)
+                    .unwrap()
+            };
         }
         st.synchronize().unwrap();
         let f16t = t1.elapsed();
@@ -3453,5 +3852,4 @@ extern "C" __global__ void mmq_q8_0_v2(
             f16t.as_secs_f64() / i8t.as_secs_f64()
         );
     }
-
 }

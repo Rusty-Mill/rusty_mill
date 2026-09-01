@@ -302,8 +302,14 @@ mod tests {
 
     fn msgs() -> Vec<Message> {
         vec![
-            Message { role: Role::System, content: "S".into() },
-            Message { role: Role::User, content: "U".into() },
+            Message {
+                role: Role::System,
+                content: "S".into(),
+            },
+            Message {
+                role: Role::User,
+                content: "U".into(),
+            },
         ]
     }
 
@@ -317,7 +323,10 @@ mod tests {
 
     #[test]
     fn llama3_renders_expected() {
-        let one = [Message { role: Role::User, content: "hi".into() }];
+        let one = [Message {
+            role: Role::User,
+            content: "hi".into(),
+        }];
         assert_eq!(
             ChatTemplate::Llama3.render(&one, true),
             "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>\
@@ -336,9 +345,18 @@ mod tests {
     #[test]
     fn gemma_folds_system_into_user_and_maps_roles() {
         let m = vec![
-            Message { role: Role::System, content: "S".into() },
-            Message { role: Role::User, content: "U".into() },
-            Message { role: Role::Assistant, content: "A".into() },
+            Message {
+                role: Role::System,
+                content: "S".into(),
+            },
+            Message {
+                role: Role::User,
+                content: "U".into(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "A".into(),
+            },
         ];
         assert_eq!(
             ChatTemplate::Gemma.render(&m, true),
@@ -358,13 +376,21 @@ mod tests {
 
     #[test]
     fn add_gen_false_omits_assistant_header() {
-        assert!(!ChatTemplate::ChatMl.render(&msgs(), false).contains("assistant"));
+        assert!(!ChatTemplate::ChatMl
+            .render(&msgs(), false)
+            .contains("assistant"));
     }
 
     #[test]
     fn from_name_parses_known_and_rejects_unknown() {
-        assert_eq!(ChatTemplate::from_name("chatml"), Some(ChatTemplate::ChatMl));
-        assert_eq!(ChatTemplate::from_name("llama3"), Some(ChatTemplate::Llama3));
+        assert_eq!(
+            ChatTemplate::from_name("chatml"),
+            Some(ChatTemplate::ChatMl)
+        );
+        assert_eq!(
+            ChatTemplate::from_name("llama3"),
+            Some(ChatTemplate::Llama3)
+        );
         assert_eq!(ChatTemplate::from_name("qwen2"), Some(ChatTemplate::Qwen2));
         assert_eq!(ChatTemplate::from_name("jinja"), None);
         assert_eq!(ChatTemplate::from_name("gemma"), Some(ChatTemplate::Gemma));
@@ -381,7 +407,10 @@ mod tests {
             ChatTemplate::detect_from(Some("x <|im_start|> y"), "llama"),
             Some(ChatTemplate::ChatMl)
         );
-        assert_eq!(ChatTemplate::detect_from(None, "qwen2"), Some(ChatTemplate::Qwen2));
+        assert_eq!(
+            ChatTemplate::detect_from(None, "qwen2"),
+            Some(ChatTemplate::Qwen2)
+        );
         assert_eq!(ChatTemplate::detect_from(None, "llama"), None);
     }
 
@@ -401,6 +430,13 @@ mod tests {
         // interpolation), and eos_token (string interpolation). bos_token is
         // always "" (see render_jinja's doc comment), so it's covered by the
         // Llama-3-shaped test below instead of asserted on directly here.
+        //
+        // The bool interpolates as Python's `True`, not Rust's `true`:
+        // minijinja 2.22 changed none/bool rendering to `None`/`True`/`False`
+        // for Jinja2 compatibility (upstream #913). This crate renders chat
+        // templates authored *for* Python Jinja2, so that is the behavior it
+        // wants; the expectation was written against 2.21, which this repo's
+        // lockfile pinned before the monorepo merge unified it forward.
         let out = render_jinja(
             "{{ messages|length }} msgs, gen={{ add_generation_prompt }}, eos={{ eos_token }}",
             &msgs(),
@@ -408,7 +444,7 @@ mod tests {
             "<|eot|>",
         )
         .unwrap();
-        assert_eq!(out, "2 msgs, gen=true, eos=<|eot|>");
+        assert_eq!(out, "2 msgs, gen=True, eos=<|eot|>");
     }
 
     #[test]

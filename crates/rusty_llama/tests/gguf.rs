@@ -34,9 +34,22 @@ fn parses_metadata_and_tensor_table() {
 
     assert_eq!(gguf.version, 3);
     assert_eq!(gguf.meta_str("general.architecture").unwrap(), "llama");
-    assert_eq!(gguf.meta_u64("llama.embedding_length").unwrap(), c.dim as u64);
-    assert_eq!(gguf.meta_u64("llama.block_count").unwrap(), c.n_layers as u64);
-    assert!((gguf.meta_f32("llama.attention.layer_norm_rms_epsilon").unwrap() - 1e-5).abs() < 1e-9);
+    assert_eq!(
+        gguf.meta_u64("llama.embedding_length").unwrap(),
+        c.dim as u64
+    );
+    assert_eq!(
+        gguf.meta_u64("llama.block_count").unwrap(),
+        c.n_layers as u64
+    );
+    assert!(
+        (gguf
+            .meta_f32("llama.attention.layer_norm_rms_epsilon")
+            .unwrap()
+            - 1e-5)
+            .abs()
+            < 1e-9
+    );
 
     let t = gguf.tensor("token_embd.weight").expect("embedding tensor");
     assert_eq!(t.dims, vec![c.dim as u64, c.vocab_size as u64]);
@@ -96,7 +109,16 @@ fn gpt2_tokenizer_loads_from_gguf() {
     // The full generation loop works with byte-level BPE decode.
     let mut sampler = SamplerChain::new(c.vocab_size, 0.0, 0.9, 1);
     let mut st = RunState::new(&model.config);
-    let n = generate(&model, &mut st, &backend, &tk, &mut sampler, "hi", 4, |_| {});
+    let n = generate(
+        &model,
+        &mut st,
+        &backend,
+        &tk,
+        &mut sampler,
+        "hi",
+        4,
+        |_| {},
+    );
     assert!(n <= c.seq_len);
 }
 
@@ -305,7 +327,10 @@ fn q8_0_forward_approximates_f32() {
         .zip(&quant)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    assert!(max_diff < 0.05, "Q8_0 logits diverge from f32 by {max_diff}");
+    assert!(
+        max_diff < 0.05,
+        "Q8_0 logits diverge from f32 by {max_diff}"
+    );
 }
 
 #[test]
@@ -535,9 +560,16 @@ fn moe_loads_and_generates() {
         let mut st = RunState::new(&model.config);
         let mut sampler = SamplerChain::new(c.vocab_size, 0.0, 0.9, 1);
         let mut out = Vec::new();
-        generate(&model, &mut st, &backend, &tok, &mut sampler, "hi", 6, |b| {
-            out.extend_from_slice(b)
-        });
+        generate(
+            &model,
+            &mut st,
+            &backend,
+            &tok,
+            &mut sampler,
+            "hi",
+            6,
+            |b| out.extend_from_slice(b),
+        );
         out
     };
     assert_eq!(run(), run(), "MoE greedy generation must be reproducible");
@@ -579,8 +611,9 @@ fn moe_batched_decode_matches_independent_sequences() {
 
     // Batched: prefill each prompt into its slot, then decode all together.
     let mut batch = Batch::new(&model.config, prompts.len());
-    let mut states: Vec<RunState> =
-        (0..prompts.len()).map(|_| RunState::new(&model.config)).collect();
+    let mut states: Vec<RunState> = (0..prompts.len())
+        .map(|_| RunState::new(&model.config))
+        .collect();
     let (mut cur, mut positions) = (Vec::new(), Vec::new());
     for (s, prompt) in prompts.iter().enumerate() {
         forward_prefill(&model, &mut states[s], &backend, prompt, 0);
@@ -595,12 +628,16 @@ fn moe_batched_decode_matches_independent_sequences() {
         }
         let logits = batch.decode_step(&model, &backend, &mut states, &slots, &cur, &positions);
         for s in 0..prompts.len() {
-            cur[s] = argmax(&logits[s * model.config.vocab_size..(s + 1) * model.config.vocab_size]);
+            cur[s] =
+                argmax(&logits[s * model.config.vocab_size..(s + 1) * model.config.vocab_size]);
             positions[s] += 1;
         }
     }
 
-    assert_eq!(batched, reference, "MoE batched decode must match independent runs");
+    assert_eq!(
+        batched, reference,
+        "MoE batched decode must match independent runs"
+    );
 }
 
 // --- Qwen2-MoE (Phase 3.2): routed experts + always-on shared expert ----------
@@ -634,12 +671,23 @@ fn qwen2moe_loads_and_generates() {
         let mut st = RunState::new(&model.config);
         let mut sampler = SamplerChain::new(c.vocab_size, 0.0, 0.9, 1);
         let mut out = Vec::new();
-        generate(&model, &mut st, &backend, &tok, &mut sampler, "hi", 6, |b| {
-            out.extend_from_slice(b)
-        });
+        generate(
+            &model,
+            &mut st,
+            &backend,
+            &tok,
+            &mut sampler,
+            "hi",
+            6,
+            |b| out.extend_from_slice(b),
+        );
         out
     };
-    assert_eq!(run(), run(), "Qwen2-MoE greedy generation must be reproducible");
+    assert_eq!(
+        run(),
+        run(),
+        "Qwen2-MoE greedy generation must be reproducible"
+    );
 }
 
 #[test]
@@ -676,8 +724,9 @@ fn qwen2moe_batched_decode_matches_independent_sequences() {
         .collect();
 
     let mut batch = Batch::new(&model.config, prompts.len());
-    let mut states: Vec<RunState> =
-        (0..prompts.len()).map(|_| RunState::new(&model.config)).collect();
+    let mut states: Vec<RunState> = (0..prompts.len())
+        .map(|_| RunState::new(&model.config))
+        .collect();
     let (mut cur, mut positions) = (Vec::new(), Vec::new());
     for (s, prompt) in prompts.iter().enumerate() {
         forward_prefill(&model, &mut states[s], &backend, prompt, 0);
@@ -692,10 +741,14 @@ fn qwen2moe_batched_decode_matches_independent_sequences() {
         }
         let logits = batch.decode_step(&model, &backend, &mut states, &slots, &cur, &positions);
         for s in 0..prompts.len() {
-            cur[s] = argmax(&logits[s * model.config.vocab_size..(s + 1) * model.config.vocab_size]);
+            cur[s] =
+                argmax(&logits[s * model.config.vocab_size..(s + 1) * model.config.vocab_size]);
             positions[s] += 1;
         }
     }
 
-    assert_eq!(batched, reference, "Qwen2-MoE batched decode must match independent runs");
+    assert_eq!(
+        batched, reference,
+        "Qwen2-MoE batched decode must match independent runs"
+    );
 }

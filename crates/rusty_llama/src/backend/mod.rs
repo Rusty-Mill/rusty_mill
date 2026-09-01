@@ -169,7 +169,12 @@ pub trait Backend: Send + Sync {
     fn rmsnorm_batch(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32, rows: usize) {
         let dim = weight.len();
         for r in 0..rows {
-            self.rmsnorm(&mut out[r * dim..r * dim + dim], &x[r * dim..r * dim + dim], weight, eps);
+            self.rmsnorm(
+                &mut out[r * dim..r * dim + dim],
+                &x[r * dim..r * dim + dim],
+                weight,
+                eps,
+            );
         }
     }
 

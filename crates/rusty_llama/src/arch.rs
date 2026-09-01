@@ -195,7 +195,10 @@ impl Arch {
     /// permute NeoX Q/K weights at load instead (the inverse of that converter
     /// step), so no backend changes are needed.
     pub fn rope_neox(&self) -> bool {
-        matches!(self, Arch::Qwen2 | Arch::Phi3 | Arch::Gemma2 | Arch::Qwen2Moe)
+        matches!(
+            self,
+            Arch::Qwen2 | Arch::Phi3 | Arch::Gemma2 | Arch::Qwen2Moe
+        )
     }
 
     /// Only plain Llama uses the fused resident GPU/CUDA decode; every other arch

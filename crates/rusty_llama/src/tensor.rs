@@ -95,9 +95,7 @@ impl<'a> QMatrix<'a> {
             QMatrix::F32 { data, cols, .. } => {
                 out.copy_from_slice(&data[row * cols..row * cols + cols]);
             }
-            QMatrix::Quant {
-                ty, data, cols, ..
-            } => {
+            QMatrix::Quant { ty, data, cols, .. } => {
                 let rb = ty.bytes_for(*cols);
                 // Lengths were validated at construction; dequant can't fail.
                 let _ = dequantize_into(*ty, &data[row * rb..row * rb + rb], out);

@@ -120,6 +120,7 @@ members = [
     "crates/rusty_key/crates/mcp",
     "crates/rusty_key/crates/compose",
     "crates/rusty_key/crates/app",
+    "crates/rusty_llama",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.

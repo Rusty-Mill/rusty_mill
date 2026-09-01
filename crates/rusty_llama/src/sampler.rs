@@ -43,11 +43,12 @@ impl TokenDataArray {
     /// `logit = value`, full live prefix, nothing selected or sorted.
     fn fill_from(&mut self, logits: &[f32]) {
         self.data.clear();
-        self.data.extend(logits.iter().enumerate().map(|(i, &l)| TokenData {
-            id: i as u32,
-            logit: l,
-            p: 0.0,
-        }));
+        self.data
+            .extend(logits.iter().enumerate().map(|(i, &l)| TokenData {
+                id: i as u32,
+                logit: l,
+                p: 0.0,
+            }));
         self.size = self.data.len();
         self.selected = None;
         self.sorted = false;
@@ -275,7 +276,10 @@ impl SamplerStage for MinP {
         // Sort desc by logit so survivors form a prefix and `min_keep` is exact.
         cur.data[..n]
             .sort_unstable_by(|a, b| b.logit.partial_cmp(&a.logit).unwrap_or(Ordering::Equal));
-        let above = cur.data[..n].iter().take_while(|c| c.logit >= thresh).count();
+        let above = cur.data[..n]
+            .iter()
+            .take_while(|c| c.logit >= thresh)
+            .count();
         cur.size = above.max(self.min_keep).max(1).min(n);
         cur.sorted = false;
     }
@@ -423,10 +427,11 @@ impl SamplerStage for Mirostat {
 
         // Solve for the top-k cutoff that keeps expected surprise near `mu`.
         let epsilon_hat = s_hat - 1.0;
-        let k = ((epsilon_hat * 2f64.powf(self.mu as f64))
-            / (1.0 - (-epsilon_hat).powf(n as f64)))
-        .powf(1.0 / s_hat);
-        let keep = if k.is_finite() { k as i64 } else { 1 }.max(1).min(n as i64) as usize;
+        let k = ((epsilon_hat * 2f64.powf(self.mu as f64)) / (1.0 - (-epsilon_hat).powf(n as f64)))
+            .powf(1.0 / s_hat);
+        let keep = if k.is_finite() { k as i64 } else { 1 }
+            .max(1)
+            .min(n as i64) as usize;
         cur.size = keep;
         // Renormalize over the truncated (still-sorted) set.
         cur.softmax_p();
@@ -1080,7 +1085,11 @@ mod tests {
     fn min_p_drops_low_probability_tail() {
         // thresh = 10 + ln(0.5) ≈ 9.31 ⇒ only the 10 (id 0) clears it.
         let mut cur = tda(&[10.0, 9.0, 2.0, 1.0]);
-        MinP { p: 0.5, min_keep: 1 }.apply(&mut cur);
+        MinP {
+            p: 0.5,
+            min_keep: 1,
+        }
+        .apply(&mut cur);
         assert_eq!(cur.size, 1);
         assert_eq!(cur.data[0].id, 0);
     }
@@ -1088,7 +1097,11 @@ mod tests {
     #[test]
     fn min_p_respects_min_keep() {
         let mut cur = tda(&[10.0, 9.0, 2.0, 1.0]);
-        MinP { p: 0.5, min_keep: 3 }.apply(&mut cur);
+        MinP {
+            p: 0.5,
+            min_keep: 3,
+        }
+        .apply(&mut cur);
         assert_eq!(cur.size, 3); // forced to keep 3 despite the threshold
     }
 
@@ -1142,10 +1155,10 @@ mod tests {
     fn mirostat_v2_truncates_and_updates_mu() {
         let mut m = MirostatV2::new(5.0, 0.1, 1);
         assert_eq!(m.mu, 10.0); // 2*tau
-        // A dominant logit -> after softmax + truncation only token 0 survives
-        // (its surprise is ~0, everything else's exceeds mu=10), so the
-        // post-truncation softmax gives p=1 exactly: an exactly hand-computable
-        // mu update.
+                                // A dominant logit -> after softmax + truncation only token 0 survives
+                                // (its surprise is ~0, everything else's exceeds mu=10), so the
+                                // post-truncation softmax gives p=1 exactly: an exactly hand-computable
+                                // mu update.
         let mut cur = tda(&[10.0, 0.0, 0.0]);
         m.apply(&mut cur);
         assert_eq!(cur.size, 1);
@@ -1403,7 +1416,10 @@ mod tests {
             };
             let a = draw();
             let b = draw();
-            assert_eq!(a, b, "mirostat mode {mode} must be reproducible for a fixed seed");
+            assert_eq!(
+                a, b,
+                "mirostat mode {mode} must be reproducible for a fixed seed"
+            );
             assert!(a.iter().all(|&t| t < vocab), "mode {mode}: {a:?}");
         }
     }

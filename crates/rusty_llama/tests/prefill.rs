@@ -106,7 +106,11 @@ fn moe_prefill_matches_sequential() {
     let (next, pos) = (11usize, tokens.len());
     forward(&model, &mut sa, &backend, next, pos);
     forward(&model, &mut sb, &backend, next, pos);
-    assert_eq!(sa.logits(), sb.logits(), "MoE decode-after-prefill KV parity");
+    assert_eq!(
+        sa.logits(),
+        sb.logits(),
+        "MoE decode-after-prefill KV parity"
+    );
 }
 
 /// Qwen2-MoE (routed experts + shared expert + QKV bias + NeoX rope) must also
@@ -149,5 +153,9 @@ fn qwen2moe_prefill_matches_sequential() {
     let (next, pos) = (11usize, tokens.len());
     forward(&model, &mut sa, &backend, next, pos);
     forward(&model, &mut sb, &backend, next, pos);
-    assert_eq!(sa.logits(), sb.logits(), "Qwen2-MoE decode-after-prefill KV parity");
+    assert_eq!(
+        sa.logits(),
+        sb.logits(),
+        "Qwen2-MoE decode-after-prefill KV parity"
+    );
 }

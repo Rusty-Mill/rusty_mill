@@ -28,9 +28,9 @@ use crate::backend::make_backend;
 use crate::chat::{ChatRenderer, Message, Role};
 use crate::config::Config;
 use crate::gguf::Gguf;
+use crate::grammar::{Grammar, GrammarStage, JSON_GRAMMAR};
 use crate::loader::Checkpoint;
 use crate::model::{forward_prefill, Batch, KvPagePool, Model, RunState};
-use crate::grammar::{Grammar, GrammarStage, JSON_GRAMMAR};
 use crate::sampler::{SamplerChain, SamplerConfig};
 use crate::tokenizer::Tokenizer;
 
@@ -230,7 +230,9 @@ pub fn serve(
 
     // Block until the worker has loaded the model (propagating load errors)
     // before we start accepting connections.
-    ready_rx.recv().map_err(|_| "worker thread died during startup")??;
+    ready_rx
+        .recv()
+        .map_err(|_| "worker thread died during startup")??;
 
     let model_id: Arc<str> = Arc::from(model_label(model_path));
     let listener = TcpListener::bind((host, port))?;
@@ -286,11 +288,11 @@ fn kv_budget_cells(cap: usize, config: &Config) -> usize {
 struct Slot {
     reply: Sender<Event>,
     sampler: SamplerChain,
-    prev: usize,      // previous token (decode renders `cur` as decode(prev, cur))
-    cur: usize,       // current token: emit it, then feed it at `pos`
-    pos: usize,       // position to feed `cur` at
-    emitted: usize,   // generated tokens emitted so far
-    max_new: usize,   // cap on `emitted`
+    prev: usize,    // previous token (decode renders `cur` as decode(prev, cur))
+    cur: usize,     // current token: emit it, then feed it at `pos`
+    pos: usize,     // position to feed `cur` at
+    emitted: usize, // generated tokens emitted so far
+    max_new: usize, // cap on `emitted`
     prompt_len: usize,
     pending: Vec<u8>, // UTF-8 carry across tokens
 }
@@ -324,9 +326,9 @@ impl Slot {
     /// Flush any carry and report completion.
     fn finish(self) {
         if !self.pending.is_empty() {
-            let _ = self
-                .reply
-                .send(Event::Token(String::from_utf8_lossy(&self.pending).into_owned()));
+            let _ = self.reply.send(Event::Token(
+                String::from_utf8_lossy(&self.pending).into_owned(),
+            ));
         }
         let _ = self.reply.send(Event::Done {
             prompt: self.prompt_len,
@@ -440,9 +442,22 @@ fn worker(
 
         // Phase B: one batched decode step over the active slots → next token each.
         if !active.is_empty() {
-            let tokens: Vec<usize> = active.iter().map(|&i| slots[i].as_ref().unwrap().cur).collect();
-            let positions: Vec<usize> = active.iter().map(|&i| slots[i].as_ref().unwrap().pos).collect();
-            let logits = batch.decode_step(&model, backend.as_ref(), &mut states, &active, &tokens, &positions);
+            let tokens: Vec<usize> = active
+                .iter()
+                .map(|&i| slots[i].as_ref().unwrap().cur)
+                .collect();
+            let positions: Vec<usize> = active
+                .iter()
+                .map(|&i| slots[i].as_ref().unwrap().pos)
+                .collect();
+            let logits = batch.decode_step(
+                &model,
+                backend.as_ref(),
+                &mut states,
+                &active,
+                &tokens,
+                &positions,
+            );
             for (r, &i) in active.iter().enumerate() {
                 let slot = slots[i].as_mut().unwrap();
                 let next = slot.sampler.sample(&logits[r * vocab..(r + 1) * vocab]);
@@ -521,7 +536,11 @@ fn admit(
         };
         // Build the vocab-sized piece table once, then share it across requests.
         let table = pieces.get_or_insert_with(|| {
-            Arc::new((0..tokenizer.vocab_size()).map(|i| tokenizer.token_piece(i)).collect())
+            Arc::new(
+                (0..tokenizer.vocab_size())
+                    .map(|i| tokenizer.token_piece(i))
+                    .collect(),
+            )
         });
         sampler.prepend(Box::new(GrammarStage::new(
             grammar,
@@ -689,7 +708,10 @@ fn buffer_chat(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) -> io:
     for ev in rx {
         match ev {
             Event::Token(s) => content.push_str(&s),
-            Event::Done { prompt: p, completion: c } => {
+            Event::Done {
+                prompt: p,
+                completion: c,
+            } => {
                 prompt = p;
                 completion = c;
                 break;
@@ -704,12 +726,19 @@ fn buffer_chat(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) -> io:
         model: model.to_string(),
         choices: vec![ChatChoice {
             index: 0,
-            message: RespMessage { role: "assistant", content },
+            message: RespMessage {
+                role: "assistant",
+                content,
+            },
             finish_reason: "stop",
         }],
         usage: usage(prompt, completion),
     };
-    write_json(stream, 200, &serde_json::to_string(&resp).unwrap_or_default())
+    write_json(
+        stream,
+        200,
+        &serde_json::to_string(&resp).unwrap_or_default(),
+    )
 }
 
 fn stream_chat(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) -> io::Result<()> {
@@ -717,17 +746,47 @@ fn stream_chat(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) -> io:
     let created = now();
     write_sse_headers(stream)?;
     // First chunk announces the assistant role.
-    send_chunk(stream, &chat_chunk(&id, created, model, Delta { role: Some("assistant"), content: None }, None))?;
+    send_chunk(
+        stream,
+        &chat_chunk(
+            &id,
+            created,
+            model,
+            Delta {
+                role: Some("assistant"),
+                content: None,
+            },
+            None,
+        ),
+    )?;
     for ev in rx {
         match ev {
             Event::Token(s) => send_chunk(
                 stream,
-                &chat_chunk(&id, created, model, Delta { role: None, content: Some(s) }, None),
+                &chat_chunk(
+                    &id,
+                    created,
+                    model,
+                    Delta {
+                        role: None,
+                        content: Some(s),
+                    },
+                    None,
+                ),
             )?,
             Event::Done { .. } => {
                 send_chunk(
                     stream,
-                    &chat_chunk(&id, created, model, Delta { role: None, content: None }, Some("stop")),
+                    &chat_chunk(
+                        &id,
+                        created,
+                        model,
+                        Delta {
+                            role: None,
+                            content: None,
+                        },
+                        Some("stop"),
+                    ),
                 )?;
                 break;
             }
@@ -746,7 +805,10 @@ fn buffer_completion(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) 
     for ev in rx {
         match ev {
             Event::Token(s) => text.push_str(&s),
-            Event::Done { prompt: p, completion: c } => {
+            Event::Done {
+                prompt: p,
+                completion: c,
+            } => {
                 prompt = p;
                 completion = c;
                 break;
@@ -759,10 +821,18 @@ fn buffer_completion(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) 
         object: "text_completion",
         created: now(),
         model: model.to_string(),
-        choices: vec![CompletionChoice { index: 0, text, finish_reason: "stop" }],
+        choices: vec![CompletionChoice {
+            index: 0,
+            text,
+            finish_reason: "stop",
+        }],
         usage: usage(prompt, completion),
     };
-    write_json(stream, 200, &serde_json::to_string(&resp).unwrap_or_default())
+    write_json(
+        stream,
+        200,
+        &serde_json::to_string(&resp).unwrap_or_default(),
+    )
 }
 
 fn stream_completion(stream: &mut TcpStream, rx: &Receiver<Event>, model: &str) -> io::Result<()> {
@@ -800,7 +870,11 @@ fn chat_chunk(
         object: "chat.completion.chunk",
         created,
         model: model.to_string(),
-        choices: vec![ChunkChoice { index: 0, delta, finish_reason }],
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta,
+            finish_reason,
+        }],
     }
 }
 
@@ -899,18 +973,35 @@ fn model_label(path: &str) -> String {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn time_seed() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 fn gen_id(prefix: &str) -> String {
-    format!("{prefix}-{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0))
+    format!(
+        "{prefix}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
 }
 
-fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> io::Result<()> {
+fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -992,8 +1083,18 @@ mod tests {
 
     #[test]
     fn chat_chunk_omits_absent_delta_fields() {
-        let c = chat_chunk("id1", 7, "m", Delta { role: Some("assistant"), content: None }, None);
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        let c = chat_chunk(
+            "id1",
+            7,
+            "m",
+            Delta {
+                role: Some("assistant"),
+                content: None,
+            },
+            None,
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(v["object"], "chat.completion.chunk");
         assert_eq!(v["choices"][0]["delta"]["role"], "assistant");
         assert!(v["choices"][0]["delta"].get("content").is_none());

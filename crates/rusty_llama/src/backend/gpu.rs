@@ -1102,11 +1102,11 @@ struct DecodeState {
     // Resident buffers the step touches directly. The purely-intermediate
     // activations (xb, q, hb, …) and the constant params buffers are held alive
     // by the bind groups that reference them, so they aren't stored here.
-    x: wgpu::Buffer,                 // embedding written here each step
-    k_tmp: wgpu::Buffer,             // fresh K, copied into the resident cache
-    v_tmp: wgpu::Buffer,             // fresh V, copied into the resident cache
-    logits: wgpu::Buffer,            // classifier output, copied to staging
-    logits_staging: wgpu::Buffer,    // mapped to read logits back
+    x: wgpu::Buffer,              // embedding written here each step
+    k_tmp: wgpu::Buffer,          // fresh K, copied into the resident cache
+    v_tmp: wgpu::Buffer,          // fresh V, copied into the resident cache
+    logits: wgpu::Buffer,         // classifier output, copied to staging
+    logits_staging: wgpu::Buffer, // mapped to read logits back
     // Resident KV cache, one buffer per layer (seq_len * kv_dim each).
     key: Vec<wgpu::Buffer>,
     value: Vec<wgpu::Buffer>,
@@ -1309,20 +1309,22 @@ impl GpuBackend {
 
     /// A read-only storage buffer initialized with `data`.
     fn storage_ro(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: data,
-            usage: wgpu::BufferUsages::STORAGE,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: data,
+                usage: wgpu::BufferUsages::STORAGE,
+            })
     }
 
     /// A read/write storage buffer initialized with `data` and readable back.
     fn storage_rw(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: data,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: data,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            })
     }
 
     /// An uninitialized output buffer of `len` f32s, readable back.
@@ -1412,7 +1414,12 @@ impl GpuBackend {
     }
 
     /// Dispatch `pipeline` over `grid` workgroups without reading anything back.
-    fn dispatch_grid(&self, pipeline: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, grid: [u32; 3]) {
+    fn dispatch_grid(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        bind: &wgpu::BindGroup,
+        grid: [u32; 3],
+    ) {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -1495,7 +1502,11 @@ impl GpuBackend {
             }
             // Everything else: host dequant to f32 (the original behaviour).
             QMatrix::Quant {
-                ty, data, rows, cols, ..
+                ty,
+                data,
+                rows,
+                cols,
+                ..
             } => {
                 let f = dequantize(*ty, data, rows * cols).expect("weight dequantization");
                 (Cow::Owned(f32_bytes(&f).to_vec()), GgmlType::F32)
@@ -1620,11 +1631,12 @@ impl GpuBackend {
 
     /// A storage param buffer initialized from `words`, also writable later.
     fn params_dyn(&self, words: &[u32]) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: u32_bytes(words),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("params"),
+                contents: u32_bytes(words),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            })
     }
 
     /// Build the resident decode state for `model` (weights/KV/activations +
@@ -1682,8 +1694,14 @@ impl GpuBackend {
             model.rope.mscale.to_bits(),
             dim as u32,
         ]);
-        let attn_params =
-            self.params_dyn(&[hs as u32, kv_dim as u32, seq as u32, kv_mul, 0, scale.to_bits()]);
+        let attn_params = self.params_dyn(&[
+            hs as u32,
+            kv_dim as u32,
+            seq as u32,
+            kv_mul,
+            0,
+            scale.to_bits(),
+        ]);
 
         // Resident weights (cached by pointer) and per-layer norm weights. Each
         // matmul binds the weight against the pipeline matching its on-device
@@ -1732,7 +1750,10 @@ impl GpuBackend {
         let rms_final = self.table_buffer(&w.rms_final_weight);
         let wcls = self.weight_buffer(&w.wcls);
         let final_rms = self.bind(&self.pipelines.rmsnorm, &[&x, &rms_final, &xb, &p_rms]);
-        let final_cls = self.bind(self.matmul_pipeline(wcls.ty), &[&wcls.buf, &xb, &logits, &p_vocab]);
+        let final_cls = self.bind(
+            self.matmul_pipeline(wcls.ty),
+            &[&wcls.buf, &xb, &logits, &p_vocab],
+        );
         let final_cls_ty = wcls.ty;
 
         // int8 (DP4A) overlay: built only when enabled and every matmul weight is
@@ -1748,10 +1769,14 @@ impl GpuBackend {
             let hb_scale = self.buffer("hb_scale", hidden / 32, U::STORAGE);
             let p_q_xb = self.storage_ro("p_q", u32_bytes(&[(dim / 32) as u32]));
             let p_q_hb = self.storage_ro("p_q", u32_bytes(&[(hidden / 32) as u32]));
-            let quant_xb =
-                self.bind(&self.pipelines.quantize_q8, &[&xb, &xb_i8, &xb_scale, &p_q_xb]);
-            let quant_hb =
-                self.bind(&self.pipelines.quantize_q8, &[&hb, &hb_i8, &hb_scale, &p_q_hb]);
+            let quant_xb = self.bind(
+                &self.pipelines.quantize_q8,
+                &[&xb, &xb_i8, &xb_scale, &p_q_xb],
+            );
+            let quant_hb = self.bind(
+                &self.pipelines.quantize_q8,
+                &[&hb, &hb_i8, &hb_scale, &p_q_hb],
+            );
             // int8 matmul bind order: [wq, wscale, aq, ascale, out, params].
             let mm8 = |w8: &GpuWeightI8,
                        aq: &wgpu::Buffer,
@@ -1881,8 +1906,12 @@ impl GpuBackend {
         // inserts the read-after-write barriers between dependent dispatches).
         // Cooperative matmuls dispatch one workgroup per output row; the
         // elementwise add/swiglu keep one thread per element.
-        let (mm_dim, mm_kv, mm_hidden, mm_vocab) =
-            (d.dim as u32, d.kv_dim as u32, d.hidden as u32, d.vocab as u32);
+        let (mm_dim, mm_kv, mm_hidden, mm_vocab) = (
+            d.dim as u32,
+            d.kv_dim as u32,
+            d.hidden as u32,
+            d.vocab as u32,
+        );
         let sw_wg = ceil_div(d.hidden, 64);
         let wg_rope = ceil_div(d.dim / 2, 64);
         let wg_heads = d.n_heads as u32;
@@ -1948,7 +1977,12 @@ impl GpuBackend {
                 pass(&mut enc, mm[6], &lb.m2, mm_dim); // folds residual add into x
             }
             pass(&mut enc, &self.pipelines.rmsnorm, &d.final_rms, 1);
-            pass(&mut enc, self.matmul_pipeline(d.final_cls_ty), &d.final_cls, mm_vocab);
+            pass(
+                &mut enc,
+                self.matmul_pipeline(d.final_cls_ty),
+                &d.final_cls,
+                mm_vocab,
+            );
         }
         enc.copy_buffer_to_buffer(&d.logits, 0, &d.logits_staging, 0, (d.vocab * 4) as u64);
         self.queue.submit(Some(enc.finish()));
@@ -2029,8 +2063,19 @@ impl Backend for GpuBackend {
         // softcap == 0 && window == 0 stays on GPU.
         if logit_softcap > 0.0 || window != 0 {
             super::CpuBackend.attention(
-                out, q, key_cache, value_cache, att, pos, n_heads, n_kv_heads, head_size, seq_len,
-                kv_dim, logit_softcap, window,
+                out,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                pos,
+                n_heads,
+                n_kv_heads,
+                head_size,
+                seq_len,
+                kv_dim,
+                logit_softcap,
+                window,
             );
             return;
         }
@@ -2060,7 +2105,13 @@ impl Backend for GpuBackend {
         let h2 = self.storage_ro("hb2", f32_bytes(hb2));
         let pb = self.params(&[hb.len() as u32]);
         let bind = self.bind(&self.pipelines.swiglu, &[&h, &h2, &pb]);
-        self.run(&self.pipelines.swiglu, &bind, ceil_div(hb.len(), 64), &h, hb);
+        self.run(
+            &self.pipelines.swiglu,
+            &bind,
+            ceil_div(hb.len(), 64),
+            &h,
+            hb,
+        );
     }
 
     fn add(&self, out: &mut [f32], x: &[f32]) {
@@ -2068,7 +2119,13 @@ impl Backend for GpuBackend {
         let xb = self.storage_ro("x", f32_bytes(x));
         let pb = self.params(&[out.len() as u32]);
         let bind = self.bind(&self.pipelines.add, &[&ob, &xb, &pb]);
-        self.run(&self.pipelines.add, &bind, ceil_div(out.len(), 64), &ob, out);
+        self.run(
+            &self.pipelines.add,
+            &bind,
+            ceil_div(out.len(), 64),
+            &ob,
+            out,
+        );
     }
 
     // --- Batched (prefill) overrides ------------------------------------
@@ -2097,7 +2154,13 @@ impl Backend for GpuBackend {
         let pb = self.params(&[dim as u32, eps.to_bits(), rows as u32]);
         let bind = self.bind(&self.pipelines.rmsnorm_batch, &[&xb, &wb, &ob, &pb]);
         // One workgroup per row (each reduces its own row over 256 lanes).
-        self.run_grid(&self.pipelines.rmsnorm_batch, &bind, [rows as u32, 1, 1], &ob, out);
+        self.run_grid(
+            &self.pipelines.rmsnorm_batch,
+            &bind,
+            [rows as u32, 1, 1],
+            &ob,
+            out,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2153,8 +2216,20 @@ impl Backend for GpuBackend {
     ) {
         if logit_softcap > 0.0 || window != 0 {
             super::CpuBackend.attention_batch(
-                out, q, key_cache, value_cache, att, pos_base, rows, n_heads, n_kv_heads,
-                head_size, seq_len, kv_dim, logit_softcap, window,
+                out,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                pos_base,
+                rows,
+                n_heads,
+                n_kv_heads,
+                head_size,
+                seq_len,
+                kv_dim,
+                logit_softcap,
+                window,
             );
             return;
         }
@@ -2271,7 +2346,15 @@ fn model_q8_0_eligible(model: &crate::model::Model) -> bool {
         return false;
     }
     let w = &model.weights;
-    let q8 = |m: &QMatrix| matches!(m, QMatrix::Quant { ty: GgmlType::Q8_0, .. });
+    let q8 = |m: &QMatrix| {
+        matches!(
+            m,
+            QMatrix::Quant {
+                ty: GgmlType::Q8_0,
+                ..
+            }
+        )
+    };
     q8(&w.wcls)
         && (0..p.n_layers).all(|l| {
             q8(&w.wq[l])
@@ -2540,7 +2623,13 @@ mod tests {
             &[&wqb, &wsb, &aqb, &asb, &ob, &pb],
         );
         let mut got = vec![0.0f32; rows];
-        g.run_grid(&g.pipelines.matmul_q8_0_i8, &bind, [rows as u32, 1, 1], &ob, &mut got);
+        g.run_grid(
+            &g.pipelines.matmul_q8_0_i8,
+            &bind,
+            [rows as u32, 1, 1],
+            &ob,
+            &mut got,
+        );
         close(&got, &want);
     }
 
@@ -2575,9 +2664,18 @@ mod tests {
         let asb = g.storage_ro("ascale", f32_bytes(&act.scales));
         let ob = g.storage_rw("out", f32_bytes(&prior)); // seeded + readable back
         let pb = g.params(&[rows as u32, cols as u32, 1]); // acc=1
-        let bind = g.bind(&g.pipelines.matmul_q8_0_i8, &[&wqb, &wsb, &aqb, &asb, &ob, &pb]);
+        let bind = g.bind(
+            &g.pipelines.matmul_q8_0_i8,
+            &[&wqb, &wsb, &aqb, &asb, &ob, &pb],
+        );
         let mut got = vec![0.0f32; rows];
-        g.run_grid(&g.pipelines.matmul_q8_0_i8, &bind, [rows as u32, 1, 1], &ob, &mut got);
+        g.run_grid(
+            &g.pipelines.matmul_q8_0_i8,
+            &bind,
+            [rows as u32, 1, 1],
+            &ob,
+            &mut got,
+        );
         close(&got, &want);
     }
 
@@ -2589,7 +2687,11 @@ mod tests {
         let host = crate::quant::quantize_activation_q8(&x);
         // GPU quantize.
         let xb = g.storage_ro("x", f32_bytes(&x));
-        let qb = g.buffer("q", n / 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let qb = g.buffer(
+            "q",
+            n / 4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
         let sb = g.buffer(
             "s",
             n / 32,
@@ -2609,7 +2711,10 @@ mod tests {
             .map(|b| b as i8)
             .collect();
         for (i, (&hq, &gq)) in host.qs.iter().zip(&gpu_q).enumerate() {
-            assert!((hq as i32 - gq as i32).abs() <= 1, "idx {i}: host {hq} gpu {gq}");
+            assert!(
+                (hq as i32 - gq as i32).abs() <= 1,
+                "idx {i}: host {hq} gpu {gq}"
+            );
         }
         for (hs, gs) in host.scales.iter().zip(&scales) {
             assert!((hs - gs).abs() <= 1e-6 * hs.abs().max(1.0) + 1e-9);
@@ -2640,12 +2745,21 @@ mod tests {
         let f = crate::Model::from_gguf(&f_gguf).unwrap();
 
         // Q8_0 + int8 enabled (default) => the overlay is built.
-        assert!(g.build_decode_state(&q8).int8.is_some(), "Q8_0 should enable int8");
+        assert!(
+            g.build_decode_state(&q8).int8.is_some(),
+            "Q8_0 should enable int8"
+        );
         // F32 weights are ineligible => no overlay.
-        assert!(g.build_decode_state(&f).int8.is_none(), "F32 is ineligible for int8");
+        assert!(
+            g.build_decode_state(&f).int8.is_none(),
+            "F32 is ineligible for int8"
+        );
         // Toggle off => no overlay even for an eligible Q8_0 model.
         g.set_int8_decode(false);
-        assert!(g.build_decode_state(&q8).int8.is_none(), "toggle disables int8");
+        assert!(
+            g.build_decode_state(&q8).int8.is_none(),
+            "toggle disables int8"
+        );
     }
 
     // --- int8 DP4A k-quant decode path (Stage 2) ------------------------
@@ -2657,9 +2771,21 @@ mod tests {
         let x = noise(n, 41);
         let host = crate::quant::quantize_activation_q8k(&x);
         let xb = g.storage_ro("x", f32_bytes(&x));
-        let qb = g.buffer("q", n / 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
-        let db = g.buffer("d", n / 256, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
-        let bsb = g.buffer("bs", n / 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let qb = g.buffer(
+            "q",
+            n / 4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let db = g.buffer(
+            "d",
+            n / 256,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let bsb = g.buffer(
+            "bs",
+            n / 16,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
         let pb = g.params(&[(n / 256) as u32]);
         let bind = g.bind(&g.pipelines.quantize_q8k, &[&xb, &qb, &db, &bsb, &pb]);
         g.dispatch(&g.pipelines.quantize_q8k, &bind, ceil_div(n / 256, 64));
@@ -2678,13 +2804,19 @@ mod tests {
         // int8 within ±1 of host (round-to-even vs away), scales close, and each
         // 16-group sum within ±16 (the per-element ±1 can accumulate over 16).
         for (i, (&h, &gq)) in host.qs.iter().zip(&gpu_q).enumerate() {
-            assert!((h as i32 - gq as i32).abs() <= 1, "qs idx {i}: host {h} gpu {gq}");
+            assert!(
+                (h as i32 - gq as i32).abs() <= 1,
+                "qs idx {i}: host {h} gpu {gq}"
+            );
         }
         for (hs, gs) in host.d.iter().zip(&scales) {
             assert!((hs - gs).abs() <= 1e-6 * hs.abs().max(1.0) + 1e-9);
         }
         for (i, (&h, &gb)) in host.bsums.iter().zip(&gpu_bs).enumerate() {
-            assert!((h as i32 - gb).abs() <= 16, "bsums idx {i}: host {h} gpu {gb}");
+            assert!(
+                (h as i32 - gb).abs() <= 16,
+                "bsums idx {i}: host {h} gpu {gb}"
+            );
         }
     }
 
@@ -2710,9 +2842,18 @@ mod tests {
         let absb = g.storage_ro("absums", u32_bytes(&bsums_u32));
         let ob = g.alloc_out(rows);
         let pb = g.params(&[rows as u32, cols as u32, 0]);
-        let bind = g.bind(&g.pipelines.matmul_q4_k_i8, &[&wbb, &aqb, &adb, &absb, &ob, &pb]);
+        let bind = g.bind(
+            &g.pipelines.matmul_q4_k_i8,
+            &[&wbb, &aqb, &adb, &absb, &ob, &pb],
+        );
         let mut got = vec![0.0f32; rows];
-        g.run_grid(&g.pipelines.matmul_q4_k_i8, &bind, [rows as u32, 1, 1], &ob, &mut got);
+        g.run_grid(
+            &g.pipelines.matmul_q4_k_i8,
+            &bind,
+            [rows as u32, 1, 1],
+            &ob,
+            &mut got,
+        );
         close(&got, &want);
     }
 
@@ -2736,7 +2877,13 @@ mod tests {
         let pb = g.params(&[rows as u32, cols as u32, 0]);
         let bind = g.bind(&g.pipelines.matmul_q6_k_i8, &[&wbb, &aqb, &adb, &ob, &pb]);
         let mut got = vec![0.0f32; rows];
-        g.run_grid(&g.pipelines.matmul_q6_k_i8, &bind, [rows as u32, 1, 1], &ob, &mut got);
+        g.run_grid(
+            &g.pipelines.matmul_q6_k_i8,
+            &bind,
+            [rows as u32, 1, 1],
+            &ob,
+            &mut got,
+        );
         close(&got, &want);
     }
 
@@ -3183,15 +3330,16 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         let absb = g.storage_ro("absums", u32_bytes(&bsums_u32));
         let pb = g.params(&[rows as u32, cols as u32, 0]);
 
-        let time = |pipe: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, ob: &wgpu::Buffer| -> f64 {
-            let mut out = vec![0.0f32; rows];
-            g.run_grid(pipe, bind, [rows as u32, 1, 1], ob, &mut out); // warm
-            let t = Instant::now();
-            for _ in 0..iters {
-                g.run_grid(pipe, bind, [rows as u32, 1, 1], ob, &mut out);
-            }
-            iters as f64 / t.elapsed().as_secs_f64()
-        };
+        let time =
+            |pipe: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, ob: &wgpu::Buffer| -> f64 {
+                let mut out = vec![0.0f32; rows];
+                g.run_grid(pipe, bind, [rows as u32, 1, 1], ob, &mut out); // warm
+                let t = Instant::now();
+                for _ in 0..iters {
+                    g.run_grid(pipe, bind, [rows as u32, 1, 1], ob, &mut out);
+                }
+                iters as f64 / t.elapsed().as_secs_f64()
+            };
 
         for &(name, ty) in &[("Q4_K", GgmlType::Q4_K), ("Q6_K", GgmlType::Q6_K)] {
             let bytes = if ty == GgmlType::Q4_K {
@@ -3286,10 +3434,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         let mut att_g = vec![0.0; n_heads * seq_len];
         let mut att_c = att_g.clone();
         g.attention(
-            &mut a_g, &q, &kc, &vc, &mut att_g, pos, n_heads, n_kv_heads, head_size, seq_len, kv_dim, 0.0, 0,
+            &mut a_g, &q, &kc, &vc, &mut att_g, pos, n_heads, n_kv_heads, head_size, seq_len,
+            kv_dim, 0.0, 0,
         );
         CpuBackend.attention(
-            &mut a_c, &q, &kc, &vc, &mut att_c, pos, n_heads, n_kv_heads, head_size, seq_len, kv_dim, 0.0, 0,
+            &mut a_c, &q, &kc, &vc, &mut att_c, pos, n_heads, n_kv_heads, head_size, seq_len,
+            kv_dim, 0.0, 0,
         );
         close(&a_g, &a_c);
     }
@@ -3332,8 +3482,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         let mut q_c = q_g.clone();
         let mut k_g = noise(n * kv_dim, 6);
         let mut k_c = k_g.clone();
-        g.rope_batch(&mut q_g, &mut k_g, 3, n, head_size, kv_dim, q_dim, &inv, 1.0);
-        CpuBackend.rope_batch(&mut q_c, &mut k_c, 3, n, head_size, kv_dim, q_dim, &inv, 1.0);
+        g.rope_batch(
+            &mut q_g, &mut k_g, 3, n, head_size, kv_dim, q_dim, &inv, 1.0,
+        );
+        CpuBackend.rope_batch(
+            &mut q_c, &mut k_c, 3, n, head_size, kv_dim, q_dim, &inv, 1.0,
+        );
         close(&q_g, &q_c);
         close(&k_g, &k_c);
     }
@@ -3352,10 +3506,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         let (mut a, mut b) = (vec![0.0; n * dim], vec![0.0; n * dim]);
         let mut att = vec![0.0; n_heads * seq_len];
         g.attention_batch(
-            &mut a, &q, &kc, &vc, &mut att, 0, n, n_heads, n_kv_heads, head_size, seq_len, kv_dim, 0.0, 0,
+            &mut a, &q, &kc, &vc, &mut att, 0, n, n_heads, n_kv_heads, head_size, seq_len, kv_dim,
+            0.0, 0,
         );
         CpuBackend.attention_batch(
-            &mut b, &q, &kc, &vc, &mut att, 0, n, n_heads, n_kv_heads, head_size, seq_len, kv_dim, 0.0, 0,
+            &mut b, &q, &kc, &vc, &mut att, 0, n, n_heads, n_kv_heads, head_size, seq_len, kv_dim,
+            0.0, 0,
         );
         close(&a, &b);
     }
@@ -3372,19 +3528,18 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     fn probe_cooperative_matrix() {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = match pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
+        let adapter =
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: None,
-            },
-        )) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("skipping coopmat probe: no adapter: {e}");
-                return;
-            }
-        };
+            })) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("skipping coopmat probe: no adapter: {e}");
+                    return;
+                }
+            };
         eprintln!("adapter: {}", adapter.get_info().name);
 
         let advertised = adapter
@@ -3423,21 +3578,20 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         // The experimental-features token is required to even request the
         // feature; `enabled()` is unsafe (acknowledges possible UB in the WIP
         // coopmat path). Safe here — this is a throwaway probe.
-        let (device, _queue) = match pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
+        let (device, _queue) =
+            match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("coopmat-probe"),
                 required_features: wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX,
                 required_limits: adapter.limits(),
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 ..Default::default()
-            },
-        )) {
-            Ok(dq) => dq,
-            Err(e) => {
-                eprintln!("=> device with coopmat feature failed: {e}");
-                return;
-            }
-        };
+            })) {
+                Ok(dq) => dq,
+                Err(e) => {
+                    eprintln!("=> device with coopmat feature failed: {e}");
+                    return;
+                }
+            };
         let queue = _queue;
         eprintln!("device created with coopmat feature OK");
 
@@ -3504,9 +3658,18 @@ fn main() {
             label: Some("coopmat-binds"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: a_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: b_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: c_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: c_buf.as_entire_binding(),
+                },
             ],
         });
 

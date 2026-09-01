@@ -45,7 +45,10 @@ pub struct CharSet {
 
 impl CharSet {
     fn single(b: u8) -> Self {
-        CharSet { ranges: vec![(b, b)], negate: false }
+        CharSet {
+            ranges: vec![(b, b)],
+            negate: false,
+        }
     }
 
     fn matches(&self, b: u8) -> bool {
@@ -217,11 +220,11 @@ impl GrammarStage {
                 .collect::<Vec<_>>(),
         );
         Ok(GrammarStage::new(
-        grammar,
-        pieces,
-        tokenizer.eog_ids(),
-        tokenizer.special_ids(),
-    ))
+            grammar,
+            pieces,
+            tokenizer.eog_ids(),
+            tokenizer.special_ids(),
+        ))
     }
 }
 
@@ -238,7 +241,9 @@ impl SamplerStage for GrammarStage {
                 false
             } else {
                 match self.pieces.get(c.id as usize) {
-                    Some(p) if !p.is_empty() => self.grammar.advance_bytes(&self.state, p).is_some(),
+                    Some(p) if !p.is_empty() => {
+                        self.grammar.advance_bytes(&self.state, p).is_some()
+                    }
                     _ => false,
                 }
             };
@@ -286,7 +291,12 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Self {
-        Parser { src: src.as_bytes(), pos: 0, rules: Vec::new(), names: HashMap::new() }
+        Parser {
+            src: src.as_bytes(),
+            pos: 0,
+            rules: Vec::new(),
+            names: HashMap::new(),
+        }
     }
 
     fn parse(mut self) -> Result<Grammar, String> {
@@ -310,7 +320,10 @@ impl<'a> Parser<'a> {
             self.rules[id] = alts;
         }
         let root = *self.names.get("root").ok_or("grammar has no 'root' rule")?;
-        Ok(Grammar { rules: self.rules, root })
+        Ok(Grammar {
+            rules: self.rules,
+            root,
+        })
     }
 
     /// First pass: find `name ::=` rule headers and number them.
@@ -412,7 +425,10 @@ impl<'a> Parser<'a> {
                 }
                 Some(b'"') => {
                     let bytes = self.string_literal()?;
-                    let base: Vec<Elem> = bytes.into_iter().map(|b| Elem::Char(CharSet::single(b))).collect();
+                    let base: Vec<Elem> = bytes
+                        .into_iter()
+                        .map(|b| Elem::Char(CharSet::single(b)))
+                        .collect();
                     seq.extend(self.apply_postfix(base));
                 }
                 Some(b'[') => {
@@ -431,7 +447,10 @@ impl<'a> Parser<'a> {
                 }
                 Some(b'.') => {
                     self.pos += 1;
-                    let any = CharSet { ranges: vec![(0, 255)], negate: false };
+                    let any = CharSet {
+                        ranges: vec![(0, 255)],
+                        negate: false,
+                    };
                     seq.extend(self.apply_postfix(vec![Elem::Char(any)]));
                 }
                 Some(c) => return Err(format!("unexpected character '{}'", c as char)),
@@ -520,7 +539,10 @@ impl<'a> Parser<'a> {
         if !self.peek().is_some_and(is_ident_start) {
             return None;
         }
-        while self.peek().is_some_and(|c| is_ident_start(c) || c.is_ascii_digit()) {
+        while self
+            .peek()
+            .is_some_and(|c| is_ident_start(c) || c.is_ascii_digit())
+        {
             self.pos += 1;
         }
         Some(String::from_utf8_lossy(&self.src[start..self.pos]).into_owned())
@@ -716,14 +738,25 @@ mod tests {
     fn grammar_stage_masks_and_allows_eog_when_complete() {
         use crate::sampler::{SamplerStage, TokenData, TokenDataArray};
         let arr = || TokenDataArray {
-            data: (0..4).map(|i| TokenData { id: i, logit: 0.0, p: 0.0 }).collect(),
+            data: (0..4)
+                .map(|i| TokenData {
+                    id: i,
+                    logit: 0.0,
+                    p: 0.0,
+                })
+                .collect(),
             size: 4,
             selected: None,
             sorted: false,
         };
         // Tokens: 0="a", 1="b", 2="c", 3 = EOG (empty piece).
         let g = Grammar::parse(r#"root ::= "ab""#).unwrap();
-        let pieces = std::sync::Arc::new(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), Vec::new()]);
+        let pieces = std::sync::Arc::new(vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+            Vec::new(),
+        ]);
         let mut stage = GrammarStage::new(g, pieces, vec![3], vec![]);
 
         let mut cur = arr();
@@ -750,7 +783,13 @@ mod tests {
     fn grammar_stage_masks_non_eog_control_tokens() {
         use crate::sampler::{SamplerStage, TokenData, TokenDataArray};
         let arr = || TokenDataArray {
-            data: (0..4).map(|i| TokenData { id: i, logit: 0.0, p: 0.0 }).collect(),
+            data: (0..4)
+                .map(|i| TokenData {
+                    id: i,
+                    logit: 0.0,
+                    p: 0.0,
+                })
+                .collect(),
             size: 4,
             selected: None,
             sorted: false,
@@ -759,8 +798,12 @@ mod tests {
         // grammar wants 'b' next (the previous test shows it would be allowed), a
         // control token must never satisfy a grammar — else it leaks into output.
         let g = Grammar::parse(r#"root ::= "ab""#).unwrap();
-        let pieces =
-            std::sync::Arc::new(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), Vec::new()]);
+        let pieces = std::sync::Arc::new(vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+            Vec::new(),
+        ]);
         let mut stage = GrammarStage::new(g, pieces, vec![3], vec![1]); // 1 = control
         stage.accept(0); // consume "a" → grammar now wants 'b'
         let mut cur = arr();

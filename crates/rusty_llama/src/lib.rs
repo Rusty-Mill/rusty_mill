@@ -20,8 +20,8 @@
 #[cfg(target_endian = "big")]
 compile_error!("rusty_llama currently assumes a little-endian target");
 
-pub mod arch;
 pub mod adapter;
+pub mod arch;
 pub mod backend;
 pub mod chat;
 pub mod config;
@@ -44,26 +44,26 @@ mod loader;
 #[cfg(test)]
 mod bench_util;
 
-pub use backend::{make_backend, Backend, CpuBackend};
+pub use adapter::{AdapterBackend, ControlVector, LoraAdapter};
 pub use arch::Arch;
 #[cfg(feature = "cuda")]
 pub use backend::CudaBackend;
 #[cfg(feature = "gpu")]
 pub use backend::GpuBackend;
-pub use grammar::{Grammar, GrammarStage};
+pub use backend::{make_backend, Backend, CpuBackend};
+pub use chat::{ChatRenderer, ChatTemplate, Message, Role};
 pub use config::{Config, RopeScaling, RopeTable};
 pub use error::{Error, Result};
 pub use gguf::Gguf;
+pub use grammar::{Grammar, GrammarStage};
 pub use loader::Checkpoint;
-pub use chat::{ChatRenderer, ChatTemplate, Message, Role};
-pub use adapter::{AdapterBackend, ControlVector, LoraAdapter};
 pub use model::{
     forward, forward_embed, forward_prefill, generate, generate_tokens, Batch, KvPagePool, Model,
     Pooling, RunState, Weights,
 };
 pub use quant::GgmlType;
 pub use sampler::{SamplerChain, SamplerConfig};
-pub use tensor::QMatrix;
-pub use tokenizer::Tokenizer;
 #[cfg(feature = "server")]
 pub use server::serve;
+pub use tensor::QMatrix;
+pub use tokenizer::Tokenizer;

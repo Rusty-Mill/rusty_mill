@@ -263,8 +263,11 @@ impl Config {
                 high_freq_factor,
                 orig_ctx,
             } => {
-                let (factor, lo, hi) =
-                    (factor as f64, low_freq_factor as f64, high_freq_factor as f64);
+                let (factor, lo, hi) = (
+                    factor as f64,
+                    low_freq_factor as f64,
+                    high_freq_factor as f64,
+                );
                 let low_wavelen = orig_ctx as f64 / lo;
                 let high_wavelen = orig_ctx as f64 / hi;
                 for f in &mut inv_freq {

@@ -107,8 +107,15 @@ fn prefill_matches_cpu() {
             .zip(&gpu_l)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(max_diff < 1e-2, "{ty:?}: prefill logits diverge by {max_diff}");
-        assert_eq!(argmax(&cpu), argmax(&gpu_l), "{ty:?}: prefill greedy token differs");
+        assert!(
+            max_diff < 1e-2,
+            "{ty:?}: prefill logits diverge by {max_diff}"
+        );
+        assert_eq!(
+            argmax(&cpu),
+            argmax(&gpu_l),
+            "{ty:?}: prefill greedy token differs"
+        );
     }
 }
 
@@ -158,7 +165,10 @@ fn prefill_matches_cpu_real_kquant() {
     // finite, and bounded rel-L2 (a gross tiling/index bug would blow past it) — not
     // CPU argmax parity (which they don't share, and which isn't a GPU defect).
     assert!(gpu_l.iter().all(|v| v.is_finite()));
-    assert!(rel < 0.05, "real Q4_K_M prefill rel-L2 {rel} — tiling regression?");
+    assert!(
+        rel < 0.05,
+        "real Q4_K_M prefill rel-L2 {rel} — tiling regression?"
+    );
 }
 
 /// Timing bench for the wgpu batched prefill on the real Q4_K_M model (Q4_K + Q6_K
@@ -179,7 +189,9 @@ fn bench_prefill_gpu_real() {
     let gguf = Gguf::parse(&bytes).unwrap();
     let model = Model::from_gguf(&gguf).unwrap();
     let n = 512usize;
-    let tokens: Vec<usize> = (0..n).map(|i| (i * 7 + 3) % model.config.vocab_size).collect();
+    let tokens: Vec<usize> = (0..n)
+        .map(|i| (i * 7 + 3) % model.config.vocab_size)
+        .collect();
     let mut s = RunState::new(&model.config);
     // warmup (uploads + caches weights on device), then a timed prefill.
     forward_prefill(&model, &mut s, &g, &tokens, 0);
@@ -294,7 +306,9 @@ fn wgpu_kquant_matmul_matches_f32() {
     };
     for w in [&model.weights.wq[0], &model.weights.w2[0]] {
         let (oc, ic) = (w.rows(), w.cols());
-        let x: Vec<f32> = (0..ic).map(|i| ((i * 7 % 17) as f32 - 8.0) * 0.05).collect();
+        let x: Vec<f32> = (0..ic)
+            .map(|i| ((i * 7 % 17) as f32 - 8.0) * 0.05)
+            .collect();
         let mut og = vec![0.0f32; oc];
         g.matmul(&mut og, &x, w);
         let mut oc_cpu = vec![0.0f32; oc];
@@ -318,7 +332,6 @@ fn wgpu_kquant_matmul_matches_f32() {
         );
     }
 }
-
 
 /// The fused on-device decode step (with the prefill→decode KV sync) must track
 /// the CPU forward and pick the same next token, for F32 and Q8_0.
@@ -353,8 +366,15 @@ fn decode_step_matches_cpu() {
             .zip(&gpu_l)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(max_diff < 1e-2, "{ty:?}: decode logits diverge by {max_diff}");
-        assert_eq!(argmax(&cpu), argmax(&gpu_l), "{ty:?}: decode greedy token differs");
+        assert!(
+            max_diff < 1e-2,
+            "{ty:?}: decode logits diverge by {max_diff}"
+        );
+        assert_eq!(
+            argmax(&cpu),
+            argmax(&gpu_l),
+            "{ty:?}: decode greedy token differs"
+        );
     }
 }
 
@@ -384,7 +404,11 @@ fn greedy_stream_matches_cpu() {
             out
         };
 
-        assert_eq!(run(&CpuBackend::new()), run(&g), "{ty:?}: greedy stream differs");
+        assert_eq!(
+            run(&CpuBackend::new()),
+            run(&g),
+            "{ty:?}: greedy stream differs"
+        );
     }
 }
 
@@ -414,7 +438,10 @@ fn decode_step_int8_coherent_with_cpu() {
     let cpu = decode(&CpuBackend::new());
     let int8 = decode(&g);
 
-    assert!(int8.iter().all(|v| v.is_finite()), "int8 logits must be finite");
+    assert!(
+        int8.iter().all(|v| v.is_finite()),
+        "int8 logits must be finite"
+    );
     let max_diff = cpu
         .iter()
         .zip(&int8)
@@ -425,6 +452,13 @@ fn decode_step_int8_coherent_with_cpu() {
     // little (observed ~2e-4 on this tiny model; the prototype saw ~0.07 on
     // TinyLlama-1.1B). A wiring regression (bad scale/barrier) would diverge by
     // O(1), so this bound cleanly separates "coherent" from "broken".
-    assert!(max_diff < 0.05, "int8 decode diverges from CPU by {max_diff}");
-    assert_eq!(argmax(&cpu), argmax(&int8), "int8 decode greedy token differs");
+    assert!(
+        max_diff < 0.05,
+        "int8 decode diverges from CPU by {max_diff}"
+    );
+    assert_eq!(
+        argmax(&cpu),
+        argmax(&int8),
+        "int8 decode greedy token differs"
+    );
 }

@@ -20,7 +20,9 @@ use rusty_llama::dummy::{synthetic_checkpoint, synthetic_gguf_typed};
 use rusty_llama::{Config, GgmlType};
 
 fn main() -> std::io::Result<()> {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "dummy.gguf".into());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "dummy.gguf".into());
     let ty = match std::env::args().nth(2).as_deref() {
         Some("q8_0") | Some("q8") => GgmlType::Q8_0,
         _ => GgmlType::F32,

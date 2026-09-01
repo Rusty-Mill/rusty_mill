@@ -231,7 +231,11 @@ impl SpecialTokens {
         while i < text.len() {
             let rest = &text[i..];
             // `entries` is longest-first, so the first hit is the longest match.
-            if let Some((s, id)) = self.entries.iter().find(|(s, _)| rest.starts_with(s.as_str())) {
+            if let Some((s, id)) = self
+                .entries
+                .iter()
+                .find(|(s, _)| rest.starts_with(s.as_str()))
+            {
                 if gap_start < i {
                     f(Segment::Gap(&text[gap_start..i]));
                 }
@@ -754,10 +758,7 @@ impl Bpe {
 
     /// Decode a token id to its raw bytes (caller concatenates).
     pub fn decode(&self, token: usize) -> Vec<u8> {
-        self.id_to_bytes
-            .get(token)
-            .cloned()
-            .unwrap_or_default()
+        self.id_to_bytes.get(token).cloned().unwrap_or_default()
     }
 
     /// Vocabulary size.
@@ -1001,7 +1002,7 @@ mod tests {
         let s = |b: u8| enc[b as usize].to_string();
         // Append merged tokens and the merges that build them.
         let merged = [
-            (s(b'h'), s(b'i')),                  // "hi"
+            (s(b'h'), s(b'i')),                           // "hi"
             (format!("{}{}", s(b' '), s(b'y')), s(b'o')), // "Ġyo" (" yo")
         ];
         let mut merges = Vec::new();
@@ -1023,7 +1024,10 @@ mod tests {
 
         // gpt-2 pre (ignore_merges = false): with no merge, "hi" stays two byte tokens.
         let gpt2 = Tokenizer::from_bpe(tokens.clone(), merges.clone(), Some(1), Some(2));
-        assert_eq!(gpt2.encode("hi", false, false), vec![b'h' as usize, b'i' as usize]);
+        assert_eq!(
+            gpt2.encode("hi", false, false),
+            vec![b'h' as usize, b'i' as usize]
+        );
 
         // llama-bpe pre (ignore_merges = true): the whole pre-token is a vocab token,
         // so it is emitted directly (matching llama.cpp) instead of the byte fallback.
@@ -1078,10 +1082,7 @@ mod tests {
     #[test]
     fn special_tokens_split_longest_first() {
         // Overlapping specials: the longer one must win at a shared prefix.
-        let st = SpecialTokens::new(vec![
-            ("<|a|>".to_string(), 10),
-            ("<|ab|>".to_string(), 11),
-        ]);
+        let st = SpecialTokens::new(vec![("<|a|>".to_string(), 10), ("<|ab|>".to_string(), 11)]);
         let mut segs = Vec::new();
         st.split("x<|ab|>y<|a|>", |seg| {
             segs.push(match seg {

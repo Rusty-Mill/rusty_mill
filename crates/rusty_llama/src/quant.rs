@@ -729,7 +729,11 @@ fn vec_dot_q4_k_scalar(weight: &[u8], act: &Q8KActivation) -> f32 {
             let mut sub: i32 = 0;
             for k in 0..32 {
                 let byte = qs[chunk * 32 + k];
-                let nib = if hi { (byte >> 4) as i32 } else { (byte & 0x0f) as i32 };
+                let nib = if hi {
+                    (byte >> 4) as i32
+                } else {
+                    (byte & 0x0f) as i32
+                };
                 sub += nib * (qx[j * 32 + k] as i32);
             }
             acc += sc as i32 * sub;
@@ -790,7 +794,9 @@ fn vec_dot_q6_k_scalar(weight: &[u8], act: &Q8KActivation) -> f32 {
         let mut acc: i32 = 0;
         for sub in 0..16 {
             let sc = scales[sub] as i8 as i32; // scales are signed
-            let s: i32 = (0..16).map(|k| a[sub * 16 + k] * qx[sub * 16 + k] as i32).sum();
+            let s: i32 = (0..16)
+                .map(|k| a[sub * 16 + k] * qx[sub * 16 + k] as i32)
+                .sum();
             acc += sc * s;
         }
         total += d * bigd * acc as f32;
@@ -941,10 +947,7 @@ pub(crate) mod x86 {
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn hsum_i32_x8(v: __m256i) -> i32 {
-        let s = _mm_add_epi32(
-            _mm256_castsi256_si128(v),
-            _mm256_extracti128_si256::<1>(v),
-        );
+        let s = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
         let s = _mm_hadd_epi32(s, s);
         let s = _mm_hadd_epi32(s, s);
         _mm_cvtsi128_si32(s)
@@ -1310,7 +1313,11 @@ pub(crate) mod x86 {
     /// # Safety
     /// [`avx2_supported`] true; `weights.len() <= 4`, all rows equal length.
     #[target_feature(enable = "avx2")]
-    pub unsafe fn vec_dot_q4_k_tiled_avx2(weights: &[&[u8]], acts: &[Q8KActivation], out: &mut [f32]) {
+    pub unsafe fn vec_dot_q4_k_tiled_avx2(
+        weights: &[&[u8]],
+        acts: &[Q8KActivation],
+        out: &mut [f32],
+    ) {
         let lomask = _mm256_set1_epi8(0x0f);
         let nr = weights.len();
         let n = acts.len();
@@ -1352,10 +1359,23 @@ pub(crate) mod x86 {
                     for chunk in 0..4 {
                         // Activation loaded ONCE, reused across all nr weight rows.
                         let xlo = _mm256_loadu_si256(qx.add((2 * chunk) * 32) as *const __m256i);
-                        let xhi = _mm256_loadu_si256(qx.add((2 * chunk + 1) * 32) as *const __m256i);
+                        let xhi =
+                            _mm256_loadu_si256(qx.add((2 * chunk + 1) * 32) as *const __m256i);
                         for r in 0..nr {
-                            vacc0[r] = _mm256_add_epi32(vacc0[r], _mm256_mullo_epi32(madd_u8_i8(nib[r][2 * chunk], xlo), _mm256_set1_epi32(sc[r][2 * chunk])));
-                            vacc1[r] = _mm256_add_epi32(vacc1[r], _mm256_mullo_epi32(madd_u8_i8(nib[r][2 * chunk + 1], xhi), _mm256_set1_epi32(sc[r][2 * chunk + 1])));
+                            vacc0[r] = _mm256_add_epi32(
+                                vacc0[r],
+                                _mm256_mullo_epi32(
+                                    madd_u8_i8(nib[r][2 * chunk], xlo),
+                                    _mm256_set1_epi32(sc[r][2 * chunk]),
+                                ),
+                            );
+                            vacc1[r] = _mm256_add_epi32(
+                                vacc1[r],
+                                _mm256_mullo_epi32(
+                                    madd_u8_i8(nib[r][2 * chunk + 1], xhi),
+                                    _mm256_set1_epi32(sc[r][2 * chunk + 1]),
+                                ),
+                            );
                         }
                     }
                     let bsums = &act.bsums[sb * 16..sb * 16 + 16];
@@ -1384,7 +1404,11 @@ pub(crate) mod x86 {
     /// [`avx2_supported`] true; `weights.len() <= 4`, all rows equal length.
     #[target_feature(enable = "avx2")]
     #[allow(clippy::needless_range_loop)] // k indexes qv[r][k] and the act offset/scale
-    pub unsafe fn vec_dot_q6_k_tiled_avx2(weights: &[&[u8]], acts: &[Q8KActivation], out: &mut [f32]) {
+    pub unsafe fn vec_dot_q6_k_tiled_avx2(
+        weights: &[&[u8]],
+        acts: &[Q8KActivation],
+        out: &mut [f32],
+    ) {
         let lomask = _mm256_set1_epi8(0x0f);
         let three = _mm256_set1_epi8(3);
         let nr = weights.len();
@@ -1412,10 +1436,20 @@ pub(crate) mod x86 {
                         let ql_hi = _mm256_loadu_si256(ql.add(half * 64 + 32) as *const __m256i);
                         let qhv = _mm256_loadu_si256(qh.add(half * 32) as *const __m256i);
                         let hi2 = |sh: __m256i| _mm256_slli_epi16::<4>(_mm256_and_si256(sh, three));
-                        qv[r][half * 4] = _mm256_or_si256(_mm256_and_si256(ql_lo, lomask), hi2(qhv));
-                        qv[r][half * 4 + 1] = _mm256_or_si256(_mm256_and_si256(ql_hi, lomask), hi2(_mm256_srli_epi16::<2>(qhv)));
-                        qv[r][half * 4 + 2] = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16::<4>(ql_lo), lomask), hi2(_mm256_srli_epi16::<4>(qhv)));
-                        qv[r][half * 4 + 3] = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16::<4>(ql_hi), lomask), hi2(_mm256_srli_epi16::<6>(qhv)));
+                        qv[r][half * 4] =
+                            _mm256_or_si256(_mm256_and_si256(ql_lo, lomask), hi2(qhv));
+                        qv[r][half * 4 + 1] = _mm256_or_si256(
+                            _mm256_and_si256(ql_hi, lomask),
+                            hi2(_mm256_srli_epi16::<2>(qhv)),
+                        );
+                        qv[r][half * 4 + 2] = _mm256_or_si256(
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(ql_lo), lomask),
+                            hi2(_mm256_srli_epi16::<4>(qhv)),
+                        );
+                        qv[r][half * 4 + 3] = _mm256_or_si256(
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(ql_hi), lomask),
+                            hi2(_mm256_srli_epi16::<6>(qhv)),
+                        );
                     }
                 }
                 for tt in 0..bs {
@@ -1492,7 +1526,10 @@ pub fn vec_dot_q6_k_tiled(weights: &[&[u8]], acts: &[Q8KActivation], out: &mut [
 ///
 /// Handy for building quantized test fixtures and demo GGUFs.
 pub fn quantize_q8_0(x: &[f32]) -> Vec<u8> {
-    assert!(x.len().is_multiple_of(32), "Q8_0 length must be a multiple of 32");
+    assert!(
+        x.len().is_multiple_of(32),
+        "Q8_0 length must be a multiple of 32"
+    );
     let mut out = Vec::with_capacity(x.len() / 32 * 34);
     for blk in x.chunks_exact(32) {
         let amax = blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
@@ -1600,7 +1637,11 @@ mod tests {
                 (t0.elapsed(), sink)
             };
             let (ts, _) = run(false);
-            let (tv, _) = if x86::avx2f_supported() { run(true) } else { (ts, 0.0) };
+            let (tv, _) = if x86::avx2f_supported() {
+                run(true)
+            } else {
+                (ts, 0.0)
+            };
             eprintln!(
                 "attn inner-loop (hs={hs}, keys={keys}, heads={heads}): scalar {ts:?}  avx2 {tv:?}  speedup {:.2}x",
                 ts.as_secs_f64() / tv.as_secs_f64()
@@ -1644,7 +1685,11 @@ mod tests {
         for j in 0..16 {
             let want_lo = j as f32 * d + m;
             let want_hi = (15 - j) as f32 * d + m;
-            assert!((y[j] - want_lo).abs() < 1e-4, "lo[{j}]: {} vs {want_lo}", y[j]);
+            assert!(
+                (y[j] - want_lo).abs() < 1e-4,
+                "lo[{j}]: {} vs {want_lo}",
+                y[j]
+            );
             assert!(
                 (y[j + 16] - want_hi).abs() < 1e-4,
                 "hi[{j}]: {} vs {want_hi}",
@@ -1687,7 +1732,11 @@ mod tests {
         for j in 0..16 {
             let want_lo = (j as i32 - 16) as f32 * d;
             let want_hi = ((15 - j) as i32 - 16) as f32 * d;
-            assert!((y[j] - want_lo).abs() < 1e-4, "lo[{j}]: {} vs {want_lo}", y[j]);
+            assert!(
+                (y[j] - want_lo).abs() < 1e-4,
+                "lo[{j}]: {} vs {want_lo}",
+                y[j]
+            );
             assert!(
                 (y[j + 16] - want_hi).abs() < 1e-4,
                 "hi[{j}]: {} vs {want_hi}",
@@ -1743,7 +1792,11 @@ mod tests {
         for j in 0..16 {
             let want_lo = j as f32 * d + m;
             let want_hi = (15 - j) as f32 * d + m;
-            assert!((y[j] - want_lo).abs() < 1e-4, "lo[{j}]: {} vs {want_lo}", y[j]);
+            assert!(
+                (y[j] - want_lo).abs() < 1e-4,
+                "lo[{j}]: {} vs {want_lo}",
+                y[j]
+            );
             assert!(
                 (y[j + 16] - want_hi).abs() < 1e-4,
                 "hi[{j}]: {} vs {want_hi}",
@@ -1958,9 +2011,13 @@ mod tests {
     #[test]
     fn vec_dot_q8_0_equals_dequantized_dot() {
         let cols = 64; // two blocks
-        let wf: Vec<f32> = (0..cols).map(|i| ((i * 13 % 17) as f32 - 8.0) * 0.3).collect();
+        let wf: Vec<f32> = (0..cols)
+            .map(|i| ((i * 13 % 17) as f32 - 8.0) * 0.3)
+            .collect();
         let wbytes = quantize_q8_0(&wf);
-        let x: Vec<f32> = (0..cols).map(|i| ((i * 7 % 11) as f32 - 5.0) * 0.2).collect();
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 7 % 11) as f32 - 5.0) * 0.2)
+            .collect();
         let act = quantize_activation_q8(&x);
 
         let wdq = dequantize(GgmlType::Q8_0, &wbytes, cols).unwrap();
@@ -1979,7 +2036,9 @@ mod tests {
                 wbytes.push(((b * 16 + j) * 7 % 256) as u8); // arbitrary nibbles
             }
         }
-        let x: Vec<f32> = (0..cols).map(|i| ((i * 5 % 9) as f32 - 4.0) * 0.1).collect();
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 5 % 9) as f32 - 4.0) * 0.1)
+            .collect();
         let act = quantize_activation_q8(&x);
 
         let wdq = dequantize(GgmlType::Q4_0, &wbytes, cols).unwrap();
@@ -2002,7 +2061,9 @@ mod tests {
         }
         assert_eq!(blk.len(), GgmlType::Q4_K.type_size());
 
-        let x: Vec<f32> = (0..256).map(|i| ((i * 11 % 23) as f32 - 11.0) * 0.05).collect();
+        let x: Vec<f32> = (0..256)
+            .map(|i| ((i * 11 % 23) as f32 - 11.0) * 0.05)
+            .collect();
         let act = quantize_activation_q8k(&x);
         let wdq = dequantize(GgmlType::Q4_K, &blk, 256).unwrap();
         let reference: f32 = wdq.iter().zip(&act.dequantized()).map(|(a, b)| a * b).sum();
@@ -2025,7 +2086,9 @@ mod tests {
         blk.extend_from_slice(&f32_to_f16(0.03).to_le_bytes()); // d
         assert_eq!(blk.len(), GgmlType::Q6_K.type_size());
 
-        let x: Vec<f32> = (0..256).map(|i| ((i * 13 % 19) as f32 - 9.0) * 0.04).collect();
+        let x: Vec<f32> = (0..256)
+            .map(|i| ((i * 13 % 19) as f32 - 9.0) * 0.04)
+            .collect();
         let act = quantize_activation_q8k(&x);
         let wdq = dequantize(GgmlType::Q6_K, &blk, 256).unwrap();
         let reference: f32 = wdq.iter().zip(&act.dequantized()).map(|(a, b)| a * b).sum();
@@ -2070,7 +2133,11 @@ mod tests {
             }
             let s = vec_dot_q8_0_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q8_0_avx2(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != avx2 {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != avx2 {v}"
+            );
         }
     }
 
@@ -2087,13 +2154,20 @@ mod tests {
                 .collect();
             let act = quantize_activation_q8(&xf);
             let mut w = Vec::new();
-            for (b, blk) in prng_bytes(seed + 100, (cols / 32) * 16).chunks_exact(16).enumerate() {
+            for (b, blk) in prng_bytes(seed + 100, (cols / 32) * 16)
+                .chunks_exact(16)
+                .enumerate()
+            {
                 w.extend_from_slice(&f32_to_f16(0.03 + b as f32 * 0.002).to_le_bytes());
                 w.extend_from_slice(blk);
             }
             let s = vec_dot_q4_0_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q4_0_avx2(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != avx2 {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != avx2 {v}"
+            );
         }
     }
 
@@ -2117,7 +2191,11 @@ mod tests {
             }
             let s = vec_dot_q4_k_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q4_k_avx2(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != avx2 {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != avx2 {v}"
+            );
         }
     }
 
@@ -2140,7 +2218,11 @@ mod tests {
             }
             let s = vec_dot_q6_k_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q6_k_avx2(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != avx2 {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != avx2 {v}"
+            );
         }
     }
 
@@ -2153,7 +2235,9 @@ mod tests {
             .map(|r| {
                 let mut w = Vec::new();
                 for sb in 0..(cols / 256) {
-                    w.extend_from_slice(&f32_to_f16(0.05 + sb as f32 * 0.01 + r as f32 * 0.002).to_le_bytes());
+                    w.extend_from_slice(
+                        &f32_to_f16(0.05 + sb as f32 * 0.01 + r as f32 * 0.002).to_le_bytes(),
+                    );
                     w.extend_from_slice(&f32_to_f16(0.02 + sb as f32 * 0.005).to_le_bytes());
                     w.extend_from_slice(&prng_bytes(31 + sb as u32 + r as u32 * 17, 140));
                 }
@@ -2164,7 +2248,8 @@ mod tests {
             .map(|t| {
                 let xf: Vec<f32> = (0..cols)
                     .map(|i| {
-                        ((i as u32 ^ (t as u32 * 7 + 1)).wrapping_mul(2246822519) % 263) as f32 * 0.013
+                        ((i as u32 ^ (t as u32 * 7 + 1)).wrapping_mul(2246822519) % 263) as f32
+                            * 0.013
                             - 1.7
                     })
                     .collect();
@@ -2177,7 +2262,13 @@ mod tests {
         for r in 0..nr {
             for (t, act) in acts.iter().enumerate() {
                 let want = vec_dot_q4_k(&rows[r], act);
-                assert_eq!(got[r * n + t].to_bits(), want.to_bits(), "Q4_K tiled ({r},{t}): {} != {}", got[r * n + t], want);
+                assert_eq!(
+                    got[r * n + t].to_bits(),
+                    want.to_bits(),
+                    "Q4_K tiled ({r},{t}): {} != {}",
+                    got[r * n + t],
+                    want
+                );
             }
         }
     }
@@ -2201,7 +2292,8 @@ mod tests {
             .map(|t| {
                 let xf: Vec<f32> = (0..cols)
                     .map(|i| {
-                        ((i as u32 ^ (t as u32 * 5 + 3)).wrapping_mul(2654435761) % 251) as f32 * 0.011
+                        ((i as u32 ^ (t as u32 * 5 + 3)).wrapping_mul(2654435761) % 251) as f32
+                            * 0.011
                             - 1.4
                     })
                     .collect();
@@ -2214,7 +2306,13 @@ mod tests {
         for r in 0..nr {
             for (t, act) in acts.iter().enumerate() {
                 let want = vec_dot_q6_k(&rows[r], act);
-                assert_eq!(got[r * n + t].to_bits(), want.to_bits(), "Q6_K tiled ({r},{t}): {} != {}", got[r * n + t], want);
+                assert_eq!(
+                    got[r * n + t].to_bits(),
+                    want.to_bits(),
+                    "Q6_K tiled ({r},{t}): {} != {}",
+                    got[r * n + t],
+                    want
+                );
             }
         }
     }
@@ -2239,7 +2337,11 @@ mod tests {
             }
             let s = vec_dot_q8_0_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q8_0(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != simd {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != simd {v}"
+            );
         }
     }
 
@@ -2265,7 +2367,11 @@ mod tests {
             }
             let s = vec_dot_q4_0_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q4_0(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != simd {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != simd {v}"
+            );
         }
     }
 
@@ -2292,7 +2398,11 @@ mod tests {
             }
             let s = vec_dot_q4_k_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q4_k(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != simd {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != simd {v}"
+            );
         }
     }
 
@@ -2317,7 +2427,11 @@ mod tests {
             }
             let s = vec_dot_q6_k_scalar(&w, &act);
             let v = unsafe { x86::vec_dot_q6_k(&w, &act) };
-            assert_eq!(s.to_bits(), v.to_bits(), "seed {seed}: scalar {s} != simd {v}");
+            assert_eq!(
+                s.to_bits(),
+                v.to_bits(),
+                "seed {seed}: scalar {s} != simd {v}"
+            );
         }
     }
 
@@ -2386,7 +2500,11 @@ mod tests {
             }
             let s = vec_dot_q6_k_scalar(&w, &act);
             let e = vec_dot_q6_k_vnni_emulated(&w, &act);
-            assert_eq!(s.to_bits(), e.to_bits(), "seed {seed}: scalar {s} != emulated {e}");
+            assert_eq!(
+                s.to_bits(),
+                e.to_bits(),
+                "seed {seed}: scalar {s} != emulated {e}"
+            );
         }
     }
 
