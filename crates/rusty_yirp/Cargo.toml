@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sessionmgr-core",
+    "crates/sessionmgr-protocol",
+    "crates/sessionmgr-proc",
+    "crates/sessionmgr-git",
+    "crates/sessionmgr-pty",
+    "crates/sessionmgr-tui",
+    "crates/sessionmgr-agents",
+    "crates/sessionmgr-daemon",
+    "crates/sessionmgr-desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Verified, not guessed. 1.75 was inherited from a sibling project's
+# manifest and was wrong by thirteen releases: `rusty_libc` (transitive,
+# via `rustils`) requires 1.88, and edition-2024 dependencies rule out
+# anything below 1.85 regardless. CI pins a job to exactly this version
+# so the claim cannot silently drift again.
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# The async runtime AND this project's sole process-spawn and local-IPC
+# layer -- see `docs/decisions/0001-async-runtime-rusty-tokio.md` for the
+# Phase 0 verification that pinned this rev.
+#
+# Pinned by rev, never tracking a branch: the same convention
+# `rusty_prime_agent` and `rusty_tokio` itself both document for their own
+# git dependencies. Bumping it is a single deliberate edit here, shared by
+# every member crate, rather than four independently drifting pins.
+#
+# Deliberately NOT `rusty_prime_agent`'s older `01e455ae` -- Phase 0 exists
+# precisely so this is a freshly verified rev rather than an inherited one.
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "6e6f18471749ee8327ce52e9d9b825e2e9e5e1a7" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+# TUI (Phase 4). `tui-term` wraps `vt100` -- a real VT100/ANSI parser and
+# screen-state machine -- as a ratatui widget, per ADR-0002: panes must
+# *interpret* terminal escape sequences, not print them. Reusing it
+# instead of hand-rolling cursor addressing, SGR colors, and wide/
+# combining-character handling is the same "boring over bespoke" call
+# this project already made for the PTY layer itself (`sessionmgr-pty`
+# wraps rustils rather than adding a second PTY implementation).
+ratatui = "0.30"
+crossterm = "0.29"
+tui-term = "0.3"
+# `tui-term`'s own re-export of the parser it wraps -- pinned directly
+# too, since `terminal_pane.rs` constructs a `vt100::Parser` itself, not
+# just the widget.
+vt100 = "0.16"
+
+# Outbound webhook dispatch (Phase 4, session hooks/extensibility).
+# `ureq` over `reqwest`: this is one best-effort POST fired from a
+# throwaway thread (see `sessionmgr-daemon::hooks::dispatch`), not
+# something that needs an async client or connection pooling -- a
+# blocking call on its own thread is simpler and pulls in less than an
+# async HTTP stack would. Default features (rustls) avoid a system
+# OpenSSL dependency, which matters on Windows.
+ureq = "3"
+
+sessionmgr-core = { path = "crates/sessionmgr-core" }
+sessionmgr-protocol = { path = "crates/sessionmgr-protocol" }
+sessionmgr-proc = { path = "crates/sessionmgr-proc" }
+sessionmgr-git = { path = "crates/sessionmgr-git" }
+sessionmgr-pty = { path = "crates/sessionmgr-pty" }
+sessionmgr-tui = { path = "crates/sessionmgr-tui" }
+sessionmgr-agents = { path = "crates/sessionmgr-agents" }

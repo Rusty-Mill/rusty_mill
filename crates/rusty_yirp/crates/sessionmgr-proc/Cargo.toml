@@ -1,0 +1,39 @@
+[package]
+name = "sessionmgr-proc"
+description = "Process adapter for sessionmgr: detached spawn, PID-reuse-safe liveness, termination, and stdio-inheritance hardening."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sessionmgr_proc"
+path = "src/lib.rs"
+
+[dependencies]
+sessionmgr-core = { workspace = true }
+rusty_tokio = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Direct, small FFI for the things `rusty_tokio::process::Command` has no
+# reason to wrap: liveness/termination for a pid this process did not
+# spawn, a process start-time fingerprint, entropy from the OS CSPRNG,
+# and clearing HANDLE_FLAG_INHERIT on our own inherited std handles.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    # `BCryptGenRandom` for session-id entropy: the OS CSPRNG rather than
+    # a `rand`-shaped dependency, matching the sibling projects' "reach
+    # for the platform directly" posture. `/dev/urandom` is the Unix arm
+    # and needs no dependency at all.
+    "Win32_Security_Cryptography",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# `kill(pid, 0)`/`SIGTERM` for liveness and termination, `setsid()` in a
+# `pre_exec` hook for real session-leader detachment (`rusty_tokio`
+# exposes `process_group` but no `setsid` builtin), and `fcntl(F_SETFD,
+# FD_CLOEXEC)` for stdio hardening.
+libc = "0.2"
