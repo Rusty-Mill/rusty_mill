@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Diagonal dodges are no longer faster than axis-aligned ones
+**2026-09-01** · PR pending · commit pending
+
+- **This port summed each dodge axis' own full-strength `(pitch, roll)`
+  contribution independently** — `RB-PHYSICS-001-FR-059`'s own Non-goals
+  had already found and flagged this exact gap: a diagonal dodge (both
+  axes held) came out `sqrt(2)`-ish times faster than an axis-aligned one,
+  "a separate, independent behavioral question this requirement doesn't
+  take on."
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateDoubleJumpOrFlip`) and
+  confirmed the real mechanism: `dodgeDir = btVector3(-pitch, yaw + roll,
+  0).safeNormalized()` — normalized to unit length *before*
+  `FLIP_INITIAL_VEL_SCALE` and the further per-axis forward/backward/side
+  speed scaling (`RB-PHYSICS-001-FR-059`'s own already-adopted finding)
+  are applied.
+- **Because normalizing a direction vector needs no new machinery this
+  port lacks** — unlike a wheeled-vehicle model or a continuous-torque
+  timing state — it transfers cleanly the same way `RB-PHYSICS-001-FR-058`/
+  `FR-059`/`FR-068`'s own adopted ratios do, regardless of `DODGE_SPEED`'s
+  own uncalibrated base magnitude.
+- **Added `drive::normalize_dodge_direction(pitch, roll) -> (f32, f32)`**,
+  wired into both the ground-dodge and wall-jump-dodge code paths in
+  `apply_driven_forces`. The existing per-axis `DODGE_DEADZONE` trigger
+  checks and `dodge_pitch_is_backward`'s own sign classification are
+  unchanged (both still read the raw stick values); only the magnitude
+  each axis contributes now comes from the normalized pair.
+- Kept this port's own sign convention (`dodge_pitch` positive means
+  forward) and did **not** fold in real yaw input's own contribution to
+  `dodgeDir` — this port's dodge direction stays pitch/roll only, a
+  separate, already-documented simplification.
+- A genuine behavioral change, not a doc correction: a diagonal dodge now
+  has the same total magnitude as an axis-aligned one, matching real
+  Rocket League. Updated the two existing diagonal-dodge tests to assert
+  the corrected magnitude and added 3 new tests pinning
+  `normalize_dodge_direction`'s own behavior directly; all pre-existing
+  tests pass unchanged, bringing the crate to 317.
+
+---
+
 ## Real air-control damping mechanism (audit finding)
 **2026-09-01** · [#149](https://github.com/baileyrd/rusty_bullet/pull/149) · `b4aa727`
 

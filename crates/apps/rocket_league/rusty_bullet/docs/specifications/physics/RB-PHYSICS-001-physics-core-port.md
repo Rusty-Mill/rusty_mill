@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.71.0
+- Version: 0.72.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3798,7 +3798,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     roll contribute independently rather than being normalized into one
     direction vector, so a diagonal dodge is faster than an axis-aligned
     one here, unlike real Rocket League) — a separate, independent
-    behavioral question this requirement doesn't take on. Does not adopt
+    behavioral question this requirement doesn't take on
+    (`RB-PHYSICS-001-FR-072` later closed this thread with a genuine fix).
+    Does not adopt
     RocketSim's own direction-agnostic `abs(forward speed)` semantics for
     *which* axis counts as "backward" beyond what `dodge_pitch_is_backward`
     already re-derives — that function's own behavior is a direct,
@@ -4619,6 +4621,75 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `FR-069`/`FR-070`'s own precedent); all 314 of `rb_physics_bullet`'s
     pre-existing tests (as of `FR-070`) pass unchanged, confirming zero
     behavioral change.
+- `RB-PHYSICS-001-FR-072` (normalized diagonal-dodge direction, implemented):
+  `RB-PHYSICS-001-FR-059`'s own Non-goals had already found and flagged a
+  genuine behavioral gap — this port's dodge summed each axis' own
+  full-strength `(pitch, roll)` contribution independently, so a diagonal
+  dodge (both axes held) came out `sqrt(2)`-ish times faster than an
+  axis-aligned one, unlike real Rocket League's own normalized direction —
+  "a separate, independent behavioral question this requirement doesn't
+  take on."
+  1. **Fetched RocketSim's own `Car.cpp`** (`_UpdateDoubleJumpOrFlip`,
+     matching this port's own established real-implementation-file method)
+     and found the exact real mechanism: `dodgeDir = btVector3(-controls.pitch,
+     controls.yaw + controls.roll, 0)`, then `dodgeDir.safeNormalized()` —
+     normalized to unit length *before* `FLIP_INITIAL_VEL_SCALE` and the
+     further per-axis forward/backward/side speed scaling
+     (`dodge_speed_scale`/`dodge_pitch_is_backward`, `FR-059`'s own already-
+     adopted finding) are applied.
+  2. **Confirmed this is a pure geometric operation this port's own model
+     represents exactly** — unlike a wheeled-vehicle/tire-slip model or a
+     continuous-torque timing state this port's architecture can't
+     represent, normalizing a 2D direction vector needs no new machinery,
+     so it transfers cleanly the same way `FR-058`/`FR-059`/`FR-068`'s own
+     adopted ratios do, regardless of `DODGE_SPEED`'s own uncalibrated base
+     magnitude.
+  3. **Added `drive::normalize_dodge_direction(pitch, roll) -> (f32, f32)`**,
+     a small pure helper normalizing the combined `(pitch, roll)` direction
+     to unit length (returning `(0.0, 0.0)` for zero input), and wired it
+     into both the ground-dodge and wall-jump-dodge code paths in
+     `apply_driven_forces`: the existing per-axis `DODGE_DEADZONE` trigger
+     checks and `dodge_pitch_is_backward`'s own sign classification are
+     unchanged (both still read the *raw* stick values), but the magnitude
+     each axis contributes to `DODGE_SPEED`/`DODGE_ANGULAR_SPEED` now comes
+     from the normalized pair instead of the raw one.
+  4. **Deliberately kept this port's own sign convention** (`dodge_pitch`
+     positive means forward) rather than the reference's own negated
+     `-controls.pitch`, and did **not** fold in real yaw input's own
+     contribution to `dodgeDir` (`controls.yaw + controls.roll`) — this
+     port's dodge direction stays pitch/roll only, `FR-059`'s own Non-goals'
+     own separate, pre-existing simplification.
+  5. **Updated the two existing diagonal-dodge tests**
+     (`a_diagonal_dodge_combines_pitch_and_roll`,
+     `a_diagonal_wall_jump_dodge_combines_pitch_and_roll`) to assert the
+     new, correct per-axis magnitude (`DODGE_SPEED / sqrt(2)` for an equal
+     pitch/roll split, with the total magnitude still matching an
+     axis-aligned dodge's own `DODGE_SPEED`) and added 3 new tests directly
+     exercising `normalize_dodge_direction` (a single-axis input is
+     unaffected; a diagonal input normalizes to unit length; zero input
+     stays zero).
+  - **Non-goals (this requirement).** Does not adopt `DODGE_SPEED`'s own
+    real base magnitude (`FLIP_INITIAL_VEL_SCALE = 500.f`) — still
+    independently uncalibrated, unaffected by this requirement. Does not
+    fold real yaw input into the dodge direction. Does not adopt
+    RocketSim's own continuous torque-over-`FLIP_TORQUE_TIME` spin model —
+    `DODGE_ANGULAR_SPEED` remains a single instantaneous kick, scaled by
+    the same normalized direction as the linear impulse but still an
+    architecture mismatch `RB-PHYSICS-001-FR-069`'s own Non-goals already
+    established. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** A diagonal dodge (both `pitch` and `roll` at or
+    above `DODGE_DEADZONE`) produces the same total linear-impulse
+    magnitude as an axis-aligned dodge in the same direction, matching real
+    Rocket League's own confirmed normalized-direction mechanism. A
+    pure-single-axis dodge (the other axis exactly zero) is bit-for-bit
+    unaffected.
+  - **Verification plan.** `a_diagonal_dodge_combines_pitch_and_roll` and
+    `a_diagonal_wall_jump_dodge_combines_pitch_and_roll` updated to assert
+    the corrected per-axis and total magnitudes; 3 new tests pin
+    `normalize_dodge_direction`'s own behavior directly. All 314
+    pre-existing tests (as of `FR-071`) pass with these 2 updated plus 3
+    new, bringing the crate to 317.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5977,8 +6048,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   since the real reference constant it would otherwise come from
   (`FLIP_INITIAL_VEL_SCALE = 500.f`) was deliberately not substituted in
   (see FR-059's own entry, including its further Non-goals: RocketSim's
-  own direction-normalization for diagonal dodges and its
-  continuous-torque-over-time spin model, both still unaddressed). That
+  own direction-normalization for diagonal dodges — since adopted as a
+  genuine fix by `RB-PHYSICS-001-FR-072` — and its continuous-torque-
+  over-time spin model, still unaddressed). That
   base magnitude is still fully in scope for this bullet. This paragraph
   had gone stale in several places, corrected here:
   `DODGE_DEADZONE`
@@ -6103,6 +6175,26 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.72.0 (2026-09-01): FR-072 added and implemented (normalized
+  diagonal-dodge direction, genuine behavioral fix) — `FR-059`'s own
+  Non-goals had already found and flagged that this port sums each dodge
+  axis' own full-strength contribution independently, making a diagonal
+  dodge `sqrt(2)`-ish times faster than an axis-aligned one, unlike real
+  Rocket League. Fetched RocketSim's own `Car.cpp`
+  (`_UpdateDoubleJumpOrFlip`) and confirmed the real mechanism: `dodgeDir
+  = btVector3(-pitch, yaw + roll, 0).safeNormalized()`, normalized to unit
+  length before any further speed-based scaling. Unlike a wheeled-vehicle
+  model or a continuous-torque timing state, normalizing a direction
+  vector needs no new machinery this port lacks, so it transfers cleanly.
+  Added `drive::normalize_dodge_direction`, wired into both the ground-
+  dodge and wall-jump-dodge code paths — the per-axis `DODGE_DEADZONE`
+  trigger and `dodge_pitch_is_backward`'s sign check still read raw stick
+  values; only the scaled magnitude changes. This port's own sign
+  convention is kept and yaw isn't folded in, both already-documented,
+  separate simplifications. Updated the two existing diagonal-dodge tests
+  to assert the corrected magnitude and added 3 new tests for
+  `normalize_dodge_direction` directly; crate grows from 314 to 317 tests,
+  all passing.
 - 0.71.0 (2026-09-01): FR-071 added and implemented (real air-control
   damping mechanism — audit finding, documentation only) — `FR-068`'s own
   Non-goals had already found RocketSim's `CAR_AIR_CONTROL_DAMPING =

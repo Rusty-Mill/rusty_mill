@@ -85,9 +85,13 @@
 //! the same axis/sign conventions air control's own pitch/roll torque
 //! already uses, so a forward dodge looks like a fast version of a forward
 //! air-control pitch. Both pitch and roll can contribute at once (a
-//! diagonal dodge), simply summed — a documented simplification, since real
-//! Rocket League normalizes the stick direction so a diagonal dodge isn't
-//! faster than an axis-aligned one, and this port doesn't. Since
+//! diagonal dodge): since `RB-PHYSICS-001-FR-072`, their combined
+//! `(pitch, roll)` direction is normalized to unit length before scaling —
+//! matching RocketSim's own confirmed real `dodgeDir.safeNormalized()`
+//! step — so a diagonal dodge has the same total magnitude as an
+//! axis-aligned one, not the larger, independently-summed magnitude a flat
+//! per-axis sum would give; see `normalize_dodge_direction`'s own doc
+//! comment for the full finding. Since
 //! `RB-PHYSICS-001-FR-059`, though, `DODGE_SPEED`'s own magnitude is no
 //! longer flat regardless of direction or current speed: a pitch dodge
 //! opposing the car's current forward-velocity direction, or any side
@@ -812,6 +816,47 @@ fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> bool {
     }
 }
 
+/// Normalizes a dodge's combined `(pitch, roll)` stick direction to unit
+/// length, returning `(0.0, 0.0)` if both are exactly zero. `dodge_speed`/
+/// `DODGE_ANGULAR_SPEED` are scaled by this normalized pair instead of the
+/// raw stick values, so a diagonal dodge (both axes held) has the same
+/// total magnitude as an axis-aligned one.
+///
+/// `RB-PHYSICS-001-FR-059`'s own Non-goals had already found and flagged
+/// this exact gap — this port previously summed each axis' own
+/// full-strength contribution independently, so a diagonal dodge came out
+/// `sqrt(2)`-ish times faster than an axis-aligned one, "a separate,
+/// independent behavioral question this requirement doesn't take on."
+/// `RB-PHYSICS-001-FR-072` fetched RocketSim's own `Car.cpp`
+/// (`_UpdateDoubleJumpOrFlip`) and confirmed the real mechanism: `dodgeDir
+/// = btVector3(-controls.pitch, controls.yaw + controls.roll,
+/// 0).safeNormalized()`, applied before any further per-axis
+/// forward/backward/side speed scaling
+/// (`dodge_speed_scale`/`dodge_pitch_is_backward`, `FR-059`'s own already-
+/// adopted finding). Unlike that per-direction *speed* ratio's own real
+/// absolute magnitude (independently uncalibrated, per `FR-031`'s "false
+/// precision" reasoning), normalization is a pure geometric operation this
+/// port's own model represents exactly — it transfers cleanly regardless
+/// of `DODGE_SPEED`'s own uncalibrated base value, the same way
+/// `FR-058`/`FR-059`/`FR-068`'s own adopted ratios do.
+///
+/// Two things are deliberately *not* adopted here, both already documented
+/// elsewhere: this port's own sign convention is kept (`dodge_pitch`
+/// positive means forward, matching `dodge_pitch_is_backward`'s own doc
+/// comment) rather than the reference's own negated `-controls.pitch`; and
+/// real yaw input's own contribution to `dodgeDir` (`controls.yaw +
+/// controls.roll`) isn't folded in — this port's dodge direction stays
+/// pitch/roll only, `RB-PHYSICS-001-FR-059`'s own Non-goals' own
+/// pre-existing, separate simplification.
+fn normalize_dodge_direction(pitch: f32, roll: f32) -> (f32, f32) {
+    let magnitude = (pitch * pitch + roll * roll).sqrt();
+    if magnitude > 0.0 {
+        (pitch / magnitude, roll / magnitude)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
 /// Uncalibrated placeholder dodge spin speed (rad/s), added directly to
 /// `RigidBody.angular_velocity` as an instantaneous change (mirroring how
 /// `apply_impulse` directly changes `linear_velocity`, rather than
@@ -1197,6 +1242,8 @@ pub fn apply_driven_forces(
                     // comment). Leaves a cancelable flip active
                     // (dodge_flip_active), same as a ground dodge.
                     let wall_jump_forward_speed = car.linear_velocity.dot(&forward);
+                    let (norm_wall_pitch, norm_wall_roll) =
+                        normalize_dodge_direction(wall_pitch, wall_roll);
                     let mut dodge_impulse =
                         wall_normal * WALL_JUMP_HORIZONTAL_SPEED + Vec3::new(0.0, 0.0, JUMP_SPEED);
                     let mut dodge_spin = Vec3::ZERO;
@@ -1207,14 +1254,14 @@ pub fn apply_driven_forces(
                         } else {
                             1.0
                         };
-                        dodge_impulse += forward * (wall_pitch * DODGE_SPEED * scale);
-                        dodge_spin += right_axis(car) * (wall_pitch * DODGE_ANGULAR_SPEED);
+                        dodge_impulse += forward * (norm_wall_pitch * DODGE_SPEED * scale);
+                        dodge_spin += right_axis(car) * (norm_wall_pitch * DODGE_ANGULAR_SPEED);
                     }
                     if wall_roll.abs() > DODGE_DEADZONE {
                         let scale =
                             dodge_speed_scale(wall_jump_forward_speed, DODGE_SIDE_SPEED_SCALE);
-                        dodge_impulse += right_axis(car) * (wall_roll * DODGE_SPEED * scale);
-                        dodge_spin += forward * (wall_roll * DODGE_ANGULAR_SPEED);
+                        dodge_impulse += right_axis(car) * (norm_wall_roll * DODGE_SPEED * scale);
+                        dodge_spin += forward * (norm_wall_roll * DODGE_ANGULAR_SPEED);
                     }
                     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
                     car.angular_velocity += dodge_spin;
@@ -1247,6 +1294,8 @@ pub fn apply_driven_forces(
                     // forward_axis). Purely horizontal, with no vertical
                     // JUMP_SPEED component — see the module doc comment.
                     let dodge_forward_speed = car.linear_velocity.dot(&forward);
+                    let (norm_dodge_pitch, norm_dodge_roll) =
+                        normalize_dodge_direction(dodge_pitch, dodge_roll);
                     let mut dodge_impulse = Vec3::ZERO;
                     let mut dodge_spin = Vec3::ZERO;
                     if dodge_pitch.abs() > DODGE_DEADZONE {
@@ -1255,13 +1304,13 @@ pub fn apply_driven_forces(
                         } else {
                             1.0
                         };
-                        dodge_impulse += forward * (dodge_pitch * DODGE_SPEED * scale);
-                        dodge_spin += right_axis(car) * (dodge_pitch * DODGE_ANGULAR_SPEED);
+                        dodge_impulse += forward * (norm_dodge_pitch * DODGE_SPEED * scale);
+                        dodge_spin += right_axis(car) * (norm_dodge_pitch * DODGE_ANGULAR_SPEED);
                     }
                     if dodge_roll.abs() > DODGE_DEADZONE {
                         let scale = dodge_speed_scale(dodge_forward_speed, DODGE_SIDE_SPEED_SCALE);
-                        dodge_impulse += right_axis(car) * (dodge_roll * DODGE_SPEED * scale);
-                        dodge_spin += forward * (dodge_roll * DODGE_ANGULAR_SPEED);
+                        dodge_impulse += right_axis(car) * (norm_dodge_roll * DODGE_SPEED * scale);
+                        dodge_spin += forward * (norm_dodge_roll * DODGE_ANGULAR_SPEED);
                     }
                     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
                     // A single instantaneous spin kick, not a continuous
@@ -2389,16 +2438,59 @@ mod tests {
             &mut double_jump_available,
             1.0 / 60.0,
         );
+        // RB-PHYSICS-001-FR-072: a diagonal dodge's combined (pitch, roll)
+        // direction is normalized to unit length before scaling by
+        // DODGE_SPEED, matching RocketSim's own confirmed real
+        // `dodgeDir.safeNormalized()` step — so each axis gets
+        // DODGE_SPEED / sqrt(2), not a full DODGE_SPEED each (which would
+        // make a diagonal dodge sqrt(2) times faster than an
+        // axis-aligned one).
+        let expected = DODGE_SPEED / std::f32::consts::SQRT_2;
         assert!(
-            (c.linear_velocity.x - DODGE_SPEED).abs() < 1.0,
+            (c.linear_velocity.x - expected).abs() < 1.0,
             "expected the forward component of a diagonal dodge, got {}",
             c.linear_velocity.x
         );
         assert!(
-            (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
+            (c.linear_velocity.y - expected).abs() < 1.0,
             "expected the lateral component of a diagonal dodge, got {}",
             c.linear_velocity.y
         );
+        let total_magnitude = (c.linear_velocity.x.powi(2) + c.linear_velocity.y.powi(2)).sqrt();
+        assert!(
+            (total_magnitude - DODGE_SPEED).abs() < 1.0,
+            "expected a diagonal dodge's total magnitude to match an \
+             axis-aligned one's DODGE_SPEED, got {total_magnitude}"
+        );
+    }
+
+    #[test]
+    fn normalize_dodge_direction_preserves_a_single_axis() {
+        // A pure axis-aligned dodge (the other axis exactly zero) is
+        // unaffected: normalizing (1.0, 0.0) or (0.0, 1.0) yields the same
+        // unit value back.
+        assert_eq!(normalize_dodge_direction(1.0, 0.0), (1.0, 0.0));
+        assert_eq!(normalize_dodge_direction(0.0, 1.0), (0.0, 1.0));
+        assert_eq!(normalize_dodge_direction(-1.0, 0.0), (-1.0, 0.0));
+    }
+
+    #[test]
+    fn normalize_dodge_direction_normalizes_a_diagonal_to_unit_length() {
+        let (pitch, roll) = normalize_dodge_direction(1.0, 1.0);
+        let magnitude = (pitch * pitch + roll * roll).sqrt();
+        assert!(
+            (magnitude - 1.0).abs() < 1e-6,
+            "expected a diagonal direction to normalize to unit length, got {magnitude}"
+        );
+        assert!(
+            (pitch - roll).abs() < 1e-6,
+            "expected an equal 45-degree split"
+        );
+    }
+
+    #[test]
+    fn normalize_dodge_direction_is_zero_for_zero_input() {
+        assert_eq!(normalize_dodge_direction(0.0, 0.0), (0.0, 0.0));
     }
 
     #[test]
@@ -2852,13 +2944,20 @@ mod tests {
             &mut double_jump_available,
             1.0 / 60.0,
         );
+        // RB-PHYSICS-001-FR-072: the dodge's own (pitch, roll) direction is
+        // normalized before scaling — see
+        // `a_diagonal_dodge_combines_pitch_and_roll`'s own comment — so
+        // each dodge component is DODGE_SPEED / sqrt(2), on top of the
+        // unaffected wall push-off.
+        let expected_dodge_component = DODGE_SPEED / std::f32::consts::SQRT_2;
         assert!(
-            (c.linear_velocity.x - (WALL_JUMP_HORIZONTAL_SPEED + DODGE_SPEED)).abs() < 1.0,
+            (c.linear_velocity.x - (WALL_JUMP_HORIZONTAL_SPEED + expected_dodge_component)).abs()
+                < 1.0,
             "expected the wall push-off plus the forward dodge component, got {}",
             c.linear_velocity.x
         );
         assert!(
-            (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
+            (c.linear_velocity.y - expected_dodge_component).abs() < 1.0,
             "expected the lateral dodge component, got {}",
             c.linear_velocity.y
         );
