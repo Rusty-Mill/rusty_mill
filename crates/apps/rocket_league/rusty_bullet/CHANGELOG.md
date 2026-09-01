@@ -632,6 +632,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   deliberately not adopted, since this project has no canonical "real"
   car construction site yet to keep that ratio against. 3 new tests; all
   pre-existing tests pass unchanged.
+- `solver::combine_restitution`/`combine_friction` real-Rocket-League
+  reference finding (`RB-PHYSICS-001-FR-063`) — `RB-PHYSICS-001-FR-043`
+  had left open which formula matches real Rocket League itself. Fetched
+  RocketSim's own `RLConst.h` (matching FR-057/FR-060/FR-061/FR-062's own
+  method) and found the real answer isn't a different formula: real
+  Rocket League hardcodes a distinct restitution/friction value per named
+  contact-pair type (`CARWORLD_COLLISION_FRICTION/RESTITUTION =
+  0.3f`/`0.3f`, `CARCAR_COLLISION_FRICTION/RESTITUTION = 0.09f`/`0.1f`,
+  `CARBALL_COLLISION_FRICTION/RESTITUTION = 2.0f`/`0.0f`), overriding
+  whatever a generic per-body combine would produce — most strikingly, a
+  car hitting the ball has zero restitution-driven bounce in real Rocket
+  League, and car-vs-ball friction exceeds `1.0`, a value no per-body
+  combine could produce. Corrected `combine_restitution`/
+  `combine_friction`'s own doc comments and this spec's stale Open
+  Questions bullet. Not adopted: real per-pair-type overrides, since
+  those functions' own signature can't know which kind of pair produced
+  their inputs — left for a future requirement. No new tests; all
+  pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

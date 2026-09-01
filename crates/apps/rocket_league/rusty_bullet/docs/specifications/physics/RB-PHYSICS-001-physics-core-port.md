@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.62.0
+- Version: 0.63.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4020,6 +4020,85 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     untouched. All 306 of `rb_physics_bullet`'s pre-existing tests (as of
     `FR-061`) pass unchanged (net +3 tests over `FR-061`'s 306, bringing
     the crate to 309).
+- `RB-PHYSICS-001-FR-063` (real Rocket League uses per-contact-pair-type
+  restitution/friction overrides, not a per-body combine — audit finding,
+  documentation only): `RB-PHYSICS-001-FR-043`'s own investigation had
+  already checked which *formula* Bullet's own generic
+  `combine_restitution`/`combine_friction` should use (an unclamped
+  product, not this port's kept average) and left open "which formula (if
+  either) actually matches real Rocket League itself... still needs real
+  recorded ball/ground behavior to calibrate against." This requirement
+  resolves that differently than expected: the real answer isn't "a
+  different formula" at all.
+  1. **Fetched RocketSim's own `RLConst.h`** (matching
+     `RB-PHYSICS-001-FR-057`/`FR-060`/`FR-061`/`FR-062`'s own method) and
+     found real Rocket League's gameplay layer doesn't compute restitution
+     or friction from a generic per-body combine at all for its own
+     named contact-pair types — it hardcodes a distinct override per pair,
+     bypassing whatever either body's own material would otherwise
+     combine to. Confirmed exact: `CAR_COLLISION_FRICTION = 0.3f`/
+     `CAR_COLLISION_RESTITUTION = 0.1f` (a generic fallback),
+     `CARWORLD_COLLISION_FRICTION = 0.3f`/
+     `CARWORLD_COLLISION_RESTITUTION = 0.3f` (car vs. static geometry),
+     `CARCAR_COLLISION_FRICTION = 0.09f`/`CARCAR_COLLISION_RESTITUTION =
+     0.1f`, and `CARBALL_COLLISION_FRICTION = 2.0f`/
+     `CARBALL_COLLISION_RESTITUTION = 0.0f`.
+  2. **Found two of these are individually striking, not just
+     "different from an average".** `CARBALL_COLLISION_RESTITUTION =
+     0.0f` means a car hitting the ball has *zero* restitution-driven
+     bounce in real Rocket League regardless of either body's own
+     material — a stark contrast with this port's own
+     `combine_restitution(ball.restitution, car.restitution)`, which
+     since `RB-PHYSICS-001-FR-062` averages the ball's own confirmed real
+     `0.6` against the car's still-generic `0.5` to a real `~0.55` bounce
+     for exactly the pairing real Rocket League gives zero. Separately,
+     `CARBALL_COLLISION_FRICTION = 2.0f` is a friction coefficient
+     *above* `1.0` — a value no combine of two bodies' own sane
+     (`0.0..=1.0`-range) per-material friction fields could ever produce,
+     confirming this isn't merely an uncalibrated-magnitude question the
+     way most of this project's other placeholder constants are (see
+     `RB-PHYSICS-001-FR-031`'s own "false precision" category) but a
+     genuinely different *model* real Rocket League uses.
+  3. **Corrected `solver::combine_restitution`/`combine_friction`'s own
+     doc comments** to state this finding directly, and corrected the
+     stale Open Questions bullet that had framed the still-open question
+     as merely "which formula" rather than "a per-body combine at all."
+  - **Non-goals (this requirement).** Does not implement per-contact-
+    pair-type overrides — `combine_restitution`/`combine_friction`'s own
+    signature (two `f32` material values in, one combined value out) has
+    no way to know which *kind* of pair produced those two values (car
+    vs. world, car vs. car, car vs. ball, or a car/ball vs. some other
+    static shape entirely); doing so for real would mean threading body/
+    shape identity into every one of `solver.rs`'s several call sites
+    (`resolve_contacts`, `resolve_contacts_between`,
+    `resolve_static_manifolds`, `resolve_dynamic_manifolds`,
+    `resolve_manifolds`) and adding a lookup keyed on that identity ahead
+    of (or instead of) the existing combine call — a substantially larger
+    architecture change than a single documentation-audit requirement
+    should take on, left as a candidate for a future, dedicated
+    requirement. Does not adopt `CAR_COLLISION_FRICTION`/
+    `CAR_COLLISION_RESTITUTION` as the car's own default material
+    properties (mirroring `RB-PHYSICS-001-FR-062`'s own `RigidBody::ball`)
+    — unlike the ball, real Rocket League has no single "the car's own"
+    restitution/friction value to adopt that way; every real value found
+    here is contact-pair-specific, so setting the car's own generic
+    default to any one of them would be arbitrary, not confirmed. Does
+    not change `combine_restitution`/`combine_friction`'s own kept
+    average formula (still `RB-PHYSICS-001-FR-043`'s own correct-reason
+    choice for the *within-model* question that finding answered — this
+    requirement is about the model itself, a separate question). Does not
+    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked
+    on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `solver::combine_restitution`/
+    `combine_friction`'s own doc comments and this spec's Open Questions
+    no longer frame the real-Rocket-League-combine-mode question as
+    "which formula" — both now state the confirmed real per-pair-type
+    override values and why this port's own per-body-combine
+    architecture can't represent them without a larger, separate change.
+  - **Verification plan.** No new tests (documentation-only, matching
+    `RB-PHYSICS-001-FR-044`/`FR-060`'s own precedent); all 309 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-062`) pass
+    unchanged, confirming zero behavioral change.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5414,20 +5493,35 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   splitting into a separate boost speed cap once real recorded top-speed
   data exists to calibrate one.
 - FR-005 above.
-- Restitution/friction combine mode (`rb_physics_bullet::solver` currently
-  averages) — `RB-PHYSICS-001-FR-043` checked this bullet's own prior claim
-  that Bullet's actual default is `max` directly against
-  `btManifoldResult`'s real source and found it wrong: the real default for
-  both is an unclamped **product** (`a * b`), not `max`, with no `max` mode
-  anywhere in the reference. This port's average is kept anyway, now for a
-  correct reason: it preserves the identity `combine(a, a) == a`, which the
-  reference's own product does not (`0.5 * 0.5 == 0.25`), and most bodies
-  here currently share the same uncalibrated placeholder coefficient (see
-  `body.rs`'s `Default` impls) — see `RB-PHYSICS-001-FR-043`'s own entry
-  for the full finding. Which formula (if either) actually matches real
-  Rocket League itself is unchanged by this correction and still needs real
-  recorded ball/ground behavior to calibrate against — revisit once
-  `RB-VERIFY-001`/`RB-VERIFY-002` data exists.
+- ~~Restitution/friction combine mode (`rb_physics_bullet::solver`
+  currently averages) — `RB-PHYSICS-001-FR-043` checked this bullet's own
+  prior claim that Bullet's actual default is `max` directly against
+  `btManifoldResult`'s real source and found it wrong: the real default
+  for both is an unclamped **product** (`a * b`), not `max`, with no `max`
+  mode anywhere in the reference. This port's average is kept anyway, now
+  for a correct reason: it preserves the identity `combine(a, a) == a`,
+  which the reference's own product does not (`0.5 * 0.5 == 0.25`), and
+  most bodies here currently share the same uncalibrated placeholder
+  coefficient (see `body.rs`'s `Default` impls) — see
+  `RB-PHYSICS-001-FR-043`'s own entry for the full finding. Which formula
+  (if either) actually matches real Rocket League itself is unchanged by
+  this correction and still needs real recorded ball/ground behavior to
+  calibrate against~~ — `RB-PHYSICS-001-FR-063` found this framing itself
+  was the wrong question: real Rocket League's own gameplay layer doesn't
+  compute restitution/friction from any generic per-body combine formula
+  at all for its own named contact-pair types (car-vs-world, car-vs-car,
+  car-vs-ball) — it hardcodes a distinct value per pair, overriding
+  whatever either body's own material would combine to. Most strikingly,
+  `CARBALL_COLLISION_RESTITUTION = 0.0f` (a car hitting the ball has zero
+  restitution-driven bounce in real Rocket League, regardless of either
+  body's own material) and `CARBALL_COLLISION_FRICTION = 2.0f` (a
+  friction coefficient above `1.0`, which no combine of two bodies' own
+  sane per-material values could produce). This port's own
+  `combine_restitution`/`combine_friction` architecture — two `f32`
+  material values in, one combined value out, with no notion of *which
+  kind* of pair produced them — can't represent a per-pair-type override
+  without a substantially larger change (see that requirement's own
+  Non-goals); this remains open, now for the right reason.
 - Sleeping is no longer an open item — `RB-PHYSICS-001-FR-037` implemented
   it, and with it the actual fix for the *bouncy* (restitution > 0) resting
   contact that used to never settle (`RB-PHYSICS-001-FR-034`'s split
@@ -5468,6 +5562,44 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.63.0 (2026-09-01): FR-063 added and implemented (real Rocket League
+  uses per-contact-pair-type restitution/friction overrides, not a
+  per-body combine — audit finding, documentation only) —
+  `RB-PHYSICS-001-FR-043` had left open "which formula (if either)
+  actually matches real Rocket League itself" for
+  `solver::combine_restitution`/`combine_friction`. Fetched RocketSim's
+  own `RLConst.h` (matching `FR-057`/`FR-060`/`FR-061`/`FR-062`'s own
+  method) and found the real answer isn't a different formula at all:
+  real Rocket League hardcodes a distinct restitution/friction value per
+  named contact-pair type (`CARWORLD_COLLISION_FRICTION/RESTITUTION =
+  0.3f`/`0.3f`, `CARCAR_COLLISION_FRICTION/RESTITUTION = 0.09f`/`0.1f`,
+  `CARBALL_COLLISION_FRICTION/RESTITUTION = 2.0f`/`0.0f`), overriding
+  whatever a generic per-body combine would produce. Two findings are
+  individually striking: `CARBALL_COLLISION_RESTITUTION = 0.0f` means a
+  car hitting the ball has zero restitution-driven bounce in real Rocket
+  League regardless of either body's own material (a stark contrast with
+  this port's own combine, which since `FR-062` averages the ball's
+  confirmed real `0.6` against the car's generic `0.5` to a real `~0.55`
+  bounce for exactly that pairing); `CARBALL_COLLISION_FRICTION = 2.0f`
+  is a friction coefficient above `1.0`, which no combine of two bodies'
+  own sane per-material values could ever produce, confirming this is a
+  genuinely different model, not merely an uncalibrated magnitude.
+  Corrected `combine_restitution`/`combine_friction`'s own doc comments
+  and this spec's stale Open Questions bullet to state this finding
+  directly. Not adopted: implementing real per-pair-type overrides, since
+  `combine_restitution`/`combine_friction`'s own two-`f32`-in-one-out
+  signature has no way to know which kind of pair produced its inputs —
+  doing so for real would mean threading body/shape identity into every
+  one of `solver.rs`'s several call sites, a substantially larger
+  architecture change left for a future, dedicated requirement. Also not
+  adopted: setting the car's own generic default restitution/friction to
+  any of these values (mirroring `FR-062`'s `RigidBody::ball`) — unlike
+  the ball, real Rocket League has no single "the car's own" value here,
+  every real number found is contact-pair-specific, so picking one for a
+  generic default would be arbitrary. No behavioral change and no new
+  tests (documentation-only, matching `RB-PHYSICS-001-FR-044`/`FR-060`'s
+  own precedent); all 309 of `rb_physics_bullet`'s pre-existing tests
+  pass unchanged.
 - 0.62.0 (2026-09-01): FR-062 added and implemented (real ball material
   properties via a new `RigidBody::ball` constructor) —
   `RB-PHYSICS-001-FR-061`'s own Non-goals had explicitly deferred adopting
