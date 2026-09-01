@@ -5850,6 +5850,7 @@ dependencies = [
  "rusty_request",
  "rusty_sqlite",
  "rusty_tokio",
+ "rusty_uuid",
  "rusty_wire",
 ]
 

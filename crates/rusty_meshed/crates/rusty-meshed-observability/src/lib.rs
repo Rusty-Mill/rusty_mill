@@ -10,6 +10,7 @@
 mod contract_gate;
 mod lineage;
 mod metrics;
+mod slo;
 
 pub use contract_gate::{
     assert_schema_compatible, contract_subject_name, register_consumer_contract, ContractGateError,
@@ -19,3 +20,4 @@ pub use metrics::{
     ensure_schema as ensure_metrics_schema, get_violation_count, record_violation,
     MetricsCollector, MetricsError, ProductMetrics,
 };
+pub use slo::{SLOMonitor, SLOResult, SLOViolationPayload};

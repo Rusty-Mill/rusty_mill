@@ -14,6 +14,7 @@ rusty_kafka = { path = "../../../rusty_kafka" }
 rusty_json = { path = "../../../rusty_json" }
 rusty_request = { path = "../../../rusty_request" }
 rusty_tokio = { path = "../../../rusty_tokio" }
+rusty_uuid = { path = "../../../rusty_uuid" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]
