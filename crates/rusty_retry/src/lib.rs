@@ -33,7 +33,11 @@ pub enum Backoff {
     /// no jitter, `1.0` randomizes the whole delay (uniform over
     /// `[0, capped)`), and values between interpolate -- `0.5` yields a
     /// delay uniform over `[capped/2, capped)`.
-    Exponential { base: Duration, max: Duration, jitter: f64 },
+    Exponential {
+        base: Duration,
+        max: Duration,
+        jitter: f64,
+    },
 }
 
 impl Backoff {
@@ -144,7 +148,13 @@ mod tests {
                 "{delay:?} outside the jittered range"
             );
         }
-        assert!(delays.iter().collect::<std::collections::HashSet<_>>().len() > 1);
+        assert!(
+            delays
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1
+        );
     }
 
     #[test]

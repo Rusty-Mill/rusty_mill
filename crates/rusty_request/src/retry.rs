@@ -60,10 +60,12 @@ impl Backoff {
         let attempt = u32::try_from(attempt).unwrap_or(u32::MAX);
         match *self {
             Backoff::Fixed(d) => rusty_retry::Backoff::Fixed(d).delay_for(attempt),
-            Backoff::Exponential { base, max, jitter } => {
-                rusty_retry::Backoff::Exponential { base, max, jitter: if jitter { 1.0 } else { 0.0 } }
-                    .delay_for(attempt)
+            Backoff::Exponential { base, max, jitter } => rusty_retry::Backoff::Exponential {
+                base,
+                max,
+                jitter: if jitter { 1.0 } else { 0.0 },
             }
+            .delay_for(attempt),
         }
     }
 }
