@@ -89,8 +89,12 @@
 //! `[-1.0, 1.0]` individually first) — matching RocketSim's own confirmed
 //! `dodgeDir = (-pitch, yaw + roll, 0)`, so a yaw-only press (no roll held)
 //! now fires a sideways dodge too, the same as a real Rocket League player
-//! nudging the right stick purely left/right. Both pitch and the combined
-//! roll/yaw can contribute at once (a diagonal dodge): since
+//! nudging the right stick purely left/right. Since `RB-PHYSICS-001-FR-075`,
+//! `DODGE_DEADZONE`'s own trigger (`dodge_pitch.abs() > DODGE_DEADZONE ||
+//! dodge_roll.abs() > DODGE_DEADZONE`) is confirmed the same decision as
+//! RocketSim's own real cancellation check, once that fold-in is in place —
+//! see `DODGE_DEADZONE`'s own doc comment for the full finding. Both pitch
+//! and the combined roll/yaw can contribute at once (a diagonal dodge): since
 //! `RB-PHYSICS-001-FR-072`, their combined
 //! `(pitch, roll)` direction is normalized to unit length before scaling —
 //! matching RocketSim's own confirmed real `dodgeDir.safeNormalized()`
@@ -738,13 +742,29 @@ const AIR_CONTROL_ROLL_SCALE: f32 = 400.0 / 130.0;
 /// shape itself is not a mistake to correct.
 pub const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
 
-/// Arbitrary deadzone for `pitch`/`roll` input at the moment of a double
-/// jump's fresh press: below this magnitude on both axes, the press is
-/// treated as "no directional intent" and fires a plain vertical double
-/// jump; at or above it on either axis, it fires a dodge instead. Not a
-/// physics constant and not derived from any Rocket League value — purely
-/// an input-processing threshold, chosen only to ignore tiny analog stick
-/// drift.
+/// Deadzone for `pitch`/`roll` input at the moment of a double jump's
+/// fresh press: below this magnitude on both axes, the press is treated as
+/// "no directional intent" and fires a plain vertical double jump; at or
+/// above it on either axis, it fires a dodge instead.
+///
+/// `RB-PHYSICS-001-FR-075` found this port's own long-standing "not a
+/// physics constant and not derived from any Rocket League value" framing
+/// was stale: RocketSim's own confirmed `_UpdateDoubleJumpOrFlip`
+/// cancellation check (`RB-PHYSICS-001-FR-072`/`FR-073`/`FR-074`'s own
+/// fetches) is `if (abs(controls.yaw + controls.roll) < 0.1f &&
+/// abs(controls.pitch) < 0.1f) { dodgeDir = {0,0,0}; }` — a dodge fires iff
+/// `abs(yaw + roll) >= 0.1 || abs(pitch) >= 0.1`. Since `FR-073` already
+/// folds yaw into this port's own `dodge_roll`/`wall_roll` (`roll + yaw`),
+/// this port's own trigger — `dodge_pitch.abs() > DODGE_DEADZONE ||
+/// dodge_roll.abs() > DODGE_DEADZONE` — is the *same* boolean expression as
+/// the real one once `DODGE_DEADZONE` equals the real threshold, up to an
+/// immaterial strict-vs-non-strict inequality at the exact boundary value
+/// (a floating-point edge case with no practical effect). `0.1` is exactly
+/// that real threshold: this constant already matches real Rocket League,
+/// it just wasn't confirmed as such until this fetch. See
+/// `normalize_dodge_direction`'s own doc comment for the related, already-
+/// adopted normalization/snap findings this same cancellation check feeds
+/// into.
 const DODGE_DEADZONE: f32 = 0.1;
 
 /// Real confirmed threshold (`RB-PHYSICS-001-FR-074`): RocketSim's own
