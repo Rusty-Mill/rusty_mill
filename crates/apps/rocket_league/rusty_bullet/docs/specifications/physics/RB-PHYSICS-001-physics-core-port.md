@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.73.0
+- Version: 0.74.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4742,11 +4742,14 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     combined gate) left for a future requirement if it turns out to matter.
     Does not adopt RocketSim's own post-normalization small-component
     zeroing (`abs(x) < 0.1` on each *normalized* direction component,
-    confirmed during `FR-072`'s own investigation) — a separate, independent
-    simplification. Does not adopt `DODGE_SPEED`'s own real base magnitude,
-    still independently uncalibrated. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    confirmed during `FR-072`'s own investigation) — mis-scoped here as "a
+    separate, independent simplification"; it is actually the same kind of
+    pure post-processing step `normalize_dodge_direction` already performs,
+    needing no new machinery (`RB-PHYSICS-001-FR-074` later closed this
+    thread with a genuine fix, correcting that mis-scoping). Does not adopt
+    `DODGE_SPEED`'s own real base magnitude, still independently
+    uncalibrated. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
   - **Acceptance criteria.** A dodge or wall-jump-dodge press with only
     `yaw` held (no `roll`) fires the same sideways dodge a roll-only press
     would. Equal-and-opposite `yaw` and `roll` cancel to no sideways
@@ -4758,6 +4761,74 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `a_yaw_only_press_fires_a_sideways_wall_jump_dodge_like_roll`) added;
     all 317 pre-existing tests (as of `FR-072`) pass unchanged, bringing the
     crate to 320.
+- `RB-PHYSICS-001-FR-074` (snap a near-axis-aligned dodge to a pure single
+  axis, implemented): `RB-PHYSICS-001-FR-073`'s own Non-goals had flagged
+  RocketSim's post-normalization small-component zeroing as "a separate,
+  independent simplification" left open — a mis-scoping this requirement
+  corrects: it is not a separate mechanism at all, but a further pure
+  post-processing step on the exact normalized `(pitch, roll)` pair
+  `normalize_dodge_direction` already computes.
+  1. **Re-confirmed real RocketSim's exact mechanism** (`Car.cpp`,
+     `_UpdateDoubleJumpOrFlip`, same fetch technique as `FR-072`/`FR-073`):
+     after `dodgeDir = dodgeDir.safeNormalized()`, `if (abs(dodgeDir.x()) <
+     0.1f) dodgeDir.x() = 0; if (abs(dodgeDir.y()) < 0.1f) dodgeDir.y() =
+     0;` — applied to the already-normalized direction, not the raw stick
+     input, and not re-normalized afterward.
+  2. **Confirmed this needs no new machinery**: like normalization itself
+     (`FR-072`), zeroing a small component of an already-computed pair is a
+     pure post-processing step this function's own existing return value
+     already supports — no new state, no new input, no architecture this
+     port lacks. The same "pure operation, no new architecture" transfer
+     `FR-058`/`FR-059`/`FR-068`/`FR-072`/`FR-073`'s own adopted findings
+     share.
+  3. **Added `drive::DODGE_DIRECTION_SNAP_THRESHOLD: f32 = 0.1`** (a
+     distinct named constant from `DODGE_DEADZONE`, despite sharing the
+     same real value, since they serve different real purposes — a raw-
+     stick trigger threshold vs. a post-normalization direction-snap
+     threshold — and could in principle be recalibrated independently).
+     `normalize_dodge_direction` now zeroes either returned component whose
+     magnitude falls below this threshold, after normalizing, matching
+     RocketSim's own order of operations exactly.
+  4. **Effect**: a dodge stick input that is nearly, but not quite,
+     axis-aligned (e.g. a diagonal whose secondary axis is just barely
+     above `DODGE_DEADZONE`) now snaps to a clean single-axis dodge instead
+     of producing a tiny, physically negligible perpendicular component —
+     matching real Rocket League's own behavior for imprecise stick
+     centering. Both call sites in `apply_driven_forces` already route
+     through `normalize_dodge_direction`, so no call-site changes were
+     needed.
+  5. **Updated `normalize_dodge_direction`'s own doc comment**, the module
+     doc's dodge paragraph, and added a forward citation from
+     `RB-PHYSICS-001-FR-073`'s own Non-goals bullet correcting its
+     "separate, independent simplification" mis-scoping.
+  6. **Added 2 new tests**:
+     `normalize_dodge_direction_snaps_a_near_axis_aligned_input_to_a_pure_axis`
+     (pitch=1.0, roll=0.05 — the tiny roll component snaps to exactly
+     zero) and `normalize_dodge_direction_does_not_snap_a_clearly_diagonal_input`
+     (pitch=1.0, roll=0.5 — both components stay well above the threshold,
+     unaffected).
+  - **Non-goals (this requirement).** Does not adopt RocketSim's own
+    all-or-nothing cancellation check (`abs(yaw + roll) < 0.1 &&
+    abs(pitch) < 0.1` zeroes the entire dodge direction) in place of this
+    port's own independent per-axis `DODGE_DEADZONE` trigger —
+    `RB-PHYSICS-001-FR-073`'s own Non-goals already correctly identified
+    this as a genuine architectural difference (independent per-axis
+    firing vs. one combined gate), unlike the small-component zeroing this
+    requirement closes; still left for a future requirement if it turns
+    out to matter. Does not adopt `DODGE_SPEED`'s own real base magnitude,
+    still independently uncalibrated. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** A dodge whose secondary stick axis, once the
+    combined `(pitch, roll)` direction is normalized, falls below
+    `DODGE_DIRECTION_SNAP_THRESHOLD` in magnitude now fires as a pure
+    single-axis dodge (that component exactly zero) instead of a slightly
+    diagonal one. A clearly diagonal dodge (both normalized components at
+    or above the threshold) is unaffected.
+  - **Verification plan.** 2 new tests pin
+    `normalize_dodge_direction`'s own snapping behavior directly at both
+    sides of the threshold; all 320 pre-existing tests (as of `FR-073`)
+    pass unchanged, bringing the crate to 322.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6243,6 +6314,25 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.74.0 (2026-09-01): FR-074 added and implemented (snap a near-axis-
+  aligned dodge to a pure single axis, genuine behavioral fix) —
+  `FR-073`'s own Non-goals had flagged RocketSim's post-normalization
+  small-component zeroing as "a separate, independent simplification," a
+  mis-scoping this requirement corrects: it's a further pure
+  post-processing step on `normalize_dodge_direction`'s own already-
+  computed normalized pair, needing no new machinery, exactly like
+  normalization itself (`FR-072`). Re-confirmed via RocketSim's `Car.cpp`:
+  after `dodgeDir.safeNormalized()`, `if (abs(dodgeDir.x()) < 0.1f)
+  dodgeDir.x() = 0; if (abs(dodgeDir.y()) < 0.1f) dodgeDir.y() = 0;` — not
+  re-normalized afterward. Added `drive::DODGE_DIRECTION_SNAP_THRESHOLD =
+  0.1` (a distinct constant from `DODGE_DEADZONE` despite sharing the same
+  real value, since they serve different real purposes) and wired the
+  zeroing into `normalize_dodge_direction`'s own return path — both dodge
+  call sites already route through it, so no call-site changes were
+  needed. Effect: a near-axis-aligned diagonal stick input now snaps to a
+  clean single-axis dodge instead of a slightly diagonal one. Added 2 new
+  tests pinning the snap behavior at both sides of the threshold; crate
+  grows from 320 to 322, all passing.
 - 0.73.0 (2026-09-01): FR-073 added and implemented (fold yaw input into
   the dodge/wall-jump-dodge direction, genuine behavioral fix) —
   `FR-059`'s own Non-goals (and `FR-072`'s own doc comment) had already

@@ -1064,6 +1064,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   are otherwise unchanged. Added 3 new tests (a yaw-only dodge, a
   yaw-and-roll cancellation, and a yaw-only wall-jump-dodge); all
   pre-existing tests pass unchanged, bringing the crate to 320.
+- A near-axis-aligned diagonal dodge came out slightly off-axis instead of
+  a clean single-axis dodge (`RB-PHYSICS-001-FR-074`) —
+  `RB-PHYSICS-001-FR-073`'s own Non-goals had flagged RocketSim's
+  post-normalization small-component zeroing as "a separate, independent
+  simplification," a mis-scoping this fix corrects: it's a further pure
+  post-processing step on `normalize_dodge_direction`'s own
+  already-computed normalized pair, needing no new machinery, exactly
+  like normalization itself (`FR-072`). Re-confirmed via RocketSim's own
+  `Car.cpp`: after `dodgeDir.safeNormalized()`, any component whose
+  magnitude falls below `0.1` is zeroed, not re-normalized afterward.
+  Added `drive::DODGE_DIRECTION_SNAP_THRESHOLD = 0.1` (a distinct
+  constant from `DODGE_DEADZONE` despite sharing the same real value,
+  since they serve different real purposes) and wired the zeroing into
+  `normalize_dodge_direction`'s own return path — both dodge call sites
+  already route through it, so no call-site changes were needed. Added 2
+  new tests pinning the snap behavior at both sides of the threshold; all
+  pre-existing tests pass unchanged, bringing the crate to 322.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

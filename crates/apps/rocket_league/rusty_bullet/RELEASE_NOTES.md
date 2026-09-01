@@ -6,6 +6,47 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Near-axis-aligned dodges now snap to a pure single axis, matching real Rocket League
+**2026-09-01** · PR pending · commit pending
+
+- **`FR-073`'s own Non-goals had flagged RocketSim's post-normalization
+  small-component zeroing as "a separate, independent simplification"** —
+  a mis-scoping this change corrects: it isn't a separate mechanism at
+  all, but a further pure post-processing step on the exact normalized
+  `(pitch, roll)` pair `drive::normalize_dodge_direction` already
+  computes.
+- **Re-confirmed RocketSim's own `Car.cpp`** (`_UpdateDoubleJumpOrFlip`):
+  after `dodgeDir = dodgeDir.safeNormalized()`, `if (abs(dodgeDir.x()) <
+  0.1f) dodgeDir.x() = 0; if (abs(dodgeDir.y()) < 0.1f) dodgeDir.y() = 0;`
+  — applied to the already-normalized direction, not re-normalized
+  afterward.
+- **Needed no new machinery**: like normalization itself, zeroing a small
+  component of an already-computed pair is a pure post-processing step
+  this function's own existing return value already supports — the same
+  "pure operation, no new architecture" transfer
+  `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-068`/`FR-072`/`FR-073`'s own
+  adopted findings share.
+- **Added `drive::DODGE_DIRECTION_SNAP_THRESHOLD = 0.1`** (a distinct
+  constant from `DODGE_DEADZONE` despite sharing the same real value,
+  since they serve different real purposes — a raw-stick trigger
+  threshold vs. a post-normalization direction-snap threshold) and wired
+  the zeroing into `normalize_dodge_direction`'s own return path. Both
+  dodge call sites already route through it, so no call-site changes were
+  needed.
+- **A genuine behavioral fix, not a doc correction**: a dodge stick input
+  that's nearly, but not quite, axis-aligned now snaps to a clean
+  single-axis dodge instead of producing a tiny, physically negligible
+  perpendicular component. Added 2 new tests pinning the snap behavior at
+  both sides of the threshold; all 320 pre-existing tests pass unchanged,
+  bringing the crate to 322.
+- **Not adopted**: RocketSim's own all-or-nothing cancellation check
+  (independent per-axis firing vs. one combined gate) — a genuine
+  architectural difference, still left open, documented in
+  `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
+  (`RB-PHYSICS-001-FR-074`).
+
+---
+
 ## Yaw input now contributes to a dodge's direction, matching real Rocket League
 **2026-09-01** · [#153](https://github.com/baileyrd/rusty_bullet/pull/153) · `99a498a`
 

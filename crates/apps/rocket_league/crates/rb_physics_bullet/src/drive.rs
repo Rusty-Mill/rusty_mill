@@ -96,7 +96,11 @@
 //! matching RocketSim's own confirmed real `dodgeDir.safeNormalized()`
 //! step — so a diagonal dodge has the same total magnitude as an
 //! axis-aligned one, not the larger, independently-summed magnitude a flat
-//! per-axis sum would give; see `normalize_dodge_direction`'s own doc
+//! per-axis sum would give; since `RB-PHYSICS-001-FR-074`, a near-axis-
+//! aligned diagonal input additionally snaps to a pure single-axis dodge
+//! (matching RocketSim's own post-normalization small-component zeroing)
+//! instead of leaving a tiny, likely-unintentional perpendicular
+//! component — see `normalize_dodge_direction`'s own doc
 //! comment for the full finding. Since
 //! `RB-PHYSICS-001-FR-059`, though, `DODGE_SPEED`'s own magnitude is no
 //! longer flat regardless of direction or current speed: a pitch dodge
@@ -743,6 +747,23 @@ pub const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
 /// drift.
 const DODGE_DEADZONE: f32 = 0.1;
 
+/// Real confirmed threshold (`RB-PHYSICS-001-FR-074`): RocketSim's own
+/// `_UpdateDoubleJumpOrFlip` zeroes any component of the *normalized*
+/// `dodgeDir` whose absolute value is below `0.1`, applied after
+/// `dodgeDir.safeNormalized()` — `if (abs(dodgeDir.x()) < 0.1f)
+/// dodgeDir.x() = 0; if (abs(dodgeDir.y()) < 0.1f) dodgeDir.y() = 0;` —
+/// snapping a near-axis-aligned diagonal stick input (e.g. 88 degrees
+/// instead of a clean 90) to a pure single-axis dodge instead of leaving a
+/// tiny, likely-unintentional perpendicular component from imprecise stick
+/// centering. Numerically identical to `DODGE_DEADZONE` above, but a
+/// distinct real constant serving a different purpose (a pre-normalization
+/// raw-stick trigger threshold vs. a post-normalization direction-snap
+/// threshold) — kept as its own name rather than reusing `DODGE_DEADZONE`,
+/// so the two can diverge if either is ever recalibrated independently.
+/// See `normalize_dodge_direction`'s own doc comment for the adoption
+/// reasoning.
+const DODGE_DIRECTION_SNAP_THRESHOLD: f32 = 0.1;
+
 /// Uncalibrated placeholder dodge horizontal impulse speed (uu/s), applied
 /// along `forward_axis` (scaled by `pitch`) and/or `right_axis` (scaled by
 /// `roll`) as an instantaneous velocity change (like `JUMP_SPEED`, not a
@@ -862,10 +883,32 @@ fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> bool {
 /// value the same way the reference does. `RB-PHYSICS-001-FR-059`'s own
 /// Non-goals had flagged this exact gap ("this port's dodge direction is
 /// pitch/roll only").
+///
+/// Since `RB-PHYSICS-001-FR-074`, the returned pair also matches
+/// RocketSim's own post-normalization small-component zeroing: after
+/// normalizing, any component whose magnitude falls below
+/// `DODGE_DIRECTION_SNAP_THRESHOLD` (real value `0.1`, confirmed identical
+/// to `dodgeDir.x()`/`dodgeDir.y()`'s own zeroing in `_UpdateDoubleJumpOrFlip`)
+/// is snapped to exactly zero — a near-axis-aligned diagonal stick input
+/// no longer leaves a tiny, physically negligible but real perpendicular
+/// dodge component. `RB-PHYSICS-001-FR-073`'s own Non-goals had flagged
+/// this as a "separate architectural difference," but it isn't one: like
+/// normalization itself, it's a pure post-processing step on the already-
+/// normalized pair this function already computes, needing no new
+/// machinery — the same "pure operation, no new architecture" transfer
+/// this function's own earlier finding already used.
 fn normalize_dodge_direction(pitch: f32, roll: f32) -> (f32, f32) {
     let magnitude = (pitch * pitch + roll * roll).sqrt();
     if magnitude > 0.0 {
-        (pitch / magnitude, roll / magnitude)
+        let mut norm_pitch = pitch / magnitude;
+        let mut norm_roll = roll / magnitude;
+        if norm_pitch.abs() < DODGE_DIRECTION_SNAP_THRESHOLD {
+            norm_pitch = 0.0;
+        }
+        if norm_roll.abs() < DODGE_DIRECTION_SNAP_THRESHOLD {
+            norm_roll = 0.0;
+        }
+        (norm_pitch, norm_roll)
     } else {
         (0.0, 0.0)
     }
@@ -2574,6 +2617,38 @@ mod tests {
             (pitch - roll).abs() < 1e-6,
             "expected an equal 45-degree split"
         );
+    }
+
+    #[test]
+    fn normalize_dodge_direction_snaps_a_near_axis_aligned_input_to_a_pure_axis() {
+        // RB-PHYSICS-001-FR-074: RocketSim's own post-normalization
+        // small-component zeroing snaps a near-axis-aligned diagonal (e.g.
+        // a stick nudged almost, but not quite, purely forward) to a pure
+        // single-axis dodge instead of leaving a tiny perpendicular
+        // component. pitch=1.0, roll=0.05 normalizes to roll ~= 0.05,
+        // well below DODGE_DIRECTION_SNAP_THRESHOLD (0.1).
+        let (pitch, roll) = normalize_dodge_direction(1.0, 0.05);
+        assert_eq!(
+            roll, 0.0,
+            "expected the tiny roll component to snap to zero"
+        );
+        assert!(
+            pitch > 0.9,
+            "expected the pitch component to stay close to its full unit magnitude, got {pitch}"
+        );
+    }
+
+    #[test]
+    fn normalize_dodge_direction_does_not_snap_a_clearly_diagonal_input() {
+        // A genuinely diagonal input (both axes well above the snap
+        // threshold once normalized) is unaffected by the snap.
+        let (pitch, roll) = normalize_dodge_direction(1.0, 0.5);
+        assert!(
+            pitch.abs() >= DODGE_DIRECTION_SNAP_THRESHOLD
+                && roll.abs() >= DODGE_DIRECTION_SNAP_THRESHOLD,
+            "expected neither component to snap to zero, got ({pitch}, {roll})"
+        );
+        assert!(roll > 0.0, "expected the roll component to stay nonzero");
     }
 
     #[test]
