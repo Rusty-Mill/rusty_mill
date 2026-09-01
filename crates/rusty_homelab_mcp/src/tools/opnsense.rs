@@ -6,8 +6,8 @@ use rusty_mcp::ToolError;
 use rusty_opnsense::ServiceAction;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 
+use crate::json_result::JsonResult;
 use crate::server::HomelabServer;
 
 /// An action to take on a named service.
@@ -48,12 +48,13 @@ impl HomelabServer {
     #[tool(
         description = "Get the OPNsense firewall's overall system status: firmware version, running kernel, pending updates, and per-service health."
     )]
-    pub async fn opnsense_system_status(&self) -> Result<Json<Value>, ErrorData> {
+    pub async fn opnsense_system_status(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
                 .system_status()
                 .await
-                .map_err(opnsense_error)?,
+                .map_err(opnsense_error)?
+                .into(),
         ))
     }
 
@@ -61,12 +62,13 @@ impl HomelabServer {
     #[tool(
         description = "List every service OPNsense's service supervisor knows about, with its running state and short id (used by opnsense_service_control)."
     )]
-    pub async fn opnsense_list_services(&self) -> Result<Json<Value>, ErrorData> {
+    pub async fn opnsense_list_services(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
                 .list_services()
                 .await
-                .map_err(opnsense_error)?,
+                .map_err(opnsense_error)?
+                .into(),
         ))
     }
 
@@ -77,12 +79,13 @@ impl HomelabServer {
     pub async fn opnsense_service_control(
         &self,
         Parameters(ServiceControlArgs { name, action }): Parameters<ServiceControlArgs>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
                 .service_control(&name, action.into())
                 .await
-                .map_err(opnsense_error)?,
+                .map_err(opnsense_error)?
+                .into(),
         ))
     }
 
@@ -90,12 +93,13 @@ impl HomelabServer {
     #[tool(
         description = "List every network interface OPNsense knows about, keyed by device name."
     )]
-    pub async fn opnsense_list_interfaces(&self) -> Result<Json<Value>, ErrorData> {
+    pub async fn opnsense_list_interfaces(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
                 .list_interfaces()
                 .await
-                .map_err(opnsense_error)?,
+                .map_err(opnsense_error)?
+                .into(),
         ))
     }
 
@@ -103,12 +107,13 @@ impl HomelabServer {
     #[tool(
         description = "List every firewall alias currently configured on OPNsense (name, type, and contents)."
     )]
-    pub async fn opnsense_list_firewall_aliases(&self) -> Result<Json<Value>, ErrorData> {
+    pub async fn opnsense_list_firewall_aliases(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
                 .list_firewall_aliases()
                 .await
-                .map_err(opnsense_error)?,
+                .map_err(opnsense_error)?
+                .into(),
         ))
     }
 
@@ -116,12 +121,13 @@ impl HomelabServer {
     #[tool(
         description = "List every configured gateway on OPNsense with its monitor status (none/loss/down) and ping latency."
     )]
-    pub async fn opnsense_list_gateways(&self) -> Result<Json<Value>, ErrorData> {
+    pub async fn opnsense_list_gateways(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.opnsense()?
                 .list_gateways()
                 .await
-                .map_err(opnsense_error)?,
+                .map_err(opnsense_error)?
+                .into(),
         ))
     }
 }

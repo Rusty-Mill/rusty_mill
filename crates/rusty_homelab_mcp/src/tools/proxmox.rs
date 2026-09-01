@@ -5,8 +5,8 @@ use rusty_mcp::ToolError;
 use rusty_proxmox::{GuestKind, PowerAction};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 
+use crate::json_result::JsonResult;
 use crate::server::HomelabServer;
 
 /// Which kind of Proxmox guest a tool call is about.
@@ -105,9 +105,13 @@ impl HomelabServer {
     #[tool(
         description = "List every node in the Proxmox cluster, with its online/offline status, CPU and memory usage, and uptime."
     )]
-    pub async fn proxmox_list_nodes(&self) -> Result<Json<Value>, ErrorData> {
+    pub async fn proxmox_list_nodes(&self) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.proxmox()?.list_nodes().await.map_err(proxmox_error)?,
+            self.proxmox()?
+                .list_nodes()
+                .await
+                .map_err(proxmox_error)?
+                .into(),
         ))
     }
 
@@ -118,12 +122,13 @@ impl HomelabServer {
     pub async fn proxmox_node_status(
         &self,
         Parameters(NodeArgs { node }): Parameters<NodeArgs>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.proxmox()?
                 .node_status(&node)
                 .await
-                .map_err(proxmox_error)?,
+                .map_err(proxmox_error)?
+                .into(),
         ))
     }
 
@@ -134,12 +139,13 @@ impl HomelabServer {
     pub async fn proxmox_list_guests(
         &self,
         Parameters(GuestListArgs { node, kind }): Parameters<GuestListArgs>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.proxmox()?
                 .list_guests(&node, kind.into())
                 .await
-                .map_err(proxmox_error)?,
+                .map_err(proxmox_error)?
+                .into(),
         ))
     }
 
@@ -150,12 +156,13 @@ impl HomelabServer {
     pub async fn proxmox_guest_status(
         &self,
         Parameters(GuestArgs { node, kind, vmid }): Parameters<GuestArgs>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.proxmox()?
                 .guest_status(&node, kind.into(), vmid)
                 .await
-                .map_err(proxmox_error)?,
+                .map_err(proxmox_error)?
+                .into(),
         ))
     }
 
