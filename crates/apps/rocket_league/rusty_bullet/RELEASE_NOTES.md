@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## `GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#117](https://github.com/baileyrd/rusty_bullet/pull/117) · `fd53770`
 
 - **Fetched the current RLBot wiki's "Useful Game Values" page directly**
   (the same page `RB-PHYSICS-001-FR-036`'s own research already used to
