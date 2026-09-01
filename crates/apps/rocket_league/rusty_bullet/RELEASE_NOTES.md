@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Static multi-surface contact combined-solve investigation
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#109](https://github.com/baileyrd/rusty_bullet/pull/109) · `6581c7f`
 
 - **`PhysicsWorld::step` resolved a body's contact against each static
   shape type independently and sequentially** — the ground, then every
