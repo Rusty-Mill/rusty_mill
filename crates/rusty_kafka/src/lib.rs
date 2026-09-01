@@ -16,29 +16,47 @@
 //!   `Metadata` (broker/topic discovery), `CreateTopics` (what
 //!   `TopicManager` needs), `ListOffsets` (watermark/timestamp lookup,
 //!   at v1 -- see [`protocol::list_offsets`]'s module doc for why v1
-//!   specifically), `OffsetFetch` (a consumer group's committed
-//!   offset, with a coordinator-routing caveat -- see
-//!   [`protocol::offset_fetch`]'s module doc), `Produce` (at v3, the
-//!   version [`protocol::produce`] explains -- needs the record batch
-//!   v2 wire format, see [`record_batch`]) -- v0 for every one of
-//!   these except `ListOffsets`/`Produce`.
-//! - **Not yet implemented**: `Fetch` and the rest of consumer-group
-//!   coordination (`FindCoordinator`/`JoinGroup`/`SyncGroup`/
-//!   `Heartbeat`/`OffsetCommit`) -- a consumer side to match `Produce`'s
-//!   producer side, deferred to a follow-up pass.
-//! - **`Produce`/record batch v2 have no live broker to validate
-//!   against** in this environment (see [`record_batch`]'s own module
-//!   doc for the verification approach used instead -- hand-checking
-//!   every field against the published spec, plus a CRC-32C
-//!   implementation cross-checked against the standard Castagnoli test
-//!   vector). Treat this path with more caution than the rest of the
-//!   crate until it's been run against a real broker at least once.
+//!   specifically), `OffsetFetch`/`OffsetCommit` (a consumer group's
+//!   committed offsets, read and write -- `OffsetCommit` at v2, see
+//!   [`protocol::offset_commit`]'s module doc for why; both share
+//!   [`protocol::offset_fetch`]'s coordinator-routing caveat), `Produce`
+//!   (at v3) and `Fetch` (at v4) -- the versions
+//!   [`protocol::produce`]/[`protocol::fetch`] each explain, both
+//!   needing the record batch v2 wire format (see [`record_batch`]) --
+//!   and the rest of consumer-group coordination, `FindCoordinator`/
+//!   `JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup`, every one at v0.
+//! - **What "consumer-group coordination" covers here, and what it
+//!   doesn't**: this crate implements the full *wire protocol* for
+//!   joining, syncing, heartbeating, leaving a group, and committing/
+//!   fetching offsets within one -- including the embedded
+//!   `ConsumerProtocolSubscription`/`ConsumerProtocolAssignment`
+//!   payload format `JoinGroup`/`SyncGroup` carry
+//!   ([`protocol::consumer_protocol`]). It does **not** include the
+//!   *partition-assignment decision* a group's elected leader must
+//!   make in `SyncGroup` (deciding which member gets which partition,
+//!   the way `librdkafka`'s "range"/"roundrobin" assignors do) --
+//!   that's policy for whichever caller drives the join/sync/
+//!   heartbeat/fetch loop (`rusty-meshed-sdk`'s future consumer poll
+//!   loop) to supply, the same layering [`crate::protocol::create_topics`]'s
+//!   raw `CreateTopics` vs. `rusty-meshed-sdk::TopicManager`'s naming-
+//!   convention enforcement already draws.
+//! - **`Produce`/`Fetch`/record batch v2 have no live broker to
+//!   validate against** in this environment (see [`record_batch`]'s
+//!   own module doc for the verification approach used instead --
+//!   hand-checking every field against the published spec, plus a
+//!   CRC-32C implementation cross-checked against the standard
+//!   Castagnoli test vector). Treat this path, and the rest of the
+//!   consumer-group coordination layered on top of it, with more
+//!   caution than the rest of the crate until it's been run against a
+//!   real broker at least once.
 //! - **Single-connection, no pipelining**: [`KafkaClient`] sends one
 //!   request and awaits its response before sending the next, over one
 //!   connection. No multiplexing/pipelining, and no controller/leader
 //!   discovery -- every request goes to whichever broker it's connected
-//!   to, matching meshed's own only real deployment target (a single
-//!   all-in-one KRaft node in local dev; see `meshed/compose.yaml`).
+//!   to (including `FindCoordinator`'s own result -- see
+//!   [`protocol::find_coordinator`]'s module doc), matching meshed's
+//!   own only real deployment target (a single all-in-one KRaft node
+//!   in local dev; see `meshed/compose.yaml`).
 //!
 //! The [`protocol`] module's request/response types are pure
 //! encode/decode, independent of the network layer, and are the most

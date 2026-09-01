@@ -14,6 +14,14 @@
 use crate::error::CodecError;
 use rusty_wire::{Reader, Writer};
 
+pub(crate) fn read_i8(reader: &mut Reader) -> Result<i8, CodecError> {
+    Ok(reader.read_bytes(1)?[0] as i8)
+}
+
+pub(crate) fn write_i8(writer: &mut Writer, v: i8) {
+    writer.write_bytes(&[v as u8]);
+}
+
 pub(crate) fn read_i16(reader: &mut Reader) -> Result<i16, CodecError> {
     Ok(reader.read_u16_be()? as i16)
 }
@@ -88,6 +96,35 @@ pub(crate) fn read_array_len(reader: &mut Reader) -> Result<i32, CodecError> {
         return Err(CodecError::InvalidArrayLength(len));
     }
     Ok(len)
+}
+
+/// Reads a Kafka `NULLABLE_BYTES` field: an `INT32` byte length (`-1`
+/// means `None`) followed by that many raw bytes -- the same shape
+/// [`read_nullable_string`] uses for text, for fields that carry
+/// arbitrary bytes instead (consumer-group `metadata`/`assignment`
+/// payloads, `Fetch`'s `record_set`).
+pub(crate) fn read_nullable_bytes<'a>(
+    reader: &mut Reader<'a>,
+) -> Result<Option<&'a [u8]>, CodecError> {
+    let len = read_i32(reader)?;
+    if len < -1 {
+        return Err(CodecError::InvalidBytesLength(len));
+    }
+    if len == -1 {
+        return Ok(None);
+    }
+    Ok(Some(reader.read_bytes(len as usize)?))
+}
+
+/// Writes a Kafka `NULLABLE_BYTES` field.
+pub(crate) fn write_nullable_bytes(writer: &mut Writer, value: Option<&[u8]>) {
+    match value {
+        None => write_i32(writer, -1),
+        Some(bytes) => {
+            write_i32(writer, bytes.len() as i32);
+            writer.write_bytes(bytes);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +207,52 @@ mod tests {
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         assert_eq!(read_i64(&mut reader).unwrap(), 1_735_689_600_000);
+    }
+
+    #[test]
+    fn nullable_bytes_round_trips_some() {
+        let mut writer = Writer::new();
+        write_nullable_bytes(&mut writer, Some(&[1, 2, 3]));
+        let bytes = writer.into_vec();
+        assert_eq!(bytes, [0x00, 0x00, 0x00, 0x03, 1, 2, 3]);
+
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(
+            read_nullable_bytes(&mut reader).unwrap(),
+            Some(&[1, 2, 3][..])
+        );
+    }
+
+    #[test]
+    fn nullable_bytes_round_trips_none() {
+        let mut writer = Writer::new();
+        write_nullable_bytes(&mut writer, None);
+        let bytes = writer.into_vec();
+        assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF]);
+
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(read_nullable_bytes(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn nullable_bytes_rejects_below_negative_one() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, -2);
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        assert!(matches!(
+            read_nullable_bytes(&mut reader),
+            Err(CodecError::InvalidBytesLength(-2))
+        ));
+    }
+
+    #[test]
+    fn i8_round_trips_negative_values() {
+        let mut writer = Writer::new();
+        write_i8(&mut writer, -1);
+        let bytes = writer.into_vec();
+        assert_eq!(bytes, [0xFF]);
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(read_i8(&mut reader).unwrap(), -1);
     }
 }

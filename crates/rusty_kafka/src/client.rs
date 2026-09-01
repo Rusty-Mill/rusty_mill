@@ -6,11 +6,18 @@ use crate::error::ClientError;
 use crate::protocol::api_key;
 use crate::protocol::api_versions::{ApiVersionsRequest, ApiVersionsResponse};
 use crate::protocol::create_topics::{CreateTopicsRequest, CreateTopicsResponse};
+use crate::protocol::fetch::{FetchRequest, FetchResponse};
+use crate::protocol::find_coordinator::{FindCoordinatorRequest, FindCoordinatorResponse};
 use crate::protocol::header::{RequestHeader, ResponseHeader};
+use crate::protocol::heartbeat::{HeartbeatRequest, HeartbeatResponse};
+use crate::protocol::join_group::{JoinGroupRequest, JoinGroupResponse};
+use crate::protocol::leave_group::{LeaveGroupRequest, LeaveGroupResponse};
 use crate::protocol::list_offsets::{ListOffsetsRequest, ListOffsetsResponse};
 use crate::protocol::metadata::{MetadataRequest, MetadataResponse};
+use crate::protocol::offset_commit::{OffsetCommitRequest, OffsetCommitResponse};
 use crate::protocol::offset_fetch::{OffsetFetchRequest, OffsetFetchResponse};
 use crate::protocol::produce::{ProduceRequest, ProduceResponse};
+use crate::protocol::sync_group::{SyncGroupRequest, SyncGroupResponse};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_wire::{Reader, Writer};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -168,6 +175,94 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
             .await?;
         let mut reader = Reader::new(&body);
         Ok(ProduceResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `FetchRequest` v4. See [`crate::protocol::fetch`]'s
+    /// module doc for why v4, not v0.
+    pub async fn fetch(&mut self, request: &FetchRequest) -> Result<FetchResponse, ClientError> {
+        let body = self
+            .call(api_key::FETCH, 4, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(FetchResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `FindCoordinatorRequest` v0. See
+    /// [`crate::protocol::find_coordinator`]'s module doc for the
+    /// coordinator-routing caveat this call doesn't handle.
+    pub async fn find_coordinator(
+        &mut self,
+        request: &FindCoordinatorRequest,
+    ) -> Result<FindCoordinatorResponse, ClientError> {
+        let body = self
+            .call(api_key::FIND_COORDINATOR, 0, |writer| {
+                request.encode(writer)
+            })
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(FindCoordinatorResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `JoinGroupRequest` v0.
+    pub async fn join_group(
+        &mut self,
+        request: &JoinGroupRequest,
+    ) -> Result<JoinGroupResponse, ClientError> {
+        let body = self
+            .call(api_key::JOIN_GROUP, 0, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(JoinGroupResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `SyncGroupRequest` v0.
+    pub async fn sync_group(
+        &mut self,
+        request: &SyncGroupRequest,
+    ) -> Result<SyncGroupResponse, ClientError> {
+        let body = self
+            .call(api_key::SYNC_GROUP, 0, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(SyncGroupResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `HeartbeatRequest` v0.
+    pub async fn heartbeat(
+        &mut self,
+        request: &HeartbeatRequest,
+    ) -> Result<HeartbeatResponse, ClientError> {
+        let body = self
+            .call(api_key::HEARTBEAT, 0, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(HeartbeatResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `LeaveGroupRequest` v0.
+    pub async fn leave_group(
+        &mut self,
+        request: &LeaveGroupRequest,
+    ) -> Result<LeaveGroupResponse, ClientError> {
+        let body = self
+            .call(api_key::LEAVE_GROUP, 0, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(LeaveGroupResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `OffsetCommitRequest` v2. See
+    /// [`crate::protocol::offset_commit`]'s module doc for why v2, not
+    /// v0.
+    pub async fn offset_commit(
+        &mut self,
+        request: &OffsetCommitRequest,
+    ) -> Result<OffsetCommitResponse, ClientError> {
+        let body = self
+            .call(api_key::OFFSET_COMMIT, 2, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(OffsetCommitResponse::decode(&mut reader)?)
     }
 }
 
@@ -424,6 +519,295 @@ mod tests {
         server.await.unwrap();
 
         assert_eq!(response.topics[0].partitions[0].base_offset, 42);
+        assert_eq!(response.topics[0].partitions[0].error_code, 0);
+    }
+
+    #[rusty_tokio::test]
+    async fn fetch_round_trips_through_a_fake_peer() {
+        use crate::protocol::fetch::{FetchPartitionRequest, FetchTopicRequest};
+
+        let (client_io, mut peer) = duplex(4096);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::FETCH);
+            assert_eq!(header.api_version, 4);
+
+            let mut reader = Reader::new(&body);
+            let decoded = crate::protocol::fetch::FetchRequest::decode(&mut reader).unwrap();
+            assert_eq!(decoded.replica_id, -1);
+            assert_eq!(decoded.topics[0].partitions[0].fetch_offset, 5);
+
+            let response = crate::protocol::fetch::FetchResponse {
+                throttle_time_ms: 0,
+                topics: vec![crate::protocol::fetch::FetchTopicResponse {
+                    name: "manpower.personnel-lifecycle.assignments".to_string(),
+                    partitions: vec![crate::protocol::fetch::FetchPartitionResponse {
+                        partition_index: 0,
+                        error_code: 0,
+                        high_watermark: 6,
+                        last_stable_offset: 6,
+                        aborted_transactions: vec![],
+                        records: vec![crate::record_batch::Record {
+                            key: None,
+                            value: Some(b"{\"person_id\":\"p-1\"}".to_vec()),
+                            headers: vec![],
+                        }],
+                    }],
+                }],
+            };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body, 1_735_689_600_000);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = FetchRequest {
+            replica_id: -1,
+            max_wait_ms: 1000,
+            min_bytes: 1,
+            max_bytes: 1_048_576,
+            isolation_level: crate::protocol::fetch::READ_UNCOMMITTED,
+            topics: vec![FetchTopicRequest {
+                name: "manpower.personnel-lifecycle.assignments".to_string(),
+                partitions: vec![FetchPartitionRequest {
+                    partition_index: 0,
+                    fetch_offset: 5,
+                    partition_max_bytes: 1_048_576,
+                }],
+            }],
+        };
+        let response = client.fetch(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.topics[0].partitions[0].high_watermark, 6);
+        assert_eq!(response.topics[0].partitions[0].records.len(), 1);
+    }
+
+    #[rusty_tokio::test]
+    async fn find_coordinator_round_trips_through_a_fake_peer() {
+        use crate::protocol::find_coordinator::{FindCoordinatorRequest, FindCoordinatorResponse};
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::FIND_COORDINATOR);
+
+            let response = FindCoordinatorResponse {
+                error_code: 0,
+                node_id: 1,
+                host: "localhost".to_string(),
+                port: 9092,
+            };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = FindCoordinatorRequest {
+            group_id: "readiness-reporting-personnel-consumer".to_string(),
+        };
+        let response = client.find_coordinator(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.node_id, 1);
+        assert_eq!(response.port, 9092);
+    }
+
+    #[rusty_tokio::test]
+    async fn join_group_round_trips_through_a_fake_peer() {
+        use crate::protocol::join_group::{JoinGroupProtocol, JoinGroupRequest, JoinGroupResponse};
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::JOIN_GROUP);
+
+            let response = JoinGroupResponse {
+                error_code: 0,
+                generation_id: 1,
+                group_protocol: "range".to_string(),
+                leader_id: "consumer-1-abc".to_string(),
+                member_id: "consumer-1-abc".to_string(),
+                members: vec![],
+            };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = JoinGroupRequest {
+            group_id: "readiness-reporting-personnel-consumer".to_string(),
+            session_timeout_ms: 10_000,
+            member_id: String::new(),
+            protocol_type: "consumer".to_string(),
+            protocols: vec![JoinGroupProtocol {
+                name: "range".to_string(),
+                metadata: crate::protocol::consumer_protocol::encode_subscription(&[
+                    "manpower.personnel-lifecycle.assignments".to_string(),
+                ]),
+            }],
+        };
+        let response = client.join_group(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.generation_id, 1);
+        assert!(response.is_leader());
+    }
+
+    #[rusty_tokio::test]
+    async fn sync_group_round_trips_through_a_fake_peer() {
+        use crate::protocol::sync_group::{SyncGroupRequest, SyncGroupResponse};
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::SYNC_GROUP);
+
+            let response = SyncGroupResponse {
+                error_code: 0,
+                assignment: crate::protocol::consumer_protocol::encode_assignment(&[(
+                    "manpower.personnel-lifecycle.assignments".to_string(),
+                    vec![0, 1, 2],
+                )]),
+            };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = SyncGroupRequest {
+            group_id: "readiness-reporting-personnel-consumer".to_string(),
+            generation_id: 1,
+            member_id: "consumer-1-abc".to_string(),
+            assignments: vec![],
+        };
+        let response = client.sync_group(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            crate::protocol::consumer_protocol::decode_assignment(&response.assignment).unwrap(),
+            vec![(
+                "manpower.personnel-lifecycle.assignments".to_string(),
+                vec![0, 1, 2]
+            )]
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn heartbeat_round_trips_through_a_fake_peer() {
+        use crate::protocol::heartbeat::{HeartbeatRequest, HeartbeatResponse};
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::HEARTBEAT);
+
+            let response = HeartbeatResponse { error_code: 0 };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = HeartbeatRequest {
+            group_id: "readiness-reporting-personnel-consumer".to_string(),
+            generation_id: 1,
+            member_id: "consumer-1-abc".to_string(),
+        };
+        let response = client.heartbeat(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.error_code, 0);
+    }
+
+    #[rusty_tokio::test]
+    async fn leave_group_round_trips_through_a_fake_peer() {
+        use crate::protocol::leave_group::{LeaveGroupRequest, LeaveGroupResponse};
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::LEAVE_GROUP);
+
+            let response = LeaveGroupResponse { error_code: 0 };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = LeaveGroupRequest {
+            group_id: "readiness-reporting-personnel-consumer".to_string(),
+            member_id: "consumer-1-abc".to_string(),
+        };
+        let response = client.leave_group(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.error_code, 0);
+    }
+
+    #[rusty_tokio::test]
+    async fn offset_commit_round_trips_through_a_fake_peer() {
+        use crate::protocol::offset_commit::{
+            OffsetCommitPartitionRequest, OffsetCommitRequest, OffsetCommitResponse,
+            OffsetCommitTopicRequest,
+        };
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::OFFSET_COMMIT);
+            assert_eq!(header.api_version, 2);
+
+            let mut reader = Reader::new(&body);
+            let decoded = OffsetCommitRequest::decode(&mut reader).unwrap();
+            assert_eq!(decoded.group_generation_id, 1);
+            assert_eq!(decoded.topics[0].partitions[0].committed_offset, 6);
+
+            let response = OffsetCommitResponse {
+                topics: vec![crate::protocol::offset_commit::OffsetCommitTopicResponse {
+                    name: "manpower.personnel-lifecycle.assignments".to_string(),
+                    partitions: vec![
+                        crate::protocol::offset_commit::OffsetCommitPartitionResponse {
+                            partition_index: 0,
+                            error_code: 0,
+                        },
+                    ],
+                }],
+            };
+            let mut response_body = Writer::new();
+            response.encode(&mut response_body);
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = OffsetCommitRequest {
+            group_id: "readiness-reporting-personnel-consumer".to_string(),
+            group_generation_id: 1,
+            member_id: "consumer-1-abc".to_string(),
+            retention_time_ms: -1,
+            topics: vec![OffsetCommitTopicRequest {
+                name: "manpower.personnel-lifecycle.assignments".to_string(),
+                partitions: vec![OffsetCommitPartitionRequest {
+                    partition_index: 0,
+                    committed_offset: 6,
+                    committed_metadata: None,
+                }],
+            }],
+        };
+        let response = client.offset_commit(&request).await.unwrap();
+        server.await.unwrap();
+
         assert_eq!(response.topics[0].partitions[0].error_code, 0);
     }
 

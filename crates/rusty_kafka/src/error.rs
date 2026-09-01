@@ -20,6 +20,10 @@ pub enum CodecError {
     /// A Kafka string's `INT16` length prefix was below `-1`.
     #[error("string length {0} is invalid (must be -1 or >= 0)")]
     InvalidStringLength(i16),
+    /// A Kafka `NULLABLE_BYTES` field's `INT32` length prefix was below
+    /// `-1`.
+    #[error("bytes length {0} is invalid (must be -1 or >= 0)")]
+    InvalidBytesLength(i32),
     /// A record batch's `magic` byte wasn't `2` -- this crate only
     /// encodes/decodes record batch v2 (see
     /// [`crate::record_batch`]'s module doc for why).
