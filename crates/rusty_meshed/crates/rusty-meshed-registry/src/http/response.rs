@@ -2,14 +2,43 @@
 //! `Content-Length` is set by [`super::server::serve`] right before
 //! writing, from the final body length -- builders here don't need to
 //! track it themselves.
+//!
+//! Almost every response is [`Response::sse`]'s complete opposite: a
+//! value computed once and written back whole. The one exception is
+//! an SSE event stream (REG/XFM's `/transformation/events` et al.),
+//! which has to keep producing chunks indefinitely -- see
+//! [`Response::sse`] and [`super::server::handle_connection`]'s
+//! streaming write path.
 
 use rusty_http::{HeaderMap, StatusCode};
+use std::future::Future;
+use std::pin::Pin;
 
-#[derive(Debug, Clone)]
+/// Produces the next SSE chunk (already formatted as `data: ...\n\n`
+/// or `: heartbeat\n\n`) each time it's called -- an `SseSource` is
+/// its own accumulated poll state (e.g. `last_id`), not a fresh
+/// closure per call.
+pub type SseSource = Box<dyn FnMut() -> Pin<Box<dyn Future<Output = String> + Send>> + Send>;
+
 pub struct Response {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
+    /// `Some` only for a streaming (SSE) response -- see
+    /// [`Response::sse`]. When set, [`Response::body`] is ignored by
+    /// the server's write path.
+    pub sse: Option<SseSource>,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("body", &self.body)
+            .field("sse", &self.sse.is_some())
+            .finish()
+    }
 }
 
 impl Response {
@@ -19,7 +48,36 @@ impl Response {
             status,
             headers: HeaderMap::new(),
             body: Vec::new(),
+            sse: None,
         }
+    }
+
+    /// A `text/event-stream` response (REG-030/XFM-030's
+    /// `media_type="text/event-stream"` plus its three headers):
+    /// `source` is called repeatedly, forever, each call producing the
+    /// next chunk to write to the connection. The server never reads
+    /// [`Response::body`] for this response -- there is no fixed body,
+    /// only an indefinite stream.
+    pub fn sse(source: SseSource) -> Self {
+        let mut response = Response::new(StatusCode::OK);
+        response
+            .headers
+            .insert("Content-Type", "text/event-stream")
+            .expect("static header name/value is always valid");
+        response
+            .headers
+            .insert("Cache-Control", "no-cache")
+            .expect("static header name/value is always valid");
+        response
+            .headers
+            .insert("Connection", "keep-alive")
+            .expect("static header name/value is always valid");
+        response
+            .headers
+            .insert("X-Accel-Buffering", "no")
+            .expect("static header name/value is always valid");
+        response.sse = Some(source);
+        response
     }
 
     /// A `Content-Type: application/json` response serializing `value`.

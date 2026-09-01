@@ -10,6 +10,7 @@ pub mod data_products;
 pub mod governance;
 pub mod lineage;
 pub mod ports;
+pub mod transformation;
 
 use crate::http::response::Response;
 use rusty_http::StatusCode;

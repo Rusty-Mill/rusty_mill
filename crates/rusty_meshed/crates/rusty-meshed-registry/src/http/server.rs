@@ -55,6 +55,28 @@ where
 
     let req = Request::from_head(&head, body);
     let mut response = cors::handle(&router, req).await;
+
+    if let Some(mut source) = response.sse.take() {
+        // A streaming response never gets Content-Length (there is no
+        // fixed length) and stays open indefinitely -- chunked framing
+        // instead, matching the source's StreamingResponse. This loop
+        // runs forever by design (the source's own SSE generator never
+        // terminates either); it ends only when a write fails, i.e.
+        // the peer closed the connection.
+        response.headers.insert("Transfer-Encoding", "chunked")?;
+        let response_head = ResponseHead {
+            status: response.status,
+            reason: response.status.canonical_reason().unwrap_or("").to_string(),
+            version: Version::Http11,
+            headers: response.headers,
+        };
+        transport.write_response_head(&response_head).await?;
+        loop {
+            let chunk = source().await;
+            transport.write_chunk(chunk.as_bytes()).await?;
+        }
+    }
+
     response
         .headers
         .insert("Content-Length", &response.body.len().to_string())?;
@@ -112,5 +134,57 @@ mod tests {
         assert_eq!(response_head.status, StatusCode::OK);
         assert_eq!(body, b"ok");
         assert_eq!(response_head.headers.get("Content-Length"), Some("2"));
+    }
+
+    #[rusty_tokio::test]
+    async fn streams_an_sse_response_as_chunked_transfer_encoding() {
+        let router = Arc::new(Router::new().get("/events", |_req| async {
+            let mut n = 0u32;
+            Response::sse(Box::new(move || {
+                n += 1;
+                let chunk = format!("data: {n}\n\n");
+                Box::pin(async move { chunk })
+            }))
+        }));
+        let (client, server) = duplex(4096);
+
+        let server_task = rusty_tokio::spawn(async move {
+            // The loop runs forever until the client disconnects, at
+            // which point the next write fails and the task ends --
+            // this Err is the expected/normal way an SSE connection
+            // closes, not a bug.
+            let _ = handle_connection(server, router).await;
+        });
+
+        let mut transport = AsyncTransport::new(client);
+        let request_head = rusty_http::head::RequestHead {
+            method: rusty_http::Method::Get,
+            target: "/events".to_string(),
+            version: Version::Http11,
+            headers: rusty_http::HeaderMap::new(),
+        };
+        transport.write_request_head(&request_head).await.unwrap();
+        transport.write_body(&[]).await.unwrap();
+
+        let response_head = transport.read_response_head(MAX_HEAD_LEN).await.unwrap();
+        assert_eq!(response_head.status, StatusCode::OK);
+        assert_eq!(
+            response_head.headers.get("Transfer-Encoding"),
+            Some("chunked")
+        );
+        assert_eq!(
+            response_head.headers.get("Content-Type"),
+            Some("text/event-stream")
+        );
+        assert_eq!(response_head.headers.get("Cache-Control"), Some("no-cache"));
+
+        let mut body_reader = transport.into_body_reader(rusty_http::body::Framing::Chunked);
+        let first = body_reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(first, b"data: 1\n\n");
+        let second = body_reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(second, b"data: 2\n\n");
+
+        drop(body_reader);
+        let _ = server_task.await;
     }
 }
