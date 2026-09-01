@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Yaw input now contributes to a dodge's direction, matching real Rocket League
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#153](https://github.com/baileyrd/rusty_bullet/pull/153) · `99a498a`
 
 - **This port's dodge/wall-jump-dodge direction read `pitch`/`roll` stick
   input only, never `yaw`** — `RB-PHYSICS-001-FR-059`'s own Non-goals (and
