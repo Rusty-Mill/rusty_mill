@@ -74,8 +74,14 @@
 //! air-control pitch. Both pitch and roll can contribute at once (a
 //! diagonal dodge), simply summed — a documented simplification, since real
 //! Rocket League normalizes the stick direction so a diagonal dodge isn't
-//! faster than an axis-aligned one, and this port doesn't. A dodge is
-//! purely horizontal (no vertical component, unlike the plain double
+//! faster than an axis-aligned one, and this port doesn't. Since
+//! `RB-PHYSICS-001-FR-059`, though, `DODGE_SPEED`'s own magnitude is no
+//! longer flat regardless of direction or current speed: a pitch dodge
+//! opposing the car's current forward-velocity direction, or any side
+//! (roll) dodge, scales up as current speed rises toward `MAX_CAR_SPEED`
+//! — see `dodge_speed_scale`'s own doc comment for the confirmed real
+//! ratios and `dodge_pitch_is_backward`'s for the backward classification.
+//! A dodge is purely horizontal (no vertical component, unlike the plain double
 //! jump) — real Rocket League's dodge impulse does have a small upward
 //! component too, not modeled here. Below `DODGE_DEADZONE` on both axes,
 //! the plain vertical double jump fires exactly as before dodge existed.
@@ -206,31 +212,38 @@
 //! scales it by RocketSim's own confirmed real curve shape as speed rises,
 //! tapering smoothly to zero at `UNBOOSTED_MAX_CAR_SPEED` instead of a hard
 //! cutoff (see that function's own doc comment for why the curve's shape,
-//! unlike its peak magnitude, transfers cleanly). `STEER_TORQUE`,
+//! unlike its peak magnitude, transfers cleanly). `DODGE_SPEED`'s own base
+//! magnitude is likewise still an uncalibrated placeholder, but since
+//! `RB-PHYSICS-001-FR-059` its per-direction scaling (a backward dodge
+//! opposing current motion, or any side dodge, growing stronger as current
+//! speed rises) matches RocketSim's own confirmed real ratios via
+//! `dodge_speed_scale` — the same "shape confirmed, magnitude not" split
+//! `THROTTLE_ACCELERATION` already has. `STEER_TORQUE`,
 //! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
-//! `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, and
+//! `WALL_JUMP_HORIZONTAL_SPEED`, and `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
 //! only to produce a visibly responsive turn/slide/spin/push-off/flip for
 //! this car's mass/inertia in tests — `RB-PHYSICS-001-FR-031`'s audit
 //! found real reference numbers for some of these (a dodge's real ~500
-//! uu/s base impulse and direction/speed-dependent scaling; a wall jump
-//! reusing the plain jump impulse rather than its own faster speed; real
-//! air-control torque/damping coefficients), but none of them port
-//! directly: they're expressed as torques or velocity-dependent curves
-//! calibrated against real Rocket League's own specific car mass/inertia
-//! tensor and mechanic shape, neither of which this port's own
-//! placeholder car body or simplified single-impulse mechanics are
-//! calibrated to match, so adopting the raw numbers here would be false
-//! precision, not a real fix — see the audit's own findings for detail.
-//! `MAX_CAR_ANGULAR_SPEED` doesn't have that problem even though it also
-//! bounds rotation: it caps the *result* (angular velocity, in rad/s)
-//! rather than prescribing the torque that produces it, so it transfers
-//! cleanly regardless of this port's own car body/inertia tensor not
-//! matching real Rocket League's — see `RB-PHYSICS-001-FR-057`'s own
-//! findings for why that distinction let this one constant clear the bar
-//! the torque-based placeholders above couldn't. Aside from that one
-//! exception, none of these are independently confirmed by this project —
-//! see `RB-PHYSICS-001-FR-005`/`FR-031`.
+//! uu/s base impulse; a wall jump reusing the plain jump impulse rather
+//! than its own faster speed; real air-control torque/damping
+//! coefficients), but none of them port directly: they're expressed as
+//! torques or velocity-dependent curves calibrated against real Rocket
+//! League's own specific car mass/inertia tensor and mechanic shape,
+//! neither of which this port's own placeholder car body or simplified
+//! single-impulse mechanics are calibrated to match, so adopting the raw
+//! numbers here would be false precision, not a real fix — see the
+//! audit's own findings for detail. `MAX_CAR_ANGULAR_SPEED` (and, since
+//! `RB-PHYSICS-001-FR-059`, `DODGE_SPEED`'s own per-direction scale
+//! ratios) don't have that problem even though they also bound
+//! rotation/velocity: they cap or scale the *result* (a rad/s or uu/s
+//! quantity) rather than prescribing the torque or force that produces
+//! it, so they transfer cleanly regardless of this port's own car
+//! body/inertia tensor not matching real Rocket League's — see
+//! `RB-PHYSICS-001-FR-057`'s own findings for why that distinction let
+//! these constants clear the bar the torque-based placeholders above
+//! couldn't. Aside from those exceptions, none of these are independently
+//! confirmed by this project — see `RB-PHYSICS-001-FR-005`/`FR-031`.
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -448,8 +461,78 @@ const DODGE_DEADZONE: f32 = 0.1;
 /// continuous force) — chosen only to produce a visibly fast, distinct
 /// dodge in tests, not derived from any measured or documented Rocket
 /// League value. `pub` so `world.rs`'s end-to-end tests can assert against
-/// it directly, the same way `JUMP_SPEED` already is.
+/// it directly, the same way `JUMP_SPEED` already is. This is the
+/// standing-start (and forward-dodge) magnitude specifically — since
+/// `RB-PHYSICS-001-FR-059`, a backward or side dodge made at speed scales
+/// above this via `dodge_speed_scale`, matching RocketSim's own confirmed
+/// per-direction speed dependence, even though this base value itself
+/// remains unconfirmed.
 pub const DODGE_SPEED: f32 = 1400.0;
+
+/// Confirmed real ratio: a *backward* pitch-dodge (one opposing the car's
+/// own current forward-velocity direction, per `dodge_pitch_is_backward`)
+/// grows up to this multiple of `DODGE_SPEED` as current speed rises
+/// toward `MAX_CAR_SPEED` — RocketSim's own `Car.cpp`
+/// (`_UpdateDoubleJumpOrFlip`) confirmed exact against `RLConst.h`:
+/// `FLIP_BACKWARD_IMPULSE_MAX_SPEED_SCALE = 2.5f`. A forward pitch-dodge's
+/// own real scale is exactly `1.0` (`FLIP_FORWARD_IMPULSE_MAX_SPEED_SCALE`)
+/// — unchanged from `DODGE_SPEED`'s own base value — so there's no
+/// separate forward-scale constant here. Only this *ratio* is adopted;
+/// RocketSim's own real base magnitude (`FLIP_INITIAL_VEL_SCALE = 500.f`,
+/// which the forward case corresponds to one-to-one) is deliberately not
+/// substituted for `DODGE_SPEED` itself — see this constant's own Non-goals
+/// in `RB-PHYSICS-001-FR-059`'s own Requirements entry for why.
+const DODGE_BACKWARD_SPEED_SCALE: f32 = 2.5;
+
+/// Confirmed real ratio: a side (`roll`) dodge grows up to this multiple of
+/// `DODGE_SPEED` as current speed rises toward `MAX_CAR_SPEED`, regardless
+/// of left/right direction — RocketSim's own confirmed
+/// `FLIP_SIDE_IMPULSE_MAX_SPEED_SCALE = 1.9f`. See `DODGE_BACKWARD_SPEED_SCALE`'s
+/// own doc comment for the same "ratio adopted, base magnitude not"
+/// caveat.
+const DODGE_SIDE_SPEED_SCALE: f32 = 1.9;
+
+/// Below this current forward speed (uu/s), `dodge_pitch_is_backward`
+/// falls back to stick direction alone rather than comparing it against a
+/// near-zero, noisy current-velocity direction — RocketSim's own
+/// confirmed threshold, `abs(forwardSpeed_UU) < 100.0f`.
+const DODGE_BACKWARD_CLASSIFICATION_SPEED_THRESHOLD: f32 = 100.0;
+
+/// A dodge's real per-axis magnitude scale as a function of the car's
+/// current forward speed — confirmed against RocketSim's own `Car.cpp`
+/// during `RB-PHYSICS-001-FR-059`'s audit: `1.0` (no change) at a standing
+/// start, rising linearly to `scale_at_max_speed` by `MAX_CAR_SPEED`, then
+/// held flat beyond it (`forward_speed` can in principle exceed
+/// `MAX_CAR_SPEED` transiently, e.g. after a boosted speed-flip chain;
+/// RocketSim's own real ratio isn't itself clamped in the source, but this
+/// port clamps it here rather than let an already-uncalibrated dodge
+/// magnitude grow unbounded past the one confirmed reference point).
+fn dodge_speed_scale(forward_speed: f32, scale_at_max_speed: f32) -> f32 {
+    let ratio = (forward_speed.abs() / MAX_CAR_SPEED).min(1.0);
+    1.0 + (scale_at_max_speed - 1.0) * ratio
+}
+
+/// Whether a pitch-dodge counts as "backward" for `DODGE_BACKWARD_SPEED_SCALE`
+/// purposes: opposing the car's own current forward-velocity direction: at
+/// or above `DODGE_BACKWARD_CLASSIFICATION_SPEED_THRESHOLD`, that means
+/// `dodge_pitch` and `forward_speed` disagree in sign (dodging forward
+/// while already moving backward counts as "backward" too, the same as
+/// the more common backward-dodge-while-moving-forward case — both oppose
+/// current motion); below it, classification falls back to `dodge_pitch`'s
+/// own sign alone, since comparing against a near-zero velocity direction
+/// would be noise. Confirmed against RocketSim's own `Car.cpp`
+/// (`shouldDodgeBackwards`), re-derived in this port's own sign convention
+/// (positive `dodge_pitch` means forward, matching `apply_driven_forces`'s
+/// own `dodge_impulse += forward * (dodge_pitch * DODGE_SPEED)`) rather
+/// than translated symbol-for-symbol from the reference's own stick-sign
+/// convention.
+fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> bool {
+    if forward_speed.abs() < DODGE_BACKWARD_CLASSIFICATION_SPEED_THRESHOLD {
+        dodge_pitch < 0.0
+    } else {
+        (dodge_pitch >= 0.0) != (forward_speed >= 0.0)
+    }
+}
 
 /// Uncalibrated placeholder dodge spin speed (rad/s), added directly to
 /// `RigidBody.angular_velocity` as an instantaneous change (mirroring how
@@ -750,15 +833,24 @@ pub fn apply_driven_forces(
                     // deliberate simplification (see the module doc
                     // comment). Leaves a cancelable flip active
                     // (dodge_flip_active), same as a ground dodge.
+                    let wall_jump_forward_speed = car.linear_velocity.dot(&forward);
                     let mut dodge_impulse =
                         wall_normal * WALL_JUMP_HORIZONTAL_SPEED + Vec3::new(0.0, 0.0, JUMP_SPEED);
                     let mut dodge_spin = Vec3::ZERO;
                     if wall_pitch.abs() > DODGE_DEADZONE {
-                        dodge_impulse += forward * (wall_pitch * DODGE_SPEED);
+                        let scale = if dodge_pitch_is_backward(wall_pitch, wall_jump_forward_speed)
+                        {
+                            dodge_speed_scale(wall_jump_forward_speed, DODGE_BACKWARD_SPEED_SCALE)
+                        } else {
+                            1.0
+                        };
+                        dodge_impulse += forward * (wall_pitch * DODGE_SPEED * scale);
                         dodge_spin += right_axis(car) * (wall_pitch * DODGE_ANGULAR_SPEED);
                     }
                     if wall_roll.abs() > DODGE_DEADZONE {
-                        dodge_impulse += right_axis(car) * (wall_roll * DODGE_SPEED);
+                        let scale =
+                            dodge_speed_scale(wall_jump_forward_speed, DODGE_SIDE_SPEED_SCALE);
+                        dodge_impulse += right_axis(car) * (wall_roll * DODGE_SPEED * scale);
                         dodge_spin += forward * (wall_roll * DODGE_ANGULAR_SPEED);
                     }
                     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
@@ -791,14 +883,21 @@ pub fn apply_driven_forces(
                     // from roll (translate along right_axis, spin about
                     // forward_axis). Purely horizontal, with no vertical
                     // JUMP_SPEED component — see the module doc comment.
+                    let dodge_forward_speed = car.linear_velocity.dot(&forward);
                     let mut dodge_impulse = Vec3::ZERO;
                     let mut dodge_spin = Vec3::ZERO;
                     if dodge_pitch.abs() > DODGE_DEADZONE {
-                        dodge_impulse += forward * (dodge_pitch * DODGE_SPEED);
+                        let scale = if dodge_pitch_is_backward(dodge_pitch, dodge_forward_speed) {
+                            dodge_speed_scale(dodge_forward_speed, DODGE_BACKWARD_SPEED_SCALE)
+                        } else {
+                            1.0
+                        };
+                        dodge_impulse += forward * (dodge_pitch * DODGE_SPEED * scale);
                         dodge_spin += right_axis(car) * (dodge_pitch * DODGE_ANGULAR_SPEED);
                     }
                     if dodge_roll.abs() > DODGE_DEADZONE {
-                        dodge_impulse += right_axis(car) * (dodge_roll * DODGE_SPEED);
+                        let scale = dodge_speed_scale(dodge_forward_speed, DODGE_SIDE_SPEED_SCALE);
+                        dodge_impulse += right_axis(car) * (dodge_roll * DODGE_SPEED * scale);
                         dodge_spin += forward * (dodge_roll * DODGE_ANGULAR_SPEED);
                     }
                     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
@@ -1935,6 +2034,150 @@ mod tests {
         assert!(
             (c.linear_velocity.y - DODGE_SPEED).abs() < 1.0,
             "expected the lateral component of a diagonal dodge, got {}",
+            c.linear_velocity.y
+        );
+    }
+
+    #[test]
+    fn dodge_speed_scale_matches_the_real_curve() {
+        // RB-PHYSICS-001-FR-059: RocketSim's own
+        // FLIP_BACKWARD_IMPULSE_MAX_SPEED_SCALE (2.5) and
+        // FLIP_SIDE_IMPULSE_MAX_SPEED_SCALE (1.9) confirmed exact against
+        // its own RLConst.h.
+        assert_eq!(dodge_speed_scale(0.0, 2.5), 1.0);
+        assert_eq!(dodge_speed_scale(MAX_CAR_SPEED, 2.5), 2.5);
+        assert!(
+            (dodge_speed_scale(MAX_CAR_SPEED / 2.0, 2.5) - 1.75).abs() < 1e-4,
+            "expected the midpoint to interpolate to 1.75, got {}",
+            dodge_speed_scale(MAX_CAR_SPEED / 2.0, 2.5)
+        );
+        assert_eq!(
+            dodge_speed_scale(MAX_CAR_SPEED * 2.0, 2.5),
+            2.5,
+            "expected speed past MAX_CAR_SPEED to clamp"
+        );
+        assert_eq!(
+            dodge_speed_scale(-MAX_CAR_SPEED, 1.9),
+            1.9,
+            "expected the scale to use the speed's magnitude, not its sign"
+        );
+    }
+
+    #[test]
+    fn dodge_pitch_is_backward_matches_the_real_classification() {
+        // Below DODGE_BACKWARD_CLASSIFICATION_SPEED_THRESHOLD, classification
+        // falls back to stick direction alone.
+        assert!(dodge_pitch_is_backward(-1.0, 0.0));
+        assert!(!dodge_pitch_is_backward(1.0, 0.0));
+        // At speed, classification compares dodge direction to current
+        // motion: opposing directions count as "backward" (a real backward
+        // dodge, or a forward dodge while already moving backward).
+        assert!(dodge_pitch_is_backward(-1.0, MAX_CAR_SPEED));
+        assert!(dodge_pitch_is_backward(1.0, -MAX_CAR_SPEED));
+        assert!(!dodge_pitch_is_backward(1.0, MAX_CAR_SPEED));
+        assert!(!dodge_pitch_is_backward(-1.0, -MAX_CAR_SPEED));
+    }
+
+    #[test]
+    fn a_backward_dodge_scales_up_with_current_forward_speed() {
+        // RB-PHYSICS-001-FR-059: a dodge opposing the car's own current
+        // motion now scales up toward DODGE_BACKWARD_SPEED_SCALE as speed
+        // rises, matching RocketSim's own confirmed
+        // FLIP_BACKWARD_IMPULSE_MAX_SPEED_SCALE — this test would see a
+        // plain DODGE_SPEED-sized delta instead, without the scale.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
+        let before = c.linear_velocity.x;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(-1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        let delta = c.linear_velocity.x - before;
+        assert!(
+            (delta - (-DODGE_SPEED * DODGE_BACKWARD_SPEED_SCALE)).abs() < 1.0,
+            "expected a backward dodge at max speed to scale to DODGE_SPEED \
+             * DODGE_BACKWARD_SPEED_SCALE, got delta {}",
+            delta
+        );
+    }
+
+    #[test]
+    fn a_forward_dodge_does_not_scale_with_current_forward_speed() {
+        // The real forward-dodge scale is exactly 1.0 (RocketSim's own
+        // FLIP_FORWARD_IMPULSE_MAX_SPEED_SCALE) — a forward dodge stays at
+        // DODGE_SPEED regardless of current speed, unlike a backward or
+        // side dodge.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
+        let before = c.linear_velocity.x;
+        let input = ControllerInput {
+            jump: true,
+            pitch: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        let delta = c.linear_velocity.x - before;
+        assert!(
+            (delta - DODGE_SPEED).abs() < 1.0,
+            "expected a forward dodge to stay at plain DODGE_SPEED \
+             regardless of current speed, got delta {}",
+            delta
+        );
+    }
+
+    #[test]
+    fn a_side_dodge_scales_up_with_current_forward_speed() {
+        // RB-PHYSICS-001-FR-059: a side (roll) dodge scales up toward
+        // DODGE_SIDE_SPEED_SCALE as current forward speed rises, regardless
+        // of direction, matching RocketSim's own confirmed
+        // FLIP_SIDE_IMPULSE_MAX_SPEED_SCALE.
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
+        let input = ControllerInput {
+            jump: true,
+            roll: Some(1.0),
+            ..Default::default()
+        };
+        step_with_input_and_double_jump_state(
+            &mut c,
+            &input,
+            false,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            1.0 / 60.0,
+        );
+        assert!(
+            (c.linear_velocity.y - DODGE_SPEED * DODGE_SIDE_SPEED_SCALE).abs() < 1.0,
+            "expected a side dodge at max speed to scale to DODGE_SPEED * \
+             DODGE_SIDE_SPEED_SCALE, got {}",
             c.linear_velocity.y
         );
     }
