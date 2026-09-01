@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/config",
+    "crates/observe",
+    "crates/constrain",
+    "crates/feed",
+    "crates/kernel",
+    "crates/mcp",
+    "crates/compose",
+    "crates/app",
+]
+# The Tauri desktop shell (Phase 15) is its own workspace under `desktop/` — it
+# pulls Tauri + WebKitGTK, so it is intentionally kept out of the core workspace
+# to keep `cargo build --workspace` lean. It builds in a dedicated CI job.
+exclude = ["desktop"]
+
+[workspace.package]
+edition = "2021"
+# MSRV. The coding-standards doc pins 1.82, but aisdk 0.5.2 (and its macro crate)
+# use let-chains, stabilized in Rust 1.88 — so 1.88 is the true floor. See
+# docs/dev/coding-standards.md §1.
+rust-version = "1.88"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+# External
+aisdk = "0.5.2"
+async-trait = "0.1.88"
+schemars = "1.0.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0.12"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "process"] }
+
+# Internal
+rk-config = { path = "crates/config" }
+rk-observe = { path = "crates/observe" }
+rk-constrain = { path = "crates/constrain" }
+rk-feed = { path = "crates/feed" }
+rk-kernel = { path = "crates/kernel" }
+rk-mcp = { path = "crates/mcp" }
+rk-compose = { path = "crates/compose" }

@@ -1,0 +1,30 @@
+[package]
+name = "rk-kernel"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rk-config.workspace = true
+rk-observe.workspace = true
+rk-constrain.workspace = true
+aisdk.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures = "0.3"
+
+[features]
+# Ships the scripted FakeLanguageModel fixture (testing-strategy.md). Enabled in
+# dev/tests; downstream test crates turn it on too.
+fake = []
+
+[dev-dependencies]
+rk-kernel = { path = ".", features = ["fake"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
