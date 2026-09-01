@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real forward-speed-dependent dodge impulse scaling
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#125](https://github.com/baileyrd/rusty_bullet/pull/125) · `5f20ac4`
 
 - **`RB-PHYSICS-001-FR-031`'s own audit had already found real Rocket
   League's dodge impulse has "direction/speed-dependent scaling"** but
