@@ -4,6 +4,7 @@
 //! into the app's route table (the equivalent of FastAPI's
 //! `app.include_router`, REG-006).
 
+pub mod access_grants;
 pub mod contracts;
 pub mod data_products;
 pub mod governance;

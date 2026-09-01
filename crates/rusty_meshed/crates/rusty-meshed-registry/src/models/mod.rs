@@ -81,7 +81,28 @@ pub struct DataContract {
     pub quality_assertions: String,
 }
 
-/// Creates the four registry tables if they don't already exist, and
+/// A grant authorizing a consumer group to resolve (and thus subscribe
+/// to) a specific output port's topic -- the Rust port of
+/// `meshed.governance.rbac.PortAccessGrant` (GOV-013). Lives in this
+/// crate rather than `rusty-meshed-governance` despite the Python
+/// module's name (`rbac.py`) -- it's a SQLite-backed table + HTTP
+/// routes, not part of the governance engine itself (see that crate's
+/// module doc for the same note). Unlike [`InputPort`]/[`OutputPort`],
+/// `output_port_id` has no `ON DELETE CASCADE`, matching the source's
+/// plain `foreign_key="output_ports.id"` with no cascade declared, and
+/// there's no DB-level uniqueness on `(output_port_id,
+/// consumer_group_id)` either (REG-091) -- duplicates are rejected
+/// only at the API layer (409, GOV-015).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortAccessGrant {
+    pub id: i64,
+    pub output_port_id: i64,
+    pub consumer_group_id: String,
+    pub granted_by: String,
+    pub granted_at: String,
+}
+
+/// Creates the five registry tables if they don't already exist, and
 /// turns on FK enforcement (SQLite disables it by default per
 /// connection) so the `ON DELETE CASCADE` clauses below actually fire
 /// -- matching `SQLModel.metadata.create_all`'s no-migrations approach
@@ -132,7 +153,17 @@ pub fn ensure_schema(conn: &Connection) -> SqlResult<()> {
             slo_freshness_seconds INTEGER NOT NULL,
             slo_completeness_pct REAL NOT NULL,
             quality_assertions TEXT NOT NULL DEFAULT '[]'
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS port_access_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            output_port_id INTEGER NOT NULL REFERENCES output_ports(id),
+            consumer_group_id TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_port_access_grants_output_port_id ON port_access_grants(output_port_id);
+        CREATE INDEX IF NOT EXISTS idx_port_access_grants_consumer_group_id ON port_access_grants(consumer_group_id);",
     )
 }
 
@@ -274,6 +305,37 @@ mod tests {
         assert!(
             result.is_err(),
             "data_product_id must reference an existing data_products row"
+        );
+    }
+
+    #[test]
+    fn port_access_grants_has_no_composite_uniqueness_at_the_db_level() {
+        let conn = seeded_connection();
+        let product_id = insert_product(&conn);
+        conn.execute(
+            "INSERT INTO output_ports (data_product_id, topic_name, schema_subject, event_type) VALUES (?1, ?2, ?3, ?4)",
+            params![product_id, "downstream.topic", "downstream.topic-value", "delta"],
+        )
+        .unwrap();
+        let port_id = conn.last_insert_rowid();
+
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO port_access_grants (output_port_id, consumer_group_id, granted_by, granted_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![port_id, "billing-service", "admin@example.com", "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM port_access_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "REG-091: no DB-level composite uniqueness on (output_port_id, consumer_group_id)"
         );
     }
 }

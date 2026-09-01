@@ -5,7 +5,7 @@
 //! for a distinct "public" type to guard against.
 
 use super::enums::MaturityTier;
-use super::{DataContract, InputPort, OutputPort};
+use super::{DataContract, InputPort, OutputPort, PortAccessGrant};
 use rusty_err::Error;
 use rusty_meshed_core::EventType;
 use rusty_meshed_governance::{GovernanceEngine, GovernedProduct};
@@ -267,6 +267,38 @@ impl DataContractPublic {
     }
 }
 
+/// Request body for creating a port access grant -- the Rust port of
+/// `meshed.governance.rbac.PortAccessGrantCreate` (GOV-013). No
+/// validation beyond field presence: the source's schema has none
+/// either (unlike `DataContractCreate`), and the router itself is
+/// what enforces the port-exists (404) and duplicate-grant (409)
+/// rules (GOV-014, GOV-015).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortAccessGrantCreate {
+    pub output_port_id: i64,
+    pub consumer_group_id: String,
+    pub granted_by: String,
+}
+
+impl PortAccessGrantCreate {
+    pub fn new(
+        output_port_id: i64,
+        consumer_group_id: impl Into<String>,
+        granted_by: impl Into<String>,
+    ) -> Self {
+        PortAccessGrantCreate {
+            output_port_id,
+            consumer_group_id: consumer_group_id.into(),
+            granted_by: granted_by.into(),
+        }
+    }
+}
+
+/// Response schema for access-grant endpoints -- a plain alias, as
+/// with [`InputPortPublic`]/[`OutputPortPublic`] (see the parent
+/// module doc).
+pub type PortAccessGrantPublic = PortAccessGrant;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +471,13 @@ mod tests {
             public.quality_assertions,
             vec!["no nulls in order_id".to_string(), "amount > 0".to_string()]
         );
+    }
+
+    #[test]
+    fn port_access_grant_create_builds_from_its_three_fields() {
+        let create = PortAccessGrantCreate::new(2, "billing-service", "admin@example.com");
+        assert_eq!(create.output_port_id, 2);
+        assert_eq!(create.consumer_group_id, "billing-service");
+        assert_eq!(create.granted_by, "admin@example.com");
     }
 }
