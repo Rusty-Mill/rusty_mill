@@ -950,6 +950,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   existing `jump_hold_time_remaining` state instead of adding a second
   field, so no caller needed to change. 3 new tests; all pre-existing tests
   pass unchanged.
+- Missing real per-axis air-control torque ratio (`RB-PHYSICS-001-FR-068`)
+  — all three axes (pitch/yaw/roll) shared one flat `AIR_CONTROL_TORQUE`
+  magnitude. `RB-PHYSICS-001-FR-031`'s own audit had already found real
+  air-control torque coefficients exist but didn't adopt them (absolute
+  torques calibrated against real Rocket League's own specific
+  mass/inertia). Fetching RocketSim's own `Car.cpp` (`_UpdateAirTorque`,
+  the same technique FR-058/FR-059/FR-064 used) found the real mechanism
+  is structurally identical to this port's own — a direct per-axis torque
+  scaled by analog input — unlike steering or handbrake's own architecture
+  mismatches, with `RLConst.h` confirming `CAR_AIR_CONTROL_TORQUE =
+  Vec(130, 95, 400)` (pitch-yaw-roll order). Added
+  `drive::AIR_CONTROL_YAW_SCALE = 95.0/130.0` and
+  `AIR_CONTROL_ROLL_SCALE = 400.0/130.0`, wired into
+  `apply_driven_forces`'s yaw/roll torque application; `AIR_CONTROL_TORQUE`
+  itself (pitch's own magnitude) is unchanged, still uncalibrated. 2 new
+  tests pin the exact expected angular velocity in closed form; all
+  pre-existing tests pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

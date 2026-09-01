@@ -50,10 +50,15 @@
 //! an analog value, e.g. replay-derived input, see `rb_domain`) is treated
 //! as zero, same as a centered stick. Unlike ground steering, air control
 //! isn't speed-scaled: a car can spin freely from a standing start in the
-//! air, since there's no wheel grip to require momentum for. All three
-//! axes share one `AIR_CONTROL_TORQUE` constant — a real simplification,
-//! since Rocket League's actual pitch/yaw/roll rates differ from each
-//! other; this port doesn't model that difference. Since
+//! air, since there's no wheel grip to require momentum for. Since
+//! `RB-PHYSICS-001-FR-068`, the three axes no longer share one flat
+//! `AIR_CONTROL_TORQUE` magnitude: yaw and roll are scaled from pitch's own
+//! by `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`, RocketSim's own
+//! confirmed real per-axis ratios (`CAR_AIR_CONTROL_TORQUE = Vec(130, 95,
+//! 400)` in pitch-yaw-roll order) — real Rocket League's pitch/yaw/roll
+//! rates still differ in absolute magnitude too, not just this ratio, but
+//! only the ratio transfers cleanly onto this port's own uncalibrated
+//! pitch baseline (see `AIR_CONTROL_TORQUE`'s own doc comment). Since
 //! `RB-PHYSICS-001-FR-057`, sustained air control (or a dodge's own kick,
 //! or the landing-orientation assist) can no longer spin a car arbitrarily
 //! fast, though: `clamp_angular_speed` caps the result at
@@ -261,10 +266,9 @@
 //! League applies a genuinely anisotropic (direction-dependent) reduction,
 //! not this port's one isotropic factor — see that requirement's own
 //! entry and `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc comment for the
-//! full finding. `AIR_CONTROL_TORQUE` and
-//! `DODGE_ANGULAR_SPEED`, and
+//! full finding. `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
-//! only to produce a visibly responsive turn/spin/flip for
+//! only to produce a visibly responsive spin/flip for
 //! this car's mass/inertia in tests — `LANDING_AUTO_UPRIGHT_TORQUE` in
 //! particular isn't a simplification of one real system at all, since
 //! `RB-PHYSICS-001-FR-060` found real Rocket League's two closest systems
@@ -275,12 +279,23 @@
 //! confirmed to have no distinct wall-jump mechanic or constant to
 //! calibrate against at all — see that requirement's own entry and
 //! `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for the full finding.
+//! `AIR_CONTROL_TORQUE` itself (pitch's own magnitude) remains an
+//! uncalibrated placeholder too, but since `RB-PHYSICS-001-FR-068` its own
+//! per-axis *ratio* — unlike `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/
+//! `WALL_JUMP_HORIZONTAL_SPEED`'s own confirmed-but-not-adopted findings —
+//! is confirmed and directly adopted: yaw and roll are scaled from pitch's
+//! own by RocketSim's own confirmed real ratios, since real air control
+//! turned out to be the same *kind* of direct per-axis torque mechanism
+//! this port already models, unlike those other three findings' own
+//! architecture mismatches — see that requirement's own entry and
+//! `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full finding.
 //! `RB-PHYSICS-001-FR-031`'s audit
 //! found real reference numbers for some of these (a dodge's real ~500
 //! uu/s base impulse; a wall jump reusing the plain jump impulse rather
 //! than its own faster speed, confirmed exact by `RB-PHYSICS-001-FR-067`;
-//! real air-control torque/damping
-//! coefficients), but none of them port directly: they're expressed as
+//! real air-control torque/damping coefficients, whose per-axis ratio
+//! `RB-PHYSICS-001-FR-068` later confirmed and adopted), but none of the
+//! remaining raw absolute values port directly: they're expressed as
 //! torques or velocity-dependent curves calibrated against real Rocket
 //! League's own specific car mass/inertia tensor and mechanic shape,
 //! neither of which this port's own placeholder car body or simplified
@@ -551,14 +566,49 @@ const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 /// also apply, unmodified, to the double jump.
 pub const JUMP_SPEED: f32 = 875.0 / 3.0;
 
-/// Uncalibrated placeholder air-control torque magnitude, shared by pitch,
-/// yaw, and roll (about the car's local right, up, and forward axes
-/// respectively) at full analog input — chosen only so a full-stick
-/// rotation is visibly responsive for this car's mass/inertia in tests,
-/// not derived from any measured or documented Rocket League value. Real
-/// Rocket League's pitch/yaw/roll rates differ from each other; this port
-/// doesn't model that difference.
+/// Uncalibrated placeholder air-control torque magnitude for *pitch*
+/// specifically (about the car's local right axis) at full analog input —
+/// chosen only so a full-stick pitch is visibly responsive for this car's
+/// mass/inertia in tests, not derived from any measured or documented
+/// Rocket League value. Since `RB-PHYSICS-001-FR-068`, yaw and roll no
+/// longer share this same magnitude: they're scaled from it by
+/// `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`, RocketSim's own
+/// confirmed real per-axis ratios — see that constant's own doc comment
+/// for the full finding. Real Rocket League's pitch/yaw/roll rates still
+/// differ in absolute magnitude too, not just this ratio, from this port's
+/// own uncalibrated pitch baseline; only the *ratio* between axes is
+/// adopted here.
 const AIR_CONTROL_TORQUE: f32 = 1_000_000.0;
+
+/// Confirmed real ratio: yaw's real air-control torque is this fraction of
+/// pitch's. `RB-PHYSICS-001-FR-068` fetched RocketSim's real `Car.cpp`
+/// (`_UpdateAirTorque`) and found real Rocket League's air control is the
+/// same *kind* of mechanism this port already models — a torque about each
+/// local axis, scaled directly by analog stick input, not a wheel/tire
+/// model like steering (`RB-PHYSICS-001-FR-065`) or a friction split like
+/// handbrake (`FR-066`) turned out to need — computed as
+/// `pitch * dirPitch_right * CAR_AIR_CONTROL_TORQUE.x + yaw * dirYaw_up *
+/// CAR_AIR_CONTROL_TORQUE.y + roll * dirRoll_forward *
+/// CAR_AIR_CONTROL_TORQUE.z`. RocketSim's own `RLConst.h` confirms
+/// `CAR_AIR_CONTROL_TORQUE = Vec(130, 95, 400)` ("Angle order is PYR"),
+/// giving `95.0 / 130.0` for yaw relative to pitch. Because the real
+/// mechanism matches this port's own structurally (a direct per-axis
+/// torque, not a value requiring a transfer function this port's
+/// architecture can't represent), this per-axis *ratio* is adoptable the
+/// same way `RB-PHYSICS-001-FR-058`'s throttle taper and `FR-059`'s dodge
+/// scale are — a direct multiplier on a torque this port already applies
+/// the same way real Rocket League does, transferring cleanly regardless
+/// of this port's own uncalibrated `AIR_CONTROL_TORQUE` magnitude (unlike
+/// the real curve's own *absolute* torque values, which `RB-PHYSICS-001-FR-031`'s
+/// "false precision" finding already ruled out for this port's
+/// differently-calibrated car body).
+const AIR_CONTROL_YAW_SCALE: f32 = 95.0 / 130.0;
+
+/// Confirmed real ratio: roll's real air-control torque is this multiple of
+/// pitch's — see `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full
+/// finding and reasoning. Same source: `CAR_AIR_CONTROL_TORQUE.z /
+/// CAR_AIR_CONTROL_TORQUE.x` = `400.0 / 130.0`.
+const AIR_CONTROL_ROLL_SCALE: f32 = 400.0 / 130.0;
 
 /// Uncalibrated placeholder wall-jump horizontal push-off speed (uu/s),
 /// applied outward along the wall's normal as an instantaneous velocity
@@ -1007,12 +1057,12 @@ pub fn apply_driven_forces(
 
         let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
         if yaw != 0.0 {
-            car.apply_torque(up_axis(car) * (yaw * AIR_CONTROL_TORQUE));
+            car.apply_torque(up_axis(car) * (yaw * AIR_CONTROL_TORQUE * AIR_CONTROL_YAW_SCALE));
         }
 
         let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
         if roll != 0.0 {
-            car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE));
+            car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE * AIR_CONTROL_ROLL_SCALE));
         }
 
         // Landing auto-orientation assistance: with no active pitch/roll
@@ -2768,6 +2818,72 @@ mod tests {
             c.angular_velocity.x.abs() > 0.0,
             "expected roll to produce angular velocity about the local forward (X) axis, got {:?}",
             c.angular_velocity
+        );
+    }
+
+    #[test]
+    fn yaw_air_control_is_scaled_down_from_pitch_by_the_confirmed_real_ratio() {
+        // RB-PHYSICS-001-FR-068: RocketSim's real CAR_AIR_CONTROL_TORQUE =
+        // Vec(130, 95, 400) (pitch-yaw-roll order) confirms yaw's real
+        // torque is 95/130 of pitch's — this test would see yaw and pitch
+        // produce the same angular speed (scaled only by this car's own
+        // differing moments of inertia about each axis) without that ratio
+        // applied.
+        let dt = 1.0 / 60.0;
+        let inv_inertia = car().inv_inertia_world();
+
+        let mut pitch_car = car();
+        let mut pitch_boost = MAX_BOOST;
+        step_with_input(&mut pitch_car, &full_pitch(), false, &mut pitch_boost, dt);
+        let expected_pitch =
+            AIR_CONTROL_TORQUE * inv_inertia.mul_vec3(&Vec3::new(0.0, 1.0, 0.0)).y * dt;
+        assert!(
+            (pitch_car.angular_velocity.y - expected_pitch).abs() < 1e-3,
+            "expected pitch's own angular velocity to match AIR_CONTROL_TORQUE directly, got {} \
+             (expected {})",
+            pitch_car.angular_velocity.y,
+            expected_pitch
+        );
+
+        let mut yaw_car = car();
+        let mut yaw_boost = MAX_BOOST;
+        step_with_input(&mut yaw_car, &full_yaw(), false, &mut yaw_boost, dt);
+        let expected_yaw = AIR_CONTROL_TORQUE
+            * AIR_CONTROL_YAW_SCALE
+            * inv_inertia.mul_vec3(&Vec3::new(0.0, 0.0, 1.0)).z
+            * dt;
+        assert!(
+            (yaw_car.angular_velocity.z - expected_yaw).abs() < 1e-3,
+            "expected yaw's own angular velocity to be scaled by AIR_CONTROL_YAW_SCALE, got {} \
+             (expected {})",
+            yaw_car.angular_velocity.z,
+            expected_yaw
+        );
+    }
+
+    #[test]
+    fn roll_air_control_is_scaled_up_from_pitch_by_the_confirmed_real_ratio() {
+        // RB-PHYSICS-001-FR-068: RocketSim's real CAR_AIR_CONTROL_TORQUE
+        // confirms roll's real torque is 400/130 (~3.08x) of pitch's — this
+        // test would see roll and pitch produce the same angular speed
+        // (scaled only by this car's own differing moments of inertia)
+        // without that ratio applied.
+        let dt = 1.0 / 60.0;
+        let inv_inertia = car().inv_inertia_world();
+
+        let mut roll_car = car();
+        let mut roll_boost = MAX_BOOST;
+        step_with_input(&mut roll_car, &full_roll(), false, &mut roll_boost, dt);
+        let expected_roll = AIR_CONTROL_TORQUE
+            * AIR_CONTROL_ROLL_SCALE
+            * inv_inertia.mul_vec3(&Vec3::new(1.0, 0.0, 0.0)).x
+            * dt;
+        assert!(
+            (roll_car.angular_velocity.x - expected_roll).abs() < 1e-3,
+            "expected roll's own angular velocity to be scaled by AIR_CONTROL_ROLL_SCALE, got {} \
+             (expected {})",
+            roll_car.angular_velocity.x,
+            expected_roll
         );
     }
 
