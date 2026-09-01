@@ -171,7 +171,7 @@ fn read_variable(r: &mut Reader<'_>, width: usize) -> Result<u32> {
     match width {
         1 => Ok(r.read_u8()? as u32),
         2 => Ok(r.read_u16_le()? as u32),
-        _ => r.read_u32_le(),
+        _ => Ok(r.read_u32_le()?),
     }
 }
 

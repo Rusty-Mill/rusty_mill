@@ -132,7 +132,7 @@ fn unwrap<'a>(buf: &'a [u8], expected: u16) -> Result<(u16, Reader<'a>)> {
 /// right decoder.
 pub fn decode_msg_type(buf: &[u8]) -> Result<u16> {
     let mut r = Reader::new(buf);
-    r.read_u16_le()
+    Ok(r.read_u16_le()?)
 }
 
 fn read_wchar_z(r: &mut Reader<'_>) -> Result<String> {
@@ -708,7 +708,7 @@ impl FileContentsResponsePdu {
             });
         }
         let mut r = Reader::new(&self.data);
-        r.read_u64_le()
+        Ok(r.read_u64_le()?)
     }
 }
 

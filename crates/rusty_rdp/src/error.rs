@@ -59,3 +59,20 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Converts a `rusty_wire` cursor error into this crate's error type,
+/// preserving the variant shape (`UnexpectedEof`/`InvalidValue` line up
+/// field-for-field) so every `?` call site on [`crate::cursor::Reader`] /
+/// [`crate::cursor::Writer`] keeps working unchanged.
+impl From<rusty_wire::Error> for Error {
+    fn from(e: rusty_wire::Error) -> Self {
+        match e {
+            rusty_wire::Error::UnexpectedEof { needed, available } => {
+                Error::UnexpectedEof { needed, available }
+            }
+            rusty_wire::Error::InvalidValue { field, value } => {
+                Error::InvalidValue { field, value }
+            }
+        }
+    }
+}

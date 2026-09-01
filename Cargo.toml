@@ -83,6 +83,7 @@ members = [
     "crates/rusty_config",
     "crates/rusty_jinja",
     "crates/rusty_ansder",
+    "crates/rusty_rag",
     "crates/rusty_boot",
     "crates/rusty_whisper",
     "crates/rusty_rdp",

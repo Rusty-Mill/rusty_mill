@@ -2650,9 +2650,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -5405,9 +5405,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.1.4"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
+checksum = "42b6914fac0be956fe704a38239c3f44a9f841d1b06a5713d2f638065593f5b5"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5442,9 +5442,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.1.4"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a85d45508e9b4ba024fe996c2638799635d75b6dd0ba8f32ccf08f8026f0c780"
+checksum = "cdf1c49bd4d52014b94db0877410db273c2008f01628b0252a2e9460ad9b7fda"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -6006,10 +6006,6 @@ dependencies = [
 name = "rusty_ansder"
 version = "0.1.0"
 dependencies = [
- "rusty_json",
- "rusty_regx",
- "rusty_simd 0.1.0",
- "rusty_std",
  "rusty_wire",
 ]
 
@@ -6251,6 +6247,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_rag"
+version = "0.1.0"
+dependencies = [
+ "rusty_simd 0.1.0",
+]
+
+[[package]]
 name = "rusty_rdp"
 version = "0.1.0"
 dependencies = [
@@ -6259,7 +6262,6 @@ dependencies = [
  "platform-linux 0.27.0",
  "platform-mock 0.27.0",
  "rustls",
- "rusty_ansder",
  "rusty_tls",
  "rusty_wire",
 ]
