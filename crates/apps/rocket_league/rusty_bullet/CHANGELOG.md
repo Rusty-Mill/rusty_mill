@@ -860,6 +860,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   it as a per-match mutator-config default at ball construction, not a
   hardcoded system invariant. 4 new tests; all pre-existing tests pass
   unchanged.
+- Missing mandatory minimum-hold window for a ground jump's variable-height
+  acceleration (`RB-PHYSICS-001-FR-064`) — `drive::JUMP_HOLD_MAX_DURATION`'s
+  own doc comment had named this exact gap since `RB-PHYSICS-001-FR-031`'s
+  original audit: real Rocket League scales its jump-hold acceleration down
+  during a `JUMP_MIN_TIME` (0.025s) window rather than applying it flat, an
+  unmodeled "two-phase ramp". Fetching RocketSim's own `Car.cpp`
+  (`_UpdateJump`, the same technique FR-058/FR-059 used) surfaced the exact
+  mechanism: the hold force keeps applying, scaled by
+  `JUMP_PRE_MIN_ACCEL_SCALE = 0.62f`, for `JUMP_MIN_TIME` seconds
+  regardless of whether `jump` is still held — even an instantaneous tap
+  gets a small amount of extra height in real Rocket League, not just a
+  release-anytime cutoff. Added `drive::JUMP_MIN_TIME`/
+  `JUMP_PRE_MIN_ACCEL_SCALE` and reworked `apply_driven_forces`'s
+  hold-acceleration check to derive elapsed time since the press from the
+  existing `jump_hold_time_remaining` state instead of adding a second
+  field, so no caller needed to change. 3 new tests; all pre-existing tests
+  pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

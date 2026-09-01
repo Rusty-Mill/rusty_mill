@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.63.0
+- Version: 0.64.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4099,6 +4099,90 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `RB-PHYSICS-001-FR-044`/`FR-060`'s own precedent); all 309 of
     `rb_physics_bullet`'s pre-existing tests (as of `FR-062`) pass
     unchanged, confirming zero behavioral change.
+- `RB-PHYSICS-001-FR-064` (real mandatory minimum-hold window for a ground
+  jump's variable-height acceleration): `drive::JUMP_HOLD_MAX_DURATION`'s
+  own doc comment had flagged, since `RB-PHYSICS-001-FR-031`'s original
+  audit, that real Rocket League scales its jump-hold acceleration down
+  during a `JUMP_MIN_TIME` (0.025s) mandatory window rather than applying
+  it flat from the first held step — "that two-phase ramp isn't modeled
+  here, only the flat-acceleration approximation." This requirement
+  implements it.
+  1. **Fetched RocketSim's own `Car.cpp`** (`_UpdateJump`, matching
+     `RB-PHYSICS-001-FR-058`/`FR-059`'s own real-implementation-file
+     method, not just `RLConst.h`'s own constants) and confirmed the exact
+     mechanism, not merely `JUMP_MIN_TIME`'s existence: `jumpTime <
+     JUMP_MIN_TIME || (jumpPressed && jumpTime < JUMP_MAX_TIME)` gates
+     whether the hold force applies at all this tick, with a separate
+     `if (jumpTime < JUMP_MIN_TIME) totalJumpForce *=
+     JUMP_PRE_MIN_ACCEL_SCALE;` (`0.62f`) scaling it down during that
+     window — applied as a hard step-scale, not an interpolation, and
+     regardless of whether the jump button is still held. The same
+     source's own inline comment (`// TODO: Either move to RLConst or
+     preferably don't use this system at all`) flags this as a stopgap its
+     own authors consider provisional, not a deliberate permanent design
+     choice — adopted anyway since it's still the real, currently-shipping
+     behavior, the same standard `RB-PHYSICS-001-FR-042`'s own
+     `box_vs_box` fallback finding already applied to an equally
+     "never proven necessary" branch in Bullet's own reference source.
+  2. **Confirmed both quantities transfer cleanly**, unlike most of
+     `drive.rs`'s own torque-shaped placeholders (see the module doc
+     comment's own "false precision" discussion): `JUMP_MIN_TIME` is a
+     duration, and `JUMP_PRE_MIN_ACCEL_SCALE` is a dimensionless ratio
+     applied to this port's own already-adopted `JUMP_HOLD_ACCELERATION`
+     — neither is a torque or force calibrated against real Rocket
+     League's own specific car mass/inertia tensor, the same category
+     `RB-PHYSICS-001-FR-057`'s `MAX_CAR_ANGULAR_SPEED` and
+     `RB-PHYSICS-001-FR-059`'s dodge-speed-scale ratios already cleared.
+  3. **Implemented the mandatory window** by adding `drive::JUMP_MIN_TIME
+     = 0.025` and `drive::JUMP_PRE_MIN_ACCEL_SCALE = 0.62`, and reworking
+     `apply_driven_forces`'s own hold-acceleration check to derive the
+     time elapsed since the ground-jump press as
+     `JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining` rather than
+     tracking a second, separate elapsed-time field — at rest (
+     `jump_hold_time_remaining == 0.0`, meaning no ground jump is in
+     flight) this derivation already reads as `JUMP_HOLD_MAX_DURATION`,
+     comfortably past `JUMP_MIN_TIME`, so a car that never pressed jump
+     never spuriously enters the mandatory branch, with zero new state and
+     zero changes needed anywhere `jump_hold_time_remaining` is threaded
+     (`PhysicsWorld`, every existing test call site). The hold-acceleration
+     condition now applies (scaled during the mandatory window) whenever
+     `elapsed < JUMP_MIN_TIME`, regardless of `input.jump`, or whenever
+     `jump` is still held with time left — matching RocketSim's own gate
+     exactly.
+  - **Non-goals (this requirement).** Does not touch `JUMP_HOLD_MAX_DURATION`
+    or `JUMP_HOLD_ACCELERATION`'s own values — both already confirmed by
+    `RB-PHYSICS-001-FR-031`'s audit and unchanged here. Does not adopt
+    `JUMP_ACCEL`'s own real magnitude beyond what `FR-031` already did;
+    this requirement is scoped to the two-phase ramp's *shape* alone. Does
+    not model real Rocket League's own further `_UpdateJump` nuances this
+    same fetch surfaced but didn't need for this specific fix (e.g. how
+    `jumpTime` itself resets across a fresh jump versus a double
+    jump/dodge) — this port's own pre-existing `jump_hold_time_remaining`
+    re-arming already handles that distinction correctly for this port's
+    own simplified model, unaffected by this change. Does not touch the
+    double jump, a dodge, or the wall jump — all three remain single fixed
+    instantaneous impulses, as before.
+  - **Acceptance criteria.** For the first `JUMP_MIN_TIME` seconds after a
+    ground-jump press, `apply_driven_forces` applies
+    `JUMP_HOLD_ACCELERATION * JUMP_PRE_MIN_ACCEL_SCALE` regardless of
+    `input.jump`, including when jump is released immediately (a tap).
+    Once that window has passed, releasing `jump` ends the extra
+    acceleration immediately, exactly as before this requirement. While
+    `jump` stays held past the mandatory window, the acceleration returns
+    to full `JUMP_HOLD_ACCELERATION` for the remainder of
+    `JUMP_HOLD_MAX_DURATION`, unchanged from before this requirement.
+  - **Verification plan.** 3 new `rb_physics_bullet` unit tests
+    (`jump_hold_acceleration_is_scaled_down_during_the_mandatory_pre_min_time_window`,
+    `releasing_jump_within_the_mandatory_pre_min_time_window_does_not_immediately_stop_the_extra_acceleration`,
+    `mandatory_pre_min_time_window_closes_on_schedule_even_when_jump_is_never_held`)
+    pin the new mandatory-window behavior directly, including the exact
+    scaled-acceleration magnitude. All 309 of `rb_physics_bullet`'s
+    pre-existing tests (as of `FR-063`) pass unchanged — confirmed
+    empirically, not just by inspection: every existing hold-window test's
+    own release/expiry timing happens to fall at or after `JUMP_MIN_TIME`
+    has already elapsed, so none exercises the new early-release-within-
+    the-mandatory-window case this requirement adds — bringing the crate
+    to 312.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5562,6 +5646,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.64.0 (2026-09-01): FR-064 added and implemented (real mandatory
+  minimum-hold window for a ground jump's variable-height acceleration) —
+  `drive::JUMP_HOLD_MAX_DURATION`'s own doc comment had flagged, since
+  `RB-PHYSICS-001-FR-031`'s original audit, that real Rocket League scales
+  its jump-hold acceleration down during a `JUMP_MIN_TIME` (0.025s)
+  mandatory window rather than applying it flat, unmodeled here. Fetched
+  RocketSim's own `Car.cpp` (`_UpdateJump`, matching `FR-058`/`FR-059`'s
+  own real-implementation-file method) and confirmed the exact mechanism:
+  the hold force keeps applying (scaled by `JUMP_PRE_MIN_ACCEL_SCALE =
+  0.62f`) for the first `JUMP_MIN_TIME` seconds regardless of whether
+  `jump` is still held, not merely a slower ramp — even an instantaneous
+  tap gets a small amount of extra height in real Rocket League. Added
+  `drive::JUMP_MIN_TIME`/`JUMP_PRE_MIN_ACCEL_SCALE` and reworked
+  `apply_driven_forces`'s hold-acceleration check to derive elapsed time
+  since the press from the existing `jump_hold_time_remaining` state
+  (`JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining`) rather than
+  adding a second field, so no caller (`PhysicsWorld`, any existing test)
+  needed to change; 3 new tests pin the mandatory window's own scaled
+  acceleration, its immunity to an early release, and its on-schedule
+  closure even when jump is never held. All 309 pre-existing tests pass
+  unchanged, bringing the crate to 312.
 - 0.63.0 (2026-09-01): FR-063 added and implemented (real Rocket League
   uses per-contact-pair-type restitution/friction overrides, not a
   per-body combine — audit finding, documentation only) —

@@ -133,16 +133,22 @@
 //! fresh press that fires it adds a continuous `JUMP_HOLD_ACCELERATION`
 //! upward force, for up to `JUMP_HOLD_MAX_DURATION` seconds, on top of the
 //! fixed `JUMP_SPEED` impulse — releasing early (or the window simply
-//! running out) stops the extra acceleration immediately, matching real
-//! Rocket League's held-vs-tapped jump height difference. This is scoped to
-//! the ground jump alone: the double jump, a dodge, and the wall jump are
-//! still each a single fixed instantaneous impulse, completely unaffected
-//! by how long jump is held, since firing any of them requires releasing
-//! jump first (a fresh press), which itself unconditionally ends the ground
-//! jump's hold window (see `apply_driven_forces`'s own doc comment for the
-//! exact ordering). Tracked per car via `jump_hold_time_remaining`, the same
-//! kind of caller-owned persisted state `jump_held`/`double_jump_available`
-//! already are.
+//! running out) stops the extra acceleration, matching real Rocket League's
+//! held-vs-tapped jump height difference. Since `RB-PHYSICS-001-FR-064`,
+//! that release isn't *always* immediate: for the first `JUMP_MIN_TIME`
+//! seconds after the press, the acceleration keeps applying regardless of
+//! whether `jump` is still held (scaled down by `JUMP_PRE_MIN_ACCEL_SCALE`)
+//! — real Rocket League's own `_UpdateJump` has this same mandatory
+//! minimum-hold quirk, so even an instantaneous tap gets a small amount of
+//! extra height. Only past that mandatory window does releasing `jump` end
+//! it right away. This is scoped to the ground jump alone: the double jump,
+//! a dodge, and the wall jump are still each a single fixed instantaneous
+//! impulse, completely unaffected by how long jump is held, since firing
+//! any of them requires releasing jump first (a fresh press), which itself
+//! unconditionally ends the ground jump's hold window (see
+//! `apply_driven_forces`'s own doc comment for the exact ordering). Tracked
+//! per car via `jump_hold_time_remaining`, the same kind of caller-owned
+//! persisted state `jump_held`/`double_jump_available` already are.
 //!
 //! A dodge's spin can be canceled early — **flip-cancel** — by pressing
 //! jump again before landing or wall contact: a fresh press while airborne,
@@ -213,10 +219,12 @@
 //! `RB-PHYSICS-001-FR-056` split the single flat `BOOST_ACCELERATION` this
 //! bullet used to name into the two distinct values the same sources
 //! actually cite), `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`,
-//! `JUMP_HOLD_ACCELERATION`, and (since `RB-PHYSICS-001-FR-057`)
-//! `MAX_CAR_ANGULAR_SPEED` are commonly-cited, multi-source-confirmed
-//! community-reverse-engineered approximations (the same body of public
-//! research `PhysicsWorld::new`'s gravity constant comes from);
+//! `JUMP_HOLD_ACCELERATION`, (since `RB-PHYSICS-001-FR-057`)
+//! `MAX_CAR_ANGULAR_SPEED`, and (since `RB-PHYSICS-001-FR-064`)
+//! `JUMP_MIN_TIME`/`JUMP_PRE_MIN_ACCEL_SCALE` are commonly-cited,
+//! multi-source-confirmed community-reverse-engineered approximations (the
+//! same body of public research `PhysicsWorld::new`'s gravity constant
+//! comes from);
 //! `BOOST_CONSUMPTION_RATE` is a simplified constant standing in for Rocket
 //! League's real boost-drain behavior; `THROTTLE_ACCELERATION`'s own peak
 //! magnitude is likewise a simplified, uncalibrated placeholder, but since
@@ -572,9 +580,9 @@ const DODGE_ANGULAR_SPEED: f32 = 5.5;
 /// matches both RocketSim's `RLConst.h` (`JUMP_MAX_TIME = 0.2f`) and
 /// RLUtilities' `Jump::max_duration = 0.2f`. Real Rocket League also has a
 /// `JUMP_MIN_TIME` (0.025s) during which the hold acceleration is scaled
-/// down (0.62x) rather than applied at full strength immediately — that
-/// two-phase ramp isn't modeled here, only the flat-acceleration
-/// approximation.
+/// down (`JUMP_PRE_MIN_ACCEL_SCALE`) rather than applied at full strength
+/// immediately — since `RB-PHYSICS-001-FR-064`, that two-phase ramp is
+/// modeled too, see `JUMP_MIN_TIME`'s own doc comment.
 const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
 
 /// Continuous upward acceleration (uu/s^2) applied every step `jump` is
@@ -583,11 +591,42 @@ const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
 /// impulse. Refined from an earlier `1400.0` approximation to the precise
 /// value during `RB-PHYSICS-001-FR-031`'s audit: RocketSim's `RLConst.h`
 /// defines `JUMP_ACCEL = 4375.f/3.f`, matched independently by RLUtilities'
-/// `Jump::acceleration = 1458.3333f`. Real Rocket League scales this down
-/// (0.62x) during the first 0.025s of the hold — see
-/// `JUMP_HOLD_MAX_DURATION`'s own doc comment — which this port doesn't
-/// model, applying the full acceleration from the first held step instead.
+/// `Jump::acceleration = 1458.3333f`. Scaled down by `JUMP_PRE_MIN_ACCEL_SCALE`
+/// during `JUMP_MIN_TIME`'s own mandatory window — see that constant's own
+/// doc comment.
 const JUMP_HOLD_ACCELERATION: f32 = 4375.0 / 3.0;
+
+/// Seconds after a ground-jump press during which `JUMP_HOLD_ACCELERATION`
+/// (scaled by `JUMP_PRE_MIN_ACCEL_SCALE`) keeps applying regardless of
+/// whether `jump` is still held — a mandatory minimum hold real Rocket
+/// League's own engine applies even to an instantaneous tap. Confirmed
+/// exact against RocketSim's real `RLConst.h` (`JUMP_MIN_TIME = 0.025f`)
+/// during `RB-PHYSICS-001-FR-064`; fetching the same reference's actual
+/// `Car.cpp` (`_UpdateJump`) directly confirmed the exact mechanism —
+/// `jumpTime < JUMP_MIN_TIME || (jumpPressed && jumpTime < JUMP_MAX_TIME)`
+/// gates whether the force applies at all, with the pre-`JUMP_MIN_TIME`
+/// branch scaling it down regardless of `jumpPressed` — not merely the
+/// constant's existence. That same source's own inline comment (`// TODO:
+/// Either move to RLConst or preferably don't use this system at all`)
+/// flags this as a stopgap even its own authors consider provisional, not a
+/// deliberate permanent design choice — adopted here anyway since it's
+/// still the real, currently-shipping behavior, and both this and
+/// `JUMP_PRE_MIN_ACCEL_SCALE` are a duration and a dimensionless ratio
+/// respectively, not a torque or force calibrated against real Rocket
+/// League's own specific car mass/inertia, so unlike most of `drive.rs`'s
+/// own torque-shaped placeholders (see the module doc comment's own
+/// "false precision" discussion) they transfer cleanly regardless of this
+/// port's car body not matching that calibration.
+const JUMP_MIN_TIME: f32 = 0.025;
+
+/// Multiplier applied to `JUMP_HOLD_ACCELERATION` during `JUMP_MIN_TIME`'s
+/// own mandatory window. Confirmed exact against RocketSim's real
+/// `Car.cpp` (`_UpdateJump`, `constexpr float JUMP_PRE_MIN_ACCEL_SCALE =
+/// 0.62f;`) during `RB-PHYSICS-001-FR-064` — a hard step-scale applied
+/// all-or-nothing for the whole window (`totalJumpForce *=
+/// JUMP_PRE_MIN_ACCEL_SCALE`), not an interpolation ramping from `0.62` up
+/// to `1.0` as `JUMP_MIN_TIME` approaches.
+const JUMP_PRE_MIN_ACCEL_SCALE: f32 = 0.62;
 
 /// Uncalibrated placeholder landing-auto-orientation restoring-torque
 /// magnitude — applied while airborne with no active `pitch`/`roll` air
@@ -671,10 +710,15 @@ fn input_is_active(input: &ControllerInput) -> bool {
 /// below, using whatever value the *previous* call left it at, so a fresh
 /// ground-jump press's own step only ever fires the plain `JUMP_SPEED`
 /// impulse; that same press then re-arms `jump_hold_time_remaining` to
-/// `JUMP_HOLD_MAX_DURATION` for subsequent calls to consume. Releasing
-/// `jump` immediately zeroes it (stopping the extra acceleration right
-/// away), and it's otherwise untouched by the double jump, a dodge, or the
-/// wall jump — see the module doc comment. `dodge_flip_active` is whether
+/// `JUMP_HOLD_MAX_DURATION` for subsequent calls to consume. Since
+/// `RB-PHYSICS-001-FR-064`, releasing `jump` doesn't always zero it right
+/// away: `JUMP_MIN_TIME` seconds' own mandatory window (derived as
+/// `JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining < JUMP_MIN_TIME`)
+/// keeps decrementing it, at a `JUMP_PRE_MIN_ACCEL_SCALE`-scaled
+/// acceleration, regardless of `input.jump` — only past that window does
+/// releasing `jump` stop the extra acceleration immediately. It's otherwise
+/// untouched by the double jump, a dodge, or the wall jump — see the module
+/// doc comment. `dodge_flip_active` is whether
 /// the car's most recent double-jump-or-dodge press was a dodge whose spin
 /// hasn't been canceled or superseded yet: the dodge branch sets it `true`,
 /// the plain-double-jump branch explicitly sets it `false` (so a stale
@@ -728,10 +772,26 @@ pub fn apply_driven_forces(
     // whatever jump_hold_time_remaining the *previous* call left behind,
     // before this call's own on_ground/jump_pressed handling below can
     // re-arm it — so a fresh ground-jump press's own step here never gets
-    // the extra force, only continued holding into later calls does.
-    // Releasing jump ends the window immediately, even if time was left.
-    if input.jump && *jump_hold_time_remaining > 0.0 {
-        car.apply_central_force(Vec3::new(0.0, 0.0, JUMP_HOLD_ACCELERATION * car.mass()));
+    // the extra force, only continued holding (or the mandatory window
+    // below) into later calls does. RB-PHYSICS-001-FR-064: real Rocket
+    // League's own `_UpdateJump` keeps applying this force, scaled by
+    // `JUMP_PRE_MIN_ACCEL_SCALE`, for the first `JUMP_MIN_TIME` seconds
+    // since the press regardless of whether `jump` is still held — derived
+    // here as `JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining` rather
+    // than tracked as a second, separate elapsed-time field, since at rest
+    // (`jump_hold_time_remaining == 0.0`) that derivation already reads as
+    // `JUMP_HOLD_MAX_DURATION`, comfortably past `JUMP_MIN_TIME`, so a car
+    // that never pressed jump never spuriously enters this branch. Only
+    // once that mandatory window has passed does releasing `jump` end the
+    // window immediately, even if time was left.
+    let in_mandatory_pre_min_window =
+        JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining < JUMP_MIN_TIME;
+    if in_mandatory_pre_min_window || (input.jump && *jump_hold_time_remaining > 0.0) {
+        let mut hold_acceleration = JUMP_HOLD_ACCELERATION;
+        if in_mandatory_pre_min_window {
+            hold_acceleration *= JUMP_PRE_MIN_ACCEL_SCALE;
+        }
+        car.apply_central_force(Vec3::new(0.0, 0.0, hold_acceleration * car.mass()));
         *jump_hold_time_remaining = (*jump_hold_time_remaining - dt).max(0.0);
     } else {
         *jump_hold_time_remaining = 0.0;
@@ -2727,6 +2787,178 @@ mod tests {
             (c.linear_velocity.z - velocity_at_release).abs() < 1e-3,
             "expected no further upward velocity gain after releasing jump early, \
              velocity at release={velocity_at_release}, after={}",
+            c.linear_velocity.z
+        );
+    }
+
+    #[test]
+    fn jump_hold_acceleration_is_scaled_down_during_the_mandatory_pre_min_time_window() {
+        // RB-PHYSICS-001-FR-064: real Rocket League's own `_UpdateJump`
+        // scales the hold acceleration by `JUMP_PRE_MIN_ACCEL_SCALE` for the
+        // first `JUMP_MIN_TIME` seconds after a ground-jump press, applied
+        // regardless of whether `jump` is still held.
+        let dt = 1.0 / 120.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+
+        // Press: arms the window; only the fixed JUMP_SPEED impulse fires
+        // this step.
+        step_with_input_and_hold(
+            &mut c,
+            &full_jump(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+        let velocity_after_press = c.linear_velocity.z;
+
+        // The very next step is still well within JUMP_MIN_TIME (0.025s = 3
+        // steps at this dt).
+        step_with_input_and_hold(
+            &mut c,
+            &full_jump(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+
+        let expected_gain = JUMP_HOLD_ACCELERATION * JUMP_PRE_MIN_ACCEL_SCALE * dt;
+        assert!(
+            (c.linear_velocity.z - (velocity_after_press + expected_gain)).abs() < 1e-2,
+            "expected the mandatory pre-min-time window's own scaled acceleration, \
+             got a gain of {}, expected {}",
+            c.linear_velocity.z - velocity_after_press,
+            expected_gain
+        );
+    }
+
+    #[test]
+    fn releasing_jump_within_the_mandatory_pre_min_time_window_does_not_immediately_stop_the_extra_acceleration(
+    ) {
+        // Unlike releasing jump after JUMP_MIN_TIME has already elapsed (see
+        // releasing_jump_early_stops_the_extra_acceleration_from_a_held_ground_jump,
+        // which releases well past it), releasing within the mandatory
+        // window doesn't end it early — real Rocket League's own engine
+        // keeps applying the scaled acceleration regardless of `jump`.
+        let dt = 1.0 / 120.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+
+        step_with_input_and_hold(
+            &mut c,
+            &full_jump(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+        let velocity_after_press = c.linear_velocity.z;
+
+        // Release immediately (a tap) — still within JUMP_MIN_TIME.
+        step_with_input_and_hold(
+            &mut c,
+            &ControllerInput::default(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+
+        let expected_gain = JUMP_HOLD_ACCELERATION * JUMP_PRE_MIN_ACCEL_SCALE * dt;
+        assert!(
+            (c.linear_velocity.z - (velocity_after_press + expected_gain)).abs() < 1e-2,
+            "expected a tap to still gain the mandatory window's own scaled acceleration \
+             despite releasing jump immediately, got a gain of {}, expected {}",
+            c.linear_velocity.z - velocity_after_press,
+            expected_gain
+        );
+        assert!(
+            hold_remaining > 0.0,
+            "expected the mandatory window to still have time left, not yet closed"
+        );
+    }
+
+    #[test]
+    fn mandatory_pre_min_time_window_closes_on_schedule_even_when_jump_is_never_held() {
+        let dt = 1.0 / 120.0;
+        let mut c = car();
+        let mut boost = MAX_BOOST;
+        let mut jump_held = false;
+        let mut double_jump_available = true;
+        let mut hold_remaining = 0.0;
+
+        step_with_input_and_hold(
+            &mut c,
+            &full_jump(),
+            true,
+            None,
+            &mut boost,
+            &mut jump_held,
+            &mut double_jump_available,
+            &mut hold_remaining,
+            dt,
+        );
+
+        // Release immediately and stay released well past JUMP_MIN_TIME
+        // (0.025s = 3 steps at this dt) — the mandatory window must still
+        // close on its own schedule even though jump was never held past
+        // the press.
+        for _ in 0..6 {
+            step_with_input_and_hold(
+                &mut c,
+                &ControllerInput::default(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        assert_eq!(
+            hold_remaining, 0.0,
+            "expected the mandatory window to have closed by now"
+        );
+        let velocity_after_window_closes = c.linear_velocity.z;
+
+        for _ in 0..5 {
+            step_with_input_and_hold(
+                &mut c,
+                &ControllerInput::default(),
+                true,
+                None,
+                &mut boost,
+                &mut jump_held,
+                &mut double_jump_available,
+                &mut hold_remaining,
+                dt,
+            );
+        }
+        assert!(
+            (c.linear_velocity.z - velocity_after_window_closes).abs() < 1e-3,
+            "expected no further upward velocity gain once the mandatory window has closed, \
+             velocity at window close={velocity_after_window_closes}, after={}",
             c.linear_velocity.z
         );
     }
