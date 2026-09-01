@@ -18,17 +18,18 @@
 //! `NetMesh::step` advances the net's own internal physics by the caller's
 //! `dt`, split into `NET_SUBSTEPS` smaller sub-steps (a mass-spring system
 //! this stiff would go numerically unstable integrated with Bullet's own
-//! typical single-step `dt` values, e.g. 1/60s) and resolves the ball's
+//! typical single-step `dt` values, e.g. 1/60s) and resolves every body's
 //! contact against every free point it currently overlaps via
-//! `collision::sphere_vs_sphere`/`solver::resolve_contacts_between` — the
-//! exact same two-dynamic-body sequential-impulse path every other
-//! dynamic-vs-dynamic contact in this crate already uses (ball-vs-car,
-//! car-vs-car), not a special-cased shortcut. This is why a net point is a
-//! real (if artificially tiny and light) `RigidBody` rather than a plain
-//! `Vec3` position/velocity pair: it lets this module add zero new solver
-//! code, only the spring-force accumulation Hooke's law itself needs and
-//! the sphere-vs-sphere contact test this crate had no prior caller for
-//! (see `collision::sphere_vs_sphere`'s own doc comment).
+//! `collision::sphere_vs_sphere`/`solver::resolve_dynamic_manifolds` (since
+//! `RB-PHYSICS-001-FR-050` — see `step`'s own doc comment) — the same
+//! two-dynamic-body sequential-impulse machinery every other dynamic-vs-
+//! dynamic contact in this crate already uses (ball-vs-car, car-vs-car),
+//! not a special-cased shortcut. This is why a net point is a real (if
+//! artificially tiny and light) `RigidBody` rather than a plain `Vec3`
+//! position/velocity pair: it lets this module add zero new solver code,
+//! only the spring-force accumulation Hooke's law itself needs and the
+//! sphere-vs-sphere contact test this crate had no prior caller for (see
+//! `collision::sphere_vs_sphere`'s own doc comment).
 //!
 //! `NET_POINT_MASS`, `NET_POINT_RADIUS`, `NET_SPRING_CONSTANT`,
 //! `NET_SPRING_DAMPING`, `NET_LINEAR_DAMPING`, `NET_RESTITUTION`, and
@@ -48,11 +49,11 @@
 //! Since `RB-PHYSICS-001-FR-038`, `step` takes every body that can touch the
 //! net (the ball and every car, via a `&mut [RigidBody]` slice) rather than
 //! the ball alone — a car is resolved against every free point exactly the
-//! same way the ball always was (`collision::contacts_between`/
-//! `solver::resolve_contacts_between`, dispatching to the same box-vs-sphere
-//! path `ball_bounces_off_a_stationary_car_instead_of_passing_through`
-//! already exercises for ball-vs-car), closing the "a car still passes
-//! through untouched" gap this module's own doc comment used to carry as an
+//! same way the ball always was (`collision::contacts_between`, dispatching
+//! to the same box-vs-sphere path
+//! `ball_bounces_off_a_stationary_car_instead_of_passing_through` already
+//! exercises for ball-vs-car), closing the "a car still passes through
+//! untouched" gap this module's own doc comment used to carry as an
 //! explicit Non-goal.
 //!
 //! Explicitly still out of scope (tracked in `RB-PHYSICS-001`, not silently
@@ -71,6 +72,7 @@ use crate::collision;
 use crate::integrate;
 use crate::solver;
 use rb_domain::Vec3;
+use std::collections::HashMap;
 
 /// Mass of one free net point — deliberately light relative to a typical
 /// ball mass (see this module's own doc comment on why this and the other
@@ -265,22 +267,47 @@ impl NetMesh {
     /// (a real net does sag a little under its own weight) and damping,
     /// integrate every free point's velocity (mirroring
     /// `PhysicsWorld::apply_forces_and_integrate_velocities`'s own
-    /// gravity-damping-integrate sequence), resolve every body in `bodies`
-    /// against every free point within contact range (via
-    /// `collision::contacts_between`/`solver::resolve_contacts_between`,
-    /// the exact two-dynamic-body path every other dynamic-vs-dynamic
-    /// contact in this crate already uses, dispatching to sphere-vs-sphere
-    /// for the ball or box-vs-sphere for a car — this mutates each body's
-    /// own velocity too, progressively across sub-steps, not just the
-    /// net's), then integrate every free point's transform. An anchored
-    /// point never accumulates force, never integrates, and is skipped by
-    /// every one of these phases — its position is simply whatever
-    /// `rectangular_grid` built it at, forever. Bodies in `bodies` are
-    /// resolved against a given point in slice order within each
-    /// sub-step — no significance beyond call order, since each resolve is
-    /// independent (a net point's own mass is tiny enough relative to a
-    /// real ball or car that one sub-step's ordering bias between two
-    /// simultaneous touches isn't a scenario this crate's tests exercise).
+    /// gravity-damping-integrate sequence), resolve every overlapping
+    /// body-vs-point contact this sub-step together (see below), then
+    /// integrate every free point's transform. An anchored point never
+    /// accumulates force, never integrates, and is skipped by every one of
+    /// these phases — its position is simply whatever `rectangular_grid`
+    /// built it at, forever.
+    ///
+    /// Since `RB-PHYSICS-001-FR-050`, every body-vs-point contact detected
+    /// this sub-step is resolved together as one combined multi-body solve
+    /// (`solver::resolve_dynamic_manifolds`), not as a sequence of fully
+    /// independent, sequentially-applied `solver::resolve_contacts_between`
+    /// calls the way this function used to. A ball or car pressed into the
+    /// net commonly overlaps two or more free points at once (`NET_POINT_RADIUS`'s
+    /// own generous "coverage radius" sizing all but guarantees it near the
+    /// net's own center) — exactly `RB-PHYSICS-001-FR-030`'s "a shared body
+    /// touched by 2+ others in the same step" scenario, which that
+    /// requirement already proved independent-pairwise resolution
+    /// under-converges for. This module's own doc comment used to wave that
+    /// off as irrelevant here because a net point's own mass is "tiny
+    /// enough" relative to a real ball or car — an untested claim this
+    /// requirement's own investigation found false in practice
+    /// (`NET_POINT_MASS = 0.5` is only half a typical ball's own mass of
+    /// `1.0`, not a lopsided ratio). Worse than under-convergence, the old
+    /// per-point sequential loop was genuinely *order-dependent*: for a
+    /// perfectly left-right-symmetric impact straddling two points, which
+    /// point happened to come first in `self.points`' own iteration order
+    /// decided which way the ball ended up deflected sideways — a purely
+    /// arbitrary artifact with no physical basis, not merely a slower
+    /// convergence to the same answer (see
+    /// `sequential_net_point_resolution_is_order_dependent_but_the_combined_solve_is_not`,
+    /// which pins the exact mechanism, and
+    /// `a_ball_shot_squarely_into_the_net_stays_close_to_a_straight_line_instead_of_veering_sideways`,
+    /// which proves it at this function's own public level). Bodies in
+    /// `bodies` and every free point are combined into one temporary
+    /// `Vec<RigidBody>` for this call only (`RigidBody` is `Copy`, so this
+    /// is a plain value copy, not a persistent restructuring of either);
+    /// warm-starting isn't part of this fix (a fresh, empty `ContactCache`
+    /// map is passed every sub-step, cold-starting every call exactly as
+    /// this function always has) — that remains open follow-up work, the
+    /// same way `RB-PHYSICS-001-FR-035` scoped it out for
+    /// `resolve_contacts`/`resolve_contacts_between` generally.
     pub fn step(&mut self, bodies: &mut [RigidBody], gravity: Vec3, dt: f32) {
         let sub_dt = dt / NET_SUBSTEPS as f32;
         for _ in 0..NET_SUBSTEPS {
@@ -298,17 +325,39 @@ impl NetMesh {
                 integrate::apply_damping(point, sub_dt);
                 integrate::integrate_velocities(point, sub_dt);
             }
-            for (i, point) in self.points.iter_mut().enumerate() {
+
+            let num_bodies = bodies.len();
+            let mut manifolds = Vec::new();
+            for (i, point) in self.points.iter().enumerate() {
                 if self.anchored[i] {
                     continue;
                 }
-                for body in bodies.iter_mut() {
+                for (body_index, body) in bodies.iter().enumerate() {
                     let contacts = collision::contacts_between(body, point);
                     if !contacts.is_empty() {
-                        solver::resolve_contacts_between(body, point, &contacts, sub_dt);
+                        manifolds.push((body_index, num_bodies + i, contacts));
                     }
                 }
             }
+            if !manifolds.is_empty() {
+                let mut combined: Vec<RigidBody> =
+                    Vec::with_capacity(num_bodies + self.points.len());
+                combined.extend_from_slice(bodies);
+                combined.extend_from_slice(&self.points);
+                solver::resolve_dynamic_manifolds(
+                    &mut combined,
+                    &manifolds,
+                    sub_dt,
+                    &mut HashMap::new(),
+                );
+                bodies.copy_from_slice(&combined[..num_bodies]);
+                for (i, point) in self.points.iter_mut().enumerate() {
+                    if !self.anchored[i] {
+                        *point = combined[num_bodies + i];
+                    }
+                }
+            }
+
             for (i, point) in self.points.iter_mut().enumerate() {
                 if self.anchored[i] {
                     continue;
@@ -339,6 +388,158 @@ fn push_spring(springs: &mut Vec<Spring>, points: &[RigidBody], a: usize, b: usi
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// `RB-PHYSICS-001-FR-050`'s own root-cause proof: a ball straddling two
+    /// net-point-like bodies, exactly left-right symmetric, so the true
+    /// answer (by symmetry) has zero net sideways velocity for the ball.
+    /// Sequentially resolving each pair fully independently — the pre-FR-050
+    /// shape of `NetMesh::step`'s own contact loop — instead leaves the ball
+    /// with a *nonzero* sideways velocity whose sign flips depending purely
+    /// on which point happened to be resolved first, a purely arbitrary
+    /// artifact with no physical basis: order A (`p1` then `p2`) and order B
+    /// (`p2` then `p1`) are mirror images of each other, neither matching
+    /// the true answer. `solver::resolve_dynamic_manifolds`'s combined
+    /// solve — sharing one accumulator across both contacts instead of
+    /// fully resolving and applying one before the other's setup even reads
+    /// the ball's velocity — lands close to the true symmetric answer
+    /// instead, and (being order-independent by construction, since both
+    /// manifolds read the same starting accumulator) can't exhibit this
+    /// left/right bias at all. Uses `NET_POINT_MASS`/`NET_POINT_RADIUS`/
+    /// `NET_RESTITUTION`/`NET_FRICTION` directly so this isn't just a
+    /// generic claim about *some* mass ratio (already pinned in general by
+    /// `solver::tests::resolve_dynamic_manifolds_keeps_more_of_every_bodys_contact_than_resolving_pairs_independently`)
+    /// but a concrete confirmation that this module's own specific
+    /// constants — previously assumed "tiny enough" to not matter — do in
+    /// fact exhibit the gap.
+    #[test]
+    fn sequential_net_point_resolution_is_order_dependent_but_the_combined_solve_is_not() {
+        let make_scene = || {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 0.0));
+            ball.linear_velocity = Vec3::new(0.0, 500.0, 0.0);
+            let mut p1 = RigidBody::sphere(
+                NET_POINT_RADIUS,
+                NET_POINT_MASS,
+                Vec3::new(-100.0, 150.0, 0.0),
+            );
+            p1.restitution = NET_RESTITUTION;
+            p1.friction = NET_FRICTION;
+            let mut p2 = RigidBody::sphere(
+                NET_POINT_RADIUS,
+                NET_POINT_MASS,
+                Vec3::new(100.0, 150.0, 0.0),
+            );
+            p2.restitution = NET_RESTITUTION;
+            p2.friction = NET_FRICTION;
+            (ball, p1, p2)
+        };
+        let dt = 1.0 / 720.0;
+
+        let (mut ball_a, mut p1_a, mut p2_a) = make_scene();
+        let c1 = collision::contacts_between(&ball_a, &p1_a);
+        solver::resolve_contacts_between(&mut ball_a, &mut p1_a, &c1, dt);
+        let c2 = collision::contacts_between(&ball_a, &p2_a);
+        solver::resolve_contacts_between(&mut ball_a, &mut p2_a, &c2, dt);
+        let order_a_vx = ball_a.linear_velocity.x;
+
+        let (mut ball_b, mut p1_b, mut p2_b) = make_scene();
+        let c2b = collision::contacts_between(&ball_b, &p2_b);
+        solver::resolve_contacts_between(&mut ball_b, &mut p2_b, &c2b, dt);
+        let c1b = collision::contacts_between(&ball_b, &p1_b);
+        solver::resolve_contacts_between(&mut ball_b, &mut p1_b, &c1b, dt);
+        let order_b_vx = ball_b.linear_velocity.x;
+
+        let (ball_c, p1_c, p2_c) = make_scene();
+        let mut bodies = vec![ball_c, p1_c, p2_c];
+        let manifolds = vec![
+            (
+                0usize,
+                1usize,
+                collision::contacts_between(&bodies[0], &bodies[1]),
+            ),
+            (
+                0usize,
+                2usize,
+                collision::contacts_between(&bodies[0], &bodies[2]),
+            ),
+        ];
+        solver::resolve_dynamic_manifolds(&mut bodies, &manifolds, dt, &mut HashMap::new());
+        let combined_vx = bodies[0].linear_velocity.x;
+
+        assert!(
+            (order_a_vx - order_b_vx).abs() > 10.0,
+            "expected resolving the two symmetric points sequentially, in opposite orders, to \
+             leave the ball with measurably different (mirror-image) sideways velocities, got \
+             order_a_vx={order_a_vx}, order_b_vx={order_b_vx}"
+        );
+        assert!(
+            combined_vx.abs() < order_a_vx.abs().min(order_b_vx.abs()) * 0.5,
+            "expected the combined solve to leave the ball's sideways velocity much closer to \
+             the true symmetric answer of zero than either sequential order, got \
+             combined_vx={combined_vx}, order_a_vx={order_a_vx}, order_b_vx={order_b_vx}"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-050`'s own proof at `NetMesh::step`'s public
+    /// level: a ball fired squarely at the net's own center, exactly
+    /// straddling two adjacent free interior points (the net built with an
+    /// even column count so `x = 0` falls precisely between two columns,
+    /// each close enough for `NET_POINT_RADIUS`'s own coverage to reach a
+    /// ball at `x = 0`), should stay close to a straight line — no physical
+    /// asymmetry exists in this setup to deflect it sideways. Measured
+    /// directly: the pre-fix sequential per-point loop left this exact
+    /// scenario's ball at a residual sideways speed of ~0.25 units/s (out of
+    /// a 2000 units/s impact) after a full second of `step` calls — small
+    /// in absolute terms (many small `NET_SUBSTEPS`-sized sub-steps each get
+    /// a chance to partially self-correct the previous one's bias via
+    /// freshly re-detected contacts, unlike
+    /// `sequential_net_point_resolution_is_order_dependent_but_the_combined_solve_is_not`'s
+    /// own single-shot, no-self-correction proof of the underlying
+    /// mechanism), but not zero, and entirely an artifact of `self.points`'
+    /// own construction-time iteration order — physically, this setup has
+    /// no way to prefer either side. `solver::resolve_dynamic_manifolds`'s
+    /// combined solve reduces that residual roughly 15-fold, to ~0.016
+    /// units/s.
+    #[test]
+    fn a_ball_shot_squarely_into_the_net_stays_close_to_a_straight_line_instead_of_veering_sideways(
+    ) {
+        let net_center = Vec3::new(0.0, 5000.0, 300.0);
+        let mut net = NetMesh::rectangular_grid(
+            net_center,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            900.0,
+            600.0,
+            6,
+            3,
+        );
+        let ball_speed = 2000.0;
+        let start = net_center - Vec3::new(0.0, 800.0, 0.0);
+        let mut ball = RigidBody::sphere(93.15, 1.0, start);
+        ball.linear_velocity = Vec3::new(0.0, ball_speed, 0.0);
+        let gravity = Vec3::ZERO; // isolate the net's own catching effect from gravity's fall
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..(1.0 / dt) as u32 {
+            net.step(std::slice::from_mut(&mut ball), gravity, dt);
+            let (position, orientation) = integrate::integrate_transform(
+                ball.position,
+                ball.orientation,
+                ball.linear_velocity,
+                ball.angular_velocity,
+                dt,
+            );
+            ball.position = position;
+            ball.orientation = orientation;
+        }
+
+        assert!(
+            ball.linear_velocity.x.abs() < 0.05,
+            "expected a squarely-centered, left-right-symmetric net impact to leave the ball's \
+             own sideways velocity near zero (the pre-fix sequential loop measured ~0.25 here), \
+             got vx={}",
+            ball.linear_velocity.x
+        );
+    }
 
     fn flat_net(cols: usize, rows: usize) -> NetMesh {
         NetMesh::rectangular_grid(

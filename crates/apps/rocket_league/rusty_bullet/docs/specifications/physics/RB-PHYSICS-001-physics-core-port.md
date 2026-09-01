@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.49.0
+- Version: 0.50.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -200,12 +200,26 @@
   error rather than the true (near-zero) tangential velocity, occasionally
   landing degenerate relative to `normal`; confirmed via a dedicated
   isotropic-friction regression test verified to fail under the old fixed
-  `plane_space`-only basis — investigated and adopted, 3 new tests;
-  static-contact warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
-  calibration, full convergence of the sandwiched case, a rigorous
-  (non-heuristic) edge-edge nearest-pair selection, and real-data
-  calibration (including which combine mode, if either, actually matches
-  real Rocket League) are open follow-up work)
+  `plane_space`-only basis — investigated and adopted, 3 new tests; and,
+  since FR-050, `net::NetMesh::step`'s own per-point sequential
+  `solver::resolve_contacts_between` loop was investigated for the same
+  independent-pairwise gap `RB-PHYSICS-001-FR-030` already fixed for
+  ball-vs-car/car-vs-car — a ball or car pressing into the net commonly
+  overlaps 2+ free points at once (`NET_POINT_RADIUS`'s own generous
+  coverage radius), and this module's own prior "net-point mass is tiny
+  enough to not matter" claim was found untested and false (`NET_POINT_MASS`
+  is only half a typical ball's own mass); a dedicated single-shot test
+  confirmed the old sequential loop is genuinely order-dependent for a
+  perfectly symmetric impact, not merely slower to converge, and a
+  `NetMesh::step`-level test measured the resulting real-world residual
+  bias directly (~0.25 units/s out of a 2000 units/s impact) — adopted
+  `solver::resolve_dynamic_manifolds`'s combined solve for every
+  body-vs-point contact each sub-step, reducing that residual roughly
+  15-fold; 2 new tests; static-contact warm-starting,
+  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
+  of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
+  selection, and real-data calibration (including which combine mode, if
+  either, actually matches real Rocket League) are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -2929,6 +2943,81 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     279 of `rb_physics_bullet`'s pre-existing tests (as of `FR-048`) pass
     unchanged. 3 new tests, bringing the crate to 282 total (+3 over
     `FR-048`'s 279).
+- `RB-PHYSICS-001-FR-050` (net-point contact combined-solve investigation,
+  implemented): `net::NetMesh::step` resolves every one of `bodies`' contact
+  against every free net point it overlaps via
+  `solver::resolve_contacts_between`, one pair at a time — the exact
+  independent-pairwise shape `RB-PHYSICS-001-FR-030` already proved
+  under-converges (and, worse, is genuinely order-dependent) for a shared
+  body touched by 2+ others in the same step. This module's own doc comment
+  had waved that off as irrelevant here, reasoning that a net point's own
+  mass is "tiny enough" relative to a real ball or car — an untested claim.
+  This requirement investigated it directly.
+  1. **The "tiny enough" claim was checked and found false.** `NET_POINT_MASS`
+     is `0.5`, exactly half of the `1.0` mass this crate's own tests
+     consistently use for the ball — not a lopsided ratio at all. A ball or
+     car pressing into the net commonly overlaps two or more free points at
+     once, since `NET_POINT_RADIUS` (`120.0`) is deliberately a generous
+     "coverage radius" relative to typical grid spacing.
+  2. **A dedicated single-shot test confirmed the underlying mechanism is
+     genuinely order-dependent, not merely slow to converge.** For a ball
+     placed exactly symmetrically between two net-point-like bodies (so the
+     true answer, by symmetry, has zero sideways velocity), resolving each
+     point fully independently in one order left the ball with a nonzero
+     sideways velocity; resolving in the opposite order left it with the
+     mirror-image (opposite-sign) velocity — a purely arbitrary artifact of
+     iteration order, not a physically meaningful result either way.
+     `solver::resolve_dynamic_manifolds`'s combined solve, sharing one
+     accumulator across both contacts, landed close to the true symmetric
+     answer instead.
+  3. **A `NetMesh::step`-level test measured the real-world size of the
+     bias directly.** A ball fired squarely at the net's own center,
+     straddling two symmetric free interior points, was measurably deflected
+     sideways by the old sequential loop — a residual of ~0.25 units/s out
+     of a 2000 units/s impact after a full second of `step` calls. Smaller
+     in absolute terms than the single-shot proof (each of `NetMesh::step`'s
+     own many small `NET_SUBSTEPS`-sized sub-steps gets a chance to partially
+     self-correct the previous one's bias via freshly re-detected contacts),
+     but nonzero, and with no physical justification for either sign.
+  4. **Adopted `solver::resolve_dynamic_manifolds` for every body-vs-point
+     contact within a sub-step.** `NetMesh::step` now gathers every
+     overlapping body-vs-point manifold detected in a sub-step and resolves
+     them together (bodies and free points combined into one temporary
+     array for the call, `RigidBody` being `Copy`), instead of resolving
+     each pair immediately and independently. Measured directly: this
+     reduces the squarely-centered-impact residual from ~0.25 units/s to
+     ~0.016 units/s, roughly a 15-fold improvement. Warm-starting is
+     deliberately not part of this fix — a fresh, empty `ContactCache` is
+     still passed every sub-step, cold-starting every call exactly as
+     before — left as the same kind of open follow-up work
+     `RB-PHYSICS-001-FR-035` already scoped out for
+     `resolve_contacts`/`resolve_contacts_between` generally.
+  - **Non-goals (this requirement).** Does not add warm-starting to
+    `net::NetMesh::step`'s own contacts (finding 4's own scoping). Does not
+    touch `resolve_contacts` (static-body contacts, e.g. ground/arena walls)
+    — a body's own contact with a static surface only depends on that one
+    body, so there is no cross-body information for independent resolution
+    to lose there, the same reasoning `resolve_dynamic_manifolds`'s own doc
+    comment already gives for excluding static contacts from its combined
+    solve. Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration,
+    still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `net::NetMesh::step` resolves every
+    body-vs-point contact detected in a sub-step together via
+    `solver::resolve_dynamic_manifolds`, not as a sequence of independent
+    `solver::resolve_contacts_between` calls. A symmetric double-point
+    impact no longer depends on iteration order for its qualitative
+    direction, and its residual sideways deflection is measurably smaller
+    than before this requirement. All pre-existing tests pass unchanged.
+  - **Verification plan.** 2 new `net.rs` tests:
+    `sequential_net_point_resolution_is_order_dependent_but_the_combined_solve_is_not`
+    pins the exact root-cause mechanism at the raw solver level (order
+    dependence for a symmetric two-point impact, and the combined solve's
+    own order-independence); `a_ball_shot_squarely_into_the_net_stays_close_to_a_straight_line_instead_of_veering_sideways`
+    proves it at `NetMesh::step`'s own public level, with the fix verified
+    to reduce (from ~0.25 to ~0.016 units/s) rather than merely mask the
+    measured residual. All 282 of `rb_physics_bullet`'s pre-existing tests
+    (as of `FR-049`) pass unchanged. 2 new tests, bringing the crate to 284
+    total (+2 over `FR-049`'s 282).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4307,6 +4396,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.50.0 (2026-09-01): FR-050 added and implemented (net-point contact
+  combined-solve investigation) — `net::NetMesh::step` used to resolve every
+  body-vs-net-point contact independently and sequentially via
+  `solver::resolve_contacts_between`, one pair at a time, waving off
+  `RB-PHYSICS-001-FR-030`'s own documented independent-pairwise gap as
+  irrelevant because a net point's mass is "tiny enough" — an untested
+  claim found false (`NET_POINT_MASS = 0.5` is half a typical ball's own
+  mass). A dedicated single-shot test confirmed the old sequential loop is
+  genuinely order-dependent (not merely slow to converge) for a perfectly
+  symmetric double-point impact; a `NetMesh::step`-level test measured the
+  real residual at ~0.25 units/s out of a 2000 units/s impact. Adopted
+  `solver::resolve_dynamic_manifolds`'s combined solve for every
+  body-vs-point contact within a sub-step, reducing that residual roughly
+  15-fold to ~0.016 units/s; warm-starting deliberately left out of scope.
+  2 new tests, bringing `rb_physics_bullet` to 284 tests (+2 over FR-049's
+  282).
 - 0.49.0 (2026-09-01): FR-049 added and implemented (velocity-aligned
   friction direction selection) — closes the genuine, significant
   divergence `RB-PHYSICS-001-FR-048` found and explicitly left open: a new
