@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Landing auto-orientation vs. real auto-flip/auto-roll (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#127](https://github.com/baileyrd/rusty_bullet/pull/127) · `6348835`
 
 - **`RB-PHYSICS-001-FR-057`'s own Non-goals had left open** whether real
   Rocket League's auto-flip (`CAR_AUTOFLIP_IMPULSE/TORQUE/TIME/
