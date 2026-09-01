@@ -6139,6 +6139,22 @@ name = "rusty_h2"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_homelab_mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rmcp",
+ "rusty-mcp",
+ "rusty_opnsense",
+ "rusty_proxmox",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rusty_http"
 version = "0.1.0"
 dependencies = [
@@ -6208,6 +6224,27 @@ dependencies = [
 [[package]]
 name = "rusty_oauth"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_opnsense"
+version = "0.1.0"
+dependencies = [
+ "rusty_request",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rusty_proxmox"
+version = "0.1.0"
+dependencies = [
+ "rusty_request",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
 
 [[package]]
 name = "rusty_rag"
