@@ -7,6 +7,8 @@ mod support;
 // The binary's modules, compiled into the test -- `crate::` paths inside
 // them (e.g. `crate::server::HomelabServer`) resolve against this test
 // binary's own module tree, which mirrors `src/`'s exactly.
+#[path = "../src/json_result.rs"]
+mod json_result;
 #[path = "../src/server.rs"]
 mod server;
 #[path = "../src/tools/mod.rs"]
@@ -122,6 +124,33 @@ async fn every_backend_contributes_its_tools() {
     client.cancel().await.expect("cancel");
 }
 
+/// MCP requires a tool's structured output -- and the `outputSchema` a
+/// client validates it against -- to be a JSON object at the top level.
+/// `serde_json::Value` on its own doesn't guarantee that (some backend
+/// endpoints return a bare array), which is exactly what broke every
+/// passthrough tool here once: a strict client (Claude Code/Cowork) rejected
+/// the whole `tools/list` result and refused to start the server at all.
+/// `JsonResult` (see `src/json_result.rs`) is the fix -- this guards it
+/// stays fixed.
+#[tokio::test]
+async fn every_declared_output_schema_is_a_json_object() {
+    let client = connect(HomelabServer::new(None, None)).await;
+
+    let tools = client.list_tools(None).await.expect("tools/list");
+    for tool in &tools.tools {
+        if let Some(schema) = &tool.output_schema {
+            assert_eq!(
+                schema.get("type").and_then(|t| t.as_str()),
+                Some("object"),
+                "tool {} has a non-object outputSchema: {schema:?}",
+                tool.name
+            );
+        }
+    }
+
+    client.cancel().await.expect("cancel");
+}
+
 #[tokio::test]
 async fn an_unconfigured_backend_fails_with_a_clear_error() {
     let client = connect(HomelabServer::new(None, None)).await;
@@ -153,7 +182,7 @@ async fn proxmox_list_nodes_returns_structured_data_from_the_real_client_path() 
         .expect("call proxmox_list_nodes");
 
     assert_ne!(result.is_error, Some(true));
-    assert_eq!(structured(&result)[0]["node"], "pve");
+    assert_eq!(structured(&result)["result"][0]["node"], "pve");
 
     client.cancel().await.expect("cancel");
 }
@@ -193,7 +222,7 @@ async fn opnsense_system_status_returns_structured_data_from_the_real_client_pat
         .expect("call opnsense_system_status");
 
     assert_ne!(result.is_error, Some(true));
-    assert_eq!(structured(&result)["status"], "ok");
+    assert_eq!(structured(&result)["result"]["status"], "ok");
 
     client.cancel().await.expect("cancel");
 }

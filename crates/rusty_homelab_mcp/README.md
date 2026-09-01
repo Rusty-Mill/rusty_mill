@@ -81,11 +81,14 @@ stop/shutdown/reboot/suspend/resume a QEMU VM or LXC container).
 `opnsense_list_interfaces`, `opnsense_list_firewall_aliases`,
 `opnsense_list_gateways`.
 
-Most tools return the backend's own JSON as structured content, unopinionated
-about shape (see each client crate's README for why). `proxmox_guest_power`
-returns Proxmox's task ID (a `UPID:...` string) as plain text, since Proxmox
-runs guest power actions asynchronously rather than waiting for them to
-finish.
+Most tools return the backend's own JSON as structured content under a
+`result` field (`{"result": ...}`), unopinionated about the shape of `result`
+itself (see each client crate's README for why). The wrapper exists because
+MCP requires structured tool output to be a JSON object at the top level, and
+several endpoints (e.g. `proxmox_list_nodes`, `opnsense_list_services`) return
+a bare JSON array. `proxmox_guest_power` returns Proxmox's task ID (a
+`UPID:...` string) as plain text instead, since Proxmox runs guest power
+actions asynchronously rather than waiting for them to finish.
 
 ## Adding a backend
 

@@ -18,6 +18,7 @@
 //! ...); see `--help` for the full list.
 
 mod config;
+mod json_result;
 mod server;
 mod tools;
 
