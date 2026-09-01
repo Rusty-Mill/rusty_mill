@@ -5864,6 +5864,7 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_kafka",
+ "rusty_request",
  "rusty_sqlite",
  "rusty_tokio",
 ]

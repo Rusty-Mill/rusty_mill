@@ -9,11 +9,12 @@ publish = false
 
 [dependencies]
 rusty_err = { path = "../../../rusty_err" }
-rusty_http = { path = "../../../rusty_http" }
+rusty_http = { path = "../../../rusty_http", features = ["rusty-tokio"] }
 rusty_tokio = { path = "../../../rusty_tokio" }
 rusty_sqlite = { path = "../../../rusty_sqlite" }
 rusty_json = { path = "../../../rusty_json" }
 rusty_kafka = { path = "../../../rusty_kafka" }
+rusty_request = { path = "../../../rusty_request" }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-governance = { path = "../rusty-meshed-governance" }
 rusty-meshed-observability = { path = "../rusty-meshed-observability" }
