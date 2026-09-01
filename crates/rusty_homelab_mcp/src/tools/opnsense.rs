@@ -42,6 +42,48 @@ pub struct ServiceControlArgs {
     pub action: ServiceActionArg,
 }
 
+/// Arguments naming a firewall rule by UUID.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FirewallRuleUuidArgs {
+    /// The rule's UUID, as returned by `opnsense_list_firewall_rules` or
+    /// `opnsense_create_firewall_rule`.
+    pub uuid: String,
+}
+
+/// Arguments for creating a firewall rule.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateFirewallRuleArgs {
+    /// The rule's fields, in the same shape OPNsense's own rule form
+    /// submits: `action` (pass/block/reject), `interface`, `direction`
+    /// (in/out), `protocol`, `source_net`, `source_port`,
+    /// `destination_net`, `destination_port`, `description`, `log`,
+    /// `enabled`, and so on. Call `opnsense_list_firewall_rules` first to
+    /// see example field names and values from existing rules.
+    pub rule: serde_json::Value,
+}
+
+/// Arguments for updating a firewall rule.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateFirewallRuleArgs {
+    /// The rule's UUID, as returned by `opnsense_list_firewall_rules`.
+    pub uuid: String,
+    /// The rule's new field set -- replaces the rule entirely, so call
+    /// `opnsense_get_firewall_rule` first and send back its full field set
+    /// unless clearing the fields left out is intended.
+    pub rule: serde_json::Value,
+}
+
+/// Arguments for toggling a firewall rule's enabled state.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToggleFirewallRuleArgs {
+    /// The rule's UUID, as returned by `opnsense_list_firewall_rules`.
+    pub uuid: String,
+    /// Set the rule's enabled state explicitly. Omit to just flip whatever
+    /// it currently is.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 #[tool_router(router = opnsense_tools, vis = "pub(crate)")]
 impl HomelabServer {
     /// Firmware version, running kernel, pending updates, service health.
@@ -125,6 +167,119 @@ impl HomelabServer {
         Ok(Json(
             self.opnsense()?
                 .list_gateways()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Every configured firewall rule.
+    #[tool(
+        description = "List every firewall rule currently configured on OPNsense, with its UUID, enabled state, action, interface, direction, protocol, and source/destination. Call this to find a rule's UUID before getting, updating, deleting, or toggling it."
+    )]
+    pub async fn opnsense_list_firewall_rules(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_firewall_rules()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// One firewall rule's full field set.
+    #[tool(
+        description = "Get one OPNsense firewall rule's full field set by UUID. Call opnsense_list_firewall_rules first to find UUIDs."
+    )]
+    pub async fn opnsense_get_firewall_rule(
+        &self,
+        Parameters(FirewallRuleUuidArgs { uuid }): Parameters<FirewallRuleUuidArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .get_firewall_rule(&uuid)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Create a firewall rule.
+    #[tool(
+        description = "Create a new OPNsense firewall rule. Does not take effect until opnsense_apply_firewall_changes is called."
+    )]
+    pub async fn opnsense_create_firewall_rule(
+        &self,
+        Parameters(CreateFirewallRuleArgs { rule }): Parameters<CreateFirewallRuleArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .create_firewall_rule(rule)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Update a firewall rule.
+    #[tool(
+        description = "Update an existing OPNsense firewall rule by UUID. Does not take effect until opnsense_apply_firewall_changes is called."
+    )]
+    pub async fn opnsense_update_firewall_rule(
+        &self,
+        Parameters(UpdateFirewallRuleArgs { uuid, rule }): Parameters<UpdateFirewallRuleArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .update_firewall_rule(&uuid, rule)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Delete a firewall rule.
+    #[tool(
+        description = "Delete an OPNsense firewall rule by UUID. Does not take effect until opnsense_apply_firewall_changes is called."
+    )]
+    pub async fn opnsense_delete_firewall_rule(
+        &self,
+        Parameters(FirewallRuleUuidArgs { uuid }): Parameters<FirewallRuleUuidArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .delete_firewall_rule(&uuid)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Enable or disable a firewall rule.
+    #[tool(
+        description = "Enable or disable an OPNsense firewall rule by UUID, without deleting it. Pass enabled to set it explicitly, or omit it to just flip the current state. Does not take effect until opnsense_apply_firewall_changes is called."
+    )]
+    pub async fn opnsense_toggle_firewall_rule(
+        &self,
+        Parameters(ToggleFirewallRuleArgs { uuid, enabled }): Parameters<ToggleFirewallRuleArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .toggle_firewall_rule(&uuid, enabled)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Apply pending firewall changes.
+    #[tool(
+        description = "Apply pending OPNsense firewall changes (reloads the live ruleset). Call this after opnsense_create_firewall_rule, opnsense_update_firewall_rule, opnsense_delete_firewall_rule, or opnsense_toggle_firewall_rule -- none of those take effect on their own."
+    )]
+    pub async fn opnsense_apply_firewall_changes(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .apply_firewall_changes()
                 .await
                 .map_err(opnsense_error)?
                 .into(),

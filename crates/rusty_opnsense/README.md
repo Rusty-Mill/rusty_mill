@@ -47,6 +47,16 @@ installed plugin version. See the
 what each endpoint returns.
 
 Covered: system status, service search/start/stop/restart, interface
-listing, firewall alias export, gateway status. Not covered (open to a PR):
-firewall rule CRUD, DHCP lease listing, VPN (WireGuard/OpenVPN/IPsec)
-status, backup/config management.
+listing, firewall alias export, gateway status, firewall rule CRUD
+(list/get/create/update/delete/toggle) plus applying pending rule changes.
+Not covered (open to a PR): DHCP lease listing, VPN (WireGuard/OpenVPN/
+IPsec) status, backup/config management.
+
+Firewall rule writes (`create_firewall_rule`/`update_firewall_rule`) take
+the rule's field set as a passthrough `serde_json::Value` rather than a
+typed struct, for the same reason every other method returns raw JSON: the
+valid field set depends on the rule's own `ipprotocol`/`protocol`, not one
+fixed schema. None of `create_firewall_rule`/`update_firewall_rule`/
+`delete_firewall_rule`/`toggle_firewall_rule` take effect until
+`apply_firewall_changes` is called -- OPNsense buffers rule changes the same
+way the web UI's "Apply changes" button implies.

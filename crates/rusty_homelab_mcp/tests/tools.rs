@@ -99,12 +99,19 @@ async fn every_backend_contributes_its_tools() {
     assert_eq!(
         names,
         [
+            "opnsense_apply_firewall_changes",
+            "opnsense_create_firewall_rule",
+            "opnsense_delete_firewall_rule",
+            "opnsense_get_firewall_rule",
             "opnsense_list_firewall_aliases",
+            "opnsense_list_firewall_rules",
             "opnsense_list_gateways",
             "opnsense_list_interfaces",
             "opnsense_list_services",
             "opnsense_service_control",
             "opnsense_system_status",
+            "opnsense_toggle_firewall_rule",
+            "opnsense_update_firewall_rule",
             "proxmox_guest_power",
             "proxmox_guest_status",
             "proxmox_list_guests",
@@ -250,6 +257,37 @@ async fn opnsense_system_status_returns_structured_data_from_the_real_client_pat
 
     assert_ne!(result.is_error, Some(true));
     assert_eq!(structured(&result)["result"]["status"], "ok");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"result":"saved","uuid":"new-uuid"}"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "opnsense_create_firewall_rule",
+            serde_json::json!({
+                "rule": {
+                    "action": "pass",
+                    "interface": "lan",
+                    "direction": "in",
+                    "protocol": "TCP",
+                    "destination_port": "22",
+                    "description": "allow ssh",
+                },
+            }),
+        ))
+        .await
+        .expect("call opnsense_create_firewall_rule");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["uuid"], "new-uuid");
 
     client.cancel().await.expect("cancel");
 }
