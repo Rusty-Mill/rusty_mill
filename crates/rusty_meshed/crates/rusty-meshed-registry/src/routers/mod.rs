@@ -8,6 +8,7 @@ pub mod access_grants;
 pub mod contracts;
 pub mod data_products;
 pub mod governance;
+pub mod lineage;
 pub mod ports;
 
 use crate::http::response::Response;
