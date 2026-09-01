@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real air-control damping mechanism (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#149](https://github.com/baileyrd/rusty_bullet/pull/149) · `b4aa727`
 
 - **`RB-PHYSICS-001-FR-068`'s own Non-goals had already found RocketSim's
   `CAR_AIR_CONTROL_DAMPING = Vec(30, 20, 50)` exists** but left it as "a
