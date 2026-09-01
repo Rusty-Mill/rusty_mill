@@ -5806,11 +5806,14 @@ dependencies = [
 name = "rusty-meshed-cli"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "rusty-meshed-core",
  "rusty-meshed-observability",
  "rusty-meshed-registry",
  "rusty_err",
+ "rusty_json",
  "rusty_sqlite",
+ "rusty_tokio",
 ]
 
 [[package]]
