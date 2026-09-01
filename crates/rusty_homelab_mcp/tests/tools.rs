@@ -112,13 +112,22 @@ async fn every_backend_contributes_its_tools() {
             "opnsense_system_status",
             "opnsense_toggle_firewall_rule",
             "opnsense_update_firewall_rule",
+            "proxmox_clone_guest",
+            "proxmox_create_guest",
+            "proxmox_create_snapshot",
+            "proxmox_delete_guest",
+            "proxmox_delete_snapshot",
+            "proxmox_guest_config",
             "proxmox_guest_power",
             "proxmox_guest_status",
             "proxmox_list_guests",
             "proxmox_list_nodes",
+            "proxmox_list_snapshots",
             "proxmox_node_status",
+            "proxmox_rollback_snapshot",
             "proxmox_task_log",
             "proxmox_task_status",
+            "proxmox_update_guest_config",
         ]
     );
 
@@ -288,6 +297,62 @@ async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
 
     assert_ne!(result.is_error, Some(true));
     assert_eq!(structured(&result)["result"]["uuid"], "new-uuid");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn proxmox_update_guest_config_sends_the_config_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(r#"{"data":null}"#)]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_update_guest_config",
+            serde_json::json!({
+                "node": "pve",
+                "kind": "qemu",
+                "vmid": 100,
+                "config": { "memory": 4096 },
+            }),
+        ))
+        .await
+        .expect("call proxmox_update_guest_config");
+
+    assert_ne!(result.is_error, Some(true));
+    assert!(structured(&result)["result"].is_null());
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn proxmox_create_guest_returns_the_task_upid_as_plain_text() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmcreate:200:automation@pve!test:"}"#,
+    )]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_create_guest",
+            serde_json::json!({
+                "node": "pve",
+                "kind": "qemu",
+                "config": { "vmid": 200, "ostype": "l26" },
+            }),
+        ))
+        .await
+        .expect("call proxmox_create_guest");
+
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("create_guest returns text");
+    assert!(text.starts_with("UPID:pve:"), "unexpected upid: {text}");
 
     client.cancel().await.expect("cancel");
 }

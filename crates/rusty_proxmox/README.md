@@ -1,10 +1,10 @@
 # rusty_proxmox
 
 An async client for the [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment)
-REST API: cluster/node listing, guest (QEMU VM and LXC container) listing and
-status, and guest power control. Built on
-[`rusty_request`](../rusty_request), this workspace's own async HTTP client,
-rather than `reqwest`.
+REST API: cluster/node listing, guest (QEMU VM and LXC container) listing,
+status, power control, config, lifecycle (create/delete/clone), and
+snapshots. Built on [`rusty_request`](../rusty_request), this workspace's own
+async HTTP client, rather than `reqwest`.
 
 Used by [`rusty_homelab_mcp`](../rusty_homelab_mcp) to expose Proxmox control
 as MCP tools, but has no dependency on MCP/`rmcp` itself -- reusable from a
@@ -49,12 +49,18 @@ Every method returns Proxmox's own JSON (`serde_json::Value`) rather than a
 hand-maintained struct per endpoint -- the response shape varies with guest
 configuration and storage/network setup, and is already documented by the API
 viewer bundled with every Proxmox install
-(`https://<host>:8006/pve-docs/api-viewer/`). `guest_power` is the one
-exception: it unwraps the task ID (`UPID:...`) Proxmox hands back for the
-asynchronous action.
+(`https://<host>:8006/pve-docs/api-viewer/`). Every asynchronous action
+(`guest_power`, `create_guest`, `delete_guest`, `clone_guest`,
+`create_snapshot`, `delete_snapshot`, `rollback_snapshot`) is the exception:
+it unwraps the task ID (`UPID:...`) Proxmox hands back instead of waiting for
+the action to finish -- poll it with `task_status`/`task_log`.
+`create_guest`/`update_guest_config`/`clone_guest`/`create_snapshot` take
+their fields as a passthrough `serde_json::Value` for the same reason: the
+valid field set differs between QEMU and LXC and by what's already
+configured, not one fixed schema.
 
-Covered: node listing and status, guest listing and status, guest power
-actions (start/stop/shutdown/reboot/suspend/resume), and task status/log
-polling for the asynchronous actions above. Not covered (open to a PR):
-storage/backup management, cluster/HA configuration, guest config/create/
-clone/snapshot.
+Covered: node listing and status, guest listing/status/config, guest power
+actions (start/stop/shutdown/reboot/suspend/resume), guest create/delete/
+clone, snapshot list/create/delete/rollback, and task status/log polling for
+every asynchronous action above. Not covered (open to a PR): storage/backup
+management, cluster/HA configuration.
