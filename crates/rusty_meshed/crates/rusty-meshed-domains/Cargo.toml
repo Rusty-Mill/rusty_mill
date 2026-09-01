@@ -14,6 +14,14 @@ rusty_time = { path = "../../../rusty_time" }
 rusty_json = { path = "../../../rusty_json" }
 rusty_sqlite = { path = "../../../rusty_sqlite" }
 rusty_tokio = { path = "../../../rusty_tokio" }
+# A real (non-dev) dependency, unlike the rest of this crate's own
+# products: `generators::topics`/the `run_continuous`/`run_scenario`
+# binaries (DOM-037..047) issue `Metadata`/`CreateTopics` calls
+# directly, bypassing `rusty-meshed-sdk::TopicManager`'s naming-
+# convention validator -- same reason the source's own demo scripts
+# use `AdminClient` directly instead of each producer's own topic
+# creation (see `generators::topics`'s own module doc).
+rusty_kafka = { path = "../../../rusty_kafka" }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-sdk = { path = "../rusty-meshed-sdk" }
 
@@ -24,7 +32,6 @@ rusty-meshed-sdk = { path = "../rusty-meshed-sdk" }
 # PlatformConfig) -- only these crates' own tests, wiring up
 # DataProductProducerBase::new/DataProductConsumerBase::new directly
 # against fake servers/brokers, need to name them.
-rusty_kafka = { path = "../../../rusty_kafka" }
 rusty_wire = { path = "../../../rusty_wire" }
 rusty_request = { path = "../../../rusty_request" }
 rusty-meshed-observability = { path = "../rusty-meshed-observability" }

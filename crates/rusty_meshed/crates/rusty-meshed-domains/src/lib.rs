@@ -6,11 +6,11 @@
 //!
 //! See `../../capability-manifest.md` (rows DOM-001..047) for the
 //! capabilities this crate covers. The event schemas (DOM-001..011,
-//! [`events`]) and the three domain products/two derivation consumers
-//! (DOM-012..025, [`products`] -- partially: see that module's own doc
-//! for what's still blocked on `rusty_kafka`'s `Fetch` gap) are
-//! implemented; `ScenarioBuilder` and the `run_continuous`/
-//! `run_scenario` demo generators (DOM-026..047) are not yet.
+//! [`events`]), the three domain products/two derivation consumers
+//! (DOM-012..025, [`products`]), [`generators::ScenarioBuilder`]
+//! (DOM-026..036), and the `run_continuous`/`run_scenario` demo
+//! binaries (`src/bin/`, DOM-037..047) are all implemented.
 
 pub mod events;
+pub mod generators;
 pub mod products;
