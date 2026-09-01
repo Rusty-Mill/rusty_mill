@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real steering is a wheeled-vehicle raycast model, not a torque (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#137](https://github.com/baileyrd/rusty_bullet/pull/137) · `8a967c1`
 
 - **`drive::STEER_TORQUE` had no public reference at all** — this port
   applies a direct yaw torque about the car's local up axis, scaled up
