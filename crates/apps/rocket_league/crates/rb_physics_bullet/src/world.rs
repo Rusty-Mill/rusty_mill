@@ -22,20 +22,21 @@ use std::collections::HashMap;
 /// and `curves`' own doc comment; since `RB-PHYSICS-001-FR-027`, a car is
 /// deflected by one too, not just the ball). Every body collides with the
 /// ground, every wall, every curve, every compound-corner fillet, every
-/// goal wall, and every bounded wall — since `RB-PHYSICS-001-FR-051`, all
-/// of a body's own static-surface contacts detected in a step are resolved
-/// together via `solver::resolve_static_manifolds`
-/// (`resolve_static_contacts`), not one independent `solver::resolve_contacts`
-/// call per static shape (a wall is just a `StaticPlane` whose normal isn't
-/// "up," so the same machinery serves both);
-/// every car also collides with the ball and with every other car
+/// goal wall, and every bounded wall (a wall is just a `StaticPlane` whose
+/// normal isn't "up," so the same machinery serves both); every car also
+/// collides with the ball and with every other car
 /// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
-/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped; since
-/// `RB-PHYSICS-001-FR-030`, every such manifold in a step is resolved
-/// together as one combined multi-body solve
-/// (`solver::resolve_dynamic_manifolds`), not one independent pairwise
-/// solve per manifold (see `step`'s own doc comment). Each car also has a
+/// `RB-PHYSICS-001-FR-004`/`FR-006` originally scoped. Since
+/// `RB-PHYSICS-001-FR-052`, every body's own static-surface contacts and
+/// every ball-vs-car/car-vs-car manifold detected in a step are all
+/// resolved together via `solver::resolve_manifolds`, one shared iteration
+/// budget per body, rather than a body's static contacts (themselves
+/// already combined since `RB-PHYSICS-001-FR-051`, and every dynamic
+/// manifold already combined since `RB-PHYSICS-001-FR-030`) being two
+/// separate solves, one fully resolved and applied before the other's own
+/// setup ever reads the shared body's velocity (see `step`'s own doc
+/// comment). Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
 /// `ControllerInput::default()` — neutral — until set), a boost resource
 /// (`car_boost`, set via `set_car_boost`, starting full), a remembered base
@@ -110,24 +111,24 @@ pub struct PhysicsWorld {
     /// `with_net` — empty by default. Catches the ball and, since
     /// `RB-PHYSICS-001-FR-038`, every car too (see `net::NetMesh`'s own doc
     /// comment); resolved after every other contact this step, reusing the
-    /// same ball-plus-cars snapshot `solver::resolve_dynamic_manifolds` just
-    /// resolved rather than going through that function's own shared
-    /// multi-body solve (a net's own points aren't part of that scene-wide
-    /// `bodies` list at all).
+    /// same ball-plus-cars snapshot `solver::resolve_manifolds` just
+    /// resolved rather than going through that function's own shared solve
+    /// (a net's own points aren't part of that scene-wide `bodies` list at
+    /// all).
     pub nets: Vec<NetMesh>,
     pub gravity: Vec3,
     elapsed_secs: f32,
     /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) for
-    /// `solver::resolve_dynamic_manifolds`, keyed by (normalized)
-    /// ball-vs-car/car-vs-car body-index pair — see
+    /// `solver::resolve_manifolds`'s own dynamic-manifold channel, keyed by
+    /// (normalized) ball-vs-car/car-vs-car body-index pair — see
     /// `solver::ContactCache`'s own doc comment for what it does and why
-    /// only this call site (not `resolve_static_contacts`'s own
-    /// `solver::resolve_static_manifolds` call below) is warm-started.
+    /// only a body's dynamic manifolds (not its static-shape contacts) are
+    /// warm-started.
     dynamic_manifold_caches: HashMap<(usize, usize), ContactCache>,
 }
 
 /// Borrowed references to every static-shape collection in a `PhysicsWorld`
-/// (`RB-PHYSICS-001-FR-051`) — exists purely so `resolve_static_contacts`
+/// (`RB-PHYSICS-001-FR-051`) — exists purely so `static_contact_manifolds`
 /// takes one bundled parameter instead of six separate slice/reference
 /// arguments (clippy's `too_many_arguments` threshold), not as a genuine
 /// new abstraction; every field here is still borrowed directly from the
@@ -411,36 +412,40 @@ impl PhysicsWorld {
     /// in the scene — the ground, every wall, every curve
     /// (`RB-PHYSICS-001-FR-020`), every compound-corner fillet
     /// (`RB-PHYSICS-001-FR-023`), every goal wall (`RB-PHYSICS-001-FR-024`),
-    /// and every bounded wall (`RB-PHYSICS-001-FR-029`) — and resolves them
-    /// all together via `solver::resolve_static_manifolds`
-    /// (`RB-PHYSICS-001-FR-051`), instead of one independent
-    /// `solver::resolve_contacts` call per static shape.
+    /// and every bounded wall (`RB-PHYSICS-001-FR-029`) — returning every
+    /// `(restitution, friction, contacts)` group found, rather than
+    /// resolving them itself. `step` folds every body's own groups together
+    /// with every ball-vs-car/car-vs-car manifold into one combined call to
+    /// `solver::resolve_manifolds` (`RB-PHYSICS-001-FR-052`), instead of
+    /// this function resolving a body's static contacts on its own via
+    /// `solver::resolve_static_manifolds` (`RB-PHYSICS-001-FR-051`) before
+    /// `step`'s own separate dynamic-manifold solve ever reads that body's
+    /// updated velocity.
     ///
-    /// Before this requirement, `step` called one dedicated
+    /// Before `RB-PHYSICS-001-FR-051`, `step` called one dedicated
     /// `resolve_*_contact` helper per static shape type in sequence (ground,
     /// then every wall, then every curve, and so on) — each one fully
     /// resolving and applying its own `SOLVER_ITERATIONS` pass before the
-    /// next shape's setup even read `body`'s updated velocity. That's
-    /// harmless when `body` only ever touches one static shape at a time,
-    /// but a body simultaneously touching two different static surfaces is
-    /// a routine scenario, not an edge case — a car driving along a wall
-    /// near the floor, or wedged into a corner formed by two walls
-    /// (`RB-PHYSICS-001-FR-039`'s own wall-jump-at-a-corner handling already
-    /// has to account for a car touching two walls at once) — and this
-    /// port's own module doc comment used to claim resolving each
-    /// independently was fine "since a body's contact with static geometry
-    /// never depends on another dynamic body," which is true but doesn't
-    /// cover a body touching two *static* surfaces at once. This is exactly
-    /// `RB-PHYSICS-001-FR-030`'s and `RB-PHYSICS-001-FR-050`'s own
-    /// independent-pairwise gap, just for static-vs-dynamic contacts
-    /// instead of dynamic-vs-dynamic ones — see
-    /// `solver::resolve_static_manifolds`'s own doc comment for the exact
-    /// mechanism and its dedicated test. `scene` bundles every static-shape
-    /// slice into one borrow (clippy's `too_many_arguments` threshold is
-    /// the only reason this isn't just six separate parameters — every
-    /// caller still borrows the same six `PhysicsWorld` fields directly,
-    /// same as before this requirement).
-    fn resolve_static_contacts(body: &mut RigidBody, scene: &StaticScene, dt: f32) {
+    /// next shape's setup even read `body`'s updated velocity. FR-051 fixed
+    /// that for a body touching two different *static* surfaces at once (a
+    /// car driving along a wall near the floor, or wedged into a corner)
+    /// via `solver::resolve_static_manifolds`'s own combined solve — but
+    /// left the exact same gap one level up: a body's now-combined static
+    /// resolve was still its own separate call, fully resolved and applied
+    /// before `resolve_dynamic_manifolds`'s own setup for that same body
+    /// (touching another car, say) ever read the result. `RB-PHYSICS-001-FR-052`
+    /// closes that remaining gap by folding this function's own gathered
+    /// groups into `solver::resolve_manifolds`'s shared solve instead — see
+    /// that function's own doc comment for the exact mechanism and its
+    /// dedicated test. `scene` bundles every static-shape slice into one
+    /// borrow (clippy's `too_many_arguments` threshold is the only reason
+    /// this isn't just six separate parameters — every caller still borrows
+    /// the same six `PhysicsWorld` fields directly, same as before
+    /// `RB-PHYSICS-001-FR-051`).
+    fn static_contact_manifolds(
+        body: &RigidBody,
+        scene: &StaticScene,
+    ) -> Vec<(f32, f32, Vec<collision::Contact>)> {
         let mut manifolds: Vec<(f32, f32, Vec<collision::Contact>)> = Vec::new();
 
         let ground_contacts = collision::contacts_vs_plane(body, scene.ground);
@@ -490,7 +495,7 @@ impl PhysicsWorld {
             }
         }
 
-        solver::resolve_static_manifolds(body, &manifolds, dt);
+        manifolds
     }
 
     /// Integrates `body`'s transform from its (already-resolved) velocity,
@@ -516,16 +521,12 @@ impl PhysicsWorld {
     /// every body's unconstrained velocity (for cars, including
     /// `drive::apply_driven_forces` from that car's current input), then
     /// detect and resolve every contact — every body's own static-surface
-    /// contacts first (independent of every *other* body, since a body's
-    /// contact with static geometry never depends on another dynamic body
-    /// — but combined together for that one body via
-    /// `resolve_static_contacts`/`solver::resolve_static_manifolds` since
-    /// `RB-PHYSICS-001-FR-051`, not one independent call per static shape),
-    /// then every ball-vs-car and car-vs-car manifold together in
-    /// one combined solve (`solver::resolve_dynamic_manifolds`, since
-    /// `RB-PHYSICS-001-FR-030`) — then integrate every body's transform,
-    /// never resolving one body's transform before another body's contacts
-    /// have had a chance to affect it.
+    /// contacts (`static_contact_manifolds`) and every ball-vs-car/car-vs-car
+    /// manifold, all resolved together in one combined solve
+    /// (`solver::resolve_manifolds`, since `RB-PHYSICS-001-FR-052`) — then
+    /// integrate every body's transform, never resolving one body's
+    /// transform before another body's contacts have had a chance to affect
+    /// it.
     ///
     /// Before `RB-PHYSICS-001-FR-030`, car-vs-car and ball-vs-car pairs
     /// were each resolved with their own independent call to
@@ -534,17 +535,26 @@ impl PhysicsWorld {
     /// approximation once 3+ bodies were mutually touching in the same
     /// step (e.g. a car pinned between the ball and another car), since
     /// the shared body in two pairs never had both contacts reasoned about
-    /// together. `resolve_dynamic_manifolds` fixes that by sharing one
-    /// `DeltaVelocity` accumulator per body index across every manifold
-    /// that body takes part in — still simpler than Bullet's actual
-    /// interleaved-across-islands solver architecture (no persistent
-    /// islands), but a genuine combined solve for the step it runs, not a
-    /// sequence of independent pairwise ones. Since
-    /// `RB-PHYSICS-001-FR-035`, `dynamic_manifold_caches` also carries each
-    /// manifold's converged impulses across steps, so
-    /// `solver::resolve_dynamic_manifolds` warm-starts from last step's
-    /// answer instead of zero — see that function's and
-    /// `solver::ContactCache`'s own doc comments. Since
+    /// together. `solver::resolve_dynamic_manifolds` fixed that by sharing
+    /// one `DeltaVelocity` accumulator per body index across every dynamic
+    /// manifold that body takes part in. `RB-PHYSICS-001-FR-051` then made
+    /// the same fix one level down, for a body's own multiple static-shape
+    /// contacts (`solver::resolve_static_manifolds`). But each of those two
+    /// combined solves was still its own separate call — a body's static
+    /// contacts fully resolved and applied before the dynamic solve's own
+    /// setup for that same body (touching another car, say) ever read the
+    /// result — the identical order-dependent gap one level up.
+    /// `RB-PHYSICS-001-FR-052` closes that: `solver::resolve_manifolds`
+    /// folds a step's static and dynamic manifolds into one shared solve,
+    /// still simpler than Bullet's actual interleaved-across-islands solver
+    /// architecture (no persistent islands), but a genuine combined solve
+    /// for everything touching a body this step, not a sequence of
+    /// independent ones. Since `RB-PHYSICS-001-FR-035`,
+    /// `dynamic_manifold_caches` also carries each dynamic manifold's
+    /// converged impulses across steps, so `solver::resolve_manifolds`
+    /// warm-starts that channel from last step's answer instead of zero
+    /// (a body's static contacts still cold-start every call) — see that
+    /// function's and `solver::ContactCache`'s own doc comments. Since
     /// `RB-PHYSICS-001-FR-037`, the ball and every car have their sleep
     /// state (`body::RigidBody::update_sleep_state`) re-evaluated once
     /// every contact above (including the net panels) is resolved but
@@ -553,7 +563,7 @@ impl PhysicsWorld {
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
-        // driven forces move anything) — `resolve_static_contacts` below
+        // driven forces move anything) — `static_contact_manifolds` below
         // re-derives the same contacts for the actual solve; the small
         // duplicated `contacts_vs_plane` call is simpler than threading
         // the manifold through, and cheap (a handful of corner checks).
@@ -646,41 +656,48 @@ impl PhysicsWorld {
             goal_walls: &self.goal_walls,
             bounded_walls: &self.bounded_walls,
         };
-        Self::resolve_static_contacts(&mut self.ball, &static_scene, dt);
-        for car in &mut self.cars {
-            Self::resolve_static_contacts(car, &static_scene, dt);
-        }
-
-        // Combined multi-body solve (RB-PHYSICS-001-FR-030): collect every
-        // ball-vs-car and car-vs-car manifold with at least one contact,
-        // then resolve them all together via `solver::resolve_dynamic_manifolds`
-        // — one shared iteration budget per body, instead of each pair
-        // running its own full `SOLVER_ITERATIONS` pass and being applied
-        // before the next pair is even set up (see that function's own doc
+        // Combined static-and-dynamic solve (RB-PHYSICS-001-FR-052): every
+        // body's own static-shape contacts (`static_manifolds`) and every
+        // ball-vs-car/car-vs-car manifold (`dynamic_manifolds`) are gathered
+        // first and resolved together in one `solver::resolve_manifolds`
+        // call, sharing one iteration budget per body — instead of this
+        // body's static contacts being fully resolved and applied by their
+        // own separate call before the dynamic solve's own setup for that
+        // same body ever read the result (see that function's own doc
         // comment). Index 0 is the ball, index `i + 1` is `self.cars[i]`.
         let mut bodies: Vec<RigidBody> = Vec::with_capacity(1 + self.cars.len());
         bodies.push(self.ball);
         bodies.extend(self.cars.iter().copied());
 
-        let mut manifolds: Vec<(usize, usize, Vec<collision::Contact>)> = Vec::new();
+        let mut static_manifolds: Vec<(usize, f32, f32, Vec<collision::Contact>)> = Vec::new();
+        for (body_index, body) in bodies.iter().enumerate() {
+            for (restitution, friction, contacts) in
+                Self::static_contact_manifolds(body, &static_scene)
+            {
+                static_manifolds.push((body_index, restitution, friction, contacts));
+            }
+        }
+
+        let mut dynamic_manifolds: Vec<(usize, usize, Vec<collision::Contact>)> = Vec::new();
         for (car_index, car) in self.cars.iter().enumerate() {
             let contacts = collision::contacts_between(&self.ball, car);
             if !contacts.is_empty() {
-                manifolds.push((0, car_index + 1, contacts));
+                dynamic_manifolds.push((0, car_index + 1, contacts));
             }
         }
         for i in 0..self.cars.len() {
             for j in (i + 1)..self.cars.len() {
                 let contacts = collision::contacts_between(&self.cars[i], &self.cars[j]);
                 if !contacts.is_empty() {
-                    manifolds.push((i + 1, j + 1, contacts));
+                    dynamic_manifolds.push((i + 1, j + 1, contacts));
                 }
             }
         }
 
-        solver::resolve_dynamic_manifolds(
+        solver::resolve_manifolds(
             &mut bodies,
-            &manifolds,
+            &static_manifolds,
+            &dynamic_manifolds,
             dt,
             &mut self.dynamic_manifold_caches,
         );
@@ -691,9 +708,9 @@ impl PhysicsWorld {
         // resolved after every other contact this step so each body's
         // velocity going in already reflects gravity, driven forces, and
         // every static/dynamic contact above — see `nets`' own doc comment
-        // for why this isn't part of `resolve_dynamic_manifolds`' shared
-        // solve. Reuses the same `bodies` snapshot `resolve_dynamic_manifolds`
-        // just resolved (index 0 the ball, index `i + 1` `self.cars[i]`,
+        // for why this isn't part of `resolve_manifolds`' shared solve.
+        // Reuses the same `bodies` snapshot `resolve_manifolds` just
+        // resolved (index 0 the ball, index `i + 1` `self.cars[i]`,
         // exactly as above) rather than syncing back to `self.ball`/`self.cars`
         // and rebuilding a fresh one, deferring that sync until every net has
         // had its turn.
@@ -1800,7 +1817,9 @@ mod tests {
         // whichever wall was resolved last, an arbitrary artifact with no
         // physical basis; this test was confirmed to fail under that old
         // sequential loop before `step` was changed to use
-        // `solver::resolve_static_manifolds` instead.
+        // `solver::resolve_static_manifolds` instead (folded, since
+        // `RB-PHYSICS-001-FR-052`, into `solver::resolve_manifolds`'s own
+        // wider combined solve — see that function's own doc comment).
         let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
         let wall_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
         let ball_radius = 93.15;
@@ -1827,13 +1846,62 @@ mod tests {
     }
 
     #[test]
+    fn a_ball_wedged_between_a_wall_and_a_heavy_car_settles_symmetrically_instead_of_favoring_one()
+    {
+        // RB-PHYSICS-001-FR-052: the real proof at `PhysicsWorld::step`'s
+        // own public level, one level up from
+        // `a_ball_wedged_into_a_two_wall_corner_settles_symmetrically_instead_of_favoring_one_wall`
+        // above. Same symmetric corner setup, except `wall_y` is replaced by
+        // a real car in the scene — a very-heavy box (`mass = 1e9`)
+        // positioned so its own face is exactly where `wall_y`'s own plane
+        // would be, making it a real ball-vs-car dynamic-manifold contact
+        // instead of a static one, but as immovable as a real wall for all
+        // practical purposes. Before this requirement, `step` resolved the
+        // ball's static wall contact fully via `resolve_static_contacts`
+        // before ever building the `bodies` array `resolve_dynamic_manifolds`
+        // used for the ball-vs-car contact, the same order-dependent gap
+        // `RB-PHYSICS-001-FR-030`/`FR-051` already found and fixed
+        // elsewhere; this test was confirmed to fail under that old
+        // two-call sequence (measurably biased, same as the two-static-wall
+        // test's own pre-fix failure) before `step` was changed to route
+        // both channels through one `solver::resolve_manifolds` call.
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(ball_radius, ball_radius, 1000.0),
+        );
+        ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+        let heavy_car = RigidBody::car_box(
+            Vec3::new(1000.0, 1000.0, 1000.0),
+            1.0e9,
+            Vec3::new(ball_radius, -1000.0, 1000.0),
+        );
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall_x)
+            .with_car(heavy_car);
+        world.gravity = Vec3::ZERO; // isolate the corner impact from falling
+
+        world.step(1.0 / 60.0);
+
+        let vx = world.ball.linear_velocity.x;
+        let vy = world.ball.linear_velocity.y;
+        assert!(
+            (vx - vy).abs() < 5.0,
+            "expected a squarely-symmetric wall-and-heavy-car corner impact to leave the \
+             ball's x/y velocity components nearly equal, got vx={vx}, vy={vy}"
+        );
+    }
+
+    #[test]
     fn a_ball_bounces_off_a_wall_instead_of_passing_through() {
         // The real end-to-end proof that arena walls are actual physical
         // geometry, not just an input-detection hack: a ball shot at a
         // wall should bounce off it the same way it already does off a
         // car (`ball_bounces_off_a_stationary_car_instead_of_passing_through`),
-        // via the same generic resolve_static_contacts machinery the ground
-        // already uses.
+        // via the same generic `static_contact_manifolds` machinery the
+        // ground already uses.
         let wall_x = 100.0;
         let wall = StaticPlane {
             restitution: 0.5,
