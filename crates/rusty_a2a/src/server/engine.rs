@@ -10,9 +10,9 @@ use std::sync::Arc;
 use async_stream::stream;
 use chrono::Utc;
 use futures_core::Stream;
+use rusty_uuid::Uuid;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use rusty_uuid::Uuid;
 
 /// How many recent events [`subscribe_to_task`](Engine::subscribe_to_task)
 /// can replay per task on reconnect - matches the broadcast bus's own
