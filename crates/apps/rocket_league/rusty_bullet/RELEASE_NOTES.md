@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real handbrake friction reduction is anisotropic, not a single uniform multiplier (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#139](https://github.com/baileyrd/rusty_bullet/pull/139) · `45b107f`
 
 - **`drive::HANDBRAKE_FRICTION_MULTIPLIER` had no public reference at
   all** — this port multiplies the car's own single isotropic
