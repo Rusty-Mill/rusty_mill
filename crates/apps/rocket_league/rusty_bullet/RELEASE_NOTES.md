@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real speed-dependent throttle taper
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#123](https://github.com/baileyrd/rusty_bullet/pull/123) · `b729cc8`
 
 - **`THROTTLE_ACCELERATION`'s own doc comment had named this exact gap
   since it was introduced**: full flat acceleration right up to a hard
