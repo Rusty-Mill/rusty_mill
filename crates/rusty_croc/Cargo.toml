@@ -14,7 +14,11 @@ argon2 = "0.5"
 rand = "0.8"
 flate2 = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+# `raw_value`, not `arbitrary_precision`: the PAKE handshake needs the exact
+# decimal text of curve-sized integers (see `pake::Pake::update`), and
+# `arbitrary_precision` is a workspace-wide behaviour change once cargo unifies
+# features across this monorepo's members.
+serde_json = { version = "1", features = ["raw_value"] }
 base64 = "0.22"
 num-bigint = "0.4"
 num-traits = "0.2"

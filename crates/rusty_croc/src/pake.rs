@@ -634,12 +634,24 @@ impl Pake {
     }
 
     /// Process the other party's `bytes()`. Mirrors `Pake.Update`.
+    ///
+    /// The coordinates on the wire are curve-sized decimal integers -- far past
+    /// what `f64` (and so `serde_json::Number`) holds exactly -- so the fields
+    /// are read as `RawValue` and their *source text* is handed to `BigUint`.
+    /// `serde_json`'s `arbitrary_precision` would do the same job, but it is a
+    /// crate-level feature: cargo unifies features across a workspace build, so
+    /// turning it on here would silently change how every other crate in this
+    /// monorepo sees JSON numbers (it routes them through a map, which breaks
+    /// `#[serde(flatten)]` over numeric fields). `raw_value` is additive and
+    /// costs the rest of the workspace nothing.
     pub fn update(&mut self, q_bytes: &[u8]) -> Result<(), PakeError> {
-        let v: serde_json::Value =
+        use serde_json::value::RawValue;
+
+        let v: std::collections::BTreeMap<String, Box<RawValue>> =
             serde_json::from_slice(q_bytes).map_err(|e| PakeError::BadMessage(e.to_string()))?;
         let q_role = v
             .get("Role")
-            .and_then(|r| r.as_u64())
+            .and_then(|r| r.get().trim().parse::<u64>().ok())
             .ok_or_else(|| PakeError::BadMessage("missing Role".into()))?;
         if q_role == u64::from(self.role) {
             return Err(PakeError::SameRole);
@@ -647,15 +659,21 @@ impl Pake {
 
         let get_pt = |a: &str, b: &str| -> Result<Point, PakeError> {
             let read = |k: &str| -> Result<Option<BigUint>, PakeError> {
-                match v.get(k) {
-                    None | Some(serde_json::Value::Null) => Ok(None),
-                    Some(serde_json::Value::Number(n)) => {
-                        BigUint::parse_bytes(n.to_string().as_bytes(), 10)
-                            .map(Some)
-                            .ok_or_else(|| PakeError::BadMessage(format!("bad number in {k}")))
-                    }
-                    Some(_) => Err(PakeError::BadMessage(format!("bad type for {k}"))),
+                let Some(raw) = v.get(k) else {
+                    return Ok(None);
+                };
+                let text = raw.get().trim();
+                if text == "null" {
+                    return Ok(None);
                 }
+                // Only a JSON number can be a coordinate; anything else (a
+                // string, an object) is the "bad type" case, as before.
+                if !text.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+                    return Err(PakeError::BadMessage(format!("bad type for {k}")));
+                }
+                BigUint::parse_bytes(text.as_bytes(), 10)
+                    .map(Some)
+                    .ok_or_else(|| PakeError::BadMessage(format!("bad number in {k}")))
             };
             match (read(a)?, read(b)?) {
                 (Some(x), Some(y)) => Ok(Some((x, y))),
