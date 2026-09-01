@@ -698,6 +698,31 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   body is handbraking — the same architecture-mismatch category
   FR-063/FR-065 already established. No new tests; all pre-existing
   tests pass unchanged.
+- `drive::WALL_JUMP_HORIZONTAL_SPEED` real-Rocket-League reference finding
+  (`RB-PHYSICS-001-FR-067`) — `WALL_JUMP_HORIZONTAL_SPEED` had no public
+  reference at all. Fetched RocketSim's own `Car.cpp` (`_UpdateJump`) and
+  found real Rocket League has no distinct wall-jump mechanic or constant
+  at all: `_UpdateJump` applies exactly one impulse, `GetUpDir() *
+  mutatorConfig.jumpImmediateForce` (the same real value this port's own
+  `JUMP_SPEED` already matches), gated only on `isOnGround`, itself
+  defined purely by wheel-contact count with no floor-vs-wall distinction;
+  no `WALL_JUMP`-named constant exists anywhere in `RLConst.h`. Since
+  FR-065 already confirmed real cars ride Bullet's own raycast vehicle
+  system, a car driving on a wall has its own orientation continuously
+  tipped by wheel/suspension contact forces to match that wall, so
+  `GetUpDir()` already points along the wall's outward normal by the time
+  a wall jump fires — real Rocket League's "wall jump" is the identical
+  single grounded-jump impulse, not a distinct horizontal-plus-vertical
+  composite. Corrected `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment, the
+  module doc's wall-jump section, and the "commonly-cited constants"
+  paragraph; also fixed adjacent stale text in the spec's own Open
+  Questions section. Not adopted as a fix: this port's car has no wheels,
+  raycasting, or surface-tracking orientation system at all (the same
+  architecture gap FR-065 found for steering) — applying only `JUMP_SPEED`
+  straight up on a wall touch would produce no push-off at all in this
+  port's own model, so its own two-component composite substitute remains
+  deliberate and necessary. No new tests; all pre-existing tests pass
+  unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

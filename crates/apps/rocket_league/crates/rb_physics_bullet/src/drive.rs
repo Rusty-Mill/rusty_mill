@@ -112,7 +112,14 @@
 //! a double jump left afterward.
 //! Wall jump has no per-wall-contact limit of its own: touching a (new or
 //! the same) wall again always allows another wall jump, unlike the
-//! double jump's once-per-airborne-period limit.
+//! double jump's once-per-airborne-period limit. Since
+//! `RB-PHYSICS-001-FR-067`, real Rocket League is confirmed to have no
+//! distinct wall-jump mechanic or constant at all — it's the identical
+//! grounded-jump impulse applied along the car's own up axis, which tips
+//! to match a touched wall via the wheel/suspension system this port's box
+//! car doesn't have; see `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for
+//! the full finding and why this port's two-component substitute isn't
+//! adopted away.
 //!
 //! Wall jump can itself be dodged off of: the same `pitch`/`roll`-vs-
 //! `DODGE_DEADZONE` check the ground double jump uses is applied on a wall
@@ -254,19 +261,25 @@
 //! League applies a genuinely anisotropic (direction-dependent) reduction,
 //! not this port's one isotropic factor — see that requirement's own
 //! entry and `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc comment for the
-//! full finding. `AIR_CONTROL_TORQUE`,
-//! `WALL_JUMP_HORIZONTAL_SPEED`, and `DODGE_ANGULAR_SPEED`, and
+//! full finding. `AIR_CONTROL_TORQUE` and
+//! `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
-//! only to produce a visibly responsive turn/slide/spin/push-off/flip for
+//! only to produce a visibly responsive turn/spin/flip for
 //! this car's mass/inertia in tests — `LANDING_AUTO_UPRIGHT_TORQUE` in
 //! particular isn't a simplification of one real system at all, since
 //! `RB-PHYSICS-001-FR-060` found real Rocket League's two closest systems
 //! (auto-flip, auto-roll) are both grounded and input-gated, unlike this
 //! port's own airborne, input-free nudge — see that module doc section's
-//! own detail. `RB-PHYSICS-001-FR-031`'s audit
+//! own detail. `WALL_JUMP_HORIZONTAL_SPEED` remains an uncalibrated
+//! placeholder too, but since `RB-PHYSICS-001-FR-067` real Rocket League is
+//! confirmed to have no distinct wall-jump mechanic or constant to
+//! calibrate against at all — see that requirement's own entry and
+//! `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for the full finding.
+//! `RB-PHYSICS-001-FR-031`'s audit
 //! found real reference numbers for some of these (a dodge's real ~500
 //! uu/s base impulse; a wall jump reusing the plain jump impulse rather
-//! than its own faster speed; real air-control torque/damping
+//! than its own faster speed, confirmed exact by `RB-PHYSICS-001-FR-067`;
+//! real air-control torque/damping
 //! coefficients), but none of them port directly: they're expressed as
 //! torques or velocity-dependent curves calibrated against real Rocket
 //! League's own specific car mass/inertia tensor and mechanic shape,
@@ -557,6 +570,45 @@ const AIR_CONTROL_TORQUE: f32 = 1_000_000.0;
 /// `world.rs`'s end-to-end tests can assert against it directly (including
 /// distinguishing a wall jump from the differently-sized `DODGE_SPEED`),
 /// the same way `JUMP_SPEED` already is.
+///
+/// `RB-PHYSICS-001-FR-067` looked for that missing reference directly:
+/// fetching RocketSim's real `Car.cpp` found real Rocket League has no
+/// separate wall-jump mechanic — or constant — at all. `_UpdateJump`
+/// applies exactly one impulse, `GetUpDir() * mutatorConfig.jumpImmediateForce`
+/// (the same real value this port's own `JUMP_SPEED` already matches),
+/// gated only on `isOnGround`, itself defined purely by wheel-contact count
+/// (`numWheelsInContact >= 3`) with no floor-vs-wall distinction at all; a
+/// dedicated search of `RLConst.h` for any `WALL`-named constant found only
+/// an unrelated Heatseeker-mode threshold. Since `RB-PHYSICS-001-FR-065`
+/// already confirmed real Rocket League's cars ride on Bullet's own
+/// raycast vehicle system (`btVehicleRL`), a car driving on a wall has its
+/// own orientation continuously tipped to match that wall by ordinary
+/// wheel/suspension contact forces, the same way a real car tilts to match
+/// a ramp — so `GetUpDir()` (the car's own local up axis in world space)
+/// already points along the wall's outward normal by the time a wall jump
+/// fires, with no special-cased direction logic needed. Real Rocket
+/// League's "wall jump" is thus the *identical* single grounded-jump
+/// impulse, along whatever direction the car's own up axis currently
+/// points — never a distinct horizontal-plus-vertical composite with its
+/// own separate magnitude. This confirms, with the exact mechanism rather
+/// than just the constant's absence, what `RB-PHYSICS-001-FR-031`'s
+/// original audit only briefly noted as "a wall jump reusing the plain
+/// jump impulse rather than its own faster speed."
+///
+/// Not adopted as a fix: this port's car has no wheels, raycasting, or
+/// surface-tracking orientation system at all (the same architecture gap
+/// `RB-PHYSICS-001-FR-065` found for steering) — its orientation doesn't
+/// automatically tip to match a touched wall, so its own up axis stays
+/// world-vertical throughout a wall touch. Applying only `JUMP_SPEED`
+/// straight up on a wall touch, as the confirmed real mechanism would
+/// suggest, would produce no push-off from the wall at all in this port,
+/// defeating the entire point of a wall jump. This port's own two-component
+/// composite (a separate horizontal push-off along the wall's normal, on
+/// top of the same vertical `JUMP_SPEED`) remains a deliberate, necessary
+/// substitute for the missing surface-tracking orientation mechanism, not
+/// an unfilled calibration gap — `WALL_JUMP_HORIZONTAL_SPEED`'s own
+/// magnitude is still an uncalibrated placeholder, but the two-component
+/// shape itself is not a mistake to correct.
 pub const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
 
 /// Arbitrary deadzone for `pitch`/`roll` input at the moment of a double
