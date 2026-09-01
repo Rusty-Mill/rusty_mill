@@ -40,9 +40,11 @@ pub struct OpnsenseConfig {
 /// included).
 ///
 /// Firewall rule writes (`create_firewall_rule`/`update_firewall_rule`/
-/// `delete_firewall_rule`/`toggle_firewall_rule`) don't take effect on their
-/// own -- OPNsense buffers rule changes until [`OpnsenseClient::apply_firewall_changes`]
-/// is called, the same way the web UI's "Apply changes" banner implies.
+/// `delete_firewall_rule`/`toggle_firewall_rule`) and VLAN writes
+/// (`create_vlan`/`update_vlan`/`delete_vlan`) don't take effect on their
+/// own -- OPNsense buffers each config area's changes until its own
+/// `apply_*_changes` method is called, the same way the web UI's "Apply
+/// changes" banner implies.
 #[derive(Debug, Clone)]
 pub struct OpnsenseClient {
     http: Client,
@@ -182,6 +184,72 @@ impl OpnsenseClient {
     /// their own.
     pub async fn apply_firewall_changes(&self) -> Result<Value> {
         self.post("/api/firewall/filter/apply").await
+    }
+
+    /// `POST /dhcpv4/leases/searchLease` -- every current DHCP lease (a
+    /// `{"rows": [...], "rowCount": N, ...}` search envelope, same shape as
+    /// [`OpnsenseClient::list_services`]).
+    pub async fn list_dhcp_leases(&self) -> Result<Value> {
+        self.post_json("/api/dhcpv4/leases/searchLease", &serde_json::json!({}))
+            .await
+    }
+
+    /// `POST /interfaces/vlan_settings/searchItem` -- every configured VLAN
+    /// interface (search envelope, same shape as
+    /// [`OpnsenseClient::list_dhcp_leases`]).
+    pub async fn list_vlans(&self) -> Result<Value> {
+        self.post_json(
+            "/api/interfaces/vlan_settings/searchItem",
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    /// `GET /interfaces/vlan_settings/getItem/{uuid}` -- one VLAN's full
+    /// field set.
+    pub async fn get_vlan(&self, uuid: &str) -> Result<Value> {
+        self.get(&format!("/api/interfaces/vlan_settings/getItem/{uuid}"))
+            .await
+    }
+
+    /// `POST /interfaces/vlan_settings/addItem` -- create a VLAN. `fields`
+    /// is the same field set OPNsense's own VLAN form submits (`if` the
+    /// parent interface, `tag`, `descr`, `pcp`) -- passed through as-is,
+    /// same reasoning as [`OpnsenseClient::create_firewall_rule`]. Doesn't
+    /// take effect until [`OpnsenseClient::apply_vlan_changes`] is called.
+    pub async fn create_vlan(&self, fields: Value) -> Result<Value> {
+        self.post_json(
+            "/api/interfaces/vlan_settings/addItem",
+            &serde_json::json!({ "vlan": fields }),
+        )
+        .await
+    }
+
+    /// `POST /interfaces/vlan_settings/setItem/{uuid}` -- update a VLAN.
+    /// Same passthrough field set as [`OpnsenseClient::create_vlan`].
+    /// Doesn't take effect until [`OpnsenseClient::apply_vlan_changes`] is
+    /// called.
+    pub async fn update_vlan(&self, uuid: &str, fields: Value) -> Result<Value> {
+        self.post_json(
+            &format!("/api/interfaces/vlan_settings/setItem/{uuid}"),
+            &serde_json::json!({ "vlan": fields }),
+        )
+        .await
+    }
+
+    /// `POST /interfaces/vlan_settings/delItem/{uuid}` -- delete a VLAN.
+    /// Doesn't take effect until [`OpnsenseClient::apply_vlan_changes`] is
+    /// called.
+    pub async fn delete_vlan(&self, uuid: &str) -> Result<Value> {
+        self.post(&format!("/api/interfaces/vlan_settings/delItem/{uuid}"))
+            .await
+    }
+
+    /// `POST /interfaces/vlan_settings/reconfigure` -- apply every pending
+    /// VLAN change. OPNsense buffers create/update/delete above until this
+    /// is called -- none of them take effect on their own.
+    pub async fn apply_vlan_changes(&self) -> Result<Value> {
+        self.post("/api/interfaces/vlan_settings/reconfigure").await
     }
 
     async fn get(&self, path: &str) -> Result<Value> {

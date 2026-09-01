@@ -48,15 +48,20 @@ what each endpoint returns.
 
 Covered: system status, service search/start/stop/restart, interface
 listing, firewall alias export, gateway status, firewall rule CRUD
-(list/get/create/update/delete/toggle) plus applying pending rule changes.
-Not covered (open to a PR): DHCP lease listing, VPN (WireGuard/OpenVPN/
-IPsec) status, backup/config management.
+(list/get/create/update/delete/toggle) plus applying pending rule changes,
+DHCP lease listing, and VLAN CRUD (list/get/create/update/delete) plus
+applying pending VLAN changes. Not covered (open to a PR): general
+interface settings writes (enable/blockpriv/blockbogons on a physical
+interface) -- no stable, documented core REST endpoint for this was found,
+as opposed to guessing one the way the OPNSenseMCP reference implementation
+does; VPN (WireGuard/OpenVPN/IPsec) status; backup/config management.
 
-Firewall rule writes (`create_firewall_rule`/`update_firewall_rule`) take
-the rule's field set as a passthrough `serde_json::Value` rather than a
-typed struct, for the same reason every other method returns raw JSON: the
-valid field set depends on the rule's own `ipprotocol`/`protocol`, not one
-fixed schema. None of `create_firewall_rule`/`update_firewall_rule`/
-`delete_firewall_rule`/`toggle_firewall_rule` take effect until
-`apply_firewall_changes` is called -- OPNsense buffers rule changes the same
-way the web UI's "Apply changes" button implies.
+Firewall rule and VLAN writes (`create_firewall_rule`/`update_firewall_rule`/
+`create_vlan`/`update_vlan`) take their field set as a passthrough
+`serde_json::Value` rather than a typed struct, for the same reason every
+other method returns raw JSON: the valid field set depends on context (a
+rule's own `ipprotocol`/`protocol`, in the firewall case), not one fixed
+schema. None of the writes in either config area take effect until that
+area's own `apply_firewall_changes`/`apply_vlan_changes` is called --
+OPNsense buffers changes per config area the same way the web UI's "Apply
+changes" button implies.
