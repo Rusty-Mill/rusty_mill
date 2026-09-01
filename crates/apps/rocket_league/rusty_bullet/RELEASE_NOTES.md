@@ -6,6 +6,48 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real forward-speed-dependent dodge impulse scaling
+**2026-09-01** · PR pending · commit pending
+
+- **`RB-PHYSICS-001-FR-031`'s own audit had already found real Rocket
+  League's dodge impulse has "direction/speed-dependent scaling"** but
+  couldn't adopt it — the audit only had `RLConst.h`'s bare constant
+  declarations, not the formula they combine into.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateDoubleJumpOrFlip`, the
+  same file/technique `RB-PHYSICS-001-FR-058` used for the throttle
+  taper) and found the real mechanism: a dodge's base impulse scales
+  per-axis by `((maxSpeedScale - 1) * forwardSpeedRatio) + 1`, where
+  `maxSpeedScale` is `1.f` for a forward dodge (no change, ever), `2.5f`
+  for a backward dodge (opposing the car's current velocity direction,
+  per `shouldDodgeBackwards`), or `1.9f` for any side (roll) dodge.
+- **Adopted the confirmed real *ratios* (`2.5`, `1.9`), not the real base
+  magnitude (`500.f`)** — since the real forward-dodge scale is exactly
+  `1.0`, this port's own existing (still-uncalibrated) `DODGE_SPEED =
+  1400.0` already stands in for that case unchanged, the same "shape
+  confirmed, magnitude not" split FR-058 established for
+  `THROTTLE_ACCELERATION`.
+- **Added `drive::dodge_speed_scale`/`dodge_pitch_is_backward`** (the
+  second re-derived in this port's own pitch-sign convention rather than
+  translated symbol-for-symbol from the reference) and wired the scale
+  into both the ground-dodge and wall-jump-dodge blocks.
+- **Explicitly not adopted**: RocketSim's own diagonal-dodge direction
+  normalization (this port's own pre-existing, already-documented
+  simplification — pitch and roll still contribute independently rather
+  than being normalized into one direction) and its
+  continuous-torque-over-`FLIP_TORQUE_TIME` spin model (a substantially
+  larger redesign than this requirement's own scope) — both left for a
+  future requirement.
+- 5 new `drive.rs` tests (two unit tests of the new functions, three
+  integration tests confirming exact scaled magnitudes from a car
+  already at `MAX_CAR_SPEED`). All pre-existing tests pass unchanged —
+  every existing dodge test dodges from a standing start, where the new
+  scale evaluates to `1.0` regardless of direction, an explicit
+  zero-regression-risk property confirmed by inspection before
+  implementation. 302 total in `rb_physics_bullet` (+5 over FR-058's
+  297).
+
+---
+
 ## Real speed-dependent throttle taper
 **2026-09-01** · [#123](https://github.com/baileyrd/rusty_bullet/pull/123) · `b729cc8`
 

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.58.0
+- Version: 0.59.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -3726,6 +3726,97 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     295 of `rb_physics_bullet`'s pre-existing tests (as of `FR-057`) pass
     unchanged (net +2 tests over `FR-057`'s 295, bringing the crate to
     297).
+- `RB-PHYSICS-001-FR-059` (real forward-speed-dependent dodge impulse
+  scaling, implemented): `RB-PHYSICS-001-FR-031`'s own audit had already
+  found that real Rocket League's dodge impulse has "direction/speed-dependent
+  scaling" but didn't adopt it, since the audit only had `RLConst.h`'s
+  constant declarations, not the formula they combine into — flagged as a
+  candidate for "a later, more careful requirement" by `RB-PHYSICS-001-FR-057`'s
+  own Non-goals. This requirement fetched RocketSim's own `Car.cpp`
+  (`_UpdateDoubleJumpOrFlip`, the same file/technique `RB-PHYSICS-001-FR-058`
+  used for the throttle taper) and found the real mechanism: a dodge's
+  base impulse (`FLIP_INITIAL_VEL_SCALE = 500.f`) is scaled per-axis by
+  `((maxSpeedScale - 1) * forwardSpeedRatio) + 1`, where
+  `forwardSpeedRatio = abs(forwardSpeed_UU) / CAR_MAX_SPEED` and
+  `maxSpeedScale` is `FLIP_FORWARD_IMPULSE_MAX_SPEED_SCALE` (`1.f` — no
+  change, ever), `FLIP_BACKWARD_IMPULSE_MAX_SPEED_SCALE` (`2.5f`, applied
+  when the dodge direction opposes the car's current velocity direction,
+  per `shouldDodgeBackwards`), or `FLIP_SIDE_IMPULSE_MAX_SPEED_SCALE`
+  (`1.9f`, applied to any side/roll dodge regardless of direction).
+  1. **Adopted the confirmed real *ratios* (`2.5`, `1.9`), not the real
+     base magnitude (`500`).** Since the real forward-dodge scale is
+     exactly `1.0`, `DODGE_SPEED`'s own existing (still-uncalibrated)
+     value doubles as the real forward-dodge case unchanged — the same
+     "shape confirmed, magnitude not" split `RB-PHYSICS-001-FR-058` used
+     for `THROTTLE_ACCELERATION`. Added `DODGE_BACKWARD_SPEED_SCALE =
+     2.5`, `DODGE_SIDE_SPEED_SCALE = 1.9`, and
+     `DODGE_BACKWARD_CLASSIFICATION_SPEED_THRESHOLD = 100.0` (RocketSim's
+     own `abs(forwardSpeed_UU) < 100.0f` fallback threshold), plus two new
+     functions: `dodge_speed_scale` (the confirmed linear interpolation
+     from `1.0` to `scale_at_max_speed` as speed rises to `MAX_CAR_SPEED`,
+     clamped beyond it) and `dodge_pitch_is_backward` (the real backward
+     classification, re-derived in this port's own pitch-sign convention
+     rather than translated symbol-for-symbol from the reference's own
+     stick-sign convention).
+  2. **Wired the scale into both dodge sites.** `apply_driven_forces`'s
+     ground-dodge block and its wall-jump-dodge variant both now scale
+     `DODGE_SPEED` by `dodge_speed_scale` before applying it: the pitch
+     axis uses `DODGE_BACKWARD_SPEED_SCALE` when
+     `dodge_pitch_is_backward` is true, `1.0` otherwise; the roll axis
+     always uses `DODGE_SIDE_SPEED_SCALE`.
+  3. **Corrected doc comments** (the module-level "commonly-cited
+     constants" paragraph, and a new note on the module's own dodge
+     description) that previously described `DODGE_SPEED` as a flat
+     magnitude regardless of direction or speed.
+  - **Non-goals (this requirement).** Does not adopt RocketSim's own real
+    base magnitude (`FLIP_INITIAL_VEL_SCALE = 500.f`) for `DODGE_SPEED`
+    itself — still an independently uncalibrated placeholder, per the
+    "ratio confirmed, magnitude not" split above. Does not adopt
+    RocketSim's own direction-normalization for a diagonal dodge (this
+    port's own pre-existing, already-documented simplification: pitch and
+    roll contribute independently rather than being normalized into one
+    direction vector, so a diagonal dodge is faster than an axis-aligned
+    one here, unlike real Rocket League) — a separate, independent
+    behavioral question this requirement doesn't take on. Does not adopt
+    RocketSim's own direction-agnostic `abs(forward speed)` semantics for
+    *which* axis counts as "backward" beyond what `dodge_pitch_is_backward`
+    already re-derives — that function's own behavior is a direct,
+    faithful port of the reference's real classification logic, not a
+    simplification. Does not adopt RocketSim's own continuous
+    torque-over-`FLIP_TORQUE_TIME` (`0.65f`) spin model — this port's
+    `DODGE_ANGULAR_SPEED` remains a single instantaneous kick, a
+    substantially different (and substantially larger, out-of-scope-for-
+    one-requirement) redesign left for a future requirement. Does not
+    adopt real yaw input's contribution to dodge direction (RocketSim's
+    own `dodgeDir` combines `yaw + roll`; this port's dodge direction is
+    pitch/roll only, matching its own pre-existing convention). Does not
+    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked
+    on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `dodge_speed_scale`/`dodge_pitch_is_backward`'s
+    own doc comments state the exact RocketSim citations and their scope
+    caveats. A backward pitch-dodge or a side (roll) dodge made at
+    `MAX_CAR_SPEED` now measurably scales up to `2.5x`/`1.9x`
+    `DODGE_SPEED` respectively, instead of a flat `DODGE_SPEED` regardless
+    of speed or direction. A forward pitch-dodge stays at plain
+    `DODGE_SPEED` regardless of current speed, matching the real forward
+    scale of exactly `1.0`. All pre-existing tests pass unchanged — every
+    existing dodge test dodges from a standing start (`forward_speed =
+    0`), where `dodge_speed_scale` evaluates to `1.0` regardless of
+    direction, an explicit zero-regression-risk property confirmed by
+    inspection before implementation, not merely by the suite passing
+    afterward.
+  - **Verification plan.** 5 new `drive.rs` tests:
+    `dodge_speed_scale_matches_the_real_curve` and
+    `dodge_pitch_is_backward_matches_the_real_classification` unit-test
+    the two new functions directly; `a_backward_dodge_scales_up_with_current_forward_speed`,
+    `a_forward_dodge_does_not_scale_with_current_forward_speed`, and
+    `a_side_dodge_scales_up_with_current_forward_speed` are integration
+    tests confirming the exact scaled magnitudes from a car already at
+    `MAX_CAR_SPEED` — the backward and side tests would see a plain
+    `DODGE_SPEED`-sized delta instead, on the old flat-magnitude code. All
+    297 of `rb_physics_bullet`'s pre-existing tests (as of `FR-058`) pass
+    unchanged (net +5 tests over `FR-058`'s 297, bringing the crate to
+    302).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5066,13 +5157,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   units that don't transfer to this port's own car body the same clean
   way the curve's unitless shape does — see FR-058's own entry for the
   full finding. That peak magnitude is still fully in scope for this
-  bullet. `STEER_TORQUE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
-  `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
-  `DODGE_SPEED`, `DODGE_ANGULAR_SPEED`, `JUMP_HOLD_MAX_DURATION`,
-  `JUMP_HOLD_ACCELERATION`, and `LANDING_AUTO_UPRIGHT_TORQUE` in particular
-  have no public reference at all
-  (unlike gravity, max speed, the boost constants, or `JUMP_SPEED`), so any
-  of them may be off by a large factor, not just imprecise.
+  bullet. `RB-PHYSICS-001-FR-059` did the same again for `DODGE_SPEED`'s
+  own per-direction *scaling*: fetching RocketSim's own `Car.cpp` found a
+  backward or side dodge's real impulse grows with current speed
+  (confirmed exact ratios `2.5x`/`1.9x` at `MAX_CAR_SPEED`), modeled
+  directly (`drive::dodge_speed_scale`/`dodge_pitch_is_backward`) — but
+  `DODGE_SPEED`'s own base magnitude (`1400.0`) remains uncalibrated,
+  since the real reference constant it would otherwise come from
+  (`FLIP_INITIAL_VEL_SCALE = 500.f`) was deliberately not substituted in
+  (see FR-059's own entry, including its further Non-goals: RocketSim's
+  own direction-normalization for diagonal dodges and its
+  continuous-torque-over-time spin model, both still unaddressed). That
+  base magnitude is still fully in scope for this bullet. `STEER_TORQUE`,
+  `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
+  `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`, `DODGE_ANGULAR_SPEED`,
+  `JUMP_HOLD_MAX_DURATION`, `JUMP_HOLD_ACCELERATION`, and
+  `LANDING_AUTO_UPRIGHT_TORQUE` in particular have no public reference at
+  all (unlike gravity, max speed, the boost constants, or `JUMP_SPEED`),
+  so any of them may be off by a large factor, not just imprecise.
 - Splitting `AIR_CONTROL_TORQUE` into distinct per-axis constants (pitch,
   yaw, roll) once real recorded air-control data exists to calibrate them
   separately — real Rocket League's three rates genuinely differ (roll
@@ -5154,6 +5256,37 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.59.0 (2026-09-01): FR-059 added and implemented (real
+  forward-speed-dependent dodge impulse scaling) — `RB-PHYSICS-001-FR-031`'s
+  own audit had already found real Rocket League's dodge impulse has
+  "direction/speed-dependent scaling" but couldn't adopt it without the
+  actual formula, only `RLConst.h`'s bare constants. Fetched RocketSim's
+  own `Car.cpp` (`_UpdateDoubleJumpOrFlip`, the same file/technique
+  `FR-058` used) and found the real mechanism: a dodge's base impulse
+  scales per-axis by `((maxSpeedScale - 1) * forwardSpeedRatio) + 1`,
+  where `maxSpeedScale` is `1.f` for a forward dodge (no change, ever),
+  `2.5f` for a backward dodge (opposing current velocity, per
+  `shouldDodgeBackwards`), or `1.9f` for any side dodge. Adopted the
+  confirmed real *ratios* (`2.5`, `1.9`) via two new functions
+  (`drive::dodge_speed_scale`/`dodge_pitch_is_backward`, the second
+  re-derived in this port's own sign convention), wired into both the
+  ground-dodge and wall-jump-dodge blocks — but deliberately not the real
+  base magnitude (`FLIP_INITIAL_VEL_SCALE = 500.f`, vs this port's own
+  still-uncalibrated `DODGE_SPEED = 1400.0`, unchanged), since the real
+  forward-dodge scale of exactly `1.0` means `DODGE_SPEED` already stands
+  in for that case — the same "shape confirmed, magnitude not" split
+  `FR-058` established for `THROTTLE_ACCELERATION`. Also explicitly not
+  adopted: RocketSim's own diagonal-dodge direction normalization (a
+  separate, already-documented simplification) and its
+  continuous-torque-over-`FLIP_TORQUE_TIME` spin model (a substantially
+  larger redesign, left for a future requirement). 5 new `drive.rs` tests
+  (two unit tests of the new functions, three integration tests
+  confirming exact scaled magnitudes at `MAX_CAR_SPEED`); every existing
+  dodge test dodges from a standing start, where the new scale evaluates
+  to `1.0` regardless of direction — an explicit zero-regression-risk
+  property confirmed by inspection before implementation, then by the
+  full suite passing unchanged; bringing the crate to 302 total (+5 over
+  `FR-058`'s 297).
 - 0.58.0 (2026-09-01): FR-058 added and implemented (real speed-dependent
   throttle taper) — `THROTTLE_ACCELERATION`'s own doc comment had named
   this exact gap since it was introduced: applying full flat acceleration

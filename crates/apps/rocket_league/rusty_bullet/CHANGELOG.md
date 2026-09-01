@@ -788,6 +788,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `THROTTLE_ACCELERATION`'s own peak magnitude remains an uncalibrated
   placeholder, only the curve's shape is now confirmed and modeled. 2
   new tests; all pre-existing tests pass unchanged.
+- Missing real forward-speed-dependent dodge impulse scaling
+  (`RB-PHYSICS-001-FR-059`) — a backward or side dodge applied a flat
+  `DODGE_SPEED` magnitude regardless of current speed or direction.
+  Fetching RocketSim's own `Car.cpp` (the same technique FR-058 used)
+  surfaced the real mechanism: a dodge's impulse scales per-axis by a
+  confirmed real ratio — `1.0` for a forward dodge (no change), `2.5` for
+  a backward dodge (opposing current velocity), or `1.9` for any side
+  dodge — as current speed rises toward `MAX_CAR_SPEED`. Added
+  `drive::dodge_speed_scale`/`dodge_pitch_is_backward` and wired the
+  scale into both the ground-dodge and wall-jump-dodge blocks —
+  `DODGE_SPEED`'s own base magnitude remains an uncalibrated placeholder
+  (RocketSim's real `500.0` base was deliberately not substituted, since
+  the confirmed forward-dodge scale is exactly `1.0`). 5 new tests; all
+  pre-existing tests pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
