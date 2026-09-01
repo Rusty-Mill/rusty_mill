@@ -1,0 +1,17 @@
+[package]
+name = "rusty-meshed-cli"
+version = "0.1.0"
+edition = "2021"
+description = "The meshed operator CLI (health/lineage/metrics/slo commands), ported from meshed.cli."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mill"
+publish = false
+
+[dependencies]
+rusty_err = { path = "../../../rusty_err" }
+rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty-meshed-core = { path = "../rusty-meshed-core" }
+rusty-meshed-observability = { path = "../rusty-meshed-observability" }
+rusty-meshed-registry = { path = "../rusty-meshed-registry" }
+
+[dev-dependencies]

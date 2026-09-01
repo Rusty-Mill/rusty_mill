@@ -1,0 +1,17 @@
+[package]
+name = "rusty-meshed-observability"
+version = "0.1.0"
+edition = "2021"
+description = "Lineage tracking, metrics collection, SLO monitoring, and the CI contract gate, ported from meshed.observability."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mill"
+publish = false
+
+[dependencies]
+rusty_err = { path = "../../../rusty_err" }
+rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_kafka = { path = "../../../rusty_kafka" }
+rusty_json = { path = "../../../rusty_json" }
+rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
+
+[dev-dependencies]

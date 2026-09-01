@@ -1,0 +1,17 @@
+[package]
+name = "rusty-meshed-domains"
+version = "0.1.0"
+edition = "2021"
+description = "The manpower domain: event schemas, domain data products (personnel lifecycle, position management, readiness reporting), scenario builder, and demo generators, ported from meshed.domains."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mill"
+publish = false
+
+[dependencies]
+rusty_err = { path = "../../../rusty_err" }
+rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_time = { path = "../../../rusty_time" }
+rusty-meshed-core = { path = "../rusty-meshed-core" }
+rusty-meshed-sdk = { path = "../rusty-meshed-sdk" }
+
+[dev-dependencies]

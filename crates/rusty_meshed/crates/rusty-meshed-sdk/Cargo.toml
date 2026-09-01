@@ -1,0 +1,21 @@
+[package]
+name = "rusty-meshed-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mill"
+publish = false
+
+[dependencies]
+rusty_err = { path = "../../../rusty_err" }
+rusty_kafka = { path = "../../../rusty_kafka" }
+rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_json = { path = "../../../rusty_json" }
+rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_time = { path = "../../../rusty_time" }
+rusty-meshed-core = { path = "../rusty-meshed-core" }
+rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
+rusty-meshed-observability = { path = "../rusty-meshed-observability" }
+
+[dev-dependencies]
