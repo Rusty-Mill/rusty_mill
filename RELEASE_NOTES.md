@@ -13,6 +13,30 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_skillopt`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_skillopt` — a from-scratch Rust take on
+  Microsoft's SkillOpt: optimize a skill markdown document as the trainable
+  state of a frozen LLM agent, with epochs, batches and a validation gate,
+  entirely in text space. Four crates behind one nested workspace, merged
+  via `git subtree` with full history.
+- **Changed:** its `[workspace.package]` collided on `license`, so its four
+  crates carry literal `[package]` fields (the `rusty_db` treatment) and
+  only its dependencies were hoisted. Root `tokio` widened to the union of
+  what `rusty_search`, `rusty_db` and `rusty_skillopt` need; root `chrono`
+  gained `serde`. `thiserror` stays literal on `skillopt-core`/
+  `skillopt-model`, same `"2"`-vs-`"1"` reason as before.
+- **Known limitation:** the workspace now resolves two `reqwest` majors —
+  0.13.4 for `rusty_acp`/`rusty_mcp` and 0.12.28 for `skillopt-model`.
+  Cargo treats them as unrelated crates so they coexist cleanly and no type
+  crosses between the two groups; bumping `skillopt-model` would be an API
+  change outside this merge's scope. A build-size cost, not a correctness
+  one.
+- No dependency swaps: nothing in `rusty_skillopt` depended on a sibling in
+  this workspace. Full suite (68 tests, 2 environment-gated ignores) passes
+  unmodified.
+
 ## Fourth-wave merge — `rusty_inventrory`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

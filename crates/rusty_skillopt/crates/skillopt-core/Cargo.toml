@@ -1,8 +1,8 @@
 [package]
 name = "skillopt-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
 async-trait.workspace = true
@@ -10,7 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
+thiserror = "2"
 tracing.workspace = true
 rand.workspace = true
 chrono.workspace = true

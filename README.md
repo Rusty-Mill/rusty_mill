@@ -123,6 +123,10 @@ same way; this row set reflects whichever of those have landed so far.
 | [`inventory-core`](crates/rusty_inventrory/crates/inventory-core) | `crates/rusty_inventrory/crates/inventory-core` | Local-first encrypted index over the conversation history AI coding tools write to disk |
 | [`inventory-cli`](crates/rusty_inventrory/crates/inventory-cli) | `crates/rusty_inventrory/crates/inventory-cli` | `inv`: search every AI agent and IDE conversation on your machine, from the terminal |
 | [`inventory-tauri`](crates/rusty_inventrory/crates/inventory-tauri) | `crates/rusty_inventrory/crates/inventory-tauri` | Menu-bar app over `inventory-core`: one keystroke to every AI conversation on your machine |
+| [`skillopt-core`](crates/rusty_skillopt/crates/skillopt-core) | `crates/rusty_skillopt/crates/skillopt-core` | Text-space optimizer for skill markdown: epochs, batches, and a validation gate over a frozen LLM agent |
+| [`skillopt-model`](crates/rusty_skillopt/crates/skillopt-model) | `crates/rusty_skillopt/crates/skillopt-model` | LLM provider adapters for `skillopt-core` |
+| [`skillopt-envs`](crates/rusty_skillopt/crates/skillopt-envs) | `crates/rusty_skillopt/crates/skillopt-envs` | Task environments and benchmark adapters `skillopt-core` optimizes against |
+| [`skillopt-cli`](crates/rusty_skillopt/crates/skillopt-cli) | `crates/rusty_skillopt/crates/skillopt-cli` | `skillopt`: the training-loop command line front end |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -706,6 +710,31 @@ regardless of the shell. Windows and macOS use OS-native APIs for both and
 need nothing extra. Its frontend is a checked-in static `ui/index.html`,
 not an npm build, so `cargo build -p inventory-tauri` is the whole build.
 
+`rusty_skillopt` is four crates behind one nested workspace
+(`skillopt-core`, `skillopt-model`, `skillopt-envs`, `skillopt-cli`), with
+no dependency relationship to anything already here — its dependencies are
+all crates.io crates — so, again, no pins to retire. Its
+`[workspace.package]` collided on `license` (`"MIT"` vs. this root's
+`"MIT OR Apache-2.0"`), so its four crates carry literal `[package]` fields
+and only its dependencies were hoisted, the `rusty_db` shape. Two of those
+hoists needed widening rather than a straight copy: `tokio`'s feature list
+is now the union of what `rusty_search`, `rusty_db` and `rusty_skillopt`
+each need (`fs`/`process`/`io-util` added), and `chrono` gained `serde`,
+which only `skillopt-core` asks for — the same "widen, don't split"
+call made when `rusty_db` merged. `thiserror` is the same `"2"`-vs-`"1"`
+split as `rusty_test`'s and `rusty_inventrory`'s, resolved the same way.
+
+The one thing worth stating plainly: this workspace now carries two
+semver-incompatible `reqwest` majors — 0.13.4 (`rusty_acp`, `rusty_mcp`,
+whose unification is described above) and 0.12.28, which `skillopt-model`
+requests. They are distinct crates to Cargo, so they coexist without a
+resolution conflict, and no type from either crosses between those crate
+groups. Bumping `skillopt-model` to 0.13 to collapse them would be an API
+change to a crate this merge is not otherwise touching, so it was left
+alone; the duplication is a build-size cost, not a correctness one.
+The full suite (68 tests, 2 environment-gated ones ignored) passes
+unmodified.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -782,8 +811,9 @@ standalone repos the same way, starting with
 [`rusty_test`](https://github.com/baileyrd/rusty_test) (six crates behind
 one nested workspace) and
 [`rusty_inventrory`](https://github.com/baileyrd/rusty_inventrory) (three
-crates behind another) — and continuing with
-[`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt),
+crates behind another) and
+[`rusty_skillopt`](https://github.com/baileyrd/rusty_skillopt) (four behind
+a third) — and continuing with
 [`rusty_key`](https://github.com/baileyrd/rusty_key),
 [`rusty_llama`](https://github.com/baileyrd/rusty_llama),
 [`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale),

@@ -108,6 +108,10 @@ members = [
     "crates/rusty_inventrory/crates/inventory-core",
     "crates/rusty_inventrory/crates/inventory-cli",
     "crates/rusty_inventrory/crates/inventory-tauri",
+    "crates/rusty_skillopt/crates/skillopt-core",
+    "crates/rusty_skillopt/crates/skillopt-model",
+    "crates/rusty_skillopt/crates/skillopt-envs",
+    "crates/rusty_skillopt/crates/skillopt-cli",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -177,7 +181,17 @@ serde_json = "1"
 # dependency (previously a pinned git rev, matching the pattern used for
 # every other pin retired in this series).
 rusty_serde = { path = "crates/rusty_serde/rusty_serde", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Feature set is the union of what rusty_search, rusty_db and rusty_skillopt
+# each need -- widened rather than split, so one tokio serves all three.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "process",
+    "io-util",
+] }
 tantivy = "0.26"
 
 # rusty_db's own five crates (path deps, mirroring rusty-search-* above).
@@ -204,7 +218,8 @@ heck = "0.5"
 proc-macro-crate = "3"
 uuid = { version = "1", features = ["v4"] }
 bigdecimal = "0.4"
-chrono = "0.4"
+# `serde` is rusty_skillopt's requirement; rusty_db only needs the base crate.
+chrono = { version = "0.4", features = ["serde"] }
 
 # Hoisted from rustils' own former `[workspace.package]`/
 # `[workspace.dependencies]` tables (it was its own nested Cargo workspace
@@ -249,6 +264,22 @@ inventory-core = { path = "crates/rusty_inventrory/crates/inventory-core" }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
 rusqlite = "0.32.1"
+
+# Hoisted from rusty_skillopt's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `license` ("MIT" vs. this root's
+# "MIT OR Apache-2.0"), so its four crates carry literal `[package]` fields
+# -- the rusty_db treatment again. `async-trait`/`serde`/`serde_json`/
+# `anyhow`/`chrono`/`tracing`/`tokio` above already cover its requirements;
+# `thiserror` is the same "2"-vs-"1" split rusty_test and rusty_inventrory
+# hit, so its two consumers keep literal ones.
+skillopt-core = { path = "crates/rusty_skillopt/crates/skillopt-core" }
+skillopt-model = { path = "crates/rusty_skillopt/crates/skillopt-model" }
+skillopt-envs = { path = "crates/rusty_skillopt/crates/skillopt-envs" }
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

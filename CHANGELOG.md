@@ -17,11 +17,18 @@ Removed / Fixed / Security, newest first.
 - `rusty_inventrory` merged into `crates/rusty_inventrory` via `git subtree`
   (fourth wave) — three crates (`inventory-core`, `inventory-cli`,
   `inventory-tauri`) behind one nested workspace
+- `rusty_skillopt` merged into `crates/rusty_skillopt` via `git subtree`
+  (fourth wave) — four crates (`skillopt-core`, `skillopt-model`,
+  `skillopt-envs`, `skillopt-cli`) behind one nested workspace
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
 
 ### Changed
+- Root `[workspace.dependencies]`: `tokio`'s feature list widened to the
+  union `rusty_search`/`rusty_db`/`rusty_skillopt` need (`fs`, `process`,
+  `io-util`); `chrono` gained `serde` for `skillopt-core`
+
 ### Fixed
 - `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce
   constructions rewritten to the equivalent `From<&[T]>` conversion — the
