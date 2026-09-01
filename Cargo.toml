@@ -151,6 +151,12 @@ members = [
     "crates/rusty_adk/examples/weather-agent",
     "crates/rusty_adk/examples/mcp-tool-server",
     "crates/rusty_adk/examples/a2a-agent-server",
+    "crates/rusty_provider/crates/core",
+    "crates/rusty_provider/crates/providers",
+    "crates/rusty_provider/crates/router",
+    "crates/rusty_provider/crates/mcp",
+    "crates/rusty_provider/crates/server",
+    "crates/rusty_provider/crates/cli",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -236,6 +242,10 @@ tokio = { version = "1", features = [
     "process",
     "io-util",
     "io-std",
+    # rusty_provider asks for the "full" bundle; Cargo unifies tokio's
+    # features across the graph anyway, so it is declared here rather than
+    # hidden in one member manifest.
+    "full",
 ] }
 tantivy = "0.26"
 
@@ -322,7 +332,11 @@ skillopt-model = { path = "crates/rusty_skillopt/crates/skillopt-model" }
 skillopt-envs = { path = "crates/rusty_skillopt/crates/skillopt-envs" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls-native-roots",
+] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 
@@ -400,6 +414,31 @@ futures = "0.3"
 tokio-test = "0.4"
 # rusty_a2a is a merged sibling -- retiring adk-a2a's git dependency on it.
 rusty_a2a = { path = "crates/rusty_a2a" }
+
+# Hoisted from rusty_provider's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `license` ("MIT"), so its six crates
+# carry literal `[package]` fields -- rusty_db treatment. `rusty-mcp` is a
+# merged sibling here, retiring rusty_provider's branch-tracking git
+# dependency on it.
+rp-core = { path = "crates/rusty_provider/crates/core" }
+rp-mcp = { path = "crates/rusty_provider/crates/mcp" }
+rp-providers = { path = "crates/rusty_provider/crates/providers" }
+rp-router = { path = "crates/rusty_provider/crates/router" }
+rusty-mcp = { path = "crates/rusty_mcp/crates/rusty-mcp" }
+rmcp = { version = "3.1", default-features = false }
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+prometheus = { version = "0.13", default-features = false }
+wiremock = "0.6"
+tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring", "native-certs"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8"
+ring = "0.17"
+regex = "1"
+jsonwebtoken = "9"
+eventsource-stream = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

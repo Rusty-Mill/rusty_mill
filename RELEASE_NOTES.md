@@ -13,6 +13,26 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_provider`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_provider` — an AI provider router: one
+  OpenAI-compatible HTTP API in front of OpenAI, Anthropic, Gemini, Groq,
+  Together AI and Fireworks, with config-driven fallback chains, budgets,
+  metrics, an MCP surface and a CLI. Six crates behind one nested
+  workspace, merged via `git subtree` with full history.
+- **Changed:** its branch-tracking `rusty-mcp` git dependency retired to a
+  `path` dependency on the merged sibling. It had resolved to `ee6c7637` —
+  six commits behind the commit this workspace imported, plus two since.
+  Verified by running the group's full suite (905 tests) against the swap.
+- **Changed:** `[workspace.package]` collided on `license`, so its crates
+  carry literal `[package]` fields. Root `reqwest` gained `stream` (SSE
+  deltas from upstream providers) and root `tokio` gained `full`, declared
+  at the root because Cargo unifies features across the graph either way.
+- 905 tests pass. No lint or format fixes were needed — `rusty_provider`
+  is the first crate group in this wave to arrive already clean under this
+  workspace's `-D warnings` gate and `cargo fmt`.
+
 ## Fourth-wave merge — `rusty_adk`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

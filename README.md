@@ -166,6 +166,12 @@ same way; this row set reflects whichever of those have landed so far.
 | [`weather-agent`](crates/rusty_adk/examples/weather-agent) | `crates/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
 | [`mcp-tool-server`](crates/rusty_adk/examples/mcp-tool-server) | `crates/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
 | [`a2a-agent-server`](crates/rusty_adk/examples/a2a-agent-server) | `crates/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
+| [`rp-core`](crates/rusty_provider/crates/core) | `crates/rusty_provider/crates/core` | Unified OpenAI-shaped request/response types and the provider trait |
+| [`rp-providers`](crates/rusty_provider/crates/providers) | `crates/rusty_provider/crates/providers` | Provider adapters: OpenAI, Anthropic, Gemini, Groq, Together AI, Fireworks |
+| [`rp-router`](crates/rusty_provider/crates/router) | `crates/rusty_provider/crates/router` | Config-driven routing: fallback chains, budgets, metrics, and usage persistence |
+| [`rp-mcp`](crates/rusty_provider/crates/mcp) | `crates/rusty_provider/crates/mcp` | MCP surface over the router, built on the `rusty-mcp` scaffold |
+| [`rp-server`](crates/rusty_provider/crates/server) | `crates/rusty_provider/crates/server` | The OpenAI-compatible HTTP server front end |
+| [`rp-cli`](crates/rusty_provider/crates/cli) | `crates/rusty_provider/crates/cli` | `rp-cli`: config inspection and routing dry-runs from the terminal |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -934,6 +940,35 @@ suite against the swap — 13 unit tests, 8 end-to-end and 10 remote-transport
 tests, all passing unmodified — rather than by reading the diff. Full group:
 278 tests pass, 2 ignored.
 
+`rusty_provider` is six crates behind one nested workspace (`rp-core`,
+`rp-providers`, `rp-router`, `rp-mcp`, `rp-server`, `rp-cli`): an
+OpenAI-compatible HTTP API in front of six upstream providers, with
+config-driven fallback chains. Its `[workspace.package]` collided on
+`license` (`"MIT"`), so its crates carry literal `[package]` fields and
+only its dependencies were hoisted.
+
+Its one pin retirement is `rusty-mcp`, and — like `rusty_adk`'s `rusty_a2a`
+— it was a *branch-tracking* git dependency rather than a `rev`-pinned one.
+What it resolved to (`ee6c7637`) is six commits and 328 insertions / 54
+deletions behind the commit this workspace's `crates/rusty_mcp` was
+imported from, plus two commits since (the `rusty_url` sovereignty swap and
+its `auth/config` follow-on, 53 insertions / 43 deletions). Swapped to a
+`path` dependency on `crates/rusty_mcp/crates/rusty-mcp` and verified by
+running the full group's suite — 905 tests, including `rp-mcp`'s own
+scaffold tests and `rp-server`'s HTTP surface tests — all passing
+unmodified.
+
+Two more root hoists were widened rather than copied: `reqwest` gained
+`stream` (`rp-providers` streams SSE deltas from upstream providers), and
+`tokio` gained `full` — `rusty_provider` asks for the bundle, and since
+Cargo unifies a crate's features across the graph, declaring it at the root
+is the honest place for it rather than leaving it to look member-local.
+`rp-router` also keeps `rusqlite`'s `bundled` feature explicitly when
+opting into this root's `rusqlite = "0.32.1"` entry, which its own manifest
+had asked for at `"0.32"` — the one crate in this wave whose SQLite
+requirement already matched the workspace's `libsqlite3-sys` line without
+any adjustment. No lint or format fixes were needed.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -1018,8 +1053,8 @@ behind a fourth) and
 [`rusty_tailscale`](https://github.com/baileyrd/rusty_tailscale) (sixteen
 crates behind a fifth nested workspace) and
 [`rusty_adk`](https://github.com/baileyrd/rusty_adk) (fourteen behind a
-sixth) — and continuing with
-[`rusty_provider`](https://github.com/baileyrd/rusty_provider),
-[`rusty_yirp`](https://github.com/baileyrd/rusty_yirp), and
+sixth) and [`rusty_provider`](https://github.com/baileyrd/rusty_provider)
+(six behind a seventh) — and continuing with
+[`rusty_yirp`](https://github.com/baileyrd/rusty_yirp) and
 [`rusty_agent_gateway`](https://github.com/baileyrd/rusty_agent_gateway) —
 one crate at a time, same process.

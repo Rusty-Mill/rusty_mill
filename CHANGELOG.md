@@ -36,6 +36,10 @@ Removed / Fixed / Security, newest first.
   wave) — eleven `adk-*`/`rusty-adk` crates plus three examples behind one
   nested workspace; `adk-a2a`'s branch-tracking `rusty_a2a` git dependency
   retired to a path dependency on the merged sibling
+- `rusty_provider` merged into `crates/rusty_provider` via `git subtree`
+  (fourth wave) — six `rp-*` crates behind one nested workspace; its
+  branch-tracking `rusty-mcp` git dependency retired to a path dependency
+  on the merged sibling
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
@@ -45,7 +49,8 @@ Removed / Fixed / Security, newest first.
   union `rusty_search`/`rusty_db`/`rusty_skillopt`/`rusty_adk` need (`fs`,
   `process`, `io-util`, `io-std`); `chrono` gained `serde` for
   `skillopt-core`; `uuid` gained `serde` and `serde_json` gained
-  `float_roundtrip` for `rusty_adk`
+  `float_roundtrip` for `rusty_adk`; `reqwest` gained `stream` and `tokio`
+  gained `full` for `rusty_provider`
 
 ### Fixed
 - `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce
