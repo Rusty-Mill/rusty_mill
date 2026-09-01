@@ -6224,6 +6224,9 @@ dependencies = [
 [[package]]
 name = "rusty_oauth"
 version = "0.1.0"
+dependencies = [
+ "rusty_rsa",
+]
 
 [[package]]
 name = "rusty_opnsense"
@@ -6262,6 +6265,7 @@ dependencies = [
  "platform-linux 0.27.0",
  "platform-mock 0.27.0",
  "rustls",
+ "rusty_rsa",
  "rusty_tls",
  "rusty_wire",
 ]
@@ -6285,6 +6289,10 @@ dependencies = [
  "rusty_tokio",
  "tokio",
 ]
+
+[[package]]
+name = "rusty_rsa"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_rusqlite"
