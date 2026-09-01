@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Confirmed the dodge deadzone already matches real Rocket League exactly
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#157](https://github.com/baileyrd/rusty_bullet/pull/157) · `2f5a3eb`
 
 - **This spec's own Open Questions had claimed `DODGE_DEADZONE` "still has
   no public reference at all... so it may be off by a large factor,"** and
