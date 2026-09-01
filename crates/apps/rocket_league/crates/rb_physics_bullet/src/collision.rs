@@ -183,6 +183,35 @@ fn sphere_vs_goal_wall(position: Vec3, radius: f32, wall: &StaticGoalWall) -> Op
 /// into a goal at an angle would produce, and the same per-corner
 /// approximation technique `box_vs_quarter_pipe`/`box_vs_corner_fillet`
 /// (`RB-PHYSICS-001-FR-027`) already established for curved geometry.
+///
+/// `RB-PHYSICS-001-FR-028`'s own doc comment left open whether a face
+/// bigger than the window, centered on it (every corner outside the
+/// window while the window itself sits entirely within the face's own
+/// interior), could be under-detected the way `RB-PHYSICS-001-FR-032`
+/// once suspected for a curved fillet. `RB-PHYSICS-001-FR-054` closed
+/// that: it cannot, by a convex-hull argument distinct from but analogous
+/// to FR-032's own. The window is a convex 2D region (a rectangle); a
+/// box's touching face — whichever corners individually penetrate the
+/// plane — is the convex hull of those corner points. If *every one* of
+/// those corners lies outside the window, the window (convex) cannot
+/// contain any point of their convex hull that isn't already a convex
+/// combination of points outside it — concretely, containing the whole
+/// face inside the window would require every one of its extreme points
+/// (its corners) to be inside too, so "some corner is outside" is exactly
+/// equivalent to "the face doesn't fully fit through the window", the
+/// correct condition for treating it as blocked. And since a flat rigid
+/// face resting on a flat surface only ever needs its own corner points
+/// to fully determine the contact response in this port (the same
+/// precondition `box_vs_plane` itself already relies on for an
+/// *un*-windowed plane), whether the window's hole happens to sit
+/// strictly inside that face's interior — never touching a corner —
+/// changes nothing about which corners are individually on solid
+/// material, so per-corner testing loses nothing by not also sampling the
+/// interior. Confirmed empirically too, via
+/// `box_bigger_than_the_goal_window_and_centered_on_it_collides_on_all_four_corners_matching_an_unwindowed_plane`:
+/// a face far larger than the window, centered squarely on it (the window
+/// entirely interior to the face, clear of every corner), collides
+/// bit-for-bit identically to an unwindowed `box_vs_plane`.
 fn box_vs_goal_wall(
     position: Vec3,
     orientation: Quat,
@@ -256,6 +285,33 @@ fn sphere_vs_bounded_wall(
 /// contact (the opposite gate from `box_vs_goal_wall`'s own per-corner
 /// window test). A corner inside the bound falls through to an ordinary
 /// `box_vs_plane`-style corner test.
+///
+/// `RB-PHYSICS-001-FR-054` investigated this function alongside
+/// `box_vs_goal_wall`'s own "face bigger than the window, centered on it"
+/// question and found the *mirror image* here is a genuine gap, not a
+/// resolved non-issue: `box_vs_goal_wall`'s convex-hull argument (see its
+/// own doc comment) shows "some corner outside the window" exactly means
+/// "the face doesn't fully fit through", the correct block condition —
+/// but a bound is solid *inside*, not outside, so the analogous safe
+/// condition here would need "some corner inside the bound", not "some
+/// corner outside" of anything. A face *larger* than the bound and
+/// centered on it — every corner outside the bound, while the bound's own
+/// rectangle sits entirely within the face's interior — has no corner
+/// touching solid material anywhere, so this function returns zero
+/// contacts even though the middle of the face is genuinely resting on
+/// real bound material: a true under-detection, letting a large enough
+/// body pass straight through a wall it should be blocked by. Confirmed
+/// empirically by
+/// `box_much_bigger_than_the_bound_and_centered_on_it_is_missed_entirely_a_known_gap`.
+/// Deliberately not fixed: closing it for real needs a proper 2D
+/// convex-polygon overlap test (the box's own touching-corner footprint
+/// against the bound's rectangle), not just corner-in/corner-out
+/// sampling, and this project's only two `StaticBoundedWall`s
+/// (`arena::goal_side_wall`'s `GOAL_DEPTH * 0.5`-by-`GOAL_HEIGHT * 0.5`
+/// bound and `arena::goal_roof`'s `GOAL_HALF_WIDTH`-by-`GOAL_DEPTH * 0.5`
+/// one — hundreds of units on their shortest side) are always far larger
+/// than this project's own established car (`60x30x18` half-extents) or
+/// ball (`93.15` radius) — see Non-goals.
 fn box_vs_bounded_wall(
     position: Vec3,
     orientation: Quat,
@@ -1879,6 +1935,28 @@ mod tests {
         assert!(!windowed.is_empty());
     }
 
+    #[test]
+    fn box_bigger_than_the_goal_window_and_centered_on_it_collides_on_all_four_corners_matching_an_unwindowed_plane(
+    ) {
+        // RB-PHYSICS-001-FR-054: the case `RB-PHYSICS-001-FR-028`'s own
+        // doc comment left open -- a face bigger than the window in both
+        // directions, centered on it, so the window (20 wide, 30 tall)
+        // sits entirely inside the face's own interior (25 wide, 35 tall)
+        // without ever touching a corner. `box_vs_goal_wall`'s convex-hull
+        // argument (see its own doc comment) says this must collide
+        // exactly like an unwindowed plane, since no corner is inside the
+        // window -- confirmed here bit-for-bit, the box equivalent of
+        // `box_entirely_outside_the_goal_window_behaves_like_an_ordinary_plane`
+        // but for a face that *contains* the window rather than avoiding
+        // it entirely.
+        let wall = goal_wall();
+        let car = RigidBody::car_box(Vec3::new(25.0, 1.0, 35.0), 1.0, Vec3::new(0.0, 99.5, 30.0));
+        let windowed = contacts_vs_goal_wall(&car, &wall);
+        let unwindowed = contacts_vs_plane(&car, &wall.plane);
+        assert_eq!(windowed, unwindowed);
+        assert_eq!(windowed.len(), 4);
+    }
+
     /// A wall at x=20 (normal (-1,0,0)), bounded to a 10-wide (y), 30-tall
     /// (z) rectangle centered at (20, 110, 30) -- the same fixture
     /// `body::tests::bounded_wall` uses.
@@ -1947,6 +2025,30 @@ mod tests {
     fn box_entirely_outside_the_bound_has_no_contact() {
         let wall = bounded_wall();
         let car = RigidBody::car_box(Vec3::new(1.0, 1.0, 1.0), 1.0, Vec3::new(19.5, 200.0, 30.0));
+        assert!(contacts_vs_bounded_wall(&car, &wall).is_empty());
+    }
+
+    #[test]
+    fn box_much_bigger_than_the_bound_and_centered_on_it_is_missed_entirely_a_known_gap() {
+        // RB-PHYSICS-001-FR-054: the mirror image of
+        // `box_bigger_than_the_goal_window_and_centered_on_it_...` above,
+        // and *not* a resolved non-issue the way that one is -- see
+        // `box_vs_bounded_wall`'s own doc comment. A face bigger than the
+        // bound (10 wide, 30 tall) in both directions, centered on it (15
+        // wide, 35 tall here), has every corner outside the bound while
+        // the bound's own rectangle sits entirely within the face's
+        // interior. Real material genuinely exists under the middle of
+        // this face, but since no single corner touches it, this returns
+        // zero contacts -- a real, deliberately-not-fixed under-detection
+        // gap (see the doc comment for why it's safe to leave open: no
+        // body this project actually constructs is ever close to as large
+        // as either standard-arena `StaticBoundedWall`'s own bound).
+        let wall = bounded_wall();
+        let car = RigidBody::car_box(
+            Vec3::new(1.0, 15.0, 35.0),
+            1.0,
+            Vec3::new(19.5, 110.0, 30.0),
+        );
         assert!(contacts_vs_bounded_wall(&car, &wall).is_empty());
     }
 }

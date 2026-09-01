@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Goal-wall/bounded-wall corner-testing overlap investigation
+**2026-09-01** · PR pending · commit pending
+
+- **Closed the one question `RB-PHYSICS-001-FR-028`'s own doc comment
+  left open**: could `collision::box_vs_goal_wall`'s per-corner window
+  test under-detect a car's face resting flush against the window's own
+  edge, every corner just clear of it while the face's middle already
+  overlapped it — the same category of concern `RB-PHYSICS-001-FR-032`
+  investigated for a curved fillet, but explicitly not covered by that
+  finding since a goal window's boundary is a flat rectangle, not a
+  curve.
+- **Resolved via a convex-hull argument**: a box's touching face is the
+  convex hull of whichever corners individually penetrate the plane, so
+  "every corner outside the (convex) window" is exactly equivalent to
+  "the face doesn't fully fit through it" — the correct condition for
+  treating it as blocked. No bug, matching `RB-PHYSICS-001-FR-032`'s own
+  "further investigation found the suspected gap doesn't exist"
+  precedent, via a distinct argument (convex containment, not a convex
+  scalar maximum).
+- **Investigated `collision::box_vs_bounded_wall` alongside it**, since it
+  shares the identical corner-testing technique with the opposite gate,
+  and found the mirror image *is* a genuine gap: a face larger than a
+  bound and centered on it has no corner touching solid material even
+  though the bound's own rectangle sits entirely within the face's
+  interior, so it reports zero contacts despite genuinely resting on real
+  material.
+- **Confirmed this gap is currently unreachable**: this project's own
+  two `StaticBoundedWall`s (`arena::goal_side_wall`/`goal_roof`, hundreds
+  of units on their shortest side) are always far larger than this
+  project's own established car (`60x30x18` half-extents) or ball
+  (`93.15` radius) — documented as an explicit Non-goals item rather than
+  fixed with a heavier 2D convex-polygon overlap test no constructible
+  scene needs.
+- 2 new `collision.rs` tests. All 289 pre-existing tests pass unchanged.
+  291 total in `rb_physics_bullet` (+2 over `FR-053`'s 289).
+
+---
+
 ## `combine_friction` defensive clamp
 **2026-09-01** · [#113](https://github.com/baileyrd/rusty_bullet/pull/113) · `310f588`
 
