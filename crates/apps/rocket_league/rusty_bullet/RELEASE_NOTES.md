@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real ball material properties via a new `RigidBody::ball` constructor
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#131](https://github.com/baileyrd/rusty_bullet/pull/131) · `a1a0812`
 
 - **`RB-PHYSICS-001-FR-061`'s own Non-goals had deferred adopting
   `BALL_DRAG`** for lack of a dedicated ball-construction API — `sphere`
