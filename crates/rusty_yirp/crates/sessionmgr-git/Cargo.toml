@@ -1,11 +1,11 @@
 [package]
 name = "sessionmgr-git"
 description = "Git adapter for sessionmgr: worktree lifecycle, status, and diff, by shelling out to the system git."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
 
 [lib]
 name = "sessionmgr_git"

@@ -1,11 +1,11 @@
 [package]
 name = "sessionmgr-agents"
 description = "Per-agent-CLI adapters: launch_args and tier-3 needs_input pattern matching for Claude Code, Codex, and Gemini CLI, against a vt100-rendered screen per ADR-0002. Gemini's adapter is built from its own shipped source and hooks docs rather than a live-verified session -- no credentials on this machine to run one."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
 
 [lib]
 name = "sessionmgr_agents"

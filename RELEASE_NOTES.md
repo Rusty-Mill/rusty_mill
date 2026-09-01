@@ -13,6 +13,35 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_yirp`
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_yirp` — sessionmgr, a Windows-native session
+  manager for AI coding-agent CLIs (Claude Code, Codex, Gemini CLI): each
+  session optionally in its own git worktree, a TUI grid dashboard, and
+  sessions that survive the manager closing. Eight `sessionmgr-*` crates
+  plus a Tauri 2 desktop shell behind one nested workspace, merged via
+  `git subtree` with full history.
+- **Changed:** four pins retired — `rusty_tokio` (rev `6e6f1847`, from its
+  own `[workspace.dependencies]`) and `sessionmgr-pty`'s `platform`,
+  `platform-linux`, `platform-windows` (`rustils` rev `ce9259d4`) — all now
+  this root's path entries. `sessionmgr-pty`'s manifest warned that a
+  second, differing `rustils` pin would build two non-interoperating copies
+  of the platform layer; this wave merged a third consumer
+  (`rusty_tailscale`, at a different rev again), and a `path` dependency
+  settles that by construction.
+- **Changed:** `[workspace.package]` collided on `rust-version` and
+  `license`, so its crates carry literal `[package]` fields.
+- **Known limitation:** `sessionmgr-daemon`'s
+  `a_fresh_claude_session_reaches_needs_input_on_its_own` drives a real
+  `claude` session and skips when `claude` is not on `PATH` — the state of
+  a CI runner. On a machine with the CLI installed but no way to complete
+  its interactive trust prompt, the guard passes and the test times out.
+  Same class as `mill-term`'s known environment-dependent failure. With
+  `claude` off `PATH` the suite is 130/130.
+- All eight non-Tauri crates cross-compile for `x86_64-pc-windows-gnu`. No
+  lint or format fixes were needed.
+
 ## Fourth-wave merge — `rusty_provider`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

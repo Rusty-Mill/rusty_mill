@@ -1,11 +1,11 @@
 [package]
 name = "sessionmgr-proc"
 description = "Process adapter for sessionmgr: detached spawn, PID-reuse-safe liveness, termination, and stdio-inheritance hardening."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
 
 [lib]
 name = "sessionmgr_proc"

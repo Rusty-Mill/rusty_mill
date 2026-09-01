@@ -40,6 +40,10 @@ Removed / Fixed / Security, newest first.
   (fourth wave) — six `rp-*` crates behind one nested workspace; its
   branch-tracking `rusty-mcp` git dependency retired to a path dependency
   on the merged sibling
+- `rusty_yirp` merged into `crates/rusty_yirp` via `git subtree` (fourth
+  wave) — eight `sessionmgr-*` crates plus a Tauri desktop shell behind one
+  nested workspace; its `rusty_tokio` pin and `sessionmgr-pty`'s three
+  `rustils` pins retired to this root's path dependencies
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend

@@ -1,11 +1,11 @@
 [package]
 name = "sessionmgr-tui"
 description = "The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
 
 [lib]
 name = "sessionmgr_tui"

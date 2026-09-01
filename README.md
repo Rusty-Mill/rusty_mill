@@ -172,6 +172,15 @@ same way; this row set reflects whichever of those have landed so far.
 | [`rp-mcp`](crates/rusty_provider/crates/mcp) | `crates/rusty_provider/crates/mcp` | MCP surface over the router, built on the `rusty-mcp` scaffold |
 | [`rp-server`](crates/rusty_provider/crates/server) | `crates/rusty_provider/crates/server` | The OpenAI-compatible HTTP server front end |
 | [`rp-cli`](crates/rusty_provider/crates/cli) | `crates/rusty_provider/crates/cli` | `rp-cli`: config inspection and routing dry-runs from the terminal |
+| [`sessionmgr-core`](crates/rusty_yirp/crates/sessionmgr-core) | `crates/rusty_yirp/crates/sessionmgr-core` | sessionmgr's pure domain logic: session state machine, identifiers, crash-recovery policy |
+| [`sessionmgr-protocol`](crates/rusty_yirp/crates/sessionmgr-protocol) | `crates/rusty_yirp/crates/sessionmgr-protocol` | Wire types shared by the sessionmgr daemon, its workers, and its clients |
+| [`sessionmgr-proc`](crates/rusty_yirp/crates/sessionmgr-proc) | `crates/rusty_yirp/crates/sessionmgr-proc` | Process adapter: detached spawn, PID-reuse-safe liveness, stdio-inheritance hardening |
+| [`sessionmgr-git`](crates/rusty_yirp/crates/sessionmgr-git) | `crates/rusty_yirp/crates/sessionmgr-git` | Git adapter: worktree lifecycle, status, and diff |
+| [`sessionmgr-pty`](crates/rusty_yirp/crates/sessionmgr-pty) | `crates/rusty_yirp/crates/sessionmgr-pty` | PTY adapter over `rustils`' `Pty` capability (ConPTY on Windows, `openpty` on Linux) |
+| [`sessionmgr-tui`](crates/rusty_yirp/crates/sessionmgr-tui) | `crates/rusty_yirp/crates/sessionmgr-tui` | The TUI grid dashboard (ratatui + `tui-term`'s vt100 screen) |
+| [`sessionmgr-agents`](crates/rusty_yirp/crates/sessionmgr-agents) | `crates/rusty_yirp/crates/sessionmgr-agents` | Per-agent-CLI adapters for Claude Code, Codex, and Gemini CLI |
+| [`sessionmgr-daemon`](crates/rusty_yirp/crates/sessionmgr-daemon) | `crates/rusty_yirp/crates/sessionmgr-daemon` | `sessionmgr`: the composition root — supervisor daemon, detached workers, CLI client |
+| [`sessionmgr-desktop`](crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri) | `crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri` | sessionmgr's Tauri 2 desktop shell over the daemon socket |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -197,6 +206,13 @@ dependent failure in this monorepo:
 `augmented_path_prepends_tool_directories_and_keeps_existing_path` hardcodes
 a Windows-style path and only ever passed on a Windows runner — unrelated
 to this merge.
+
+`sessionmgr-daemon` has one test in the same class:
+`a_fresh_claude_session_reaches_needs_input_on_its_own` drives a real
+`claude` session and skips itself when `claude` is not on `PATH` (the state
+of a CI runner). On a machine that *does* have the CLI but cannot complete
+its interactive trust-folder prompt, the skip guard passes and the test
+times out instead.
 
 ## How the crates relate
 
@@ -969,6 +985,47 @@ had asked for at `"0.32"` — the one crate in this wave whose SQLite
 requirement already matched the workspace's `libsqlite3-sys` line without
 any adjustment. No lint or format fixes were needed.
 
+`rusty_yirp` (sessionmgr) is nine crates behind one nested workspace: a
+Windows-native session manager for AI coding-agent CLIs, where each session
+optionally lives in its own git worktree and survives the manager closing.
+Its `[workspace.package]` collided on `rust-version` (1.88) and `license`
+(`"MIT"`), so its crates carry literal `[package]` fields; `publish = false`
+happens to match the value `rusty_test` put in this root's
+`[workspace.package]`, but it is written literally too rather than
+half-inheriting one table.
+
+Four pins retire here. `rusty_tokio` was pinned at rev `6e6f1847` in its own
+`[workspace.dependencies]` — deliberately, with an ADR behind it — and is
+now this root's `path` entry, which the three crates that use it pick up
+unchanged through `rusty_tokio = { workspace = true }`. `sessionmgr-pty`
+separately pinned `platform`, `platform-linux` and `platform-windows` to a
+`rustils` rev (`ce9259d4`) with a comment explaining that a second,
+differing pin would build two copies of the platform layer with
+non-interoperating handle types into one binary. That concern is exactly
+what a `path` dependency settles by construction — and note this wave
+merged a *third* consumer, `rusty_tailscale`, pinning `rustils` at a
+different rev again (`b8bf992f`); all of them now resolve to the one
+`crates/rustils` in this workspace, which is the whole point.
+
+`sessionmgr-desktop` is the third Tauri shell to arrive in this wave and
+the second to join as a full workspace member (its own repo had it in
+`members`, so it stays there — the same "preserve upstream's own call"
+rule that keeps `rusty_key`'s excluded). Its frontend is a checked-in
+static `ui/`, so no npm step is involved.
+
+Its 130 tests pass — but one of them, `sessionmgr-daemon`'s
+`a_fresh_claude_session_reaches_needs_input_on_its_own`, is worth naming as
+a known environment-dependent case in the same class as `mill-term`'s: it
+drives a *real* `claude` session to prove its tier-3 `needs_input` pattern
+match against live output, and skips cleanly when `claude` is not on
+`PATH`, which is the state of a GitHub-hosted runner. On a machine that
+does have the CLI installed but cannot complete an interactive
+trust-folder prompt, the guard passes and the test then times out after 60
+seconds. Not a merge artifact and not a CI concern — verified by running
+the same test with `claude` off `PATH`, where it skips and the suite is
+130/130. All eight non-Tauri crates also cross-compile for
+`x86_64-pc-windows-gnu`, as befits a Windows-first design.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -1054,7 +1111,8 @@ behind a fourth) and
 crates behind a fifth nested workspace) and
 [`rusty_adk`](https://github.com/baileyrd/rusty_adk) (fourteen behind a
 sixth) and [`rusty_provider`](https://github.com/baileyrd/rusty_provider)
-(six behind a seventh) — and continuing with
-[`rusty_yirp`](https://github.com/baileyrd/rusty_yirp) and
+(six behind a seventh) and
+[`rusty_yirp`](https://github.com/baileyrd/rusty_yirp) (nine behind an
+eighth) — and finishing with
 [`rusty_agent_gateway`](https://github.com/baileyrd/rusty_agent_gateway) —
 one crate at a time, same process.

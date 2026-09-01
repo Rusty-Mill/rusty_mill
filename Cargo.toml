@@ -157,6 +157,15 @@ members = [
     "crates/rusty_provider/crates/mcp",
     "crates/rusty_provider/crates/server",
     "crates/rusty_provider/crates/cli",
+    "crates/rusty_yirp/crates/sessionmgr-core",
+    "crates/rusty_yirp/crates/sessionmgr-protocol",
+    "crates/rusty_yirp/crates/sessionmgr-proc",
+    "crates/rusty_yirp/crates/sessionmgr-git",
+    "crates/rusty_yirp/crates/sessionmgr-pty",
+    "crates/rusty_yirp/crates/sessionmgr-tui",
+    "crates/rusty_yirp/crates/sessionmgr-agents",
+    "crates/rusty_yirp/crates/sessionmgr-daemon",
+    "crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -439,6 +448,24 @@ ring = "0.17"
 regex = "1"
 jsonwebtoken = "9"
 eventsource-stream = "0.2"
+
+# Hoisted from rusty_yirp's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `rust-version` (1.88) and `license`
+# ("MIT"), so its nine crates carry literal `[package]` fields -- rusty_db
+# treatment. Its `rusty_tokio` pin, and sessionmgr-pty's three `rustils`
+# pins, retire to this root's existing path entries.
+sessionmgr-core = { path = "crates/rusty_yirp/crates/sessionmgr-core" }
+sessionmgr-protocol = { path = "crates/rusty_yirp/crates/sessionmgr-protocol" }
+sessionmgr-proc = { path = "crates/rusty_yirp/crates/sessionmgr-proc" }
+sessionmgr-git = { path = "crates/rusty_yirp/crates/sessionmgr-git" }
+sessionmgr-pty = { path = "crates/rusty_yirp/crates/sessionmgr-pty" }
+sessionmgr-tui = { path = "crates/rusty_yirp/crates/sessionmgr-tui" }
+sessionmgr-agents = { path = "crates/rusty_yirp/crates/sessionmgr-agents" }
+ratatui = "0.30"
+crossterm = "0.29"
+tui-term = "0.3"
+vt100 = "0.16"
+ureq = "3"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
