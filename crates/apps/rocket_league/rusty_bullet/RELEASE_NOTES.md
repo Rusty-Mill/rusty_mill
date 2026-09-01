@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Static-vs-dynamic combined-solve ordering investigation
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#111](https://github.com/baileyrd/rusty_bullet/pull/111) · `524b593`
 
 - **`PhysicsWorld::step` resolved a body's now-combined static contacts and
   its combined dynamic manifolds as two separate solves** — one fully
