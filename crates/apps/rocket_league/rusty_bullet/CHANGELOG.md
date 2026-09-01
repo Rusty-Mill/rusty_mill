@@ -784,6 +784,25 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   inertia tensor, the same "false precision" reasoning that already keeps
   `AIR_CONTROL_TORQUE` a placeholder. No new tests; all 314 pre-existing
   tests pass unchanged.
+- Confirmed `DODGE_DEADZONE` matches RocketSim's own real dodge-
+  cancellation threshold (`RB-PHYSICS-001-FR-075`) — this spec's own Open
+  Questions had claimed `DODGE_DEADZONE` "still has no public reference at
+  all... so it may be off by a large factor," and `RB-PHYSICS-001-FR-074`'s
+  own Non-goals (mirroring `FR-073`'s identical earlier claim) separately
+  framed RocketSim's all-or-nothing dodge-cancellation check as "a real but
+  separate architectural difference" from this port's own independent
+  per-axis trigger. Both were wrong: RocketSim's own confirmed check
+  (already quoted verbatim during `FR-072`/`FR-073`/`FR-074`'s own
+  investigations) fires iff `abs(yaw + roll) >= 0.1 || abs(pitch) >= 0.1`;
+  since `FR-073` already folds yaw into this port's own `dodge_roll`, this
+  port's own trigger is the identical boolean decision once
+  `DODGE_DEADZONE == 0.1` — the same real value, differing only in an
+  unobservable strict-vs-non-strict boundary comparison. Corrected
+  `DODGE_DEADZONE`'s own doc comment, the module doc's dodge paragraph,
+  this spec's stale Open Questions bullet, and `FR-073`'s/`FR-074`'s own
+  Non-goals framing. No code change: this port's dodge trigger already
+  matched real Rocket League exactly. No new tests; all 322 pre-existing
+  tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

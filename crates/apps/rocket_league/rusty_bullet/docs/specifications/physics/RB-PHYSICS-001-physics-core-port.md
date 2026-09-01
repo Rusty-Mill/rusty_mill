@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.74.0
+- Version: 0.75.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4737,9 +4737,12 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - **Non-goals (this requirement).** Does not adopt RocketSim's own
     all-or-nothing cancellation check (`abs(yaw + roll) < 0.1 &&
     abs(pitch) < 0.1` zeroes the *entire* dodge direction) in place of this
-    port's own independent per-axis `DODGE_DEADZONE` trigger — a real but
-    separate architectural difference (independent per-axis firing vs. one
-    combined gate) left for a future requirement if it turns out to matter.
+    port's own independent per-axis `DODGE_DEADZONE` trigger — framed here
+    as "a real but separate architectural difference... left for a future
+    requirement if it turns out to matter", a framing
+    `RB-PHYSICS-001-FR-075` later found was itself wrong: once this
+    requirement's own yaw fold-in is in place, the two triggers are the
+    same boolean decision, not a genuine architectural difference.
     Does not adopt RocketSim's own post-normalization small-component
     zeroing (`abs(x) < 0.1` on each *normalized* direction component,
     confirmed during `FR-072`'s own investigation) — mis-scoped here as "a
@@ -4810,12 +4813,14 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - **Non-goals (this requirement).** Does not adopt RocketSim's own
     all-or-nothing cancellation check (`abs(yaw + roll) < 0.1 &&
     abs(pitch) < 0.1` zeroes the entire dodge direction) in place of this
-    port's own independent per-axis `DODGE_DEADZONE` trigger —
-    `RB-PHYSICS-001-FR-073`'s own Non-goals already correctly identified
-    this as a genuine architectural difference (independent per-axis
-    firing vs. one combined gate), unlike the small-component zeroing this
-    requirement closes; still left for a future requirement if it turns
-    out to matter. Does not adopt `DODGE_SPEED`'s own real base magnitude,
+    port's own independent per-axis `DODGE_DEADZONE` trigger, framed here
+    as "a genuine architectural difference... left for a future
+    requirement if it turns out to matter" —
+    `RB-PHYSICS-001-FR-075` later found this framing itself was wrong: once
+    `FR-073`'s own yaw fold-in is in place, this port's independent
+    per-axis trigger and RocketSim's own combined all-or-nothing check are
+    the *same* boolean decision, not a genuine architectural difference at
+    all. Does not adopt `DODGE_SPEED`'s own real base magnitude,
     still independently uncalibrated. Does not touch
     `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
     `PHASE-0-EXIT`.
@@ -4829,6 +4834,53 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `normalize_dodge_direction`'s own snapping behavior directly at both
     sides of the threshold; all 320 pre-existing tests (as of `FR-073`)
     pass unchanged, bringing the crate to 322.
+- `RB-PHYSICS-001-FR-075` (confirm `DODGE_DEADZONE` matches RocketSim's own
+  real cancellation threshold — audit finding, documentation only): this
+  spec's own Open Questions section had claimed `DODGE_DEADZONE` "still has
+  no public reference at all... so it may be off by a large factor," and
+  `RB-PHYSICS-001-FR-074`'s own Non-goals (mirroring `FR-073`'s own
+  earlier, identical claim) had separately framed RocketSim's all-or-
+  nothing dodge-cancellation check as "a real but separate architectural
+  difference" from this port's independent per-axis `DODGE_DEADZONE`
+  trigger. Both were wrong.
+  1. **Re-examined RocketSim's own confirmed `_UpdateDoubleJumpOrFlip`
+     cancellation check** (already fetched and quoted verbatim during
+     `FR-072`/`FR-073`/`FR-074`'s own investigations, not a fresh fetch):
+     `if (abs(controls.yaw + controls.roll) < 0.1f && abs(controls.pitch) <
+     0.1f) { dodgeDir = {0,0,0}; }` — by De Morgan's law, a dodge fires iff
+     `abs(yaw + roll) >= 0.1 || abs(pitch) >= 0.1`.
+  2. **Derived that this port's own trigger is the same boolean expression**:
+     since `RB-PHYSICS-001-FR-073`, this port's own `dodge_roll`/`wall_roll`
+     already equal `roll + yaw` combined, and this port's trigger is
+     `dodge_pitch.abs() > DODGE_DEADZONE || dodge_roll.abs() >
+     DODGE_DEADZONE`. Given `DODGE_DEADZONE == 0.1`, this is the identical
+     decision to RocketSim's own real one, differing only in a strict (`>`)
+     vs. non-strict (`>=`) comparison at the exact boundary value — an
+     unobservable floating-point edge case, not a behavioral or
+     architectural difference. `0.1` was already the real value; it simply
+     hadn't been confirmed as such.
+  3. **Corrected `DODGE_DEADZONE`'s own doc comment** (previously "Not a
+     physics constant and not derived from any Rocket League value —
+     purely an input-processing threshold"), the module doc's dodge
+     paragraph, this spec's own stale Open Questions bullet, and added
+     forward citations from `FR-073`'s and `FR-074`'s own Non-goals
+     bullets correcting their "separate architectural difference" framing.
+  4. **No code change**: this port's dodge trigger already matched real
+     Rocket League exactly (given `FR-073`'s own prior yaw fold-in); this
+     requirement corrects the record, not the behavior.
+  - **Non-goals (this requirement).** Does not change any production
+    behavior — `DODGE_DEADZONE`'s own value (`0.1`) and the trigger logic
+    around it are unchanged; only doc comments and this spec's own prose
+    are corrected. Does not adopt `DODGE_SPEED`'s own real base magnitude
+    or any other still-uncalibrated constant. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `DODGE_DEADZONE`'s own doc comment, this
+    spec's Open Questions section, and `FR-073`'s/`FR-074`'s own Non-goals
+    bullets no longer describe this constant as unreferenced or its
+    trigger architecture as diverging from real Rocket League.
+  - **Verification plan.** Documentation-only; no new tests. All 322
+    pre-existing tests (as of `FR-074`) pass unchanged.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6193,9 +6245,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   base magnitude is still fully in scope for this bullet. This paragraph
   had gone stale in several places, corrected here:
   `DODGE_DEADZONE`
-  still has no public reference at all (unlike gravity, max speed, the
-  boost constants, or `JUMP_SPEED`), so it may be off by a large
-  factor, not just imprecise. `STEER_TORQUE`, `AIR_CONTROL_TORQUE`,
+  is no longer "no public reference at all" either —
+  `RB-PHYSICS-001-FR-075` confirmed it exact against RocketSim's own real
+  dodge-cancellation threshold (`0.1f`), the same value this port already
+  used; see that requirement's own entry for the full finding. `STEER_TORQUE`, `AIR_CONTROL_TORQUE`,
   `HANDBRAKE_FRICTION_MULTIPLIER`, and `WALL_JUMP_HORIZONTAL_SPEED` are a
   different case, not "no reference at all": `RB-PHYSICS-001-FR-065`,
   `RB-PHYSICS-001-FR-057`, `RB-PHYSICS-001-FR-066`, and
@@ -6314,6 +6367,28 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.75.0 (2026-09-01): FR-075 added and investigated (confirm
+  `DODGE_DEADZONE` matches RocketSim's own real cancellation threshold —
+  audit finding, documentation only) — this spec's own Open Questions
+  section claimed `DODGE_DEADZONE` "still has no public reference at
+  all... so it may be off by a large factor," and `FR-074`'s own Non-goals
+  (mirroring `FR-073`'s identical earlier claim) separately framed
+  RocketSim's all-or-nothing dodge-cancellation check as "a real but
+  separate architectural difference" from this port's own independent
+  per-axis trigger. Both were wrong: RocketSim's own confirmed check
+  (already quoted verbatim during `FR-072`/`FR-073`/`FR-074`'s own
+  investigations) is `if (abs(yaw + roll) < 0.1f && abs(pitch) < 0.1f)`,
+  i.e. fires iff `abs(yaw + roll) >= 0.1 || abs(pitch) >= 0.1`. Since
+  `FR-073` already folds yaw into this port's own `dodge_roll`, this
+  port's own trigger (`dodge_pitch.abs() > DODGE_DEADZONE ||
+  dodge_roll.abs() > DODGE_DEADZONE`) is the identical boolean decision
+  once `DODGE_DEADZONE == 0.1` — the same real value, differing only in an
+  unobservable strict-vs-non-strict boundary comparison. Corrected
+  `DODGE_DEADZONE`'s own doc comment, the module doc's dodge paragraph,
+  this spec's stale Open Questions bullet, and added forward citations
+  from `FR-073`'s and `FR-074`'s own Non-goals correcting their framing.
+  No code change: this port's dodge trigger already matched real Rocket
+  League exactly. No new tests; all 322 pre-existing tests pass unchanged.
 - 0.74.0 (2026-09-01): FR-074 added and implemented (snap a near-axis-
   aligned dodge to a pure single axis, genuine behavioral fix) —
   `FR-073`'s own Non-goals had flagged RocketSim's post-normalization

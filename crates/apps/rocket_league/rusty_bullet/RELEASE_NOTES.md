@@ -6,6 +6,39 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Confirmed the dodge deadzone already matches real Rocket League exactly
+**2026-09-01** · PR pending · commit pending
+
+- **This spec's own Open Questions had claimed `DODGE_DEADZONE` "still has
+  no public reference at all... so it may be off by a large factor,"** and
+  `FR-074`'s own Non-goals (mirroring `FR-073`'s identical earlier claim)
+  separately framed RocketSim's all-or-nothing dodge-cancellation check as
+  "a real but separate architectural difference" from this port's own
+  independent per-axis trigger. Both were wrong.
+- **Re-examined RocketSim's own confirmed `_UpdateDoubleJumpOrFlip`
+  cancellation check** (already fetched and quoted verbatim during
+  `FR-072`/`FR-073`/`FR-074`'s own investigations, not a fresh fetch):
+  `if (abs(controls.yaw + controls.roll) < 0.1f && abs(controls.pitch) <
+  0.1f) { dodgeDir = {0,0,0}; }` — by De Morgan's law, a dodge fires iff
+  `abs(yaw + roll) >= 0.1 || abs(pitch) >= 0.1`.
+- **Derived that this port's own trigger is the same boolean expression**:
+  since `RB-PHYSICS-001-FR-073` already folds yaw into this port's own
+  `dodge_roll`/`wall_roll` (`roll + yaw`), and this port's trigger is
+  `dodge_pitch.abs() > DODGE_DEADZONE || dodge_roll.abs() >
+  DODGE_DEADZONE`, the two conditions are identical once `DODGE_DEADZONE
+  == 0.1` — the same real value — differing only in an unobservable
+  strict-vs-non-strict comparison at the exact boundary.
+- **A pure documentation correction, zero behavioral change**: corrected
+  `DODGE_DEADZONE`'s own doc comment (previously "Not a physics constant
+  and not derived from any Rocket League value"), the module doc's dodge
+  paragraph, this spec's own stale Open Questions bullet, and added
+  forward citations from `FR-073`'s and `FR-074`'s own Non-goals
+  correcting their "separate architectural difference" framing. No code
+  change — this port's dodge trigger already matched real Rocket League
+  exactly. No new tests; all 322 pre-existing tests pass unchanged.
+
+---
+
 ## Near-axis-aligned dodges now snap to a pure single axis, matching real Rocket League
 **2026-09-01** · [#155](https://github.com/baileyrd/rusty_bullet/pull/155) · `00039fc`
 
