@@ -12,6 +12,13 @@ rusty_err = { path = "../../../rusty_err" }
 rusty_sqlite = { path = "../../../rusty_sqlite" }
 rusty_kafka = { path = "../../../rusty_kafka" }
 rusty_json = { path = "../../../rusty_json" }
+rusty_request = { path = "../../../rusty_request" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]
+# Test-only: stands in as a fake Schema Registry HTTP server (no
+# network access to a real one in this environment). "rusty-tokio"
+# feature gates rusty_http's AsyncTransport, used to read/write raw
+# HTTP/1.1 messages over a local rusty_tokio TcpListener.
+rusty_tokio = { path = "../../../rusty_tokio" }
+rusty_http = { path = "../../../rusty_http", features = ["rusty-tokio"] }

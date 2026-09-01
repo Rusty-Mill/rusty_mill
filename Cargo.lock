@@ -5844,9 +5844,12 @@ version = "0.1.0"
 dependencies = [
  "rusty-meshed-schema-registry",
  "rusty_err",
+ "rusty_http",
  "rusty_json",
  "rusty_kafka",
+ "rusty_request",
  "rusty_sqlite",
+ "rusty_tokio",
 ]
 
 [[package]]
