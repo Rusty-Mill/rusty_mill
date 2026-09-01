@@ -744,6 +744,25 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   per-car elapsed-flip-time state threaded through `PhysicsWorld` — a
   redesign FR-059's own Non-goals already flagged as out of scope. No new
   tests; all 314 pre-existing tests pass unchanged.
+- Real flip-cancel mechanism finding (`RB-PHYSICS-001-FR-070`) —
+  `RB-PHYSICS-001-FR-069`'s own fetch of `_UpdateAirTorque` surfaced a
+  `pitchTorqueScale` factor scoped out as "an additional speed- or
+  state-dependent scale... didn't fully characterize." Fetched RocketSim's
+  own `Car.cpp` again and found real Rocket League's flip-cancel is driven
+  by continuously *holding* pitch in the same direction as the flip's own
+  pitch-torque component, scaling only that pitch-axis component by
+  `1 - abs(controls.pitch)` every tick — not this port's own jump-press
+  trigger that zeros every axis outright. A sideways (roll-only) dodge has
+  no pitch-torque component, so real Rocket League can't pitch-cancel it at
+  all. Corrected the `drive` module's flip-cancel doc comment, which had
+  inaccurately claimed to match real Rocket League, and added a forward
+  citation from `RB-PHYSICS-001-FR-016`'s own entry. Not adopted: this
+  port's dodge has no per-axis torque split to partially cancel (the same
+  architecture gap `FR-069` already found for the dodge's own spin), and
+  reproducing the real continuous-hold trigger and pitch-only scope would
+  need the same per-axis torque and elapsed-flip-time state `FR-059`'s own
+  Non-goals already flagged as out of scope. No new tests; all 314
+  pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

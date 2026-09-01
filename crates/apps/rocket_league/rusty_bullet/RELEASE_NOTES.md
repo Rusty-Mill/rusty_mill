@@ -6,6 +6,41 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real flip-cancel is continuous, pitch-stick-driven, and pitch-axis-only (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **This port's flip-cancel (`RB-PHYSICS-001-FR-016`) triggers on a fresh
+  jump press and zeros the car's angular velocity outright** — its own doc
+  comment claimed this matched real Rocket League, but that claim was never
+  checked against real source.
+- **`RB-PHYSICS-001-FR-069`'s own fetch of `_UpdateAirTorque` had already
+  surfaced a `pitchTorqueScale` factor**, scoped out at the time as "an
+  additional speed- or state-dependent scale... didn't fully characterize."
+- **Fetched RocketSim's own `Car.cpp` again to close that thread** and found
+  real Rocket League's flip-cancel is driven by continuously *holding*
+  pitch in the same direction as the flip's own pitch-torque component:
+  `pitchScale = 1 - abs(controls.pitch)` scales down only that pitch-axis
+  torque component, every tick, for as long as the flip continues — a
+  continuous, proportional, pitch-only reduction, not a discrete jump-press
+  trigger that zeros every axis. A sideways (roll-only) dodge has no
+  pitch-torque component at all, so real Rocket League can't pitch-cancel
+  it — this port's own cancel works uniformly regardless of dodge
+  direction.
+- **Not adopted as a fix.** This port's dodge is a single flat
+  angular-velocity kick with no per-axis torque split to partially cancel
+  (the same architecture gap `RB-PHYSICS-001-FR-069` already found for the
+  dodge's own spin), and reproducing the real continuous-hold trigger and
+  pitch-only scope would need the same per-axis torque and
+  elapsed-flip-time state `RB-PHYSICS-001-FR-059`'s own Non-goals already
+  flagged as out of scope.
+- Corrected the `drive` module's flip-cancel doc comment (removing the
+  inaccurate "matching real Rocket League" claim) and added a forward
+  citation from `RB-PHYSICS-001-FR-016`'s own entry.
+- A pure documentation/audit finding: zero production behavior changed, no
+  new tests; all 314 pre-existing `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real dodge spin is a continuous per-axis torque over a fixed window, not an instantaneous kick (audit finding)
 **2026-09-01** · PR pending · commit pending
 

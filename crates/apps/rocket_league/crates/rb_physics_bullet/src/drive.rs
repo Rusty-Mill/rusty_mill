@@ -178,17 +178,36 @@
 //! not touching a wall, `double_jump_available` already spent (so this
 //! isn't a wall jump or another double jump/dodge), and `dodge_flip_active`
 //! still set, zeroes `RigidBody.angular_velocity` outright and clears
-//! `dodge_flip_active` — stopping the flip immediately, matching real
-//! Rocket League. This applies equally to a wall-jump dodge's spin, since
-//! it also consumes `double_jump_available` and sets `dodge_flip_active`
-//! exactly like a ground dodge does. It doesn't touch linear velocity (the
-//! dodge's own translation is unaffected) and doesn't consume or restore
+//! `dodge_flip_active` — stopping the flip immediately. This applies
+//! equally to a wall-jump dodge's spin, since it also consumes
+//! `double_jump_available` and sets `dodge_flip_active` exactly like a
+//! ground dodge does. It doesn't touch linear velocity (the dodge's own
+//! translation is unaffected) and doesn't consume or restore
 //! `double_jump_available` (already spent by the dodge that set the flag).
 //! This port has no timed flip animation to interrupt (a dodge is one
 //! instantaneous angular-velocity kick, not a sustained torque over a fixed
 //! duration — see above), so "mid-flip" here means "any time before
 //! landing or a wall touch re-arms the double jump," a documented
 //! simplification of real Rocket League's actual flip-duration window.
+//! `RB-PHYSICS-001-FR-070` fetched RocketSim's real `Car.cpp` and found real
+//! Rocket League's own flip-cancel is a substantially different mechanism
+//! from this jump-press trigger and outright zeroing: it's driven by
+//! *holding pitch* (not pressing jump again) in the same direction as the
+//! dodge's own pitch-torque component, continuously, every tick, for as
+//! long as `isFlipping` holds — `pitchScale = 1 - abs(controls.pitch)`
+//! scales down (not zeros, unless pitch is fully held) only the flip's
+//! *pitch-axis* torque component, leaving any roll-axis component
+//! untouched; a sideways (roll-only) dodge has no pitch-torque component at
+//! all and so can't be canceled by pitch input in real Rocket League at
+//! all, unlike this port's own jump-press cancel, which zeros every axis
+//! uniformly regardless of dodge direction. Not adopted: this port's dodge
+//! is a single flat angular-velocity kick with no per-axis torque split to
+//! partially cancel (`RB-PHYSICS-001-FR-069` already confirmed this same
+//! architecture gap for the dodge's own spin), and real flip-cancel's input
+//! channel (a continuously-held stick) is a different trigger shape than
+//! this port's discrete jump-press-again gate — reproducing it would need
+//! the same continuous per-axis torque and elapsed-flip-time state
+//! `RB-PHYSICS-001-FR-059`'s own Non-goals already flagged as out of scope.
 //! Wall jump keeps priority over flip-cancel on a fresh press while
 //! touching a wall, unchanged. A plain double jump explicitly clears
 //! `dodge_flip_active` rather than leaving it alone, so a stale flag from
