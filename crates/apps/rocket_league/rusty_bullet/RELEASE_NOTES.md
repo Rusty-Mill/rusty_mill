@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Goal-wall/bounded-wall corner-testing overlap investigation
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#115](https://github.com/baileyrd/rusty_bullet/pull/115) · `bf8e713`
 
 - **Closed the one question `RB-PHYSICS-001-FR-028`'s own doc comment
   left open**: could `collision::box_vs_goal_wall`'s per-corner window
