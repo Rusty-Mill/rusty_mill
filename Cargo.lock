@@ -5870,8 +5870,9 @@ name = "rusty-meshed-schema-registry"
 version = "0.1.0"
 dependencies = [
  "rusty_err",
- "rusty_json",
+ "rusty_http",
  "rusty_request",
+ "rusty_tokio",
 ]
 
 [[package]]
