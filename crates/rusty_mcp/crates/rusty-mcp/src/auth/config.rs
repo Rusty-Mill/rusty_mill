@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
-use url::Url;
+use rusty_url::Url;
 
 use super::token::TokenValidator;
 
@@ -17,7 +17,7 @@ pub enum AuthConfigError {
         uri: String,
         /// Underlying parse failure.
         #[source]
-        source: url::ParseError,
+        source: rusty_url::ParseError,
     },
 
     /// Carried a fragment, which RFC 8707 forbids on a resource identifier.

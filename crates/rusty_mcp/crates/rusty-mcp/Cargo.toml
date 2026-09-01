@@ -44,7 +44,7 @@ thiserror = "2"
 tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-url = "2"
+rusty_url = { path = "../../../rusty_url" }
 tower-layer = "0.3"
 # `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }

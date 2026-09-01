@@ -5774,6 +5774,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rsa",
+ "rusty_url",
  "schemars",
  "serde",
  "serde_json",
@@ -5785,7 +5786,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
