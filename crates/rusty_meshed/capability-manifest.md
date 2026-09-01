@@ -15,28 +15,28 @@ Source: baileyrd/meshed (Python, v1.0 shipped) → Rusty-Mill/rusty_mill, crates
 | REG-009 | `PlatformConfig.registry_db_path` default `"meshed_registry.db"`, overridable via `MESHED_REGISTRY_DB_PATH` | config | code+test | — | REQUIRED | | |
 | REG-010 | `PlatformConfig.registry_base_url` default `"http://localhost:8000"`, overridable via `MESHED_REGISTRY_BASE_URL` | config | code | — | REQUIRED | | |
 | REG-011 | `PlatformConfig.kafka_bootstrap_servers` default `"localhost:9092"`, overridable via `MESHED_KAFKA_BOOTSTRAP_SERVERS`, consumed by the metrics endpoint | config | code | — | REQUIRED | | |
-| REG-012 | `MaturityTier` str-enum values: `mvp`, `enhanced`, `mature` | interface | code | — | REQUIRED | | |
-| REG-013 | `EventType` str-enum values: `delta`, `state`, `measurement` | interface | code | — | REQUIRED | | |
-| REG-014 | `DataProduct.name` is indexed but NOT unique | behavior | code | — | REQUIRED | | |
-| REG-015 | `DataProduct.domain` is indexed for discovery | behavior | code | — | REQUIRED | | |
-| REG-016 | `DataProduct.maturity_tier` defaults to `MaturityTier.MVP` when omitted | behavior | code+test | — | REQUIRED | | |
-| REG-017 | `DataProduct.tags` defaults to `"[]"` (JSON-encoded empty list string) when omitted | behavior | code | — | REQUIRED | | |
-| REG-018 | `DataProduct → InputPort` relationship cascades `"all, delete-orphan"` | behavior | code | — | REQUIRED | | |
-| REG-019 | `DataProduct → OutputPort` relationship cascades `"all, delete-orphan"` | behavior | code | — | REQUIRED | | |
-| REG-020 | `OutputPort → DataContract` relationship cascades `"all, delete-orphan"` | behavior | code | — | REQUIRED | | |
-| REG-021 | `InputPort.data_product_id` is a required FK to `data_products.id` | behavior | code | — | REQUIRED | | |
-| REG-022 | `OutputPort.data_product_id` is a required FK to `data_products.id` | behavior | code | — | REQUIRED | | |
-| REG-023 | `DataContract.output_port_id` is a UNIQUE FK to `output_ports.id`, one-contract-per-port at the DB schema level | behavior | code | — | REQUIRED | | |
-| REG-024 | `DataContract.slo_completeness_pct` constrained to `[0.0, 100.0]` via `Field(ge=0.0, le=100.0)` at the model layer | behavior | code | — | REQUIRED | | |
-| REG-025 | `DataContract.quality_assertions` stored as JSON-encoded string, model-layer default `"[]"` | behavior | code | — | REQUIRED | | |
-| REG-026 | `DataProductUpdate`: all fields Optional; PATCH applies only fields explicitly present (`exclude_unset=True` semantics) | behavior | code | — | REQUIRED | | |
-| REG-027 | `DataContractCreate.slo_completeness_pct` constrained `[0.0, 100.0]` at the schema layer — out-of-range returns 422 | behavior | code | — | REQUIRED | | |
-| REG-028 | `DataContractCreate` validator rejects `schema_ref` empty/all-whitespace → 422 | behavior | code+test | — | REQUIRED | | |
-| REG-029 | `DataContractCreate` validator rejects `owner` empty/all-whitespace → 422 | behavior | code+test | — | REQUIRED | | |
-| REG-030 | `DataContractCreate` validator rejects an empty `quality_assertions` list → 422 | behavior | code+test | — | REQUIRED | | |
-| REG-031 | `DataContractPublic.quality_assertions` always returned as `list[str]`, decoded from JSON string storage | behavior | code+test | — | REQUIRED | | |
-| REG-032 | `InputPortCreate.description` optional, defaults to `null` | interface | code | — | REQUIRED | | |
-| REG-033 | `OutputPortCreate.event_type` required, must be valid `EventType` member — invalid values return 422 | interface | code | — | REQUIRED | | |
+| REG-012 | `MaturityTier` str-enum values: `mvp`, `enhanced`, `mature` | interface | code | — | DONE | | `rusty-meshed-registry::models::enums::MaturityTier`, test `parse_round_trips_every_member` |
+| REG-013 | `EventType` str-enum values: `delta`, `state`, `measurement` | interface | code | — | DONE | | `rusty-meshed-core::EventType` (shared across registry/sdk/domains, see its module doc), test `parse_round_trips_every_member` |
+| REG-014 | `DataProduct.name` is indexed but NOT unique | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (`idx_data_products_name`, no `UNIQUE` constraint) |
+| REG-015 | `DataProduct.domain` is indexed for discovery | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (`idx_data_products_domain`) |
+| REG-016 | `DataProduct.maturity_tier` defaults to `MaturityTier.MVP` when omitted | behavior | code+test | — | DONE | | `rusty-meshed-registry::models::schemas::DataProductCreate::new` and the table's `DEFAULT 'mvp'`, tests `data_product_create_defaults_maturity_tier_and_tags`, `data_product_maturity_tier_and_tags_default_at_the_schema_level` |
+| REG-017 | `DataProduct.tags` defaults to `"[]"` (JSON-encoded empty list string) when omitted | behavior | code | — | DONE | | `rusty-meshed-registry::models::schemas::DataProductCreate::new` and the table's `DEFAULT '[]'`, same tests as REG-016 |
+| REG-018 | `DataProduct → InputPort` relationship cascades `"all, delete-orphan"` | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (`ON DELETE CASCADE`), test `deleting_a_data_product_cascades_to_its_input_ports` |
+| REG-019 | `DataProduct → OutputPort` relationship cascades `"all, delete-orphan"` | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (`ON DELETE CASCADE`), test `deleting_a_data_product_cascades_to_its_output_ports_and_their_contracts` |
+| REG-020 | `OutputPort → DataContract` relationship cascades `"all, delete-orphan"` | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (`ON DELETE CASCADE`), test `deleting_a_data_product_cascades_to_its_output_ports_and_their_contracts` (cascades transitively through the deleted output port) |
+| REG-021 | `InputPort.data_product_id` is a required FK to `data_products.id` | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema`, test `an_input_port_requires_a_valid_data_product_fk` |
+| REG-022 | `OutputPort.data_product_id` is a required FK to `data_products.id` | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (same `REFERENCES ... ON DELETE CASCADE` shape as REG-021) |
+| REG-023 | `DataContract.output_port_id` is a UNIQUE FK to `output_ports.id`, one-contract-per-port at the DB schema level | behavior | code | — | DONE | | `rusty-meshed-registry::models::ensure_schema` (`UNIQUE REFERENCES`), test `an_output_port_may_have_at_most_one_data_contract` |
+| REG-024 | `DataContract.slo_completeness_pct` constrained to `[0.0, 100.0]` via `Field(ge=0.0, le=100.0)` at the model layer | behavior | code | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractCreate::new`, test `data_contract_create_rejects_completeness_out_of_range` |
+| REG-025 | `DataContract.quality_assertions` stored as JSON-encoded string, model-layer default `"[]"` | behavior | code | — | DONE | | `rusty-meshed-registry::models::DataContract::quality_assertions` field + `ensure_schema`'s `DEFAULT '[]'` |
+| REG-026 | `DataProductUpdate`: all fields Optional; PATCH applies only fields explicitly present (`exclude_unset=True` semantics) | behavior | code | — | DONE | | `rusty-meshed-registry::models::schemas::DataProductUpdate`, test `data_product_update_defaults_to_all_none` (the CRUD endpoint that applies a patch is REG-034..058, not yet implemented) |
+| REG-027 | `DataContractCreate.slo_completeness_pct` constrained `[0.0, 100.0]` at the schema layer — out-of-range returns 422 | behavior | code | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractCreate::new` (`DataContractValidationError::CompletenessOutOfRange` stands in for the 422 until the HTTP layer exists), test `data_contract_create_rejects_completeness_out_of_range` |
+| REG-028 | `DataContractCreate` validator rejects `schema_ref` empty/all-whitespace → 422 | behavior | code+test | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractCreate::new`, test `data_contract_create_rejects_blank_schema_ref` |
+| REG-029 | `DataContractCreate` validator rejects `owner` empty/all-whitespace → 422 | behavior | code+test | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractCreate::new`, test `data_contract_create_rejects_blank_owner` |
+| REG-030 | `DataContractCreate` validator rejects an empty `quality_assertions` list → 422 | behavior | code+test | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractCreate::new`, test `data_contract_create_rejects_empty_quality_assertions` |
+| REG-031 | `DataContractPublic.quality_assertions` always returned as `list[str]`, decoded from JSON string storage | behavior | code+test | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractPublic::from_row`, test `data_contract_public_decodes_quality_assertions_from_json` |
+| REG-032 | `InputPortCreate.description` optional, defaults to `null` | interface | code | — | DONE | | `rusty-meshed-registry::models::schemas::InputPortCreate::new`, test `input_port_create_description_defaults_to_none` |
+| REG-033 | `OutputPortCreate.event_type` required, must be valid `EventType` member — invalid values return 422 | interface | code | — | DONE | | `rusty-meshed-registry::models::schemas::OutputPortCreate::new`, tests `output_port_create_accepts_a_valid_event_type`, `output_port_create_rejects_an_invalid_event_type` |
 | REG-034 | `POST /data-products/` returns 201 with created record including DB-assigned `id` | interface | code+test | — | REQUIRED | | |
 | REG-035 | `POST /data-products/` runs `_DEFAULT_ENGINE.evaluate(...)` before insert; 422 `{"detail": {"governance_violations": [...]}}` on violation | interface | code+test | — | REQUIRED | | |
 | REG-036 | Governance policy `require_description_min_length`: description ≥ 20 chars, else `"description must be at least 20 characters (got N)"` | behavior | code+test | — | REQUIRED | | |
@@ -141,8 +141,8 @@ Source: baileyrd/meshed (Python, v1.0 shipped) → Rusty-Mill/rusty_mill, crates
 | REG-135 | `monitor.py` module-level `_DEFAULT_DB_PATH` hardcodes `"meshed_registry.db"` independently of `lineage.py`'s own copy | config | code | — | REQUIRED | | |
 | REG-136 | `GET /docs` returns 200 (Swagger UI enabled) | interface | test | — | REQUIRED | | |
 | REG-137 | `GET /openapi.json` returns valid JSON with a `"paths"` key | interface | test | — | REQUIRED | | |
-| REG-138 | `DataProductPublic.tags` returned as raw JSON-encoded string (not decoded), unlike `DataContractPublic.quality_assertions` | behavior | code | — | REQUIRED | | |
-| REG-139 | `DataContractCreate.slo_freshness_seconds` plain int, no non-negativity constraint | behavior | code | — | REQUIRED | | |
+| REG-138 | `DataProductPublic.tags` returned as raw JSON-encoded string (not decoded), unlike `DataContractPublic.quality_assertions` | behavior | code | — | DONE | | `rusty-meshed-registry::models::DataProduct` (its module doc explains why there's no separate `DataProductPublic` struct — `DataProduct` already is that shape, `tags: String` stays raw) |
+| REG-139 | `DataContractCreate.slo_freshness_seconds` plain int, no non-negativity constraint | behavior | code | — | DONE | | `rusty-meshed-registry::models::schemas::DataContractCreate::new`, test `data_contract_create_allows_a_negative_freshness_seconds_no_constraint` |
 | REG-140 | `SchemaRegistryEnforcer.DEFAULT_COMPATIBILITY = CompatibilityMode.FULL_TRANSITIVE` | config | code | — | DONE | | `rusty-meshed-schema-registry::SchemaRegistryEnforcer::DEFAULT_COMPATIBILITY` |
 | REG-141 | `SchemaRegistryEnforcer(url, client=None)` constructs its own `SchemaRegistryClient({"url": url})` when no client injected | config | code | — | DONE | | `rusty-meshed-schema-registry::SchemaRegistryEnforcer::new`/`with_client` |
 | REG-142 | `initialize_global_compatibility()` calls `client.set_compatibility("FULL_TRANSITIVE")` with no subject_name (registry-wide default) | behavior | code+test | — | DONE | | `rusty-meshed-schema-registry::SchemaRegistryEnforcer::initialize_global_compatibility`, test `initialize_global_compatibility_puts_full_transitive_to_config` |

@@ -8,4 +8,5 @@
 //! still open, see the crate's module list below for what's
 //! implemented so far.
 
+pub mod models;
 pub mod transformation;

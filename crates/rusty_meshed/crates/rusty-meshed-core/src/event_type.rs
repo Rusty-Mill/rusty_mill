@@ -34,6 +34,19 @@ impl EventType {
             EventType::Measurement => "measurement",
         }
     }
+
+    /// Parses a wire-format string back into an `EventType`. `None` for
+    /// anything other than the three valid member values -- callers at
+    /// an API boundary (e.g. REG-033's `OutputPortCreate.event_type`)
+    /// turn that into their own "422 invalid value" error.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "delta" => EventType::Delta,
+            "state" => EventType::State,
+            "measurement" => EventType::Measurement,
+            _ => return None,
+        })
+    }
 }
 
 impl std::fmt::Display for EventType {
@@ -51,5 +64,17 @@ mod tests {
         assert_eq!(EventType::Delta.as_str(), "delta");
         assert_eq!(EventType::State.as_str(), "state");
         assert_eq!(EventType::Measurement.as_str(), "measurement");
+    }
+
+    #[test]
+    fn parse_round_trips_every_member() {
+        for event_type in [EventType::Delta, EventType::State, EventType::Measurement] {
+            assert_eq!(EventType::parse(event_type.as_str()), Some(event_type));
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_values() {
+        assert_eq!(EventType::parse("not-a-real-event-type"), None);
     }
 }
