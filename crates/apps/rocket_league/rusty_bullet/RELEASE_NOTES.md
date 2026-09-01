@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real mandatory minimum-hold window for a ground jump's variable-height acceleration
+**2026-09-01** · PR pending · commit pending
+
+- **`drive::JUMP_HOLD_MAX_DURATION`'s own doc comment had named this exact
+  gap** since `RB-PHYSICS-001-FR-031`'s original audit: real Rocket League
+  scales its jump-hold acceleration down during a `JUMP_MIN_TIME` (0.025s)
+  mandatory window rather than applying it flat from the first held step —
+  "that two-phase ramp isn't modeled here."
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateJump`, matching
+  `RB-PHYSICS-001-FR-058`/`FR-059`'s own real-implementation-file method,
+  not just `RLConst.h`'s constants) and confirmed the exact mechanism: the
+  hold force keeps applying, scaled by `JUMP_PRE_MIN_ACCEL_SCALE = 0.62f`,
+  for the first `JUMP_MIN_TIME` seconds regardless of whether `jump` is
+  still held — not a slower ramp, a hard step-scale, and applied
+  unconditionally, not gated on holding. Even an instantaneous tap gets a
+  small amount of extra height in real Rocket League. The reference's own
+  inline comment flags this as a stopgap its authors consider provisional
+  (`// TODO: Either move to RLConst or preferably don't use this system at
+  all`), adopted anyway since it's still the real, currently-shipping
+  behavior.
+- **Added `drive::JUMP_MIN_TIME`/`JUMP_PRE_MIN_ACCEL_SCALE`** and reworked
+  `apply_driven_forces`'s hold-acceleration check to derive elapsed time
+  since the press as `JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining`
+  rather than tracking a second, separate elapsed-time field — at rest
+  this derivation already reads as comfortably past `JUMP_MIN_TIME`, so a
+  car that never pressed jump never spuriously enters the mandatory
+  branch, and no caller (`PhysicsWorld`, any existing test) needed to
+  change.
+- 3 new tests (the mandatory window's own scaled acceleration magnitude,
+  its immunity to an early release within the window, and its on-schedule
+  closure even when jump is never held). All 309 pre-existing tests pass
+  unchanged — every existing hold-window test's own release/expiry timing
+  happens to fall at or after `JUMP_MIN_TIME` has already elapsed, so none
+  exercised this exact case before. 312 total in `rb_physics_bullet` (+3
+  over FR-063's 309).
+
+---
+
 ## Real Rocket League uses per-contact-pair-type restitution/friction (audit finding)
 **2026-09-01** · [#133](https://github.com/baileyrd/rusty_bullet/pull/133) · `0483b46`
 
