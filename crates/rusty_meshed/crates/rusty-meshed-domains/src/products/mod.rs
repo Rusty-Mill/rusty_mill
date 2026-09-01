@@ -12,16 +12,15 @@
 //! `DataProductProducerBase`/`DataProductConsumerBase` the way the
 //! source's subclasses wrap the base class's inherited behavior.
 //!
-//! [`readiness_reporting::ReadinessReportingProduct::prepare`] and the
-//! two consumers' [`process`](personnel_lifecycle) methods are the only
-//! genuinely consumer-shaped pieces here, and both are scoped by the
-//! same `rusty_kafka` `Fetch`/consumer-group gap
-//! `rusty-meshed-sdk::consumer`'s own module doc explains: `process()`
-//! (the event-derivation business logic, DOM-023/024) is fully built
-//! and tested, since it needs only `DataProductProducerBase::publish`;
-//! there is no poll loop to drive it from yet, and
-//! `ReadinessReportingProduct::run`'s `asyncio.gather`-driven
-//! concurrent polling (DOM-025) isn't built for the same reason.
+//! [`readiness_reporting::ReadinessReportingProduct`] is the only
+//! genuinely consumer-shaped piece here (DOM-023..025), and it's fully
+//! built: `startup()` (source-parity name, joins both consumers'
+//! groups and resolves starting offsets sequentially) and `run()`
+//! (both consumers' poll loops driven concurrently via
+//! `rusty_tokio::try_join!`, matching the source's own `asyncio.gather`
+//! -- see that module's own doc for why) both build on
+//! `rusty-meshed-sdk::consumer::DataProductConsumerBase`'s `startup`/
+//! `run`.
 
 mod personnel_lifecycle;
 mod position_management;

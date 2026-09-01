@@ -1256,15 +1256,19 @@ mod tests {
             };
             let mut writer = Writer::new();
             response.encode(&mut writer);
+
+            // Stop *before* sending the response the loop's next
+            // `running` check races against: this is a multi-threaded
+            // runtime, so "call stop() after the response is sent" is
+            // a genuine data race against the client task -- it could
+            // observe the still-true flag and send a second Heartbeat
+            // before this task's `stop()` call is even scheduled.
+            // Calling it first means the client can only see `running
+            // == false` once it reads this response.
+            stop_handle.stop();
             send_response(&mut peer, header.correlation_id, writer.as_slice())
                 .await
                 .unwrap();
-
-            // The loop checks `running` again before the next
-            // Heartbeat/Fetch round trip -- stop it here so `run()`
-            // exits after exactly one iteration, then answer its
-            // best-effort LeaveGroup.
-            stop_handle.stop();
 
             let (header, _body) = recv_request(&mut peer).await.unwrap();
             assert_eq!(header.api_key, api_key::LEAVE_GROUP);
@@ -1349,12 +1353,16 @@ mod tests {
             };
             let mut writer = Writer::new();
             response.encode(&mut writer, 1_735_689_600_000);
+
+            // Stop before sending, not after -- see the sibling test's
+            // own comment on why calling it after would race the
+            // client's next `running` check on this multi-threaded
+            // runtime. No OffsetCommit expected either way -- the
+            // record was a duplicate.
+            stop_handle.stop();
             send_response(&mut peer, header.correlation_id, writer.as_slice())
                 .await
                 .unwrap();
-
-            // No OffsetCommit expected -- the record was a duplicate.
-            stop_handle.stop();
 
             let (header, _body) = recv_request(&mut peer).await.unwrap();
             assert_eq!(header.api_key, api_key::LEAVE_GROUP);

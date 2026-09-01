@@ -12,19 +12,24 @@
 //! is a property of these two `process()` methods, not of the event
 //! type itself).
 //!
-//! # What's built, and what's still blocked
+//! # `run()`: `rusty_tokio::try_join!`, not `rusty_tokio::spawn`
 //!
-//! [`process`] is fully built and tested: it needs only
-//! `DataProductProducerBase::publish`, not `Fetch`. There is no poll
-//! loop to drive it from yet, so nothing here calls it automatically
-//! -- see `rusty-meshed-sdk::consumer`'s own module doc for the
-//! blocker. [`ReadinessReportingProduct::prepare`] builds and runs the
-//! *sequential* half of the source's `startup()` (producer schema/
-//! product/port registration, then both consumers' output-port
-//! resolution and contract validation) since none of that needs
-//! `Fetch` either; `run()`'s concurrent `asyncio.gather`-driven polling
-//! (DOM-025) is not built, for the same reason `DataProductConsumerBase`
-//! has no `run()` yet.
+//! The source's own module doc explains why `run()` uses
+//! `asyncio.gather` rather than two sequential `await`s: sequential
+//! awaiting would block the second consumer until the first stopped,
+//! so only one consumer would ever be actively polling. This port
+//! reaches for [`rusty_tokio::try_join!`] rather than
+//! [`rusty_tokio::spawn`]-ing two background tasks for the same reason
+//! `DataProductConsumerBase::run` (see that module's own doc) doesn't
+//! spawn its own poll loop internally: `try_join!` polls both
+//! `PersonnelAssignmentConsumer::run`/`PositionFillConsumer::run`
+//! futures within [`ReadinessReportingProduct::run`]'s own task,
+//! genuinely concurrently (neither one blocks the other from making
+//! progress), without needing `'static` bounds or a runtime handle --
+//! `spawn` would need both, since [`ReadinessReportingProduct::run`]
+//! borrows `&mut self`. `try_join!`, not the plain `join!` that waits
+//! for both regardless of outcome, mirrors `asyncio.gather`'s own
+//! default behavior of returning as soon as either task raises.
 //!
 //! [`process`]: PersonnelAssignmentConsumer::process
 
@@ -33,8 +38,8 @@ use rusty_err::Error;
 use rusty_meshed_core::EventType;
 use rusty_meshed_core::PlatformConfig;
 use rusty_meshed_sdk::{
-    ConsumerStartupError, DataProductConsumerBase, DataProductProducerBase, OutputPortSpec,
-    PortDescriptor, ProducerError, PublishError,
+    ConsumerRunError, ConsumerStartupError, ConsumerStopHandle, DataProductConsumerBase,
+    DataProductProducerBase, OutputPortSpec, PortDescriptor, ProducerError, PublishError,
 };
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_tokio::sync::Mutex;
@@ -69,13 +74,15 @@ impl ReadinessAssessmentProducer {
 }
 
 /// Errors from [`ReadinessReportingProduct::connect`]/
-/// [`ReadinessReportingProduct::prepare`].
+/// [`ReadinessReportingProduct::startup`]/[`ReadinessReportingProduct::run`].
 #[derive(Debug, Error)]
 pub enum ReadinessReportingError {
     #[error("{0}")]
     Producer(#[from] ProducerError),
     #[error("{0}")]
     Consumer(#[from] ConsumerStartupError),
+    #[error("{0}")]
+    Run(#[from] ConsumerRunError),
 }
 
 /// Consumer for personnel assignment events that emits readiness
@@ -104,17 +111,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
         PersonnelAssignmentConsumer { base, producer }
     }
 
-    /// Read-only access to this consumer's base, for
-    /// [`ReadinessReportingProduct::prepare`]'s output-port resolution
-    /// step.
+    /// Read-only access to this consumer's base -- e.g. for
+    /// `resolve_output_port` outside of a full [`startup`](Self::startup)
+    /// call.
     pub fn base(&self) -> &DataProductConsumerBase<PersonnelAssigned, S> {
         &self.base
     }
 
     /// Derives a [`UnitReadinessAssessed`] measurement from `event` and
     /// publishes it via the shared producer (DOM-023) -- the testable
-    /// core of the source's `process()`, not yet drivable by a real
-    /// poll loop (see the module doc).
+    /// core of the source's `process()`. [`run`](Self::run) duplicates
+    /// this logic in its own closure rather than calling this method
+    /// directly: `DataProductConsumerBase::run` already holds `&mut
+    /// self.base` for the poll loop's duration, and a closure calling
+    /// `self.process(...)` would need `&self` (the whole receiver, not
+    /// just the disjoint `self.producer` field a method call can't
+    /// project out of `self`) -- a genuine borrow conflict, not just an
+    /// ergonomics choice.
     pub async fn process(&self, event: &PersonnelAssigned) -> Result<(), PublishError> {
         let assessment = derive_assessment(
             &event.base.correlation_id,
@@ -129,6 +142,51 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
             .await?;
         producer.flush(10.0);
         Ok(())
+    }
+
+    /// Resolves this consumer's topic, joins its group, and resolves
+    /// starting offsets (SDK-034..036, via
+    /// [`DataProductConsumerBase::startup`]).
+    pub async fn startup(&mut self) -> Result<(), ConsumerStartupError> {
+        self.base.startup().await
+    }
+
+    /// Runs this consumer's fetch/dedup/process/commit poll loop
+    /// (SDK-039..042), deriving and publishing a readiness assessment
+    /// for every [`PersonnelAssigned`] event via [`process`](Self::process),
+    /// until this consumer's [`stop_handle`](Self::stop_handle) is
+    /// signaled.
+    pub async fn run(&mut self) -> Result<(), ConsumerRunError> {
+        let producer = self.producer.clone();
+        self.base
+            .run(move |event: PersonnelAssigned| {
+                let producer = producer.clone();
+                async move {
+                    let assessment = derive_assessment(
+                        &event.base.correlation_id,
+                        &event.base.event_id,
+                        &event.unit_uic,
+                        &event.effective_date,
+                        &event.transaction_date,
+                    );
+                    let mut producer = producer.lock().await;
+                    producer
+                        .publish("manpower.readiness-reporting.assessments", &assessment)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    producer.flush(10.0);
+                    Ok(())
+                }
+            })
+            .await
+    }
+
+    /// A cloneable, thread-safe handle to stop a future
+    /// [`run`](Self::run) call -- see
+    /// `DataProductConsumerBase::stop_handle`'s own doc for why this
+    /// exists instead of a same-`self` `stop()` method.
+    pub fn stop_handle(&self) -> ConsumerStopHandle {
+        self.base.stop_handle()
     }
 }
 
@@ -158,7 +216,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PositionFillConsumer<S> {
     }
 
     /// Derives a [`UnitReadinessAssessed`] measurement from `event` and
-    /// publishes it via the shared producer (DOM-024).
+    /// publishes it via the shared producer (DOM-024). See
+    /// [`PersonnelAssignmentConsumer::process`]'s own doc for why
+    /// [`run`](Self::run) duplicates this logic rather than calling
+    /// this method directly.
     pub async fn process(&self, event: &PositionFilled) -> Result<(), PublishError> {
         let assessment = derive_assessment(
             &event.base.correlation_id,
@@ -173,6 +234,51 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PositionFillConsumer<S> {
             .await?;
         producer.flush(10.0);
         Ok(())
+    }
+
+    /// Resolves this consumer's topic, joins its group, and resolves
+    /// starting offsets (SDK-034..036, via
+    /// [`DataProductConsumerBase::startup`]).
+    pub async fn startup(&mut self) -> Result<(), ConsumerStartupError> {
+        self.base.startup().await
+    }
+
+    /// Runs this consumer's fetch/dedup/process/commit poll loop
+    /// (SDK-039..042), deriving and publishing a readiness assessment
+    /// for every [`PositionFilled`] event via [`process`](Self::process),
+    /// until this consumer's [`stop_handle`](Self::stop_handle) is
+    /// signaled.
+    pub async fn run(&mut self) -> Result<(), ConsumerRunError> {
+        let producer = self.producer.clone();
+        self.base
+            .run(move |event: PositionFilled| {
+                let producer = producer.clone();
+                async move {
+                    let assessment = derive_assessment(
+                        &event.base.correlation_id,
+                        &event.base.event_id,
+                        &event.unit_uic,
+                        &event.effective_date,
+                        &event.transaction_date,
+                    );
+                    let mut producer = producer.lock().await;
+                    producer
+                        .publish("manpower.readiness-reporting.assessments", &assessment)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    producer.flush(10.0);
+                    Ok(())
+                }
+            })
+            .await
+    }
+
+    /// A cloneable, thread-safe handle to stop a future
+    /// [`run`](Self::run) call -- see
+    /// `DataProductConsumerBase::stop_handle`'s own doc for why this
+    /// exists instead of a same-`self` `stop()` method.
+    pub fn stop_handle(&self) -> ConsumerStopHandle {
+        self.base.stop_handle()
     }
 }
 
@@ -291,17 +397,42 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ReadinessReportingProduct<S> {
         }
     }
 
-    /// The sequential half of the source's `startup()` (DOM-025):
-    /// registers the producer's schemas/product/ports, then resolves
-    /// and validates each consumer's output port. Returns the two
-    /// resolved topics `(personnel, position)` -- what a `Fetch`-
-    /// capable `run()` would go on to subscribe to (not built, see the
-    /// module doc).
-    pub async fn prepare(&mut self) -> Result<(String, String), ReadinessReportingError> {
+    /// The source's `startup()` (DOM-025): registers the producer's
+    /// schemas/product/ports, then joins both consumers' groups and
+    /// resolves their starting offsets. Sequential -- `await`ed one
+    /// after another, exactly matching the source; only [`run`](Self::run)
+    /// needs concurrency (see the module doc).
+    ///
+    /// Named `startup`, not `prepare`, matching the source exactly --
+    /// an earlier pass here used `prepare` while this method could
+    /// only run the output-port-resolution half of the source's
+    /// `startup()` (before `DataProductConsumerBase::startup` existed);
+    /// now that it does the whole thing, so does this method, so it
+    /// takes the source's own name back.
+    pub async fn startup(&mut self) -> Result<(), ReadinessReportingError> {
         self.producer.lock().await.startup().await?;
-        let personnel_topic = self.personnel_consumer.base().resolve_output_port().await?;
-        let position_topic = self.position_consumer.base().resolve_output_port().await?;
-        Ok((personnel_topic, position_topic))
+        self.personnel_consumer.startup().await?;
+        self.position_consumer.startup().await?;
+        Ok(())
+    }
+
+    /// Runs both consumers' poll loops concurrently until both stop
+    /// (DOM-025) -- see the module doc for why `try_join!`, not
+    /// sequential `.await` or `rusty_tokio::spawn`.
+    pub async fn run(&mut self) -> Result<(), ReadinessReportingError> {
+        rusty_tokio::try_join!(self.personnel_consumer.run(), self.position_consumer.run())?;
+        Ok(())
+    }
+
+    /// Stop handles for both consumers' [`run`](Self::run) loops --
+    /// obtain before calling `run()` (same reasoning as
+    /// `DataProductConsumerBase::stop_handle`'s own doc) and signal
+    /// either or both to end it.
+    pub fn stop_handles(&self) -> (ConsumerStopHandle, ConsumerStopHandle) {
+        (
+            self.personnel_consumer.stop_handle(),
+            self.position_consumer.stop_handle(),
+        )
     }
 
     /// Read-only access to the shared producer, for tests and callers
@@ -327,12 +458,32 @@ mod tests {
     use rusty_http::async_tokio::AsyncTransport;
     use rusty_http::head::ResponseHead;
     use rusty_http::{HeaderMap, StatusCode, Version};
+    use rusty_kafka::protocol::api_key;
+    use rusty_kafka::protocol::consumer_protocol::{encode_assignment, encode_subscription};
     use rusty_kafka::protocol::create_topics::{
         CreatableTopicResult, CreateTopicsRequest, CreateTopicsResponse,
+    };
+    use rusty_kafka::protocol::fetch::{FetchPartitionResponse, FetchResponse, FetchTopicResponse};
+    use rusty_kafka::protocol::find_coordinator::FindCoordinatorResponse;
+    use rusty_kafka::protocol::heartbeat::HeartbeatResponse;
+    use rusty_kafka::protocol::join_group::{JoinGroupMember, JoinGroupResponse};
+    use rusty_kafka::protocol::leave_group::LeaveGroupResponse;
+    use rusty_kafka::protocol::list_offsets::{
+        ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
+    };
+    use rusty_kafka::protocol::metadata::{MetadataResponse, PartitionMetadata, TopicMetadata};
+    use rusty_kafka::protocol::offset_commit::{
+        OffsetCommitPartitionResponse, OffsetCommitResponse, OffsetCommitTopicResponse,
+    };
+    use rusty_kafka::protocol::offset_fetch::{
+        OffsetFetchPartitionResponse, OffsetFetchResponse, OffsetFetchTopicResponse,
+        NO_COMMITTED_OFFSET,
     };
     use rusty_kafka::protocol::produce::{
         ProducePartitionResponse, ProduceResponse, ProduceTopicResponse,
     };
+    use rusty_kafka::protocol::sync_group::SyncGroupResponse;
+    use rusty_kafka::record_batch::Record;
     use rusty_kafka::testing::{recv_request, send_response};
     use rusty_kafka::KafkaClient;
     use rusty_meshed_observability::LineageTracker;
@@ -572,5 +723,496 @@ mod tests {
 
         consumer.process(&event).await.unwrap();
         server.await.unwrap();
+    }
+
+    /// `MetadataResponse` has no `encode` (`rusty_kafka` is
+    /// client-only, and `rusty_kafka::wire` is private) -- hand-encodes
+    /// the v0 wire shape a fake broker needs to send back, symmetric
+    /// with `MetadataResponse::decode`. A local copy of
+    /// `rusty-meshed-sdk::consumer`'s own test-only helper of the same
+    /// name -- see that module's test doc comment for why it's
+    /// duplicated rather than shared.
+    fn write_metadata_response(writer: &mut Writer, response: &MetadataResponse) {
+        fn write_i16(writer: &mut Writer, v: i16) {
+            writer.write_u16_be(v as u16);
+        }
+        fn write_i32(writer: &mut Writer, v: i32) {
+            writer.write_u32_be(v as u32);
+        }
+        fn write_string(writer: &mut Writer, v: &str) {
+            write_i16(writer, v.len() as i16);
+            writer.write_bytes(v.as_bytes());
+        }
+
+        write_i32(writer, response.brokers.len() as i32);
+        for broker in &response.brokers {
+            write_i32(writer, broker.node_id);
+            write_string(writer, &broker.host);
+            write_i32(writer, broker.port);
+        }
+        write_i32(writer, response.topics.len() as i32);
+        for topic in &response.topics {
+            write_i16(writer, topic.error_code);
+            write_string(writer, &topic.name);
+            write_i32(writer, topic.partitions.len() as i32);
+            for partition in &topic.partitions {
+                write_i16(writer, partition.error_code);
+                write_i32(writer, partition.partition_index);
+                write_i32(writer, partition.leader_id);
+                write_i32(writer, partition.replica_nodes.len() as i32);
+                for node in &partition.replica_nodes {
+                    write_i32(writer, *node);
+                }
+                write_i32(writer, partition.isr_nodes.len() as i32);
+                for node in &partition.isr_nodes {
+                    write_i32(writer, *node);
+                }
+            }
+        }
+    }
+
+    /// Drives one full `DataProductConsumerBase::startup`
+    /// group-coordination round trip as the sole (and therefore
+    /// leader) group member, subscribed to a single-partition `topic`:
+    /// `FindCoordinator` -> `JoinGroup` -> `Metadata` (1 partition) ->
+    /// `SyncGroup` (that partition assigned back) -> `OffsetFetch`
+    /// (nothing committed) -> `ListOffsets` (earliest = 0). Does not
+    /// answer `resolve_output_port`'s Data Product Registry HTTP calls
+    /// -- callers still need their own fake HTTP server for those (see
+    /// `rusty-meshed-sdk::consumer`'s own test of the same shape for
+    /// why the two are separate concerns).
+    async fn respond_to_startup_single_partition(peer: &mut Dup, topic: &str) {
+        let (header, _body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, api_key::FIND_COORDINATOR);
+        let response = FindCoordinatorResponse {
+            error_code: 0,
+            node_id: 1,
+            host: "localhost".to_string(),
+            port: 9092,
+        };
+        let mut writer = Writer::new();
+        response.encode(&mut writer);
+        send_response(peer, header.correlation_id, writer.as_slice())
+            .await
+            .unwrap();
+
+        let (header, _body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, api_key::JOIN_GROUP);
+        let response = JoinGroupResponse {
+            error_code: 0,
+            generation_id: 1,
+            group_protocol: "range".to_string(),
+            leader_id: "consumer-1".to_string(),
+            member_id: "consumer-1".to_string(),
+            members: vec![JoinGroupMember {
+                member_id: "consumer-1".to_string(),
+                metadata: encode_subscription(&[topic.to_string()]),
+            }],
+        };
+        let mut writer = Writer::new();
+        response.encode(&mut writer);
+        send_response(peer, header.correlation_id, writer.as_slice())
+            .await
+            .unwrap();
+
+        let (header, _body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, api_key::METADATA);
+        let response = MetadataResponse {
+            brokers: vec![],
+            topics: vec![TopicMetadata {
+                error_code: 0,
+                name: topic.to_string(),
+                partitions: vec![PartitionMetadata {
+                    error_code: 0,
+                    partition_index: 0,
+                    leader_id: 1,
+                    replica_nodes: vec![1],
+                    isr_nodes: vec![1],
+                }],
+            }],
+        };
+        let mut writer = Writer::new();
+        write_metadata_response(&mut writer, &response);
+        send_response(peer, header.correlation_id, writer.as_slice())
+            .await
+            .unwrap();
+
+        let (header, _body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, api_key::SYNC_GROUP);
+        let response = SyncGroupResponse {
+            error_code: 0,
+            assignment: encode_assignment(&[(topic.to_string(), vec![0])]),
+        };
+        let mut writer = Writer::new();
+        response.encode(&mut writer);
+        send_response(peer, header.correlation_id, writer.as_slice())
+            .await
+            .unwrap();
+
+        let (header, _body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, api_key::OFFSET_FETCH);
+        let response = OffsetFetchResponse {
+            topics: vec![OffsetFetchTopicResponse {
+                name: topic.to_string(),
+                partitions: vec![OffsetFetchPartitionResponse {
+                    partition_index: 0,
+                    committed_offset: NO_COMMITTED_OFFSET,
+                    metadata: None,
+                    error_code: 0,
+                }],
+            }],
+        };
+        let mut writer = Writer::new();
+        response.encode(&mut writer);
+        send_response(peer, header.correlation_id, writer.as_slice())
+            .await
+            .unwrap();
+
+        let (header, _body) = recv_request(peer).await.unwrap();
+        assert_eq!(header.api_key, api_key::LIST_OFFSETS);
+        let response = ListOffsetsResponse {
+            topics: vec![ListOffsetsTopicResponse {
+                name: topic.to_string(),
+                partitions: vec![ListOffsetsPartitionResponse {
+                    partition_index: 0,
+                    error_code: 0,
+                    timestamp: -1,
+                    offset: 0,
+                }],
+            }],
+        };
+        let mut writer = Writer::new();
+        response.encode(&mut writer);
+        send_response(peer, header.correlation_id, writer.as_slice())
+            .await
+            .unwrap();
+    }
+
+    /// An empty `FetchResponse` for `topic`'s single partition -- no
+    /// records, so `DataProductConsumerBase::run` skips straight to
+    /// its next loop check with no `process`/`OffsetCommit` call.
+    fn empty_fetch_response(topic: &str) -> FetchResponse {
+        FetchResponse {
+            throttle_time_ms: 0,
+            topics: vec![FetchTopicResponse {
+                name: topic.to_string(),
+                partitions: vec![FetchPartitionResponse {
+                    partition_index: 0,
+                    error_code: 0,
+                    high_watermark: 0,
+                    last_stable_offset: 0,
+                    aborted_transactions: vec![],
+                    records: vec![],
+                }],
+            }],
+        }
+    }
+
+    /// Exercises [`PersonnelAssignmentConsumer::run`] end to end: a
+    /// real `startup()` group-join round trip, then one fetched
+    /// `PersonnelAssigned` record derives and publishes a readiness
+    /// assessment through the shared producer (proving the closure
+    /// `run()` builds -- not `process()` itself, see that method's own
+    /// doc for why -- actually performs the derive-and-publish work),
+    /// commits that record's offset, and stops cleanly via
+    /// `stop_handle()`.
+    #[rusty_tokio::test]
+    async fn personnel_assignment_consumer_run_derives_publishes_and_commits_for_one_event() {
+        let topic = "manpower.personnel-lifecycle.assignments";
+        let (producer, mut producer_peer) = started_producer().await;
+
+        let (reg_url, _reg_server) = start_fake_http_server(vec![
+            (200, r#"[{"id": 1, "name": "personnel-lifecycle"}]"#),
+            (
+                200,
+                r#"[{"id": 10, "data_product_id": 1, "description": "assignments", "topic_name": "manpower.personnel-lifecycle.assignments"}]"#,
+            ),
+            (404, "{}"),
+        ]);
+
+        let consumer_db = temp_db_path("run_personnel");
+        let (consumer_client_io, mut consumer_peer) = duplex(8192);
+        let consumer_base = DataProductConsumerBase::<PersonnelAssigned, Dup>::new(
+            PersonnelAssignmentConsumer::<Dup>::PRODUCT_NAME,
+            PersonnelAssignmentConsumer::<Dup>::PORT_NAME,
+            PersonnelAssignmentConsumer::<Dup>::GROUP_ID,
+            RegistryClient::new(&reg_url),
+            LineageTracker::new(&consumer_db).unwrap(),
+            KafkaClient::new(consumer_client_io, None),
+        );
+        let mut consumer = PersonnelAssignmentConsumer::new(consumer_base, producer);
+
+        let startup_server = rusty_tokio::spawn(async move {
+            respond_to_startup_single_partition(&mut consumer_peer, topic).await;
+            consumer_peer
+        });
+        consumer.startup().await.unwrap();
+        let mut consumer_peer = startup_server.await.unwrap();
+
+        let stop_handle = consumer.stop_handle();
+        let event = PersonnelAssigned::new(
+            "req-1",
+            "p-1",
+            "pos-1",
+            "UIC-1",
+            "Rifleman",
+            "E4",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        let value = event.serialize();
+
+        let poll_server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut consumer_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::HEARTBEAT);
+            let response = HeartbeatResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut consumer_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut consumer_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::FETCH);
+            let response = FetchResponse {
+                throttle_time_ms: 0,
+                topics: vec![FetchTopicResponse {
+                    name: topic.to_string(),
+                    partitions: vec![FetchPartitionResponse {
+                        partition_index: 0,
+                        error_code: 0,
+                        high_watermark: 1,
+                        last_stable_offset: 1,
+                        aborted_transactions: vec![],
+                        records: vec![Record {
+                            key: None,
+                            value: Some(value),
+                            headers: vec![],
+                        }],
+                    }],
+                }],
+            };
+            let mut writer = Writer::new();
+            response.encode(&mut writer, 1_735_689_600_000);
+            send_response(&mut consumer_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut consumer_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::OFFSET_COMMIT);
+            let response = OffsetCommitResponse {
+                topics: vec![OffsetCommitTopicResponse {
+                    name: topic.to_string(),
+                    partitions: vec![OffsetCommitPartitionResponse {
+                        partition_index: 0,
+                        error_code: 0,
+                    }],
+                }],
+            };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+
+            // Stop before sending, not after -- this is a
+            // multi-threaded runtime, so calling `stop()` once the
+            // response is already sent races the client task's own
+            // next `running` check (it could observe `true` and send
+            // a second Heartbeat before this task's `stop()` call even
+            // runs). Calling it first guarantees the client can only
+            // see `running == false` once it reads this response.
+            stop_handle.stop();
+            send_response(&mut consumer_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut consumer_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::LEAVE_GROUP);
+            let response = LeaveGroupResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut consumer_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+        });
+
+        let produce_server = rusty_tokio::spawn(async move {
+            respond_to_produce(&mut producer_peer, 0).await;
+        });
+
+        consumer.run().await.unwrap();
+        poll_server.await.unwrap();
+        produce_server.await.unwrap();
+    }
+
+    /// Proves DOM-025's actual concurrency requirement -- the module
+    /// doc's own reasoning for why `ReadinessReportingProduct::run`
+    /// uses `try_join!` rather than sequential `.await`: the personnel
+    /// consumer's fake broker deliberately stalls its `Fetch` response
+    /// until it observes the position consumer's own `Fetch` round
+    /// trip has *already* completed. If `run()` drove the two
+    /// consumers sequentially instead of concurrently,
+    /// `position_peer` would never even receive its `Heartbeat`
+    /// request -- `personnel_consumer.run()` wouldn't return (and let
+    /// `position_consumer.run()` start) until personnel's own broker
+    /// task unblocks, which it can't do until position's completion
+    /// signal arrives. A non-concurrent implementation deadlocks this
+    /// test.
+    #[rusty_tokio::test]
+    async fn readiness_reporting_product_run_drives_both_consumers_concurrently() {
+        let personnel_topic = "manpower.personnel-lifecycle.assignments";
+        let position_topic = "manpower.position-management.fills";
+
+        let (producer, _producer_peer) = started_producer().await;
+
+        let (personnel_reg_url, _personnel_reg_server) = start_fake_http_server(vec![
+            (200, r#"[{"id": 1, "name": "personnel-lifecycle"}]"#),
+            (
+                200,
+                r#"[{"id": 10, "data_product_id": 1, "description": "assignments", "topic_name": "manpower.personnel-lifecycle.assignments"}]"#,
+            ),
+            (404, "{}"),
+        ]);
+        let (position_reg_url, _position_reg_server) = start_fake_http_server(vec![
+            (200, r#"[{"id": 2, "name": "position-management"}]"#),
+            (
+                200,
+                r#"[{"id": 20, "data_product_id": 2, "description": "fills", "topic_name": "manpower.position-management.fills"}]"#,
+            ),
+            (404, "{}"),
+        ]);
+
+        let personnel_db = temp_db_path("concurrent_personnel");
+        let (personnel_client_io, mut personnel_peer) = duplex(8192);
+        let personnel_base = DataProductConsumerBase::<PersonnelAssigned, Dup>::new(
+            PersonnelAssignmentConsumer::<Dup>::PRODUCT_NAME,
+            PersonnelAssignmentConsumer::<Dup>::PORT_NAME,
+            PersonnelAssignmentConsumer::<Dup>::GROUP_ID,
+            RegistryClient::new(&personnel_reg_url),
+            LineageTracker::new(&personnel_db).unwrap(),
+            KafkaClient::new(personnel_client_io, None),
+        );
+        let mut personnel_consumer =
+            PersonnelAssignmentConsumer::new(personnel_base, producer.clone());
+
+        let position_db = temp_db_path("concurrent_position");
+        let (position_client_io, mut position_peer) = duplex(8192);
+        let position_base = DataProductConsumerBase::<PositionFilled, Dup>::new(
+            PositionFillConsumer::<Dup>::PRODUCT_NAME,
+            PositionFillConsumer::<Dup>::PORT_NAME,
+            PositionFillConsumer::<Dup>::GROUP_ID,
+            RegistryClient::new(&position_reg_url),
+            LineageTracker::new(&position_db).unwrap(),
+            KafkaClient::new(position_client_io, None),
+        );
+        let mut position_consumer = PositionFillConsumer::new(position_base, producer.clone());
+
+        let personnel_startup = rusty_tokio::spawn(async move {
+            respond_to_startup_single_partition(&mut personnel_peer, personnel_topic).await;
+            personnel_peer
+        });
+        let position_startup = rusty_tokio::spawn(async move {
+            respond_to_startup_single_partition(&mut position_peer, position_topic).await;
+            position_peer
+        });
+        personnel_consumer.startup().await.unwrap();
+        position_consumer.startup().await.unwrap();
+        let mut personnel_peer = personnel_startup.await.unwrap();
+        let mut position_peer = position_startup.await.unwrap();
+
+        let mut product =
+            ReadinessReportingProduct::new(producer, personnel_consumer, position_consumer);
+        let (personnel_stop, position_stop) = product.stop_handles();
+
+        let (position_done_tx, position_done_rx) = rusty_tokio::sync::oneshot::channel::<()>();
+
+        let personnel_poll = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut personnel_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::HEARTBEAT);
+            let response = HeartbeatResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(
+                &mut personnel_peer,
+                header.correlation_id,
+                writer.as_slice(),
+            )
+            .await
+            .unwrap();
+
+            let (header, _body) = recv_request(&mut personnel_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::FETCH);
+
+            // Block until position's own Heartbeat+Fetch round trip
+            // has already finished -- see this test's own doc.
+            position_done_rx.await.unwrap();
+
+            let response = empty_fetch_response(personnel_topic);
+            let mut writer = Writer::new();
+            response.encode(&mut writer, 1_735_689_600_000);
+
+            // Stop before sending -- see
+            // `personnel_assignment_consumer_run_derives_publishes_and_commits_for_one_event`'s
+            // own comment for why calling it after the response is
+            // sent would race the client's next `running` check on
+            // this multi-threaded runtime.
+            personnel_stop.stop();
+            send_response(
+                &mut personnel_peer,
+                header.correlation_id,
+                writer.as_slice(),
+            )
+            .await
+            .unwrap();
+
+            let (header, _body) = recv_request(&mut personnel_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::LEAVE_GROUP);
+            let response = LeaveGroupResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(
+                &mut personnel_peer,
+                header.correlation_id,
+                writer.as_slice(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let position_poll = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut position_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::HEARTBEAT);
+            let response = HeartbeatResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut position_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut position_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::FETCH);
+            let response = empty_fetch_response(position_topic);
+            let mut writer = Writer::new();
+            response.encode(&mut writer, 1_735_689_600_000);
+
+            // Stop before sending, same reasoning as personnel's own
+            // task above.
+            position_stop.stop();
+            send_response(&mut position_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+            let _ = position_done_tx.send(());
+
+            let (header, _body) = recv_request(&mut position_peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::LEAVE_GROUP);
+            let response = LeaveGroupResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut position_peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+        });
+
+        product.run().await.unwrap();
+        personnel_poll.await.unwrap();
+        position_poll.await.unwrap();
     }
 }
