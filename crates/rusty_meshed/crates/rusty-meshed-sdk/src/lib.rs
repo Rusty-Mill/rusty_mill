@@ -7,6 +7,7 @@
 //! capabilities this crate covers; most are still open, see the crate's
 //! module list below for what's implemented so far.
 
+mod assignor;
 mod consumer;
 mod error;
 pub mod outbox;
@@ -24,7 +25,9 @@ mod types;
 /// dependency edge between them).
 pub use rusty_meshed_core::BaseEvent;
 
-pub use consumer::{ConsumerStartupError, DataProductConsumerBase};
+pub use consumer::{
+    ConsumerRunError, ConsumerStartupError, ConsumerStopHandle, DataProductConsumerBase,
+};
 pub use error::{ContractVersionMismatch, RegistryError};
 pub use outbox::{
     ensure_schema as ensure_outbox_schema, relay_pending, write_outbox_entry, OutboxEntry,

@@ -83,7 +83,7 @@ pub enum ReadinessReportingError {
 /// Kafka stream type -- same reasoning as
 /// [`crate::products::PersonnelLifecycleProducer`]'s own module doc.
 pub struct PersonnelAssignmentConsumer<S> {
-    base: DataProductConsumerBase<PersonnelAssigned>,
+    base: DataProductConsumerBase<PersonnelAssigned, S>,
     producer: Arc<Mutex<DataProductProducerBase<S>>>,
 }
 
@@ -98,7 +98,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
     /// [`ReadinessAssessmentProducer`] this consumer's derived
     /// assessments publish through.
     pub fn new(
-        base: DataProductConsumerBase<PersonnelAssigned>,
+        base: DataProductConsumerBase<PersonnelAssigned, S>,
         producer: Arc<Mutex<DataProductProducerBase<S>>>,
     ) -> Self {
         PersonnelAssignmentConsumer { base, producer }
@@ -107,7 +107,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
     /// Read-only access to this consumer's base, for
     /// [`ReadinessReportingProduct::prepare`]'s output-port resolution
     /// step.
-    pub fn base(&self) -> &DataProductConsumerBase<PersonnelAssigned> {
+    pub fn base(&self) -> &DataProductConsumerBase<PersonnelAssigned, S> {
         &self.base
     }
 
@@ -135,7 +135,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
 /// Consumer for position fill events that emits readiness assessments
 /// (DOM-024).
 pub struct PositionFillConsumer<S> {
-    base: DataProductConsumerBase<PositionFilled>,
+    base: DataProductConsumerBase<PositionFilled, S>,
     producer: Arc<Mutex<DataProductProducerBase<S>>>,
 }
 
@@ -147,13 +147,13 @@ impl<S> PositionFillConsumer<S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> PositionFillConsumer<S> {
     pub fn new(
-        base: DataProductConsumerBase<PositionFilled>,
+        base: DataProductConsumerBase<PositionFilled, S>,
         producer: Arc<Mutex<DataProductProducerBase<S>>>,
     ) -> Self {
         PositionFillConsumer { base, producer }
     }
 
-    pub fn base(&self) -> &DataProductConsumerBase<PositionFilled> {
+    pub fn base(&self) -> &DataProductConsumerBase<PositionFilled, S> {
         &self.base
     }
 
@@ -518,12 +518,14 @@ mod tests {
     async fn personnel_assignment_consumer_process_publishes_the_derived_assessment() {
         let (producer, mut peer) = started_producer().await;
         let consumer_db = temp_db_path("personnel_consumer");
-        let consumer_base = DataProductConsumerBase::<PersonnelAssigned>::new(
+        let (consumer_client_io, _consumer_client_peer) = duplex(4096);
+        let consumer_base = DataProductConsumerBase::<PersonnelAssigned, Dup>::new(
             PersonnelAssignmentConsumer::<Dup>::PRODUCT_NAME,
             PersonnelAssignmentConsumer::<Dup>::PORT_NAME,
             PersonnelAssignmentConsumer::<Dup>::GROUP_ID,
             RegistryClient::new("http://unused.invalid"),
             LineageTracker::new(&consumer_db).unwrap(),
+            KafkaClient::new(consumer_client_io, None),
         );
         let consumer = PersonnelAssignmentConsumer::new(consumer_base, producer);
 
@@ -550,12 +552,14 @@ mod tests {
     async fn position_fill_consumer_process_publishes_the_derived_assessment() {
         let (producer, mut peer) = started_producer().await;
         let consumer_db = temp_db_path("position_consumer");
-        let consumer_base = DataProductConsumerBase::<PositionFilled>::new(
+        let (consumer_client_io, _consumer_client_peer) = duplex(4096);
+        let consumer_base = DataProductConsumerBase::<PositionFilled, Dup>::new(
             PositionFillConsumer::<Dup>::PRODUCT_NAME,
             PositionFillConsumer::<Dup>::PORT_NAME,
             PositionFillConsumer::<Dup>::GROUP_ID,
             RegistryClient::new("http://unused.invalid"),
             LineageTracker::new(&consumer_db).unwrap(),
+            KafkaClient::new(consumer_client_io, None),
         );
         let consumer = PositionFillConsumer::new(consumer_base, producer);
 
