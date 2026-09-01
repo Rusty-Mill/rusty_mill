@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 mod common;
-use common::free_port;
+use common::{free_port, yaml_path};
 
 /// A self-signed cert for `localhost`, written as PEM.
 struct Certificate {
@@ -90,8 +90,8 @@ binds:
             backends:
               - host: "127.0.0.1:{upstream_port}"
 "#,
-        cert.dir.path().display(),
-        cert.dir.path().display(),
+        yaml_path(cert.dir.path()),
+        yaml_path(cert.dir.path()),
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
@@ -333,10 +333,10 @@ binds:
         routes:
           - backends: [{{host: "127.0.0.1:1"}}]
 "#,
-        a.dir.path().display(),
-        a.dir.path().display(),
-        b.dir.path().display(),
-        b.dir.path().display(),
+        yaml_path(a.dir.path()),
+        yaml_path(a.dir.path()),
+        yaml_path(b.dir.path()),
+        yaml_path(b.dir.path()),
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
@@ -413,9 +413,9 @@ binds:
               - host: "127.0.0.1:{upstream_port}"
 "#,
         first_name = first.0,
-        first_dir = first.1.dir.path().display(),
+        first_dir = yaml_path(first.1.dir.path()),
         second_name = second.0,
-        second_dir = second.1.dir.path().display(),
+        second_dir = yaml_path(second.1.dir.path()),
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
@@ -575,8 +575,8 @@ binds:
           cert: "{b}/cert.pem"
           key: "{b}/key.pem"
 "#,
-        a = alpha.dir.path().display(),
-        b = beta.dir.path().display(),
+        a = yaml_path(alpha.dir.path()),
+        b = yaml_path(beta.dir.path()),
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
@@ -609,8 +609,8 @@ binds:
           cert: "{b}/cert.pem"
           key: "{b}/key.pem"
 "#,
-        a = alpha.dir.path().display(),
-        b = beta.dir.path().display(),
+        a = yaml_path(alpha.dir.path()),
+        b = yaml_path(beta.dir.path()),
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
@@ -645,7 +645,7 @@ binds:
           cert: "{dir}/cert.pem"
           key: "{dir}/key.pem"
 "#,
-        dir = shared.dir.path().display(),
+        dir = yaml_path(shared.dir.path()),
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
@@ -690,7 +690,7 @@ binds:
           - backends:
               - host: "127.0.0.1:{echo}"
 "#,
-        dir = cert.dir.path().display(),
+        dir = yaml_path(cert.dir.path()),
         echo = upstream_for(label).await,
     );
 

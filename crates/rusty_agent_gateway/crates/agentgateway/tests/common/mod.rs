@@ -7,6 +7,22 @@ use std::sync::{LazyLock, Mutex};
 
 use fs4::fs_std::FileExt;
 
+/// Render a filesystem path for splicing into a *double-quoted* YAML scalar.
+///
+/// Inside double quotes the YAML scanner reads a backslash as the start of an
+/// escape, so a Windows path goes in as escape sequences rather than as a path:
+/// `C:\Users\...` is rejected outright ("did not find expected hexadecimal
+/// number", because `\U` wants eight hex digits), and a path that happens to
+/// escape into something legal would be read as the wrong path, which is worse.
+/// Doubling each backslash says "a literal backslash". A no-op on a Unix path.
+#[allow(
+    dead_code,
+    reason = "only the suites that splice a path into their config call this"
+)]
+pub fn yaml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
 /// Ports per band. The largest test binary here asks for a few hundred, so
 /// this is sized well above that rather than just above it.
 const BAND: u32 = 1024;

@@ -78,14 +78,12 @@ fn mock_server() -> String {
     path.push(format!("mock_mcp_server{}", std::env::consts::EXE_SUFFIX));
     assert!(path.exists(), "fixture not built at {}", path.display());
     // The caller splices this into a double-quoted YAML scalar (`cmd:
-    // "{server}"`), and a Windows path is all backslashes -- unescaped, the
-    // YAML scanner reads `\a`, `\t`, ... as escape sequences and rejects the
-    // document. A no-op on a Unix path.
-    path.display().to_string().replace('\\', "\\\\")
+    // "{server}"`), so it goes through `yaml_path`.
+    yaml_path(&path)
 }
 
 mod common;
-use common::free_port;
+use common::{free_port, yaml_path};
 
 struct Harness {
     client: RunningService<rmcp::RoleClient, ()>,
@@ -121,7 +119,7 @@ impl Harness {
                          \x20               audiences: [\"{RESOURCE}\"]\n\
                          \x20               jwks:\n\
                          \x20                 file: \"{}\"\n",
-                        path.display()
+                        yaml_path(&path)
                     ),
                     Some(dir),
                 )

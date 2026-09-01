@@ -70,14 +70,12 @@ fn mock_server() -> String {
     // empty everywhere else.
     path.push(format!("mock_mcp_server{}", std::env::consts::EXE_SUFFIX));
     // The caller splices this into a double-quoted YAML scalar (`cmd:
-    // "{server}"`), and a Windows path is all backslashes -- unescaped, the
-    // YAML scanner reads `\a`, `\t`, ... as escape sequences and rejects the
-    // document. A no-op on a Unix path.
-    path.display().to_string().replace('\\', "\\\\")
+    // "{server}"`), so it goes through `yaml_path`.
+    yaml_path(&path)
 }
 
 mod common;
-use common::free_port;
+use common::{free_port, yaml_path};
 
 const CONFIG: &str = r#"
 binds:
@@ -118,7 +116,7 @@ async fn start() -> (String, CancellationToken, tempfile::TempDir) {
     let yaml = CONFIG
         .replace("{port}", &port.to_string())
         .replace("{server}", &mock_server())
-        .replace("{jwks}", &jwks_path.display().to_string());
+        .replace("{jwks}", &yaml_path(&jwks_path));
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
