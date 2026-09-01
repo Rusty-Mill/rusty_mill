@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Near-axis-aligned dodges now snap to a pure single axis, matching real Rocket League
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#155](https://github.com/baileyrd/rusty_bullet/pull/155) · `00039fc`
 
 - **`FR-073`'s own Non-goals had flagged RocketSim's post-normalization
   small-component zeroing as "a separate, independent simplification"** —
