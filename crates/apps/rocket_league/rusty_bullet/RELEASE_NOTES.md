@@ -6,6 +6,45 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Net-point contact combined-solve investigation
+**2026-09-01** · PR pending · commit pending
+
+- **`net::NetMesh::step` resolved every body-vs-net-point contact
+  independently and sequentially**, one pair at a time via
+  `solver::resolve_contacts_between` — the exact independent-pairwise shape
+  `RB-PHYSICS-001-FR-030` already proved under-converges (and can be
+  genuinely order-dependent) for a shared body touched by 2+ others in the
+  same step. This module's own doc comment had waved that off as
+  irrelevant here, reasoning a net point's own mass is "tiny enough" to
+  not matter.
+- **That "tiny enough" claim was checked and found false.** `NET_POINT_MASS`
+  (`0.5`) is exactly half a typical ball's own mass (`1.0`) — not a
+  lopsided ratio. A ball or car pressing into the net commonly overlaps
+  two or more free points at once, given `NET_POINT_RADIUS`'s own generous
+  coverage-radius sizing.
+- **A dedicated single-shot test confirmed the mechanism is genuinely
+  order-dependent, not merely slow to converge.** For a ball placed
+  exactly symmetrically between two net-point-like bodies, resolving each
+  point fully independently in one order left the ball with a nonzero
+  sideways velocity; the opposite order left the mirror-image velocity —
+  a purely arbitrary artifact of iteration order.
+- **A `NetMesh::step`-level test measured the real-world size of the bias
+  directly**: a ball fired squarely at the net's own center, straddling
+  two symmetric free interior points, was measurably deflected sideways by
+  ~0.25 units/s out of a 2000 units/s impact under the old sequential
+  loop.
+- **Adopted `solver::resolve_dynamic_manifolds`'s combined solve** for
+  every body-vs-point contact detected within a sub-step, instead of
+  resolving each pair immediately and independently. Measured directly:
+  reduces the squarely-centered-impact residual from ~0.25 units/s to
+  ~0.016 units/s, roughly a 15-fold improvement. Warm-starting is
+  deliberately not part of this fix, left as the same kind of open
+  follow-up work `RB-PHYSICS-001-FR-035` already scoped out for
+  `resolve_contacts`/`resolve_contacts_between` generally.
+- **2 new tests.** All 282 pre-existing tests pass unchanged; 284 total.
+
+---
+
 ## Velocity-aligned friction direction selection
 **2026-09-01** · [#105](https://github.com/baileyrd/rusty_bullet/pull/105) · `1954adf`
 

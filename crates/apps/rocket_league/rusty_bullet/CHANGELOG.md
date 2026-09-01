@@ -665,6 +665,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   tests, including a dedicated isotropic-friction regression test verified
   to fail under the old fixed-basis behavior; all pre-existing tests pass
   unchanged.
+- `net::NetMesh::step`'s body-vs-net-point contact resolution
+  (`RB-PHYSICS-001-FR-050`) — resolved every overlapping point
+  independently and sequentially, an untested "net-point mass is tiny
+  enough to not matter" assumption found false and, worse, genuinely
+  order-dependent for a symmetric double-point impact (confirmed by a
+  dedicated test), with a measured real-world residual of ~0.25 units/s
+  out of a 2000 units/s impact. Adopted `solver::resolve_dynamic_manifolds`'s
+  combined solve for every body-vs-point contact within a sub-step,
+  reducing that residual roughly 15-fold to ~0.016 units/s; warm-starting
+  deliberately left out of scope. 2 new tests; all pre-existing tests pass
+  unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
