@@ -2,22 +2,31 @@
 name = "agentgateway-config"
 version = "0.1.0"
 description = "Configuration model for rusty_agent_gateway, wire-compatible with agentgateway's local config"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_agent_gateway"
+authors = ["rusty_agent_gateway contributors"]
 publish = false
 
-[lints]
-workspace = true
+# De-inherited from rusty_agent_gateway's own former `[workspace.lints]`:
+# this workspace root's `[workspace.lints]` is rustils' (a weaker
+# `unsafe_code = "warn"`, and none of the rest), so these are written
+# literally rather than silently downgraded.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "warn"
+unwrap_used = "warn"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }
-thiserror = { workspace = true }
+thiserror = "2"
 http = { workspace = true }
 
 [dev-dependencies]

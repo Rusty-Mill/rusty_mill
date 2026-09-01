@@ -344,6 +344,192 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentgateway"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-a2a",
+ "agentgateway-auth",
+ "agentgateway-config",
+ "agentgateway-core",
+ "agentgateway-llm",
+ "agentgateway-mcp",
+ "agentgateway-proxy",
+ "agentgateway-tls",
+ "anyhow",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonwebtoken 11.0.0",
+ "prost",
+ "prost-types",
+ "rand 0.8.8",
+ "rcgen",
+ "reqwest 0.13.4",
+ "rmcp 3.1.4",
+ "rsa",
+ "rustix 1.1.4",
+ "rusty-mcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "agentgateway-a2a"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "http",
+ "regex",
+ "reqwest 0.13.4",
+ "rusty_a2a",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-auth"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "base64 0.22.1",
+ "http",
+ "jsonwebtoken 11.0.0",
+ "rand 0.8.8",
+ "reqwest 0.13.4",
+ "rsa",
+ "rusty-mcp",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-config"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "agentgateway-core"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "http",
+ "regex",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-llm"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "agentgateway-core",
+ "async-stream",
+ "bytes",
+ "cel",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "regex",
+ "reqwest 0.13.4",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-mcp"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "agentgateway-core",
+ "axum 0.8.9",
+ "cel",
+ "http",
+ "http-body-util",
+ "opentelemetry",
+ "process-wrap 9.1.0",
+ "prost",
+ "prost-types",
+ "regex",
+ "reqwest 0.13.4",
+ "rmcp 3.1.4",
+ "rusty-mcp",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
+name = "agentgateway-proxy"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "agentgateway-core",
+ "bytes",
+ "cel",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-tls"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "agentgateway-core",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "rusty_tls",
+ "rusty_tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -544,6 +730,23 @@ dependencies = [
  "anstyle",
  "once_cell_polyfill",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "antlr4rust"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "093d520274bfff7278d776f7ea12981a0a0a6f96db90964658e0f38fc6e9a6a6"
+dependencies = [
+ "better_any",
+ "bit-set 0.8.0",
+ "byteorder",
+ "lazy_static",
+ "murmur3 0.4.1",
+ "once_cell",
+ "parking_lot",
+ "typed-arena",
+ "uuid",
 ]
 
 [[package]]
@@ -1075,6 +1278,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "better_any"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4372b9543397a4b86050cc5e7ee36953edf4bac9518e8a774c2da694977fb6e4"
+
+[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1542,6 +1751,22 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex 2.0.1",
+]
+
+[[package]]
+name = "cel"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f93082a93da8fd78394852602ced1e2e7754ed8c29dc813fa80b01a1baf9032"
+dependencies = [
+ "antlr4rust",
+ "chrono",
+ "lazy_static",
+ "nom 7.1.3",
+ "pastey",
+ "regex",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -5900,6 +6125,15 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "murmur3"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a198f9589efc03f544388dfc4a19fe8af4323662b62f598b8dcfdac62c14771c"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
+name = "murmur3"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9252111cf132ba0929b6f8e030cac2a24b507f3a4d6db6fb2896f27b354c714b"
@@ -9158,6 +9392,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9278,7 +9521,7 @@ dependencies = [
  "ignore",
  "log",
  "md-5 0.10.6",
- "murmur3",
+ "murmur3 0.5.2",
  "num-bigint",
  "num-traits",
  "p256 0.13.2",
@@ -13031,6 +13274,12 @@ dependencies = [
  "ratatui-widgets",
  "vt100",
 ]
+
+[[package]]
+name = "typed-arena"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
 
 [[package]]
 name = "typeid"

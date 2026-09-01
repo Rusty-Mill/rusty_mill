@@ -44,6 +44,10 @@ Removed / Fixed / Security, newest first.
   wave) — eight `sessionmgr-*` crates plus a Tauri desktop shell behind one
   nested workspace; its `rusty_tokio` pin and `sessionmgr-pty`'s three
   `rustils` pins retired to this root's path dependencies
+- `rusty_agent_gateway` merged into `crates/rusty_agent_gateway` via
+  `git subtree` (fourth wave, and the last of it) — nine
+  `agentgateway-*` crates behind one nested workspace; four pins retired
+  (`rusty_a2a`, `rusty-mcp` at tag `v0.4.1`, `rusty_tls`, `rusty_tokio`)
 - CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
@@ -54,7 +58,11 @@ Removed / Fixed / Security, newest first.
   `process`, `io-util`, `io-std`); `chrono` gained `serde` for
   `skillopt-core`; `uuid` gained `serde` and `serde_json` gained
   `float_roundtrip` for `rusty_adk`; `reqwest` gained `stream` and `tokio`
-  gained `full` for `rusty_provider`
+  gained `full` for `rusty_provider`; `clap` gained `env` for
+  `rusty_agent_gateway`
+- Root `rusty_a2a` and `rusty-mcp` entries carry `default-features = false`
+  so `rusty_agent_gateway`'s crates can inherit them — a no-op for their
+  other consumers, since both crates' `default` feature is empty
 
 ### Fixed
 - `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce

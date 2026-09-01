@@ -166,6 +166,15 @@ members = [
     "crates/rusty_yirp/crates/sessionmgr-agents",
     "crates/rusty_yirp/crates/sessionmgr-daemon",
     "crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri",
+    "crates/rusty_agent_gateway/crates/agentgateway-config",
+    "crates/rusty_agent_gateway/crates/agentgateway-auth",
+    "crates/rusty_agent_gateway/crates/agentgateway-a2a",
+    "crates/rusty_agent_gateway/crates/agentgateway-llm",
+    "crates/rusty_agent_gateway/crates/agentgateway-mcp",
+    "crates/rusty_agent_gateway/crates/agentgateway-proxy",
+    "crates/rusty_agent_gateway/crates/agentgateway-tls",
+    "crates/rusty_agent_gateway/crates/agentgateway-core",
+    "crates/rusty_agent_gateway/crates/agentgateway",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -340,7 +349,7 @@ skillopt-core = { path = "crates/rusty_skillopt/crates/skillopt-core" }
 skillopt-model = { path = "crates/rusty_skillopt/crates/skillopt-model" }
 skillopt-envs = { path = "crates/rusty_skillopt/crates/skillopt-envs" }
 serde_yaml = "0.9"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
@@ -421,8 +430,12 @@ adk-mcp = { path = "crates/rusty_adk/crates/adk-mcp", version = "0.1.0" }
 adk-a2a = { path = "crates/rusty_adk/crates/adk-a2a", version = "0.1.0" }
 futures = "0.3"
 tokio-test = "0.4"
-# rusty_a2a is a merged sibling -- retiring adk-a2a's git dependency on it.
-rusty_a2a = { path = "crates/rusty_a2a" }
+# rusty_a2a is a merged sibling -- retiring adk-a2a's and
+# agentgateway-a2a's git dependencies on it. `default-features = false`
+# because both ask for it explicitly and an inheriting member may not
+# override the root's choice; a no-op either way, since rusty_a2a's own
+# `default` feature is empty.
+rusty_a2a = { path = "crates/rusty_a2a", default-features = false }
 
 # Hoisted from rusty_provider's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `license` ("MIT"), so its six crates
@@ -433,7 +446,11 @@ rp-core = { path = "crates/rusty_provider/crates/core" }
 rp-mcp = { path = "crates/rusty_provider/crates/mcp" }
 rp-providers = { path = "crates/rusty_provider/crates/providers" }
 rp-router = { path = "crates/rusty_provider/crates/router" }
-rusty-mcp = { path = "crates/rusty_mcp/crates/rusty-mcp" }
+# `default-features = false` because rusty_agent_gateway's crates ask for it
+# explicitly and an inheriting member may not override the root's choice.
+# A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
+# own `default` feature is empty.
+rusty-mcp = { path = "crates/rusty_mcp/crates/rusty-mcp", default-features = false }
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
@@ -466,6 +483,34 @@ crossterm = "0.29"
 tui-term = "0.3"
 vt100 = "0.16"
 ureq = "3"
+
+# Hoisted from rusty_agent_gateway's own former `[workspace.dependencies]`.
+# Its `[workspace.package]` collided on `edition` (2024), `rust-version`
+# (1.88), `license` (Apache-2.0), `repository` and `authors`, so its nine
+# crates carry literal `[package]` fields -- rusty_db treatment. Its
+# `[workspace.lints]` collided too and is likewise written literally into
+# each crate (see the README). `rmcp`/`axum`/`tower`/`hyper`/`hyper-util`/
+# `http`/`http-body-util`/`bytes`/`regex`/`serde_yaml` above already cover
+# its requirements; `clap` gained `env` for its CLI.
+agentgateway-config = { path = "crates/rusty_agent_gateway/crates/agentgateway-config", version = "0.1.0" }
+agentgateway-auth = { path = "crates/rusty_agent_gateway/crates/agentgateway-auth", version = "0.1.0" }
+agentgateway-core = { path = "crates/rusty_agent_gateway/crates/agentgateway-core", version = "0.1.0" }
+agentgateway-a2a = { path = "crates/rusty_agent_gateway/crates/agentgateway-a2a", version = "0.1.0" }
+agentgateway-llm = { path = "crates/rusty_agent_gateway/crates/agentgateway-llm", version = "0.1.0" }
+agentgateway-mcp = { path = "crates/rusty_agent_gateway/crates/agentgateway-mcp", version = "0.1.0" }
+agentgateway-proxy = { path = "crates/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }
+agentgateway-tls = { path = "crates/rusty_agent_gateway/crates/agentgateway-tls", version = "0.1.0" }
+# Another merged sibling, retiring agentgateway-tls' pinned git dependency.
+rusty_tls = { path = "crates/rusty_tls" }
+tokio-util = { version = "0.7", default-features = false }
+http-body = "1"
+cel = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "transport"] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

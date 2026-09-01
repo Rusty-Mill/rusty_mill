@@ -13,6 +13,42 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fourth-wave merge — `rusty_agent_gateway` (wave complete)
+**2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
+
+- **Added:** `crates/rusty_agent_gateway` — a Rust implementation of the
+  agentgateway data plane, built as a drop-in for its `config.yaml`:
+  configuration, listeners, route matching, policies, and the MCP gateway
+  (several upstream MCP servers federated behind one endpoint, with
+  tool-level filtering and authorization). Nine crates behind one nested
+  workspace, merged via `git subtree` with full history. This completes the
+  fourth wave and the monorepo consolidation.
+- **Changed:** four pins retired, the most of any crate in this series, all
+  to merged siblings — `rusty_a2a` (rev `b9778e1`, 11,324/360 behind),
+  `rusty-mcp` (tag `v0.4.1`, 1,367/210 behind — the only tag-pinned
+  dependency in the series), `rusty_tls` (rev `7ac6956e`, 109/27) and
+  `rusty_tokio` (rev `6d3bb05a`, 3,158/587). The last two had to move
+  together by construction, the same `AsyncRead`/`AsyncWrite` trait-identity
+  constraint `rusty_request`'s retirement documented.
+- **Changed:** this root's `rusty_a2a` and `rusty-mcp` entries now carry
+  `default-features = false`, because a member inheriting a workspace
+  dependency may not set it when the root does not — and the gateway's
+  crates set it deliberately. Verified to be a no-op for their other
+  consumers (`adk-a2a`, `rp-mcp`, `rp-server`): both crates' `default`
+  feature is empty.
+- **Fixed/Changed:** `[workspace.package]` collided on five fields, so its
+  crates carry literal `[package]` fields; its `[workspace.lints]` is
+  stricter than this root's (`unsafe_code = "forbid"`, `missing_docs`,
+  `clippy::todo`, `clippy::unwrap_used`) and is written literally into each
+  crate rather than silently downgraded — same call as `rusty_key`'s. Root
+  `clap` gained `env`.
+- **Known limitation (pre-existing, unchanged):** `hyper`'s `http2` feature
+  is load-bearing for the shipped `agentgateway` binary (its TLS listener
+  advertises `h2` over ALPN) but Cargo's feature unification means the test
+  binary has it regardless — so it must be verified against a built binary
+  with `curl`, not by `cargo test`, exactly as before the merge.
+- 73 tests pass. No lint or format fixes were needed.
+
 ## Fourth-wave merge — `rusty_yirp`
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 

@@ -8,12 +8,13 @@ pipeline. Each crate keeps its full original commit history, merged in via
 A first wave merged fourteen crates (below the `rusty_term` row through
 `rusty_text`). A second wave added fifteen more (`rusty_tokio` through
 `rustils_async`), and a third wave twenty-six more (`rusty_wire` through
-`rusty_voice`); both are complete. A fourth wave, in progress, is merging
-the eleven remaining standalone `baileyrd/*` repos — `rusty_croc`,
-`rusty_test`, `rusty_inventrory`, `rusty_skillopt`, `rusty_key`,
-`rusty_llama`, `rusty_tailscale`, `rusty_adk`, `rusty_provider`,
-`rusty_yirp`, and `rusty_agent_gateway` — merged one crate at a time, the
-same way; this row set reflects whichever of those have landed so far.
+`rusty_voice`). A fourth wave merged the last eleven standalone
+`baileyrd/*` repos — `rusty_croc`, `rusty_test`, `rusty_inventrory`,
+`rusty_skillopt`, `rusty_key`, `rusty_llama`, `rusty_tailscale`,
+`rusty_adk`, `rusty_provider`, `rusty_yirp`, and `rusty_agent_gateway` —
+one crate at a time, the same way. All four waves are complete: every
+`baileyrd/rusty_*` repo that was in scope now lives under `crates/`, and
+the standalone repos carry an archive notice pointing here.
 
 ## Crates
 
@@ -181,6 +182,15 @@ same way; this row set reflects whichever of those have landed so far.
 | [`sessionmgr-agents`](crates/rusty_yirp/crates/sessionmgr-agents) | `crates/rusty_yirp/crates/sessionmgr-agents` | Per-agent-CLI adapters for Claude Code, Codex, and Gemini CLI |
 | [`sessionmgr-daemon`](crates/rusty_yirp/crates/sessionmgr-daemon) | `crates/rusty_yirp/crates/sessionmgr-daemon` | `sessionmgr`: the composition root — supervisor daemon, detached workers, CLI client |
 | [`sessionmgr-desktop`](crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri) | `crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri` | sessionmgr's Tauri 2 desktop shell over the daemon socket |
+| [`agentgateway-config`](crates/rusty_agent_gateway/crates/agentgateway-config) | `crates/rusty_agent_gateway/crates/agentgateway-config` | Configuration model, wire-compatible with agentgateway's own `config.yaml` |
+| [`agentgateway-core`](crates/rusty_agent_gateway/crates/agentgateway-core) | `crates/rusty_agent_gateway/crates/agentgateway-core` | Route matching and policy evaluation |
+| [`agentgateway-auth`](crates/rusty_agent_gateway/crates/agentgateway-auth) | `crates/rusty_agent_gateway/crates/agentgateway-auth` | JWT authentication policy, over `rusty-mcp`'s JWKS validator |
+| [`agentgateway-a2a`](crates/rusty_agent_gateway/crates/agentgateway-a2a) | `crates/rusty_agent_gateway/crates/agentgateway-a2a` | A2A method gating and agent-card discovery |
+| [`agentgateway-llm`](crates/rusty_agent_gateway/crates/agentgateway-llm) | `crates/rusty_agent_gateway/crates/agentgateway-llm` | OpenAI-compatible LLM gateway pillar |
+| [`agentgateway-mcp`](crates/rusty_agent_gateway/crates/agentgateway-mcp) | `crates/rusty_agent_gateway/crates/agentgateway-mcp` | MCP federation: several upstream MCP servers behind one endpoint, with guardrails |
+| [`agentgateway-proxy`](crates/rusty_agent_gateway/crates/agentgateway-proxy) | `crates/rusty_agent_gateway/crates/agentgateway-proxy` | HTTP reverse proxying for host backends |
+| [`agentgateway-tls`](crates/rusty_agent_gateway/crates/agentgateway-tls) | `crates/rusty_agent_gateway/crates/agentgateway-tls` | TLS termination, over `rusty_tls` |
+| [`agentgateway`](crates/rusty_agent_gateway/crates/agentgateway) | `crates/rusty_agent_gateway/crates/agentgateway` | `agentgateway`: the AI-native gateway binary for MCP, speaking agentgateway's config |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -1026,6 +1036,62 @@ the same test with `claude` off `PATH`, where it skips and the suite is
 130/130. All eight non-Tauri crates also cross-compile for
 `x86_64-pc-windows-gnu`, as befits a Windows-first design.
 
+`rusty_agent_gateway` closes the fourth wave, and closes the
+consolidation: nine crates behind one nested workspace, a Rust data plane
+built to be a drop-in for agentgateway's own `config.yaml`. Its
+`[workspace.package]` collided on five fields at once (`edition` 2024,
+`rust-version` 1.88, `license` Apache-2.0, `repository`, `authors`), so its
+crates carry literal `[package]` fields; only `clap` needed widening
+(`env`, for its CLI) since everything else it asks for was already in this
+root from the eight crate groups merged before it.
+
+Like `rusty_key`, it brought its own `[workspace.lints]`, and a stricter
+one than this root's `rustils`-derived table:
+`unsafe_code = "forbid"` plus `missing_docs = "warn"`,
+`clippy::todo = "warn"` and `clippy::unwrap_used = "warn"`. Inheriting the
+root's would have quietly dropped three lints and downgraded a fourth, so
+all nine crates carry the table literally.
+
+It retires four pins — the most of any crate in this series, and all four
+to siblings already here:
+
+* `rusty_a2a` (`agentgateway-a2a`, rev `b9778e1`) — 11,324 insertions /
+  360 deletions behind this workspace's copy.
+* `rusty-mcp` (`agentgateway-auth`, `agentgateway-mcp`, `agentgateway`,
+  tag `v0.4.1` → `0ca6a288`) — 1,367 / 210 behind. The only *tag*-pinned
+  dependency retired in this series; every other has been a rev or a
+  branch.
+* `rusty_tls` (`agentgateway-tls`, rev `7ac6956e`) — 109 / 27 behind. Its
+  manifest explained the pin was a bare SHA rather than a tag because
+  `TlsAcceptor::accept_async` had not landed in v0.9.0 yet; a `path`
+  dependency retires that reasoning along with the pin.
+* `rusty_tokio` (`agentgateway-tls`, rev `6d3bb05a`) — 3,158 / 587 behind,
+  and load-bearing: `rusty_tls`'s async adapter is generic over
+  `rusty_tokio`'s `AsyncRead`/`AsyncWrite`, so the two had to move
+  together, exactly the constraint `rusty_request`'s three-pin retirement
+  documented above. A `path` dependency makes it structural rather than
+  bookkeeping.
+
+Two of those swaps needed a root-manifest detail worth recording, because
+it is a Cargo rule rather than a judgment call: a member inheriting a
+workspace dependency may not set `default-features = false` when the root
+entry does not. `agentgateway-a2a` and the three `rusty-mcp` consumers all
+do, deliberately (the gateway *fronts* agents rather than becoming one; the
+comment in `agentgateway-a2a` explains that turning `rusty_a2a`'s agent
+harness off is what keeps its `axum` 0.7 / `tonic` / `reqwest` 0.12 out of
+this graph). So this root's `rusty_a2a` and `rusty-mcp` entries carry
+`default-features = false` themselves — a no-op for their other consumers,
+since both crates' `default` feature is empty, checked before making the
+change rather than assumed from the swap pattern.
+
+Its 73 tests pass and it needed no lint or format fixes. Note that
+`agentgateway`'s own manifest flags one thing no test can protect and this
+merge does not change: `hyper`'s `http2` feature is load-bearing for the
+shipped binary (the TLS listener advertises `h2` over ALPN), while Cargo's
+feature unification means the *test* binary would have it regardless — so
+that flag must be verified against a built binary with `curl`, not by
+`cargo test`, exactly as it was before the merge.
+
 ## History
 
 These crates originated as standalone repos under `baileyrd`:
@@ -1096,7 +1162,7 @@ nested workspace),
 [`rusty_voice`](https://github.com/baileyrd/rusty_voice) — merged one at
 a time, same process.
 
-A fourth wave finishes the consolidation, merging the last eleven
+A fourth wave finished the consolidation, merging the last eleven
 standalone repos the same way, starting with
 [`rusty_croc`](https://github.com/baileyrd/rusty_croc) and
 [`rusty_test`](https://github.com/baileyrd/rusty_test) (six crates behind
@@ -1111,8 +1177,10 @@ behind a fourth) and
 crates behind a fifth nested workspace) and
 [`rusty_adk`](https://github.com/baileyrd/rusty_adk) (fourteen behind a
 sixth) and [`rusty_provider`](https://github.com/baileyrd/rusty_provider)
-(six behind a seventh) and
+(six behind a seventh),
 [`rusty_yirp`](https://github.com/baileyrd/rusty_yirp) (nine behind an
-eighth) — and finishing with
-[`rusty_agent_gateway`](https://github.com/baileyrd/rusty_agent_gateway) —
-one crate at a time, same process.
+eighth), and finally
+[`rusty_agent_gateway`](https://github.com/baileyrd/rusty_agent_gateway)
+(nine behind a ninth) — one crate at a time, same process. Each of those
+eleven repos now carries an archive notice in its README pointing at its
+new home under `crates/`.
