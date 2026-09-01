@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.64.0
+- Version: 0.65.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4183,6 +4183,70 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     has already elapsed, so none exercises the new early-release-within-
     the-mandatory-window case this requirement adds — bringing the crate
     to 312.
+- `RB-PHYSICS-001-FR-065` (real steering is a wheeled-vehicle raycast
+  model, not a torque, with an inverted speed-vs-turning-ability curve —
+  audit finding, documentation only): `drive::STEER_TORQUE`'s own doc
+  comment had no public reference at all; this requirement fetched
+  RocketSim's real `Car.cpp` directly to check.
+  1. **Fetched RocketSim's own `Car.cpp`** (`_UpdateWheels`, matching
+     `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`'s own
+     real-implementation-file method) and found real Rocket League's
+     steering isn't a direct yaw-torque model at all: a wheel's *steer
+     angle* (not a torque) is set from a confirmed real
+     `STEER_ANGLE_FROM_SPEED_CURVE` (`RLConst.h`, a piecewise-linear
+     curve in radians), and that angled wheel's lateral tire friction —
+     computed per-wheel by `btVehicleRL`, a custom extension of Bullet's
+     own raycast vehicle system (`btDefaultVehicleRaycaster`), through a
+     further confirmed `LAT_FRICTION_CURVE` slip-friction curve — is what
+     actually turns the car. This port has no wheels, raycasting, or
+     tire-slip model at all (the car is one rigid box), so this real
+     mechanism can't be ported without a substantially larger
+     architecture change — the same category `RB-PHYSICS-001-FR-063`
+     already established for per-contact-pair-type restitution/friction.
+  2. **Found the confirmed curve's own shape is the opposite of this
+     port's own `speed_factor`.** Real Rocket League's maximum steering
+     angle is highest at a standstill (`0.53356` rad ≈ 30.6° at 0 uu/s)
+     and decreases sharply as speed rises (down to `0.03454` rad ≈ 2° at
+     3000 uu/s) — a car can turn tightest from a stop, only gently at
+     speed. This port's own `speed_factor` (`(car.linear_velocity.length()
+     / MAX_CAR_SPEED).min(1.0)`) does the opposite: zero torque at a
+     standstill, scaling *up* to full `STEER_TORQUE` at `MAX_CAR_SPEED` —
+     a stark, directional mismatch, not merely an uncalibrated magnitude.
+  3. **Corrected `drive::STEER_TORQUE`'s and `MAX_CAR_SPEED`'s own doc
+     comments**, and the `speed_factor` call site's own inline comment, to
+     state this finding directly.
+  - **Non-goals (this requirement).** Does not implement a wheeled-vehicle
+    raycast/tire-slip model — this port's single-rigid-box car has no
+    wheels to raycast or slip-friction curves to apply; adopting the real
+    mechanism for real would mean a substantially larger architecture
+    change than a single documentation-audit requirement should take on,
+    left as a candidate for a future, dedicated requirement. Does not
+    reverse `speed_factor`'s own direction to match the real curve's
+    shape: unlike `RB-PHYSICS-001-FR-058`'s throttle taper or `FR-059`'s
+    dodge scale (direct multipliers on a force/impulse this port already
+    applies the same way real Rocket League does), the real curve maps
+    speed to a *wheel angle*, which real Rocket League then feeds through
+    nonlinear tire-slip friction (dependent on wheelbase geometry and
+    friction curves this port doesn't model at all) to produce the actual
+    turning force — there's no principled way to carry even the curve's
+    normalized shape onto this port's own direct-torque model. Reversing
+    `speed_factor`'s direction without that transfer function would
+    substitute one unconfirmed guess for another, not adopt a confirmed
+    real value — the same reasoning that kept `RB-PHYSICS-001-FR-057`'s
+    `AIR_CONTROL_TORQUE` and `FR-059`'s `DODGE_SPEED` base magnitude as
+    placeholders despite a real reference existing for each. Does not
+    change `STEER_TORQUE`'s own magnitude. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `drive::STEER_TORQUE`'s own doc comment
+    states the confirmed real steering mechanism (a wheeled-vehicle
+    raycast/tire-slip model, not a torque) and the confirmed real
+    speed-vs-steering-angle curve's inverted shape relative to this
+    port's own `speed_factor`, along with why neither is adopted.
+  - **Verification plan.** No new tests (documentation-only, matching
+    `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`'s own precedent); all 312 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-064`) pass
+    unchanged, confirming zero behavioral change.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5543,13 +5607,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   (see FR-059's own entry, including its further Non-goals: RocketSim's
   own direction-normalization for diagonal dodges and its
   continuous-torque-over-time spin model, both still unaddressed). That
-  base magnitude is still fully in scope for this bullet. `STEER_TORQUE`,
-  `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
-  `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`, `DODGE_ANGULAR_SPEED`,
-  `JUMP_HOLD_MAX_DURATION`, `JUMP_HOLD_ACCELERATION`, and
-  `LANDING_AUTO_UPRIGHT_TORQUE` in particular have no public reference at
-  all (unlike gravity, max speed, the boost constants, or `JUMP_SPEED`),
-  so any of them may be off by a large factor, not just imprecise.
+  base magnitude is still fully in scope for this bullet. This paragraph
+  had gone stale in three places, corrected here: `HANDBRAKE_FRICTION_MULTIPLIER`,
+  `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`, and `DODGE_ANGULAR_SPEED`
+  still have no public reference at all (unlike gravity, max speed, the
+  boost constants, or `JUMP_SPEED`), so any of them may be off by a large
+  factor, not just imprecise. `STEER_TORQUE` and `AIR_CONTROL_TORQUE` are
+  a different case, not "no reference at all": `RB-PHYSICS-001-FR-065`
+  and `RB-PHYSICS-001-FR-057` respectively found real reference values for
+  each, but neither transfers onto this port's own model (a
+  wheeled-vehicle raycast/tire-slip system for real steering; a
+  car-mass/inertia-calibrated torque for real air control) — see each
+  requirement's own entry for the full finding. `JUMP_HOLD_MAX_DURATION`/
+  `JUMP_HOLD_ACCELERATION` are no longer open at all — `RB-PHYSICS-001-FR-031`'s
+  own audit already confirmed both exact against real source, this
+  paragraph simply never updated when that landed. `LANDING_AUTO_UPRIGHT_TORQUE`
+  likewise isn't "no reference found yet" — `RB-PHYSICS-001-FR-060` found
+  real Rocket League has no matching mechanic at all to reference (see
+  that requirement's own entry).
 - Splitting `AIR_CONTROL_TORQUE` into distinct per-axis constants (pitch,
   yaw, roll) once real recorded air-control data exists to calibrate them
   separately — real Rocket League's three rates genuinely differ (roll
@@ -5646,6 +5721,30 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.65.0 (2026-09-01): FR-065 added and implemented (real steering is a
+  wheeled-vehicle raycast model, not a torque, with an inverted
+  speed-vs-turning-ability curve — audit finding, documentation only) —
+  `drive::STEER_TORQUE` had no public reference at all. Fetched
+  RocketSim's own `Car.cpp` (`_UpdateWheels`, matching
+  `FR-058`/`FR-059`/`FR-064`'s own method) and found real Rocket League's
+  steering is not a direct yaw-torque model: a wheel's *steer angle* (from
+  a confirmed `STEER_ANGLE_FROM_SPEED_CURVE`) feeds Bullet's own raycast
+  vehicle system (`btVehicleRL`), whose per-wheel lateral tire friction
+  (a further confirmed `LAT_FRICTION_CURVE`) is what actually turns the
+  car — a fundamentally different architecture this port's single-rigid-
+  box car has no way to represent, the same category `FR-063` already
+  established. The confirmed curve's own shape is also strikingly the
+  opposite of this port's own `speed_factor`: real turning ability is
+  highest at a standstill and decreases with speed, while this port's
+  `speed_factor` is zero at a standstill and scales up with speed.
+  Corrected `STEER_TORQUE`'s and `MAX_CAR_SPEED`'s own doc comments and
+  the `speed_factor` call site's own comment to state this finding
+  directly; not adopted as a fix, since the real curve maps speed to a
+  wheel angle whose translation to yaw torque depends on tire-slip
+  friction this port doesn't model, leaving no principled way to carry
+  even the curve's shape onto this port's own direct-torque model. Zero
+  production behavior changed, no new tests; all 312 pre-existing tests
+  pass unchanged.
 - 0.64.0 (2026-09-01): FR-064 added and implemented (real mandatory
   minimum-hold window for a ground jump's variable-height acceleration) —
   `drive::JUMP_HOLD_MAX_DURATION`'s own doc comment had flagged, since

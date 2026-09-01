@@ -6,6 +6,47 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Real steering is a wheeled-vehicle raycast model, not a torque (audit finding)
+**2026-09-01** · PR pending · commit pending
+
+- **`drive::STEER_TORQUE` had no public reference at all** — this port
+  applies a direct yaw torque about the car's local up axis, scaled up
+  with speed via `speed_factor`.
+- **Fetched RocketSim's own `Car.cpp`** (`_UpdateWheels`, matching
+  `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`'s own method) and found real
+  Rocket League's steering isn't a direct yaw-torque model at all: a
+  wheel's *steer angle* (not a torque) is set from a confirmed real
+  `STEER_ANGLE_FROM_SPEED_CURVE` (`RLConst.h`, radians), and that angled
+  wheel's lateral tire friction — computed per-wheel by `btVehicleRL`, a
+  custom extension of Bullet's own raycast vehicle system — is what
+  actually turns the car. This port has no wheels, raycasting, or
+  tire-slip model (the car is one rigid box), so this mechanism can't be
+  ported without a substantially larger architecture change — the same
+  category `RB-PHYSICS-001-FR-063` already established for
+  per-contact-pair-type restitution/friction.
+- **The confirmed curve's own shape is strikingly the opposite of this
+  port's own `speed_factor`**: real maximum steering angle is highest at
+  a standstill (`0.53356` rad ≈ 30.6° at 0 uu/s) and decreases sharply as
+  speed rises (down to `0.03454` rad ≈ 2° at 3000 uu/s) — a car turns
+  tightest from a stop, only gently at speed. This port's own
+  `speed_factor` does the opposite: zero torque at a standstill, scaling
+  *up* to full `STEER_TORQUE` at `MAX_CAR_SPEED`.
+- **Not adopted as a fix**: unlike `RB-PHYSICS-001-FR-058`'s throttle
+  taper or `FR-059`'s dodge scale (direct multipliers on a force/impulse
+  this port already applies the same way real Rocket League does), the
+  real curve maps speed to a *wheel angle*, translated to actual turning
+  force through nonlinear tire-slip friction this port doesn't model at
+  all — there's no principled way to carry even the curve's normalized
+  shape onto this port's own direct-torque model.
+- Also corrected adjacent stale text in the spec's own Open Questions
+  section that still claimed `AIR_CONTROL_TORQUE`/`JUMP_HOLD_MAX_DURATION`/
+  `JUMP_HOLD_ACCELERATION` had no public reference at all, contradicting
+  `RB-PHYSICS-001-FR-057`'s and `FR-031`'s own already-shipped findings.
+- Zero production code changed, no new tests. All 312 pre-existing
+  `rb_physics_bullet` tests pass unchanged.
+
+---
+
 ## Real mandatory minimum-hold window for a ground jump's variable-height acceleration
 **2026-09-01** · [#135](https://github.com/baileyrd/rusty_bullet/pull/135) · `e201222`
 
