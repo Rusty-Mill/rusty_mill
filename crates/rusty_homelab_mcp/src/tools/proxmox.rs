@@ -86,6 +86,16 @@ pub struct GuestArgs {
     pub vmid: u32,
 }
 
+/// Arguments naming a Proxmox task by its UPID.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskArgs {
+    /// Node name the task is running on, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// The task's UPID, as returned by `proxmox_guest_power` (or any other
+    /// asynchronous action).
+    pub upid: String,
+}
+
 /// Arguments for a guest power action.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GuestPowerArgs {
@@ -183,6 +193,41 @@ impl HomelabServer {
             .guest_power(&node, kind.into(), vmid, action.into())
             .await
             .map_err(proxmox_error)
+    }
+
+    /// Whether an asynchronous task has finished, and if so, whether it
+    /// succeeded.
+    #[tool(
+        description = "Check whether an asynchronous Proxmox task (identified by the UPID that proxmox_guest_power or another action returned) has finished, and if so, whether it succeeded."
+    )]
+    pub async fn proxmox_task_status(
+        &self,
+        Parameters(TaskArgs { node, upid }): Parameters<TaskArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .task_status(&node, &upid)
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// An asynchronous task's log output.
+    #[tool(
+        description = "Get an asynchronous Proxmox task's log output (identified by the UPID that proxmox_guest_power or another action returned) -- most useful for finding out why a task failed."
+    )]
+    pub async fn proxmox_task_log(
+        &self,
+        Parameters(TaskArgs { node, upid }): Parameters<TaskArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .task_log(&node, &upid)
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
     }
 }
 

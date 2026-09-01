@@ -74,7 +74,9 @@ trusted network.
 
 **Proxmox** (`rusty_proxmox`): `proxmox_list_nodes`, `proxmox_node_status`,
 `proxmox_list_guests`, `proxmox_guest_status`, `proxmox_guest_power` (start/
-stop/shutdown/reboot/suspend/resume a QEMU VM or LXC container).
+stop/shutdown/reboot/suspend/resume a QEMU VM or LXC container),
+`proxmox_task_status`/`proxmox_task_log` (poll the UPID `proxmox_guest_power`
+and other asynchronous actions return).
 
 **OPNsense** (`rusty_opnsense`): `opnsense_system_status`,
 `opnsense_list_services`, `opnsense_service_control` (start/stop/restart),
@@ -88,7 +90,8 @@ MCP requires structured tool output to be a JSON object at the top level, and
 several endpoints (e.g. `proxmox_list_nodes`, `opnsense_list_services`) return
 a bare JSON array. `proxmox_guest_power` returns Proxmox's task ID (a
 `UPID:...` string) as plain text instead, since Proxmox runs guest power
-actions asynchronously rather than waiting for them to finish.
+actions asynchronously rather than waiting for them to finish -- pass that
+UPID to `proxmox_task_status`/`proxmox_task_log` to find out when it's done.
 
 ## Adding a backend
 

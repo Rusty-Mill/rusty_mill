@@ -27,9 +27,11 @@ let client = ProxmoxClient::new(ProxmoxConfig {
 
 let nodes = client.list_nodes().await?;
 let vms = client.list_guests("pve", GuestKind::Qemu).await?;
-client
+let upid = client
     .guest_power("pve", GuestKind::Qemu, 100, PowerAction::Start)
     .await?;
+// Power actions run asynchronously -- poll the task to know when it's done.
+let status = client.task_status("pve", &upid).await?;
 # Ok(())
 # }
 ```
@@ -52,6 +54,7 @@ exception: it unwraps the task ID (`UPID:...`) Proxmox hands back for the
 asynchronous action.
 
 Covered: node listing and status, guest listing and status, guest power
-actions (start/stop/shutdown/reboot/suspend/resume). Not covered (open to a
-PR): task status polling, storage/backup management, cluster/HA
-configuration, guest creation/cloning.
+actions (start/stop/shutdown/reboot/suspend/resume), and task status/log
+polling for the asynchronous actions above. Not covered (open to a PR):
+storage/backup management, cluster/HA configuration, guest config/create/
+clone/snapshot.

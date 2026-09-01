@@ -110,6 +110,8 @@ async fn every_backend_contributes_its_tools() {
             "proxmox_list_guests",
             "proxmox_list_nodes",
             "proxmox_node_status",
+            "proxmox_task_log",
+            "proxmox_task_status",
         ]
     );
 
@@ -206,6 +208,31 @@ async fn a_proxmox_api_error_surfaces_as_a_protocol_error() {
         err.to_string().contains("invalid API token"),
         "unexpected error: {err}"
     );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn proxmox_task_status_returns_structured_data_from_the_real_client_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#,
+    )]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_task_status",
+            serde_json::json!({
+                "node": "pve",
+                "upid": "UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:",
+            }),
+        ))
+        .await
+        .expect("call proxmox_task_status");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["exitstatus"], "OK");
 
     client.cancel().await.expect("cancel");
 }

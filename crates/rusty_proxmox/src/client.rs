@@ -97,8 +97,7 @@ impl ProxmoxClient {
     ///
     /// Proxmox runs this asynchronously and returns a task ID (a `UPID:...`
     /// string) rather than waiting for the action to finish; poll
-    /// `/nodes/{node}/tasks/{upid}/status` (not yet exposed by this crate) to
-    /// find out when it completes.
+    /// [`ProxmoxClient::task_status`] with it to find out when it completes.
     pub async fn guest_power(
         &self,
         node: &str,
@@ -111,6 +110,23 @@ impl ProxmoxClient {
         data.as_str().map(str::to_string).ok_or_else(|| {
             Error::MissingData(format!("expected a UPID string in `data`, got {data}"))
         })
+    }
+
+    /// `GET /nodes/{node}/tasks/{upid}/status` -- whether an asynchronous
+    /// task (the UPID string returned by `guest_power` and every other
+    /// action Proxmox runs in the background) is still running, and if not,
+    /// whether it succeeded (`status: "OK"` vs. an error message).
+    pub async fn task_status(&self, node: &str, upid: &str) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/tasks/{upid}/status"))
+            .await
+    }
+
+    /// `GET /nodes/{node}/tasks/{upid}/log` -- an asynchronous task's log
+    /// output, most useful for finding out *why* a task in `task_status`
+    /// failed.
+    pub async fn task_log(&self, node: &str, upid: &str) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/tasks/{upid}/log"))
+            .await
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
