@@ -693,6 +693,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `resolve_bounded_wall_contact`, all removed). 2 new tests, one confirmed
   to fail under the old sequential loop; all pre-existing tests pass
   unchanged.
+- `PhysicsWorld::step`'s static-vs-dynamic combined-solve ordering
+  (`RB-PHYSICS-001-FR-052`) — resolved a body's now-combined static
+  contacts and its combined dynamic manifolds as two separate solves, one
+  fully resolved and applied before the other's own setup for that same
+  body ever read the result, the same independent-pairwise gap
+  `RB-PHYSICS-001-FR-030`/`RB-PHYSICS-001-FR-050`/`RB-PHYSICS-001-FR-051`
+  already proved under-converges. A dedicated test reused FR-051's own
+  symmetric two-wall corner setup with one wall replaced by a very-heavy
+  dynamic body, confirming the old two-call order is genuinely
+  order-dependent. A new `solver::resolve_manifolds` folds a step's static
+  and dynamic manifolds into one shared solve; `step` was rewired to use
+  it, replacing the two separate calls with one. 2 new tests, one
+  confirmed to fail under the old two-call sequence; all pre-existing
+  tests pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

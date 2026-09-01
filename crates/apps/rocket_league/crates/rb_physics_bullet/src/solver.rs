@@ -1126,12 +1126,20 @@ fn warm_start_two_body_row(
 /// `warm_starting_a_sandwiched_ball_across_two_calls_converges_closer_than_a_repeated_cold_start`
 /// for the direct proof.
 ///
-/// Static contacts (ground, arena walls, curves, goal geometry) are
-/// deliberately NOT part of this shared solve — each body's own contact
-/// with a *static* surface only depends on that one body, so resolving it
-/// independently (via `resolve_contacts`, unchanged) loses no cross-body
-/// information; the actual gap this function closes is specifically the
-/// dynamic-vs-dynamic case a static contact can't have.
+/// Static contacts (ground, arena walls, curves, goal geometry) are not
+/// part of this function's own shared solve — this function only knows
+/// about `bodies`, and a static shape isn't one — but that does NOT mean
+/// resolving a body's static contact independently of this function's own
+/// dynamic-manifold solve is safe in general: `RB-PHYSICS-001-FR-052` found
+/// a body simultaneously touched by a static surface *and* another dynamic
+/// body in the same step (a car pinned against a wall by another car) is
+/// exactly the same order-dependent gap this function itself closes for
+/// two dynamic manifolds, just at the boundary between this function and a
+/// separate static-contact resolve instead of inside either one alone. See
+/// `resolve_manifolds` for the sibling function that folds a body's own
+/// static contacts into this same shared solve when that matters; this
+/// function stays as the plain dynamic-only path for a caller (like
+/// `net::NetMesh::step`) that never has static contacts to combine.
 ///
 /// Since `RB-PHYSICS-001-FR-041`, each manifold's own velocity rows (normal
 /// plus both friction directions — not the split-impulse push rows, which
@@ -1345,6 +1353,278 @@ pub fn resolve_dynamic_manifolds(
         .collect();
 }
 
+/// Resolves every static-shape manifold and every dynamic-vs-dynamic
+/// manifold touching any of `bodies` together, in one combined solve
+/// (`RB-PHYSICS-001-FR-052`) — the same "share one accumulator instead of
+/// fully resolving and applying one independent solve before the next
+/// one's setup even reads the shared body's velocity" fix
+/// `RB-PHYSICS-001-FR-030` already made for two dynamic manifolds sharing a
+/// body and `RB-PHYSICS-001-FR-051` already made for two static manifolds
+/// sharing a body, extended one level further: a body touched by a static
+/// surface *and* another dynamic body in the same step (a car pinned
+/// against a wall by another car, or driving close enough to a wall while
+/// also touching the ball — a routine gameplay occurrence, not an edge
+/// case) used to have its static contact fully resolved by a separate
+/// `resolve_static_manifolds` call before `resolve_dynamic_manifolds`'s own
+/// setup even read that body's already-updated velocity. See
+/// `tests::resolving_a_bodys_static_and_dynamic_contact_together_avoids_the_order_dependent_bias_sequential_resolution_has`
+/// for the exact mechanism and proof (reusing `RB-PHYSICS-001-FR-051`'s own
+/// symmetric two-wall corner setup, with one wall replaced by a very-heavy
+/// dynamic body standing in for it).
+///
+/// `static_manifolds` is `(body_index, static_restitution, static_friction,
+/// contacts)` tuples, one per static shape some `bodies[body_index]`
+/// currently touches — mirroring `resolve_static_manifolds`'s own
+/// per-manifold combined-restitution/friction setup, just indexed into
+/// `bodies` instead of naming a single body directly. `dynamic_manifolds`
+/// is unchanged from `resolve_dynamic_manifolds` — `(index_a, index_b,
+/// contacts)` triples. Every body's own static contacts and dynamic
+/// manifolds share one `DeltaVelocity`/push-delta accumulator (indexed by
+/// `body_index`) for the whole `SOLVER_ITERATIONS` loop, so an earlier
+/// static row's correction already influences a later dynamic row's `rhs`
+/// baseline within the same iteration, and vice versa.
+///
+/// `RB-PHYSICS-001-FR-041`'s own `1 / k` fair-share relaxation keeps its
+/// existing meaning unchanged here: `k` is still counted purely from
+/// `dynamic_manifolds` (a body's static contacts don't add to it), exactly
+/// matching `resolve_dynamic_manifolds`'s own behavior — this function
+/// doesn't relax a body's static rows at all, matching
+/// `resolve_static_manifolds`'s own unscaled convention (extending FR-041's
+/// relaxation to a body's static contacts changes their own established,
+/// tested convergence behavior — `RB-PHYSICS-001-FR-051`'s own two-static-wall
+/// test — and isn't part of this requirement's scope, which is purely
+/// about *when* a body's contacts are resolved, not adding new relaxation).
+///
+/// Only `dynamic_manifolds` warm-start from `caches`
+/// (`RB-PHYSICS-001-FR-035`, unchanged); a static contact still cold-starts
+/// every call, the same scoping `RB-PHYSICS-001-FR-051`'s own Non-goals
+/// already left open as separate future work.
+pub fn resolve_manifolds(
+    bodies: &mut [RigidBody],
+    static_manifolds: &[(usize, f32, f32, Vec<Contact>)],
+    dynamic_manifolds: &[(usize, usize, Vec<Contact>)],
+    dt: f32,
+    caches: &mut HashMap<(usize, usize), ContactCache>,
+) {
+    if static_manifolds.is_empty() && dynamic_manifolds.is_empty() {
+        caches.clear();
+        return;
+    }
+
+    struct StaticManifold {
+        body_index: usize,
+        combined_friction: f32,
+        rows: Vec<[ConstraintRow; 3]>,
+    }
+
+    struct DynamicManifold {
+        a: usize,
+        b: usize,
+        combined_friction: f32,
+        positions: Vec<Vec3>,
+        rows: Vec<[TwoBodyRow; 3]>,
+        impulse_scale: f32,
+    }
+
+    // RB-PHYSICS-001-FR-041's own `k` — counted purely from
+    // `dynamic_manifolds`, unaffected by `static_manifolds`, so a body with
+    // no dynamic manifolds at all (the overwhelming majority of contacts)
+    // behaves bit-for-bit like `resolve_dynamic_manifolds` with an empty
+    // manifold list, same as before this requirement.
+    let mut dynamic_manifold_count = vec![0u32; bodies.len()];
+    for (a, b, _) in dynamic_manifolds {
+        dynamic_manifold_count[*a] += 1;
+        dynamic_manifold_count[*b] += 1;
+    }
+
+    let mut solved_static: Vec<StaticManifold> = static_manifolds
+        .iter()
+        .map(
+            |(body_index, static_restitution, static_friction, contacts)| {
+                let body = bodies[*body_index];
+                let combined_restitution =
+                    combine_restitution(body.restitution, *static_restitution);
+                let combined_friction = combine_friction(body.friction, *static_friction);
+                let mut effective_body = body;
+                effective_body.restitution = combined_restitution;
+                let rows = contacts
+                    .iter()
+                    .map(|c| setup_rows(&effective_body, c, dt))
+                    .collect();
+                StaticManifold {
+                    body_index: *body_index,
+                    combined_friction,
+                    rows,
+                }
+            },
+        )
+        .collect();
+
+    let mut solved_dynamic: Vec<DynamicManifold> = dynamic_manifolds
+        .iter()
+        .map(|(a, b, contacts)| {
+            let combined_restitution =
+                combine_restitution(bodies[*a].restitution, bodies[*b].restitution);
+            let combined_friction = combine_friction(bodies[*a].friction, bodies[*b].friction);
+            let rows = contacts
+                .iter()
+                .map(|c| setup_two_body_rows(&bodies[*a], &bodies[*b], c, combined_restitution, dt))
+                .collect();
+            let shared_degree = dynamic_manifold_count[*a].max(dynamic_manifold_count[*b]);
+            DynamicManifold {
+                a: *a,
+                b: *b,
+                combined_friction,
+                positions: contacts.iter().map(|c| c.point).collect(),
+                rows,
+                impulse_scale: 1.0 / shared_degree as f32,
+            }
+        })
+        .collect();
+
+    let inv_masses: Vec<f32> = bodies.iter().map(RigidBody::inv_mass).collect();
+    let mut deltas: Vec<DeltaVelocity> = (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+    let mut push_deltas: Vec<DeltaVelocity> =
+        (0..bodies.len()).map(|_| DeltaVelocity::zero()).collect();
+
+    // Warm start (RB-PHYSICS-001-FR-035): dynamic manifolds only — see this
+    // function's own doc comment for why a static contact stays cold-started.
+    for m in &mut solved_dynamic {
+        let key = (m.a.min(m.b), m.a.max(m.b));
+        let Some(cache) = caches.get(&key) else {
+            continue;
+        };
+        let inv_mass_a = inv_masses[m.a];
+        let inv_mass_b = inv_masses[m.b];
+        let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+        for (rows, position) in m.rows.iter_mut().zip(&m.positions) {
+            let seed = cache.seed_for(*position);
+            warm_start_two_body_row(
+                &mut rows[0],
+                seed.0,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+            warm_start_two_body_row(
+                &mut rows[1],
+                seed.1,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+            warm_start_two_body_row(
+                &mut rows[2],
+                seed.2,
+                inv_mass_a,
+                inv_mass_b,
+                delta_a,
+                delta_b,
+            );
+        }
+    }
+
+    for _ in 0..SOLVER_ITERATIONS {
+        for m in &mut solved_static {
+            let inv_mass = inv_masses[m.body_index];
+            let delta = &mut deltas[m.body_index];
+            let push_delta = &mut push_deltas[m.body_index];
+            for rows in &mut m.rows {
+                resolve_row(&mut rows[0], inv_mass, delta);
+                resolve_push_row(&mut rows[0], inv_mass, push_delta);
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+                rows[2].lower_limit = -friction_limit;
+                rows[2].upper_limit = friction_limit;
+
+                resolve_row(&mut rows[1], inv_mass, delta);
+                resolve_row(&mut rows[2], inv_mass, delta);
+            }
+        }
+
+        for m in &mut solved_dynamic {
+            let inv_mass_a = inv_masses[m.a];
+            let inv_mass_b = inv_masses[m.b];
+            let (delta_a, delta_b) = delta_pair_mut(&mut deltas, m.a, m.b);
+            let (push_delta_a, push_delta_b) = delta_pair_mut(&mut push_deltas, m.a, m.b);
+            for rows in &mut m.rows {
+                resolve_two_body_row_relaxed(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+                resolve_two_body_push_row(
+                    &mut rows[0],
+                    inv_mass_a,
+                    inv_mass_b,
+                    push_delta_a,
+                    push_delta_b,
+                );
+
+                let friction_limit = m.combined_friction * rows[0].applied_impulse;
+                rows[1].lower_limit = -friction_limit;
+                rows[1].upper_limit = friction_limit;
+                rows[2].lower_limit = -friction_limit;
+                rows[2].upper_limit = friction_limit;
+
+                resolve_two_body_row_relaxed(
+                    &mut rows[1],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+                resolve_two_body_row_relaxed(
+                    &mut rows[2],
+                    inv_mass_a,
+                    inv_mass_b,
+                    delta_a,
+                    delta_b,
+                    m.impulse_scale,
+                );
+            }
+        }
+    }
+
+    for ((body, delta), push_delta) in bodies.iter_mut().zip(deltas.iter()).zip(push_deltas.iter())
+    {
+        body.linear_velocity += delta.linear;
+        body.angular_velocity += delta.angular;
+        apply_push_delta(body, push_delta, dt);
+    }
+
+    // Replace, don't merge — same idiom `resolve_dynamic_manifolds` already
+    // uses; static manifolds are never cached (see this function's own doc
+    // comment).
+    *caches = solved_dynamic
+        .into_iter()
+        .map(|m| {
+            let entries = m
+                .positions
+                .into_iter()
+                .zip(&m.rows)
+                .map(|(position, rows)| CachedContact {
+                    position,
+                    impulses: [
+                        rows[0].applied_impulse,
+                        rows[1].applied_impulse,
+                        rows[2].applied_impulse,
+                    ],
+                })
+                .collect();
+            ((m.a.min(m.b), m.a.max(m.b)), ContactCache { entries })
+        })
+        .collect();
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1441,6 +1721,112 @@ mod tests {
             "expected the combined solve to leave the ball's x/y velocity components much \
              closer to each other (the true symmetric answer) than either sequential order, \
              got combined={combined:?}, order_a={order_a:?}"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-052`'s own root-cause proof: the same symmetric
+    /// two-wall corner `sequential_wall_resolution_is_order_dependent_but_the_combined_solve_is_not`
+    /// uses above, except `plane_y` is replaced by a very-heavy dynamic body
+    /// (`mass = 1e9`) positioned so its own contact against the ball is
+    /// geometrically identical to `plane_y`'s (reusing `plane_y`'s own
+    /// `Contact` output directly for the dynamic manifold — `Contact`'s
+    /// normal/point/depth carry no reference to which body produced them,
+    /// and `resolve_dynamic_manifolds`' own normal convention, "points from
+    /// B toward A," matches a static contact's "points from the surface
+    /// toward the body" exactly). A body this heavy is, for all practical
+    /// purposes, as immovable as a real wall, so an order-independent solve
+    /// should land close to the same symmetric answer
+    /// `resolve_static_manifolds`'s own combined solve already reaches for
+    /// two *static* walls. Before `RB-PHYSICS-001-FR-052`, `PhysicsWorld::step`
+    /// instead resolved a body's static contacts fully via a separate
+    /// `resolve_static_manifolds` call before `resolve_dynamic_manifolds`'s
+    /// own setup even read that body's updated velocity — order A (static,
+    /// then dynamic, `step`'s own pre-fix order) and order B (reversed)
+    /// leave the ball measurably asymmetric in different directions, the
+    /// same order-dependent bias `RB-PHYSICS-001-FR-030`/`FR-051` already
+    /// found elsewhere. `resolve_manifolds`'s combined solve — sharing one
+    /// accumulator across the static and dynamic channel instead — lands
+    /// on the exact same near-symmetric answer `resolve_static_manifolds`'s
+    /// own two-*static*-wall result reaches, since the heavy body's own
+    /// negligible inverse mass means its dynamic-manifold row contributes
+    /// no meaningful correction of its own.
+    #[test]
+    fn resolving_a_bodys_static_and_dynamic_contact_together_avoids_the_order_dependent_bias_sequential_resolution_has(
+    ) {
+        let make_scene = || {
+            let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(93.15, 93.15, 0.0));
+            ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+            let plane_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+            let plane_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
+            // Tangent to the y=0 plane at (93.15, 0, 0) -- geometrically
+            // identical to `plane_y`'s own contact against `ball`, but
+            // resolved through the two-body dynamic-manifold path instead
+            // of the single-body static one.
+            let heavy = RigidBody::sphere(1000.0, 1.0e9, Vec3::new(93.15, -1000.0, 0.0));
+            (ball, plane_x, plane_y, heavy)
+        };
+        let dt = 1.0 / 60.0;
+
+        // Order A: static first, then dynamic -- `PhysicsWorld::step`'s own
+        // pre-FR-052 order.
+        let (mut ball_a, plane_x_a, plane_y_a, heavy_a) = make_scene();
+        let cx = contacts_vs_plane(&ball_a, &plane_x_a);
+        resolve_static_manifolds(
+            &mut ball_a,
+            &[(plane_x_a.restitution, plane_x_a.friction, cx)],
+            dt,
+        );
+        let cy = contacts_vs_plane(&ball_a, &plane_y_a);
+        let mut bodies_a = vec![ball_a, heavy_a];
+        resolve_dynamic_manifolds(&mut bodies_a, &[(0, 1, cy)], dt, &mut HashMap::new());
+        let order_a = bodies_a[0].linear_velocity;
+
+        // Order B: dynamic first, then static -- the reverse.
+        let (ball_b, plane_x_b, plane_y_b, heavy_b) = make_scene();
+        let cyb = contacts_vs_plane(&ball_b, &plane_y_b);
+        let mut bodies_b = vec![ball_b, heavy_b];
+        resolve_dynamic_manifolds(&mut bodies_b, &[(0, 1, cyb)], dt, &mut HashMap::new());
+        let mut ball_b = bodies_b[0];
+        let cxb = contacts_vs_plane(&ball_b, &plane_x_b);
+        resolve_static_manifolds(
+            &mut ball_b,
+            &[(plane_x_b.restitution, plane_x_b.friction, cxb)],
+            dt,
+        );
+        let order_b = ball_b.linear_velocity;
+
+        // Combined: both channels share one solve via `resolve_manifolds`.
+        let (ball_c, plane_x_c, plane_y_c, heavy_c) = make_scene();
+        let cxc = contacts_vs_plane(&ball_c, &plane_x_c);
+        let cyc = contacts_vs_plane(&ball_c, &plane_y_c);
+        let mut bodies_c = vec![ball_c, heavy_c];
+        resolve_manifolds(
+            &mut bodies_c,
+            &[(0, plane_x_c.restitution, plane_x_c.friction, cxc)],
+            &[(0, 1, cyc)],
+            dt,
+            &mut HashMap::new(),
+        );
+        let combined = bodies_c[0].linear_velocity;
+
+        assert!(
+            (order_a.x - order_a.y).abs() > 10.0,
+            "expected resolving the static wall and the heavy dynamic body \
+             sequentially to leave the ball measurably asymmetric (biased toward \
+             whichever channel was resolved last), got order_a={order_a:?}"
+        );
+        assert!(
+            (order_a.x - order_a.y).signum() != (order_b.x - order_b.y).signum(),
+            "expected the two sequential orders to be biased in opposite directions, \
+             got order_a={order_a:?}, order_b={order_b:?}"
+        );
+        assert!(
+            (combined.x - combined.y).abs() < (order_a.x - order_a.y).abs() * 0.2,
+            "expected the combined solve to leave the ball's x/y velocity components much \
+             closer to each other (the same near-symmetric answer resolving both as static \
+             walls already reaches, since a body this heavy contributes no meaningful \
+             correction of its own) than either sequential order, got combined={combined:?}, \
+             order_a={order_a:?}"
         );
     }
 

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.51.0
+- Version: 0.52.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -228,12 +228,21 @@
   `solver::resolve_static_manifolds` generalizes `resolve_contacts` to
   combine every static-shape manifold `body` touches into one shared solve,
   replacing `step`'s old five-function-per-body sequence with a single
-  `resolve_static_contacts` call; 2 new tests; static-contact
-  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
-  full convergence of the sandwiched case, a rigorous (non-heuristic)
-  edge-edge nearest-pair selection, and real-data calibration (including
-  which combine mode, if either, actually matches real Rocket League) are
-  open follow-up work)
+  `resolve_static_contacts` call; 2 new tests; and, since FR-052, the same
+  independent-pairwise gap was found and closed one level higher still —
+  `PhysicsWorld::step` resolved a body's now-combined static contacts and
+  its combined dynamic manifolds as two separate solves, a body's static
+  contact fully resolved and applied before the dynamic solve's own setup
+  for that same body ever read the result, confirmed genuinely
+  order-dependent by reusing FR-051's own two-wall corner setup with one
+  wall replaced by a very-heavy dynamic body; a new
+  `solver::resolve_manifolds` folds a step's static and dynamic manifolds
+  into one shared solve, replacing `step`'s two separate calls with one;
+  2 new tests; static-contact warm-starting, `arena::FILLET_RADIUS`/
+  `CORNER_ARCH_RADIUS` calibration, full convergence of the sandwiched
+  case, a rigorous (non-heuristic) edge-edge nearest-pair selection, and
+  real-data calibration (including which combine mode, if either, actually
+  matches real Rocket League) are open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -3112,6 +3121,87 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `rb_physics_bullet`'s pre-existing tests (as of `FR-050`) pass
     unchanged. 2 new tests, bringing the crate to 286 total (+2 over
     `FR-050`'s 284).
+- `RB-PHYSICS-001-FR-052` (static-vs-dynamic combined-solve ordering
+  investigation, implemented): `RB-PHYSICS-001-FR-051` closed the
+  independent-pairwise gap for a body's own multiple static-shape
+  contacts, and `RB-PHYSICS-001-FR-030` closed it for a body's own
+  multiple dynamic-vs-dynamic manifolds — but `PhysicsWorld::step` still
+  resolved those two combined solves as two separate calls: a body's
+  static contacts fully resolved and applied via `solver::resolve_static_manifolds`
+  before `solver::resolve_dynamic_manifolds`'s own setup for that same
+  body (touching another car, say) ever read the result. This requirement
+  investigated whether that boundary itself was the exact same gap one
+  level up, and found it was.
+  1. **A dedicated single-shot test confirmed the underlying mechanism is
+     genuinely order-dependent, not merely slow to converge.** Reusing
+     `RB-PHYSICS-001-FR-051`'s own symmetric two-wall corner setup, with
+     one wall replaced by a very-heavy dynamic body (`mass = 1e9`)
+     positioned so its own contact against the ball is geometrically
+     identical to that wall's — as immovable as a real wall for all
+     practical purposes, but routed through the dynamic-manifold code
+     path instead of the static one: resolving the static wall fully
+     first, then the dynamic body (`PhysicsWorld::step`'s own pre-fix
+     order), left the ball biased toward whichever channel was resolved
+     last; the reversed order gave the exact mirror image. Neither matched
+     the true, by-symmetry answer.
+  2. **A new `solver::resolve_manifolds` folds a step's static and
+     dynamic manifolds into one shared solve.** `static_manifolds` is
+     `(body_index, restitution, friction, contacts)` tuples indexed into
+     the same `bodies` array `dynamic_manifolds` already uses; every
+     body's own static rows and dynamic-manifold rows share one
+     `DeltaVelocity`/push-delta accumulator (per body index) for the whole
+     `SOLVER_ITERATIONS` loop, so an earlier static row's correction
+     already influences a later dynamic row's `rhs` baseline within the
+     same iteration, and vice versa. `RB-PHYSICS-001-FR-041`'s own `1 / k`
+     relaxation keeps its existing meaning unchanged — `k` is still
+     counted purely from `dynamic_manifolds`, and a body's static rows are
+     never relaxed, matching `resolve_static_manifolds`'s own established,
+     tested convergence behavior exactly (extending that relaxation to a
+     body's static contacts was investigated and found to *regress*
+     `RB-PHYSICS-001-FR-051`'s own two-static-wall test's convergence —
+     not adopted). Only the dynamic channel still warm-starts from
+     `caches`, unchanged.
+  3. **`PhysicsWorld::step` was rewired to use it.** `resolve_static_contacts`
+     became `static_contact_manifolds`, now returning a body's gathered
+     `(restitution, friction, contacts)` groups instead of resolving them
+     directly; `step` builds the `bodies` array first, gathers every
+     body's static manifolds and every ball-vs-car/car-vs-car dynamic
+     manifold, then makes one `solver::resolve_manifolds` call instead of
+     two separate ones.
+  4. **A `PhysicsWorld::step`-level test proves the fix at the real public
+     API.** A ball fired diagonally into a wall-and-heavy-car corner via
+     an actual `PhysicsWorld` (one real `StaticPlane` wall, one real
+     heavy-mass car) settles with nearly equal x/y velocity components
+     after one real `step` call — confirmed to fail under the old
+     two-call sequence before the rewire.
+  - **Non-goals (this requirement).** Does not add relaxation to a body's
+    static rows (see finding 2 above — investigated and rejected as a
+    regression). Does not change any single-channel scenario's behavior —
+    a body touching only static contacts, or only dynamic manifolds, this
+    step degenerates to exactly the pre-existing `resolve_static_manifolds`/
+    `resolve_dynamic_manifolds` math respectively. Does not add
+    warm-starting to a body's static contacts (still cold-started every
+    call, the same scoping `RB-PHYSICS-001-FR-051`'s own Non-goals already
+    left open). Does not touch `RB-PHYSICS-001-FR-005`'s real-data
+    calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `PhysicsWorld::step` resolves every body's
+    static-surface contacts and every dynamic manifold detected in a step
+    together via `solver::resolve_manifolds`, not as two separate combined
+    solves. A symmetric wall-and-heavy-body corner impact no longer
+    depends on which solve ran first for its qualitative direction, and
+    its residual asymmetry is measurably smaller than before this
+    requirement. All pre-existing tests pass unchanged.
+  - **Verification plan.** 2 new tests:
+    `solver::tests::resolving_a_bodys_static_and_dynamic_contact_together_avoids_the_order_dependent_bias_sequential_resolution_has`
+    pins the exact root-cause mechanism at the raw solver level (order
+    dependence between the static and dynamic channel, and the combined
+    solve's own much-closer-to-symmetric result);
+    `world::tests::a_ball_wedged_between_a_wall_and_a_heavy_car_settles_symmetrically_instead_of_favoring_one`
+    proves it at `PhysicsWorld::step`'s own public level, confirmed to
+    fail under the old two-call sequence before the fix. All 286 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-051`) pass
+    unchanged. 2 new tests, bringing the crate to 288 total (+2 over
+    `FR-051`'s 286).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4490,6 +4580,35 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.52.0 (2026-09-01): FR-052 added and implemented (static-vs-dynamic
+  combined-solve ordering investigation) — `PhysicsWorld::step` resolved a
+  body's now-combined static contacts (FR-051) and its combined dynamic
+  manifolds (FR-030) as two separate solves, one fully resolved and
+  applied before the other's own setup for that same body ever read the
+  result — the same independent-pairwise gap FR-030/FR-050/FR-051 already
+  proved under-converges, just at the boundary between the two existing
+  combined solves instead of inside either one. A dedicated single-shot
+  test reused FR-051's own symmetric two-wall corner setup, replacing one
+  wall with a very-heavy dynamic body (`mass = 1e9`, geometrically
+  identical contact) routed through the dynamic-manifold code path
+  instead of the static one, and confirmed resolving the static wall then
+  the dynamic body (`step`'s own pre-fix order) is genuinely
+  order-dependent (mirror-image results depending on which channel
+  resolves first), not merely slow to converge. A new
+  `solver::resolve_manifolds` folds a step's static and dynamic manifolds
+  into one shared solve, sharing one `DeltaVelocity`/push-delta
+  accumulator per body index across both channels for the whole
+  `SOLVER_ITERATIONS` loop; `RB-PHYSICS-001-FR-041`'s own `1 / k`
+  relaxation keeps counting `k` purely from dynamic manifolds (extending
+  it to a body's static rows was tried and found to regress FR-051's own
+  two-static-wall test, not adopted). `PhysicsWorld::step` was rewired to
+  use it: `resolve_static_contacts` became `static_contact_manifolds`
+  (now returning gathered manifolds instead of resolving them), and
+  `step` makes one `solver::resolve_manifolds` call instead of two
+  separate ones. A `PhysicsWorld::step`-level test (a ball fired into a
+  real wall-and-heavy-car corner) confirmed the fix at the public API,
+  verified to fail under the old two-call sequence first. 2 new tests,
+  bringing `rb_physics_bullet` to 288 tests (+2 over FR-051's 286).
 - 0.51.0 (2026-09-01): FR-051 added and implemented (static multi-surface
   contact combined-solve investigation) — `PhysicsWorld::step` resolved a
   body's contact against each static shape type (ground, then every wall,

@@ -6,6 +6,46 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Static-vs-dynamic combined-solve ordering investigation
+**2026-09-01** · PR pending · commit pending
+
+- **`PhysicsWorld::step` resolved a body's now-combined static contacts and
+  its combined dynamic manifolds as two separate solves** — one fully
+  resolved and applied before the other's own setup for that same body
+  ever read the result — the same independent-pairwise gap
+  `RB-PHYSICS-001-FR-030`/`RB-PHYSICS-001-FR-050`/`RB-PHYSICS-001-FR-051`
+  already proved under-converges, just at the boundary between the two
+  existing combined solves instead of inside either one.
+- **A dedicated single-shot test confirmed the mechanism is genuinely
+  order-dependent, not merely slow to converge.** Reusing
+  `RB-PHYSICS-001-FR-051`'s own symmetric two-wall corner setup, with one
+  wall replaced by a very-heavy dynamic body (`mass = 1e9`, geometrically
+  identical contact) routed through the dynamic-manifold code path instead
+  of the static one: resolving the static wall fully first, then the
+  dynamic body (`step`'s own pre-fix order), left the ball biased toward
+  whichever channel was resolved last; the reversed order gave the exact
+  mirror image.
+- **A new `solver::resolve_manifolds` folds a step's static and dynamic
+  manifolds into one shared solve**, sharing one `DeltaVelocity`/push-delta
+  accumulator per body index across both channels for the whole
+  `SOLVER_ITERATIONS` loop. `RB-PHYSICS-001-FR-041`'s own `1 / k`
+  relaxation keeps counting `k` purely from dynamic manifolds — extending
+  it to a body's static rows was tried and found to *regress*
+  `RB-PHYSICS-001-FR-051`'s own two-static-wall test's convergence, so it
+  wasn't adopted.
+- **`PhysicsWorld::step` was rewired to use it**: `resolve_static_contacts`
+  became `static_contact_manifolds` (now returning gathered manifolds
+  instead of resolving them directly), and `step` makes one
+  `solver::resolve_manifolds` call instead of two separate ones.
+- **A `PhysicsWorld::step`-level test proves the fix at the real public
+  API**: a ball fired diagonally into a real wall-and-heavy-car corner
+  settles with nearly equal x/y velocity components after one real `step`
+  call — confirmed to fail under the old two-call sequence before the
+  rewire.
+- **2 new tests.** All 286 pre-existing tests pass unchanged; 288 total.
+
+---
+
 ## Static multi-surface contact combined-solve investigation
 **2026-09-01** · [#109](https://github.com/baileyrd/rusty_bullet/pull/109) · `6581c7f`
 
