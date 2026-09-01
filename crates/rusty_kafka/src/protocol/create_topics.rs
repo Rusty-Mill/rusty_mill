@@ -6,8 +6,8 @@
 
 use crate::error::CodecError;
 use crate::wire::{
-    read_array_len, read_i16, read_string, write_i16, write_i32, write_nullable_string,
-    write_string,
+    read_array_len, read_i16, read_i32, read_nullable_string, read_string, write_i16, write_i32,
+    write_nullable_string, write_string,
 };
 use rusty_wire::{Reader, Writer};
 
@@ -89,6 +89,54 @@ impl CreateTopicsRequest {
         }
         write_i32(writer, self.timeout_ms);
     }
+
+    /// Decodes a v0 body -- symmetric with [`encode`](Self::encode), for
+    /// anything standing in as a fake broker in tests (a real broker
+    /// would use this same shape server-side; this crate is
+    /// client-only, so the only consumer of `decode` today is test
+    /// code, via [`crate::testing`]).
+    pub fn decode(reader: &mut Reader) -> Result<Self, CodecError> {
+        let topic_count = read_array_len(reader)?.max(0);
+        let mut topics = Vec::with_capacity(topic_count as usize);
+        for _ in 0..topic_count {
+            let name = read_string(reader)?;
+            let num_partitions = read_i32(reader)?;
+            let replication_factor = read_i16(reader)?;
+
+            let assignment_count = read_array_len(reader)?.max(0);
+            let mut assignments = Vec::with_capacity(assignment_count as usize);
+            for _ in 0..assignment_count {
+                let partition_index = read_i32(reader)?;
+                let broker_id_count = read_array_len(reader)?.max(0);
+                let mut broker_ids = Vec::with_capacity(broker_id_count as usize);
+                for _ in 0..broker_id_count {
+                    broker_ids.push(read_i32(reader)?);
+                }
+                assignments.push(ReplicaAssignment {
+                    partition_index,
+                    broker_ids,
+                });
+            }
+
+            let config_count = read_array_len(reader)?.max(0);
+            let mut configs = Vec::with_capacity(config_count as usize);
+            for _ in 0..config_count {
+                let name = read_string(reader)?;
+                let value = read_nullable_string(reader)?;
+                configs.push(ConfigEntry { name, value });
+            }
+
+            topics.push(CreatableTopic {
+                name,
+                num_partitions,
+                replication_factor,
+                assignments,
+                configs,
+            });
+        }
+        let timeout_ms = read_i32(reader)?;
+        Ok(CreateTopicsRequest { topics, timeout_ms })
+    }
 }
 
 /// One topic's creation result within a [`CreateTopicsResponse`].
@@ -121,6 +169,18 @@ impl CreateTopicsResponse {
             });
         }
         Ok(CreateTopicsResponse { topics })
+    }
+
+    /// Encodes the v0 body -- symmetric with [`decode`](Self::decode).
+    /// This crate is client-only (see the crate's module doc), so the
+    /// only consumer of `encode` on a *response* type is test code
+    /// standing in as a fake broker via [`crate::testing`].
+    pub fn encode(&self, writer: &mut Writer) {
+        write_i32(writer, self.topics.len() as i32);
+        for topic in &self.topics {
+            write_string(writer, &topic.name);
+            write_i16(writer, topic.error_code);
+        }
     }
 }
 
@@ -236,5 +296,32 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         let response = CreateTopicsResponse::decode(&mut reader).unwrap();
         assert_eq!(response.topics[0].error_code, TOPIC_ALREADY_EXISTS);
+    }
+
+    #[test]
+    fn request_encode_then_decode_round_trips() {
+        let request = CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "manpower.readiness-reporting.assessments".to_string(),
+                num_partitions: 3,
+                replication_factor: 1,
+                assignments: vec![ReplicaAssignment {
+                    partition_index: 0,
+                    broker_ids: vec![1, 2],
+                }],
+                configs: vec![ConfigEntry {
+                    name: "cleanup.policy".to_string(),
+                    value: Some("delete".to_string()),
+                }],
+            }],
+            timeout_ms: 5000,
+        };
+        let mut writer = Writer::new();
+        request.encode(&mut writer);
+        let bytes = writer.into_vec();
+
+        let mut reader = Reader::new(&bytes);
+        let decoded = CreateTopicsRequest::decode(&mut reader).unwrap();
+        assert_eq!(decoded, request);
     }
 }

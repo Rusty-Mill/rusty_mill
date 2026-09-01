@@ -43,6 +43,7 @@ pub mod client;
 pub mod error;
 mod frame;
 pub mod protocol;
+pub mod testing;
 mod wire;
 
 pub use client::{KafkaClient, DEFAULT_MAX_FRAME_LEN};

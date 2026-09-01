@@ -5886,7 +5886,9 @@ dependencies = [
  "rusty_kafka",
  "rusty_sqlite",
  "rusty_time",
+ "rusty_tokio",
  "rusty_uuid",
+ "rusty_wire",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 rusty_err = { path = "../../../rusty_err" }
 rusty_kafka = { path = "../../../rusty_kafka" }
+rusty_tokio = { path = "../../../rusty_tokio" }
+rusty_wire = { path = "../../../rusty_wire" }
 rusty_sqlite = { path = "../../../rusty_sqlite" }
 rusty_json = { path = "../../../rusty_json" }
 rusty_uuid = { path = "../../../rusty_uuid" }
