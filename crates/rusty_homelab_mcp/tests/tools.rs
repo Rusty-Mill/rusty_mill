@@ -100,18 +100,25 @@ async fn every_backend_contributes_its_tools() {
         names,
         [
             "opnsense_apply_firewall_changes",
+            "opnsense_apply_vlan_changes",
             "opnsense_create_firewall_rule",
+            "opnsense_create_vlan",
             "opnsense_delete_firewall_rule",
+            "opnsense_delete_vlan",
             "opnsense_get_firewall_rule",
+            "opnsense_get_vlan",
+            "opnsense_list_dhcp_leases",
             "opnsense_list_firewall_aliases",
             "opnsense_list_firewall_rules",
             "opnsense_list_gateways",
             "opnsense_list_interfaces",
             "opnsense_list_services",
+            "opnsense_list_vlans",
             "opnsense_service_control",
             "opnsense_system_status",
             "opnsense_toggle_firewall_rule",
             "opnsense_update_firewall_rule",
+            "opnsense_update_vlan",
             "proxmox_clone_guest",
             "proxmox_create_guest",
             "proxmox_create_snapshot",
@@ -297,6 +304,49 @@ async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
 
     assert_ne!(result.is_error, Some(true));
     assert_eq!(structured(&result)["result"]["uuid"], "new-uuid");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"result":"saved","uuid":"new-vlan-uuid"}"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "opnsense_create_vlan",
+            serde_json::json!({
+                "vlan": { "if": "igc0", "tag": "20", "descr": "guest network" },
+            }),
+        ))
+        .await
+        .expect("call opnsense_create_vlan");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["uuid"], "new-vlan-uuid");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"rows":[{"address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call("opnsense_list_dhcp_leases", serde_json::json!({})))
+        .await
+        .expect("call opnsense_list_dhcp_leases");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["rows"][0]["hostname"], "nas");
 
     client.cancel().await.expect("cancel");
 }

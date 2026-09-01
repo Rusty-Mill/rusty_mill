@@ -88,7 +88,11 @@ and other asynchronous actions return), `proxmox_guest_config`/
 `opnsense_get_firewall_rule`/`opnsense_create_firewall_rule`/
 `opnsense_update_firewall_rule`/`opnsense_delete_firewall_rule`/
 `opnsense_toggle_firewall_rule` (firewall rule CRUD -- none of these take
-effect until `opnsense_apply_firewall_changes` is called).
+effect until `opnsense_apply_firewall_changes` is called),
+`opnsense_list_dhcp_leases`, `opnsense_list_vlans`/`opnsense_get_vlan`/
+`opnsense_create_vlan`/`opnsense_update_vlan`/`opnsense_delete_vlan` (VLAN
+CRUD -- none of these take effect until `opnsense_apply_vlan_changes` is
+called).
 
 Most tools return the backend's own JSON as structured content under a
 `result` field (`{"result": ...}`), unopinionated about the shape of `result`

@@ -84,6 +84,35 @@ pub struct ToggleFirewallRuleArgs {
     pub enabled: Option<bool>,
 }
 
+/// Arguments naming a VLAN by UUID.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VlanUuidArgs {
+    /// The VLAN's UUID, as returned by `opnsense_list_vlans` or
+    /// `opnsense_create_vlan`.
+    pub uuid: String,
+}
+
+/// Arguments for creating a VLAN.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateVlanArgs {
+    /// The VLAN's fields, in the same shape OPNsense's own VLAN form
+    /// submits: `if` (the parent interface), `tag`, `descr`, `pcp`. Call
+    /// `opnsense_list_vlans` first to see example field names and values
+    /// from existing VLANs.
+    pub vlan: serde_json::Value,
+}
+
+/// Arguments for updating a VLAN.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateVlanArgs {
+    /// The VLAN's UUID, as returned by `opnsense_list_vlans`.
+    pub uuid: String,
+    /// The VLAN's new field set -- replaces it entirely, so call
+    /// `opnsense_get_vlan` first and send back its full field set unless
+    /// clearing the fields left out is intended.
+    pub vlan: serde_json::Value,
+}
+
 #[tool_router(router = opnsense_tools, vis = "pub(crate)")]
 impl HomelabServer {
     /// Firmware version, running kernel, pending updates, service health.
@@ -280,6 +309,116 @@ impl HomelabServer {
         Ok(Json(
             self.opnsense()?
                 .apply_firewall_changes()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Every current DHCP lease.
+    #[tool(
+        description = "List every current DHCP lease on OPNsense: IP address, MAC address, hostname, and lease state. Answers \"what's on my network right now\"."
+    )]
+    pub async fn opnsense_list_dhcp_leases(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_dhcp_leases()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Every configured VLAN.
+    #[tool(
+        description = "List every VLAN interface currently configured on OPNsense, with its UUID, parent interface, and tag. Call this to find a VLAN's UUID before getting, updating, or deleting it."
+    )]
+    pub async fn opnsense_list_vlans(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_vlans()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// One VLAN's full field set.
+    #[tool(
+        description = "Get one OPNsense VLAN's full field set by UUID. Call opnsense_list_vlans first to find UUIDs."
+    )]
+    pub async fn opnsense_get_vlan(
+        &self,
+        Parameters(VlanUuidArgs { uuid }): Parameters<VlanUuidArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .get_vlan(&uuid)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Create a VLAN.
+    #[tool(
+        description = "Create a new VLAN interface on OPNsense. Does not take effect until opnsense_apply_vlan_changes is called."
+    )]
+    pub async fn opnsense_create_vlan(
+        &self,
+        Parameters(CreateVlanArgs { vlan }): Parameters<CreateVlanArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .create_vlan(vlan)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Update a VLAN.
+    #[tool(
+        description = "Update an existing OPNsense VLAN by UUID. Does not take effect until opnsense_apply_vlan_changes is called."
+    )]
+    pub async fn opnsense_update_vlan(
+        &self,
+        Parameters(UpdateVlanArgs { uuid, vlan }): Parameters<UpdateVlanArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .update_vlan(&uuid, vlan)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Delete a VLAN.
+    #[tool(
+        description = "Delete an OPNsense VLAN by UUID. Does not take effect until opnsense_apply_vlan_changes is called."
+    )]
+    pub async fn opnsense_delete_vlan(
+        &self,
+        Parameters(VlanUuidArgs { uuid }): Parameters<VlanUuidArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .delete_vlan(&uuid)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Apply pending VLAN changes.
+    #[tool(
+        description = "Apply pending OPNsense VLAN changes. Call this after opnsense_create_vlan, opnsense_update_vlan, or opnsense_delete_vlan -- none of those take effect on their own."
+    )]
+    pub async fn opnsense_apply_vlan_changes(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .apply_vlan_changes()
                 .await
                 .map_err(opnsense_error)?
                 .into(),
