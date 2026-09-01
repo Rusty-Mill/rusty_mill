@@ -5,6 +5,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
+use fs4::fs_std::FileExt;
+
 /// Ports per band. The largest test binary here asks for a few hundred, so
 /// this is sized well above that rather than just above it.
 const BAND: u32 = 1024;
@@ -87,10 +89,12 @@ fn band_base() -> Option<u32> {
 /// prevent -- and it came back looking like a flake in whichever test drew the
 /// port second.
 ///
-/// So the band is *claimed* rather than derived. `flock` is the right primitive
-/// for it: the kernel releases the lock when the process ends however it ends,
-/// so a killed test run leaves nothing behind to clean up and no band that
-/// later runs believe is taken. The files themselves are empty and reused.
+/// So the band is *claimed* rather than derived. An advisory file lock is the
+/// right primitive for it: the OS releases the lock when the process ends
+/// however it ends, so a killed test run leaves nothing behind to clean up and
+/// no band that later runs believe is taken. The files themselves are empty and
+/// reused. `fs4` supplies the lock so this works on Windows too (`LockFileEx`)
+/// as well as on Unix (`flock`).
 ///
 /// `None` when every band is held, which is a signal to fall back rather than
 /// an error -- see [`free_port`].
@@ -102,7 +106,7 @@ pub fn claim_band(directory: &Path) -> Option<(File, u32)> {
             // than one user. Their band, then.
             continue;
         };
-        if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok() {
+        if file.try_lock_exclusive().unwrap_or(false) {
             return Some((file, FLOOR + index * BAND));
         }
     }

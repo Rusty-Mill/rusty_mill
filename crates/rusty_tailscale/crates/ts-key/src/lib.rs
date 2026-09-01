@@ -133,7 +133,7 @@ fn hex_decode32(s: &str) -> Option<[u8; 32]> {
         }
     };
     let mut out = [0u8; 32];
-    for (i, chunk) in s.chunks_exact(2).enumerate() {
+    for (i, chunk) in s.as_chunks::<2>().0.iter().enumerate() {
         out[i] = (nibble(chunk[0])? << 4) | nibble(chunk[1])?;
     }
     Some(out)

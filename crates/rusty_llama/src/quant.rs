@@ -424,7 +424,7 @@ fn block_q4_k(blk: &[u8], out: &mut [f32]) {
 
     let mut y = 0;
     let mut is = 0;
-    for q in qs.chunks_exact(32) {
+    for q in qs.as_chunks::<32>().0 {
         let (sc1, m1) = get_scale_min_k4(is, scales);
         let (sc2, m2) = get_scale_min_k4(is + 1, scales);
         let (d1, min1) = (d * sc1 as f32, dmin * m1 as f32);
@@ -457,7 +457,7 @@ fn block_q5_k(blk: &[u8], out: &mut [f32]) {
     let mut is = 0;
     let mut u1: u8 = 1;
     let mut u2: u8 = 2;
-    for ql in qs.chunks_exact(32) {
+    for ql in qs.as_chunks::<32>().0 {
         let (sc1, m1) = get_scale_min_k4(is, scales);
         let (sc2, m2) = get_scale_min_k4(is + 1, scales);
         let (d1, min1) = (d * sc1 as f32, dmin * m1 as f32);
@@ -526,7 +526,7 @@ impl Q8Activation {
     /// Reconstruct the (lossy) f32 values — used to check the integer kernels.
     pub fn dequantized(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.qs.len());
-        for (b, chunk) in self.qs.chunks_exact(32).enumerate() {
+        for (b, chunk) in self.qs.as_chunks::<32>().0.iter().enumerate() {
             for &q in chunk {
                 out.push(self.scales[b] * q as f32);
             }
@@ -541,7 +541,7 @@ pub fn quantize_activation_q8(x: &[f32]) -> Q8Activation {
     let mut qs = Vec::with_capacity(x.len());
     let mut scales = Vec::with_capacity(x.len() / 32);
     let mut block_sums = Vec::with_capacity(x.len() / 32);
-    for blk in x.chunks_exact(32) {
+    for blk in x.as_chunks::<32>().0 {
         let amax = blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let d = amax / 127.0;
         let id = if d != 0.0 { 1.0 / d } else { 0.0 };
@@ -585,7 +585,7 @@ pub fn vec_dot_q8_0(weight: &[u8], act: &Q8Activation) -> f32 {
 /// Scalar reference for [`vec_dot_q8_0`] (portable; also the SIMD oracle).
 fn vec_dot_q8_0_scalar(weight: &[u8], act: &Q8Activation) -> f32 {
     let mut acc = 0.0f32;
-    for (b, blk) in weight.chunks_exact(34).enumerate() {
+    for (b, blk) in weight.as_chunks::<34>().0.iter().enumerate() {
         let dw = rd_f16(blk, 0);
         let base = b * 32;
         let mut sum: i32 = 0;
@@ -616,7 +616,7 @@ pub fn vec_dot_q4_0(weight: &[u8], act: &Q8Activation) -> f32 {
 /// Scalar reference for [`vec_dot_q4_0`] (portable; also the SIMD oracle).
 fn vec_dot_q4_0_scalar(weight: &[u8], act: &Q8Activation) -> f32 {
     let mut acc = 0.0f32;
-    for (b, blk) in weight.chunks_exact(18).enumerate() {
+    for (b, blk) in weight.as_chunks::<18>().0.iter().enumerate() {
         let dw = rd_f16(blk, 0);
         let qs = &blk[2..18];
         let base = b * 32;
@@ -661,7 +661,7 @@ pub fn quantize_activation_q8k(x: &[f32]) -> Q8KActivation {
     let mut qs = Vec::with_capacity(x.len());
     let mut d = Vec::with_capacity(x.len() / 256);
     let mut bsums = Vec::with_capacity(x.len() / 16);
-    for blk in x.chunks_exact(256) {
+    for blk in x.as_chunks::<256>().0 {
         let (mut amax, mut max) = (0.0f32, 0.0f32);
         for &v in blk {
             if v.abs() > amax {
@@ -712,7 +712,7 @@ pub fn vec_dot_q4_k(weight: &[u8], act: &Q8KActivation) -> f32 {
 /// Scalar reference for [`vec_dot_q4_k`] (portable; also the SIMD oracle).
 fn vec_dot_q4_k_scalar(weight: &[u8], act: &Q8KActivation) -> f32 {
     let mut total = 0.0f32;
-    for (sb, wblk) in weight.chunks_exact(144).enumerate() {
+    for (sb, wblk) in weight.as_chunks::<144>().0.iter().enumerate() {
         let d = rd_f16(wblk, 0);
         let dmin = rd_f16(wblk, 2);
         let scales = &wblk[4..16];
@@ -770,7 +770,7 @@ pub fn vec_dot_q6_k(weight: &[u8], act: &Q8KActivation) -> f32 {
 #[allow(clippy::identity_op)]
 fn vec_dot_q6_k_scalar(weight: &[u8], act: &Q8KActivation) -> f32 {
     let mut total = 0.0f32;
-    for (sb, wblk) in weight.chunks_exact(210).enumerate() {
+    for (sb, wblk) in weight.as_chunks::<210>().0.iter().enumerate() {
         let ql = &wblk[0..128];
         let qh = &wblk[128..192];
         let scales = &wblk[192..208];
@@ -972,7 +972,7 @@ pub(crate) mod x86 {
     #[target_feature(enable = "avx2,avx512f,avx512bw,avx512vl,avx512vnni")]
     pub unsafe fn vec_dot_q8_0(weight: &[u8], act: &Q8Activation) -> f32 {
         let mut acc = 0.0f32;
-        for (b, blk) in weight.chunks_exact(34).enumerate() {
+        for (b, blk) in weight.as_chunks::<34>().0.iter().enumerate() {
             let dw = rd_f16(blk, 0);
             let w = _mm256_loadu_si256(blk.as_ptr().add(2) as *const __m256i);
             let x = _mm256_loadu_si256(act.qs.as_ptr().add(b * 32) as *const __m256i);
@@ -991,7 +991,7 @@ pub(crate) mod x86 {
         let lomask = _mm256_set1_epi8(0x0f);
         let eight = _mm256_set1_epi8(8);
         let mut acc = 0.0f32;
-        for (b, blk) in weight.chunks_exact(18).enumerate() {
+        for (b, blk) in weight.as_chunks::<18>().0.iter().enumerate() {
             let dw = rd_f16(blk, 0);
             // The 16 packed bytes hold element j's low nibble (output index j)
             // and high nibble (output index j+16). Broadcast them to both
@@ -1022,7 +1022,7 @@ pub(crate) mod x86 {
     pub unsafe fn vec_dot_q4_k(weight: &[u8], act: &Q8KActivation) -> f32 {
         let lomask = _mm256_set1_epi8(0x0f);
         let mut total = 0.0f32;
-        for (sb, wblk) in weight.chunks_exact(144).enumerate() {
+        for (sb, wblk) in weight.as_chunks::<144>().0.iter().enumerate() {
             let d = rd_f16(wblk, 0);
             let dmin = rd_f16(wblk, 2);
             let scales = &wblk[4..16];
@@ -1084,7 +1084,7 @@ pub(crate) mod x86 {
         let lomask = _mm256_set1_epi8(0x0f);
         let three = _mm256_set1_epi8(3);
         let mut total = 0.0f32;
-        for (sb, wblk) in weight.chunks_exact(210).enumerate() {
+        for (sb, wblk) in weight.as_chunks::<210>().0.iter().enumerate() {
             let ql = wblk.as_ptr();
             let qh = wblk.as_ptr().add(128);
             let scales = &wblk[192..208];
@@ -1179,7 +1179,7 @@ pub(crate) mod x86 {
     #[target_feature(enable = "avx2")]
     pub unsafe fn vec_dot_q8_0_avx2(weight: &[u8], act: &Q8Activation) -> f32 {
         let mut acc = 0.0f32;
-        for (b, blk) in weight.chunks_exact(34).enumerate() {
+        for (b, blk) in weight.as_chunks::<34>().0.iter().enumerate() {
             let dw = rd_f16(blk, 0);
             let w = _mm256_loadu_si256(blk.as_ptr().add(2) as *const __m256i);
             let x = _mm256_loadu_si256(act.qs.as_ptr().add(b * 32) as *const __m256i);
@@ -1196,7 +1196,7 @@ pub(crate) mod x86 {
         let lomask = _mm256_set1_epi8(0x0f);
         let eight = _mm256_set1_epi8(8);
         let mut acc = 0.0f32;
-        for (b, blk) in weight.chunks_exact(18).enumerate() {
+        for (b, blk) in weight.as_chunks::<18>().0.iter().enumerate() {
             let dw = rd_f16(blk, 0);
             let packed = _mm_loadu_si128(blk.as_ptr().add(2) as *const __m128i);
             let v = _mm256_broadcastsi128_si256(packed);
@@ -1218,7 +1218,7 @@ pub(crate) mod x86 {
     pub unsafe fn vec_dot_q4_k_avx2(weight: &[u8], act: &Q8KActivation) -> f32 {
         let lomask = _mm256_set1_epi8(0x0f);
         let mut total = 0.0f32;
-        for (sb, wblk) in weight.chunks_exact(144).enumerate() {
+        for (sb, wblk) in weight.as_chunks::<144>().0.iter().enumerate() {
             let d = rd_f16(wblk, 0);
             let dmin = rd_f16(wblk, 2);
             let scales = &wblk[4..16];
@@ -1260,7 +1260,7 @@ pub(crate) mod x86 {
         let lomask = _mm256_set1_epi8(0x0f);
         let three = _mm256_set1_epi8(3);
         let mut total = 0.0f32;
-        for (sb, wblk) in weight.chunks_exact(210).enumerate() {
+        for (sb, wblk) in weight.as_chunks::<210>().0.iter().enumerate() {
             let ql = wblk.as_ptr();
             let qh = wblk.as_ptr().add(128);
             let scales = &wblk[192..208];
@@ -1531,7 +1531,7 @@ pub fn quantize_q8_0(x: &[f32]) -> Vec<u8> {
         "Q8_0 length must be a multiple of 32"
     );
     let mut out = Vec::with_capacity(x.len() / 32 * 34);
-    for blk in x.chunks_exact(32) {
+    for blk in x.as_chunks::<32>().0 {
         let amax = blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let d = amax / 127.0;
         let id = if d != 0.0 { 1.0 / d } else { 0.0 };
@@ -2127,7 +2127,12 @@ mod tests {
                 .collect();
             let act = quantize_activation_q8(&xf);
             let mut w = Vec::new();
-            for (b, blk) in prng_bytes(seed + 1, cols).chunks_exact(32).enumerate() {
+            for (b, blk) in prng_bytes(seed + 1, cols)
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .enumerate()
+            {
                 w.extend_from_slice(&f32_to_f16(0.02 + b as f32 * 0.003).to_le_bytes());
                 w.extend_from_slice(blk);
             }
@@ -2155,7 +2160,9 @@ mod tests {
             let act = quantize_activation_q8(&xf);
             let mut w = Vec::new();
             for (b, blk) in prng_bytes(seed + 100, (cols / 32) * 16)
-                .chunks_exact(16)
+                .as_chunks::<16>()
+                .0
+                .iter()
                 .enumerate()
             {
                 w.extend_from_slice(&f32_to_f16(0.03 + b as f32 * 0.002).to_le_bytes());
@@ -2331,7 +2338,12 @@ mod tests {
             let act = quantize_activation_q8(&xf);
             // Random valid Q8_0 row: f16 scale + 32 i8 (full byte range) per block.
             let mut w = Vec::new();
-            for (b, blk) in prng_bytes(seed + 1, cols).chunks_exact(32).enumerate() {
+            for (b, blk) in prng_bytes(seed + 1, cols)
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .enumerate()
+            {
                 w.extend_from_slice(&f32_to_f16(0.02 + b as f32 * 0.003).to_le_bytes());
                 w.extend_from_slice(blk);
             }
@@ -2359,7 +2371,9 @@ mod tests {
             let act = quantize_activation_q8(&xf);
             let mut w = Vec::new();
             for (b, blk) in prng_bytes(seed + 100, (cols / 32) * 16)
-                .chunks_exact(16)
+                .as_chunks::<16>()
+                .0
+                .iter()
                 .enumerate()
             {
                 w.extend_from_slice(&f32_to_f16(0.03 + b as f32 * 0.002).to_le_bytes());
@@ -2444,7 +2458,7 @@ mod tests {
     #[allow(clippy::identity_op)]
     fn vec_dot_q6_k_vnni_emulated(weight: &[u8], act: &Q8KActivation) -> f32 {
         let mut total = 0.0f32;
-        for (sb, wblk) in weight.chunks_exact(210).enumerate() {
+        for (sb, wblk) in weight.as_chunks::<210>().0.iter().enumerate() {
             let scales = &wblk[192..208];
             let d = rd_f16(wblk, 208);
             let qx = &act.qs[sb * 256..sb * 256 + 256];

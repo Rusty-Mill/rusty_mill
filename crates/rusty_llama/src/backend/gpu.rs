@@ -1462,7 +1462,7 @@ impl GpuBackend {
             .expect("device poll failed");
         {
             let view = slice.get_mapped_range();
-            for (o, c) in out.iter_mut().zip(view.chunks_exact(4)) {
+            for (o, c) in out.iter_mut().zip(view.as_chunks::<4>().0.iter()) {
                 *o = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             }
         }
@@ -3736,7 +3736,9 @@ fn main() {
     /// Reinterpret a byte slice as f32s (readback helper for the probe).
     fn bytemuck_cast(bytes: &[u8]) -> Vec<f32> {
         bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }

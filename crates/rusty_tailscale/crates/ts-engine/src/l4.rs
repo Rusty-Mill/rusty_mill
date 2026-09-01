@@ -48,7 +48,7 @@ pub fn fix_ipv4_transport_checksum(pkt: &mut [u8]) {
     let mut sum: u32 = 0;
     // Pseudo-header: src, dst, zero + proto, L4 length.
     for chunk in [&src[..], &dst[..]] {
-        for pair in chunk.chunks_exact(2) {
+        for pair in chunk.as_chunks::<2>().0 {
             sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
         }
     }
@@ -57,11 +57,11 @@ pub fn fix_ipv4_transport_checksum(pkt: &mut [u8]) {
 
     // L4 segment.
     let l4 = &pkt[ihl..end];
-    let mut chunks = l4.chunks_exact(2);
-    for pair in &mut chunks {
+    let chunks = l4.as_chunks::<2>();
+    for pair in chunks.0 {
         sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = chunks.1 {
         sum += (*last as u32) << 8;
     }
     while sum >> 16 != 0 {
@@ -87,15 +87,15 @@ mod tests {
         let total = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
         let l4 = &pkt[ihl..total];
         let mut sum: u32 = 0;
-        for pair in pkt[12..20].chunks_exact(2) {
+        for pair in pkt[12..20].as_chunks::<2>().0 {
             sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
         }
         sum += proto as u32 + (total - ihl) as u32;
-        let mut chunks = l4.chunks_exact(2);
-        for pair in &mut chunks {
+        let chunks = l4.as_chunks::<2>();
+        for pair in chunks.0 {
             sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
         }
-        if let [last] = chunks.remainder() {
+        if let [last] = chunks.1 {
             sum += (*last as u32) << 8;
         }
         while sum >> 16 != 0 {

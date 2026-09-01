@@ -289,6 +289,13 @@ impl LlmBackend {
     /// started coming back yet.
     ///
     /// `Err` carries the response to return when no attempt produced one.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the `Err` is the response `handle` returns verbatim -- \
+                  `Response<LlmBody>` is this crate's response type everywhere \
+                  else too, and boxing it here would buy an allocation on the \
+                  failure path only to unbox it again at the single call site"
+    )]
     async fn send(
         &self,
         url: &str,

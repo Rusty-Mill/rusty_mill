@@ -90,9 +90,12 @@ rsa = "0.9"
 rand = "0.8"
 tempfile = "3"
 rcgen = "0.13"
-# `flock`, for the port bands in tests/common. A safe wrapper, which matters
-# here: the workspace forbids `unsafe`, tests included.
-rustix = { version = "1", features = ["fs"] }
+# File locking, for the port bands in tests/common. A safe wrapper, which
+# matters here: the workspace forbids `unsafe`, tests included. `fs4` rather
+# than `rustix::fs::flock` because `rustix::fs` is `cfg(not(windows))` -- these
+# tests also run on windows-latest in this workspace's CI, where `fs4` maps the
+# same call onto `LockFileEx`.
+fs4 = "0.13"
 # `http2` is dev-only: the scripted gRPC processor in `mcp_guardrails.rs`
 # is the only thing here that serves h2. The gateway is a gRPC *client*.
 axum = { workspace = true, features = ["json", "tokio", "http1", "http2"] }

@@ -195,7 +195,7 @@ fn unmarshal(p: &[u8]) -> Option<Message> {
                 return None;
             }
             let mut endpoints = Vec::with_capacity(data.len() / 18);
-            for chunk in data.chunks_exact(18) {
+            for chunk in data.as_chunks::<18>().0 {
                 let ip = addr_from_16(&chunk[..16])?;
                 let port = u16::from_be_bytes([chunk[16], chunk[17]]);
                 endpoints.push(SocketAddr::new(ip, port));

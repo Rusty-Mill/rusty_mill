@@ -298,8 +298,18 @@ mod tests {
     }
 
     // End-to-end fail-closed proof under a real sandbox. Runs only where a
-    // launcher is installed (Linux CI with bubblewrap/firejail); elsewhere it
-    // is a no-op so the suite stays green on bare runners.
+    // launcher is installed *and usable* (Linux CI with bubblewrap/firejail);
+    // elsewhere it is a no-op so the suite stays green on bare runners.
+    //
+    // "Usable" is a separate question from "installed", and conflating the two
+    // is what made this fail on GitHub's hosted ubuntu images: `bwrap` is on
+    // PATH there, but the host denies it the unprivileged user namespace
+    // `--unshare-all` asks for, so bwrap exits before `sh` ever runs and the
+    // command produces no output at all. That is the same "no sandbox to prove
+    // anything about here" situation as no launcher on PATH, not a failure of
+    // the property under test -- so probe first and skip on the same terms.
+    // Wherever a sandbox does start (a dev box, a self-hosted Linux runner),
+    // every assertion below still runs.
     #[tokio::test]
     async fn sandboxed_bash_blocks_secret_read_and_network() {
         let Some(_) = SandboxLauncher::detect() else {
@@ -310,13 +320,35 @@ mod tests {
         let _ = std::fs::create_dir_all(&ws);
         let exec = SandboxedExecutor::detect();
 
+        // Does this host actually let the launcher build a sandbox?
+        let probe = exec
+            .build("echo probe", &ws)
+            .expect("launcher present")
+            .output()
+            .await
+            .expect("spawned");
+        if !String::from_utf8_lossy(&probe.stdout).contains("probe") {
+            eprintln!(
+                "skipping: sandbox launcher on PATH but unusable here ({}): {}",
+                probe.status,
+                String::from_utf8_lossy(&probe.stderr).trim()
+            );
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+
         // A path outside the workspace grant is not visible → read fails.
         let mut cmd = exec
             .build("cat /etc/shadow 2>&1; echo done", &ws)
             .expect("launcher present");
         let out = cmd.output().await.expect("spawned");
         let combined = String::from_utf8_lossy(&out.stdout);
-        assert!(combined.contains("done"));
+        assert!(
+            combined.contains("done"),
+            "sandboxed command produced no output (status {}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         assert!(
             !combined.contains("root:"),
             "secret file must not be readable under sandbox"

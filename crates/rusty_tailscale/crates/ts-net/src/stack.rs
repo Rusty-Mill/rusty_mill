@@ -474,11 +474,11 @@ mod tests {
     /// RFC 1071 Internet checksum.
     fn checksum(data: &[u8]) -> u16 {
         let mut sum: u32 = 0;
-        let mut chunks = data.chunks_exact(2);
-        for c in &mut chunks {
+        let chunks = data.as_chunks::<2>();
+        for c in chunks.0 {
             sum += u16::from_be_bytes([c[0], c[1]]) as u32;
         }
-        if let [last] = chunks.remainder() {
+        if let [last] = chunks.1 {
             sum += (*last as u32) << 8;
         }
         while sum >> 16 != 0 {
