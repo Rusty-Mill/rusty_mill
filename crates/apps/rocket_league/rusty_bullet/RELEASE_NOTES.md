@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Hard cap on car angular speed
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#121](https://github.com/baileyrd/rusty_bullet/pull/121) · `65c35e9`
 
 - **Nothing previously bounded how fast sustained air control torque
   (or a dodge's own kick, or the landing-orientation assist) could spin
