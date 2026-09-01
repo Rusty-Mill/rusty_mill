@@ -609,6 +609,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   future FR rather than fixed here. 1 new test pins the
   `restitution_curve`/call-site-clamp equivalence; all pre-existing tests
   pass unchanged.
+- `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation
+  (`RB-PHYSICS-001-FR-055`) — fetched the current RLBot wiki's "Useful
+  Game Values" page directly (the same page `RB-PHYSICS-001-FR-036`'s own
+  research used for `GOAL_DEPTH`) and confirmed both values exact against
+  its own cited "Goal center-to-post"/"Goal height" numbers — no value
+  change, a sourcing-status upgrade from "commonly-cited, unconfirmed" to
+  "confirmed", the same non-behavioral outcome FR-036 reached for
+  `GOAL_DEPTH`/`CORNER_LENGTH`. Also found and fixed a stale spec passage
+  still describing `GOAL_DEPTH` as an unconfirmed "uncalibrated
+  invention", contradicting FR-036's own already-shipped Requirements
+  entry. No new tests; all pre-existing tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.54.0
+- Version: 0.55.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -255,7 +255,16 @@
   face bigger than a bound and centered on it) *is* a real under-detection
   gap, confirmed unreachable given this project's own car/ball sizes
   against the standard arena's own bound sizes and left open rather than
-  fixed; 2 new tests; static-contact warm-starting, `arena::FILLET_RADIUS`/
+  fixed; 2 new tests; and, since FR-055, `arena::GOAL_HALF_WIDTH`/
+  `GOAL_HEIGHT` were confirmed exact against the current RLBot wiki's own
+  cited goal dimensions (fetched directly), closing the one goal-geometry
+  constant question `GOAL_DEPTH`'s own earlier FR-036 confirmation hadn't
+  reached, and a stale Open Questions passage that had never been updated
+  when FR-036 shipped — still describing `GOAL_DEPTH` as an uncalibrated
+  invention, contradicting FR-036's own already-shipped Requirements entry
+  and this spec's own Non-goals section — was corrected; no new tests,
+  matching FR-036's own precedent for a pure constant/doc-correctness
+  change with no behavioral difference; static-contact warm-starting, `arena::FILLET_RADIUS`/
   `CORNER_ARCH_RADIUS` calibration, full convergence of the sandwiched
   case, a rigorous (non-heuristic) edge-edge nearest-pair selection,
   `box_vs_bounded_wall`'s own under-detection gap, and real-data
@@ -423,9 +432,12 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   so is `FR-019`'s corner-cut inset distance (`arena::CORNER_LENGTH`),
   confirmed exact against real extracted collision-mesh data rather than
   the uncalibrated placeholder this project previously took it for; `FR-024`'s
-  own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` are commonly-cited too, but
-  likewise not independently confirmed. `FR-029`'s own `arena::GOAL_DEPTH`,
-  by contrast, is also now confirmed against the current RLBot wiki's own
+  own `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` were commonly-cited too, but,
+  until `RB-PHYSICS-001-FR-055`, likewise not independently confirmed —
+  FR-055 fetched the same current RLBot wiki page directly and found both
+  values match its own cited "Goal center-to-post"/"Goal height" numbers
+  exactly. `FR-029`'s own `arena::GOAL_DEPTH`,
+  by contrast, was also already confirmed against the current RLBot wiki's own
   cited value (`RB-PHYSICS-001-FR-036`) — this project's earlier claim
   that no reference existed for it at all, making it an uncalibrated
   invention, was itself incorrect. FR-026's 4
@@ -3381,6 +3393,68 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     gap made concrete). All 289 of `rb_physics_bullet`'s pre-existing
     tests (as of `FR-053`) pass unchanged. 2 new tests, bringing the crate
     to 291 total (+2 over `FR-053`'s 289).
+- `RB-PHYSICS-001-FR-055` (`GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference
+  confirmation, stale doc correction, implemented): `arena::GOAL_HALF_WIDTH`/
+  `GOAL_HEIGHT` (`RB-PHYSICS-001-FR-024`) had carried a "commonly-cited
+  community number, not independently confirmed" caveat since they were
+  introduced — the same sourcing tier `SIDE_WALL_X`/`BACK_WALL_Y`/
+  `CEILING_Z`/`CORNER_LENGTH`/`GOAL_DEPTH` all once carried, before
+  `RB-PHYSICS-001-FR-036` upgraded most of them to independently
+  confirmed. This requirement closes that remaining gap and, in doing so,
+  found and fixed a second, unrelated problem: this spec's own "Open
+  questions" section still described `GOAL_DEPTH` as an unconfirmed
+  "uncalibrated invention" — directly contradicting FR-036's own
+  already-shipped Requirements entry and this spec's own Non-goals
+  section, both of which already say it's confirmed. That passage was
+  simply never updated when FR-036 shipped.
+  1. **Fetched the current RLBot wiki's "Useful Game Values" page
+     directly** (`https://github.com/RLBot/RLBot/wiki/Useful-Game-Values`,
+     the same page `RB-PHYSICS-001-FR-036`'s own research already used to
+     confirm `GOAL_DEPTH`), rather than trusting a paraphrase or prior
+     training-data recall — matching this project's own established
+     "always verify against primary fetched source" discipline
+     (`RB-PHYSICS-001-FR-036`/`FR-040`/`FR-042`/`FR-043`/`FR-045`/`FR-046`/
+     `FR-047`/`FR-048`/`FR-053`/`FR-054`'s own shared method).
+  2. **Confirmed both constants exact.** The page's own cited "Goal
+     center-to-post: 892.755" and "Goal height: z=642.775" match
+     `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT`'s existing values bit-for-bit
+     — no value change, only a sourcing-status upgrade from "commonly-cited,
+     unconfirmed" to "confirmed", the same non-behavioral outcome
+     `RB-PHYSICS-001-FR-036` reached for `GOAL_DEPTH`/`CORNER_LENGTH`. (The
+     same fetch also re-confirmed the wiki's own "Ceiling: z=2044" still
+     disagrees with RocketSim's `ARENA_HEIGHT = 2048.f` — unsurprising and
+     not a new finding, since `RB-PHYSICS-001-FR-036` already investigated
+     and deliberately preferred the RocketSim/mesh-reconstruction value
+     over this same wiki page's own ceiling number for `arena::CEILING_Z`.)
+  3. **Corrected the stale Open Questions passage.** Rewrote it (with a
+     strikethrough over the superseded text, matching
+     `RB-PHYSICS-001-FR-039`/`FR-044`'s own precedent for closing a stale
+     bullet) to state plainly that all three goal-geometry constants
+     (`GOAL_HALF_WIDTH`, `GOAL_HEIGHT`, `GOAL_DEPTH`) are now confirmed,
+     leaving only `arena::NET_DEPTH` (how far into that confirmed depth
+     the net panel itself sits, a distinct, still-genuinely-uncalibrated
+     quantity `RB-PHYSICS-001-FR-033` invented) as an open invention in
+     that vicinity.
+  - **Non-goals (this requirement).** Does not change either constant's
+    value (both were already exact). Does not touch `arena::FILLET_RADIUS`/
+    `CORNER_ARCH_RADIUS`, still genuinely uncalibrated per
+    `RB-PHYSICS-001-FR-040`'s own finding. Does not touch `arena::NET_DEPTH`,
+    still this project's own uncalibrated invention (no reference exists
+    for how far into a goal's depth a real net actually hangs, only for
+    the goal box's own total depth). Does not touch `RB-PHYSICS-001-FR-005`'s
+    real-data calibration, still blocked on `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT`'s own
+    doc comments state they're confirmed against the RLBot wiki, not
+    merely commonly-cited. The spec's own Non-goals and Open Questions
+    sections no longer contradict each other or FR-036's own Requirements
+    entry about `GOAL_DEPTH`'s sourcing status. All pre-existing tests
+    pass unchanged, since neither constant's value changed.
+  - **Verification plan.** No new tests: a pure constant-sourcing-status
+    and doc-correctness change with no behavioral difference, the same
+    precedent `RB-PHYSICS-001-FR-031`/`FR-036` established for their own
+    constant/doc-only corrections — proven by the existing suite passing
+    unchanged. `cargo test --workspace` re-run clean at 291 total
+    (unchanged from `FR-054`).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4668,7 +4742,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   vertical edges, a fourth at the compound corners, and a fifth at the
   goal posts/crossbar — real Rocket League's actual goal-post radius is
   visually quite different from a wall-to-floor transition's) is itself
-  unconfirmed. `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` (FR-024) likewise
+  unconfirmed. ~~`arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` (FR-024) likewise
   have no independently-confirmed source, though they're commonly-cited
   community numbers like `SIDE_WALL_X`, not this port's own inventions
   like `CORNER_LENGTH`. `arena::GOAL_DEPTH` (FR-029) is a further step
@@ -4676,7 +4750,21 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   commonly-cited community reference for the real net's depth at all, so
   it's this project's own uncalibrated invention, same status as
   `CORNER_LENGTH`, chosen only to be a visibly real interior volume
-  comparable in scale to the goal mouth's own dimensions.
+  comparable in scale to the goal mouth's own dimensions.~~ This bullet
+  had gone stale: `arena::GOAL_DEPTH` (FR-029) was already confirmed
+  against the current RLBot wiki's own cited value by
+  `RB-PHYSICS-001-FR-036` — this passage's own "uncalibrated invention"
+  framing for it directly contradicted FR-036's own Requirements entry
+  and this same section's earlier paragraph above, simply never updated
+  when FR-036 shipped. `RB-PHYSICS-001-FR-055` fixed the stale text and,
+  while at it, closed `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT`'s own
+  genuinely-still-open question the same way: fetching that same wiki
+  page directly confirmed both values exact against its own cited "Goal
+  center-to-post"/"Goal height" numbers. All three goal-geometry
+  constants (`GOAL_HALF_WIDTH`, `GOAL_HEIGHT`, `GOAL_DEPTH`) are now
+  confirmed; only `net::NetMesh`'s own uncalibrated `arena::NET_DEPTH`
+  (how far into that confirmed depth the net panel itself sits, not the
+  goal box's own total depth) remains this project's own invention here.
 - Calibrating `drive`'s constants (`THROTTLE_ACCELERATION`, `STEER_TORQUE`,
   `BOOST_CONSUMPTION_RATE`, `HANDBRAKE_FRICTION_MULTIPLIER`,
   `AIR_CONTROL_TORQUE`, `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`,
@@ -4763,6 +4851,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.55.0 (2026-09-01): FR-055 added and implemented
+  (`GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation, stale doc
+  correction) — `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT` carried a
+  "commonly-cited, not independently confirmed" caveat since FR-024
+  introduced them. Fetched the current RLBot wiki's "Useful Game Values"
+  page directly (the same page FR-036's own research already used for
+  `GOAL_DEPTH`) and confirmed both values exact against its own cited
+  "Goal center-to-post: 892.755"/"Goal height: z=642.775" numbers — no
+  value change, a sourcing-status upgrade only. Also found and fixed a
+  stale "Open questions" passage that still described `GOAL_DEPTH` as an
+  unconfirmed "uncalibrated invention", directly contradicting FR-036's
+  own already-shipped Requirements entry and this spec's own Non-goals
+  section (never updated when FR-036 shipped) — rewritten to state all
+  three goal-geometry constants are now confirmed, leaving only
+  `arena::NET_DEPTH` open in that vicinity. No new tests (pure
+  constant-sourcing/doc correction, no behavioral change, matching
+  FR-031/FR-036's own precedent); `cargo test --workspace` re-run clean
+  at 291 total (unchanged from FR-054).
 - 0.54.0 (2026-09-01): FR-054 added and implemented (goal-wall/
   bounded-wall corner-testing overlap investigation) — closes the one
   question `RB-PHYSICS-001-FR-028`'s own doc comment left open: whether
