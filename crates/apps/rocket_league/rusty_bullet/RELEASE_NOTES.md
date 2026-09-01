@@ -6,6 +6,32 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## `GOAL_HALF_WIDTH`/`GOAL_HEIGHT` reference confirmation
+**2026-09-01** · PR pending · commit pending
+
+- **Fetched the current RLBot wiki's "Useful Game Values" page directly**
+  (the same page `RB-PHYSICS-001-FR-036`'s own research already used to
+  confirm `arena::GOAL_DEPTH`) and confirmed `arena::GOAL_HALF_WIDTH`
+  (`892.755`) and `arena::GOAL_HEIGHT` (`642.775`) exact against its own
+  cited "Goal center-to-post"/"Goal height" numbers — no value change, a
+  sourcing-status upgrade from "commonly-cited, unconfirmed" to
+  "confirmed", the same non-behavioral outcome `RB-PHYSICS-001-FR-036`
+  reached for `GOAL_DEPTH`/`CORNER_LENGTH`.
+- **Found and fixed a stale spec passage**: this spec's own "Open
+  questions" section still described `arena::GOAL_DEPTH` as an
+  unconfirmed "uncalibrated invention" — directly contradicting
+  `RB-PHYSICS-001-FR-036`'s own already-shipped Requirements entry and
+  this spec's own Non-goals section, both of which already say it's
+  confirmed. Never updated when FR-036 shipped; rewritten to state all
+  three goal-geometry constants (`GOAL_HALF_WIDTH`, `GOAL_HEIGHT`,
+  `GOAL_DEPTH`) are now confirmed, leaving only `arena::NET_DEPTH` open
+  in that vicinity.
+- No new tests — a pure constant-sourcing/doc correction with no
+  behavioral change, matching `RB-PHYSICS-001-FR-031`/`FR-036`'s own
+  precedent. All 291 pre-existing tests pass unchanged.
+
+---
+
 ## Goal-wall/bounded-wall corner-testing overlap investigation
 **2026-09-01** · PR pending · commit pending
 

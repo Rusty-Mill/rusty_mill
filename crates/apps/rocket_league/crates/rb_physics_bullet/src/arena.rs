@@ -228,12 +228,18 @@ const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);
 
 /// Half-width of the goal-mouth window cut into each back wall — a
 /// commonly-cited community-measured Rocket League dimension (same
-/// sourcing caveat as `SIDE_WALL_X`), not independently confirmed by this
-/// project against real field mesh data.
+/// sourcing tier as `SIDE_WALL_X`). Confirmed exact against the current
+/// RLBot wiki's own cited "Goal center-to-post" value
+/// (`RB-PHYSICS-001-FR-055`, fetched directly rather than assumed from
+/// `RB-PHYSICS-001-FR-036`'s prior research into the same wiki page) —
+/// no longer merely "commonly-cited", the same upgrade `GOAL_DEPTH`
+/// itself already got from FR-036.
 pub const GOAL_HALF_WIDTH: f32 = 892.755;
 
-/// Height of the goal-mouth window — same sourcing caveat as
-/// `GOAL_HALF_WIDTH`.
+/// Height of the goal-mouth window — same sourcing tier as
+/// `GOAL_HALF_WIDTH`, and confirmed the same way and at the same time
+/// (`RB-PHYSICS-001-FR-055`), against the wiki's own cited "Goal height"
+/// value.
 pub const GOAL_HEIGHT: f32 = 642.775;
 
 /// How far behind the back wall the goal box's own interior extends
@@ -250,8 +256,11 @@ pub const GOAL_DEPTH: f32 = 880.0;
 /// completely unchanged, as a safety net *behind* the net for the
 /// vanishingly unlikely case the mesh's own solve lets the ball slip past
 /// it — see `net::NetMesh`'s own doc comment for what a car, which isn't
-/// tested against the mesh at all, still collides with instead). Another
-/// uncalibrated placeholder, same category as `GOAL_DEPTH` itself.
+/// tested against the mesh at all, still collides with instead). Unlike
+/// `GOAL_DEPTH` itself (confirmed, see above), this fraction of it is
+/// this project's own uncalibrated invention — no reference exists for
+/// how far into the goal a real net actually hangs, only for the goal
+/// box's own total depth.
 pub const NET_DEPTH: f32 = GOAL_DEPTH * 0.5;
 
 /// Column count for `standard_nets`' own grid — see `net::NetMesh::
