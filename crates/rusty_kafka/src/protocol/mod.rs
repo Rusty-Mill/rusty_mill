@@ -1,10 +1,11 @@
 //! Kafka protocol message types: request/response structs plus their
-//! `encode`/`decode` methods, one module per API. Every API implemented
-//! here uses its **v0** wire format -- the oldest, non-flexible/
+//! `encode`/`decode` methods, one module per API. Most APIs implemented
+//! here use their **v0** wire format -- the oldest, non-flexible/
 //! non-compact encoding -- documented per-module rather than negotiated
 //! via [`api_versions`] yet; see the crate's module doc for that
-//! limitation. [`list_offsets`] is the one deliberate exception (v1,
-//! not v0) -- see that module's own doc for why.
+//! limitation. [`list_offsets`] (v1) and [`produce`] (v3) are the
+//! deliberate exceptions -- see each module's own doc for why; both
+//! stay within classic (non-flexible) encoding regardless.
 
 pub mod api_versions;
 pub mod create_topics;
@@ -12,16 +13,14 @@ pub mod header;
 pub mod list_offsets;
 pub mod metadata;
 pub mod offset_fetch;
+pub mod produce;
 
 /// Kafka API key constants for the requests this crate implements. The
 /// full registry is much larger (see the [Kafka protocol
 /// guide](https://kafka.apache.org/protocol.html#protocol_api_keys));
 /// only the ones this crate actually sends are listed.
 pub mod api_key {
-    /// `Produce` -- not yet implemented by this crate (see the module
-    /// doc); listed here since [`crate::protocol::api_versions`]
-    /// decodes a broker's advertised version range for every API key it
-    /// supports, including this one.
+    /// `Produce`, implemented (at v3) by [`crate::protocol::produce`].
     pub const PRODUCE: i16 = 0;
     /// `ListOffsets`, implemented (at v1) by
     /// [`crate::protocol::list_offsets`].

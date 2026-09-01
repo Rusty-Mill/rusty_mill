@@ -20,6 +20,11 @@ pub enum CodecError {
     /// A Kafka string's `INT16` length prefix was below `-1`.
     #[error("string length {0} is invalid (must be -1 or >= 0)")]
     InvalidStringLength(i16),
+    /// A record batch's `magic` byte wasn't `2` -- this crate only
+    /// encodes/decodes record batch v2 (see
+    /// [`crate::record_batch`]'s module doc for why).
+    #[error("record batch magic byte {0} is not the supported value (2)")]
+    UnsupportedMagic(u8),
 }
 
 /// Errors from talking to a Kafka broker over the wire: connection,

@@ -18,20 +18,21 @@
 //!   at v1 -- see [`protocol::list_offsets`]'s module doc for why v1
 //!   specifically), `OffsetFetch` (a consumer group's committed
 //!   offset, with a coordinator-routing caveat -- see
-//!   [`protocol::offset_fetch`]'s module doc) -- v0 for every one of
-//!   these except `ListOffsets`.
-//! - **Not yet implemented**: `Produce`/`Fetch` and the rest of
-//!   consumer-group coordination (`FindCoordinator`/`JoinGroup`/
-//!   `SyncGroup`/`Heartbeat`/`OffsetCommit`).
-//!   Modern Kafka brokers require the record-batch v2 message format
-//!   (varint-encoded, CRC32C-checksummed) for current `Produce` API
-//!   versions, and likely require flexible (compact/tagged-field)
-//!   request encoding at the versions actually accepted by the
-//!   `confluent-local` broker meshed's `compose.yaml` runs --
-//!   implementing that correctly without a live broker in this
-//!   environment to validate against would be shipping unverified wire
-//!   code, so it's deferred to a follow-up pass with that verification
-//!   available.
+//!   [`protocol::offset_fetch`]'s module doc), `Produce` (at v3, the
+//!   version [`protocol::produce`] explains -- needs the record batch
+//!   v2 wire format, see [`record_batch`]) -- v0 for every one of
+//!   these except `ListOffsets`/`Produce`.
+//! - **Not yet implemented**: `Fetch` and the rest of consumer-group
+//!   coordination (`FindCoordinator`/`JoinGroup`/`SyncGroup`/
+//!   `Heartbeat`/`OffsetCommit`) -- a consumer side to match `Produce`'s
+//!   producer side, deferred to a follow-up pass.
+//! - **`Produce`/record batch v2 have no live broker to validate
+//!   against** in this environment (see [`record_batch`]'s own module
+//!   doc for the verification approach used instead -- hand-checking
+//!   every field against the published spec, plus a CRC-32C
+//!   implementation cross-checked against the standard Castagnoli test
+//!   vector). Treat this path with more caution than the rest of the
+//!   crate until it's been run against a real broker at least once.
 //! - **Single-connection, no pipelining**: [`KafkaClient`] sends one
 //!   request and awaits its response before sending the next, over one
 //!   connection. No multiplexing/pipelining, and no controller/leader
@@ -48,6 +49,7 @@ pub mod client;
 pub mod error;
 mod frame;
 pub mod protocol;
+pub mod record_batch;
 pub mod testing;
 mod wire;
 

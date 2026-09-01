@@ -10,6 +10,7 @@ use crate::protocol::header::{RequestHeader, ResponseHeader};
 use crate::protocol::list_offsets::{ListOffsetsRequest, ListOffsetsResponse};
 use crate::protocol::metadata::{MetadataRequest, MetadataResponse};
 use crate::protocol::offset_fetch::{OffsetFetchRequest, OffsetFetchResponse};
+use crate::protocol::produce::{ProduceRequest, ProduceResponse};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_wire::{Reader, Writer};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -154,6 +155,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
             .await?;
         let mut reader = Reader::new(&body);
         Ok(OffsetFetchResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `ProduceRequest` v3. See
+    /// [`crate::protocol::produce`]'s module doc for why v3, not v0.
+    pub async fn produce(
+        &mut self,
+        request: &ProduceRequest,
+    ) -> Result<ProduceResponse, ClientError> {
+        let body = self
+            .call(api_key::PRODUCE, 3, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(ProduceResponse::decode(&mut reader)?)
     }
 }
 
@@ -355,6 +369,62 @@ mod tests {
         server.await.unwrap();
 
         assert_eq!(response.topics[0].partitions[0].committed_offset, 17);
+    }
+
+    #[rusty_tokio::test]
+    async fn produce_round_trips_through_a_fake_peer() {
+        use crate::protocol::produce::{ProducePartitionRequest, ProduceTopicRequest};
+        use crate::record_batch::Record;
+
+        let (client_io, mut peer) = duplex(4096);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::PRODUCE);
+            assert_eq!(header.api_version, 3);
+
+            let mut reader = Reader::new(&body);
+            let decoded = crate::protocol::produce::ProduceRequest::decode(&mut reader).unwrap();
+            assert_eq!(decoded.topics[0].name, "mesh.governance.slo-violations");
+            assert_eq!(
+                decoded.topics[0].partitions[0].records[0].value,
+                Some(b"{\"slo_type\":\"freshness\"}".to_vec())
+            );
+
+            let mut response_body = Writer::new();
+            write_i32(&mut response_body, 1); // topics
+            write_string(&mut response_body, "mesh.governance.slo-violations");
+            write_i32(&mut response_body, 1); // partitions
+            write_i32(&mut response_body, 0); // partition_index
+            write_i16(&mut response_body, 0); // error_code
+            crate::wire::write_i64(&mut response_body, 42); // base_offset
+            crate::wire::write_i64(&mut response_body, -1); // log_append_time
+            write_i32(&mut response_body, 0); // throttle_time_ms
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = ProduceRequest {
+            acks: -1,
+            timeout_ms: 5000,
+            base_timestamp_ms: 1_735_689_600_000,
+            topics: vec![ProduceTopicRequest {
+                name: "mesh.governance.slo-violations".to_string(),
+                partitions: vec![ProducePartitionRequest {
+                    partition_index: 0,
+                    records: vec![Record {
+                        key: Some(b"orders".to_vec()),
+                        value: Some(b"{\"slo_type\":\"freshness\"}".to_vec()),
+                        headers: vec![],
+                    }],
+                }],
+            }],
+        };
+        let response = client.produce(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.topics[0].partitions[0].base_offset, 42);
+        assert_eq!(response.topics[0].partitions[0].error_code, 0);
     }
 
     #[rusty_tokio::test]
