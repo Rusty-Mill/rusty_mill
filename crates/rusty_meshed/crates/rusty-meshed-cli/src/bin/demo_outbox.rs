@@ -1,7 +1,8 @@
 //! `demo_outbox` -- the Rust port of `scripts/demo_outbox.py`
 //! (CLI-043..045): demonstrates the transactional outbox pattern's
 //! core invariant, that a business write and its outbox entry commit
-//! in one atomic transaction.
+//! in one atomic transaction, then relays the pending entry to Kafka
+//! via a background [`OutboxRelay`](rusty_meshed_sdk::OutboxRelay).
 //!
 //! Environment variables (matching the source exactly):
 //! - `MESHED_COMPOSE_UP`: any non-empty value enables the Kafka relay
@@ -9,21 +10,38 @@
 //! - `DEMO_DB_PATH`: SQLite database path, default `"demo_outbox.db"`.
 //! - `KAFKA_BOOTSTRAP_SERVERS`: default `"localhost:9092"`.
 //!
-//! **Step 2 (the relay) is not fully ported.** With `MESHED_COMPOSE_UP`
-//! unset, this matches the source exactly: skip the relay, print every
-//! outbox row, exit 0 (CLI-044). With it set, the source starts an
-//! `OutboxRelay` background thread and waits up to 10s for the entry
-//! to publish (CLI-045) -- `rusty-meshed-sdk::outbox` doesn't implement
-//! `OutboxRelay` at all (it needs a Kafka `Produce` request
-//! `rusty_kafka` doesn't have, see that module's own doc and issue
-//! #87), so this binary reports that plainly and exits 1 rather than
-//! pretending to wait for a relay that doesn't exist.
+//! With `MESHED_COMPOSE_UP` unset, Step 2 skips the relay, prints every
+//! outbox row, exits 0 (CLI-044). With it set, Step 2 starts an
+//! [`OutboxRelay`](rusty_meshed_sdk::OutboxRelay) background thread
+//! and polls every 0.25s for up to 10s for the entry's `published_at`
+//! to be set (CLI-045); success prints the full entry, a timeout
+//! prints an error and exits 1. `OutboxRelay` itself landed in an
+//! earlier pass (SDK-057..064, once `rusty_kafka`'s `Produce` support
+//! existed) -- this binary just hadn't been wired up to actually use
+//! it yet.
 
 use rusty_json::json;
 use rusty_meshed_sdk::outbox;
+use rusty_meshed_sdk::OutboxRelay;
 use rusty_sqlite::rusqlite::Connection;
+use std::time::{Duration, Instant};
 
 const DEMO_TOPIC: &str = "meshed.demo.outbox-events";
+
+/// The one column [`main`]'s poll loop actually needs -- checked every
+/// 0.25s until it's `Some` or the 10s deadline passes (CLI-045). `id`
+/// is always the row this binary just inserted itself in Step 1, so a
+/// missing row is not a case worth distinguishing from a `NULL`
+/// `published_at` -- both just mean "not published yet" here.
+fn fetch_published_at(conn: &Connection, entry_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT published_at FROM outbox_entries WHERE id = ?1",
+        [entry_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
 
 fn main() {
     let compose_up = std::env::var("MESHED_COMPOSE_UP").unwrap_or_default();
@@ -95,12 +113,61 @@ fn main() {
         std::process::exit(0);
     }
 
-    println!("Step 2: Kafka relay requested (MESHED_COMPOSE_UP set).");
-    println!(
-        "  OutboxRelay isn't implemented in this build yet -- it needs a Kafka Produce request"
-    );
-    println!("  rusty_kafka doesn't have (see rusty-meshed-sdk::outbox's module doc).");
+    println!("Step 2: Starting OutboxRelay background thread...");
+    let mut relay = OutboxRelay::new(db_path.clone(), bootstrap_servers.clone());
+    relay.start();
+
+    println!("  Waiting up to 10 seconds for entry id={entry_id} to be published...");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut published_at = None;
+    while Instant::now() < deadline {
+        if let Some(value) = fetch_published_at(&conn, entry_id) {
+            published_at = Some(value);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    relay.stop();
+
     println!();
-    println!("ERROR: Entry id={entry_id} cannot be relayed (no relay implementation).");
-    std::process::exit(1);
+    match published_at {
+        Some(published_at) => {
+            println!("Outbox entry relayed to Kafka topic {DEMO_TOPIC} at {published_at}");
+            println!();
+            println!("Entry details:");
+            let entries = outbox::fetch_all(&conn).expect("failed to read outbox entries");
+            let entry = entries
+                .into_iter()
+                .find(|e| e.id == entry_id)
+                .expect("just-relayed entry must still exist");
+            let pretty_payload = rusty_json::from_str::<rusty_json::Value>(&entry.payload)
+                .ok()
+                .and_then(|value| {
+                    rusty_json::to_string_with_formatter(
+                        &value,
+                        rusty_json::PrettyFormatter::with_indent_width(4),
+                    )
+                    .ok()
+                })
+                .unwrap_or(entry.payload);
+            println!("  id          : {}", entry.id);
+            println!("  event_type  : {}", entry.event_type);
+            println!("  topic       : {}", entry.topic);
+            println!("  payload     : {pretty_payload}");
+            println!("  created_at  : {}", entry.created_at);
+            println!(
+                "  published_at: {}",
+                entry.published_at.as_deref().unwrap_or("None")
+            );
+        }
+        None => {
+            println!("ERROR: Entry id={entry_id} was not relayed within 10 seconds.");
+            println!("Check that Kafka is accessible at: {bootstrap_servers}");
+            std::process::exit(1);
+        }
+    }
+
+    println!();
+    println!("Demo complete.");
 }
