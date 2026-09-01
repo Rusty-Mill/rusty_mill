@@ -7,7 +7,7 @@
 
 use clap::Parser;
 use rusty_meshed_cli::app::{Cli, Command};
-use rusty_meshed_cli::{health, lineage, metrics};
+use rusty_meshed_cli::{health, lineage, metrics, slo};
 use rusty_meshed_registry::AppState;
 
 fn open_registry_connection(db_path: &str) -> Result<rusty_sqlite::rusqlite::Connection, String> {
@@ -71,6 +71,21 @@ async fn main() {
                 format,
             )
             .await
+        }
+        Command::Slo {
+            product,
+            format,
+            registry_url: _,
+            bootstrap_servers,
+        } => {
+            let conn = match open_registry_connection(&config.registry_db_path) {
+                Ok(conn) => conn,
+                Err(err) => {
+                    eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            slo::run(&conn, &bootstrap_servers, &product, format).await
         }
     };
 

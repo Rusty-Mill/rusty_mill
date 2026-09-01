@@ -32,6 +32,14 @@ pub fn yellow(text: &str) -> String {
     sgr(33, text)
 }
 
+pub fn green(text: &str) -> String {
+    sgr(32, text)
+}
+
+pub fn dim(text: &str) -> String {
+    sgr(2, text)
+}
+
 pub fn bold(text: &str) -> String {
     sgr(1, text)
 }

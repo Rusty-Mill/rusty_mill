@@ -1,15 +1,13 @@
 //! The `meshed` command-line surface -- the Rust port of
-//! `meshed.cli.app`'s Typer application factory (CLI-001).
-//!
-//! `slo` isn't registered here yet: `meshed.cli.commands.slo` publishes
-//! SLO-violation events via `SLOViolationPublisher`, which needs a
-//! Kafka `Produce` request `rusty_kafka` doesn't implement (see that
-//! crate's own module doc, and `rusty-meshed-observability::slo`'s).
-//! `health`/`lineage`/`metrics` need no such thing -- they only read
-//! (SQLite queries, `ListOffsets`/`OffsetFetch` via
-//! `rusty-meshed-observability::MetricsCollector`) -- so this pass
-//! registers those three and stops there rather than shipping a `slo`
-//! subcommand that can only ever fail to publish.
+//! `meshed.cli.app`'s Typer application factory (CLI-001), now
+//! registering all 4 of the source's subcommands: `health`/`lineage`/
+//! `metrics`/`slo`. `slo` was deferred through an earlier pass since
+//! `meshed.cli.commands.slo` publishes SLO-violation events via
+//! `SLOViolationPublisher`, which needed a Kafka `Produce` request
+//! `rusty_kafka` didn't implement yet at the time (see that crate's own
+//! module doc, and `rusty-meshed-observability::slo`'s) -- that landed
+//! since (GOV-047..049), so `slo` (CLI-026..042) is registered here now
+//! too. See [`crate::slo`]'s own module doc for the command's behavior.
 
 use crate::format::OutputFormat;
 use clap::{Parser, Subcommand};
@@ -54,6 +52,20 @@ pub enum Command {
         #[arg(short, long, value_enum, default_value = "table")]
         format: OutputFormat,
     },
+    /// Show SLO compliance status for a data product's output ports.
+    Slo {
+        /// Data product name to inspect
+        product: String,
+        /// Output format: table or json
+        #[arg(short, long, value_enum, default_value = "table")]
+        format: OutputFormat,
+        /// Registry API base URL (unused in v1; reserved)
+        #[arg(long, default_value = "http://localhost:8000")]
+        registry_url: String,
+        /// Kafka bootstrap servers
+        #[arg(short = 'b', long, default_value = "localhost:9092")]
+        bootstrap_servers: String,
+    },
 }
 
 #[cfg(test)]
@@ -67,6 +79,36 @@ mod tests {
         assert!(help.contains("health"));
         assert!(help.contains("lineage"));
         assert!(help.contains("metrics"));
+        assert!(help.contains("slo"));
+    }
+
+    #[test]
+    fn slo_defaults_match_the_source() {
+        let cli = Cli::try_parse_from(["meshed", "slo", "orders"]).unwrap();
+        let Command::Slo {
+            format,
+            registry_url,
+            bootstrap_servers,
+            ..
+        } = cli.command
+        else {
+            panic!("expected Slo");
+        };
+        assert_eq!(format, OutputFormat::Table);
+        assert_eq!(registry_url, "http://localhost:8000");
+        assert_eq!(bootstrap_servers, "localhost:9092");
+    }
+
+    #[test]
+    fn slo_accepts_the_short_bootstrap_servers_flag() {
+        let cli = Cli::try_parse_from(["meshed", "slo", "orders", "-b", "broker:9092"]).unwrap();
+        let Command::Slo {
+            bootstrap_servers, ..
+        } = cli.command
+        else {
+            panic!("expected Slo");
+        };
+        assert_eq!(bootstrap_servers, "broker:9092");
     }
 
     #[test]
