@@ -2479,6 +2479,11 @@ async fn admin_reset_client_spend_is_404_for_a_client_with_no_configured_budget(
 /// A unique SQLite file path, guaranteed empty even if a prior test run
 /// left one behind -- same rationale as `unique_env_var`, for
 /// `[persistence]`-backed tests.
+///
+/// Callers splice the result into a TOML config with `{:?}` rather than
+/// their own quotes: a TOML basic string reads a backslash as an escape, so
+/// a Windows temp path (`C:\Users\...`) goes in as `\U`, which TOML wants
+/// eight hex digits after. `Debug` for `str` escapes it correctly.
 fn unique_temp_db_path(label: &str) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -2533,7 +2538,7 @@ async fn admin_client_usage_history_reports_a_dispatched_requests_usage() {
         requests_per_minute = 60
 
         [persistence]
-        sqlite_path = "{db_path}"
+        sqlite_path = {db_path:?}
         "#,
         server.uri()
     );
