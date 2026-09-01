@@ -1028,6 +1028,25 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   itself (pitch's own magnitude) is unchanged, still uncalibrated. 2 new
   tests pin the exact expected angular velocity in closed form; all
   pre-existing tests pass unchanged.
+- Diagonal dodge faster than an axis-aligned one (`RB-PHYSICS-001-FR-072`)
+  — `RB-PHYSICS-001-FR-059`'s own Non-goals had already found and flagged
+  this gap: this port summed each dodge axis' own full-strength `(pitch,
+  roll)` contribution independently, so a diagonal dodge came out
+  `sqrt(2)`-ish times faster than an axis-aligned one, unlike real Rocket
+  League. Fetching RocketSim's own `Car.cpp` (`_UpdateDoubleJumpOrFlip`)
+  confirmed the real mechanism: `dodgeDir = btVector3(-pitch, yaw + roll,
+  0).safeNormalized()`, normalized to unit length before any further
+  speed-based scaling — a pure geometric operation this port's own model
+  represents exactly, unlike a wheeled-vehicle model or a continuous-
+  torque timing state. Added `drive::normalize_dodge_direction`, wired
+  into both the ground-dodge and wall-jump-dodge code paths — the
+  per-axis `DODGE_DEADZONE` trigger and `dodge_pitch_is_backward`'s sign
+  check still read raw stick values; only the scaled magnitude changes.
+  This port's own sign convention is kept and yaw isn't folded in, both
+  already-documented, separate simplifications. Updated the two existing
+  diagonal-dodge tests to assert the corrected magnitude and added 3 new
+  tests for `normalize_dodge_direction` directly; all pre-existing tests
+  pass unchanged, bringing the crate to 317.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
