@@ -6,6 +6,41 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Hard caps on ball linear/angular speed
+**2026-09-01** · PR pending · commit pending
+
+- **The ball had no linear or angular speed cap of any kind** — unlike the
+  car, which has had a hard angular-speed ceiling since
+  `RB-PHYSICS-001-FR-057`, the ball's `RigidBody.linear_damping`/
+  `angular_damping` both default to `0.0` and nothing else ever bounded
+  its velocity.
+- **Fetched RocketSim's own `RLConst.h` and `Ball.cpp`** (matching
+  `RB-PHYSICS-001-FR-057`/`FR-060`'s own method) and found two confirmed
+  real hard caps: `BALL_MAX_SPEED = 6000.f` and `BALL_MAX_ANG_SPEED =
+  6.f`, enforced via a hard clamp after collision resolution, at the end
+  of the physics tick.
+- **Added `world::BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` and a new
+  `world::clamp_ball_velocity`**, generalizing `drive::clamp_angular_speed`'s
+  own shape to both linear and angular speed, wired into
+  `PhysicsWorld::step` right after this step's contact resolution —
+  matching real RocketSim's own placement more precisely than the car's
+  own earlier-in-pipeline clamp.
+- **Explicitly not adopted**: `BALL_DRAG = 0.03f`, since real RocketSim
+  sets it once at ball construction as a per-match mutator-config
+  default, not a hardcoded system invariant like the two speed caps —
+  this port's own ball-construction API takes no opinion on that default,
+  and changing it is a separate, deliberate design decision left for a
+  future requirement.
+- 4 new tests (2 unit tests of `clamp_ball_velocity` directly, one each
+  for linear and angular; 1 integration test through `PhysicsWorld::step`;
+  1 no-op-below-both-caps test). All pre-existing tests pass unchanged —
+  no existing test ever set the ball's speed or angular speed anywhere
+  near either cap, an explicit zero-regression-risk property confirmed by
+  inspection before implementation. 306 total in `rb_physics_bullet` (+4
+  over FR-060's 302).
+
+---
+
 ## Landing auto-orientation vs. real auto-flip/auto-roll (audit finding)
 **2026-09-01** · [#127](https://github.com/baileyrd/rusty_bullet/pull/127) · `6348835`
 

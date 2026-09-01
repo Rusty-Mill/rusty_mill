@@ -816,6 +816,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   Questions bullet, `FR-057`'s own Non-goals bullet, and the `drive`
   module's doc comments accordingly. Zero production code changed; no new
   tests.
+- Missing hard caps on the ball's linear/angular speed
+  (`RB-PHYSICS-001-FR-061`) — the ball had no speed cap of any kind,
+  unlike the car (`drive::MAX_CAR_ANGULAR_SPEED`, since FR-057). Fetched
+  RocketSim's own `RLConst.h`/`Ball.cpp` (matching FR-057/FR-060's own
+  method) and found two confirmed real hard caps: `BALL_MAX_SPEED =
+  6000.f` and `BALL_MAX_ANG_SPEED = 6.f`, enforced by a hard clamp after
+  collision resolution. Added `world::BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED`
+  and `world::clamp_ball_velocity`, wired into `PhysicsWorld::step` right
+  after this step's contact resolution — matching real RocketSim's own
+  placement more precisely than the car's own earlier-in-pipeline clamp.
+  `BALL_DRAG = 0.03f` deliberately not adopted, since real RocketSim sets
+  it as a per-match mutator-config default at ball construction, not a
+  hardcoded system invariant. 4 new tests; all pre-existing tests pass
+  unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
