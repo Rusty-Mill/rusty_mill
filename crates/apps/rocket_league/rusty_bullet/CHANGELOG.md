@@ -749,6 +749,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   car/ball sizes vs. the standard arena's own bound sizes) and documented
   it as a Non-goals item rather than fixing it. 2 new tests; all
   pre-existing tests pass unchanged.
+- `drive::BOOST_ACCELERATION`'s missing ground/air split
+  (`RB-PHYSICS-001-FR-056`) — this port's own single flat boost
+  acceleration constant, and its own doc comments' explicit claim that
+  boost "works identically airborne", were both found wrong by fetching
+  RocketSim's own `RLConst.h` directly: the reference defines a
+  distinctly higher `BOOST_ACCEL_AIR` (`3175/3` ≈ 1058.333) than
+  `BOOST_ACCEL_GROUND` (`2975/3` ≈ 991.667, exactly matching this port's
+  prior value) — a genuine split this port didn't model, understating
+  every airborne boost by about 6.5%. Split into
+  `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR`, wired
+  `apply_driven_forces`'s existing `on_ground` parameter to select
+  between them, and corrected every doc comment claiming the two were
+  identical. 1 new test; all pre-existing tests pass unchanged.
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

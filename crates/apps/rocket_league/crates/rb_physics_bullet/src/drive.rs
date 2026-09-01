@@ -4,11 +4,18 @@
 //! increment. Throttle, steering, handbrake, and jump are gated on the car
 //! actually touching the ground (a free-floating box has no wheels to
 //! grip, lock, or push off of, so airborne input does nothing for any of
-//! them here); boost is not — it's a rocket, not an engine, so it works
-//! identically grounded or airborne, the same way it does in real Rocket
-//! League. Air control is the mirror image: gated on the car *not*
-//! touching the ground (real air control needs no wheels at all — it's
-//! pure torque, so it would be redundant with steering while grounded).
+//! them here); boost is not gated the same way — it's a rocket, not an
+//! engine, so it still fires with no ground contact at all, unlike every
+//! grounded-only input above. It isn't identical airborne, though: since
+//! `RB-PHYSICS-001-FR-056`, its own acceleration magnitude is higher
+//! airborne than grounded (`BOOST_ACCELERATION_AIR` vs
+//! `BOOST_ACCELERATION_GROUND`), matching real Rocket League's own real
+//! split — a claim this doc comment used to get wrong by rounding "not
+//! gated on ground contact" up to "identical everywhere". Air control is
+//! the mirror image of the *gating*, not the magnitude question above:
+//! gated on the car *not* touching the ground (real air control needs no
+//! wheels at all — it's pure torque, so it would be redundant with
+//! steering while grounded).
 //!
 //! Handbrake is modeled as a temporary ground-friction reduction rather
 //! than a separate lateral-slip system: this port has no per-wheel tire
@@ -179,7 +186,10 @@
 //! RLBot wiki's independently-converging "Useful Game Values" — see
 //! `RB-PHYSICS-001-FR-031`'s audit for the full source-by-source
 //! breakdown). `MAX_CAR_SPEED`, `UNBOOSTED_MAX_CAR_SPEED`, `MAX_BOOST`,
-//! `BOOST_ACCELERATION`, `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`, and
+//! `BOOST_ACCELERATION_GROUND`/`BOOST_ACCELERATION_AIR` (since
+//! `RB-PHYSICS-001-FR-056` split the single flat `BOOST_ACCELERATION` this
+//! bullet used to name into the two distinct values the same sources
+//! actually cite), `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`, and
 //! `JUMP_HOLD_ACCELERATION` are commonly-cited, multi-source-confirmed
 //! community-reverse-engineered approximations (the same body of public
 //! research `PhysicsWorld::new`'s gravity constant comes from);
@@ -242,10 +252,32 @@ const THROTTLE_ACCELERATION: f32 = 1600.0;
 /// Rocket League value.
 const STEER_TORQUE: f32 = 1_500_000.0;
 
-/// Commonly-cited approximate boost acceleration (uu/s^2), a flat
-/// constant (unlike throttle, boost doesn't taper with speed in real
-/// Rocket League either).
-const BOOST_ACCELERATION: f32 = 991.667;
+/// Boost acceleration while grounded (uu/s^2) — unlike throttle, boost
+/// doesn't taper with speed in real Rocket League, so this (like
+/// `BOOST_ACCELERATION_AIR` below) is a flat constant, not a curve.
+/// Confirmed exact against RocketSim's own `RLConst.h`
+/// (`BOOST_ACCEL_GROUND = 2975.f / 3.f`, fetched directly during
+/// `RB-PHYSICS-001-FR-056`) — written as the same fraction the reference
+/// uses, matching `JUMP_SPEED`'s own precedent for an exact fractional
+/// source value, rather than that fraction's earlier `991.667` decimal
+/// approximation (the two are equal to float precision; this is a
+/// clarity change, not a value change).
+const BOOST_ACCELERATION_GROUND: f32 = 2975.0 / 3.0;
+
+/// Boost acceleration while airborne (uu/s^2) — genuinely different from
+/// `BOOST_ACCELERATION_GROUND`, not a rounding of the same number.
+/// `RB-PHYSICS-001-FR-056` fetched RocketSim's own `RLConst.h` directly
+/// and found `BOOST_ACCEL_AIR = 3175.f / 3.f`, distinctly higher than the
+/// grounded value — a split this port's own earlier single flat
+/// `BOOST_ACCELERATION` constant didn't model at all (every airborne
+/// boost this crate ever applied used the *grounded* number, understating
+/// real airborne boost strength by about 6.5%). `apply_driven_forces`
+/// now selects between the two by `on_ground`, matching the reference
+/// split exactly — a genuine behavioral fix, not just a doc correction,
+/// found via the same "fetch primary source directly" method this
+/// project already applies throughout (see `RB-PHYSICS-001-FR-031`'s own
+/// audit and every reference-validation FR since).
+const BOOST_ACCELERATION_AIR: f32 = 3175.0 / 3.0;
 
 /// Commonly-cited full boost tank size, in the same units `ControllerInput`
 /// and `CarState::boost_amount` use.
@@ -696,7 +728,17 @@ pub fn apply_driven_forces(
     if input.boost && *boost_amount > 0.0 {
         let forward_speed = car.linear_velocity.dot(&forward);
         if forward_speed < MAX_CAR_SPEED {
-            car.apply_central_force(forward * (BOOST_ACCELERATION * car.mass()));
+            // RB-PHYSICS-001-FR-056: real Rocket League's own boost
+            // acceleration is genuinely higher airborne than grounded —
+            // `on_ground` gates which magnitude applies, not whether
+            // boost applies at all (it always does, regardless of ground
+            // contact, per this function's own doc comment above).
+            let boost_acceleration = if on_ground {
+                BOOST_ACCELERATION_GROUND
+            } else {
+                BOOST_ACCELERATION_AIR
+            };
+            car.apply_central_force(forward * (boost_acceleration * car.mass()));
         }
         // Held boost drains the tank even when the force above didn't
         // apply (e.g. already at MAX_CAR_SPEED, or pushing into a wall) —
@@ -1077,6 +1119,53 @@ mod tests {
             c.linear_velocity.x > 0.0,
             "expected boost to accelerate an airborne car, got {}",
             c.linear_velocity.x
+        );
+    }
+
+    #[test]
+    fn boost_accelerates_an_airborne_car_faster_than_a_grounded_one() {
+        // RB-PHYSICS-001-FR-056: real Rocket League's own boost
+        // acceleration is genuinely higher airborne than grounded
+        // (RocketSim's own RLConst.h: BOOST_ACCEL_AIR = 3175/3 vs
+        // BOOST_ACCEL_GROUND = 2975/3) -- this port's own earlier single
+        // flat BOOST_ACCELERATION constant collapsed both into the
+        // grounded number, understating airborne boost. One step's worth
+        // of full boost from a dead stop produces a velocity delta of
+        // exactly `boost_acceleration * dt` regardless of mass (force is
+        // `boost_acceleration * mass`, so it cancels on integration),
+        // making the exact ratio between the two directly checkable.
+        let mut grounded = car();
+        let mut grounded_boost = MAX_BOOST;
+        step_with_input(
+            &mut grounded,
+            &full_boost(),
+            true,
+            &mut grounded_boost,
+            1.0 / 60.0,
+        );
+
+        let mut airborne = car();
+        let mut airborne_boost = MAX_BOOST;
+        step_with_input(
+            &mut airborne,
+            &full_boost(),
+            false,
+            &mut airborne_boost,
+            1.0 / 60.0,
+        );
+
+        assert!(
+            airborne.linear_velocity.x > grounded.linear_velocity.x,
+            "expected airborne boost ({}) to accelerate faster than grounded boost ({})",
+            airborne.linear_velocity.x,
+            grounded.linear_velocity.x
+        );
+        let ratio = airborne.linear_velocity.x / grounded.linear_velocity.x;
+        let expected_ratio = BOOST_ACCELERATION_AIR / BOOST_ACCELERATION_GROUND;
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-4,
+            "expected the airborne/grounded ratio to match RocketSim's own \
+             BOOST_ACCEL_AIR/BOOST_ACCEL_GROUND ratio ({expected_ratio}), got {ratio}"
         );
     }
 
