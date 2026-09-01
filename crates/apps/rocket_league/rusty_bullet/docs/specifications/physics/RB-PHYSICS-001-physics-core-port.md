@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.69.0
+- Version: 0.70.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -783,6 +783,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   touch re-arms the double jump," a documented simplification of real
   Rocket League's actual flip-duration window. No new physics constants —
   this is a state-flag-gated zeroing action, not a magnitude to calibrate.
+  `RB-PHYSICS-001-FR-070` later fetched RocketSim's real `Car.cpp` and found
+  this simplification runs deeper than the flip-duration window alone: real
+  Rocket League's own flip-cancel mechanism (continuous pitch-stick input,
+  proportional, pitch-axis-only) differs substantially from this
+  jump-press-triggered, all-axis, binary one.
 - `RB-PHYSICS-001-FR-017` (wall-jump dodge, implemented): the wall jump's
   own fresh press (see FR-013) now checks `ControllerInput.pitch`/`roll`
   the same way the ground double jump's press does (FR-014): at or above
@@ -4502,6 +4507,70 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`/`FR-065`/`FR-066`/`FR-067`'s
     own precedent); all 314 of `rb_physics_bullet`'s pre-existing tests
     (as of `FR-068`) pass unchanged, confirming zero behavioral change.
+- `RB-PHYSICS-001-FR-070` (real flip-cancel is continuous, pitch-stick-driven,
+  and pitch-axis-only, not jump-press-triggered and all-axis — audit
+  finding, documentation only): `RB-PHYSICS-001-FR-069`'s own fetch of
+  `_UpdateAirTorque` surfaced a `pitchTorqueScale` factor scaling only the
+  pitch component of air-control torque, flagged there as "an additional
+  speed- or state-dependent scale this requirement's own fetch surfaced but
+  didn't fully characterize" and scoped out. This requirement closes that
+  thread by reading the rest of `_UpdateAirTorque` and the adjacent
+  "Flip cancel check" block in `_UpdateDoubleJumpOrFlip`'s own call site.
+  1. **Fetched RocketSim's own `Car.cpp`** (`_UpdateAirTorque`, matching
+     `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/`FR-065`/`FR-066`/`FR-067`/
+     `FR-068`/`FR-069`'s own real-implementation-file method) and found real
+     Rocket League's actual flip-cancel mechanism, which this port's own
+     `drive::apply_driven_forces` flip-cancel branch (`RB-PHYSICS-001-FR-016`)
+     had labeled "matching real Rocket League" without having fetched the
+     real mechanism to check: while still flipping (`isFlipping`), if the
+     flip's own stored pitch-torque component (`flipRelTorque.y()`) is
+     nonzero and `controls.pitch` is held in that same sign, real Rocket
+     League sets `pitchScale = 1 - abs(controls.pitch)` and multiplies only
+     `relDodgeTorque.y()` (the pitch-axis component) by it, every tick, for
+     as long as the flip continues — a continuous, proportional, pitch-only
+     reduction driven by *holding* the stick, not a discrete jump-press
+     trigger. A sideways (roll-only) dodge has no pitch-torque component
+     (`flipRelTorque.y() == 0`) at all, so this check never engages for
+     it — real Rocket League cannot pitch-cancel a purely sideways dodge's
+     spin.
+  2. **Confirmed this port's own flip-cancel (`FR-016`) diverges on three
+     independent axes from the real mechanism**: trigger (a fresh
+     `ControllerInput.jump` press vs. continuously-held pitch input),
+     magnitude (an outright zero of `RigidBody.angular_velocity` vs. a
+     proportional `1 - abs(pitch)` scale applied only while pitch stays
+     held), and scope (every dodge direction alike vs. only a dodge with a
+     nonzero pitch-torque component).
+  3. **Corrected the `drive` module's flip-cancel doc comment**, removing
+     the inaccurate "matching real Rocket League" claim and replacing it
+     with the confirmed real mechanism and why this port's simplification
+     isn't upgraded to match it. Also added a forward citation from
+     `RB-PHYSICS-001-FR-016`'s own entry.
+  - **Non-goals (this requirement).** Does not implement real flip-cancel's
+    actual mechanism: this port's dodge is `RB-PHYSICS-001-FR-069`'s own
+    already-confirmed single flat angular-velocity kick, with no per-axis
+    torque split to partially, continuously reduce — the same architecture
+    gap `FR-069` found for the dodge's own spin applies identically here.
+    Reproducing the real trigger shape (continuous stick-hold rather than a
+    discrete press) and the real per-axis scope (pitch-only, direction-
+    dependent) would both need the same continuous per-axis torque and
+    elapsed-flip-time state `RB-PHYSICS-001-FR-059`'s own Non-goals already
+    flagged as out of scope for the dodge itself. Does not change
+    `apply_driven_forces`'s flip-cancel behavior (still a jump-press-
+    triggered, all-axis, outright zero). Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** The `drive` module's flip-cancel doc comment no
+    longer claims to match real Rocket League's own mechanism; it instead
+    states the confirmed real mechanism (continuous, pitch-stick-driven,
+    pitch-axis-only, direction-restricted) and explains why this port's
+    jump-press/all-axis/binary simplification remains as-is.
+    `RB-PHYSICS-001-FR-016`'s own entry carries a forward citation to this
+    requirement.
+  - **Verification plan.** No new tests (documentation-only, matching
+    `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`/`FR-065`/`FR-066`/`FR-067`/
+    `FR-069`'s own precedent); all 314 of `rb_physics_bullet`'s pre-existing
+    tests (as of `FR-069`) pass unchanged, confirming zero behavioral
+    change.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5986,6 +6055,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.70.0 (2026-09-01): FR-070 added and implemented (real flip-cancel is
+  continuous, pitch-stick-driven, and pitch-axis-only, not
+  jump-press-triggered and all-axis — audit finding, documentation only) —
+  `FR-069`'s own fetch of `_UpdateAirTorque` surfaced a `pitchTorqueScale`
+  factor scoped out as "an additional speed- or state-dependent scale...
+  didn't fully characterize." Fetched RocketSim's own `Car.cpp` again to
+  close that thread and found real Rocket League's flip-cancel is driven by
+  continuously *holding* pitch in the same direction as the flip's own
+  pitch-torque component, scaling only that pitch-axis component by
+  `1 - abs(controls.pitch)` every tick — not this port's own jump-press
+  trigger that zeros every axis outright. A sideways (roll-only) dodge has
+  no pitch-torque component, so real Rocket League can't pitch-cancel it at
+  all. Corrected the `drive` module's flip-cancel doc comment (which had
+  inaccurately claimed to match real Rocket League) and added a forward
+  citation from `FR-016`'s own entry. Not adopted: this port's dodge has no
+  per-axis torque split to partially cancel (`FR-069`'s own architecture
+  gap applies identically here), and reproducing the real continuous-hold
+  trigger and pitch-only scope would need the same per-axis torque and
+  elapsed-flip-time state `FR-059`'s own Non-goals already flagged as out
+  of scope. Zero production behavior changed, no new tests; all 314
+  pre-existing tests pass unchanged.
 - 0.69.0 (2026-09-01): FR-069 added and implemented (real dodge spin is a
   continuous per-axis torque over a fixed window, not an instantaneous
   kick — audit finding, documentation only) — `FR-031`'s own original
