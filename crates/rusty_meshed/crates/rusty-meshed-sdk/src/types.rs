@@ -99,9 +99,13 @@ impl<E> std::fmt::Debug for OutputPortSpec<E> {
 mod tests {
     use super::*;
 
-    /// Stands in for a real event type until `BaseEvent` lands (see
-    /// the crate's `SDK-001..008` issue) -- `OutputPortSpec<E>` doesn't
-    /// require anything of `E` yet beyond being a type.
+    /// A stand-in event type -- `OutputPortSpec<E>` doesn't require
+    /// anything of `E` beyond being a type. `rusty_meshed_core::BaseEvent`
+    /// (SDK-001..008) is the real lineage-contract type a concrete
+    /// domain event would embed, but nothing here binds `E` to it,
+    /// since domain events (`rusty-meshed-domains`, DOM-002 onward)
+    /// haven't landed yet -- see `BaseEvent`'s own module doc for that
+    /// open design question.
     struct SampleEvent;
 
     #[test]

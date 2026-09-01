@@ -4,12 +4,15 @@
 //! registry DB path/base URL, default topic partitions/replication/
 //! retention).
 //!
-//! See `../../capability-manifest.md` (rows XFM-041..049, SDK-081..086)
-//! for the source capabilities this crate covers.
+//! See `../../capability-manifest.md` (rows XFM-041..049, SDK-081..086,
+//! SDK-001..008/DOM-001) for the source capabilities this crate
+//! covers.
 
 use rusty_err::Error;
 
+mod base_event;
 mod event_type;
+pub use base_event::{AvroDecodeError, BaseEvent};
 pub use event_type::EventType;
 
 /// Environment-variable prefix every [`PlatformConfig`] field is read

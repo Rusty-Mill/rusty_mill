@@ -9,5 +9,7 @@ publish = false
 
 [dependencies]
 rusty_err = { path = "../../../rusty_err" }
+rusty_json = { path = "../../../rusty_json" }
+rusty_uuid = { path = "../../../rusty_uuid" }
 
 [dev-dependencies]
