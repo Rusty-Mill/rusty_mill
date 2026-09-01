@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.65.0
+- Version: 0.66.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4247,6 +4247,65 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`'s own precedent); all 312 of
     `rb_physics_bullet`'s pre-existing tests (as of `FR-064`) pass
     unchanged, confirming zero behavioral change.
+- `RB-PHYSICS-001-FR-066` (real handbrake friction reduction is
+  anisotropic, not a single uniform multiplier — audit finding,
+  documentation only): `drive::HANDBRAKE_FRICTION_MULTIPLIER` had no
+  public reference at all; this requirement fetched RocketSim's real
+  `Car.cpp` directly to check, continuing the same `_UpdateWheels`
+  investigation `RB-PHYSICS-001-FR-065` started.
+  1. **Fetched RocketSim's own `Car.cpp`** (`_UpdateWheels`, matching
+     `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/`FR-065`'s own
+     real-implementation-file method) and found real Rocket League's
+     handbrake friction reduction is genuinely anisotropic: two separate
+     confirmed real curves, `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE`
+     (`RLConst.h`, a constant `0.1` factor at every speed) and
+     `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill,
+     `0.9` at and above 1 uu/s — effectively a near-constant, barely-
+     reduced `0.9` for any real driving speed), are applied to lateral
+     and longitudinal tire friction independently, not one shared
+     multiplier applied to both.
+  2. **Found a striking coincidence that is not a confirmation.** This
+     port's own pre-existing `HANDBRAKE_FRICTION_MULTIPLIER = 0.1`
+     happens to match the real *lateral-only* factor exactly — but this
+     port applies that same `0.1` to its own single isotropic
+     `RigidBody.friction` scalar, which the ground-contact solver reads
+     identically for every direction. Real Rocket League's own handbrake
+     drift keeps a car's forward/backward grip almost intact (`x0.9`)
+     while cutting sideways grip to a tenth (`x0.1`) — this port's own
+     uniform `0.1` wrongly crushes longitudinal grip to a tenth too,
+     understating real forward-momentum retention during a drift.
+  3. **Corrected `drive::HANDBRAKE_FRICTION_MULTIPLIER`'s own doc
+     comment**, the module doc comment's "Handbrake" paragraph, and the
+     "commonly-cited constants" paragraph to state this finding directly.
+  - **Non-goals (this requirement).** Does not implement anisotropic
+    friction — this port's `solver::friction_directions` already computes
+    two separate tangent directions per contact (since
+    `RB-PHYSICS-001-FR-049`), but both directions currently read the same
+    single combined-friction scalar when their row limits are computed;
+    giving handbrake a genuinely different lateral-vs-longitudinal factor
+    would mean threading a second, direction-specific friction
+    coefficient through every one of `solver.rs`'s several row-limit
+    call sites (`resolve_contacts`, `resolve_contacts_between`,
+    `resolve_static_manifolds`, `resolve_dynamic_manifolds`,
+    `resolve_manifolds`) plus a way for those call sites to know a
+    specific body is currently handbraking — a substantially larger
+    architecture change than a single documentation-audit requirement
+    should take on, the same category `RB-PHYSICS-001-FR-063`/`FR-065`
+    already established. Does not change
+    `HANDBRAKE_FRICTION_MULTIPLIER`'s own value — its coincidental match
+    to the real lateral factor is not grounds to keep it as-is or change
+    it without also fixing the longitudinal side, which needs the
+    architecture change above. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `drive::HANDBRAKE_FRICTION_MULTIPLIER`'s own
+    doc comment states both confirmed real curves, the coincidental
+    (not confirming) match to the real lateral factor, and why the
+    anisotropic model isn't adopted.
+  - **Verification plan.** No new tests (documentation-only, matching
+    `RB-PHYSICS-001-FR-044`/`FR-060`/`FR-063`/`FR-065`'s own precedent);
+    all 312 of `rb_physics_bullet`'s pre-existing tests (as of `FR-065`)
+    pass unchanged, confirming zero behavioral change.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -5608,17 +5667,23 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   own direction-normalization for diagonal dodges and its
   continuous-torque-over-time spin model, both still unaddressed). That
   base magnitude is still fully in scope for this bullet. This paragraph
-  had gone stale in three places, corrected here: `HANDBRAKE_FRICTION_MULTIPLIER`,
-  `WALL_JUMP_HORIZONTAL_SPEED`, `DODGE_DEADZONE`, and `DODGE_ANGULAR_SPEED`
+  had gone stale in several places, corrected here:
+  `WALL_JUMP_HORIZONTAL_SPEED` and `DODGE_DEADZONE`
   still have no public reference at all (unlike gravity, max speed, the
-  boost constants, or `JUMP_SPEED`), so any of them may be off by a large
-  factor, not just imprecise. `STEER_TORQUE` and `AIR_CONTROL_TORQUE` are
-  a different case, not "no reference at all": `RB-PHYSICS-001-FR-065`
-  and `RB-PHYSICS-001-FR-057` respectively found real reference values for
-  each, but neither transfers onto this port's own model (a
+  boost constants, or `JUMP_SPEED`), so either may be off by a large
+  factor, not just imprecise. `STEER_TORQUE`, `AIR_CONTROL_TORQUE`, and
+  `HANDBRAKE_FRICTION_MULTIPLIER` are a different case, not "no reference
+  at all": `RB-PHYSICS-001-FR-065`, `RB-PHYSICS-001-FR-057`, and
+  `RB-PHYSICS-001-FR-066` respectively found real reference values for
+  each, but none transfers onto this port's own model (a
   wheeled-vehicle raycast/tire-slip system for real steering; a
-  car-mass/inertia-calibrated torque for real air control) — see each
-  requirement's own entry for the full finding. `JUMP_HOLD_MAX_DURATION`/
+  car-mass/inertia-calibrated torque for real air control; an
+  anisotropic lateral-vs-longitudinal friction split for real handbrake)
+  — see each requirement's own entry for the full finding.
+  `DODGE_ANGULAR_SPEED` (still uncalibrated, no public reference of its
+  own — its numeric equality to `MAX_CAR_ANGULAR_SPEED` is a documented
+  coincidence, see that constant's own doc comment) remains fully in
+  scope for this bullet. `JUMP_HOLD_MAX_DURATION`/
   `JUMP_HOLD_ACCELERATION` are no longer open at all — `RB-PHYSICS-001-FR-031`'s
   own audit already confirmed both exact against real source, this
   paragraph simply never updated when that landed. `LANDING_AUTO_UPRIGHT_TORQUE`
@@ -5721,6 +5786,31 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.66.0 (2026-09-01): FR-066 added and implemented (real handbrake
+  friction reduction is anisotropic, not a single uniform multiplier —
+  audit finding, documentation only) — `drive::HANDBRAKE_FRICTION_MULTIPLIER`
+  had no public reference at all. Fetched RocketSim's own `Car.cpp`
+  (`_UpdateWheels`, continuing FR-065's own investigation) and found real
+  Rocket League's handbrake applies two separate confirmed real curves,
+  `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE` (a constant `0.1`) and
+  `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill, `0.9`
+  at real driving speeds), to lateral and longitudinal tire friction
+  independently — not one shared multiplier. This port's own pre-existing
+  `HANDBRAKE_FRICTION_MULTIPLIER = 0.1` happens to match the real
+  lateral-only factor exactly, a striking coincidence, not a confirmation:
+  applied to this port's single isotropic friction scalar, it also wrongly
+  crushes longitudinal grip to a tenth, where real Rocket League keeps it
+  near `0.9`, understating real forward-momentum retention during a
+  drift. Corrected `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc comment and
+  the module doc's "Handbrake" and "commonly-cited constants" paragraphs;
+  not adopted as a fix, since `solver::friction_directions`' own two
+  tangent rows currently share one combined-friction scalar, and giving
+  handbrake a genuinely different lateral-vs-longitudinal factor would
+  mean threading a second friction coefficient through every one of
+  `solver.rs`'s several row-limit call sites plus a way to know which
+  body is handbraking — the same architecture-mismatch category
+  `FR-063`/`FR-065` already established. Zero production behavior
+  changed, no new tests; all 312 pre-existing tests pass unchanged.
 - 0.65.0 (2026-09-01): FR-065 added and implemented (real steering is a
   wheeled-vehicle raycast model, not a torque, with an inverted
   speed-vs-turning-ability curve — audit finding, documentation only) —

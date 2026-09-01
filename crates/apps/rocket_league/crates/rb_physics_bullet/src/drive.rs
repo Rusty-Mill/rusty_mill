@@ -27,7 +27,12 @@
 //! carry it into a slide instead of gripping the ground and turning
 //! cleanly. Releasing handbrake restores the car's original friction. This
 //! reuses machinery the solver already has rather than inventing a second
-//! grip model.
+//! grip model. Since `RB-PHYSICS-001-FR-066`, real Rocket League's own
+//! handbrake friction reduction is confirmed genuinely anisotropic (a
+//! separate, much milder reduction to forward/backward grip than to
+//! sideways grip) rather than the single uniform multiplier this port
+//! applies to both — see `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc
+//! comment for the full finding and why it isn't adopted.
 //!
 //! Jump is a single, fixed-height vertical impulse fired on the *rising
 //! edge* of `ControllerInput.jump` (a fresh press, not merely "held") while
@@ -243,7 +248,13 @@
 //! `speed_factor` scale-up is confirmed to have the wrong *shape*, not
 //! merely an uncalibrated magnitude — see that requirement's own entry and
 //! `STEER_TORQUE`'s own doc comment for the full finding.
-//! `HANDBRAKE_FRICTION_MULTIPLIER`, `AIR_CONTROL_TORQUE`,
+//! `HANDBRAKE_FRICTION_MULTIPLIER` itself likewise remains an uncalibrated
+//! placeholder, but since `RB-PHYSICS-001-FR-066` its own single uniform
+//! reduction is confirmed to have the wrong *shape* too — real Rocket
+//! League applies a genuinely anisotropic (direction-dependent) reduction,
+//! not this port's one isotropic factor — see that requirement's own
+//! entry and `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc comment for the
+//! full finding. `AIR_CONTROL_TORQUE`,
 //! `WALL_JUMP_HORIZONTAL_SPEED`, and `DODGE_ANGULAR_SPEED`, and
 //! `LANDING_AUTO_UPRIGHT_TORQUE` remain uncalibrated placeholders chosen
 //! only to produce a visibly responsive turn/slide/spin/push-off/flip for
@@ -480,6 +491,37 @@ const BOOST_CONSUMPTION_RATE: f32 = 33.3;
 /// produce a visibly reduced (not zero) grip in tests, not derived from any
 /// measured or documented Rocket League value — this port has no per-wheel
 /// tire model to calibrate a real rear-grip-loss number against.
+///
+/// `RB-PHYSICS-001-FR-066` fetched RocketSim's real `Car.cpp`
+/// (`_UpdateWheels`, matching `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/
+/// `FR-065`'s own real-implementation-file method) and found real Rocket
+/// League's own handbrake friction reduction is genuinely anisotropic, not
+/// a single uniform multiplier: two separate confirmed real curves,
+/// `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE` (`0.1` at every speed — this
+/// value's own coincidental exact match to this port's own `0.1` is
+/// striking but not a confirmation, see below) and
+/// `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill, `0.9` at
+/// and above 1 uu/s — effectively a near-constant, barely-reduced `0.9`
+/// for any real driving speed), are applied to lateral and longitudinal
+/// tire friction independently. Real Rocket League's handbrake drift
+/// keeps a car's forward/backward grip almost intact (`x0.9`) while
+/// cutting sideways grip to a tenth (`x0.1`) — this port's own single
+/// isotropic `RigidBody.friction` scalar, read identically by both of
+/// `solver::friction_directions`' own two tangent rows, has no way to
+/// apply a different factor to each direction without threading a second,
+/// direction-specific friction coefficient through every one of
+/// `solver.rs`'s several row-limit-computation call sites
+/// (`resolve_contacts`, `resolve_contacts_between`,
+/// `resolve_static_manifolds`, `resolve_dynamic_manifolds`,
+/// `resolve_manifolds`) — a substantially larger architecture change than
+/// this finding alone justifies, the same category
+/// `RB-PHYSICS-001-FR-063`/`FR-065` already established. `0.1`'s own
+/// coincidental match to the real lateral-only factor is exactly that: a
+/// coincidence, since this port's uniform `0.1` also (wrongly) crushes
+/// longitudinal grip to a tenth, where real Rocket League keeps it near
+/// `0.9` — this port's own handbrake understates real forward-momentum
+/// retention during a drift. Not adopted as a fix; left for a future,
+/// dedicated requirement.
 const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 
 /// Jump impulse speed (uu/s), applied as an instantaneous vertical

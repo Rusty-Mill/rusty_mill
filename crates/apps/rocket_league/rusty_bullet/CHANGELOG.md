@@ -673,6 +673,31 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   tire-slip friction this port doesn't model, leaving no principled way
   to carry even the curve's shape onto this port's own direct-torque
   model. No new tests; all pre-existing tests pass unchanged.
+- `drive::HANDBRAKE_FRICTION_MULTIPLIER` real-Rocket-League reference
+  finding (`RB-PHYSICS-001-FR-066`) — `HANDBRAKE_FRICTION_MULTIPLIER` had
+  no public reference at all. Fetched RocketSim's own `Car.cpp`
+  (`_UpdateWheels`, continuing FR-065's own investigation) and found real
+  Rocket League's handbrake applies two separate confirmed real curves,
+  `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE` (a constant `0.1`) and
+  `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill, `0.9` at
+  real driving speeds), to lateral and longitudinal tire friction
+  independently — not one shared multiplier. This port's own pre-existing
+  `HANDBRAKE_FRICTION_MULTIPLIER = 0.1` happens to match the real
+  lateral-only factor exactly, a striking coincidence, not a
+  confirmation: applied to this port's single isotropic friction scalar,
+  it also wrongly crushes longitudinal grip to a tenth, where real Rocket
+  League keeps it near `0.9`, understating real forward-momentum
+  retention during a drift. Corrected `HANDBRAKE_FRICTION_MULTIPLIER`'s
+  own doc comment and the module doc's "Handbrake" and "commonly-cited
+  constants" paragraphs; also fixed adjacent stale text in the spec's own
+  Open Questions section. Not adopted as a fix: `solver::friction_directions`'
+  own two tangent rows currently share one combined-friction scalar, and
+  giving handbrake a genuinely different lateral-vs-longitudinal factor
+  would mean threading a second friction coefficient through every one of
+  `solver.rs`'s several row-limit call sites plus a way to know which
+  body is handbraking — the same architecture-mismatch category
+  FR-063/FR-065 already established. No new tests; all pre-existing
+  tests pass unchanged.
 ### Changed
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
