@@ -9,6 +9,7 @@ pub mod contracts;
 pub mod data_products;
 pub mod governance;
 pub mod lineage;
+pub mod metrics;
 pub mod ports;
 pub mod transformation;
 

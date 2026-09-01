@@ -5,14 +5,14 @@
 //! What this covers: app metadata, DB path wiring, the
 //! `create_all`-on-startup step, CORS, and a `get_session`/`get_config`
 //! dependency pair. [`build_router`] mounts `data_products`, `ports`,
-//! `contracts`, `access_grants`, `governance`, `lineage`, and
-//! `transformation` (see `crate::routers`) plus `/openapi.json` and
-//! `/docs`; the remaining two per-resource routers (`metrics`,
-//! `monitor`, REG-006) don't have HTTP handlers of their own yet (see
-//! the tracking issues for REG-110 onward). As each one lands, mount
-//! it the same way via [`crate::http::Router::merge`] --
-//! [`openapi_json`] already reflects whatever the router table
-//! contains, so no separate bookkeeping is needed when that happens.
+//! `contracts`, `access_grants`, `governance`, `lineage`,
+//! `transformation`, and `metrics` (see `crate::routers`) plus
+//! `/openapi.json` and `/docs`; the remaining per-resource router
+//! (`monitor`, REG-006) doesn't have HTTP handlers of its own yet (see
+//! the tracking issues for REG-118 onward). As it lands, mount it the
+//! same way via [`crate::http::Router::merge`] -- [`openapi_json`]
+//! already reflects whatever the router table contains, so no separate
+//! bookkeeping is needed when that happens.
 
 use crate::http::response::Response;
 use crate::http::router::Router;
@@ -157,13 +157,13 @@ window.onload = () => {{
 
 /// Builds the app's route table: the data-products, ports, contracts,
 /// and access-grants CRUD routers, the governance dry-run endpoint,
-/// the lineage query endpoints, and the transformation simulator
-/// endpoints today, plus `/openapi.json` and `/docs` (REG-136,
-/// REG-137); the remaining two per-resource routers merge in here as
-/// they're built (see the module doc). `state` is shared across every
-/// resource router that needs DB access -- `lineage` and
-/// `transformation`'s SSE endpoint don't take it, see those modules'
-/// own docs for why.
+/// the lineage query endpoints, the transformation simulator
+/// endpoints, and the per-product metrics endpoint today, plus
+/// `/openapi.json` and `/docs` (REG-136, REG-137); the remaining
+/// per-resource router merges in here as it's built (see the module
+/// doc). `state` is shared across every resource router that needs DB
+/// access -- `lineage` and `transformation`'s SSE endpoint don't take
+/// it, see those modules' own docs for why.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let business_router = crate::routers::data_products::router(state.clone())
         .merge(crate::routers::ports::router(state.clone()))
@@ -171,7 +171,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(crate::routers::access_grants::router(state.clone()))
         .merge(crate::routers::governance::router())
         .merge(crate::routers::lineage::router())
-        .merge(crate::routers::transformation::router(state));
+        .merge(crate::routers::transformation::router(state.clone()))
+        .merge(crate::routers::metrics::router(state));
     let mut route_table = business_router.routes();
     route_table.push((rusty_http::Method::Get, "/openapi.json".to_string()));
     route_table.push((rusty_http::Method::Get, "/docs".to_string()));

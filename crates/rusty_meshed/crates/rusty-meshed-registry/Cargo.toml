@@ -21,3 +21,4 @@ rusty-meshed-observability = { path = "../rusty-meshed-observability" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]
+rusty_wire = { path = "../../../rusty_wire" }
