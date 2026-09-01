@@ -7,7 +7,7 @@ keyed by the commit/PR that shipped them.
 ---
 
 ## Real Rocket League has no distinct wall-jump mechanic or constant at all (audit finding)
-**2026-09-01** · PR pending · commit pending
+**2026-09-01** · [#141](https://github.com/baileyrd/rusty_bullet/pull/141) · `98f587a`
 
 - **`drive::WALL_JUMP_HORIZONTAL_SPEED` had no public reference at
   all** — this port pushes a wall-jumping car outward along the touched
