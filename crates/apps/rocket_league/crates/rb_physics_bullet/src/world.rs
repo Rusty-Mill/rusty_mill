@@ -21,9 +21,13 @@ use std::collections::HashMap;
 /// fillets (`curves`, added via `with_curve` — see `RB-PHYSICS-001-FR-020`
 /// and `curves`' own doc comment; since `RB-PHYSICS-001-FR-027`, a car is
 /// deflected by one too, not just the ball). Every body collides with the
-/// ground and with every wall
-/// (`resolve_plane_contact`, the same body-vs-static-plane machinery for
-/// both — a wall is just a plane whose normal isn't "up");
+/// ground, every wall, every curve, every compound-corner fillet, every
+/// goal wall, and every bounded wall — since `RB-PHYSICS-001-FR-051`, all
+/// of a body's own static-surface contacts detected in a step are resolved
+/// together via `solver::resolve_static_manifolds`
+/// (`resolve_static_contacts`), not one independent `solver::resolve_contacts`
+/// call per static shape (a wall is just a `StaticPlane` whose normal isn't
+/// "up," so the same machinery serves both);
 /// every car also collides with the ball and with every other car
 /// (`collision::contacts_between`, dispatching to `sphere_vs_box` or
 /// `box_vs_box`) — a real N-body scene, not just the one-ball-one-car case
@@ -117,9 +121,24 @@ pub struct PhysicsWorld {
     /// `solver::resolve_dynamic_manifolds`, keyed by (normalized)
     /// ball-vs-car/car-vs-car body-index pair — see
     /// `solver::ContactCache`'s own doc comment for what it does and why
-    /// only this call site (not the many per-static-geometry ones below)
-    /// is warm-started.
+    /// only this call site (not `resolve_static_contacts`'s own
+    /// `solver::resolve_static_manifolds` call below) is warm-started.
     dynamic_manifold_caches: HashMap<(usize, usize), ContactCache>,
+}
+
+/// Borrowed references to every static-shape collection in a `PhysicsWorld`
+/// (`RB-PHYSICS-001-FR-051`) — exists purely so `resolve_static_contacts`
+/// takes one bundled parameter instead of six separate slice/reference
+/// arguments (clippy's `too_many_arguments` threshold), not as a genuine
+/// new abstraction; every field here is still borrowed directly from the
+/// same `PhysicsWorld` fields it always was.
+struct StaticScene<'a> {
+    ground: &'a StaticPlane,
+    walls: &'a [StaticPlane],
+    curves: &'a [StaticQuarterPipe],
+    corner_fillets: &'a [StaticCornerFillet],
+    goal_walls: &'a [StaticGoalWall],
+    bounded_walls: &'a [StaticBoundedWall],
 }
 
 impl PhysicsWorld {
@@ -388,74 +407,90 @@ impl PhysicsWorld {
         integrate::integrate_velocities(car, dt);
     }
 
-    /// Detects and resolves `body`'s contact against a single static plane
-    /// (a manifold of 1 to 4 points depending on shape/orientation — see
-    /// `collision::contacts_vs_plane`), if any. Used for both the ground
-    /// and every arena wall — a wall is just a `StaticPlane` whose normal
-    /// isn't "up," and this function has no ground-specific logic at all.
-    fn resolve_plane_contact(body: &mut RigidBody, plane: &StaticPlane, dt: f32) {
-        let contacts = collision::contacts_vs_plane(body, plane);
-        if !contacts.is_empty() {
-            solver::resolve_contacts(body, plane.restitution, plane.friction, &contacts, dt);
-        }
-    }
+    /// Detects every one of `body`'s contacts against every static surface
+    /// in the scene — the ground, every wall, every curve
+    /// (`RB-PHYSICS-001-FR-020`), every compound-corner fillet
+    /// (`RB-PHYSICS-001-FR-023`), every goal wall (`RB-PHYSICS-001-FR-024`),
+    /// and every bounded wall (`RB-PHYSICS-001-FR-029`) — and resolves them
+    /// all together via `solver::resolve_static_manifolds`
+    /// (`RB-PHYSICS-001-FR-051`), instead of one independent
+    /// `solver::resolve_contacts` call per static shape.
+    ///
+    /// Before this requirement, `step` called one dedicated
+    /// `resolve_*_contact` helper per static shape type in sequence (ground,
+    /// then every wall, then every curve, and so on) — each one fully
+    /// resolving and applying its own `SOLVER_ITERATIONS` pass before the
+    /// next shape's setup even read `body`'s updated velocity. That's
+    /// harmless when `body` only ever touches one static shape at a time,
+    /// but a body simultaneously touching two different static surfaces is
+    /// a routine scenario, not an edge case — a car driving along a wall
+    /// near the floor, or wedged into a corner formed by two walls
+    /// (`RB-PHYSICS-001-FR-039`'s own wall-jump-at-a-corner handling already
+    /// has to account for a car touching two walls at once) — and this
+    /// port's own module doc comment used to claim resolving each
+    /// independently was fine "since a body's contact with static geometry
+    /// never depends on another dynamic body," which is true but doesn't
+    /// cover a body touching two *static* surfaces at once. This is exactly
+    /// `RB-PHYSICS-001-FR-030`'s and `RB-PHYSICS-001-FR-050`'s own
+    /// independent-pairwise gap, just for static-vs-dynamic contacts
+    /// instead of dynamic-vs-dynamic ones — see
+    /// `solver::resolve_static_manifolds`'s own doc comment for the exact
+    /// mechanism and its dedicated test. `scene` bundles every static-shape
+    /// slice into one borrow (clippy's `too_many_arguments` threshold is
+    /// the only reason this isn't just six separate parameters — every
+    /// caller still borrows the same six `PhysicsWorld` fields directly,
+    /// same as before this requirement).
+    fn resolve_static_contacts(body: &mut RigidBody, scene: &StaticScene, dt: f32) {
+        let mut manifolds: Vec<(f32, f32, Vec<collision::Contact>)> = Vec::new();
 
-    /// Like `resolve_plane_contact`, but against a curved fillet
-    /// (`RB-PHYSICS-001-FR-020`) instead of a flat plane — resolves for a
-    /// box (car) too, since `RB-PHYSICS-001-FR-027`
-    /// (`collision::contacts_vs_quarter_pipe`'s own doc comment covers what
-    /// that approximation does and doesn't catch).
-    fn resolve_curve_contact(body: &mut RigidBody, curve: &StaticQuarterPipe, dt: f32) {
-        let contacts = collision::contacts_vs_quarter_pipe(body, curve);
-        if !contacts.is_empty() {
-            solver::resolve_contacts(body, curve.restitution, curve.friction, &contacts, dt);
+        let ground_contacts = collision::contacts_vs_plane(body, scene.ground);
+        if !ground_contacts.is_empty() {
+            manifolds.push((
+                scene.ground.restitution,
+                scene.ground.friction,
+                ground_contacts,
+            ));
         }
-    }
+        for wall in scene.walls {
+            let contacts = collision::contacts_vs_plane(body, wall);
+            if !contacts.is_empty() {
+                manifolds.push((wall.restitution, wall.friction, contacts));
+            }
+        }
+        for curve in scene.curves {
+            let contacts = collision::contacts_vs_quarter_pipe(body, curve);
+            if !contacts.is_empty() {
+                manifolds.push((curve.restitution, curve.friction, contacts));
+            }
+        }
+        for corner_fillet in scene.corner_fillets {
+            let contacts = collision::contacts_vs_corner_fillet(body, corner_fillet);
+            if !contacts.is_empty() {
+                manifolds.push((corner_fillet.restitution, corner_fillet.friction, contacts));
+            }
+        }
+        for goal_wall in scene.goal_walls {
+            let contacts = collision::contacts_vs_goal_wall(body, goal_wall);
+            if !contacts.is_empty() {
+                manifolds.push((
+                    goal_wall.plane.restitution,
+                    goal_wall.plane.friction,
+                    contacts,
+                ));
+            }
+        }
+        for bounded_wall in scene.bounded_walls {
+            let contacts = collision::contacts_vs_bounded_wall(body, bounded_wall);
+            if !contacts.is_empty() {
+                manifolds.push((
+                    bounded_wall.plane.restitution,
+                    bounded_wall.plane.friction,
+                    contacts,
+                ));
+            }
+        }
 
-    /// Like `resolve_curve_contact`, but against a compound-corner fillet
-    /// (`RB-PHYSICS-001-FR-023`) instead of an edge fillet — same
-    /// box-deflects-too behavior since `RB-PHYSICS-001-FR-027`.
-    fn resolve_corner_fillet_contact(body: &mut RigidBody, fillet: &StaticCornerFillet, dt: f32) {
-        let contacts = collision::contacts_vs_corner_fillet(body, fillet);
-        if !contacts.is_empty() {
-            solver::resolve_contacts(body, fillet.restitution, fillet.friction, &contacts, dt);
-        }
-    }
-
-    /// Like `resolve_plane_contact`, but against a windowed back wall
-    /// (`RB-PHYSICS-001-FR-024`) — resolved for a box (car) exactly like a
-    /// sphere (ball) since `RB-PHYSICS-001-FR-028`, via
-    /// `collision::contacts_vs_goal_wall`'s per-corner window treatment for
-    /// a box (see its own doc comment).
-    fn resolve_goal_wall_contact(body: &mut RigidBody, wall: &StaticGoalWall, dt: f32) {
-        let contacts = collision::contacts_vs_goal_wall(body, wall);
-        if !contacts.is_empty() {
-            solver::resolve_contacts(
-                body,
-                wall.plane.restitution,
-                wall.plane.friction,
-                &contacts,
-                dt,
-            );
-        }
-    }
-
-    /// Like `resolve_goal_wall_contact`, but against a `StaticBoundedWall`
-    /// (`RB-PHYSICS-001-FR-029`) instead of a `StaticGoalWall` — resolved
-    /// for a box (car) exactly like a sphere (ball), via
-    /// `collision::contacts_vs_bounded_wall`'s per-corner bound treatment
-    /// for a box (see its own doc comment).
-    fn resolve_bounded_wall_contact(body: &mut RigidBody, wall: &StaticBoundedWall, dt: f32) {
-        let contacts = collision::contacts_vs_bounded_wall(body, wall);
-        if !contacts.is_empty() {
-            solver::resolve_contacts(
-                body,
-                wall.plane.restitution,
-                wall.plane.friction,
-                &contacts,
-                dt,
-            );
-        }
+        solver::resolve_static_manifolds(body, &manifolds, dt);
     }
 
     /// Integrates `body`'s transform from its (already-resolved) velocity,
@@ -480,10 +515,13 @@ impl PhysicsWorld {
     /// `btDiscreteDynamicsWorld::stepSimulation`'s staged pipeline: predict
     /// every body's unconstrained velocity (for cars, including
     /// `drive::apply_driven_forces` from that car's current input), then
-    /// detect and resolve every contact — ground and wall contacts for
-    /// every body first (each resolved independently, since a body's
-    /// contact with static geometry never depends on another dynamic
-    /// body), then every ball-vs-car and car-vs-car manifold together in
+    /// detect and resolve every contact — every body's own static-surface
+    /// contacts first (independent of every *other* body, since a body's
+    /// contact with static geometry never depends on another dynamic body
+    /// — but combined together for that one body via
+    /// `resolve_static_contacts`/`solver::resolve_static_manifolds` since
+    /// `RB-PHYSICS-001-FR-051`, not one independent call per static shape),
+    /// then every ball-vs-car and car-vs-car manifold together in
     /// one combined solve (`solver::resolve_dynamic_manifolds`, since
     /// `RB-PHYSICS-001-FR-030`) — then integrate every body's transform,
     /// never resolving one body's transform before another body's contacts
@@ -515,7 +553,7 @@ impl PhysicsWorld {
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
-        // driven forces move anything) — `resolve_plane_contact` below
+        // driven forces move anything) — `resolve_static_contacts` below
         // re-derives the same contacts for the actual solve; the small
         // duplicated `contacts_vs_plane` call is simpler than threading
         // the manifold through, and cheap (a handful of corner checks).
@@ -600,39 +638,17 @@ impl PhysicsWorld {
             );
         }
 
-        Self::resolve_plane_contact(&mut self.ball, &self.ground, dt);
-        for wall in &self.walls {
-            Self::resolve_plane_contact(&mut self.ball, wall, dt);
-        }
-        for curve in &self.curves {
-            Self::resolve_curve_contact(&mut self.ball, curve, dt);
-        }
-        for corner_fillet in &self.corner_fillets {
-            Self::resolve_corner_fillet_contact(&mut self.ball, corner_fillet, dt);
-        }
-        for goal_wall in &self.goal_walls {
-            Self::resolve_goal_wall_contact(&mut self.ball, goal_wall, dt);
-        }
-        for bounded_wall in &self.bounded_walls {
-            Self::resolve_bounded_wall_contact(&mut self.ball, bounded_wall, dt);
-        }
+        let static_scene = StaticScene {
+            ground: &self.ground,
+            walls: &self.walls,
+            curves: &self.curves,
+            corner_fillets: &self.corner_fillets,
+            goal_walls: &self.goal_walls,
+            bounded_walls: &self.bounded_walls,
+        };
+        Self::resolve_static_contacts(&mut self.ball, &static_scene, dt);
         for car in &mut self.cars {
-            Self::resolve_plane_contact(car, &self.ground, dt);
-            for wall in &self.walls {
-                Self::resolve_plane_contact(car, wall, dt);
-            }
-            for curve in &self.curves {
-                Self::resolve_curve_contact(car, curve, dt);
-            }
-            for corner_fillet in &self.corner_fillets {
-                Self::resolve_corner_fillet_contact(car, corner_fillet, dt);
-            }
-            for goal_wall in &self.goal_walls {
-                Self::resolve_goal_wall_contact(car, goal_wall, dt);
-            }
-            for bounded_wall in &self.bounded_walls {
-                Self::resolve_bounded_wall_contact(car, bounded_wall, dt);
-            }
+            Self::resolve_static_contacts(car, &static_scene, dt);
         }
 
         // Combined multi-body solve (RB-PHYSICS-001-FR-030): collect every
@@ -1772,12 +1788,51 @@ mod tests {
     }
 
     #[test]
+    fn a_ball_wedged_into_a_two_wall_corner_settles_symmetrically_instead_of_favoring_one_wall() {
+        // RB-PHYSICS-001-FR-051: the real proof at `PhysicsWorld::step`'s own
+        // public level. A ball moving diagonally into a perfectly symmetric
+        // two-wall corner (equal restitution/friction, perpendicular
+        // normals) has no physical reason to favor either wall — the true
+        // answer's x and y velocity components should come out equal.
+        // Before this requirement, `step`'s own per-static-shape sequential
+        // contact loop (ground, then each wall in `self.walls`' own
+        // iteration order) instead left the ball measurably biased toward
+        // whichever wall was resolved last, an arbitrary artifact with no
+        // physical basis; this test was confirmed to fail under that old
+        // sequential loop before `step` was changed to use
+        // `solver::resolve_static_manifolds` instead.
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+        let wall_y = StaticPlane::new(Vec3::new(0.0, 1.0, 0.0), 0.0);
+        let ball_radius = 93.15;
+        let mut ball = RigidBody::sphere(
+            ball_radius,
+            1.0,
+            Vec3::new(ball_radius, ball_radius, 1000.0),
+        );
+        ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground())
+            .with_wall(wall_x)
+            .with_wall(wall_y);
+        world.gravity = Vec3::ZERO; // isolate the corner impact from falling
+
+        world.step(1.0 / 60.0);
+
+        let vx = world.ball.linear_velocity.x;
+        let vy = world.ball.linear_velocity.y;
+        assert!(
+            (vx - vy).abs() < 5.0,
+            "expected a squarely-symmetric two-wall corner impact to leave the ball's x/y \
+             velocity components nearly equal, got vx={vx}, vy={vy}"
+        );
+    }
+
+    #[test]
     fn a_ball_bounces_off_a_wall_instead_of_passing_through() {
         // The real end-to-end proof that arena walls are actual physical
         // geometry, not just an input-detection hack: a ball shot at a
         // wall should bounce off it the same way it already does off a
         // car (`ball_bounces_off_a_stationary_car_instead_of_passing_through`),
-        // via the same generic resolve_plane_contact machinery the ground
+        // via the same generic resolve_static_contacts machinery the ground
         // already uses.
         let wall_x = 100.0;
         let wall = StaticPlane {

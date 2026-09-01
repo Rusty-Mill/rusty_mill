@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.50.0
+- Version: 0.51.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -215,11 +215,25 @@
   bias directly (~0.25 units/s out of a 2000 units/s impact) — adopted
   `solver::resolve_dynamic_manifolds`'s combined solve for every
   body-vs-point contact each sub-step, reducing that residual roughly
-  15-fold; 2 new tests; static-contact warm-starting,
-  `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration, full convergence
-  of the sandwiched case, a rigorous (non-heuristic) edge-edge nearest-pair
-  selection, and real-data calibration (including which combine mode, if
-  either, actually matches real Rocket League) are open follow-up work)
+  15-fold; 2 new tests; and, since FR-051, the same independent-pairwise
+  gap was found and closed one level up — `PhysicsWorld::step` resolved a
+  body's contact against each different static shape type (ground, each
+  wall, each curve, each corner fillet, each goal wall, each bounded wall)
+  fully independently and sequentially, which a dedicated single-shot test
+  (a ball wedged into a symmetric two-wall corner) confirmed is genuinely
+  order-dependent, not merely slow to converge, and an actual
+  `PhysicsWorld::step` end-to-end test confirmed manifests in real gameplay
+  scenarios too (a car driving near a wall close to the ground, or wedged
+  into any corner, is a routine occurrence, not an edge case); a new
+  `solver::resolve_static_manifolds` generalizes `resolve_contacts` to
+  combine every static-shape manifold `body` touches into one shared solve,
+  replacing `step`'s old five-function-per-body sequence with a single
+  `resolve_static_contacts` call; 2 new tests; static-contact
+  warm-starting, `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS` calibration,
+  full convergence of the sandwiched case, a rigorous (non-heuristic)
+  edge-edge nearest-pair selection, and real-data calibration (including
+  which combine mode, if either, actually matches real Rocket League) are
+  open follow-up work)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-003
 - Supersedes: none
@@ -3018,6 +3032,86 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     measured residual. All 282 of `rb_physics_bullet`'s pre-existing tests
     (as of `FR-049`) pass unchanged. 2 new tests, bringing the crate to 284
     total (+2 over `FR-049`'s 282).
+- `RB-PHYSICS-001-FR-051` (static multi-surface contact combined-solve
+  investigation, implemented): `PhysicsWorld::step` resolved a body's
+  contact against each static shape type it touches (the ground, then
+  every wall, then every curve, then every corner fillet, then every goal
+  wall, then every bounded wall) via one independent `solver::resolve_contacts`
+  call per shape, one pair at a time — the exact independent-pairwise
+  shape `RB-PHYSICS-001-FR-030`/`RB-PHYSICS-001-FR-050` already proved
+  under-converges (and can be genuinely order-dependent) for a shared body
+  touched by 2+ others in the same step. This port's own module doc
+  comment had claimed resolving each independently was safe "since a
+  body's contact with static geometry never depends on another dynamic
+  body" — true, but silent on a body touching two different *static*
+  surfaces at once (a car driving along a wall near the floor, or wedged
+  into any corner — `RB-PHYSICS-001-FR-039`'s own wall-jump-at-a-corner
+  handling already has to account for exactly this). This requirement
+  investigated it directly.
+  1. **A dedicated single-shot test confirmed the underlying mechanism is
+     genuinely order-dependent, not merely slow to converge.** A ball
+     wedged symmetrically into a corner formed by two static walls
+     (perpendicular normals, identical restitution/friction), moving
+     diagonally into both at once: resolving each wall fully independently
+     in one order left the ball with velocity components biased toward
+     whichever wall was resolved last; the opposite order gave the exact
+     mirror image. The true answer, by symmetry, has equal components —
+     neither sequential order matched it.
+  2. **A new `solver::resolve_static_manifolds` generalizes `resolve_contacts`
+     to combine every static-shape manifold a body touches into one shared
+     solve.** Each manifold group still computes its own
+     `combine_restitution`/`combine_friction` against the body's own
+     restitution/friction (different static shapes can have different
+     material properties), but every group now shares one `DeltaVelocity`/
+     push-delta accumulator across the whole `SOLVER_ITERATIONS` loop,
+     mirroring `resolve_dynamic_manifolds`'s (`FR-030`) and
+     `net::NetMesh::step`'s (`FR-050`) own "one shared accumulator instead
+     of independent sequential passes" fix. Measured directly on the
+     two-wall corner scenario: the combined solve lands far closer to the
+     true symmetric answer than either sequential order.
+  3. **`PhysicsWorld::step` was rewired to use it.** A new
+     `resolve_static_contacts` (taking a `StaticScene` bundling the six
+     static-shape slices, to stay under clippy's argument-count limit)
+     gathers every one of a body's contacts across every static shape into
+     one manifold list, then resolves them all together — replacing the
+     old five-function-per-body call sequence (`resolve_plane_contact`/
+     `resolve_curve_contact`/`resolve_corner_fillet_contact`/
+     `resolve_goal_wall_contact`/`resolve_bounded_wall_contact`, all
+     removed) for both the ball and every car.
+  4. **A `PhysicsWorld::step`-level test proves the fix at the real public
+     API.** A ball fired diagonally into a symmetric two-wall corner via an
+     actual `PhysicsWorld` (two `with_wall` calls) settles with nearly
+     equal x/y velocity components after one real `step` call — confirmed
+     to fail under the old sequential per-shape loop before the rewire.
+  - **Non-goals (this requirement).** Does not add warm-starting to
+    `resolve_static_manifolds`'s own contacts (still cold-started every
+    call, the same scoping `RB-PHYSICS-001-FR-035` already established for
+    `resolve_contacts`/`resolve_contacts_between` generally). Does not
+    change any single-static-shape scenario's behavior — the combined
+    solve is bit-for-bit equivalent to the old `resolve_contacts` for a
+    body touching only one static shape this step (the overwhelming
+    majority of contacts), since a one-manifold combined solve degenerates
+    to exactly the old single-manifold loop. Does not touch
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
+    `PHASE-0-EXIT`.
+  - **Acceptance criteria.** `PhysicsWorld::step` resolves every one of a
+    body's static-surface contacts detected in a step together via
+    `solver::resolve_static_manifolds`, not as a sequence of independent
+    per-shape `solver::resolve_contacts` calls. A symmetric two-wall corner
+    impact no longer depends on `self.walls`' own iteration order for its
+    qualitative direction, and its residual asymmetry is measurably smaller
+    than before this requirement. All pre-existing tests pass unchanged.
+  - **Verification plan.** 2 new tests:
+    `solver::tests::sequential_wall_resolution_is_order_dependent_but_the_combined_solve_is_not`
+    pins the exact root-cause mechanism at the raw solver level (order
+    dependence for a symmetric two-wall impact, and the combined solve's
+    own much-closer-to-symmetric result);
+    `world::tests::a_ball_wedged_into_a_two_wall_corner_settles_symmetrically_instead_of_favoring_one_wall`
+    proves it at `PhysicsWorld::step`'s own public level, confirmed to fail
+    under the old per-shape sequential loop before the fix. All 284 of
+    `rb_physics_bullet`'s pre-existing tests (as of `FR-050`) pass
+    unchanged. 2 new tests, bringing the crate to 286 total (+2 over
+    `FR-050`'s 284).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -4396,6 +4490,27 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.51.0 (2026-09-01): FR-051 added and implemented (static multi-surface
+  contact combined-solve investigation) — `PhysicsWorld::step` resolved a
+  body's contact against each static shape type (ground, then every wall,
+  curve, corner fillet, goal wall, bounded wall) via one independent
+  `solver::resolve_contacts` call per shape, the same independent-pairwise
+  gap FR-030/FR-050 already proved under-converges for a shared body
+  touched by 2+ others in the same step. A dedicated single-shot test
+  confirmed a ball wedged into a symmetric two-wall corner is genuinely
+  order-dependent (mirror-image results depending on which wall resolves
+  first), not merely slow to converge. A new `solver::resolve_static_manifolds`
+  generalizes `resolve_contacts` to combine every static-shape manifold a
+  body touches into one shared solve; `PhysicsWorld::step` was rewired to
+  use it via a new `resolve_static_contacts` (bundling the six static-shape
+  slices into a `StaticScene` to stay under clippy's argument-count limit),
+  replacing the old five-function-per-body call sequence
+  (`resolve_plane_contact`/`resolve_curve_contact`/
+  `resolve_corner_fillet_contact`/`resolve_goal_wall_contact`/
+  `resolve_bounded_wall_contact`, all removed). A `PhysicsWorld::step`-level
+  test (a ball fired into a real two-wall corner) confirmed the fix at the
+  public API, verified to fail under the old sequential loop first. 2 new
+  tests, bringing `rb_physics_bullet` to 286 tests (+2 over FR-050's 284).
 - 0.50.0 (2026-09-01): FR-050 added and implemented (net-point contact
   combined-solve investigation) — `net::NetMesh::step` used to resolve every
   body-vs-net-point contact independently and sequentially via
