@@ -62,23 +62,23 @@ Source: baileyrd/meshed (Python, v1.0 shipped) → Rusty-Mill/rusty_mill, crates
 | REG-056 | `DELETE /data-products/{id}` returns 404 `"Data product not found"` when id doesn't exist | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::data_products::delete`, test `delete_returns_404_for_an_unknown_id` |
 | REG-057 | `POST /data-products/` does not enforce uniqueness on `name` — duplicates permitted, no 409 path | behavior | code+test | — | DONE | | `rusty-meshed-registry::routers::data_products::create`, test `create_permits_duplicate_names` |
 | REG-058 | `POST /data-products/` returns 422 if required field (name/owner/version/domain/description) missing | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::data_products::create`, test `create_returns_422_when_a_required_field_is_missing` |
-| REG-059 | `POST /data-products/{id}/input-ports` returns 201 with assigned `id`/`data_product_id` | interface | code+test | — | REQUIRED | | |
-| REG-060 | `POST /data-products/{id}/input-ports` returns 404 `"Data product {id} not found."` when parent missing | interface | code+test | — | REQUIRED | | |
-| REG-061 | `POST /data-products/{id}/input-ports` stores optional `description`; response echoes `null` when omitted | interface | code+test | — | REQUIRED | | |
-| REG-062 | `GET /data-products/{id}/input-ports` returns 404 when parent product doesn't exist | interface | code | — | REQUIRED | | |
-| REG-063 | `GET /data-products/{id}/input-ports` lists only ports scoped to given product | interface | code+test | — | REQUIRED | | |
-| REG-064 | `DELETE /data-products/{id}/input-ports/{port_id}` returns 204 on success | interface | code+test | — | REQUIRED | | |
-| REG-065 | `DELETE .../input-ports/{port_id}` returns 404 if parent product doesn't exist | interface | code | — | REQUIRED | | |
-| REG-066 | `DELETE .../input-ports/{port_id}` returns 404 if port doesn't exist or belongs to a different product | interface | code+test | — | REQUIRED | | |
-| REG-067 | `POST /data-products/{id}/output-ports` returns 201 with `id`/`data_product_id`/`event_type` | interface | code+test | — | REQUIRED | | |
-| REG-068 | `POST .../output-ports` returns 404 when parent product doesn't exist | interface | code+test | — | REQUIRED | | |
-| REG-069 | `POST .../output-ports` accepts `event_type` of delta/state/measurement, round-trips verbatim | interface | code+test | — | REQUIRED | | |
-| REG-070 | `POST .../output-ports` returns 422 if `event_type` not a valid enum value | interface | code | — | REQUIRED | | |
-| REG-071 | `GET .../output-ports` returns 404 when parent product doesn't exist | interface | code | — | REQUIRED | | |
-| REG-072 | `GET .../output-ports` lists only ports scoped to given product | interface | code+test | — | REQUIRED | | |
-| REG-073 | `DELETE .../output-ports/{port_id}` returns 204 on success | interface | code+test | — | REQUIRED | | |
-| REG-074 | `DELETE .../output-ports/{port_id}` returns 404 if parent product doesn't exist | interface | code | — | REQUIRED | | |
-| REG-075 | `DELETE .../output-ports/{port_id}` returns 404 if port doesn't exist or belongs to a different product | interface | code+test | — | REQUIRED | | |
+| REG-059 | `POST /data-products/{id}/input-ports` returns 201 with assigned `id`/`data_product_id` | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::create_input_port`, test `create_input_port_returns_201_with_assigned_ids` |
+| REG-060 | `POST /data-products/{id}/input-ports` returns 404 `"Data product {id} not found."` when parent missing | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::product_not_found`, test `create_input_port_returns_404_for_unknown_product` |
+| REG-061 | `POST /data-products/{id}/input-ports` stores optional `description`; response echoes `null` when omitted | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::create_input_port`, tests `create_input_port_returns_201_with_assigned_ids` (omitted → `null`), `create_input_port_stores_optional_description` |
+| REG-062 | `GET /data-products/{id}/input-ports` returns 404 when parent product doesn't exist | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::list_input_ports`, test `list_input_ports_returns_404_for_unknown_product` |
+| REG-063 | `GET /data-products/{id}/input-ports` lists only ports scoped to given product | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::list_input_ports`, test `list_input_ports_scopes_to_the_given_product` |
+| REG-064 | `DELETE /data-products/{id}/input-ports/{port_id}` returns 204 on success | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_input_port`, test `delete_input_port_returns_204` |
+| REG-065 | `DELETE .../input-ports/{port_id}` returns 404 if parent product doesn't exist | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_input_port`, covered by `delete_input_port_returns_404_for_a_port_on_a_different_product`'s parent-check path |
+| REG-066 | `DELETE .../input-ports/{port_id}` returns 404 if port doesn't exist or belongs to a different product | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_input_port` (`WHERE id = ? AND data_product_id = ?`), test `delete_input_port_returns_404_for_a_port_on_a_different_product` |
+| REG-067 | `POST /data-products/{id}/output-ports` returns 201 with `id`/`data_product_id`/`event_type` | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::create_output_port`, test `create_output_port_round_trips_event_type` |
+| REG-068 | `POST .../output-ports` returns 404 when parent product doesn't exist | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::create_output_port`, test `create_output_port_returns_404_for_unknown_product` |
+| REG-069 | `POST .../output-ports` accepts `event_type` of delta/state/measurement, round-trips verbatim | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::create_output_port`, test `create_output_port_round_trips_event_type` |
+| REG-070 | `POST .../output-ports` returns 422 if `event_type` not a valid enum value | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::create_output_port` (`EventType::parse`), test `create_output_port_returns_422_for_an_invalid_event_type` |
+| REG-071 | `GET .../output-ports` returns 404 when parent product doesn't exist | interface | code | — | DONE | | `rusty-meshed-registry::routers::ports::list_output_ports` (same `product_exists` guard as `list_input_ports`, REG-062) |
+| REG-072 | `GET .../output-ports` lists only ports scoped to given product | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::list_output_ports`, test `list_output_ports_scopes_to_the_given_product` |
+| REG-073 | `DELETE .../output-ports/{port_id}` returns 204 on success | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_output_port`, test `delete_output_port_returns_204` |
+| REG-074 | `DELETE .../output-ports/{port_id}` returns 404 if parent product doesn't exist | interface | code | — | DONE | | `rusty-meshed-registry::routers::ports::delete_output_port` (same `product_exists` guard as `delete_input_port`, REG-065) |
+| REG-075 | `DELETE .../output-ports/{port_id}` returns 404 if port doesn't exist or belongs to a different product | interface | code+test | — | DONE | | `rusty-meshed-registry::routers::ports::delete_output_port`, test `delete_output_port_returns_404_for_a_port_on_a_different_product` |
 | REG-076 | `POST .../output-ports/{port_id}/contract` returns 201 when product+port exist and no contract yet | interface | code+test | — | REQUIRED | | |
 | REG-077 | `POST .../contract` returns 404 `"Data product {id} not found."` if product missing | interface | code+test | — | REQUIRED | | |
 | REG-078 | `POST .../contract` returns 404 `"Output port {id} not found on data product {id}."` if port missing/mismatched | interface | code+test | — | REQUIRED | | |

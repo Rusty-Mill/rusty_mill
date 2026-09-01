@@ -6,6 +6,7 @@
 
 pub mod data_products;
 pub mod governance;
+pub mod ports;
 
 use crate::http::response::Response;
 use rusty_http::StatusCode;
