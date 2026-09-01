@@ -27,12 +27,10 @@
 //! [`deserialize`](BaseEvent::deserialize), which are self-contained
 //! for `BaseEvent` used standalone) to fold the four lineage fields in
 //! at the front, followed by their own fields encoded via
-//! [`crate::avro`]'s primitives directly. See
-//! `rusty-meshed-domains::events`'s own module doc for why this crate
-//! doesn't try to generalize that pattern into a shared trait: with
-//! only nine concrete cases and no polymorphic dispatch over them yet,
-//! a trait would be premature abstraction over data that doesn't need
-//! one yet.
+//! [`crate::avro`]'s primitives directly. [`crate::DomainEvent`]
+//! generalizes that pattern into a shared trait -- deferred until
+//! `rusty-meshed-sdk`'s producer/consumer bases (SDK-013..039) needed
+//! polymorphic dispatch over it; see that trait's own module doc.
 
 use crate::avro::{
     decode_string, decode_string_array, encode_string, encode_string_array, AvroDecodeError,

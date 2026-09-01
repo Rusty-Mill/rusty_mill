@@ -3,7 +3,7 @@
 //! primary mechanism through which producers advertise their event
 //! contracts to the platform registry and consumers.
 
-use rusty_meshed_core::EventType;
+use rusty_meshed_core::{DomainEvent, EventType};
 use std::marker::PhantomData;
 
 /// Immutable specification for a data product output port. Generic
@@ -64,6 +64,38 @@ impl<E> OutputPortSpec<E> {
     }
 }
 
+impl<E: DomainEvent> OutputPortSpec<E> {
+    /// Type-erases this port declaration into a [`PortDescriptor`],
+    /// resolving `E::avro_schema()` in the process -- what
+    /// `DataProductProducerBase::new` takes instead of
+    /// `OutputPortSpec<E>` directly, since a producer's output ports
+    /// span multiple, generally *different* concrete event types (the
+    /// source's own `list[OutputPortSpec]` is heterogeneous the same
+    /// way), which a single `Vec<OutputPortSpec<E>>` can't express in
+    /// Rust the way Python's runtime typing can.
+    pub fn describe(&self) -> PortDescriptor {
+        PortDescriptor {
+            name: self.name.clone(),
+            topic: self.topic.clone(),
+            event_classification: self.event_classification,
+            schema: E::avro_schema(),
+        }
+    }
+}
+
+/// A type-erased [`OutputPortSpec`] -- everything
+/// `DataProductProducerBase::startup` needs from a declared output
+/// port (SDK-013..021) without needing to know its event type at the
+/// producer's own struct level. Built via [`OutputPortSpec::describe`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortDescriptor {
+    pub name: String,
+    pub topic: String,
+    pub event_classification: EventType,
+    /// `E::avro_schema()`, resolved at `describe()` time.
+    pub schema: String,
+}
+
 impl<E> Clone for OutputPortSpec<E> {
     fn clone(&self) -> Self {
         OutputPortSpec {
@@ -99,14 +131,36 @@ impl<E> std::fmt::Debug for OutputPortSpec<E> {
 mod tests {
     use super::*;
 
-    /// A stand-in event type -- `OutputPortSpec<E>` doesn't require
-    /// anything of `E` beyond being a type. `rusty_meshed_core::BaseEvent`
-    /// (SDK-001..008) is the real lineage-contract type a concrete
-    /// domain event would embed, but nothing here binds `E` to it,
-    /// since domain events (`rusty-meshed-domains`, DOM-002 onward)
-    /// haven't landed yet -- see `BaseEvent`'s own module doc for that
-    /// open design question.
+    /// A stand-in event type for tests that only exercise
+    /// `OutputPortSpec`'s own fields -- `OutputPortSpec<E>` itself
+    /// doesn't require anything of `E` beyond being a type.
+    /// [`DescribableEvent`] below is the stand-in for `describe()`'s
+    /// own test, the one place here that does require `E: DomainEvent`.
     struct SampleEvent;
+
+    struct DescribableEvent {
+        base: rusty_meshed_core::BaseEvent,
+    }
+
+    impl DomainEvent for DescribableEvent {
+        const EVENT_NAME: &'static str = "DescribableEvent";
+
+        fn base(&self) -> &rusty_meshed_core::BaseEvent {
+            &self.base
+        }
+
+        fn avro_schema() -> String {
+            r#"{"type":"record","name":"DescribableEvent","fields":[]}"#.to_string()
+        }
+
+        fn serialize(&self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn deserialize(_bytes: &[u8]) -> Result<Self, rusty_meshed_core::AvroDecodeError> {
+            unimplemented!("describe() never calls this")
+        }
+    }
 
     #[test]
     fn constructs_with_the_given_fields() {
@@ -136,5 +190,19 @@ mod tests {
         let a: OutputPortSpec<SampleEvent> = OutputPortSpec::new("a", "t", EventType::Delta);
         let b: OutputPortSpec<SampleEvent> = OutputPortSpec::new("a", "t", EventType::State);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn describe_type_erases_the_port_and_resolves_the_schema() {
+        let spec: OutputPortSpec<DescribableEvent> = OutputPortSpec::new(
+            "assignments",
+            "manpower.personnel-lifecycle.assignments",
+            EventType::Delta,
+        );
+        let descriptor = spec.describe();
+        assert_eq!(descriptor.name, "assignments");
+        assert_eq!(descriptor.topic, "manpower.personnel-lifecycle.assignments");
+        assert_eq!(descriptor.event_classification, EventType::Delta);
+        assert_eq!(descriptor.schema, DescribableEvent::avro_schema());
     }
 }

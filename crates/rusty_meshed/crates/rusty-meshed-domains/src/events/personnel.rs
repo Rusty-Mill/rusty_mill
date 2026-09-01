@@ -16,7 +16,7 @@
 
 use rusty_json::json;
 use rusty_meshed_core::avro::{decode_string, encode_string};
-use rusty_meshed_core::{AvroDecodeError, BaseEvent};
+use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent};
 
 /// Event emitted when a person is assigned to a position within a
 /// unit (DOM-002). A delta event capturing the assignment action:
@@ -339,6 +339,86 @@ impl StatusChanged {
             effective_date,
             transaction_date,
         })
+    }
+}
+
+impl DomainEvent for PersonnelAssigned {
+    const EVENT_NAME: &'static str = "PersonnelAssigned";
+
+    fn base(&self) -> &BaseEvent {
+        &self.base
+    }
+
+    fn avro_schema() -> String {
+        Self::avro_schema()
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.serialize()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
+        Self::deserialize(bytes)
+    }
+}
+
+impl DomainEvent for PersonnelPromoted {
+    const EVENT_NAME: &'static str = "PersonnelPromoted";
+
+    fn base(&self) -> &BaseEvent {
+        &self.base
+    }
+
+    fn avro_schema() -> String {
+        Self::avro_schema()
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.serialize()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
+        Self::deserialize(bytes)
+    }
+}
+
+impl DomainEvent for PersonnelSeparated {
+    const EVENT_NAME: &'static str = "PersonnelSeparated";
+
+    fn base(&self) -> &BaseEvent {
+        &self.base
+    }
+
+    fn avro_schema() -> String {
+        Self::avro_schema()
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.serialize()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
+        Self::deserialize(bytes)
+    }
+}
+
+impl DomainEvent for StatusChanged {
+    const EVENT_NAME: &'static str = "StatusChanged";
+
+    fn base(&self) -> &BaseEvent {
+        &self.base
+    }
+
+    fn avro_schema() -> String {
+        Self::avro_schema()
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.serialize()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
+        Self::deserialize(bytes)
     }
 }
 

@@ -5,7 +5,7 @@
 
 use rusty_json::json;
 use rusty_meshed_core::avro::{decode_double, decode_string, encode_double, encode_string};
-use rusty_meshed_core::{AvroDecodeError, BaseEvent};
+use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent};
 
 /// Event emitted when a unit's readiness is formally assessed
 /// (DOM-010). This is a measurement event -- it records a point-in-time
@@ -95,6 +95,26 @@ impl UnitReadinessAssessed {
             effective_date,
             transaction_date,
         })
+    }
+}
+
+impl DomainEvent for UnitReadinessAssessed {
+    const EVENT_NAME: &'static str = "UnitReadinessAssessed";
+
+    fn base(&self) -> &BaseEvent {
+        &self.base
+    }
+
+    fn avro_schema() -> String {
+        Self::avro_schema()
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.serialize()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self, AvroDecodeError> {
+        Self::deserialize(bytes)
     }
 }
 

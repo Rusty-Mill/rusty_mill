@@ -10,15 +10,14 @@
 //! `rusty_meshed_core::avro`'s primitives and
 //! `BaseEvent::avro_record_schema`/`encode_into`/`decode_from`.
 //!
-//! No shared `DomainEvent` trait unifies these nine: nothing in this
-//! pass needs to treat them polymorphically (no producer/consumer
-//! generic dispatch has landed yet, DOM-012 onward), so introducing
-//! one now would be an abstraction with no caller -- exactly what this
-//! crate family avoids elsewhere (see e.g.
-//! `rusty-meshed-observability::slo`'s `check_freshness`/
-//! `check_completeness` staying separate despite near-identical
-//! bodies). Add one if/when a real caller needs to hold a
-//! `Box<dyn DomainEvent>` or a generic `E: DomainEvent`.
+//! All nine implement `rusty_meshed_core::DomainEvent`, a thin trait
+//! delegating straight to each event's own inherent
+//! `avro_schema()`/`serialize()`/`deserialize()` (unchanged, still the
+//! real implementations) plus a `base()` accessor and an `EVENT_NAME`
+//! const -- added once `rusty-meshed-sdk`'s producer/consumer bases
+//! (SDK-013..039) needed to hold a generic `E: DomainEvent` rather than
+//! one concrete event type per call site. See that trait's own module
+//! doc in `rusty_meshed_core` for why it lives there instead of here.
 
 mod personnel;
 mod position;
