@@ -7,7 +7,9 @@ use crate::protocol::api_key;
 use crate::protocol::api_versions::{ApiVersionsRequest, ApiVersionsResponse};
 use crate::protocol::create_topics::{CreateTopicsRequest, CreateTopicsResponse};
 use crate::protocol::header::{RequestHeader, ResponseHeader};
+use crate::protocol::list_offsets::{ListOffsetsRequest, ListOffsetsResponse};
 use crate::protocol::metadata::{MetadataRequest, MetadataResponse};
+use crate::protocol::offset_fetch::{OffsetFetchRequest, OffsetFetchResponse};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_wire::{Reader, Writer};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -125,6 +127,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         let mut reader = Reader::new(&body);
         Ok(CreateTopicsResponse::decode(&mut reader)?)
     }
+
+    /// Sends `ListOffsetsRequest` v1 -- see
+    /// [`crate::protocol::list_offsets`]'s module doc for why v1, not
+    /// v0 like everything else here.
+    pub async fn list_offsets(
+        &mut self,
+        request: &ListOffsetsRequest,
+    ) -> Result<ListOffsetsResponse, ClientError> {
+        let body = self
+            .call(api_key::LIST_OFFSETS, 1, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(ListOffsetsResponse::decode(&mut reader)?)
+    }
+
+    /// Sends `OffsetFetchRequest` v0. See
+    /// [`crate::protocol::offset_fetch`]'s module doc for the
+    /// coordinator-routing caveat this call doesn't handle.
+    pub async fn offset_fetch(
+        &mut self,
+        request: &OffsetFetchRequest,
+    ) -> Result<OffsetFetchResponse, ClientError> {
+        let body = self
+            .call(api_key::OFFSET_FETCH, 0, |writer| request.encode(writer))
+            .await?;
+        let mut reader = Reader::new(&body);
+        Ok(OffsetFetchResponse::decode(&mut reader)?)
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +266,95 @@ mod tests {
                 error_code: 0
             }]
         );
+    }
+
+    #[rusty_tokio::test]
+    async fn list_offsets_round_trips_through_a_fake_peer() {
+        use crate::protocol::list_offsets::{
+            ListOffsetsPartitionRequest, ListOffsetsTopicRequest, LATEST_TIMESTAMP,
+        };
+        use crate::wire::write_i64;
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::LIST_OFFSETS);
+            assert_eq!(header.api_version, 1);
+
+            let mut response_body = Writer::new();
+            write_i32(&mut response_body, 1); // topics
+            write_string(
+                &mut response_body,
+                "manpower.readiness-reporting.assessments",
+            );
+            write_i32(&mut response_body, 1); // partitions
+            write_i32(&mut response_body, 0); // partition_index
+            write_i16(&mut response_body, 0); // error_code
+            write_i64(&mut response_body, 1_735_689_600_000); // timestamp
+            write_i64(&mut response_body, 42); // offset
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = crate::protocol::list_offsets::ListOffsetsRequest {
+            replica_id: -1,
+            topics: vec![ListOffsetsTopicRequest {
+                name: "manpower.readiness-reporting.assessments".to_string(),
+                partitions: vec![ListOffsetsPartitionRequest {
+                    partition_index: 0,
+                    timestamp: LATEST_TIMESTAMP,
+                }],
+            }],
+        };
+        let response = client.list_offsets(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.topics[0].partitions[0].offset, 42);
+        assert_eq!(
+            response.topics[0].partitions[0].timestamp,
+            1_735_689_600_000
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn offset_fetch_round_trips_through_a_fake_peer() {
+        use crate::protocol::offset_fetch::OffsetFetchTopicRequest;
+        use crate::wire::write_i64;
+
+        let (client_io, mut peer) = duplex(1024);
+        let mut client = KafkaClient::new(client_io, None);
+
+        let server = rusty_tokio::spawn(async move {
+            let (header, _body) = recv_request(&mut peer).await;
+            assert_eq!(header.api_key, api_key::OFFSET_FETCH);
+            assert_eq!(header.api_version, 0);
+
+            let mut response_body = Writer::new();
+            write_i32(&mut response_body, 1); // topics
+            write_string(
+                &mut response_body,
+                "manpower.readiness-reporting.assessments",
+            );
+            write_i32(&mut response_body, 1); // partitions
+            write_i32(&mut response_body, 0); // partition_index
+            write_i64(&mut response_body, 17); // committed_offset
+            crate::wire::write_nullable_string(&mut response_body, None); // metadata
+            write_i16(&mut response_body, 0); // error_code
+            send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
+        });
+
+        let request = crate::protocol::offset_fetch::OffsetFetchRequest {
+            group_id: "_meshed_metrics_readiness-reporting".to_string(),
+            topics: vec![OffsetFetchTopicRequest {
+                name: "manpower.readiness-reporting.assessments".to_string(),
+                partitions: vec![0],
+            }],
+        };
+        let response = client.offset_fetch(&request).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.topics[0].partitions[0].committed_offset, 17);
     }
 
     #[rusty_tokio::test]

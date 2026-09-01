@@ -30,6 +30,14 @@ pub(crate) fn write_i32(writer: &mut Writer, v: i32) {
     writer.write_u32_be(v as u32);
 }
 
+pub(crate) fn read_i64(reader: &mut Reader) -> Result<i64, CodecError> {
+    Ok(reader.read_u64_be()? as i64)
+}
+
+pub(crate) fn write_i64(writer: &mut Writer, v: i64) {
+    writer.write_u64_be(v as u64);
+}
+
 /// Reads a Kafka `NULLABLE_STRING`: an `INT16` byte length (`-1` means
 /// `None`) followed by that many UTF-8 bytes.
 pub(crate) fn read_nullable_string(reader: &mut Reader) -> Result<Option<String>, CodecError> {
@@ -143,5 +151,24 @@ mod tests {
         assert_eq!(bytes, [0xFF, 0xFF]);
         let mut reader = Reader::new(&bytes);
         assert_eq!(read_i16(&mut reader).unwrap(), -1);
+    }
+
+    #[test]
+    fn i64_round_trips_negative_values() {
+        let mut writer = Writer::new();
+        write_i64(&mut writer, -2);
+        let bytes = writer.into_vec();
+        assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]);
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(read_i64(&mut reader).unwrap(), -2);
+    }
+
+    #[test]
+    fn i64_round_trips_a_large_positive_timestamp() {
+        let mut writer = Writer::new();
+        write_i64(&mut writer, 1_735_689_600_000);
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(read_i64(&mut reader).unwrap(), 1_735_689_600_000);
     }
 }

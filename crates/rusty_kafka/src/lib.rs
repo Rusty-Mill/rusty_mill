@@ -14,10 +14,15 @@
 //!
 //! - **Implemented**: `ApiVersions` (broker capability discovery),
 //!   `Metadata` (broker/topic discovery), `CreateTopics` (what
-//!   `TopicManager` needs) -- all v0, the oldest non-flexible wire
-//!   format for each.
-//! - **Not yet implemented**: `Produce`/`Fetch` and consumer-group
-//!   coordination (`JoinGroup`/`SyncGroup`/`Heartbeat`/offset commit).
+//!   `TopicManager` needs), `ListOffsets` (watermark/timestamp lookup,
+//!   at v1 -- see [`protocol::list_offsets`]'s module doc for why v1
+//!   specifically), `OffsetFetch` (a consumer group's committed
+//!   offset, with a coordinator-routing caveat -- see
+//!   [`protocol::offset_fetch`]'s module doc) -- v0 for every one of
+//!   these except `ListOffsets`.
+//! - **Not yet implemented**: `Produce`/`Fetch` and the rest of
+//!   consumer-group coordination (`FindCoordinator`/`JoinGroup`/
+//!   `SyncGroup`/`Heartbeat`/`OffsetCommit`).
 //!   Modern Kafka brokers require the record-batch v2 message format
 //!   (varint-encoded, CRC32C-checksummed) for current `Produce` API
 //!   versions, and likely require flexible (compact/tagged-field)
