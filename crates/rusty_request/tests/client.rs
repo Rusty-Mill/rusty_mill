@@ -1,9 +1,10 @@
-//! This whole suite drives the crate's default (`rusty_tokio`) backend
-//! directly through `tests/common`'s own `rusty_tokio`-based runtime and
-//! servers -- not meaningful (and not run) under the `tokio` feature,
-//! whose connector runs on a real tokio runtime instead. See
-//! `tests/tokio_feature.rs` for that feature's own smoke tests.
-#![cfg(not(feature = "tokio"))]
+//! This whole suite drives the crate's `rusty_tokio` backend directly
+//! through `tests/common`'s own `rusty_tokio`-based runtime and servers.
+//! It runs with and without the `tokio` feature: with it on, it's the
+//! proof that the feature is additive -- a request made from inside
+//! `rusty_tokio` still runs on `rusty_tokio` with real tokio compiled in
+//! (see `src/rt.rs`). See `tests/tokio_feature.rs` for the feature's
+//! own real-tokio smoke tests.
 
 mod common;
 

@@ -1,7 +1,14 @@
 name: 'Select workspace packages for CI scope'
 description: >
   Turns the plan job's affected-crate output into cargo -p/--workspace
-  flags, applying per-OS exclusions either way.
+  flags, applying per-OS exclusions either way. Also publishes the
+  post-exclusion package list itself (`packages`), so a step that needs to
+  re-filter the selection (e.g. doctests, which must drop bin-only crates)
+  starts from the same excluded set instead of the plan job's raw output --
+  the raw output still names Windows-excluded crates, and re-deriving from
+  it silently re-admits them (that is exactly how `rusty_stream` kept being
+  compiled on windows-latest by `cargo test --doc` while build/nextest
+  correctly skipped it).
 inputs:
   full:
     description: 'plan job output: "true" to build/test/clippy the whole workspace'
@@ -17,6 +24,9 @@ outputs:
   args:
     description: 'cargo package-selection flags to pass to build/test/clippy; empty means nothing to do'
     value: ${{ steps.compute.outputs.args }}
+  packages:
+    description: 'space-separated package names actually selected on this runner (per-OS exclusions applied); empty when full is "true", since --workspace carries its own --exclude flags in `args`'
+    value: ${{ steps.compute.outputs.packages }}
 runs:
   using: composite
   steps:
@@ -31,6 +41,7 @@ runs:
           return 1
         }
 
+        pkgs=""
         if [ "${{ inputs.full }}" = "true" ]; then
           args="--workspace"
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -45,7 +56,9 @@ runs:
               continue
             fi
             args="$args -p $p"
+            pkgs="${pkgs:+$pkgs }$p"
           done
         fi
 
         echo "args=$args" >> "$GITHUB_OUTPUT"
+        echo "packages=$pkgs" >> "$GITHUB_OUTPUT"

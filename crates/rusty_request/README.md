@@ -13,10 +13,10 @@ its LocalAPI client/server. This crate's own connection pooling,
 retry/redirect policy, proxy routing, and JSON are still original code:
 no `hyper`, no `reqwest`, no `serde`, no `url` crate.
 
-## Running on real tokio instead
+## Running on real tokio too
 
-The optional `tokio` feature (off by default) drives the connector over
-real crates.io `tokio` instead of `rusty_tokio` -- for a consumer (e.g.
+The optional `tokio` feature (off by default) adds a real crates.io
+`tokio` backend for the connector -- for a consumer (e.g.
 [`rusty_search`](https://github.com/baileyrd/rusty_search)) that's
 already running inside its own real tokio runtime and would otherwise end
 up running two async runtimes side by side just to make HTTP calls:
@@ -25,17 +25,33 @@ up running two async runtimes side by side just to make HTTP calls:
 rusty_request = { git = "...", features = ["tokio"] }
 ```
 
-With the feature on, `Body::streaming`'s reader bound switches from
-`rusty_tokio::io::AsyncRead` to `tokio::io::AsyncRead` too, so a caller
-can hand it a real tokio reader (`tokio::fs::File`, etc.) directly.
-Neither `rusty_tls` nor `rusty_http` has grown a real-tokio adapter of
-its own yet (unlike `rusty_http`, which already has a `tokio` feature
-alongside its `rusty-tokio` one) -- rather than block on that upstream
-work, this crate reaches their existing `rusty_tokio`-based adapters
-through a small compat shim (`src/tokio_compat.rs`) instead. Every actual
-read, write, and connect is still real tokio's own; `rusty_tokio`
-contributes only trait/type *definitions* the shim implements, never
-anything that runs, so this is exactly one runtime, not two.
+The feature is **additive**, as Cargo features are meant to be: it
+compiles the real-tokio backend in *alongside* the default `rusty_tokio`
+one, and each request uses whichever runtime the task calling it is
+actually running on -- detected per call from the thread-local runtime
+handle (`src/rt.rs`), never chosen at compile time. A request sent from
+inside `rusty_tokio` uses `rusty_tokio`'s sockets, timers, and blocking
+pool; one sent from inside a real tokio runtime uses real tokio's. That
+matters because of Cargo feature unification: any crate in a build graph
+(or `--all-features` on a workspace member) that turns this feature on
+turns it on for every other consumer in the same build, including ones
+that only ever run on `rusty_tokio`. Those consumers keep working
+unchanged. (Before this, the feature replaced the `rusty_tokio` backend
+wholesale, and a `rusty_tokio`-based consumer caught by feature
+unification failed at run time with "there is no reactor running".)
+
+With the feature on, `Body::streaming_tokio` accepts a real tokio reader
+(`tokio::fs::File`, etc.) directly, alongside `Body::streaming`'s
+`rusty_tokio::io::AsyncRead` bound, which no longer changes with the
+feature. Neither `rusty_tls` nor `rusty_http` has grown a real-tokio
+adapter of its own yet (unlike `rusty_http`, which already has a `tokio`
+feature alongside its `rusty-tokio` one) -- rather than block on that
+upstream work, this crate reaches their existing `rusty_tokio`-based
+adapters through a small compat shim (`src/tokio_compat.rs`) instead. On
+a real tokio runtime every actual read, write, and connect is real
+tokio's own; `rusty_tokio` contributes only trait/type *definitions* the
+shim implements, never anything that runs, so that's exactly one
+runtime, not two.
 
 ## TLS/HTTPS
 
@@ -223,10 +239,12 @@ cargo test           # unit tests (url/header/json parsing) plus
                       # HTTP/1.1 servers (tests/common) -- including a
                       # TLS one and a CONNECT-tunneling proxy one -- so
                       # nothing requires real network access
-cargo test --features tokio  # tests/tokio_feature.rs: the same http(s)
-                      # round trip, but running entirely on real tokio
-                      # (tests/client.rs/https.rs don't apply under this
-                      # feature -- see their own doc comments)
+cargo test --features tokio  # everything above again (proving the
+                      # feature is additive: the rusty_tokio suites still
+                      # pass with real tokio compiled in), plus
+                      # tests/tokio_feature.rs: the same http(s) round
+                      # trip running entirely on real tokio, and a
+                      # rusty_tokio-driven request with the feature on
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features tokio -- -D warnings
 cargo fmt --check

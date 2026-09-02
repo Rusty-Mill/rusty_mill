@@ -16,11 +16,15 @@ categories = ["api-bindings", "asynchronous"]
 # dependency, same convention as every other in-workspace consumer. The
 # `tokio` feature is required, not optional: this crate (and its own
 # consumers, e.g. rusty_homelab_mcp) run under a real `tokio` runtime
-# (rmcp/the wider MCP ecosystem require it), and rusty_request defaults to
-# driving its connector over its own from-scratch `rusty_tokio` runtime
-# instead -- polling that from within a real tokio runtime would leave its
-# I/O and timers with no reactor driving them. See rusty_request's README
-# ("Running on real tokio instead") for the full picture.
+# (rmcp/the wider MCP ecosystem require it), and without the feature
+# rusty_request only has its own from-scratch `rusty_tokio` backend to
+# drive its connector with -- polling that from within a real tokio
+# runtime would leave its I/O and timers with no reactor driving them.
+# (The feature is additive: with it on, rusty_request picks the backend
+# per request from the runtime actually driving the task, so enabling it
+# here never affects a `rusty_tokio`-based consumer elsewhere in the same
+# build.) See rusty_request's README ("Running on real tokio too") for the
+# full picture.
 rusty_request = { path = "../rusty_request", features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
