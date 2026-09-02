@@ -9,6 +9,11 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `.github/scripts/test_affected_crates.py` — unit tests for the CI plan
+  step's ownership and reverse-dependency logic (nested crates, directory
+  name prefixes, transitive dependents, external deps, cycles), run by a
+  new `plan-tests` job; `affected_crates.py`'s graph logic moved into an
+  `affected_packages()` function so the tests can drive it without cargo
 - `docs/atlas/` — the Rusty Mill → Atlas evidence review (revision 2,
   verified against Rusty Mill `06ca8669` and Atlas `390d6b0f`) and the
   list of corrections applied to its first revision

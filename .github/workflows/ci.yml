@@ -45,6 +45,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  plan-tests:
+    # affected_crates.py decides what every other job runs on a PR, so its
+    # ownership and reverse-dependency logic gets its own unit tests, run
+    # against synthetic metadata (no cargo needed).
+    name: plan script unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
   plan:
     name: plan (affected crates)
     runs-on: ubuntu-latest
