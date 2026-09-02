@@ -9667,6 +9667,123 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-meshed-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rusty-meshed-core",
+ "rusty-meshed-observability",
+ "rusty-meshed-registry",
+ "rusty-meshed-schema-registry",
+ "rusty-meshed-sdk",
+ "rusty_err",
+ "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
+ "rusty_sqlite",
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty-meshed-core"
+version = "0.1.0"
+dependencies = [
+ "rusty_err",
+ "rusty_json",
+ "rusty_uuid",
+]
+
+[[package]]
+name = "rusty-meshed-domains"
+version = "0.1.0"
+dependencies = [
+ "rusty-meshed-core",
+ "rusty-meshed-observability",
+ "rusty-meshed-schema-registry",
+ "rusty-meshed-sdk",
+ "rusty_err",
+ "rusty_http",
+ "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
+ "rusty_sqlite",
+ "rusty_time",
+ "rusty_tokio",
+ "rusty_uuid",
+ "rusty_wire",
+]
+
+[[package]]
+name = "rusty-meshed-governance"
+version = "0.1.0"
+dependencies = [
+ "rusty_err",
+]
+
+[[package]]
+name = "rusty-meshed-observability"
+version = "0.1.0"
+dependencies = [
+ "rusty-meshed-schema-registry",
+ "rusty_err",
+ "rusty_http",
+ "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
+ "rusty_sqlite",
+ "rusty_tokio",
+ "rusty_uuid",
+ "rusty_wire",
+]
+
+[[package]]
+name = "rusty-meshed-registry"
+version = "0.1.0"
+dependencies = [
+ "rusty-meshed-core",
+ "rusty-meshed-governance",
+ "rusty-meshed-observability",
+ "rusty-meshed-schema-registry",
+ "rusty_err",
+ "rusty_http",
+ "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
+ "rusty_sqlite",
+ "rusty_tokio",
+ "rusty_wire",
+]
+
+[[package]]
+name = "rusty-meshed-schema-registry"
+version = "0.1.0"
+dependencies = [
+ "rusty_err",
+ "rusty_http",
+ "rusty_request",
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty-meshed-sdk"
+version = "0.1.0"
+dependencies = [
+ "rusty-meshed-core",
+ "rusty-meshed-observability",
+ "rusty-meshed-schema-registry",
+ "rusty_err",
+ "rusty_http",
+ "rusty_json",
+ "rusty_kafka",
+ "rusty_request",
+ "rusty_sqlite",
+ "rusty_time",
+ "rusty_tokio",
+ "rusty_uuid",
+ "rusty_wire",
+]
+
+[[package]]
 name = "rusty-search"
 version = "0.1.0"
 dependencies = [
@@ -10047,6 +10164,15 @@ dependencies = [
 [[package]]
 name = "rusty_json-derive"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_kafka"
+version = "0.1.0"
+dependencies = [
+ "rusty_err",
+ "rusty_tokio",
+ "rusty_wire",
+]
 
 [[package]]
 name = "rusty_libc"

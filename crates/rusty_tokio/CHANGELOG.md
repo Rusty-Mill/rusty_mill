@@ -42,6 +42,53 @@ anything prior to v0.2.0.
   caveat in the README). No tracking issue number -- flagged here rather
   than fabricated; this session's `gh` access was unavailable to open one.
 
+### Fixed
+
+- Readiness is no longer lost when an edge lands between a failed
+  syscall and the clear that follows it. Every `WouldBlock` path
+  (`poll_io` behind `read`/`write`/`connect`/`accept`, `try_io` behind
+  `try_read`/`try_write`/`try_peek`/..., and `AsyncFdReadyGuard::
+  clear_ready`) used to attempt the syscall and then unconditionally
+  clear the cached readiness bit. Under the edge-triggered backends
+  (`EPOLLET`, `EV_CLEAR`, the one-shot AFD/io_uring polls) an edge the
+  reactor delivered in that window was wiped and never re-reported, so
+  the next `readable()`/`writable()` wait hung until something else
+  poked the fd -- seen as `tests/peek.rs` stalling about 1 run in 60,
+  and the plausible cause of similar rare hangs in dependents. Each
+  direction's readiness word now packs an edge counter next to the
+  ready bit; callers snapshot it before the syscall and the clear is a
+  compare-and-swap that only lands if no edge arrived since. When it is
+  refused, the bit stays set and the operation is simply retried.
+  `AsyncFdReadyGuard::clear_ready` now follows real tokio's rule: an
+  event that arrived after the guard was created survives the clear.
+
+- `TcpStream::connect`/`connect_addr`, `TcpSocket::connect`, and
+  `UnixStream::connect`/`connect_addr`/`UnixSocket::connect` now wait for
+  a still-in-flight non-blocking connect to actually resolve before
+  returning. They used to register the socket with the reactor's
+  optimistic "already writable" default, so the `SO_ERROR` check that
+  decides whether the connect succeeded ran immediately, saw no error
+  yet, and handed back a stream that was still mid-handshake. Linux
+  masked it (a loopback `connect(2)` reports `EINPROGRESS` but has
+  already processed the handshake or RST inside the call, so the
+  premature check saw a settled `SO_ERROR`); on Windows, where the
+  result is genuinely still pending when `connect` returns, a refused
+  loopback connect never surfaced at all (Rusty-Mill/rusty_mill#137). The platform `connect` helpers now report
+  established-vs-in-progress, and an in-progress connect is registered
+  write-pending (`reactor::InitialReadiness`) so the first writability
+  wait is real. New `tests/tcp_connect_refused.rs` covers refused and
+  successful connects on every CI platform.
+- The `epoll` and `kqueue` backends now publish an fd's `ScheduledIo` in
+  the reactor registry *before* arming the kernel registration, not
+  after. Both report the fd's current readiness immediately and, being
+  edge-triggered (`EPOLLET`/`EV_CLEAR`), exactly once -- so an event the
+  reactor thread dequeued before the registry entry existed was dropped
+  and never re-reported. The optimistic default had hidden that (a lost
+  initial edge only cost one wasted syscall); with write-pending
+  registration it was a permanent hang on a connect whose first edge was
+  lost, seen as a rare stall of the new tests under parallel load. The
+  `io_uring` and Windows backends already registered in this order.
+
 ## [0.2.0] - 2026-08-02
 
 ### Breaking

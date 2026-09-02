@@ -54,7 +54,7 @@ mod windows;
 pub(crate) use windows::Reactor;
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 
@@ -129,37 +129,135 @@ pub(crate) enum Interest {
     Write,
 }
 
-/// Per-registered-fd readiness state: one bit each for readable and
-/// writable, plus the waker to fire when that bit flips on.
+/// Per-registered-fd readiness state: one word each for readable and
+/// writable, plus the waker to fire when readiness flips on.
+///
+/// Each word packs the ready bit ([`READY`]) with an edge counter in
+/// the bits above it, bumped on every [`mark_ready`](Self::mark_ready).
+/// The counter is what makes clearing readiness safe under the
+/// edge-triggered backends (`EPOLLET`, `EV_CLEAR`, and the one-shot
+/// AFD/io_uring polls, all re-armed only after an event is consumed):
+/// a caller that saw "ready", tried its syscall, and got `WouldBlock`
+/// clears the bit through [`clear_if_unchanged`](Self::clear_if_unchanged)
+/// with the [`ReadyToken`] it took *before* the attempt, and that clear
+/// only lands if no edge arrived in between. Without the counter, an
+/// edge delivered between the failed attempt and the clear was wiped
+/// -- and, being an edge, never re-reported -- so the next wait on that
+/// direction hung until something else happened to poke the fd. That
+/// was the mechanism behind rare stalls of the shape "write happened
+/// after my `WouldBlock`, `readable()` never woke".
 pub(crate) struct ScheduledIo {
-    readable: AtomicBool,
-    writable: AtomicBool,
+    readable: AtomicUsize,
+    writable: AtomicUsize,
     read_waker: Mutex<Option<Waker>>,
     write_waker: Mutex<Option<Waker>>,
 }
 
+/// The ready bit of a [`ScheduledIo`] direction word.
+const READY: usize = 1;
+/// One step of the edge counter packed above [`READY`].
+const TICK: usize = 2;
+
+/// A direction's readiness word as observed at one instant -- taken
+/// with [`ScheduledIo::snapshot`] before attempting a syscall, and
+/// handed back to [`ScheduledIo::clear_if_unchanged`] after a
+/// `WouldBlock`, so the clear can be refused if an edge arrived in
+/// between. Deliberately opaque: nothing outside this module inspects
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReadyToken(usize);
+
+/// How a freshly registered fd's readiness bits start out -- the one
+/// choice a backend's `register_with` takes from its caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InitialReadiness {
+    /// Both directions assumed ready until a `WouldBlock` proves
+    /// otherwise -- right for almost every fd (see
+    /// `ScheduledIo::with_initial`), and what plain `register` uses.
+    Optimistic,
+    /// Writable starts *cleared*: the first write-side wait blocks until
+    /// the backend actually reports the fd writable (or failed). For a
+    /// non-blocking `connect` that returned in-progress, this is the
+    /// only correct start -- see [`InitialReadiness::for_connect`].
+    WritePending,
+}
+
+impl InitialReadiness {
+    /// The right initial state for a socket whose non-blocking
+    /// `connect` just returned `outcome`.
+    ///
+    /// The optimistic default is *wrong* for a connect still in flight:
+    /// `TcpStream::connect` waits for writability and then reads
+    /// `SO_ERROR` to learn whether the connect succeeded, but with the
+    /// writable bit pre-set that check runs immediately, while the
+    /// handshake is still pending, sees no error yet, and hands back a
+    /// "connected" stream that isn't -- whatever the connect later
+    /// resolves to (including refused) is never observed by `connect`
+    /// itself. Linux masked this: a loopback `connect(2)` reports
+    /// `EINPROGRESS` but has already processed the handshake -- or the
+    /// peer's RST -- inside the call, so by the time the optimistic
+    /// check ran, `SO_ERROR` and writability were already settled; and
+    /// for a remote peer the first `send` in `SYN_SENT` returns `EAGAIN`,
+    /// so the reactor wait happened on the first write instead. On
+    /// Windows a loopback connect is genuinely still pending when
+    /// `connect` returns, and a refused one sat forever
+    /// (Rusty-Mill/rusty_mill#137).
+    ///
+    /// Starting write-pending is safe even if the connect completes
+    /// before or during registration: every backend reports an fd's
+    /// *current* state at registration time (`EPOLL_CTL_ADD` with
+    /// `EPOLLET`, `EV_ADD` with `EV_CLEAR`, `IORING_OP_POLL_ADD`, and an
+    /// `IOCTL_AFD_POLL` on an already-writable socket all complete
+    /// immediately), so the writable edge is never lost. Clearing the
+    /// bit *after* registration would not be safe under those
+    /// edge-triggered backends -- an edge delivered in between would be
+    /// wiped and never re-reported -- which is why this is a
+    /// registration-time choice rather than a `clear` call.
+    pub(crate) fn for_connect(outcome: super::socket::ConnectOutcome) -> Self {
+        match outcome {
+            super::socket::ConnectOutcome::Established => InitialReadiness::Optimistic,
+            super::socket::ConnectOutcome::InProgress => InitialReadiness::WritePending,
+        }
+    }
+}
+
 impl ScheduledIo {
-    fn new() -> Self {
+    fn with_initial(initial: InitialReadiness) -> Self {
         ScheduledIo {
-            // Optimistic: assume both directions are ready until a
-            // WouldBlock proves otherwise. This matches every real fd's
-            // actual state right after it's created (a listener can
-            // usually be written to immediately, a fresh connect result
-            // is unknown either way -- either is a safe first guess
-            // since a wrong guess just costs one wasted syscall attempt).
-            readable: AtomicBool::new(true),
-            writable: AtomicBool::new(true),
+            // Optimistic by default: assume both directions are ready
+            // until a WouldBlock proves otherwise. This matches every
+            // real fd's actual state right after it's created (a
+            // listener can usually be written to immediately; an
+            // already-established socket is writable), and a wrong
+            // guess just costs one wasted syscall attempt. The one fd
+            // where it's *not* a safe guess -- a socket whose connect is
+            // still in flight, where the wasted attempt is the `SO_ERROR`
+            // check that decides whether `connect` succeeded -- asks for
+            // `WritePending` instead; see `InitialReadiness::for_connect`.
+            readable: AtomicUsize::new(READY),
+            writable: AtomicUsize::new(match initial {
+                InitialReadiness::Optimistic => READY,
+                InitialReadiness::WritePending => 0,
+            }),
             read_waker: Mutex::new(None),
             write_waker: Mutex::new(None),
         }
     }
 
+    fn word(&self, interest: Interest) -> &AtomicUsize {
+        match interest {
+            Interest::Read => &self.readable,
+            Interest::Write => &self.writable,
+        }
+    }
+
     fn poll_ready(&self, cx: &mut Context<'_>, interest: Interest) -> Poll<()> {
-        let (flag, waker_slot) = match interest {
-            Interest::Read => (&self.readable, &self.read_waker),
-            Interest::Write => (&self.writable, &self.write_waker),
+        let word = self.word(interest);
+        let waker_slot = match interest {
+            Interest::Read => &self.read_waker,
+            Interest::Write => &self.write_waker,
         };
-        if flag.load(Ordering::Acquire) {
+        if word.load(Ordering::Acquire) & READY != 0 {
             return Poll::Ready(());
         }
         *waker_slot.lock().unwrap() = Some(cx.waker().clone());
@@ -167,17 +265,38 @@ impl ScheduledIo {
         // have flipped the bit between our first load and taking the
         // lock above, and if we didn't check again that wakeup would be
         // lost (nothing left to observe the flag flip).
-        if flag.load(Ordering::Acquire) {
+        if word.load(Ordering::Acquire) & READY != 0 {
             return Poll::Ready(());
         }
         Poll::Pending
     }
 
-    fn clear(&self, interest: Interest) {
-        match interest {
-            Interest::Read => self.readable.store(false, Ordering::Release),
-            Interest::Write => self.writable.store(false, Ordering::Release),
-        }
+    /// The `interest` direction's readiness word right now. Take it
+    /// *before* the syscall whose `WouldBlock` might lead to a clear.
+    fn snapshot(&self, interest: Interest) -> ReadyToken {
+        ReadyToken(self.word(interest).load(Ordering::Acquire))
+    }
+
+    /// Clears `interest` readiness -- but only if the direction's word
+    /// still equals `token`, i.e. no [`mark_ready`](Self::mark_ready)
+    /// has run since that snapshot was taken. Returns whether it
+    /// cleared. A `false` means an edge arrived during the caller's
+    /// syscall: the bit stays set so the caller's next `poll_ready`
+    /// passes straight through and the syscall is retried, instead of
+    /// the edge being lost.
+    ///
+    /// A single compare-and-swap, not a compare-then-store: with two
+    /// steps the reactor could bump the counter and set the bit between
+    /// them and the store would still wipe it.
+    fn clear_if_unchanged(&self, interest: Interest, token: ReadyToken) -> bool {
+        self.word(interest)
+            .compare_exchange(
+                token.0,
+                token.0 & !READY,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     /// Called by a backend's event loop when it observes `interest` is
@@ -186,11 +305,19 @@ impl ScheduledIo {
     /// Rust's default visibility already reaches every descendant of the
     /// defining module.
     fn mark_ready(&self, interest: Interest) {
-        let (flag, waker_slot) = match interest {
-            Interest::Read => (&self.readable, &self.read_waker),
-            Interest::Write => (&self.writable, &self.write_waker),
+        let waker_slot = match interest {
+            Interest::Read => &self.read_waker,
+            Interest::Write => &self.write_waker,
         };
-        flag.store(true, Ordering::Release);
+        // Bump the edge counter and set the ready bit in one atomic
+        // step, so a concurrent `clear_if_unchanged` holding an older
+        // token either lands entirely before this (and is then
+        // overridden by it) or fails its compare -- never interleaves.
+        let _ = self
+            .word(interest)
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                Some(word.wrapping_add(TICK) | READY)
+            });
         if let Some(waker) = waker_slot.lock().unwrap().take() {
             waker.wake();
         }
@@ -219,10 +346,15 @@ pub(crate) fn poll_io<T>(
         if io.poll_ready(cx, interest).is_pending() {
             return Poll::Pending;
         }
+        // Snapshot before the attempt, so a `WouldBlock` clears only
+        // the readiness that was already stale when we started -- an
+        // edge that lands during `op` keeps the bit set and the loop
+        // simply tries again (see `ScheduledIo`'s docs).
+        let token = io.snapshot(interest);
         match op() {
             Ok(v) => return Poll::Ready(Ok(v)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                io.clear(interest);
+                io.clear_if_unchanged(interest, token);
                 continue;
             }
             Err(e) => return Poll::Ready(Err(e)),
@@ -245,14 +377,27 @@ pub(crate) fn poll_ready(
     io.poll_ready(cx, interest)
 }
 
-/// Clears `io`'s cached `interest` readiness -- called after a
-/// `WouldBlock` proves the previous "ready" signal was stale. The
-/// [`poll_io`]/[`ready_io`] loop above does this internally on every
-/// `WouldBlock`; [`super::AsyncFdReadyGuard::clear_ready`] and
-/// [`super::readiness::try_io`] expose the same step for callers doing
-/// their own I/O outside this module.
-pub(crate) fn clear_ready(io: &std::sync::Arc<ScheduledIo>, interest: Interest) {
-    io.clear(interest)
+/// `io`'s `interest` readiness word right now -- take it before a
+/// syscall whose `WouldBlock` should clear readiness, and hand it to
+/// [`clear_ready_if_unchanged`] afterwards. [`poll_io`]/[`ready_io`]
+/// do this internally; [`super::AsyncFdReadyGuard`] and
+/// [`super::readiness::try_io`] do it for callers running their own
+/// I/O outside this module.
+pub(crate) fn snapshot_ready(io: &std::sync::Arc<ScheduledIo>, interest: Interest) -> ReadyToken {
+    io.snapshot(interest)
+}
+
+/// Clears `io`'s cached `interest` readiness after a `WouldBlock`
+/// proved the "ready" signal was stale -- unless a fresh readiness edge
+/// arrived since `token` was taken, in which case the bit is left set
+/// (and `false` returned) so the next wait passes straight through
+/// instead of losing that edge. See [`ScheduledIo`]'s docs.
+pub(crate) fn clear_ready_if_unchanged(
+    io: &std::sync::Arc<ScheduledIo>,
+    interest: Interest,
+    token: ReadyToken,
+) -> bool {
+    io.clear_if_unchanged(interest, token)
 }
 
 /// Run `op` in a loop, waiting for `interest` readiness on `io` between
@@ -264,4 +409,71 @@ pub(crate) async fn ready_io<T>(
     mut op: impl FnMut() -> io::Result<T>,
 ) -> io::Result<T> {
     std::future::poll_fn(|cx| poll_io(io, interest, cx, &mut op)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::Waker;
+
+    fn is_ready(io: &ScheduledIo, interest: Interest) -> bool {
+        let mut cx = Context::from_waker(Waker::noop());
+        io.poll_ready(&mut cx, interest).is_ready()
+    }
+
+    #[test]
+    fn optimistic_starts_ready_both_ways_and_write_pending_does_not() {
+        let io = ScheduledIo::with_initial(InitialReadiness::Optimistic);
+        assert!(is_ready(&io, Interest::Read));
+        assert!(is_ready(&io, Interest::Write));
+        let io = ScheduledIo::with_initial(InitialReadiness::WritePending);
+        assert!(is_ready(&io, Interest::Read));
+        assert!(!is_ready(&io, Interest::Write));
+    }
+
+    #[test]
+    fn clear_with_no_intervening_edge_clears_and_mark_ready_restores() {
+        let io = ScheduledIo::with_initial(InitialReadiness::Optimistic);
+        let token = io.snapshot(Interest::Read);
+        assert!(io.clear_if_unchanged(Interest::Read, token));
+        assert!(!is_ready(&io, Interest::Read));
+        io.mark_ready(Interest::Read);
+        assert!(is_ready(&io, Interest::Read));
+    }
+
+    /// The race this exists for: an edge delivered between the failed
+    /// attempt (snapshot) and the clear must survive the clear.
+    #[test]
+    fn clear_after_an_intervening_edge_is_refused_and_readiness_survives() {
+        let io = ScheduledIo::with_initial(InitialReadiness::Optimistic);
+        let token = io.snapshot(Interest::Read);
+        io.mark_ready(Interest::Read);
+        assert!(!io.clear_if_unchanged(Interest::Read, token));
+        assert!(is_ready(&io, Interest::Read));
+        // A fresh snapshot taken after that edge clears normally.
+        let token = io.snapshot(Interest::Read);
+        assert!(io.clear_if_unchanged(Interest::Read, token));
+        assert!(!is_ready(&io, Interest::Read));
+    }
+
+    #[test]
+    fn a_stale_token_never_clears_even_after_many_edges() {
+        let io = ScheduledIo::with_initial(InitialReadiness::Optimistic);
+        let token = io.snapshot(Interest::Write);
+        for _ in 0..1000 {
+            io.mark_ready(Interest::Write);
+        }
+        assert!(!io.clear_if_unchanged(Interest::Write, token));
+        assert!(is_ready(&io, Interest::Write));
+    }
+
+    #[test]
+    fn directions_are_independent() {
+        let io = ScheduledIo::with_initial(InitialReadiness::Optimistic);
+        let read = io.snapshot(Interest::Read);
+        io.mark_ready(Interest::Write);
+        assert!(io.clear_if_unchanged(Interest::Read, read));
+        assert!(!is_ready(&io, Interest::Read));
+        assert!(is_ready(&io, Interest::Write));
+    }
 }

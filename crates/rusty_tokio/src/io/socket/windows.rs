@@ -234,7 +234,7 @@ pub(crate) fn new_udp_socket(addr: SocketAddr) -> io::Result<OwnedSocket> {
 /// `connect` (POSIX's `EINPROGRESS`); the caller waits for the socket to
 /// become writable and then calls [`take_socket_error`] to find out
 /// whether the connection actually succeeded.
-pub(crate) fn connect(sock: RawSocket, addr: SocketAddr) -> io::Result<()> {
+pub(crate) fn connect(sock: RawSocket, addr: SocketAddr) -> io::Result<super::ConnectOutcome> {
     let (storage, len) = to_sockaddr(addr);
     // SAFETY: `storage` holds a valid sockaddr for exactly `len` bytes
     // (`to_sockaddr`'s contract); `sock` is a valid, freshly created,
@@ -247,13 +247,18 @@ pub(crate) fn connect(sock: RawSocket, addr: SocketAddr) -> io::Result<()> {
         )
     };
     if r == 0 {
-        return Ok(());
+        return Ok(super::ConnectOutcome::Established);
     }
     // SAFETY: reads the calling thread's last-error slot right after a
     // failed Winsock call.
     let code = unsafe { WinSock::WSAGetLastError() };
     if code == WinSock::WSAEWOULDBLOCK {
-        return Ok(());
+        // Always the case for a non-blocking connect on Windows, loopback
+        // included -- and here, unlike a Linux loopback connect (which
+        // also reports in-progress but has usually processed the
+        // handshake inside the call already), the result is genuinely
+        // still pending when this returns.
+        return Ok(super::ConnectOutcome::InProgress);
     }
     Err(io::Error::from_raw_os_error(code))
 }

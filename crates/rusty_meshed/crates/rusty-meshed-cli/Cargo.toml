@@ -1,0 +1,37 @@
+[package]
+name = "rusty-meshed-cli"
+version = "0.1.0"
+edition = "2021"
+description = "The meshed operator CLI (health/lineage/metrics/slo commands), ported from meshed.cli."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mill"
+publish = false
+
+[[bin]]
+name = "meshed"
+path = "src/main.rs"
+
+[dependencies]
+rusty_err = { path = "../../../rusty_err" }
+rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_json = { path = "../../../rusty_json" }
+rusty_tokio = { path = "../../../rusty_tokio" }
+rusty-meshed-core = { path = "../rusty-meshed-core" }
+rusty-meshed-observability = { path = "../rusty-meshed-observability" }
+rusty-meshed-registry = { path = "../rusty-meshed-registry" }
+rusty-meshed-sdk = { path = "../rusty-meshed-sdk" }
+rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
+# External, not hand-rolled: CLI argument parsing is operator tooling,
+# not a platform capability this migration owns (unlike the Kafka wire
+# protocol/Avro codec elsewhere in this crate family) -- matches this
+# workspace's own precedent (rusty_mcp, rusty_homelab_mcp both pull in
+# clap directly rather than a hand-rolled parser).
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# Test-only: the compose-gated smoke tests (tests/compose_smoke.rs)
+# talk to a real local Kafka broker/Schema Registry/Kafka UI when
+# MESHED_COMPOSE_UP is set; production code in this crate never needs
+# either.
+rusty_kafka = { path = "../../../rusty_kafka" }
+rusty_request = { path = "../../../rusty_request" }
