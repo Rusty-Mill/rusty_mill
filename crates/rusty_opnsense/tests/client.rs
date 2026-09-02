@@ -157,7 +157,7 @@ async fn apply_firewall_changes_posts_to_the_apply_endpoint() {
 }
 
 #[tokio::test]
-async fn list_dhcp_leases_passes_through_the_search_envelope() {
+async fn list_dhcp_leases_uses_dnsmasq_when_it_answers() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"address":"10.0.0.42","hostname":"nas","mac":"aa:bb:cc:dd:ee:ff"}],"rowCount":1}"#,
     )]);
@@ -168,6 +168,84 @@ async fn list_dhcp_leases_passes_through_the_search_envelope() {
         .expect("list_dhcp_leases");
 
     assert_eq!(leases["rows"][0]["hostname"], "nas");
+}
+
+#[tokio::test]
+async fn list_dhcp_leases_falls_back_to_kea_when_dnsmasq_is_a_404() {
+    let base_url = support::spawn(vec![
+        MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
+        MockResponse::ok(r#"{"rows":[{"ip-address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#),
+    ]);
+
+    let leases = client(base_url)
+        .list_dhcp_leases()
+        .await
+        .expect("list_dhcp_leases");
+
+    assert_eq!(leases["rows"][0]["hostname"], "nas");
+}
+
+#[tokio::test]
+async fn list_dhcp_leases_falls_back_to_legacy_isc_when_dnsmasq_and_kea_are_both_404() {
+    let base_url = support::spawn(vec![
+        MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
+        MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
+        MockResponse::ok(r#"{"rows":[{"address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#),
+    ]);
+
+    let leases = client(base_url)
+        .list_dhcp_leases()
+        .await
+        .expect("list_dhcp_leases");
+
+    assert_eq!(leases["rows"][0]["hostname"], "nas");
+}
+
+#[tokio::test]
+async fn list_dhcp_leases_reports_a_clear_error_when_no_backend_is_present() {
+    let base_url = support::spawn(vec![
+        MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
+        MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
+        MockResponse::status(404, "Not Found", r#"{"errorMessage":"Endpoint not found"}"#),
+    ]);
+
+    let err = client(base_url)
+        .list_dhcp_leases()
+        .await
+        .expect_err("no backend should be a clear final error, not a silent empty list");
+
+    match err {
+        Error::Api { status, body } => {
+            assert_eq!(status, 404);
+            assert!(
+                body.contains("dnsmasq") && body.contains("Kea") && body.contains("legacy ISC"),
+                "expected the error to name all three backends tried, got: {body}"
+            );
+        }
+        other => panic!("expected Error::Api, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_dhcp_leases_does_not_mask_a_real_failure_as_a_missing_backend() {
+    // A 401 on the very first backend tried (dnsmasq) is a real problem
+    // (bad credentials) -- it must surface immediately, not be treated
+    // like a 404 and quietly retried against Kea/legacy ISC.
+    let base_url = support::spawn(vec![MockResponse::status(
+        401,
+        "Unauthorized",
+        r#"{"message":"invalid api key"}"#,
+    )]);
+
+    let err = client(base_url)
+        .list_dhcp_leases()
+        .await
+        .expect_err("a 401 should fail immediately");
+
+    match err {
+        Error::Api { status, .. } => assert_eq!(status, 401),
+        other => panic!("expected Error::Api, got {other:?}"),
+    }
 }
 
 #[tokio::test]
