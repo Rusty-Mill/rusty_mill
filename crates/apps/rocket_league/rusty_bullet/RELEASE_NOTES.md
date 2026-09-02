@@ -6,6 +6,47 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Scoped the Phase 1 candidate engine FR-005 needs
+**2026-09-02** · `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
+
+- **Design only — no code.** With `PHASE-0-EXIT` closed, `RB-PHYSICS-001-FR-005`
+  ("calibrate constants against real recorded ground truth") is unblocked
+  but has no way to actually run yet: nothing feeds a capture's recorded
+  controller input into `rb_physics_bullet` to produce a candidate
+  trajectory to score. Scoped that prerequisite plumbing as two new
+  requirements.
+- **`FR-076`**: extend `rb_physics_bullet` to seed a `PhysicsWorld` from a
+  recorded `PhysicsFrame` (position/rotation/velocity/angular_velocity —
+  `CarState`/`BallState` already carry exactly these four fields) plus a
+  new `RigidBody::standard_car()` centralizing the car's confirmed real
+  shape/mass constants (mirroring `RigidBody::ball()`'s existing pattern),
+  and extend `world::simulate` to consume a recorded per-tick controller-
+  input sequence instead of running input-free — the exact next step its
+  own doc comment already named ("once `RB-VERIFY-002` capture data
+  exists, this signature grows an `inputs` parameter"). `dt` per tick is
+  derived from the recording's own consecutive timestamps, deliberately
+  sidestepping the fact that no confirmed real Rocket League physics-tick
+  rate exists anywhere in this project yet.
+- **`FR-077`**: wire `FR-076`'s capability into `rb_verify_cli` (its first
+  dependency on `rb_physics_bullet`) and run it once against the real
+  capture from `RB-VERIFY-002-FR-001`, producing this project's first
+  genuine fidelity number — scoring a capture's simulated-from-its-own-
+  input trajectory against its own recorded outcome, unlike every
+  `score_replay_against_capture` run to date (two unrelated matches).
+- **Known limitation, called out explicitly rather than glossed over**:
+  `PhysicsWorld` has no public setter for a car's mid-air jump/dodge state
+  (double-jump availability, jump-hold timer, active dodge), so seeding a
+  simulation is only accurate starting from a grounded, neutral moment.
+  `FR-077` works around this with a seed-frame heuristic rather than
+  adding those setters now; if that proves insufficient, adding them is a
+  follow-up.
+- Also corrected 35 stale "still blocked on `PHASE-0-EXIT`" Non-goals
+  bullets scattered across earlier `RB-PHYSICS-001` FR entries in this
+  same spec, now that gate is closed (the equivalent phrasing in
+  `TRACEABILITY.md` was already corrected in the previous entry below).
+
+---
+
 ## Ran the verification pipeline end-to-end on real data for the first time, closing all of Phase 0
 **2026-09-02** · `crates/rb_verify_cli`
 

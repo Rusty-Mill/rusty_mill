@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.5.0
+- Version: 0.6.0
 - Status: Draft (all three functional requirements implemented and wired
   into `rb_verify_cli`; now run end-to-end against a real replay AND a real
   BakkesMod capture, closing `PHASE-0-EXIT`'s own literal exit criterion;
@@ -218,9 +218,18 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   derived from each sequence's own observed average tick interval) rather
   than a single caller-supplied constant — not needed yet since no real
   candidate engine exists to expose a case where a fixed value is wrong.
+- The candidate engine this section's own "good enough" question depends
+  on is now scoped (not implemented): `RB-PHYSICS-001-FR-076`/`FR-077`,
+  in `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`.
+  Once `FR-077` produces a first real score, that number — not an
+  arbitrary a-priori choice — is what should inform an answer here.
 
 ## Change history
 
+- 0.6.0 (2026-09-02): Noted that the candidate engine this spec's own
+  "good enough" fidelity question depends on is now scoped (not
+  implemented) as `RB-PHYSICS-001-FR-076`/`FR-077` — see that spec's
+  Requirements. No code change.
 - 0.5.0 (2026-09-02): Re-ran the existing end-to-end pipeline (no code
   change) against a real BakkesMod capture for the first time, now that
   `RB-VERIFY-002-FR-001`'s plugin exists — `frames compared: 343`, real

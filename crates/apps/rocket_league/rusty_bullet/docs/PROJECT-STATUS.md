@@ -1845,6 +1845,18 @@
   doesn't exist yet (see `RB-PHYSICS-001`'s own `FR-005`, now unblocked in
   the sense that real data finally exists to calibrate against, but not
   itself started).
+- Scoped (design only, no code) `RB-PHYSICS-001-FR-076`/`FR-077`, the
+  prerequisite plumbing `FR-005` needs: `FR-076` extends
+  `rb_physics_bullet` to seed a `PhysicsWorld` from a recorded
+  `PhysicsFrame` and simulate it forward using a recorded per-tick
+  controller-input sequence (the exact next step `world::simulate`'s own
+  doc comment already named as the thing to do "once `RB-VERIFY-002`
+  capture data exists"); `FR-077` wires that into `rb_verify_cli` and
+  runs it once against the real capture from `RB-VERIFY-002-FR-001`,
+  producing this project's first genuine fidelity number. Full scope,
+  including a known limitation (no setter yet for a car's mid-air
+  jump/dodge state — a seed frame needs to be a grounded, neutral moment
+  for now), is in `RB-PHYSICS-001`'s own spec.
 
 ## In progress
 
@@ -1879,12 +1891,16 @@
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
 2. `RB-PHYSICS-001-FR-005` (real-data constant calibration) is the next
-   substantive unit of work: with `PHASE-0-EXIT` closed, real recorded
-   input/outcome data finally exists, but nothing yet feeds a capture's
-   recorded controller input into `rb_physics_bullet` to produce a
-   candidate trajectory `rb_verify_cli` could score for actual fidelity —
-   that wiring doesn't exist yet and is a substantial piece of new work,
-   not a quick follow-up.
+   substantive unit of work, but doesn't start until its prerequisite
+   plumbing exists — now scoped (design only, no code yet) as
+   `RB-PHYSICS-001-FR-076` (extend `rb_physics_bullet` to seed a
+   `PhysicsWorld` from a recorded frame and simulate forward using a
+   recorded per-tick input sequence) and `FR-077` (wire that into
+   `rb_verify_cli`, run it once against the real capture, get this
+   project's first genuine fidelity number). See both entries in
+   `RB-PHYSICS-001`'s spec for the full scope, including known
+   limitations (no setter yet for a car's mid-air jump/dodge state, so a
+   seed frame needs to be a grounded, neutral moment for now).
 
 ## Validation
 

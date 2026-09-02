@@ -49,6 +49,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   literal exit criterion and all four `PHASE-0-*` roadmap units. Not a
   fidelity measurement — the replay and capture are unrelated matches;
   that needs a Phase 1 candidate engine that doesn't exist yet.
+- Scoped (design only, no code) `RB-PHYSICS-001-FR-076`/`FR-077`, the
+  candidate-engine plumbing `FR-005`'s real-data calibration needs: seed a
+  `PhysicsWorld` from a recorded capture frame, simulate it forward using
+  that capture's own recorded per-tick input, and score the result
+  against the capture's own recorded outcome via `rb_verify_cli` — this
+  project's first genuine fidelity measurement once implemented.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation
