@@ -46,13 +46,17 @@ default assumes one deployable service growing internal module
 boundaries) — this is a **workspace of independently-versioned,
 independently-purposed crates** sharing build/CI infrastructure. `ATLAS-300`
 (`baileyrd/Atlas_Engineering_Standards_Library`, Rust Workspace and Cargo
-Architecture) was checked for a more concrete standard before writing this
-section; as of this writing it's still a seed/draft that explicitly defers
-the workspace-layout question ("When Atlas has a second real crate, forcing
-an actual choice about workspace layout... A single-crate workspace has no
-grouping decision to make yet") — not yet concrete enough to cite as a
-requirement here, so this section describes the structure that already
-exists in this repo rather than one derived from that standard.
+Architecture) is now an active volume with a published workspace
+requirement set (`ATLAS-RWC-*`: explicit membership, an explicit resolver,
+shared metadata and dependency policy, workspace-local first-party
+resolution, a committed lockfile), promoted from exercised evidence by
+Atlas ADR-0006. This repo's structure predates that promotion and was not
+derived from it; how the two line up, requirement by requirement, is
+assessed in [`docs/atlas/`](./docs/atlas/) rather than restated here.
+Feature-flag architecture is still deferred in ATLAS-300; that review
+argues the trigger has fired on this repo's evidence (PRs #134 and #136).
+This section therefore still describes the structure that exists here, not
+one derived from the standard.
 
 CI (`.github/workflows/ci.yml`) scopes each job to only the crates a PR
 actually touches (plus transitive dependents) via an `affected_crates.py`

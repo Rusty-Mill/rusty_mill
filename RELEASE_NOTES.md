@@ -13,6 +13,26 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Docs: repository-map corrections from the Atlas review
+**2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Fixed:** README relationship text that the Atlas review found stale:
+  `rusty_simd` was described as the one crate "still outstanding" while
+  merged and listed as a member; `rusty_tokio` was described as having no
+  in-repo dependents while nineteen workspace packages depend on it by
+  `path`; `rustils` was described as outside the monorepo's scope while
+  living at `crates/rustils`. The surviving `git` pins on `rustils` in
+  `rusty_tokio`, `rustils_async`, and `rusty_tls` are now stated as
+  outstanding rather than implied to be by design.
+- **Fixed:** `ARCHITECTURE.md` described ATLAS-300 as a seed too draft to
+  cite; it is an active volume since Atlas ADR-0006. The section now points
+  at `docs/atlas/` for the requirement-by-requirement crosswalk.
+- **Fixed:** the Atlas review's `rusty_tokio` dependent count, which was
+  taken from a manifest grep that matched a comment in `rusty_proxmox`;
+  now taken from `cargo metadata --all-features` at the evidence revision.
+- Known limitation: docs only. The `rustils` pin retirement itself is not
+  done here.
+
 ## Atlas evidence review — revision 2 with corrections
 **2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 
