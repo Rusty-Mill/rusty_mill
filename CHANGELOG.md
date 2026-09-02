@@ -73,6 +73,8 @@ Removed / Fixed / Security, newest first.
   other consumers, since both crates' `default` feature is empty
 
 ### Fixed
+- Two `__pycache__/*.pyc` files committed alongside the affected-crates
+  tests removed; `__pycache__/` and `*.pyc` are now ignored
 - `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce
   constructions rewritten to the equivalent `From<&[T]>` conversion — the
   workspace resolves `generic-array` 0.14.9, where they fail this repo's
