@@ -29,13 +29,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   to every car (`RB-VERIFY-001-FR-004`).
 - `rb_capture_ingest`: real capture-file parsing via a new JSON-Lines
   format (`RB-VERIFY-002-FR-002`/`NFR-001`, ADR-0005), verified against a
-  synthetic fixture. The BakkesMod-side plugin that would write a real
-  capture (`RB-VERIFY-002-FR-001`) is not yet built.
+  synthetic fixture and, now that the BakkesMod-side plugin is built, a
+  real capture too.
 - `bakkesmod-plugin/rusty_bullet_capture/`: the BakkesMod-side capture
   plugin's C++ source (`RB-VERIFY-002-FR-001`), grounded against a real
   `BakkesModSDK` clone and emitting ADR-0005's JSON-Lines format. Outside
   the Cargo workspace and this repo's CI (Windows/BakkesMod/Rocket League
-  only) — written, not yet built or run against a real game.
+  only). Built with MSVC + CMake, loaded into a real Rocket League +
+  BakkesMod session, and run in freeplay; a real capture caught and fixed a
+  bug where cars were enumerated via a PRI back-reference that's never
+  updated in freeplay, switched to `ServerWrapper::GetCars()` instead.
 - `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
   `rb_domain::divergence::score`. Manually run end-to-end against a real
   replay fixture and a capture file; not yet a fidelity measurement.

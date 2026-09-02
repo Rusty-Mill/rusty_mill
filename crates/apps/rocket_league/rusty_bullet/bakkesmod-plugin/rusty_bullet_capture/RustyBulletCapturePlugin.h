@@ -13,10 +13,9 @@
 
 // Records a JSON-Lines capture file matching ADR-0005 / RB-VERIFY-002-FR-001:
 // one line per physics tick, `{"timestamp_secs", "ball", "cars"}`, readable
-// by `rb_capture_ingest` without any changes on the Rust side. See this
-// directory's README.md for build/load instructions and the "not started"
-// -> "implemented, unverified" status this plugin is in until it's actually
-// built and run on a real BakkesMod install (see RB-VERIFY-002's spec).
+// by `rb_capture_ingest` without any changes on the Rust side. Built,
+// loaded, and run against a real Rocket League + BakkesMod install -- see
+// this directory's README.md and RB-VERIFY-002's spec Change history.
 class RustyBulletCapturePlugin : public BakkesMod::Plugin::BakkesModPlugin
 {
 public:

@@ -42,8 +42,9 @@
   replay, see ADR-0005).
 - `RB-VERIFY-002-FR-002`/`NFR-001` — `rb_capture_ingest` parses the
   JSON-Lines capture format into `PhysicsFrame`s with `CarState.input`
-  always populated, tested against a synthetic hand-authored fixture (no
-  real BakkesMod capture exists — see Blocked).
+  always populated, tested against a synthetic hand-authored fixture (now
+  also verified against a real BakkesMod capture — see the
+  `RB-VERIFY-002-FR-001` entry below).
 - `rb_verify_cli` divergence-scoring CLI wiring — `score_replay_against_capture`
   (new `lib.rs`, `main.rs` is now a thin argument/output wrapper over it)
   ingests a replay + a capture and runs `rb_domain::divergence::score`.
@@ -1802,6 +1803,33 @@
   Open Questions bullet, and FR-073's/FR-074's own Non-goals framing. No
   code change: this port's dodge trigger already matched real Rocket
   League exactly. No new tests; all 322 pre-existing tests pass unchanged.
+- `RB-VERIFY-002-FR-001` (BakkesMod-side capture plugin, built and run for
+  real) — the one step blocked on the owner's own Windows/BakkesMod/game
+  environment is done: built with MSVC (VS2022 Build Tools) + CMake against
+  the owner's own installed `BakkesModSDK` copy, loaded into a real Rocket
+  League + BakkesMod session, and run in freeplay. The first real capture
+  (9,358 lines) proved the hook (`Function TAGame.Car_TA.SetVehicleInput`)
+  fires correctly and the ball's live physics state records correctly, but
+  surfaced a genuine bug: enumerating cars via `ServerWrapper::GetPRIs()` +
+  `PriWrapper::GetCar()` recorded the same frozen spawn-point transform and
+  all-zero input on every line, since a PRI's `Car` back-reference is never
+  updated in freeplay (PRI is for scoreboard/stat tracking, which freeplay
+  has none of) — confirmed by the ball's own recorded velocity spiking
+  mid-session while the "car" entry never moved. Fixed by switching to
+  `ServerWrapper::GetCars()`, the game's own live spawned-car-actor list. A
+  second real capture (2,818 lines, ~23.5s) confirmed both ball and car
+  state update correctly with real, varied controller input (1,612 of 2,818
+  ticks with non-zero throttle/steer); every line schema-validated exactly
+  against ADR-0005, and the file parsed end-to-end via `rb_capture_ingest`
+  with every car entry carrying `Some` input in chronological order (via a
+  scratch integration test, not kept in the repo — the capture itself is
+  the owner's own personal play data). `RB-VERIFY-002-FR-002` is now
+  verified against a real capture too, not just the synthetic fixture. Both
+  of `RB-VERIFY-002`'s own former open questions (hook-name and
+  format-ergonomics) are resolved. Still open: the stricter manual
+  BakkesMod-overlay single-timestamp cross-check (see Blocked, same shape
+  as `RB-VERIFY-001`'s equivalent item) and NFR-002 (recording overhead,
+  unmeasured).
 
 ## In progress
 
@@ -1823,30 +1851,28 @@
   half is still open and needs the owner to do the manual cross-check
   locally, since this sandbox has no way to verify an exact remembered
   timestamp.
-- `RB-VERIFY-002-FR-001` (the BakkesMod-side capture plugin) — its C++
-  source now exists (`bakkesmod-plugin/rusty_bullet_capture/`), grounded
-  against a real clone of `BakkesModSDK` rather than paraphrase, but this
-  sandboxed environment has no Rocket League install, no BakkesMod, and no
-  Windows to actually build or run it (same practical blocker as
-  `RB-RESEARCH-O002`). `rb_capture_ingest`'s Rust-side parser is
-  implemented and tested against a synthetic fixture, but a real capture
-  file — and therefore `RB-VERIFY-002`'s acceptance criteria and
-  `PHASE-0-CAPTURE-INGEST`'s exit gate — needs this plugin built and run on
-  the owner's own machine.
+- `RB-VERIFY-002`'s manual BakkesMod-overlay single-timestamp cross-check
+  (one physics value pinned against what BakkesMod's own overlay/logging
+  reports for that same instant) — same shape as, and still open for the
+  same reason as, `RB-VERIFY-001`'s equivalent item above: needs the owner
+  to do it locally, since this sandbox has no way to verify an exact
+  remembered timestamp.
 - `PHASE-0-EXIT`'s exit gate isn't fully met yet: `rb_verify_cli` runs
   end-to-end today with all of `RB-VERIFY-003` implemented (ball scoring,
-  car scoring, timestamp-tolerant alignment), but only against a real
-  replay + a *synthetic* capture (see above), and the divergence number it
-  produces still isn't a meaningful fidelity comparison — there's still no
-  Phase 1 candidate physics engine wired up to actually consume recorded
+  car scoring, timestamp-tolerant alignment), but hasn't yet been run
+  against the new real capture (`RB-VERIFY-002-FR-001` is now built and
+  verified — see Completed — but feeding its output into `rb_verify_cli` is
+  still an owner-side next step), and the divergence number it produces
+  still isn't a meaningful fidelity comparison either way — there's still
+  no Phase 1 candidate physics engine wired up to actually consume recorded
   inputs and produce a comparable trajectory (`rb_physics_bullet` now has
   a car body and ball-vs-car collision, but nothing yet connects it to
   recorded controller input or to `rb_verify_cli`).
 ## Next
 
-1. `RB-VERIFY-002-FR-001` — write, build, and run the BakkesMod-side
-   capture plugin against ADR-0005's JSON-Lines format, on the owner's own
-   Windows/BakkesMod/game environment (this sandbox can't).
+1. Feed the new real BakkesMod capture into `rb_verify_cli` (owner-side,
+   per `RB-VERIFY-002-FR-001` now being built/verified — see Completed) and
+   the manual BakkesMod-overlay single-timestamp cross-check (see Blocked).
 
 ## Validation
 

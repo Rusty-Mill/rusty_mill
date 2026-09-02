@@ -8,14 +8,20 @@ capture format defined by
 `rb_capture_ingest`/`rb_verify_cli` can score this physics-core port against
 a real recording instead of only replays.
 
-**Status: source written, not yet built or run.** This is a Windows +
-BakkesMod + Rocket League deliverable — none of that exists in the sandbox
-this was written in, so nothing here has been compiled, loaded, or verified
-against the real game. Treat it as a draft to build and shake out on your
-own machine, not as a finished, tested tool. If the actual hookable event
-name (`Function TAGame.Car_TA.SetVehicleInput`, see below) turns out to be
-wrong or renamed in a current Rocket League build, the fix is a one-line
-change to the string in `RustyBulletCapturePlugin.cpp`'s `onLoad()`.
+**Status: built, loaded, and run against a real Rocket League + BakkesMod
+install.** Built with MSVC (VS2022 Build Tools) + CMake against the owner's
+own installed `BakkesModSDK` copy. The hookable event name
+(`Function TAGame.Car_TA.SetVehicleInput`) is confirmed correct — it fired
+reliably across two real freeplay captures. One real bug was found and
+fixed this way: cars were originally enumerated via `ServerWrapper::GetPRIs()`
++ `PriWrapper::GetCar()`, which recorded a frozen, all-zero-input car on
+every line, since a PRI's `Car` back-reference is never updated in freeplay
+(PRI exists for scoreboard/stat tracking, which freeplay has none of). Fixed
+by switching to `ServerWrapper::GetCars()`, the game's own live
+spawned-car-actor list — see `RB-VERIFY-002`'s Change history for the full
+before/after. Still open: a manual cross-check of one recorded value against
+BakkesMod's own overlay at a remembered timestamp, and NFR-002 (recording
+overhead), unmeasured.
 
 ## What it does
 
@@ -28,7 +34,7 @@ change to the string in `RustyBulletCapturePlugin.cpp`'s `onLoad()`.
   this project's 0-100 scale, matching `rb_replay_ingest`'s convention),
   and full controller input (including analog pitch/yaw/roll, which a
   replay can never recover — see ADR-0005 for why that matters).
-- `player_id` is just this recording session's PRI iteration order (0, 1,
+- `player_id` is just this recording session's car iteration order (0, 1,
   2, ...), not a stable cross-session id. That's deliberate: per
   `RB-VERIFY-002`'s own Non-goals, this is a one-off capture script for
   this pipeline, not a general plugin platform, and a single recording

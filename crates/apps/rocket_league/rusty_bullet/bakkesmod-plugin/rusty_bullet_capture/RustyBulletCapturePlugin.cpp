@@ -2,7 +2,6 @@
 
 #include "bakkesmod/wrappers/arraywrapper.h"
 #include "bakkesmod/wrappers/GameObject/CarComponent/BoostWrapper.h"
-#include "bakkesmod/wrappers/GameObject/PriWrapper.h"
 
 #include <sstream>
 
@@ -181,28 +180,32 @@ void RustyBulletCapturePlugin::writeFrame(ServerWrapper server, BallWrapper ball
     }
     float timestampSecs = ball.GetPhysicsTime() - startPhysicsTime_;
 
-    ArrayWrapper<PriWrapper> pris = server.GetPRIs();
+    // `server.GetPRIs()` + `PriWrapper::GetCar()` looked like the natural way
+    // to enumerate cars, but a real capture proved it wrong: in freeplay the
+    // PRI's `Car` back-reference never gets updated to the live-driven pawn
+    // (PRI exists for scoreboard/stat tracking, which freeplay has none of),
+    // so every line recorded the same frozen spawn-point transform with
+    // all-zero input while the ball moved for real. `GameEventWrapper::GetCars()`
+    // (inherited via `ServerWrapper` -> `TeamGameEventWrapper`) is the game's
+    // own live list of spawned car actors -- the same source cameras/
+    // scoreboards use -- and reflects real movement.
+    ArrayWrapper<CarWrapper> cars = server.GetCars();
 
     std::ostringstream line;
     line << "{\"timestamp_secs\":" << timestampSecs << ",\"ball\":" << rbActorJson(ball) << ",\"cars\":[";
 
     bool first = true;
     int nextPlayerId = 0;
-    // `player_id` here is just this recording session's PRI iteration
-    // order, not a stable cross-session id -- BakkesMod's own PRI/unique-id
+    // `player_id` here is just this recording session's car iteration order,
+    // not a stable cross-session id -- BakkesMod's own PRI/unique-id
     // wrappers exist, but a one-off capture script (see RB-VERIFY-002's
     // Non-goals) never replays a capture against a second session, so a
     // per-session ordinal is all `rb_capture_ingest` needs.
-    if (!pris.IsNull())
+    if (!cars.IsNull())
     {
-        for (int i = 0; i < pris.Count(); ++i)
+        for (int i = 0; i < cars.Count(); ++i)
         {
-            PriWrapper pri = pris.Get(i);
-            if (pri.IsNull())
-            {
-                continue;
-            }
-            CarWrapper car = pri.GetCar();
+            CarWrapper car = cars.Get(i);
             if (car.IsNull())
             {
                 continue;

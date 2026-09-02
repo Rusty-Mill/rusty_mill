@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Built, loaded, and fixed the BakkesMod capture plugin against a real game
+**2026-09-02** · `bakkesmod-plugin/rusty_bullet_capture/`
+
+- **Closed the one step that couldn't happen in a sandbox**: `RB-VERIFY-002-FR-001`'s
+  BakkesMod capture plugin had only ever been source-written and grounded
+  against a real SDK clone, never actually compiled or run — this required
+  the owner's own Windows/BakkesMod/Rocket League environment. Built with
+  MSVC (VS2022 Build Tools) + CMake, loaded into a real Rocket League +
+  BakkesMod session, and run in freeplay.
+- **A real capture surfaced a genuine bug no header file could catch**:
+  the first real recording (9,358 lines) showed the ball's physics state
+  updating correctly, but the car entry frozen — identical position,
+  rotation, and all-zero input on every single line, even while the ball's
+  own recorded velocity spiked mid-session (something clearly hit it).
+  Root cause: enumerating cars via `ServerWrapper::GetPRIs()` +
+  `PriWrapper::GetCar()` never picks up the live-driven pawn in freeplay,
+  since a PRI's `Car` back-reference is meant for scoreboard/stat tracking,
+  which freeplay has none of.
+- **Fixed by switching to `ServerWrapper::GetCars()`** (inherited via
+  `GameEventWrapper`), the game's own live spawned-car-actor list — the
+  same source cameras/scoreboards use. A second real capture (2,818 lines,
+  ~23.5s) confirmed both ball and car state update correctly with real,
+  varied controller input (1,612 of 2,818 ticks with non-zero
+  throttle/steer).
+- **Verified two ways**: every line of the second capture schema-validated
+  exactly against ADR-0005 (a Python check across all 2,818 lines, zero
+  errors), and the whole file parsed end-to-end via `rb_capture_ingest`
+  through a scratch integration test (not kept in the repo — the capture is
+  the owner's own personal play data), confirming every car entry carries
+  `Some` input in chronological order. This resolves both of
+  `RB-VERIFY-002`'s former open questions (the hookable event name and
+  whether ADR-0005's format is ergonomic to emit from BakkesMod's C++ SDK).
+  `RB-VERIFY-002-FR-001`/`FR-002` are now implemented and verified; still
+  open: a manual BakkesMod-overlay single-timestamp cross-check and
+  NFR-002 (recording overhead, unmeasured).
+
+---
+
 ## Confirmed the dodge deadzone already matches real Rocket League exactly
 **2026-09-01** · [#157](https://github.com/baileyrd/rusty_bullet/pull/157) · `2f5a3eb`
 
