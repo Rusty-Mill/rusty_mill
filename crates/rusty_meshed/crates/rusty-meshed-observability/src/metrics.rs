@@ -20,6 +20,8 @@ use rusty_kafka::protocol::offset_fetch::{OffsetFetchRequest, OffsetFetchTopicRe
 use rusty_kafka::{ClientError, KafkaClient};
 use rusty_sqlite::rusqlite::{params, Connection, Result as SqlResult};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
+use rusty_tokio::time::timeout;
+use std::time::Duration;
 
 /// Errors from a [`MetricsCollector`] Kafka call.
 #[derive(Debug, Error)]
@@ -39,6 +41,33 @@ pub enum MetricsError {
     /// The `schema_violations` lookup itself failed.
     #[error("failed to read violation count: {0}")]
     Sql(String),
+    /// A single Kafka call (the connect, a `ListOffsets`, an
+    /// `OffsetFetch`) took longer than [`KAFKA_TIMEOUT`].
+    #[error("Kafka call did not complete within {0:?}")]
+    Timeout(Duration),
+}
+
+/// Upper bound on any single Kafka call the collector makes -- the
+/// connect, each `ListOffsets`, each `OffsetFetch`. The source passes
+/// `timeout=5.0` to every `confluent_kafka` consumer call it makes
+/// (`get_watermark_offsets`, `committed`), so a broker that's down or
+/// unreachable turns into a prompt "unavailable" in `meshed metrics`/
+/// `meshed slo`/the registry's metrics route rather than an indefinite
+/// hang. Ported as the same bound for the same reason -- and it's what
+/// keeps the "unreachable broker" tests in this crate family finite on
+/// a platform where a refused connect doesn't fail instantly (see
+/// rusty_tokio's Windows reactor: `127.0.0.1:1` there sat until
+/// nextest's 600s kill, where Linux refuses it synchronously).
+pub const KAFKA_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs one Kafka call under [`KAFKA_TIMEOUT`].
+async fn bounded<T, E: Into<MetricsError>>(
+    call: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, MetricsError> {
+    match timeout(KAFKA_TIMEOUT, call).await {
+        Ok(result) => result.map_err(Into::into),
+        Err(_elapsed) => Err(MetricsError::Timeout(KAFKA_TIMEOUT)),
+    }
 }
 
 /// `{lag, throughput, violation_count}` -- the Rust port of
@@ -93,10 +122,14 @@ pub struct MetricsCollector<S> {
 impl MetricsCollector<TcpStream> {
     /// Connects to the Kafka broker at `bootstrap_servers` (e.g.
     /// `PlatformConfig::kafka_bootstrap_servers`).
+    ///
+    /// Bounded at [`KAFKA_TIMEOUT`], like every other Kafka call here.
     pub async fn connect(bootstrap_servers: &str) -> Result<Self, MetricsError> {
-        let client =
-            KafkaClient::connect(bootstrap_servers, Some("rusty_meshed_metrics".to_string()))
-                .await?;
+        let client = bounded(KafkaClient::connect(
+            bootstrap_servers,
+            Some("rusty_meshed_metrics".to_string()),
+        ))
+        .await?;
         Ok(MetricsCollector { client })
     }
 }
@@ -178,7 +211,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> MetricsCollector<S> {
                 }],
             }],
         };
-        let response = self.client.list_offsets(&request).await?;
+        let response = bounded(self.client.list_offsets(&request)).await?;
         let result = response
             .topics
             .first()
@@ -203,7 +236,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> MetricsCollector<S> {
                 partitions: vec![partition],
             }],
         };
-        let response = self.client.offset_fetch(&request).await?;
+        let response = bounded(self.client.offset_fetch(&request)).await?;
         let result = response
             .topics
             .first()
@@ -536,6 +569,25 @@ mod tests {
                 throughput: 20,
                 violation_count: 1,
             }
+        );
+    }
+
+    /// A broker that takes the request but never answers must surface
+    /// as `MetricsError::Timeout` after `KAFKA_TIMEOUT`, not hang -- the
+    /// source's `timeout=5.0` on every consumer call, ported. `_peer`
+    /// is held (not dropped) so the client's write side stays open and
+    /// only the missing response is what ends the call.
+    #[rusty_tokio::test]
+    async fn a_silent_broker_times_out_instead_of_hanging() {
+        let (client_io, _peer) = duplex(4096);
+        let mut collector = MetricsCollector::with_client(KafkaClient::new(client_io, None));
+        let started = std::time::Instant::now();
+        let err = collector.get_throughput("orders", 0).await.unwrap_err();
+        assert!(matches!(err, MetricsError::Timeout(_)), "{err:?}");
+        assert!(
+            started.elapsed() >= KAFKA_TIMEOUT - Duration::from_millis(500),
+            "returned too early: {:?}",
+            started.elapsed()
         );
     }
 }
