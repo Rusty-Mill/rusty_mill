@@ -42,6 +42,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
   `rb_domain::divergence::score`. Manually run end-to-end against a real
   replay fixture and a capture file; not yet a fidelity measurement.
+- Ran `rb_verify_cli` end-to-end against the real vendored replay fixture
+  and a real BakkesMod capture for the first time (343 frames compared,
+  mean ball distance 3640.81 uu, mean car position/rotation/velocity
+  distance 4714.78 uu / 2.31 rad / 2127.93 uu/s), closing `PHASE-0-EXIT`'s
+  literal exit criterion and all four `PHASE-0-*` roadmap units. Not a
+  fidelity measurement — the replay and capture are unrelated matches;
+  that needs a Phase 1 candidate engine that doesn't exist yet.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation

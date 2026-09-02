@@ -6,6 +6,33 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Ran the verification pipeline end-to-end on real data for the first time, closing all of Phase 0
+**2026-09-02** · `crates/rb_verify_cli`
+
+- **Fed the new real BakkesMod capture into `rb_verify_cli`**: `cargo run -p
+  rb_verify_cli -- crates/rb_replay_ingest/fixtures/subtr-actor-sample.replay
+  <real capture>` — `frames compared: 343, mean ball distance: 3640.81 uu,
+  max ball distance: 6015.71 uu, car pairs compared: 343, mean car
+  position/rotation/velocity distance: 4714.78 uu / 2.31 rad / 2127.93
+  uu/s, max car position/rotation/velocity distance: 7721.40 uu / 3.14 rad
+  / 3938.20 uu/s`. No errors; ball scoring, car scoring, and
+  timestamp-tolerant alignment all engaged.
+- **This is the pipeline's literal exit criterion, now met on two
+  genuinely real inputs**: a real vendored replay and a real BakkesMod
+  recording, not a hand-authored synthetic capture. Closes `PHASE-0-EXIT`
+  and, with it, all four `PHASE-0-*` roadmap units (`BOOTSTRAP`,
+  `REPLAY-INGEST`, `CAPTURE-INGEST`, `EXIT`).
+- **The numbers themselves remain exactly as meaningless as a fidelity
+  measurement as the earlier synthetic-capture run**, for the identical
+  reason: the replay and this capture are two unrelated freeplay sessions
+  with no physical reason to resemble each other. That was never this
+  gate's own criterion — actually measuring fidelity needs a Phase 1
+  candidate physics engine that consumes a capture's recorded input and
+  produces a trajectory to compare against its recorded outcome, which
+  doesn't exist yet (`RB-PHYSICS-001-FR-005`).
+
+---
+
 ## Built, loaded, and fixed the BakkesMod capture plugin against a real game
 **2026-09-02** · `bakkesmod-plugin/rusty_bullet_capture/`
 

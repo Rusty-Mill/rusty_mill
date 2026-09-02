@@ -1,9 +1,11 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.4.0
+- Version: 0.5.0
 - Status: Draft (all three functional requirements implemented and wired
-  into `rb_verify_cli`; open questions remain about calibrating an actual
-  "good enough" threshold, see Open questions)
+  into `rb_verify_cli`; now run end-to-end against a real replay AND a real
+  BakkesMod capture, closing `PHASE-0-EXIT`'s own literal exit criterion;
+  open questions remain about calibrating an actual "good enough"
+  threshold, see Open questions)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-001, RB-VERIFY-002
 - Supersedes: none
@@ -177,8 +179,28 @@ matches," not "car scoring is broken." The actual end-to-end run this
 metric exists for — recorded inputs from `RB-VERIFY-002` fed into a real
 Phase 1 candidate physics engine, output compared against the recorded
 outcome — still needs that candidate engine to exist (car bodies, not
-just sphere-vs-plane) and `RB-VERIFY-002-FR-001`'s real BakkesMod capture,
-neither of which exist yet.
+just sphere-vs-plane); `RB-VERIFY-002-FR-001`'s real BakkesMod capture now
+exists (see below).
+
+Re-run for real once `RB-VERIFY-002-FR-001`'s BakkesMod capture plugin was
+built and used to record a real freeplay session (`cargo run -p
+rb_verify_cli -- crates/rb_replay_ingest/fixtures/subtr-actor-sample.replay
+<real capture path>`, 2026-09-02, default tolerance): `frames compared:
+343, mean ball distance: 3640.81 uu, max ball distance: 6015.71 uu, car
+pairs compared: 343, mean car position/rotation/velocity distance: 4714.78
+uu / 2.31 rad / 2127.93 uu/s, max car position/rotation/velocity distance:
+7721.40 uu / 3.14 rad / 3938.20 uu/s`. This is the first time the pipeline
+has run end-to-end on **two genuinely real inputs** — a real vendored
+replay and a real BakkesMod recording, not a hand-authored synthetic
+capture — closing `PHASE-0-EXIT`'s own literal exit criterion ("produces a
+divergence score on ≥1 real replay and ≥1 real BakkesMod capture"). The
+numbers themselves remain exactly as meaningless as a fidelity measurement
+as the synthetic run above, for the identical reason: the replay and this
+capture are two unrelated freeplay sessions with no physical reason to
+resemble each other. Closing that separate, harder problem still needs a
+Phase 1 candidate engine that consumes the capture's own recorded input
+and produces a trajectory to compare against the capture's own recorded
+outcome — genuinely out of this phase's scope, not a Phase 0 exit blocker.
 
 ## Traceability
 
@@ -199,6 +221,12 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.5.0 (2026-09-02): Re-ran the existing end-to-end pipeline (no code
+  change) against a real BakkesMod capture for the first time, now that
+  `RB-VERIFY-002-FR-001`'s plugin exists — `frames compared: 343`, real
+  numbers on both real inputs, closing `PHASE-0-EXIT`'s own literal exit
+  criterion. See Verification plan for the full run and why the score
+  itself still isn't a fidelity measurement.
 - 0.4.0 (2026-08-28): FR-003 implemented — `score` gains a required
   `max_timestamp_delta_secs` parameter and now aligns frames by nearest
   timestamp (an `O(n+m)` merge over both sequences' existing chronological
