@@ -225,17 +225,27 @@ jobs:
       # (e.g. rusty_homelab_mcp) touched by a PR would otherwise fail this
       # step for having nothing to doc-test. Filter the scoped package list
       # down to crates that actually declare a `lib` target first.
+      #
+      # Both branches start from the select-packages step's outputs, never
+      # from the plan job's raw list: only the former has the per-OS
+      # exclusions applied. Re-deriving the scope here from
+      # `needs.plan.outputs.packages` (or a bare `--doc --workspace`) is
+      # exactly how rusty_stream -- Linux-only, and correctly excluded on
+      # windows-latest by every other step in this job -- was still getting
+      # compiled by this one step and failing the whole job on Windows.
       - name: Test (doctests)
         if: steps.scope.outputs.args != ''
         shell: bash
         run: |
           set -euo pipefail
           if [ "${{ needs.plan.outputs.full }}" = "true" ]; then
-            cargo test --doc --workspace --all-features
+            # `args` is `--workspace` plus this runner's `--exclude` flags;
+            # `--doc --workspace` already skips crates with no lib target.
+            cargo test --doc ${{ steps.scope.outputs.args }} --all-features
           else
             lib_pkgs="$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.targets[]?.kind[]? == "lib") | .name')"
             args=""
-            for p in ${{ needs.plan.outputs.packages }}; do
+            for p in ${{ steps.scope.outputs.packages }}; do
               if echo "$lib_pkgs" | grep -qx "$p"; then
                 args="$args -p $p"
               fi
