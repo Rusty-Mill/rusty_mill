@@ -31,6 +31,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   format (`RB-VERIFY-002-FR-002`/`NFR-001`, ADR-0005), verified against a
   synthetic fixture. The BakkesMod-side plugin that would write a real
   capture (`RB-VERIFY-002-FR-001`) is not yet built.
+- `bakkesmod-plugin/rusty_bullet_capture/`: the BakkesMod-side capture
+  plugin's C++ source (`RB-VERIFY-002-FR-001`), grounded against a real
+  `BakkesModSDK` clone and emitting ADR-0005's JSON-Lines format. Outside
+  the Cargo workspace and this repo's CI (Windows/BakkesMod/Rocket League
+  only) — written, not yet built or run against a real game.
 - `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
   `rb_domain::divergence::score`. Manually run end-to-end against a real
   replay fixture and a capture file; not yet a fidelity measurement.

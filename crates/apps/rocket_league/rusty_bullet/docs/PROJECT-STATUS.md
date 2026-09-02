@@ -1823,10 +1823,12 @@
   half is still open and needs the owner to do the manual cross-check
   locally, since this sandbox has no way to verify an exact remembered
   timestamp.
-- `RB-VERIFY-002-FR-001` (the BakkesMod-side capture plugin) — this
+- `RB-VERIFY-002-FR-001` (the BakkesMod-side capture plugin) — its C++
+  source now exists (`bakkesmod-plugin/rusty_bullet_capture/`), grounded
+  against a real clone of `BakkesModSDK` rather than paraphrase, but this
   sandboxed environment has no Rocket League install, no BakkesMod, and no
-  Windows to build a BakkesMod SDK plugin on at all (same practical
-  blocker as `RB-RESEARCH-O002`). `rb_capture_ingest`'s Rust-side parser is
+  Windows to actually build or run it (same practical blocker as
+  `RB-RESEARCH-O002`). `rb_capture_ingest`'s Rust-side parser is
   implemented and tested against a synthetic fixture, but a real capture
   file — and therefore `RB-VERIFY-002`'s acceptance criteria and
   `PHASE-0-CAPTURE-INGEST`'s exit gate — needs this plugin built and run on
