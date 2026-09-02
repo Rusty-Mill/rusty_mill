@@ -56,6 +56,16 @@ interface) -- no stable, documented core REST endpoint for this was found,
 as opposed to guessing one the way the OPNSenseMCP reference implementation
 does; VPN (WireGuard/OpenVPN/IPsec) status; backup/config management.
 
+`list_dhcp_leases` is the one method that isn't a single fixed endpoint:
+OPNsense runs exactly one of three unrelated DHCP backends at a time
+(dnsmasq, Kea, or the legacy ISC DHCP server), each with its own API
+surface, and which one a given install runs varies. It tries them in
+that order, using an actual HTTP 404 (this OPNsense doesn't have that
+backend's API module loaded) as the real, reliable signal to try the
+next one -- any other failure (auth, malformed response, 5xx) is returned
+immediately rather than masked by trying further backends. See
+`OpnsenseClient::list_dhcp_leases`'s doc comment for the exact endpoints.
+
 Firewall rule and VLAN writes (`create_firewall_rule`/`update_firewall_rule`/
 `create_vlan`/`update_vlan`) take their field set as a passthrough
 `serde_json::Value` rather than a typed struct, for the same reason every

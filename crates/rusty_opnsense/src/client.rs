@@ -186,12 +186,44 @@ impl OpnsenseClient {
         self.post("/api/firewall/filter/apply").await
     }
 
-    /// `POST /dhcpv4/leases/searchLease` -- every current DHCP lease (a
-    /// `{"rows": [...], "rowCount": N, ...}` search envelope, same shape as
-    /// [`OpnsenseClient::list_services`]).
+    /// Every current DHCP lease (a `{"rows": [...], "rowCount": N, ...}`
+    /// search envelope, same shape as [`OpnsenseClient::list_services`]).
+    ///
+    /// OPNsense runs exactly one of three unrelated DHCP backends at a
+    /// time, each with its own API surface, and which one varies by
+    /// install: `GET /dnsmasq/leases/search` (dnsmasq, the default since
+    /// 25.7), `GET /kea/leases4/search` (Kea), or
+    /// `POST /dhcpv4/leases/searchLease` (the legacy ISC DHCP server,
+    /// moved out of core into a plugin in 26.1). Tries them in that order
+    /// and returns the first one that isn't a 404 -- a 404 here means
+    /// *this OPNsense doesn't have that backend's API module loaded*, a
+    /// reliable, real signal, not a guess; any other failure (auth,
+    /// malformed response, 5xx) is returned immediately rather than masked
+    /// by trying the next backend.
     pub async fn list_dhcp_leases(&self) -> Result<Value> {
-        self.post_json("/api/dhcpv4/leases/searchLease", &serde_json::json!({}))
+        match self.get("/api/dnsmasq/leases/search").await {
+            Ok(leases) => return Ok(leases),
+            Err(Error::Api { status: 404, .. }) => {}
+            Err(err) => return Err(err),
+        }
+        match self.get("/api/kea/leases4/search").await {
+            Ok(leases) => return Ok(leases),
+            Err(Error::Api { status: 404, .. }) => {}
+            Err(err) => return Err(err),
+        }
+        match self
+            .post_json("/api/dhcpv4/leases/searchLease", &serde_json::json!({}))
             .await
+        {
+            Err(Error::Api { status: 404, body }) => Err(Error::Api {
+                status: 404,
+                body: format!(
+                    "none of OPNsense's known DHCP lease APIs (dnsmasq, Kea, legacy ISC) \
+                     are present on this host -- last attempt: {body}"
+                ),
+            }),
+            other => other,
+        }
     }
 
     /// `POST /interfaces/vlan_settings/searchItem` -- every configured VLAN
