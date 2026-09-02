@@ -126,6 +126,7 @@ async fn every_backend_contributes_its_tools() {
             "opnsense_update_firewall_rule",
             "opnsense_update_vlan",
             "proxmox_clone_guest",
+            "proxmox_cluster_resources",
             "proxmox_create_guest",
             "proxmox_create_snapshot",
             "proxmox_delete_guest",
@@ -133,11 +134,16 @@ async fn every_backend_contributes_its_tools() {
             "proxmox_guest_config",
             "proxmox_guest_power",
             "proxmox_guest_status",
+            "proxmox_list_backup_jobs",
             "proxmox_list_guests",
             "proxmox_list_nodes",
             "proxmox_list_snapshots",
+            "proxmox_list_storage",
+            "proxmox_migrate_guest",
             "proxmox_node_status",
+            "proxmox_node_storage_status",
             "proxmox_rollback_snapshot",
+            "proxmox_run_backup",
             "proxmox_task_log",
             "proxmox_task_status",
             "proxmox_update_guest_config",
@@ -436,6 +442,28 @@ async fn proxmox_create_guest_returns_the_task_upid_as_plain_text() {
         .map(|t| t.text.clone())
         .expect("create_guest returns text");
     assert!(text.starts_with("UPID:pve:"), "unexpected upid: {text}");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn proxmox_cluster_resources_with_a_filter_returns_structured_data() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"type":"storage","storage":"local"}]}"#,
+    )]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_cluster_resources",
+            serde_json::json!({ "resource_type": "storage" }),
+        ))
+        .await
+        .expect("call proxmox_cluster_resources");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"][0]["storage"], "local");
 
     client.cancel().await.expect("cancel");
 }

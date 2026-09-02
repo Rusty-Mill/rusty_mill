@@ -232,6 +232,109 @@ async fn rollback_snapshot_returns_the_task_upid() {
 }
 
 #[tokio::test]
+async fn cluster_resources_with_no_filter_hits_the_bare_endpoint() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"type":"qemu","vmid":100,"status":"running"}]}"#,
+    )]);
+
+    let resources = client(base_url)
+        .cluster_resources(None)
+        .await
+        .expect("cluster_resources");
+
+    assert_eq!(resources[0]["vmid"], 100);
+}
+
+#[tokio::test]
+async fn cluster_resources_with_a_filter_appends_the_type_query_param() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"type":"storage","storage":"local"}]}"#,
+    )]);
+
+    let resources = client(base_url)
+        .cluster_resources(Some("storage"))
+        .await
+        .expect("cluster_resources");
+
+    assert_eq!(resources[0]["storage"], "local");
+}
+
+#[tokio::test]
+async fn list_storage_unwraps_the_data_field() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"storage":"local","type":"dir"}]}"#,
+    )]);
+
+    let storage = client(base_url).list_storage().await.expect("list_storage");
+
+    assert_eq!(storage[0]["storage"], "local");
+}
+
+#[tokio::test]
+async fn node_storage_status_builds_the_node_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"storage":"local","avail":123456,"total":654321}]}"#,
+    )]);
+
+    let status = client(base_url)
+        .node_storage_status("pve")
+        .await
+        .expect("node_storage_status");
+
+    assert_eq!(status[0]["storage"], "local");
+}
+
+#[tokio::test]
+async fn list_backup_jobs_unwraps_the_data_field() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":[{"id":"backup-abc123","schedule":"0 2 * * *"}]}"#,
+    )]);
+
+    let jobs = client(base_url)
+        .list_backup_jobs()
+        .await
+        .expect("list_backup_jobs");
+
+    assert_eq!(jobs[0]["id"], "backup-abc123");
+}
+
+#[tokio::test]
+async fn run_backup_sends_the_fields_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:vzdump::automation@pve!test:"}"#,
+    )]);
+
+    let upid = client(base_url)
+        .run_backup(
+            "pve",
+            serde_json::json!({ "vmid": "100", "storage": "local", "mode": "snapshot" }),
+        )
+        .await
+        .expect("run_backup");
+
+    assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
+}
+
+#[tokio::test]
+async fn migrate_guest_returns_the_task_upid() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmigrate:100:automation@pve!test:"}"#,
+    )]);
+
+    let upid = client(base_url)
+        .migrate_guest(
+            "pve",
+            GuestKind::Qemu,
+            100,
+            serde_json::json!({ "target": "pve2", "online": true }),
+        )
+        .await
+        .expect("migrate_guest");
+
+    assert!(upid.starts_with("UPID:pve:"), "unexpected upid: {upid}");
+}
+
+#[tokio::test]
 async fn a_4xx_status_becomes_an_api_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         401,
