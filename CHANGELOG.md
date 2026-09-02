@@ -9,6 +9,9 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `docs/atlas/` — the Rusty Mill → Atlas evidence review (revision 2,
+  verified against Rusty Mill `06ca8669` and Atlas `390d6b0f`) and the
+  list of corrections applied to its first revision
 - `rusty_croc` merged into `crates/rusty_croc` via `git subtree` (fourth
   wave), full history preserved
 - `rusty_test` merged into `crates/rusty_test` via `git subtree` (fourth
