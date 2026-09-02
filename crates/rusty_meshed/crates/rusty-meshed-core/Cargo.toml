@@ -1,0 +1,15 @@
+[package]
+name = "rusty-meshed-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared platform config for rusty_meshed: env-prefixed settings loaded once, injected into every other rusty_meshed crate."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_mill"
+publish = false
+
+[dependencies]
+rusty_err = { path = "../../../rusty_err" }
+rusty_json = { path = "../../../rusty_json" }
+rusty_uuid = { path = "../../../rusty_uuid" }
+
+[dev-dependencies]
