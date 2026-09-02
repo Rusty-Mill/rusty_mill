@@ -13,6 +13,24 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Atlas evidence review — revision 2 with corrections
+**2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Added:** `docs/atlas/rusty-mill-atlas-evidence-review.md` — the review
+  of this monorepo as exercised evidence for the Atlas Engineering
+  Standards Library, revised after every claim was verified against
+  Rusty Mill `06ca8669`, the live PR/branch state, and Atlas `390d6b0f`.
+  Concludes that ATLAS-300's deferred feature-flag trigger fired (PRs #134
+  and #136), and lists the governance corrections this repo needs before
+  any conformance claim: protect `main`, enforce the documented review
+  policy, and fix the stale README/ARCHITECTURE map.
+- **Added:** `docs/atlas/rusty-mill-atlas-evidence-review-corrections.md`
+  — the must-fix and should-fix items found in the review's first
+  revision, each with the evidence that established it.
+- Known limitation: the review is an alignment assessment, not a
+  certification, and PR #131 (still open) is excluded from its evidence
+  revision.
+
 ## Fourth-wave merge — `rusty_agent_gateway` (wave complete)
 **2026-09-01** · branch [`claude/rusty-repos-migration-iwvuld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-repos-migration-iwvuld)
 
