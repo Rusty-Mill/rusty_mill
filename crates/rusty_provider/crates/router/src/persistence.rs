@@ -190,6 +190,18 @@ impl Persistence {
     /// `budget_usd` (unlike `record_client_spend`, which only tracks
     /// budgeted clients). Fire-and-forget, like `record`/
     /// `record_client_spend`.
+    /// Block until every write recorded so far has been applied.
+    ///
+    /// Only the sqlite backend queues its writes; the postgres one awaits
+    /// each in place, so there is nothing to wait for there.
+    #[cfg(test)]
+    fn flush(&self) {
+        match &self.backend {
+            Backend::Sqlite(b) => b.flush(),
+            Backend::Postgres(_) => {}
+        }
+    }
+
     pub fn record_daily_client_usage(
         &self,
         client_name: &str,
@@ -281,6 +293,12 @@ enum SqliteWrite {
         completion_tokens: u32,
         cost_usd: Option<f64>,
     },
+    /// A no-op the writer acknowledges once it reaches it. The channel is
+    /// FIFO and the thread applies one event at a time, so the
+    /// acknowledgement arriving proves every write queued ahead of it is
+    /// already committed -- see [`SqliteBackend::flush`].
+    #[cfg(test)]
+    Flush(mpsc::Sender<()>),
 }
 
 fn init_connection(path: &Path) -> rusqlite::Result<Connection> {
@@ -377,6 +395,11 @@ impl SqliteBackend {
                                 cost_usd.unwrap_or(0.0),
                             ],
                         ),
+                        #[cfg(test)]
+                        SqliteWrite::Flush(ack) => {
+                            let _ = ack.send(());
+                            Ok(0)
+                        }
                     };
                     if let Err(e) = result {
                         tracing::warn!("failed to persist event to sqlite: {e}");
@@ -386,6 +409,23 @@ impl SqliteBackend {
             .expect("failed to spawn persistence writer thread");
 
         Ok(Self { path, tx })
+    }
+
+    /// Block until the writer thread has applied everything recorded so far.
+    ///
+    /// Writes are queued rather than performed inline, so a test that reads
+    /// straight after recording is racing the writer. Riding the same FIFO
+    /// channel the writes do settles that exactly, where a sleep only makes
+    /// it unlikely -- and "unlikely" is how the day-rollup tests failed on a
+    /// loaded windows runner while passing everywhere else.
+    #[cfg(test)]
+    fn flush(&self) {
+        let (ack, done) = mpsc::channel();
+        if self.tx.send(SqliteWrite::Flush(ack)).is_ok() {
+            // An error means the writer thread is gone, which the caller
+            // cannot do anything about and which `record` already warns on.
+            let _ = done.recv();
+        }
     }
 
     fn record(&self, key: &str, usage: &Usage, cost_usd: Option<f64>) {
@@ -817,10 +857,10 @@ mod tests {
         path
     }
 
-    /// The writer thread is asynchronous relative to `record()`; give it a
-    /// moment to drain before asserting on what landed in the DB.
-    fn wait_for_writer() {
-        std::thread::sleep(Duration::from_millis(50));
+    /// The writer thread is asynchronous relative to `record()`; wait for it
+    /// to drain before asserting on what landed in the DB.
+    fn wait_for_writer(persistence: &Persistence) {
+        persistence.flush();
     }
 
     async fn open_sqlite(path: &Path) -> Persistence {
@@ -860,7 +900,7 @@ mod tests {
             },
             Some(0.5),
         );
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let stats = persistence.load_all().await.unwrap();
         let entry = &stats["anthropic/m1"];
@@ -884,7 +924,7 @@ mod tests {
         };
         persistence.record("anthropic/m1", &usage, Some(0.1));
         persistence.record("anthropic/m1", &usage, Some(0.1));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let stats = persistence.load_all().await.unwrap();
         let entry = &stats["anthropic/m1"];
@@ -910,7 +950,7 @@ mod tests {
             },
             None,
         );
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let stats = persistence.load_all().await.unwrap();
         assert_eq!(stats["anthropic/m1"].cost_usd, 0.0);
@@ -930,7 +970,7 @@ mod tests {
 
         persistence.record("anthropic/m1", &usage, Some(1.0));
         persistence.record("openai/m2", &usage, Some(2.0));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let stats = persistence.load_all().await.unwrap();
         assert_eq!(stats.len(), 2);
@@ -958,7 +998,7 @@ mod tests {
                 },
                 Some(0.9),
             );
-            wait_for_writer();
+            wait_for_writer(&persistence);
         }
 
         let reopened = open_sqlite(&path).await;
@@ -982,7 +1022,7 @@ mod tests {
             },
             Some(0.3),
         );
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let snapshot = persistence.snapshot().await.unwrap();
         assert_eq!(snapshot["anthropic/m1"].requests, 1);
@@ -1015,7 +1055,7 @@ mod tests {
         let path = unique_temp_path("client_spend_new");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("acme").await.unwrap(),
             Some((100, 5.0))
@@ -1028,7 +1068,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
         persistence.record_client_spend("acme", 100, 3.0);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("acme").await.unwrap(),
             Some((100, 8.0))
@@ -1041,7 +1081,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
         persistence.record_client_spend("acme", 101, 2.0);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("acme").await.unwrap(),
             Some((101, 2.0))
@@ -1054,7 +1094,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
         persistence.record_client_spend("globex", 100, 9.0);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("acme").await.unwrap(),
             Some((100, 5.0))
@@ -1070,9 +1110,9 @@ mod tests {
         let path = unique_temp_path("client_spend_reset");
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         persistence.reset_client_spend("acme", 100);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("acme").await.unwrap(),
             Some((100, 0.0))
@@ -1084,7 +1124,7 @@ mod tests {
         let path = unique_temp_path("client_spend_reset_new");
         let persistence = open_sqlite(&path).await;
         persistence.reset_client_spend("acme", 100);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("acme").await.unwrap(),
             Some((100, 0.0))
@@ -1097,9 +1137,9 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_client_spend("acme", 100, 5.0);
         persistence.record_client_spend("globex", 100, 9.0);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         persistence.reset_client_spend("acme", 100);
-        wait_for_writer();
+        wait_for_writer(&persistence);
         assert_eq!(
             persistence.client_spend("globex").await.unwrap(),
             Some((100, 9.0))
@@ -1134,7 +1174,7 @@ mod tests {
         let path = unique_temp_path("daily_usage_new");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(100, 50), Some(0.5));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let history = persistence
             .client_usage_history("acme", 19_723)
@@ -1158,7 +1198,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(0.1));
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(0.1));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let history = persistence
             .client_usage_history("acme", 19_723)
@@ -1177,7 +1217,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
         persistence.record_daily_client_usage("acme", 19_724, &usage(20, 10), Some(2.0));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let history = persistence
             .client_usage_history("acme", 19_723)
@@ -1194,7 +1234,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
         persistence.record_daily_client_usage("acme", 19_724, &usage(20, 10), Some(2.0));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let history = persistence
             .client_usage_history("acme", 19_724)
@@ -1218,7 +1258,7 @@ mod tests {
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
         persistence.record_daily_client_usage("globex", 19_723, &usage(20, 10), Some(2.0));
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let acme = persistence
             .client_usage_history("acme", 19_723)
@@ -1233,7 +1273,7 @@ mod tests {
         let path = unique_temp_path("daily_usage_no_cost");
         let persistence = open_sqlite(&path).await;
         persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), None);
-        wait_for_writer();
+        wait_for_writer(&persistence);
 
         let history = persistence
             .client_usage_history("acme", 19_723)
