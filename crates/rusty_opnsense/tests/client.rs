@@ -328,6 +328,97 @@ async fn apply_vlan_changes_posts_to_the_reconfigure_endpoint() {
 }
 
 #[tokio::test]
+async fn list_arp_entries_passes_through_the_arp_table() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"[{"ip":"10.0.0.42","mac":"aa:bb:cc:dd:ee:ff","hostname":"nas","intf":"igc0"}]"#,
+    )]);
+
+    let entries = client(base_url)
+        .list_arp_entries()
+        .await
+        .expect("list_arp_entries");
+
+    assert_eq!(entries[0]["hostname"], "nas");
+}
+
+#[tokio::test]
+async fn list_routes_passes_through_the_routing_table() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"[{"destination":"default","gateway":"10.0.0.1","interface-name":"igc0"}]"#,
+    )]);
+
+    let routes = client(base_url).list_routes().await.expect("list_routes");
+
+    assert_eq!(routes[0]["gateway"], "10.0.0.1");
+}
+
+#[tokio::test]
+async fn list_backup_providers_returns_the_body_as_is() {
+    let base_url = support::spawn(vec![MockResponse::ok(r#"{"this":{"name":"This Device"}}"#)]);
+
+    let providers = client(base_url)
+        .list_backup_providers()
+        .await
+        .expect("list_backup_providers");
+
+    assert_eq!(providers["this"]["name"], "This Device");
+}
+
+#[tokio::test]
+async fn list_backups_builds_the_host_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"[{"filename":"config-1735689600.xml","time":1735689600}]"#,
+    )]);
+
+    let backups = client(base_url)
+        .list_backups("this")
+        .await
+        .expect("list_backups");
+
+    assert_eq!(backups[0]["filename"], "config-1735689600.xml");
+}
+
+#[tokio::test]
+async fn download_backup_returns_raw_text_not_parsed_json() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
+    )]);
+
+    let xml = client(base_url)
+        .download_backup("this", None)
+        .await
+        .expect("download_backup");
+
+    assert!(xml.contains("<opnsense>"), "unexpected body: {xml}");
+}
+
+#[tokio::test]
+async fn download_backup_with_a_specific_backup_builds_the_host_and_backup_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
+    )]);
+
+    let xml = client(base_url)
+        .download_backup("this", Some("config-1735689600.xml"))
+        .await
+        .expect("download_backup");
+
+    assert!(xml.contains("<opnsense>"), "unexpected body: {xml}");
+}
+
+#[tokio::test]
+async fn restore_backup_builds_the_backup_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
+
+    let result = client(base_url)
+        .restore_backup("config-1735689600.xml")
+        .await
+        .expect("restore_backup");
+
+    assert_eq!(result["status"], "ok");
+}
+
+#[tokio::test]
 async fn a_4xx_status_becomes_an_api_error() {
     let base_url = support::spawn(vec![MockResponse::status(
         403,

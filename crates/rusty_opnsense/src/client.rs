@@ -284,6 +284,60 @@ impl OpnsenseClient {
         self.post("/api/interfaces/vlan_settings/reconfigure").await
     }
 
+    /// `GET /diagnostics/interface/getArp` -- the current ARP table:
+    /// IP address, MAC address, hostname (if known), and interface for
+    /// every neighbor OPNsense has resolved.
+    pub async fn list_arp_entries(&self) -> Result<Value> {
+        self.get("/api/diagnostics/interface/getArp").await
+    }
+
+    /// `GET /diagnostics/interface/getRoutes` -- the system routing table
+    /// (the same information `netstat -rn` shows on the firewall itself).
+    pub async fn list_routes(&self) -> Result<Value> {
+        self.get("/api/diagnostics/interface/getRoutes").await
+    }
+
+    /// `GET /core/backup/providers` -- every configured backup provider.
+    /// Every install has at least `"this"` (the firewall's own local
+    /// config history); more appear if a remote provider (Nextcloud,
+    /// Google Drive, ...) is configured under **System -> Configuration ->
+    /// Backups**.
+    pub async fn list_backup_providers(&self) -> Result<Value> {
+        self.get("/api/core/backup/providers").await
+    }
+
+    /// `GET /core/backup/backups/{host}` -- every backup available from one
+    /// provider (`host`, as returned by
+    /// [`OpnsenseClient::list_backup_providers`]), each identified by a
+    /// filename [`OpnsenseClient::download_backup`]/
+    /// [`OpnsenseClient::restore_backup`] take.
+    pub async fn list_backups(&self, host: &str) -> Result<Value> {
+        self.get(&format!("/api/core/backup/backups/{host}")).await
+    }
+
+    /// `GET /core/backup/download/{host}[/{backup}]` -- one backup's raw
+    /// `config.xml` content, or the current running config if `backup` is
+    /// omitted. Unlike every other method here this isn't JSON -- OPNsense
+    /// serves the config file itself -- so it's returned as raw text rather
+    /// than parsed.
+    pub async fn download_backup(&self, host: &str, backup: Option<&str>) -> Result<String> {
+        let path = match backup {
+            Some(backup) => format!("/api/core/backup/download/{host}/{backup}"),
+            None => format!("/api/core/backup/download/{host}"),
+        };
+        self.get_text(&path).await
+    }
+
+    /// `POST /core/backup/revertBackup/{backup}` -- revert the running
+    /// configuration to a previous backup (a filename as returned by
+    /// [`OpnsenseClient::list_backups`]). Takes effect immediately --
+    /// OPNsense reloads its configuration from the reverted-to backup as
+    /// part of this call, there's no separate apply step.
+    pub async fn restore_backup(&self, backup: &str) -> Result<Value> {
+        self.post(&format!("/api/core/backup/revertBackup/{backup}"))
+            .await
+    }
+
     async fn get(&self, path: &str) -> Result<Value> {
         let response = self
             .http
@@ -292,6 +346,24 @@ impl OpnsenseClient {
             .send()
             .await?;
         Self::parse(response).await
+    }
+
+    async fn get_text(&self, path: &str) -> Result<String> {
+        let response = self
+            .http
+            .get(&format!("{}{path}", self.base_url))?
+            .basic_auth(&self.key, &self.secret)?
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text()?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        Ok(text)
     }
 
     async fn post(&self, path: &str) -> Result<Value> {

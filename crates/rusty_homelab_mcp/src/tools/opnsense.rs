@@ -1,5 +1,6 @@
 //! OPNsense tools: system status, service control, interfaces, firewall
-//! aliases, and gateways.
+//! aliases/rules, gateways, DHCP leases, VLANs, ARP/routing diagnostics,
+//! and config backup/restore.
 
 use rmcp::{Json, handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
 use rusty_mcp::ToolError;
@@ -111,6 +112,35 @@ pub struct UpdateVlanArgs {
     /// `opnsense_get_vlan` first and send back its full field set unless
     /// clearing the fields left out is intended.
     pub vlan: serde_json::Value,
+}
+
+/// Arguments naming a backup provider.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BackupHostArgs {
+    /// The backup provider's id, as returned by
+    /// `opnsense_list_backup_providers` (every install has at least
+    /// `this`, the firewall's own local config history).
+    pub host: String,
+}
+
+/// Arguments for downloading a backup.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DownloadBackupArgs {
+    /// The backup provider's id, as returned by
+    /// `opnsense_list_backup_providers`.
+    pub host: String,
+    /// Which backup to download, as returned by `opnsense_list_backups`.
+    /// Omit to download the current running config instead of a
+    /// previously saved backup.
+    #[serde(default)]
+    pub backup: Option<String>,
+}
+
+/// Arguments for restoring a backup.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RestoreBackupArgs {
+    /// The backup to restore, as returned by `opnsense_list_backups`.
+    pub backup: String,
 }
 
 #[tool_router(router = opnsense_tools, vis = "pub(crate)")]
@@ -419,6 +449,96 @@ impl HomelabServer {
         Ok(Json(
             self.opnsense()?
                 .apply_vlan_changes()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// The current ARP table.
+    #[tool(
+        description = "List OPNsense's current ARP table: IP address, MAC address, hostname (if known), and interface for every neighbor it has resolved."
+    )]
+    pub async fn opnsense_list_arp_entries(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_arp_entries()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// The system routing table.
+    #[tool(
+        description = "List OPNsense's system routing table (the same information `netstat -rn` shows on the firewall itself)."
+    )]
+    pub async fn opnsense_list_routes(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_routes()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Every configured backup provider.
+    #[tool(
+        description = "List every configured OPNsense backup provider. Every install has at least `this` (the firewall's own local config history); more appear if a remote provider (Nextcloud, Google Drive, ...) is configured."
+    )]
+    pub async fn opnsense_list_backup_providers(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_backup_providers()
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// Every backup available from one provider.
+    #[tool(
+        description = "List every backup available from one OPNsense backup provider (host). Call opnsense_list_backup_providers first to find provider ids."
+    )]
+    pub async fn opnsense_list_backups(
+        &self,
+        Parameters(BackupHostArgs { host }): Parameters<BackupHostArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .list_backups(&host)
+                .await
+                .map_err(opnsense_error)?
+                .into(),
+        ))
+    }
+
+    /// One backup's raw config.xml content.
+    #[tool(
+        description = "Download one OPNsense backup's raw config.xml content, or the current running config if no backup is named. Call opnsense_list_backups first to find backup names."
+    )]
+    pub async fn opnsense_download_backup(
+        &self,
+        Parameters(DownloadBackupArgs { host, backup }): Parameters<DownloadBackupArgs>,
+    ) -> Result<String, ErrorData> {
+        self.opnsense()?
+            .download_backup(&host, backup.as_deref())
+            .await
+            .map_err(opnsense_error)
+    }
+
+    /// Revert to a previous backup.
+    #[tool(
+        description = "Revert OPNsense's running configuration to a previous backup. Takes effect immediately -- OPNsense reloads its configuration as part of this call, there's no separate apply step. Call opnsense_list_backups first to find backup names."
+    )]
+    pub async fn opnsense_restore_backup(
+        &self,
+        Parameters(RestoreBackupArgs { backup }): Parameters<RestoreBackupArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.opnsense()?
+                .restore_backup(&backup)
                 .await
                 .map_err(opnsense_error)?
                 .into(),

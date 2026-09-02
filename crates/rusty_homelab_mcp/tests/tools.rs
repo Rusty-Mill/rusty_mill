@@ -105,15 +105,21 @@ async fn every_backend_contributes_its_tools() {
             "opnsense_create_vlan",
             "opnsense_delete_firewall_rule",
             "opnsense_delete_vlan",
+            "opnsense_download_backup",
             "opnsense_get_firewall_rule",
             "opnsense_get_vlan",
+            "opnsense_list_arp_entries",
+            "opnsense_list_backup_providers",
+            "opnsense_list_backups",
             "opnsense_list_dhcp_leases",
             "opnsense_list_firewall_aliases",
             "opnsense_list_firewall_rules",
             "opnsense_list_gateways",
             "opnsense_list_interfaces",
+            "opnsense_list_routes",
             "opnsense_list_services",
             "opnsense_list_vlans",
+            "opnsense_restore_backup",
             "opnsense_service_control",
             "opnsense_system_status",
             "opnsense_toggle_firewall_rule",
@@ -328,6 +334,33 @@ async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
 
     assert_ne!(result.is_error, Some(true));
     assert_eq!(structured(&result)["result"]["uuid"], "new-vlan-uuid");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_download_backup_returns_the_raw_xml_as_plain_text() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "opnsense_download_backup",
+            serde_json::json!({ "host": "this" }),
+        ))
+        .await
+        .expect("call opnsense_download_backup");
+
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("download_backup returns text");
+    assert!(text.contains("<opnsense>"), "unexpected body: {text}");
 
     client.cancel().await.expect("cancel");
 }
