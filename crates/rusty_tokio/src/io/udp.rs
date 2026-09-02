@@ -219,7 +219,7 @@ impl UdpSocket {
     /// return `EINPROGRESS`) is reused directly: for UDP, its
     /// `EINPROGRESS` branch simply never triggers.
     pub fn connect(&self, addr: SocketAddr) -> io::Result<()> {
-        socket::connect(self.inner.as_raw_io(), addr)
+        socket::connect(self.inner.as_raw_io(), addr).map(|_outcome| ())
     }
 
     /// The [`ToSocketAddrs`]-based counterpart of [`connect`

@@ -1,7 +1,7 @@
 //! The Linux backend: `epoll_wait` plus an `eventfd` to wake it early
 //! for registration/shutdown.
 
-use super::{Interest, ScheduledIo};
+use super::{InitialReadiness, Interest, ScheduledIo};
 use std::collections::HashMap;
 use std::io;
 use std::os::fd::RawFd;
@@ -140,7 +140,18 @@ impl Reactor {
     }
 
     pub(crate) fn register(&self, fd: RawFd) -> io::Result<Arc<ScheduledIo>> {
-        let io = Arc::new(ScheduledIo::new());
+        self.register_with(fd, InitialReadiness::Optimistic)
+    }
+
+    /// [`register`](Self::register) with an explicit starting
+    /// readiness -- see [`InitialReadiness`] for the one case (a
+    /// connect still in flight) where the optimistic default is wrong.
+    pub(crate) fn register_with(
+        &self,
+        fd: RawFd,
+        initial: InitialReadiness,
+    ) -> io::Result<Arc<ScheduledIo>> {
+        let io = Arc::new(ScheduledIo::with_initial(initial));
         // `EPOLLET`: edge-triggered, matching `kqueue.rs`'s own
         // `EV_CLEAR` (see that backend's registration for the identical
         // reasoning) and the level this crate's own retry-until-
@@ -162,14 +173,26 @@ impl Reactor {
             events: (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32,
             u64: fd as u64,
         };
+        // Publish the `ScheduledIo` in the registry *before* arming the
+        // kernel side, never after: `EPOLL_CTL_ADD` reports the fd's
+        // current readiness immediately, and with `EPOLLET` it reports
+        // it exactly once. If the reactor thread dequeued that first
+        // event before the entry existed, `event_loop`'s lookup would
+        // find nothing and the edge would be gone for good -- which,
+        // for a socket registered `WritePending` (a connect still in
+        // flight, whose very first writable/error edge is the one that
+        // completes `connect`), is a permanent hang. The optimistic
+        // default used to hide this ordering bug: a lost initial edge
+        // only ever cost one wasted syscall, never a wait.
+        self.registry.lock().unwrap().insert(fd, io.clone());
         // SAFETY: `epoll_fd` is valid for the reactor's lifetime; `fd`
         // is a valid, open fd owned by the caller; `&mut ev` outlives
         // the call.
         let r = unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev) };
         if r < 0 {
+            self.registry.lock().unwrap().remove(&fd);
             return Err(io::Error::last_os_error());
         }
-        self.registry.lock().unwrap().insert(fd, io.clone());
         Ok(io)
     }
 

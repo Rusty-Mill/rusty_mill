@@ -20,7 +20,7 @@
 //! `macos-latest`/FreeBSD-VM/OpenBSD-VM CI (see rustils#48/#52/#53/#86);
 //! this reactor is this crate's own code with no such upstream coverage.
 
-use super::{Interest, ScheduledIo};
+use super::{InitialReadiness, Interest, ScheduledIo};
 use std::collections::HashMap;
 use std::io;
 use std::mem;
@@ -197,7 +197,18 @@ impl Reactor {
     }
 
     pub(crate) fn register(&self, fd: RawFd) -> io::Result<Arc<ScheduledIo>> {
-        let io = Arc::new(ScheduledIo::new());
+        self.register_with(fd, InitialReadiness::Optimistic)
+    }
+
+    /// [`register`](Self::register) with an explicit starting
+    /// readiness -- see [`InitialReadiness`] for the one case (a
+    /// connect still in flight) where the optimistic default is wrong.
+    pub(crate) fn register_with(
+        &self,
+        fd: RawFd,
+        initial: InitialReadiness,
+    ) -> io::Result<Arc<ScheduledIo>> {
+        let io = Arc::new(ScheduledIo::with_initial(initial));
         let changes = [
             change(
                 fd as usize,
@@ -227,6 +238,14 @@ impl Reactor {
         // already gets this right (`nevents: 0`); this call and
         // `deregister`'s used to differ from it for no reason that ever
         // needed the output (neither read it).
+        // Registry entry first, kernel registration second -- same
+        // reasoning as `epoll.rs`'s `register_with`: `EV_ADD` reports the
+        // fd's current state right away and `EV_CLEAR` reports each
+        // edge once, so an event dequeued before the entry exists is
+        // dropped by `event_loop`'s lookup and never re-reported. For a
+        // `WritePending` registration (an in-flight connect) that lost
+        // first edge would be the one that completes `connect`.
+        self.registry.lock().unwrap().insert(fd, io.clone());
         let r = unsafe {
             libc::kevent(
                 self.kq_fd,
@@ -238,9 +257,9 @@ impl Reactor {
             )
         };
         if r < 0 {
+            self.registry.lock().unwrap().remove(&fd);
             return Err(io::Error::last_os_error());
         }
-        self.registry.lock().unwrap().insert(fd, io.clone());
         Ok(io)
     }
 

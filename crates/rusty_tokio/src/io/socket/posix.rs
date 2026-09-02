@@ -567,7 +567,7 @@ pub(crate) fn unix_bind_addr(fd: RawFd, addr: &std::os::unix::net::SocketAddr) -
 pub(crate) fn unix_connect_addr(
     fd: RawFd,
     addr: &std::os::unix::net::SocketAddr,
-) -> io::Result<()> {
+) -> io::Result<super::ConnectOutcome> {
     let (raw, len) = to_sockaddr_un_from_addr(addr)?;
     // SAFETY: `raw` holds a valid `sockaddr_un` for exactly `len` bytes;
     // `fd` is a valid, freshly created, still-unconnected socket.
@@ -579,11 +579,11 @@ pub(crate) fn unix_connect_addr(
         )
     };
     if r == 0 {
-        return Ok(());
+        return Ok(super::ConnectOutcome::Established);
     }
     let err = io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::EINPROGRESS) {
-        return Ok(());
+        return Ok(super::ConnectOutcome::InProgress);
     }
     Err(err)
 }
@@ -591,7 +591,7 @@ pub(crate) fn unix_connect_addr(
 /// `connect(2)` to an `AF_UNIX` path on a non-blocking socket -- the
 /// `AF_UNIX` counterpart of [`connect`]; see that function's docs for why
 /// `EINPROGRESS` is treated as success here too.
-pub(crate) fn unix_connect(fd: RawFd, path: &Path) -> io::Result<()> {
+pub(crate) fn unix_connect(fd: RawFd, path: &Path) -> io::Result<super::ConnectOutcome> {
     let (addr, len) = to_sockaddr_un(path)?;
     // SAFETY: `addr` holds a valid `sockaddr_un` for exactly `len` bytes
     // (`to_sockaddr_un`'s contract); `fd` is a valid, freshly created,
@@ -604,11 +604,11 @@ pub(crate) fn unix_connect(fd: RawFd, path: &Path) -> io::Result<()> {
         )
     };
     if r == 0 {
-        return Ok(());
+        return Ok(super::ConnectOutcome::Established);
     }
     let err = io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::EINPROGRESS) {
-        return Ok(());
+        return Ok(super::ConnectOutcome::InProgress);
     }
     Err(err)
 }
@@ -618,7 +618,7 @@ pub(crate) fn unix_connect(fd: RawFd, path: &Path) -> io::Result<()> {
 /// function's point of view; the caller waits for the socket to become
 /// writable and then calls [`take_socket_error`] to find out whether the
 /// connection actually succeeded.
-pub(crate) fn connect(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
+pub(crate) fn connect(fd: RawFd, addr: SocketAddr) -> io::Result<super::ConnectOutcome> {
     let (storage, len) = to_sockaddr(addr);
     // SAFETY: `storage` holds a valid sockaddr for exactly `len` bytes
     // (`to_sockaddr`'s contract); `fd` is a valid, freshly created,
@@ -631,11 +631,11 @@ pub(crate) fn connect(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
         )
     };
     if r == 0 {
-        return Ok(());
+        return Ok(super::ConnectOutcome::Established);
     }
     let err = io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::EINPROGRESS) {
-        return Ok(());
+        return Ok(super::ConnectOutcome::InProgress);
     }
     Err(err)
 }
