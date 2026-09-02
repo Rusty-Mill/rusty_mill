@@ -13,6 +13,25 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_meshed: reverse-trace & domain-maturity crate
+**2026-09-02** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
+
+- **Added:** `crates/rusty_meshed/crates/rusty-meshed-trace` -- the core of
+  the *Reverse-Trace & Domain Maturity* spec (Phase 1): the five-level
+  `Maturity` ladder, `Domain`/`Source`/`Outcome`/`Requirement` types, a pure
+  `trace()` that classifies every requirement (satisfied / blocked / degraded
+  / missing), caps the outcome's fidelity at its weakest required domain and
+  returns a worst-first bottleneck list, TOML scenario loading via
+  `rusty_codec`'s sovereign parser, JSON round-tripping via `rusty_json`, a
+  Markdown "gap summary" export, and one shipped scenario (*Acquisition
+  Status Dashboard*, ten domains, four outcomes). Fifteen fixture tests cover
+  every verdict and edge class, ordering, what-if, and both file formats.
+- **Changed:** the crate is a new workspace member; `rusty_meshed/README.md`
+  gains a crate-table row and a section on the new capability.
+- Known limitation: the shipped scenario's maturity levels are illustrative
+  placeholders (spec open question #3), not an assessment; the renderer
+  (Phase 2) lives in the source repo's `data-mesh-monitor`, not here.
+
 ## Chore: drop committed Python bytecode, ignore it going forward
 **2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 

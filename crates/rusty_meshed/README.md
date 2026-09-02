@@ -26,6 +26,7 @@ migration status, and the tracking issues on this repo (label
 | `rusty-meshed-registry` | `meshed.registry` | core, governance, observability, schema-registry, `rusty_http` |
 | `rusty-meshed-cli` | `meshed.cli` | core, observability, registry |
 | `rusty-meshed-domains` | `meshed.domains` | core, sdk |
+| `rusty-meshed-trace` | — (new; see below) | `rusty_codec`, `rusty_json` |
 
 `meshed`'s Kafka dependency (`confluent-kafka`) has no existing RustyMill
 equivalent, so it's being hand-rolled as a new sibling crate,
@@ -36,6 +37,28 @@ capabilities above.
 The `data-mesh-monitor` Vite/React dashboard from the source repo is
 explicitly out of scope for this migration (2026-09-01, user decision) —
 it continues to run unmodified against whichever backend is live.
+
+## Reverse trace & domain maturity (`rusty-meshed-trace`)
+
+Not a port of anything in `meshed` -- a new capability from the *Reverse-Trace
+& Domain Maturity* spec (2026-09-02). A leadership outcome ("acquisition
+status across my programs") is traced back through the domains it depends on
+and the sources (systems, files, people) behind them; every domain sits on a
+five-level maturity ladder (`Tribal` .. `Integrated`), and the trace reports
+an achievable fidelity (`Full` / `Partial(fraction)` / `NotAchievable`) plus a
+worst-first bottleneck list. Pure functions, no I/O.
+
+- Scenarios are TOML, parsed with `rusty_codec`'s own TOML parser (keyed
+  tables rather than `[[arrays-of-tables]]`, which that parser deliberately
+  omits). One ships with the crate: `scenarios/acquisition_status.toml`, ten
+  domains at *placeholder* maturity levels and four outcomes.
+- The same model round-trips through `rusty_json`, and that JSON is what the
+  source repo's `data-mesh-monitor` **Reverse Trace** tab consumes (its
+  `src/reverseTrace.js` is a line-for-line port of this crate's trace, checked
+  against this crate's output by its `npm test`). Regenerate the dashboard's
+  copies with `cargo run -p rusty-meshed-trace --example export`.
+- `TraceReport::to_markdown` renders the "gap summary" for briefing decks;
+  `--example export -- --markdown` prints it for every outcome.
 
 ## Local dev
 

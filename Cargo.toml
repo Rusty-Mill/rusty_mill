@@ -10,6 +10,7 @@ members = [
     "crates/rusty_meshed/crates/rusty-meshed-registry",
     "crates/rusty_meshed/crates/rusty-meshed-cli",
     "crates/rusty_meshed/crates/rusty-meshed-domains",
+    "crates/rusty_meshed/crates/rusty-meshed-trace",
     "crates/rusty_term",
     "crates/rusty_term/l13",
     "crates/rusty_gpu",

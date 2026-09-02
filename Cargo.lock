@@ -9784,6 +9784,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-meshed-trace"
+version = "0.1.0"
+dependencies = [
+ "rusty_codec",
+ "rusty_err",
+ "rusty_json",
+]
+
+[[package]]
 name = "rusty-search"
 version = "0.1.0"
 dependencies = [

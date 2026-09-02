@@ -9,6 +9,11 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/rusty_meshed/crates/rusty-meshed-trace` — reverse-trace and
+  domain-maturity model for `rusty_meshed` (maturity ladder, scenario types,
+  pure `trace()` with fidelity verdict and worst-first bottlenecks, TOML
+  scenarios via `rusty_codec`, JSON via `rusty_json`, Markdown gap summary,
+  one shipped scenario); new workspace member
 - `.github/scripts/test_affected_crates.py` — unit tests for the CI plan
   step's ownership and reverse-dependency logic (nested crates, directory
   name prefixes, transitive dependents, external deps, cycles), run by a
