@@ -1,5 +1,7 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
 #[cfg(unix)]
+use super::reactor::InitialReadiness;
+#[cfg(unix)]
 use super::reactor::TryCloneIo;
 use super::reactor::{
     poll_io, ready_io, AsRawIo, Interest as ReactorInterest, Reactor, ScheduledIo,
@@ -500,8 +502,9 @@ impl UnixSocket {
             ));
         }
         let reactor = Handle::current().shared.reactor.clone();
-        socket::unix_connect(self.fd.as_raw_fd(), path.as_ref())?;
-        let io = reactor.register(self.fd.as_raw_fd())?;
+        let outcome = socket::unix_connect(self.fd.as_raw_fd(), path.as_ref())?;
+        let io =
+            reactor.register_with(self.fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
         let inner = PlatformUnixStream::from(self.fd);
         // Same non-blocking-connect-completes-asynchronously reasoning
         // as `UnixStream::connect`.
@@ -610,11 +613,12 @@ impl UnixStream {
     pub async fn connect(path: &Path) -> io::Result<UnixStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
-        socket::unix_connect(fd.as_raw_fd(), path)?;
-        let io = reactor.register(fd.as_raw_fd())?;
+        let outcome = socket::unix_connect(fd.as_raw_fd(), path)?;
+        let io = reactor.register_with(fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
         let inner = PlatformUnixStream::from(fd);
         // Same non-blocking-connect-completes-asynchronously reasoning
-        // as `TcpStream::connect`.
+        // as `TcpStream::connect` (including the write-pending
+        // registration -- see `InitialReadiness::for_connect`).
         ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_io())
         })
@@ -663,8 +667,8 @@ impl UnixStream {
     pub async fn connect_addr(addr: &UnixSocketAddr) -> io::Result<UnixStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
-        socket::unix_connect_addr(fd.as_raw_fd(), &addr.0)?;
-        let io = reactor.register(fd.as_raw_fd())?;
+        let outcome = socket::unix_connect_addr(fd.as_raw_fd(), &addr.0)?;
+        let io = reactor.register_with(fd.as_raw_fd(), InitialReadiness::for_connect(outcome))?;
         let inner = PlatformUnixStream::from(fd);
         ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_io())

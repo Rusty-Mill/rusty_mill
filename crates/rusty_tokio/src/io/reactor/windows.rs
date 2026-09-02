@@ -41,7 +41,7 @@
 //!   third-party firewall/antivirus LSPs mio works around; out of scope
 //!   here.
 
-use super::{Interest, RawIo, ScheduledIo};
+use super::{InitialReadiness, Interest, RawIo, ScheduledIo};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io;
@@ -568,8 +568,19 @@ impl Reactor {
     }
 
     pub(crate) fn register(&self, sock: RawIo) -> io::Result<Arc<ScheduledIo>> {
+        self.register_with(sock, InitialReadiness::Optimistic)
+    }
+
+    /// [`register`](Self::register) with an explicit starting
+    /// readiness -- see [`InitialReadiness`] for the one case (a
+    /// connect still in flight) where the optimistic default is wrong.
+    pub(crate) fn register_with(
+        &self,
+        sock: RawIo,
+        initial: InitialReadiness,
+    ) -> io::Result<Arc<ScheduledIo>> {
         let base_socket = get_base_socket(sock)?;
-        let scheduled_io = Arc::new(ScheduledIo::new());
+        let scheduled_io = Arc::new(ScheduledIo::with_initial(initial));
         let state = Arc::new(Mutex::new(SockState {
             scheduled_io: scheduled_io.clone(),
             base_socket,

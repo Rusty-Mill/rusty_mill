@@ -20,6 +20,21 @@ pub(crate) use windows::*;
 use platform::error::{OsCode, PlatformError};
 use std::io;
 
+/// What a non-blocking `connect` returned: the connection is already
+/// established (the call itself returned success -- a Unix-domain
+/// connect to a listening socket, typically), or the OS reported it in
+/// progress and the socket becoming writable is the signal to check
+/// `SO_ERROR`. TCP reports in-progress even on Linux loopback, where the
+/// handshake has nonetheless usually been processed inside the call.
+/// `TcpStream::connect` and friends feed this to
+/// `reactor::InitialReadiness::for_connect` -- see there for why the
+/// distinction matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectOutcome {
+    Established,
+    InProgress,
+}
+
 /// Adapts `rustils`' two-axis `PlatformError` to `std::io::Error` so it
 /// composes with the rest of this crate's (and every caller's) plain
 /// `io::Result`-based API. Both `OsCode` arms round-trip through std's
