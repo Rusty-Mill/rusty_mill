@@ -1195,7 +1195,28 @@ impl GpuBackend {
         }))
         .map_err(|e| format!("no suitable GPU adapter: {e}"))?;
 
-        let adapter_name = adapter.get_info().name;
+        let info = adapter.get_info();
+        let adapter_name = info.name;
+
+        // On a Windows machine with no GPU, `request_adapter` still succeeds:
+        // it hands back WARP, D3D12's software rasterizer. Dispatching to it
+        // faults inside the driver (0xc0000005) partway through, which takes
+        // the process with it rather than surfacing as an error a caller could
+        // report or recover from -- so refuse it up front, for the same reason
+        // as the storage-buffer check below, and let the caller fall back to
+        // the CPU backend. Nothing is lost by that: a software rasterizer runs
+        // this work on the very cores `CpuBackend` uses, with a driver and two
+        // buffer copies added on top.
+        //
+        // Windows only, deliberately. Mesa's software Vulkan (lavapipe) is
+        // slow but correct, and the parity tests below do run against it.
+        #[cfg(windows)]
+        if info.device_type == wgpu::DeviceType::Cpu {
+            return Err(format!(
+                "adapter '{adapter_name}' is a software rasterizer, not a GPU; \
+                 the CPU backend runs the same work without the round trip"
+            ));
+        }
 
         // Ask for the adapter's full limits: the largest weight matrices (e.g.
         // a 32000×2048 embedding/classifier dequantized to f32 ≈ 262 MB) exceed
