@@ -107,6 +107,13 @@ Removed / Fixed / Security, newest first.
 - `adk-sessions` moved from `rusqlite = "0.37"` to this root's `"0.32.1"`
   entry — the same `libsqlite3-sys` `links` conflict `inventory-core` hit,
   and the same resolution
+- README: `rusty_simd` is no longer "still outstanding", `rusty_tokio` has
+  twelve in-repo dependents rather than none, and `rustils` is in-tree
+  (its surviving `git` pins in `rusty_tokio`/`rustils_async`/`rusty_tls`
+  are noted as not yet retired). ARCHITECTURE: the ATLAS-300 reference no
+  longer describes it as a seed and points at `docs/atlas/` for the
+  crosswalk. `docs/atlas/`: the `rusty_tokio` dependent count corrected to
+  the `cargo metadata` figure
 
 ## [workspace] - 2026-09-01
 ### Fixed

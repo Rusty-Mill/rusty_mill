@@ -235,8 +235,10 @@ crate joined this monorepo later (`rusty_libc`'s three in-set consumers in
 the second wave below, `rusty_lsp`'s own later merge, and `rusty_wire`'s
 three consumers — `rusty_font`, `rusty_gui`, `rusty_stream` — noted where
 each is discussed, and `rusty_std`'s four consumers — `rusty_font`,
-`rusty_gui`, `rusty_gpu`, `rusty_tokio` — likewise). `rusty_simd` is the
-one still outstanding.
+`rusty_gui`, `rusty_gpu`, `rusty_tokio` — likewise). `rusty_simd` joined in
+a later wave as well (its own entry is below), and its consumers —
+`rusty_whisper`, `rusty_llama`, `rusty_rag` — now use `path` dependencies
+on it too, so all four of those pins have since retired.
 `mill-term` locates `rusty_git`/`rusty_text`'s `rgit`/`rsed`/
 `rawk` binaries via a `PATH`/shared-`target/`-dir lookup rather than a
 Cargo library dependency — it shells out to them, not their APIs — so that
@@ -248,16 +250,25 @@ currently disabled/unused pending a fix tracked upstream at
 [`rusty_gui#9`](https://github.com/baileyrd/rusty_gui/issues/9) — not
 addressed by this migration.
 
-`rusty_tokio` doesn't get depended on by any of the other crates in this
-repo, and until `rusty_std` merged it didn't depend on any either. Its
+`rusty_tokio` had no in-repo dependents when it merged, and until
+`rusty_std` merged it didn't depend on any either. Both halves have since
+changed: twelve workspace packages now depend on it by `path` —
+`rusty_boot`, `rusty_request`, `rusty_stream`, `rusty_voice`,
+`rusty-db-core`, `agentgateway-tls`, `sessionmgr-daemon`, `sessionmgr-proc`,
+`sessionmgr-tui`, and, behind optional features, `rusty_http`, `rusty_lsp`,
+and `rusty_tls` (`cargo metadata --all-features` is the authority; this
+list is a snapshot). Its
 `rusty_std` dependency swapped to a `path` dependency along with
 `rusty_std`'s three other pre-existing consumers below — its pinned rev
 (`3ab2361e`) predated the merge commit that landed on `rusty_std`'s own
 `main` (`99135f3`) but was content-identical (an empty diff between the
 two), so the swap is a pure mechanical change, not a version bump. Its
 `platform`/`platform-linux`/`platform-bsd`/`platform-windows` dependencies
-(from `baileyrd/rustils`) stay pinned `git` dependencies — that crate is
-outside this monorepo's scope, same as `rusty_simd` above.
+(from `baileyrd/rustils`) are still pinned `git` dependencies at rev
+`ce9259d4`, even though `rustils` has since joined this workspace as
+`crates/rustils` (fourth wave, below). Retiring those pins to `path`
+dependencies is outstanding, and the same is true of `rustils_async`'s
+and `rusty_tls`'s pins on `rustils`.
 
 `rusty_rusqlite` has no dependencies at all (`[dependencies]` is empty in
 its own manifest) and nothing in this repo depends on it yet, so nothing
@@ -403,8 +414,10 @@ were, since this outer root doesn't declare a `[workspace.package]`/
 `[workspace.dependencies]` for a nested workspace's fields to keep
 resolving against once it joins `members` directly. Its `platform`/
 `platform-mock`/`platform-linux` dependencies are pinned `git` revs
-against `baileyrd/rustils` — a separate repo outside this monorepo's
-consolidation scope, the same shape `rusty_stream`'s `rusty_wire`
+against `baileyrd/rustils` — at the time a separate repo outside this
+monorepo's consolidation scope (it has since joined as `crates/rustils`,
+below, though these pins have not yet been retired to `path`
+dependencies), the same shape `rusty_stream`'s `rusty_wire`
 dependency used to have before `rusty_wire` itself joined this
 workspace (below) — so those stayed pinned `git` dependencies rather
 than becoming `path` dependencies; the sibling crates within this same
