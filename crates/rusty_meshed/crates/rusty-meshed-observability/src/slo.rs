@@ -15,7 +15,7 @@
 //! inherits (no live broker to validate the record-batch v2 wire
 //! format against in this environment).
 
-use crate::metrics::get_violation_count;
+use crate::metrics::{get_violation_count, KAFKA_TIMEOUT};
 use rusty_err::Error;
 use rusty_json::json;
 use rusty_kafka::protocol::list_offsets::{
@@ -28,6 +28,7 @@ use rusty_kafka::record_batch::Record;
 use rusty_kafka::{ClientError, KafkaClient};
 use rusty_sqlite::rusqlite::{Connection, Result as SqlResult};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
+use rusty_tokio::time::timeout;
 
 /// The outcome of evaluating one SLO dimension (GOV-041).
 #[derive(Debug, Clone, PartialEq)]
@@ -90,8 +91,26 @@ impl SLOViolationPayload {
     }
 }
 
+/// Runs one Kafka call under [`KAFKA_TIMEOUT`] -- the same bound the
+/// metrics collector puts on every broker round trip, for the same
+/// reason (see that constant's docs). Surfaced as `ClientError::Io`
+/// with `ErrorKind::TimedOut` so the existing `ClientError`-shaped
+/// signatures here (`connect`, `publish`) stay as they are.
+async fn bounded<T>(
+    call: impl std::future::Future<Output = Result<T, ClientError>>,
+) -> Result<T, ClientError> {
+    match timeout(KAFKA_TIMEOUT, call).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(ClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("Kafka call did not complete within {KAFKA_TIMEOUT:?}"),
+        ))),
+    }
+}
+
 /// Evaluates SLO dimensions for a data product's output port, backed
-/// by a single [`rusty_kafka::KafkaClient`] connection.
+/// by a single [`rusty_kafka::KafkaClient`] connection. Every broker
+/// call is bounded at [`KAFKA_TIMEOUT`].
 pub struct SLOMonitor<S> {
     client: KafkaClient<S>,
 }
@@ -99,8 +118,11 @@ pub struct SLOMonitor<S> {
 impl SLOMonitor<TcpStream> {
     /// Connects to the Kafka broker at `bootstrap_servers`.
     pub async fn connect(bootstrap_servers: &str) -> Result<Self, ClientError> {
-        let client =
-            KafkaClient::connect(bootstrap_servers, Some("rusty_meshed_slo".to_string())).await?;
+        let client = bounded(KafkaClient::connect(
+            bootstrap_servers,
+            Some("rusty_meshed_slo".to_string()),
+        ))
+        .await?;
         Ok(SLOMonitor { client })
     }
 }
@@ -140,7 +162,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
                 }],
             }],
         };
-        let Ok(response) = self.client.list_offsets(&request).await else {
+        let Ok(response) = bounded(self.client.list_offsets(&request)).await else {
             return f64::INFINITY;
         };
         let Some(result) = response.topics.first().and_then(|t| t.partitions.first()) else {
@@ -280,10 +302,10 @@ pub struct SLOViolationPublisher<S> {
 impl SLOViolationPublisher<TcpStream> {
     /// Connects to the Kafka broker at `bootstrap_servers`.
     pub async fn connect(bootstrap_servers: &str) -> Result<Self, ClientError> {
-        let client = KafkaClient::connect(
+        let client = bounded(KafkaClient::connect(
             bootstrap_servers,
             Some("rusty_meshed_slo_publisher".to_string()),
-        )
+        ))
         .await?;
         Ok(SLOViolationPublisher { client })
     }
@@ -342,7 +364,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOViolationPublisher<S> {
                 }],
             }],
         };
-        let response = self.client.produce(&request).await?;
+        let response = bounded(self.client.produce(&request)).await?;
         let result = response
             .topics
             .first()
@@ -756,5 +778,51 @@ mod tests {
         let (client_io, _peer) = duplex(4096);
         let mut publisher = SLOViolationPublisher::with_client(KafkaClient::new(client_io, None));
         publisher.flush(5.0);
+    }
+
+    /// A broker that takes the request but never answers must collapse
+    /// to the same "no signal" outcome as a refused connection, after
+    /// `KAFKA_TIMEOUT` rather than never. `_peer` is held open so only
+    /// the missing response ends the call.
+    #[rusty_tokio::test]
+    async fn check_freshness_treats_a_silent_broker_as_infinite_age_after_the_bound() {
+        let (client_io, _peer) = duplex(4096);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let started = std::time::Instant::now();
+        let result = monitor.check_freshness("orders", 0, 60).await;
+        assert!(!result.passed);
+        assert!(result.actual_value.is_infinite());
+        assert!(
+            started.elapsed() >= KAFKA_TIMEOUT - std::time::Duration::from_millis(500),
+            "returned too early: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Same for the publisher: a silent broker is a `TimedOut` I/O
+    /// error after the bound, not a hang.
+    #[rusty_tokio::test]
+    async fn publish_to_a_silent_broker_times_out_instead_of_hanging() {
+        let (client_io, _peer) = duplex(4096);
+        let mut publisher = SLOViolationPublisher::with_client(KafkaClient::new(client_io, None));
+        let violation = SLOViolationPayload::new(
+            "orders",
+            "commerce.orders",
+            "freshness",
+            60.0,
+            f64::INFINITY,
+            "latest message is older than 60s",
+        );
+        let started = std::time::Instant::now();
+        let err = publisher.publish(&violation).await.unwrap_err();
+        assert!(
+            matches!(&err, PublishError::Kafka(ClientError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() >= KAFKA_TIMEOUT - std::time::Duration::from_millis(500),
+            "returned too early: {:?}",
+            started.elapsed()
+        );
     }
 }

@@ -53,7 +53,8 @@ pub enum MetricsError {
 /// (`get_watermark_offsets`, `committed`), so a broker that's down or
 /// unreachable turns into a prompt "unavailable" in `meshed metrics`/
 /// `meshed slo`/the registry's metrics route rather than an indefinite
-/// hang. Ported as the same bound for the same reason -- and it's what
+/// hang. Ported as the same bound for the same reason (the `slo`
+/// module's `SLOMonitor`/`SLOViolationPublisher` share it) -- and it's what
 /// keeps the "unreachable broker" tests in this crate family finite on
 /// a platform where a refused connect doesn't fail instantly (see
 /// rusty_tokio's Windows reactor: `127.0.0.1:1` there sat until
