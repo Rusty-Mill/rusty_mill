@@ -1,9 +1,10 @@
 # rusty_opnsense
 
 An async client for the [OPNsense](https://opnsense.org/) REST API: system
-status, service listing/control, interface listing, firewall alias export,
-and gateway status. Built on [`rusty_request`](../rusty_request), this
-workspace's own async HTTP client, rather than `reqwest`.
+status, service listing/control, interfaces, firewall aliases/rules, VLANs,
+gateways, DHCP leases, ARP/routing diagnostics, and config backup/restore.
+Built on [`rusty_request`](../rusty_request), this workspace's own async
+HTTP client, rather than `reqwest`.
 
 Used by [`rusty_homelab_mcp`](../rusty_homelab_mcp) to expose OPNsense
 control as MCP tools, but has no dependency on MCP/`rmcp` itself -- reusable
@@ -49,12 +50,16 @@ what each endpoint returns.
 Covered: system status, service search/start/stop/restart, interface
 listing, firewall alias export, gateway status, firewall rule CRUD
 (list/get/create/update/delete/toggle) plus applying pending rule changes,
-DHCP lease listing, and VLAN CRUD (list/get/create/update/delete) plus
-applying pending VLAN changes. Not covered (open to a PR): general
+DHCP lease listing, VLAN CRUD (list/get/create/update/delete) plus applying
+pending VLAN changes, ARP table and routing table diagnostics, and config
+backup listing/download/restore. Not covered (open to a PR): general
 interface settings writes (enable/blockpriv/blockbogons on a physical
 interface) -- no stable, documented core REST endpoint for this was found,
 as opposed to guessing one the way the OPNSenseMCP reference implementation
-does; VPN (WireGuard/OpenVPN/IPsec) status; backup/config management.
+does; VPN (WireGuard/OpenVPN/IPsec) status; plugin-gated backends (HAProxy,
+ACME, Monit); NAT (OPNsense's REST API has no NAT endpoints -- the only
+prior art, proxmox-mcp's OPNsense peer, resorts to SSH and hand-parsed
+`config.xml` for this, which isn't worth porting).
 
 `list_dhcp_leases` is the one method that isn't a single fixed endpoint:
 OPNsense runs exactly one of three unrelated DHCP backends at a time
@@ -75,3 +80,10 @@ schema. None of the writes in either config area take effect until that
 area's own `apply_firewall_changes`/`apply_vlan_changes` is called --
 OPNsense buffers changes per config area the same way the web UI's "Apply
 changes" button implies.
+
+`download_backup` is the one method that doesn't return JSON at all --
+OPNsense serves a backup as the raw `config.xml` file itself, so it
+returns `String`, not `serde_json::Value`. Backups are organized by
+provider (`list_backup_providers`/`list_backups`/`download_backup` all
+take a `host`, e.g. `this` for the firewall's own local config history);
+`restore_backup` takes effect immediately, with no separate apply step.
