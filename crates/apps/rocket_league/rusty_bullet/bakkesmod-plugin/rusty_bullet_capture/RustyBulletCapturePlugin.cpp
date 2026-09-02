@@ -6,7 +6,12 @@
 
 #include <sstream>
 
-BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.0", PLUGINTYPE_FREEPLAY | PLUGINTYPE_SOCCAR)
+// `PLUGINTYPE` (bakkesmodsdk.h) has no flag for a regular local/offline
+// match at all -- only FREEPLAY, CUSTOM_TRAINING, SPECTATOR, BOTAI, REPLAY,
+// THREADED, THREADEDUNLOAD exist. `PLUGINTYPE_FREEPLAY` is this plugin's
+// primary use case (see README); it doesn't gate loading during a normal
+// match, since there's no bit for one to begin with.
+BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.0", PLUGINTYPE_FREEPLAY)
 
 namespace
 {
