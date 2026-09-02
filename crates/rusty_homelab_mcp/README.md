@@ -78,8 +78,11 @@ stop/shutdown/reboot/suspend/resume a QEMU VM or LXC container),
 `proxmox_task_status`/`proxmox_task_log` (poll the UPID `proxmox_guest_power`
 and other asynchronous actions return), `proxmox_guest_config`/
 `proxmox_update_guest_config`, `proxmox_create_guest`/`proxmox_delete_guest`/
-`proxmox_clone_guest`, `proxmox_list_snapshots`/`proxmox_create_snapshot`/
-`proxmox_delete_snapshot`/`proxmox_rollback_snapshot`.
+`proxmox_clone_guest`/`proxmox_migrate_guest`, `proxmox_list_snapshots`/
+`proxmox_create_snapshot`/`proxmox_delete_snapshot`/
+`proxmox_rollback_snapshot`, `proxmox_cluster_resources`,
+`proxmox_list_storage`/`proxmox_node_storage_status`,
+`proxmox_list_backup_jobs`/`proxmox_run_backup`.
 
 **OPNsense** (`rusty_opnsense`): `opnsense_system_status`,
 `opnsense_list_services`, `opnsense_service_control` (start/stop/restart),

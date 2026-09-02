@@ -1,4 +1,6 @@
-//! Proxmox VE tools: node/guest listing, status, and power control.
+//! Proxmox VE tools: node/guest listing, status, power control, config,
+//! lifecycle (create/delete/clone/migrate), snapshots, cluster resources,
+//! storage, and backups.
 
 use rmcp::{Json, handler::server::wrapper::Parameters, model::ErrorData, tool, tool_router};
 use rusty_mcp::ToolError;
@@ -179,6 +181,70 @@ pub struct CreateSnapshotArgs {
     /// `description`, and for QEMU guests `vmstate` (also capture RAM
     /// state).
     pub snapshot: serde_json::Value,
+}
+
+/// Which kind of resource to filter a cluster resources overview to.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterResourceTypeArg {
+    /// QEMU VMs and LXC containers.
+    Vm,
+    /// Storage entries.
+    Storage,
+    /// Cluster nodes.
+    Node,
+    /// SDN objects.
+    Sdn,
+    /// Resource pools.
+    Pool,
+}
+
+impl ClusterResourceTypeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Vm => "vm",
+            Self::Storage => "storage",
+            Self::Node => "node",
+            Self::Sdn => "sdn",
+            Self::Pool => "pool",
+        }
+    }
+}
+
+/// Arguments for the cluster resources overview.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClusterResourcesArgs {
+    /// Restrict results to one kind of resource. Omit for everything.
+    #[serde(default)]
+    pub resource_type: Option<ClusterResourceTypeArg>,
+}
+
+/// Arguments for running an on-demand backup.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunBackupArgs {
+    /// Node to run the backup from, as returned by `proxmox_list_nodes`.
+    pub node: String,
+    /// The backup's fields, in the same shape Proxmox's own vzdump API
+    /// takes: `vmid` (one guest, or omit for every guest with `all: true`),
+    /// `storage`, `mode` (`snapshot`/`suspend`/`stop`), `compress`, and so
+    /// on.
+    pub backup: serde_json::Value,
+}
+
+/// Arguments for migrating a guest to another node.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MigrateGuestArgs {
+    /// Node the guest currently runs on, as returned by
+    /// `proxmox_list_nodes`.
+    pub node: String,
+    /// Which kind of guest `vmid` is.
+    pub kind: GuestKindArg,
+    /// The guest's VMID, as returned by `proxmox_list_guests`.
+    pub vmid: u32,
+    /// The migration's fields. Must include `target` (the destination
+    /// node); common optional fields are `online` (live-migrate a running
+    /// QEMU guest instead of suspending it) and `bwlimit`.
+    pub migration: serde_json::Value,
 }
 
 #[tool_router(router = proxmox_tools, vis = "pub(crate)")]
@@ -458,6 +524,101 @@ impl HomelabServer {
     ) -> Result<String, ErrorData> {
         self.proxmox()?
             .rollback_snapshot(&node, kind.into(), vmid, &snapname)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Every resource in the cluster, in one call.
+    #[tool(
+        description = "List every resource in the Proxmox cluster (nodes, guests, storage, SDN, pools) in one call, instead of paging through proxmox_list_nodes/proxmox_list_guests per node. Pass resource_type to restrict to one kind."
+    )]
+    pub async fn proxmox_cluster_resources(
+        &self,
+        Parameters(ClusterResourcesArgs { resource_type }): Parameters<ClusterResourcesArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .cluster_resources(resource_type.map(ClusterResourceTypeArg::as_str))
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Every storage entry configured at the datacenter level.
+    #[tool(
+        description = "List every storage entry configured at the Proxmox datacenter level (the shared config every node references)."
+    )]
+    pub async fn proxmox_list_storage(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .list_storage()
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Storage status for one node.
+    #[tool(
+        description = "Get usage, availability, and content types for every datastore visible from one Proxmox node. Call proxmox_list_nodes first to find node names."
+    )]
+    pub async fn proxmox_node_storage_status(
+        &self,
+        Parameters(NodeArgs { node }): Parameters<NodeArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .node_storage_status(&node)
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Every scheduled backup job.
+    #[tool(
+        description = "List every scheduled vzdump backup job configured on the Proxmox cluster."
+    )]
+    pub async fn proxmox_list_backup_jobs(&self) -> Result<Json<JsonResult>, ErrorData> {
+        Ok(Json(
+            self.proxmox()?
+                .list_backup_jobs()
+                .await
+                .map_err(proxmox_error)?
+                .into(),
+        ))
+    }
+
+    /// Run a backup immediately.
+    #[tool(
+        description = "Run a Proxmox backup immediately, outside any schedule. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish."
+    )]
+    pub async fn proxmox_run_backup(
+        &self,
+        Parameters(RunBackupArgs { node, backup }): Parameters<RunBackupArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .run_backup(&node, backup)
+            .await
+            .map_err(proxmox_error)
+    }
+
+    /// Migrate a guest to another node.
+    #[tool(
+        description = "Migrate a Proxmox guest to another cluster node. Runs asynchronously; returns the task ID (a UPID string) rather than waiting for it to finish. Call proxmox_list_guests first to find the VMID and proxmox_list_nodes for the destination node name."
+    )]
+    pub async fn proxmox_migrate_guest(
+        &self,
+        Parameters(MigrateGuestArgs {
+            node,
+            kind,
+            vmid,
+            migration,
+        }): Parameters<MigrateGuestArgs>,
+    ) -> Result<String, ErrorData> {
+        self.proxmox()?
+            .migrate_guest(&node, kind.into(), vmid, migration)
             .await
             .map_err(proxmox_error)
     }
