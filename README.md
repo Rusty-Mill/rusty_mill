@@ -252,12 +252,13 @@ addressed by this migration.
 
 `rusty_tokio` had no in-repo dependents when it merged, and until
 `rusty_std` merged it didn't depend on any either. Both halves have since
-changed: twelve workspace packages now depend on it by `path` —
+changed: nineteen workspace packages now depend on it by `path` —
 `rusty_boot`, `rusty_request`, `rusty_stream`, `rusty_voice`,
 `rusty-db-core`, `agentgateway-tls`, `sessionmgr-daemon`, `sessionmgr-proc`,
-`sessionmgr-tui`, and, behind optional features, `rusty_http`, `rusty_lsp`,
-and `rusty_tls` (`cargo metadata --all-features` is the authority; this
-list is a snapshot). Its
+`sessionmgr-tui`, `rusty_kafka` and the six `rusty-meshed-*` crates, and,
+behind optional features, `rusty_http`, `rusty_lsp`, and `rusty_tls`
+(`cargo metadata --all-features` is the authority; this list is a
+snapshot). Its
 `rusty_std` dependency swapped to a `path` dependency along with
 `rusty_std`'s three other pre-existing consumers below — its pinned rev
 (`3ab2361e`) predated the merge commit that landed on `rusty_std`'s own

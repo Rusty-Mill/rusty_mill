@@ -19,7 +19,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed:** README relationship text that the Atlas review found stale:
   `rusty_simd` was described as the one crate "still outstanding" while
   merged and listed as a member; `rusty_tokio` was described as having no
-  in-repo dependents while twelve workspace packages depend on it by
+  in-repo dependents while nineteen workspace packages depend on it by
   `path`; `rustils` was described as outside the monorepo's scope while
   living at `crates/rustils`. The surviving `git` pins on `rustils` in
   `rusty_tokio`, `rustils_async`, and `rusty_tls` are now stated as
@@ -29,7 +29,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   at `docs/atlas/` for the requirement-by-requirement crosswalk.
 - **Fixed:** the Atlas review's `rusty_tokio` dependent count, which was
   taken from a manifest grep that matched a comment in `rusty_proxmox`;
-  now taken from `cargo metadata --all-features`.
+  now taken from `cargo metadata --all-features` at the evidence revision.
 - Known limitation: docs only. The `rustils` pin retirement itself is not
   done here.
 

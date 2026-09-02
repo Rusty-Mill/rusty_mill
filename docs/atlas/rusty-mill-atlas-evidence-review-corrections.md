@@ -63,7 +63,7 @@ Every item below was verified on 2026-09-02 against Rusty Mill `06ca8669` (local
 
 ### B6. Strengthen the repository-map staleness finding with the specifics found
 - README says "`rusty_simd` is the one still outstanding" while the same file elsewhere says `rusty_simd` was "already merged", and `Cargo.toml` lists it as a member. The README is internally inconsistent, not only out of date.
-- README says `rusty_tokio` "doesn't get depended on by any of the other crates in this repo". Twelve workspace packages now depend on it by path per `cargo metadata --all-features`: `rusty_boot`, `rusty_request`, `rusty_stream`, `rusty_voice`, `rusty-db-core`, `agentgateway-tls`, `sessionmgr-daemon`, `sessionmgr-proc`, `sessionmgr-tui`, and optionally `rusty_http`, `rusty_lsp`, `rusty_tls`. (The first version of this list said nine and included `rusty_proxmox`, which only mentions `rusty_tokio` in a manifest comment; corrected here.)
+- README says `rusty_tokio` "doesn't get depended on by any of the other crates in this repo". At the evidence revision, twelve workspace packages depend on it by path per `cargo metadata --all-features`: `rusty_boot`, `rusty_request`, `rusty_stream`, `rusty_voice`, `rusty-db-core`, `agentgateway-tls`, `sessionmgr-daemon`, `sessionmgr-proc`, `sessionmgr-tui`, and optionally `rusty_http`, `rusty_lsp`, `rusty_tls`. (The first version of this list said nine and included `rusty_proxmox`, which only mentions `rusty_tokio` in a manifest comment; corrected here. After PR #131 merged, `rusty_kafka` and the six `rusty-meshed-*` crates bring the count to nineteen.)
 - README is 1,186 lines; ARCHITECTURE.md is 97.
 
 ### B7. Independent-review finding: widen the sample statement
