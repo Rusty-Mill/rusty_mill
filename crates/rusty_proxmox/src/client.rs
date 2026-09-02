@@ -240,6 +240,75 @@ impl ProxmoxClient {
         .and_then(Self::expect_upid)
     }
 
+    /// `GET /cluster/resources` -- every resource in the cluster (nodes,
+    /// guests, storage, SDN, pools) in one call, instead of paging through
+    /// `list_nodes`/`list_guests` per node. `resource_type` filters to one
+    /// kind (`"vm"`, `"storage"`, `"node"`, `"sdn"`, `"pool"`); `None`
+    /// returns everything.
+    pub async fn cluster_resources(&self, resource_type: Option<&str>) -> Result<Value> {
+        match resource_type {
+            Some(resource_type) => {
+                self.get(&format!(
+                    "/api2/json/cluster/resources?type={resource_type}"
+                ))
+                .await
+            }
+            None => self.get("/api2/json/cluster/resources").await,
+        }
+    }
+
+    /// `GET /storage` -- every storage entry configured at the datacenter
+    /// level (the shared config every node references), as opposed to
+    /// [`ProxmoxClient::node_storage_status`]'s per-node usage/availability.
+    pub async fn list_storage(&self) -> Result<Value> {
+        self.get("/api2/json/storage").await
+    }
+
+    /// `GET /nodes/{node}/storage` -- status for every datastore visible
+    /// from one node: usage, availability, and content types.
+    pub async fn node_storage_status(&self, node: &str) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/storage")).await
+    }
+
+    /// `GET /cluster/backup` -- every scheduled vzdump backup job.
+    pub async fn list_backup_jobs(&self) -> Result<Value> {
+        self.get("/api2/json/cluster/backup").await
+    }
+
+    /// `POST /nodes/{node}/vzdump` -- run a backup immediately, outside any
+    /// schedule. `fields` is the same field set Proxmox's own vzdump API
+    /// takes (`vmid`, `storage`, `mode`, `compress`, `all`, ...) -- passed
+    /// through as-is, since valid combinations vary widely (a single guest
+    /// vs. every guest, snapshot vs. stop mode, ...). Runs asynchronously;
+    /// returns the task UPID.
+    pub async fn run_backup(&self, node: &str, fields: Value) -> Result<String> {
+        self.post_json(&format!("/api2/json/nodes/{node}/vzdump"), &fields)
+            .await
+            .and_then(Self::expect_upid)
+    }
+
+    /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/migrate` -- migrate a guest to
+    /// another node. `fields` must include `target` (the destination
+    /// node); common optional fields are `online` (live-migrate a running
+    /// QEMU guest instead of suspending it), `bwlimit`, and
+    /// `with-local-disks`/`targetstorage` (QEMU) or
+    /// `restart`/`target-storage` (LXC). Runs asynchronously; returns the
+    /// task UPID.
+    pub async fn migrate_guest(
+        &self,
+        node: &str,
+        kind: GuestKind,
+        vmid: u32,
+        fields: Value,
+    ) -> Result<String> {
+        self.post_json(
+            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/migrate"),
+            &fields,
+        )
+        .await
+        .and_then(Self::expect_upid)
+    }
+
     /// `GET /nodes/{node}/tasks/{upid}/status` -- whether an asynchronous
     /// task (the UPID string returned by `guest_power` and every other
     /// action Proxmox runs in the background) is still running, and if not,

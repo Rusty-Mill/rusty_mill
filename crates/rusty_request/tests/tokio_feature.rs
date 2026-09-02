@@ -101,11 +101,19 @@ fn serve_one_https_response(listener: TcpListener, body: &'static [u8]) -> Vec<u
     let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
 
+    // Explicit provider for the same reason as `tests/common`'s TLS
+    // server: a workspace-wide `--all-features` build compiles both
+    // `ring` and `aws-lc-rs` into rustls, which makes the ambient
+    // auto-detection in `ServerConfig::builder()` panic.
     let config = std::sync::Arc::new(
-        ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![leaf_cert.der().clone()], key_der)
-            .expect("valid test cert/key"),
+        ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports rustls's default protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![leaf_cert.der().clone()], key_der)
+        .expect("valid test cert/key"),
     );
 
     std::thread::spawn(move || {
@@ -135,14 +143,6 @@ fn serve_one_https_response(listener: TcpListener, body: &'static [u8]) -> Vec<u
 
 #[tokio::test]
 async fn https_request_completes_on_a_real_tokio_runtime() {
-    // In this workspace, `cargo test --workspace` unifies rustls's crypto-provider
-    // features across every crate that depends on it -- this crate's own `ring`
-    // (matching `rusty_tls`) alongside `aws-lc-rs` (pulled in by `reqwest` elsewhere
-    // in the workspace, via its `rustls` feature). With both compiled in, rustls's
-    // implicit single-provider auto-detection is ambiguous and `ServerConfig::builder()`
-    // below panics unless a provider is installed explicitly first.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
     let addr: SocketAddr = listener.local_addr().unwrap();
     let ca_der = serve_one_https_response(listener, b"hello over tls, over real tokio");
