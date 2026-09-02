@@ -1,0 +1,125 @@
+# Changelog
+
+All notable changes to **this monorepo itself** are documented here —
+crate merges, workspace-wide CI, cross-crate changes. Each crate's own
+internal changes are logged in that crate's own
+`crates/<name>/CHANGELOG.md` where one exists (see ADR-0001 for why root
+and per-crate logs are separate). Format: Added / Changed / Deprecated /
+Removed / Fixed / Security, newest first.
+
+## [Unreleased]
+### Added
+- `rusty_croc` merged into `crates/rusty_croc` via `git subtree` (fourth
+  wave), full history preserved
+- `rusty_test` merged into `crates/rusty_test` via `git subtree` (fourth
+  wave) — six crates (`contract`, `compat`, `conformance`, `stat-tool`,
+  `proc-runner`, `pty-shell`) behind one nested workspace
+- `rusty_inventrory` merged into `crates/rusty_inventrory` via `git subtree`
+  (fourth wave) — three crates (`inventory-core`, `inventory-cli`,
+  `inventory-tauri`) behind one nested workspace
+- `rusty_skillopt` merged into `crates/rusty_skillopt` via `git subtree`
+  (fourth wave) — four crates (`skillopt-core`, `skillopt-model`,
+  `skillopt-envs`, `skillopt-cli`) behind one nested workspace
+- `rusty_key` merged into `crates/rusty_key` via `git subtree` (fourth
+  wave) — eight crates (`rk-config`, `rk-observe`, `rk-constrain`,
+  `rk-feed`, `rk-kernel`, `rk-mcp`, `rk-compose`, `rk-app`) behind one
+  nested workspace; its Tauri desktop shell stays excluded, as upstream
+  had it
+- `rusty_llama` merged into `crates/rusty_llama` via `git subtree` (fourth
+  wave) — a single crate; its `rusty_simd`/`rusty_std` path dependencies
+  already resolved to merged siblings
+- `rusty_tailscale` merged into `crates/rusty_tailscale` via `git subtree`
+  (fourth wave) — fifteen `ts-*` crates plus `xtask` behind one nested
+  workspace; its `platform`/`platform-linux` git pins retired to this
+  root's `rustils` path dependencies
+- `rusty_adk` merged into `crates/rusty_adk` via `git subtree` (fourth
+  wave) — eleven `adk-*`/`rusty-adk` crates plus three examples behind one
+  nested workspace; `adk-a2a`'s branch-tracking `rusty_a2a` git dependency
+  retired to a path dependency on the merged sibling
+- `rusty_provider` merged into `crates/rusty_provider` via `git subtree`
+  (fourth wave) — six `rp-*` crates behind one nested workspace; its
+  branch-tracking `rusty-mcp` git dependency retired to a path dependency
+  on the merged sibling
+- `rusty_yirp` merged into `crates/rusty_yirp` via `git subtree` (fourth
+  wave) — eight `sessionmgr-*` crates plus a Tauri desktop shell behind one
+  nested workspace; its `rusty_tokio` pin and `sessionmgr-pty`'s three
+  `rustils` pins retired to this root's path dependencies
+- `rusty_agent_gateway` merged into `crates/rusty_agent_gateway` via
+  `git subtree` (fourth wave, and the last of it) — nine
+  `agentgateway-*` crates behind one nested workspace; four pins retired
+  (`rusty_a2a`, `rusty-mcp` at tag `v0.4.1`, `rusty_tls`, `rusty_tokio`)
+- CI's Linux leg now installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
+  `libayatana-appindicator3-dev`, `librsvg2-dev`, and `libdbus-1-dev` for
+  `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
+
+### Changed
+- Root `[workspace.dependencies]`: `tokio`'s feature list widened to the
+  union `rusty_search`/`rusty_db`/`rusty_skillopt`/`rusty_adk` need (`fs`,
+  `process`, `io-util`, `io-std`); `chrono` gained `serde` for
+  `skillopt-core`; `uuid` gained `serde` and `serde_json` gained
+  `float_roundtrip` for `rusty_adk`; `reqwest` gained `stream` and `tokio`
+  gained `full` for `rusty_provider`; `clap` gained `env` for
+  `rusty_agent_gateway`
+- Root `rusty_a2a` and `rusty-mcp` entries carry `default-features = false`
+  so `rusty_agent_gateway`'s crates can inherit them — a no-op for their
+  other consumers, since both crates' `default` feature is empty
+
+### Fixed
+- `rusty_croc`'s four deprecated `GenericArray::from_slice` nonce
+  constructions rewritten to the equivalent `From<&[T]>` conversion — the
+  workspace resolves `generic-array` 0.14.9, where they fail this repo's
+  `-D warnings` clippy gate
+- `conformance`'s `layering.rs` layer-boundary check repointed at the
+  monorepo root and scoped to `crates/rusty_test/` — it had located the
+  workspace manifest two directories up and demanded a layer assignment for
+  every member it found
+- `inventory-core` pinned to `rusqlite = "0.32.1"` (from `"0.37"`): its
+  `libsqlite3-sys ^0.35` requirement conflicts with `sqlx-sqlite`'s
+  `^0.30.1` on the `sqlite3` `links` key, the same constraint `rusty_sqlite`
+  hit; 79 tests pass unmodified against the pin
+- `inventory-core`'s three deprecated `GenericArray::from_slice` calls in
+  `db.rs` rewritten, same `generic-array` 0.14.9 cause as `rusty_croc`'s
+- `rusty_key`'s eight crates keep a literal `[lints.rust] unsafe_code =
+  "forbid"` instead of inheriting this root's `[workspace.lints]`, which is
+  `rustils`' weaker `"warn"` — inheriting would have silently downgraded
+  the policy
+- `crates/rusty_key` reformatted with `cargo fmt --all` (it was not
+  fmt-clean under this workspace's settings)
+- `rusty_llama`'s two `unnecessary_cast` lints in `backend/cuda.rs`'s test
+  fixtures, only visible with `--all-features`
+- `rusty_llama`'s `render_jinja_threads_context_variables` expectation
+  updated from `true` to `True`: `minijinja` 2.22 changed bool rendering
+  for Jinja2 compatibility, and this workspace resolves 2.24 where the
+  standalone lockfile pinned 2.21
+- `crates/rusty_llama` reformatted with `cargo fmt --all`
+- `ts-magicsock` now imports `platform::net::UdpSocket`, without which
+  `send_to`/`recv_from`/`local_addr` do not resolve — a pre-existing break
+  in `rusty_tailscale`'s own `main` (it has no CI), confirmed against the
+  standalone repo
+- `ts-cli`'s `localapi::Error::Status(StatusCode)` replaced with the
+  `Api { status, body }` variant `request()` actually constructs — the same
+  pre-existing break
+- Four more `generic-array` 0.14.9 deprecations across `ts-control`,
+  `ts-disco` and `ts-derp`; `crates/rusty_tailscale` reformatted
+- `adk-sessions` moved from `rusqlite = "0.37"` to this root's `"0.32.1"`
+  entry — the same `libsqlite3-sys` `links` conflict `inventory-core` hit,
+  and the same resolution
+
+## [workspace] - 2026-09-01
+### Fixed
+- `rusty_rdp`'s hand-rolled byte cursor deduplicated against `rusty_wire`
+  ([#65](https://github.com/Rusty-Mill/rusty_mill/pull/65))
+- Six workspace-wide duplication findings resolved (glob matching, SHA-1,
+  `to_wide()`, `read_lines()`, Windows raw-mode flags, IFS splitting)
+  ([#10](https://github.com/Rusty-Mill/rusty_mill/pull/10))
+
+### Changed
+- `rusty_ansder` split into itself (DER codec only) and a new `rusty_rag`
+  crate (RAG/Q&A engine) ([#65](https://github.com/Rusty-Mill/rusty_mill/pull/65))
+
+<!-- No version tags on this repo as such — "[workspace] - DATE" entries
+     group changes to the monorepo's own build/governance surface, distinct
+     from any per-crate version a crate under crates/<name> might carry on
+     its own. Earlier crate-import history isn't backfilled here entry-by-
+     entry; see RELEASE_NOTES.md's note on that and `git log --oneline
+     --merges` for the full list. -->

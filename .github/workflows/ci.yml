@@ -218,10 +218,44 @@ jobs:
         run: cargo test --test windows_raw_mode -p rusty_lines --all-features
 
       # nextest doesn't execute doctests -- run those separately so this
-      # switch doesn't quietly drop doctest coverage.
+      # switch doesn't quietly drop doctest coverage. `cargo test --doc`
+      # explicitly scoped via `-p` hard-errors on a package with no library
+      # target ("no library targets found in package X") instead of quietly
+      # skipping it the way `--doc --workspace` does -- a bin-only crate
+      # (e.g. rusty_homelab_mcp) touched by a PR would otherwise fail this
+      # step for having nothing to doc-test. Filter the scoped package list
+      # down to crates that actually declare a `lib` target first.
+      #
+      # Both branches start from the select-packages step's outputs, never
+      # from the plan job's raw list: only the former has the per-OS
+      # exclusions applied. Re-deriving the scope here from
+      # `needs.plan.outputs.packages` (or a bare `--doc --workspace`) is
+      # exactly how rusty_stream -- Linux-only, and correctly excluded on
+      # windows-latest by every other step in this job -- was still getting
+      # compiled by this one step and failing the whole job on Windows.
       - name: Test (doctests)
         if: steps.scope.outputs.args != ''
-        run: cargo test --doc ${{ steps.scope.outputs.args }} --all-features
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.plan.outputs.full }}" = "true" ]; then
+            # `args` is `--workspace` plus this runner's `--exclude` flags;
+            # `--doc --workspace` already skips crates with no lib target.
+            cargo test --doc ${{ steps.scope.outputs.args }} --all-features
+          else
+            lib_pkgs="$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.targets[]?.kind[]? == "lib") | .name')"
+            args=""
+            for p in ${{ steps.scope.outputs.packages }}; do
+              if echo "$lib_pkgs" | grep -qx "$p"; then
+                args="$args -p $p"
+              fi
+            done
+            if [ -n "$args" ]; then
+              cargo test --doc $args --all-features
+            else
+              echo "No affected package declares a library target -- nothing to doc-test."
+            fi
+          fi
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/rusty_win32/Cargo.toml) — this mirrors its own CI's

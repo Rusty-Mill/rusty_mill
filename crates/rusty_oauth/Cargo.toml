@@ -10,5 +10,6 @@ keywords = ["oauth", "oauth2", "pkce", "jwt", "authentication"]
 categories = ["authentication", "web-programming"]
 
 [dependencies]
+rusty_rsa = { path = "../rusty_rsa" }
 
 [dev-dependencies]

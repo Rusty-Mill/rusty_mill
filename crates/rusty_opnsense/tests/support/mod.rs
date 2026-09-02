@@ -65,21 +65,53 @@ pub fn spawn(responses: Vec<MockResponse>) -> String {
 }
 
 /// Reads (and discards) bytes off `stream` until the end of the HTTP header
-/// block, so the client's write completes before this side closes.
+/// block, then drains exactly as much of the request body as the headers'
+/// own `Content-Length` promises, so the client's write completes before
+/// this side responds and closes the connection. Stopping right after the
+/// headers left any request body still in flight when the response arrived
+/// -- a race that a bodyless GET/POST never hits, but a JSON-body POST does,
+/// and Windows' TCP stack surfaces it as a hard connection reset far more
+/// readily than Linux's (the write raced a peer close instead of quietly
+/// truncating).
 fn read_request_head(stream: &mut std::net::TcpStream) {
     let mut buf = [0u8; 8192];
     let mut total = 0usize;
-    loop {
+    let header_end = loop {
         if total == buf.len() {
-            break;
+            break total;
         }
         let n = stream.read(&mut buf[total..]).unwrap_or(0);
         if n == 0 {
-            break;
+            break total;
         }
         total += n;
-        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+
+    let content_length = content_length(&buf[..header_end]);
+    let mut body_read = total - header_end;
+    while body_read < content_length {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
             break;
         }
+        body_read += n;
     }
+}
+
+/// Parses a `Content-Length` header's value out of a raw HTTP header block,
+/// defaulting to 0 (no body) if it's absent or malformed.
+fn content_length(head: &[u8]) -> usize {
+    String::from_utf8_lossy(head)
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+        .unwrap_or(0)
 }

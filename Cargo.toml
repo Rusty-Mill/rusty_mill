@@ -59,6 +59,8 @@ members = [
     "crates/rusty_err",
     "crates/rusty_err/derive",
     "crates/rusty_request",
+    "crates/rusty_retry",
+    "crates/rusty_rsa",
     "crates/rusty_sqlite",
     "crates/rusty_time",
     "crates/rusty_uuid",
@@ -105,6 +107,83 @@ members = [
     "crates/rustils/crates/platform-bsd",
     "crates/rustils/crates/winargv",
     "crates/rustils/crates/coreutils",
+    "crates/rusty_croc",
+    "crates/rusty_test/crates/contract",
+    "crates/rusty_test/crates/compat",
+    "crates/rusty_test/crates/conformance",
+    "crates/rusty_test/tools/stat-tool",
+    "crates/rusty_test/tools/proc-runner",
+    "crates/rusty_test/tools/pty-shell",
+    "crates/rusty_inventrory/crates/inventory-core",
+    "crates/rusty_inventrory/crates/inventory-cli",
+    "crates/rusty_inventrory/crates/inventory-tauri",
+    "crates/rusty_skillopt/crates/skillopt-core",
+    "crates/rusty_skillopt/crates/skillopt-model",
+    "crates/rusty_skillopt/crates/skillopt-envs",
+    "crates/rusty_skillopt/crates/skillopt-cli",
+    "crates/rusty_key/crates/config",
+    "crates/rusty_key/crates/observe",
+    "crates/rusty_key/crates/constrain",
+    "crates/rusty_key/crates/feed",
+    "crates/rusty_key/crates/kernel",
+    "crates/rusty_key/crates/mcp",
+    "crates/rusty_key/crates/compose",
+    "crates/rusty_key/crates/app",
+    "crates/rusty_llama",
+    "crates/rusty_tailscale/crates/ts-types",
+    "crates/rusty_tailscale/crates/ts-key",
+    "crates/rusty_tailscale/crates/ts-control",
+    "crates/rusty_tailscale/crates/ts-derp",
+    "crates/rusty_tailscale/crates/ts-stun",
+    "crates/rusty_tailscale/crates/ts-disco",
+    "crates/rusty_tailscale/crates/ts-magicsock",
+    "crates/rusty_tailscale/crates/ts-wg",
+    "crates/rusty_tailscale/crates/ts-tun",
+    "crates/rusty_tailscale/crates/ts-filter",
+    "crates/rusty_tailscale/crates/ts-engine",
+    "crates/rusty_tailscale/crates/ts-localapi",
+    "crates/rusty_tailscale/crates/ts-net",
+    "crates/rusty_tailscale/crates/ts-daemon",
+    "crates/rusty_tailscale/crates/ts-cli",
+    "crates/rusty_tailscale/xtask",
+    "crates/rusty_adk/crates/adk-core",
+    "crates/rusty_adk/crates/adk-macros",
+    "crates/rusty_adk/crates/adk-tools",
+    "crates/rusty_adk/crates/adk-models",
+    "crates/rusty_adk/crates/adk-sessions",
+    "crates/rusty_adk/crates/adk-graph",
+    "crates/rusty_adk/crates/adk-agents",
+    "crates/rusty_adk/crates/adk-runner",
+    "crates/rusty_adk/crates/adk-mcp",
+    "crates/rusty_adk/crates/adk-a2a",
+    "crates/rusty_adk/crates/rusty-adk",
+    "crates/rusty_adk/examples/weather-agent",
+    "crates/rusty_adk/examples/mcp-tool-server",
+    "crates/rusty_adk/examples/a2a-agent-server",
+    "crates/rusty_provider/crates/core",
+    "crates/rusty_provider/crates/providers",
+    "crates/rusty_provider/crates/router",
+    "crates/rusty_provider/crates/mcp",
+    "crates/rusty_provider/crates/server",
+    "crates/rusty_provider/crates/cli",
+    "crates/rusty_yirp/crates/sessionmgr-core",
+    "crates/rusty_yirp/crates/sessionmgr-protocol",
+    "crates/rusty_yirp/crates/sessionmgr-proc",
+    "crates/rusty_yirp/crates/sessionmgr-git",
+    "crates/rusty_yirp/crates/sessionmgr-pty",
+    "crates/rusty_yirp/crates/sessionmgr-tui",
+    "crates/rusty_yirp/crates/sessionmgr-agents",
+    "crates/rusty_yirp/crates/sessionmgr-daemon",
+    "crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri",
+    "crates/rusty_agent_gateway/crates/agentgateway-config",
+    "crates/rusty_agent_gateway/crates/agentgateway-auth",
+    "crates/rusty_agent_gateway/crates/agentgateway-a2a",
+    "crates/rusty_agent_gateway/crates/agentgateway-llm",
+    "crates/rusty_agent_gateway/crates/agentgateway-mcp",
+    "crates/rusty_agent_gateway/crates/agentgateway-proxy",
+    "crates/rusty_agent_gateway/crates/agentgateway-tls",
+    "crates/rusty_agent_gateway/crates/agentgateway-core",
+    "crates/rusty_agent_gateway/crates/agentgateway",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -123,6 +202,8 @@ exclude = [
     "crates/rusty_tls/fuzz",
     "crates/rusty_lsp/fuzz",
     "crates/rustils/fuzz",
+    "crates/rusty_croc/fuzz",
+    "crates/rusty_key/desktop/src-tauri",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/
@@ -147,6 +228,12 @@ rust-version = "1.75"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_search"
 authors = ["rusty_search contributors"]
+# rusty_test's own former `[workspace.package]` carried only edition/license/
+# publish. Its edition ("2021") and license ("MIT OR Apache-2.0") match the
+# values already here exactly, so -- unlike rusty_db/rustils -- its six
+# crates keep inheriting via `field.workspace = true`; only `publish` was
+# new, added here and opted into by those six crates alone.
+publish = false
 
 [workspace.dependencies]
 rusty-search-core = { path = "crates/rusty_search/crates/rusty-search-core", version = "0.1.0" }
@@ -162,12 +249,31 @@ rusty-search-azure-search = { path = "crates/rusty_search/crates/rusty-search-az
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is rusty_adk's requirement (its SQLite session store
+# holds events as JSON and round-trips an f64 timestamp through them);
+# serde_json feature unification makes it global anyway, so it is declared
+# here rather than hidden in one member.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # rusty_serde is now a sibling in this same workspace -- plain path
 # dependency (previously a pinned git rev, matching the pattern used for
 # every other pin retired in this series).
 rusty_serde = { path = "crates/rusty_serde/rusty_serde", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Feature set is the union of what rusty_search, rusty_db and rusty_skillopt
+# each need -- widened rather than split, so one tokio serves all three.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "process",
+    "io-util",
+    "io-std",
+    # rusty_provider asks for the "full" bundle; Cargo unifies tokio's
+    # features across the graph anyway, so it is declared here rather than
+    # hidden in one member manifest.
+    "full",
+] }
 tantivy = "0.26"
 
 # rusty_db's own five crates (path deps, mirroring rusty-search-* above).
@@ -192,9 +298,10 @@ quote = "1"
 proc-macro2 = "1"
 heck = "0.5"
 proc-macro-crate = "3"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 bigdecimal = "0.4"
-chrono = "0.4"
+# `serde` is rusty_skillopt's requirement; rusty_db only needs the base crate.
+chrono = { version = "0.4", features = ["serde"] }
 
 # Hoisted from rustils' own former `[workspace.package]`/
 # `[workspace.dependencies]` tables (it was its own nested Cargo workspace
@@ -212,6 +319,207 @@ platform-windows = { path = "crates/rustils/crates/platform-windows" }
 platform-bsd = { path = "crates/rustils/crates/platform-bsd" }
 winargv = { path = "crates/rustils/crates/winargv" }
 libc = "0.2"
+
+# Hoisted from rusty_test's own former `[workspace.dependencies]` (its
+# `[workspace.package]` didn't collide, so it was hoisted rather than
+# de-inherited -- the rusty_search treatment, not the rusty_db one).
+# `thiserror` is deliberately NOT hoisted from there: rusty_test asked for
+# "2.0" while this root already pins "1" for rusty_db/rustils, so
+# `contract` keeps a literal `thiserror = "2"` of its own rather than
+# forcing a major bump on unrelated crates.
+contract = { path = "crates/rusty_test/crates/contract" }
+compat = { path = "crates/rusty_test/crates/compat" }
+conformance = { path = "crates/rusty_test/crates/conformance" }
+cap-std = "4.0"
+portable-pty = "0.9"
+dirs = "6.0"
+anyhow = "1.0"
+
+# Hoisted from rusty_inventrory's own former `[workspace.dependencies]`.
+# Its `[workspace.package]` collided with this root's (rust-version 1.82 vs
+# 1.75, license MIT vs "MIT OR Apache-2.0", its own repository URL), so its
+# three crates carry literal `[package]` fields instead -- the rusty_db
+# treatment, not rusty_search's. `anyhow`/`serde`/`serde_json` above already
+# cover its requirements; `thiserror` is the same "2" vs "1" split as
+# rusty_test's, so inventory-core keeps a literal one of its own.
+inventory-core = { path = "crates/rusty_inventrory/crates/inventory-core" }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tracing = "0.1"
+rusqlite = "0.32.1"
+
+# Hoisted from rusty_skillopt's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `license` ("MIT" vs. this root's
+# "MIT OR Apache-2.0"), so its four crates carry literal `[package]` fields
+# -- the rusty_db treatment again. `async-trait`/`serde`/`serde_json`/
+# `anyhow`/`chrono`/`tracing`/`tokio` above already cover its requirements;
+# `thiserror` is the same "2"-vs-"1" split rusty_test and rusty_inventrory
+# hit, so its two consumers keep literal ones.
+skillopt-core = { path = "crates/rusty_skillopt/crates/skillopt-core" }
+skillopt-model = { path = "crates/rusty_skillopt/crates/skillopt-model" }
+skillopt-envs = { path = "crates/rusty_skillopt/crates/skillopt-envs" }
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls-native-roots",
+] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+
+# Hoisted from rusty_key's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `rust-version` (1.88 vs. 1.75) and
+# `license` ("MIT"), so its eight crates carry literal `[package]` fields --
+# rusty_db treatment. `async-trait`/`serde`/`serde_json`/`tokio` above cover
+# the rest; `thiserror` is the recurring "2"-vs-"1" split, kept literal on
+# the seven rk-* crates that use it.
+rk-config = { path = "crates/rusty_key/crates/config" }
+rk-observe = { path = "crates/rusty_key/crates/observe" }
+rk-constrain = { path = "crates/rusty_key/crates/constrain" }
+rk-feed = { path = "crates/rusty_key/crates/feed" }
+rk-kernel = { path = "crates/rusty_key/crates/kernel" }
+rk-mcp = { path = "crates/rusty_key/crates/mcp" }
+rk-compose = { path = "crates/rusty_key/crates/compose" }
+aisdk = "0.5.2"
+schemars = "1.0.4"
+toml = "0.8"
+
+# Hoisted from rusty_tailscale's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `version` (0.0.1), `edition` (2024) and
+# `repository`, so its sixteen crates carry literal `[package]` fields --
+# rusty_db treatment. Its two sibling `path` dependencies are re-pathed
+# from `../rusty_http`-style (relative to its own former root) to this
+# root's `crates/` layout; `platform`/`platform-linux` above already cover
+# the pins its ts-magicsock/ts-tun crates used to carry.
+ts-types = { path = "crates/rusty_tailscale/crates/ts-types" }
+ts-key = { path = "crates/rusty_tailscale/crates/ts-key" }
+ts-control = { path = "crates/rusty_tailscale/crates/ts-control" }
+ts-derp = { path = "crates/rusty_tailscale/crates/ts-derp" }
+ts-stun = { path = "crates/rusty_tailscale/crates/ts-stun" }
+ts-disco = { path = "crates/rusty_tailscale/crates/ts-disco" }
+ts-magicsock = { path = "crates/rusty_tailscale/crates/ts-magicsock" }
+ts-wg = { path = "crates/rusty_tailscale/crates/ts-wg" }
+ts-tun = { path = "crates/rusty_tailscale/crates/ts-tun" }
+ts-filter = { path = "crates/rusty_tailscale/crates/ts-filter" }
+ts-engine = { path = "crates/rusty_tailscale/crates/ts-engine" }
+ts-localapi = { path = "crates/rusty_tailscale/crates/ts-localapi" }
+ts-net = { path = "crates/rusty_tailscale/crates/ts-net" }
+rusty_http = { path = "crates/rusty_http" }
+rusty_crypto_key = { path = "crates/rusty_crypto_key" }
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+http-body-util = "0.1"
+bytes = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+blake2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+h2 = "0.4"
+http = "1"
+crypto_box = { version = "0.9", features = ["salsa20"] }
+boringtun = "0.7"
+
+# Hoisted from rusty_adk's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `rust-version` (1.85), `license`
+# (Apache-2.0) and `repository`, so its fourteen crates carry literal
+# `[package]` fields -- rusty_db treatment. `thiserror` ("2") and `schemars`
+# ("0.8", against rusty_key's "1.0.4") both stay literal on the crates that
+# use them rather than displacing this root's existing entries.
+adk-core = { path = "crates/rusty_adk/crates/adk-core", version = "0.1.0" }
+adk-macros = { path = "crates/rusty_adk/crates/adk-macros", version = "0.1.0" }
+adk-tools = { path = "crates/rusty_adk/crates/adk-tools", version = "0.1.0" }
+adk-models = { path = "crates/rusty_adk/crates/adk-models", version = "0.1.0", default-features = false }
+adk-sessions = { path = "crates/rusty_adk/crates/adk-sessions", version = "0.1.0" }
+adk-graph = { path = "crates/rusty_adk/crates/adk-graph", version = "0.1.0" }
+adk-agents = { path = "crates/rusty_adk/crates/adk-agents", version = "0.1.0" }
+adk-runner = { path = "crates/rusty_adk/crates/adk-runner", version = "0.1.0" }
+adk-mcp = { path = "crates/rusty_adk/crates/adk-mcp", version = "0.1.0" }
+adk-a2a = { path = "crates/rusty_adk/crates/adk-a2a", version = "0.1.0" }
+futures = "0.3"
+tokio-test = "0.4"
+# rusty_a2a is a merged sibling -- retiring adk-a2a's and
+# agentgateway-a2a's git dependencies on it. `default-features = false`
+# because both ask for it explicitly and an inheriting member may not
+# override the root's choice; a no-op either way, since rusty_a2a's own
+# `default` feature is empty.
+rusty_a2a = { path = "crates/rusty_a2a", default-features = false }
+
+# Hoisted from rusty_provider's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `license` ("MIT"), so its six crates
+# carry literal `[package]` fields -- rusty_db treatment. `rusty-mcp` is a
+# merged sibling here, retiring rusty_provider's branch-tracking git
+# dependency on it.
+rp-core = { path = "crates/rusty_provider/crates/core" }
+rp-mcp = { path = "crates/rusty_provider/crates/mcp" }
+rp-providers = { path = "crates/rusty_provider/crates/providers" }
+rp-router = { path = "crates/rusty_provider/crates/router" }
+# `default-features = false` because rusty_agent_gateway's crates ask for it
+# explicitly and an inheriting member may not override the root's choice.
+# A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
+# own `default` feature is empty.
+rusty-mcp = { path = "crates/rusty_mcp/crates/rusty-mcp", default-features = false }
+rmcp = { version = "3.1", default-features = false }
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+prometheus = { version = "0.13", default-features = false }
+wiremock = "0.6"
+tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring", "native-certs"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8"
+ring = "0.17"
+regex = "1"
+jsonwebtoken = "9"
+eventsource-stream = "0.2"
+
+# Hoisted from rusty_yirp's own former `[workspace.dependencies]`. Its
+# `[workspace.package]` collided on `rust-version` (1.88) and `license`
+# ("MIT"), so its nine crates carry literal `[package]` fields -- rusty_db
+# treatment. Its `rusty_tokio` pin, and sessionmgr-pty's three `rustils`
+# pins, retire to this root's existing path entries.
+sessionmgr-core = { path = "crates/rusty_yirp/crates/sessionmgr-core" }
+sessionmgr-protocol = { path = "crates/rusty_yirp/crates/sessionmgr-protocol" }
+sessionmgr-proc = { path = "crates/rusty_yirp/crates/sessionmgr-proc" }
+sessionmgr-git = { path = "crates/rusty_yirp/crates/sessionmgr-git" }
+sessionmgr-pty = { path = "crates/rusty_yirp/crates/sessionmgr-pty" }
+sessionmgr-tui = { path = "crates/rusty_yirp/crates/sessionmgr-tui" }
+sessionmgr-agents = { path = "crates/rusty_yirp/crates/sessionmgr-agents" }
+ratatui = "0.30"
+crossterm = "0.29"
+tui-term = "0.3"
+vt100 = "0.16"
+ureq = "3"
+
+# Hoisted from rusty_agent_gateway's own former `[workspace.dependencies]`.
+# Its `[workspace.package]` collided on `edition` (2024), `rust-version`
+# (1.88), `license` (Apache-2.0), `repository` and `authors`, so its nine
+# crates carry literal `[package]` fields -- rusty_db treatment. Its
+# `[workspace.lints]` collided too and is likewise written literally into
+# each crate (see the README). `rmcp`/`axum`/`tower`/`hyper`/`hyper-util`/
+# `http`/`http-body-util`/`bytes`/`regex`/`serde_yaml` above already cover
+# its requirements; `clap` gained `env` for its CLI.
+agentgateway-config = { path = "crates/rusty_agent_gateway/crates/agentgateway-config", version = "0.1.0" }
+agentgateway-auth = { path = "crates/rusty_agent_gateway/crates/agentgateway-auth", version = "0.1.0" }
+agentgateway-core = { path = "crates/rusty_agent_gateway/crates/agentgateway-core", version = "0.1.0" }
+agentgateway-a2a = { path = "crates/rusty_agent_gateway/crates/agentgateway-a2a", version = "0.1.0" }
+agentgateway-llm = { path = "crates/rusty_agent_gateway/crates/agentgateway-llm", version = "0.1.0" }
+agentgateway-mcp = { path = "crates/rusty_agent_gateway/crates/agentgateway-mcp", version = "0.1.0" }
+agentgateway-proxy = { path = "crates/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }
+agentgateway-tls = { path = "crates/rusty_agent_gateway/crates/agentgateway-tls", version = "0.1.0" }
+# Another merged sibling, retiring agentgateway-tls' pinned git dependency.
+rusty_tls = { path = "crates/rusty_tls" }
+tokio-util = { version = "0.7", default-features = false }
+http-body = "1"
+cel = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "transport"] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

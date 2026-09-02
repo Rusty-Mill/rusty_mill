@@ -32,11 +32,16 @@ rusty_http = { path = "../rusty_http", features = [
 # dependency, already present in the build graph at a compatible version
 # via `rusty_tls`/the `rustls` dev-dependency below.
 rustls-pki-types = "1"
-# Optional (see the `tokio` feature below): drives the connector over
-# real crates.io `tokio`'s `AsyncRead`/`AsyncWrite` instead of
-# `rusty_tokio`'s, for a consumer (e.g. `rusty_search`) already running
+# Exponential backoff math + Retry-After delta-seconds parsing, shared
+# with rusty-acp's own RetryPolicy. Retry *eligibility* (which statuses,
+# methods, errors) stays here -- only the delay computation moved.
+rusty_retry = { path = "../rusty_retry" }
+# Optional (see the `tokio` feature below): adds a real crates.io
+# `tokio` backend for the connector alongside the always-present
+# `rusty_tokio` one, for a consumer (e.g. `rusty_search`) already running
 # inside its own real tokio runtime -- see `src/tokio_compat.rs` for how
-# the two trait sets meet without ever starting a second reactor.
+# the two trait sets meet without ever starting a second reactor, and
+# `src/rt.rs` for how the backend is picked per call at run time.
 # `default-features = false` + exactly what's used: `net` (`TcpStream::
 # connect`), `time` (the request timeout and retry backoff sleeps), `rt`
 # (`spawn_blocking` for DNS resolution), `io-util`
@@ -49,14 +54,22 @@ tokio = { version = "1", default-features = false, features = [
 ], optional = true }
 
 [features]
-# Off by default so an existing `rusty_tokio`-based consumer sees no
-# change. See `src/tokio_compat.rs`'s module docs for the full picture:
-# `rusty_tls`/`rusty_http` haven't grown a real-tokio adapter of their
-# own yet (unlike `rusty_http`'s own `rusty-tokio`/`tokio` split), so
-# this feature reaches their existing `rusty-tokio`-based adapters
-# through a small compat shim instead of a parallel adapter module --
-# real tokio still does every bit of actual I/O; `rusty_tokio` never
-# runs.
+# Additive, as Cargo features must be: turning this on compiles in a
+# real-tokio backend *in addition to* the default `rusty_tokio` one, and
+# each request uses whichever runtime its task is actually running on
+# (`src/rt.rs`). So a `rusty_tokio`-based consumer sees no change even
+# when Cargo's feature unification switches this on for it because some
+# *other* crate in the same build (or `--all-features` on the workspace)
+# asked for it -- previously the feature swapped the backend wholesale
+# and such a consumer's requests failed with "there is no reactor
+# running" at run time. Off by default so a consumer that never runs on
+# real tokio doesn't pull it in. See `src/tokio_compat.rs`'s module docs
+# for the mechanics: `rusty_tls`/`rusty_http` haven't grown a real-tokio
+# adapter of their own yet (unlike `rusty_http`'s own `rusty-tokio`/
+# `tokio` split), so this feature reaches their existing `rusty-tokio`-
+# based adapters through a small compat shim instead of a parallel
+# adapter module -- on a real tokio runtime, real tokio still does every
+# bit of actual I/O; `rusty_tokio` never runs.
 tokio = ["dep:tokio"]
 
 [dev-dependencies]

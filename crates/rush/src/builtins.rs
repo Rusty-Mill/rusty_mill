@@ -4324,6 +4324,15 @@ struct UlimitResource {
 }
 
 #[cfg(unix)]
+// Every `RLIMIT_*` constant is cast to `i32` to unify the type this table
+// stores it as: on the default Linux backend (rusty_libc) and the `libc`
+// crate's usual `c_int` resources that's a same-type cast, but under the
+// `libc-backend` escape hatch a few (`RLIMIT_NPROC`/`RLIMIT_AS`/
+// `RLIMIT_LOCKS`) come through as a wider glibc-generated type, so the cast
+// is load-bearing there -- keep it even though clippy flags it as
+// unnecessary on whichever single target/feature combination it happens to
+// check.
+#[allow(clippy::unnecessary_cast)]
 const ULIMIT_RESOURCES: &[UlimitResource] = &[
     // bash lists resources alphabetically by flag letter; uppercase `-R`
     // sorts ahead of the lowercase letters, so it heads `ulimit -a`.

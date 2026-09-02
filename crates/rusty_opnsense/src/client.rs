@@ -38,6 +38,13 @@ pub struct OpnsenseConfig {
 /// unwrapping a field that isn't consistently present. Cheap to clone -- it
 /// shares the same underlying `rusty_request::Client` (connection pool
 /// included).
+///
+/// Firewall rule writes (`create_firewall_rule`/`update_firewall_rule`/
+/// `delete_firewall_rule`/`toggle_firewall_rule`) and VLAN writes
+/// (`create_vlan`/`update_vlan`/`delete_vlan`) don't take effect on their
+/// own -- OPNsense buffers each config area's changes until its own
+/// `apply_*_changes` method is called, the same way the web UI's "Apply
+/// changes" banner implies.
 #[derive(Debug, Clone)]
 pub struct OpnsenseClient {
     http: Client,
@@ -107,6 +114,230 @@ impl OpnsenseClient {
         self.get("/api/routes/gateway/status").await
     }
 
+    /// `GET /firewall/filter/searchRule` -- every firewall rule currently
+    /// configured (a `{"rows": [...], "rowCount": N, ...}` search envelope,
+    /// same shape as [`OpnsenseClient::list_services`]).
+    pub async fn list_firewall_rules(&self) -> Result<Value> {
+        self.get("/api/firewall/filter/searchRule").await
+    }
+
+    /// `GET /firewall/filter/getRule/{uuid}` -- one rule's full field set.
+    pub async fn get_firewall_rule(&self, uuid: &str) -> Result<Value> {
+        self.get(&format!("/api/firewall/filter/getRule/{uuid}"))
+            .await
+    }
+
+    /// `POST /firewall/filter/addRule` -- create a rule. `fields` is the
+    /// field set OPNsense's own rule form submits (`action`, `interface`,
+    /// `direction`, `protocol`, `source_net`, `destination_net`,
+    /// `description`, ...) -- passed through as-is rather than modeled,
+    /// since the valid field set depends on the rule's own
+    /// `ipprotocol`/`protocol` rather than being one fixed schema. Doesn't
+    /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
+    /// called.
+    pub async fn create_firewall_rule(&self, fields: Value) -> Result<Value> {
+        self.post_json(
+            "/api/firewall/filter/addRule",
+            &serde_json::json!({ "rule": fields }),
+        )
+        .await
+    }
+
+    /// `POST /firewall/filter/setRule/{uuid}` -- update a rule. Same
+    /// passthrough field set as [`OpnsenseClient::create_firewall_rule`];
+    /// OPNsense replaces the rule with exactly what's sent, so read
+    /// [`OpnsenseClient::get_firewall_rule`] first and send back its full
+    /// field set unless clearing the fields you omit is intended. Doesn't
+    /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
+    /// called.
+    pub async fn update_firewall_rule(&self, uuid: &str, fields: Value) -> Result<Value> {
+        self.post_json(
+            &format!("/api/firewall/filter/setRule/{uuid}"),
+            &serde_json::json!({ "rule": fields }),
+        )
+        .await
+    }
+
+    /// `POST /firewall/filter/delRule/{uuid}` -- delete a rule. Doesn't take
+    /// effect until [`OpnsenseClient::apply_firewall_changes`] is called.
+    pub async fn delete_firewall_rule(&self, uuid: &str) -> Result<Value> {
+        self.post(&format!("/api/firewall/filter/delRule/{uuid}"))
+            .await
+    }
+
+    /// `POST /firewall/filter/toggleRule/{uuid}[/{0,1}]` -- flip a rule's
+    /// enabled state, or set it explicitly when `enabled` is given. Doesn't
+    /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
+    /// called.
+    pub async fn toggle_firewall_rule(&self, uuid: &str, enabled: Option<bool>) -> Result<Value> {
+        let path = match enabled {
+            Some(true) => format!("/api/firewall/filter/toggleRule/{uuid}/1"),
+            Some(false) => format!("/api/firewall/filter/toggleRule/{uuid}/0"),
+            None => format!("/api/firewall/filter/toggleRule/{uuid}"),
+        };
+        self.post(&path).await
+    }
+
+    /// `POST /firewall/filter/apply` -- apply every pending rule change
+    /// (reloads the live ruleset). OPNsense buffers create/update/delete/
+    /// toggle above until this is called -- none of them take effect on
+    /// their own.
+    pub async fn apply_firewall_changes(&self) -> Result<Value> {
+        self.post("/api/firewall/filter/apply").await
+    }
+
+    /// Every current DHCP lease (a `{"rows": [...], "rowCount": N, ...}`
+    /// search envelope, same shape as [`OpnsenseClient::list_services`]).
+    ///
+    /// OPNsense runs exactly one of three unrelated DHCP backends at a
+    /// time, each with its own API surface, and which one varies by
+    /// install: `GET /dnsmasq/leases/search` (dnsmasq, the default since
+    /// 25.7), `GET /kea/leases4/search` (Kea), or
+    /// `POST /dhcpv4/leases/searchLease` (the legacy ISC DHCP server,
+    /// moved out of core into a plugin in 26.1). Tries them in that order
+    /// and returns the first one that isn't a 404 -- a 404 here means
+    /// *this OPNsense doesn't have that backend's API module loaded*, a
+    /// reliable, real signal, not a guess; any other failure (auth,
+    /// malformed response, 5xx) is returned immediately rather than masked
+    /// by trying the next backend.
+    pub async fn list_dhcp_leases(&self) -> Result<Value> {
+        match self.get("/api/dnsmasq/leases/search").await {
+            Ok(leases) => return Ok(leases),
+            Err(Error::Api { status: 404, .. }) => {}
+            Err(err) => return Err(err),
+        }
+        match self.get("/api/kea/leases4/search").await {
+            Ok(leases) => return Ok(leases),
+            Err(Error::Api { status: 404, .. }) => {}
+            Err(err) => return Err(err),
+        }
+        match self
+            .post_json("/api/dhcpv4/leases/searchLease", &serde_json::json!({}))
+            .await
+        {
+            Err(Error::Api { status: 404, body }) => Err(Error::Api {
+                status: 404,
+                body: format!(
+                    "none of OPNsense's known DHCP lease APIs (dnsmasq, Kea, legacy ISC) \
+                     are present on this host -- last attempt: {body}"
+                ),
+            }),
+            other => other,
+        }
+    }
+
+    /// `POST /interfaces/vlan_settings/searchItem` -- every configured VLAN
+    /// interface (search envelope, same shape as
+    /// [`OpnsenseClient::list_dhcp_leases`]).
+    pub async fn list_vlans(&self) -> Result<Value> {
+        self.post_json(
+            "/api/interfaces/vlan_settings/searchItem",
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    /// `GET /interfaces/vlan_settings/getItem/{uuid}` -- one VLAN's full
+    /// field set.
+    pub async fn get_vlan(&self, uuid: &str) -> Result<Value> {
+        self.get(&format!("/api/interfaces/vlan_settings/getItem/{uuid}"))
+            .await
+    }
+
+    /// `POST /interfaces/vlan_settings/addItem` -- create a VLAN. `fields`
+    /// is the same field set OPNsense's own VLAN form submits (`if` the
+    /// parent interface, `tag`, `descr`, `pcp`) -- passed through as-is,
+    /// same reasoning as [`OpnsenseClient::create_firewall_rule`]. Doesn't
+    /// take effect until [`OpnsenseClient::apply_vlan_changes`] is called.
+    pub async fn create_vlan(&self, fields: Value) -> Result<Value> {
+        self.post_json(
+            "/api/interfaces/vlan_settings/addItem",
+            &serde_json::json!({ "vlan": fields }),
+        )
+        .await
+    }
+
+    /// `POST /interfaces/vlan_settings/setItem/{uuid}` -- update a VLAN.
+    /// Same passthrough field set as [`OpnsenseClient::create_vlan`].
+    /// Doesn't take effect until [`OpnsenseClient::apply_vlan_changes`] is
+    /// called.
+    pub async fn update_vlan(&self, uuid: &str, fields: Value) -> Result<Value> {
+        self.post_json(
+            &format!("/api/interfaces/vlan_settings/setItem/{uuid}"),
+            &serde_json::json!({ "vlan": fields }),
+        )
+        .await
+    }
+
+    /// `POST /interfaces/vlan_settings/delItem/{uuid}` -- delete a VLAN.
+    /// Doesn't take effect until [`OpnsenseClient::apply_vlan_changes`] is
+    /// called.
+    pub async fn delete_vlan(&self, uuid: &str) -> Result<Value> {
+        self.post(&format!("/api/interfaces/vlan_settings/delItem/{uuid}"))
+            .await
+    }
+
+    /// `POST /interfaces/vlan_settings/reconfigure` -- apply every pending
+    /// VLAN change. OPNsense buffers create/update/delete above until this
+    /// is called -- none of them take effect on their own.
+    pub async fn apply_vlan_changes(&self) -> Result<Value> {
+        self.post("/api/interfaces/vlan_settings/reconfigure").await
+    }
+
+    /// `GET /diagnostics/interface/getArp` -- the current ARP table:
+    /// IP address, MAC address, hostname (if known), and interface for
+    /// every neighbor OPNsense has resolved.
+    pub async fn list_arp_entries(&self) -> Result<Value> {
+        self.get("/api/diagnostics/interface/getArp").await
+    }
+
+    /// `GET /diagnostics/interface/getRoutes` -- the system routing table
+    /// (the same information `netstat -rn` shows on the firewall itself).
+    pub async fn list_routes(&self) -> Result<Value> {
+        self.get("/api/diagnostics/interface/getRoutes").await
+    }
+
+    /// `GET /core/backup/providers` -- every configured backup provider.
+    /// Every install has at least `"this"` (the firewall's own local
+    /// config history); more appear if a remote provider (Nextcloud,
+    /// Google Drive, ...) is configured under **System -> Configuration ->
+    /// Backups**.
+    pub async fn list_backup_providers(&self) -> Result<Value> {
+        self.get("/api/core/backup/providers").await
+    }
+
+    /// `GET /core/backup/backups/{host}` -- every backup available from one
+    /// provider (`host`, as returned by
+    /// [`OpnsenseClient::list_backup_providers`]), each identified by a
+    /// filename [`OpnsenseClient::download_backup`]/
+    /// [`OpnsenseClient::restore_backup`] take.
+    pub async fn list_backups(&self, host: &str) -> Result<Value> {
+        self.get(&format!("/api/core/backup/backups/{host}")).await
+    }
+
+    /// `GET /core/backup/download/{host}[/{backup}]` -- one backup's raw
+    /// `config.xml` content, or the current running config if `backup` is
+    /// omitted. Unlike every other method here this isn't JSON -- OPNsense
+    /// serves the config file itself -- so it's returned as raw text rather
+    /// than parsed.
+    pub async fn download_backup(&self, host: &str, backup: Option<&str>) -> Result<String> {
+        let path = match backup {
+            Some(backup) => format!("/api/core/backup/download/{host}/{backup}"),
+            None => format!("/api/core/backup/download/{host}"),
+        };
+        self.get_text(&path).await
+    }
+
+    /// `POST /core/backup/revertBackup/{backup}` -- revert the running
+    /// configuration to a previous backup (a filename as returned by
+    /// [`OpnsenseClient::list_backups`]). Takes effect immediately --
+    /// OPNsense reloads its configuration from the reverted-to backup as
+    /// part of this call, there's no separate apply step.
+    pub async fn restore_backup(&self, backup: &str) -> Result<Value> {
+        self.post(&format!("/api/core/backup/revertBackup/{backup}"))
+            .await
+    }
+
     async fn get(&self, path: &str) -> Result<Value> {
         let response = self
             .http
@@ -117,11 +348,41 @@ impl OpnsenseClient {
         Self::parse(response).await
     }
 
+    async fn get_text(&self, path: &str) -> Result<String> {
+        let response = self
+            .http
+            .get(&format!("{}{path}", self.base_url))?
+            .basic_auth(&self.key, &self.secret)?
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text()?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        Ok(text)
+    }
+
     async fn post(&self, path: &str) -> Result<Value> {
         let response = self
             .http
             .post(&format!("{}{path}", self.base_url))?
             .basic_auth(&self.key, &self.secret)?
+            .send()
+            .await?;
+        Self::parse(response).await
+    }
+
+    async fn post_json(&self, path: &str, payload: &Value) -> Result<Value> {
+        let response = self
+            .http
+            .post(&format!("{}{path}", self.base_url))?
+            .basic_auth(&self.key, &self.secret)?
+            .header("Content-Type", "application/json")?
+            .body(serde_json::to_string(payload)?)
             .send()
             .await?;
         Self::parse(response).await

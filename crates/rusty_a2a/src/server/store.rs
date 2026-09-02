@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rusty_uuid::Uuid;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 use crate::types::{ListTasksRequest, Task, TaskPushNotificationConfig};
 

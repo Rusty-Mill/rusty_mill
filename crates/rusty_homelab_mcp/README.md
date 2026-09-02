@@ -74,18 +74,40 @@ trusted network.
 
 **Proxmox** (`rusty_proxmox`): `proxmox_list_nodes`, `proxmox_node_status`,
 `proxmox_list_guests`, `proxmox_guest_status`, `proxmox_guest_power` (start/
-stop/shutdown/reboot/suspend/resume a QEMU VM or LXC container).
+stop/shutdown/reboot/suspend/resume a QEMU VM or LXC container),
+`proxmox_task_status`/`proxmox_task_log` (poll the UPID `proxmox_guest_power`
+and other asynchronous actions return), `proxmox_guest_config`/
+`proxmox_update_guest_config`, `proxmox_create_guest`/`proxmox_delete_guest`/
+`proxmox_clone_guest`, `proxmox_list_snapshots`/`proxmox_create_snapshot`/
+`proxmox_delete_snapshot`/`proxmox_rollback_snapshot`.
 
 **OPNsense** (`rusty_opnsense`): `opnsense_system_status`,
 `opnsense_list_services`, `opnsense_service_control` (start/stop/restart),
 `opnsense_list_interfaces`, `opnsense_list_firewall_aliases`,
-`opnsense_list_gateways`.
+`opnsense_list_gateways`, `opnsense_list_firewall_rules`/
+`opnsense_get_firewall_rule`/`opnsense_create_firewall_rule`/
+`opnsense_update_firewall_rule`/`opnsense_delete_firewall_rule`/
+`opnsense_toggle_firewall_rule` (firewall rule CRUD -- none of these take
+effect until `opnsense_apply_firewall_changes` is called),
+`opnsense_list_dhcp_leases`, `opnsense_list_vlans`/`opnsense_get_vlan`/
+`opnsense_create_vlan`/`opnsense_update_vlan`/`opnsense_delete_vlan` (VLAN
+CRUD -- none of these take effect until `opnsense_apply_vlan_changes` is
+called), `opnsense_list_arp_entries`, `opnsense_list_routes`,
+`opnsense_list_backup_providers`/`opnsense_list_backups`/
+`opnsense_download_backup`/`opnsense_restore_backup`.
 
-Most tools return the backend's own JSON as structured content, unopinionated
-about shape (see each client crate's README for why). `proxmox_guest_power`
-returns Proxmox's task ID (a `UPID:...` string) as plain text, since Proxmox
-runs guest power actions asynchronously rather than waiting for them to
-finish.
+Most tools return the backend's own JSON as structured content under a
+`result` field (`{"result": ...}`), unopinionated about the shape of `result`
+itself (see each client crate's README for why). The wrapper exists because
+MCP requires structured tool output to be a JSON object at the top level, and
+several endpoints (e.g. `proxmox_list_nodes`, `opnsense_list_services`) return
+a bare JSON array. `proxmox_guest_power`/`proxmox_create_guest`/
+`proxmox_clone_guest`/... and `opnsense_download_backup` return plain text
+instead: the Proxmox tools return a task ID (a `UPID:...` string) since
+Proxmox runs those actions asynchronously rather than waiting for them to
+finish (pass that UPID to `proxmox_task_status`/`proxmox_task_log` to find
+out when it's done), and `opnsense_download_backup` returns OPNsense's own
+raw `config.xml`, which isn't JSON at all.
 
 ## Adding a backend
 

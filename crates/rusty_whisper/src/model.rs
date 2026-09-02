@@ -65,25 +65,7 @@ pub struct Model {
     pub tensors: HashMap<String, Weight>,
 }
 
-pub fn f16_to_f32(h: u16) -> f32 {
-    let sign = (h >> 15) as u32;
-    let exp = ((h >> 10) & 0x1f) as u32;
-    let frac = (h & 0x3ff) as u32;
-    let bits = match (exp, frac) {
-        (0, 0) => sign << 31,
-        (0, f) => {
-            // Subnormal: value = f * 2^-24. Shift the msb into the implicit
-            // bit; msb at position p gives exponent p - 24 (bias 127).
-            let p = 31 - f.leading_zeros();
-            let mantissa = (f << (10 - p)) & 0x3ff;
-            (sign << 31) | ((p + 103) << 23) | (mantissa << 13)
-        }
-        (0x1f, 0) => (sign << 31) | 0x7f80_0000,
-        (0x1f, f) => (sign << 31) | 0x7f80_0000 | (f << 13),
-        (e, f) => (sign << 31) | ((e + 127 - 15) << 23) | (f << 13),
-    };
-    f32::from_bits(bits)
-}
+pub use rusty_simd::f16_to_f32;
 
 /// f32 -> f16 bits, round-to-nearest. (Only tests produce f16 today; the
 /// loader just reads them.)

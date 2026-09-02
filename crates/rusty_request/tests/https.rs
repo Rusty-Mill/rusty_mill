@@ -19,11 +19,11 @@
 //! (pinning/no-verification never touch the system store), so they're
 //! free to run as ordinary, independent, parallel `#[test]` functions.
 //!
-//! Like `tests/client.rs`, this drives the crate's default (`rusty_tokio`)
-//! backend directly through `tests/common`'s own runtime and servers --
-//! not meaningful (and not run) under the `tokio` feature. See
-//! `tests/tokio_feature.rs` for that feature's own smoke tests.
-#![cfg(not(feature = "tokio"))]
+//! Like `tests/client.rs`, this drives the crate's `rusty_tokio` backend
+//! directly through `tests/common`'s own runtime and servers, with or
+//! without the `tokio` feature (with it on, it doubles as proof the
+//! feature is additive -- see `src/rt.rs`). See `tests/tokio_feature.rs`
+//! for that feature's own real-tokio smoke tests.
 
 mod common;
 

@@ -33,10 +33,14 @@ pub struct ProxmoxConfig {
 /// An async client for one Proxmox VE cluster/node's REST API.
 ///
 /// Every method returns the response's `data` field as-is (every Proxmox API
-/// response is documented to wrap its payload that way), except
-/// [`ProxmoxClient::guest_power`], which unwraps the task UPID string Proxmox
-/// hands back for an asynchronous action. Cheap to clone -- it shares the
-/// same underlying `rusty_request::Client` (connection pool included).
+/// response is documented to wrap its payload that way), except every
+/// asynchronous action (`guest_power`, `create_guest`, `delete_guest`,
+/// `clone_guest`, `create_snapshot`, `delete_snapshot`,
+/// `rollback_snapshot`), which unwraps the task UPID string Proxmox hands
+/// back instead of waiting for the action to finish -- poll it with
+/// [`ProxmoxClient::task_status`]/[`ProxmoxClient::task_log`]. Cheap to
+/// clone -- it shares the same underlying `rusty_request::Client`
+/// (connection pool included).
 #[derive(Debug, Clone)]
 pub struct ProxmoxClient {
     http: Client,
@@ -97,8 +101,7 @@ impl ProxmoxClient {
     ///
     /// Proxmox runs this asynchronously and returns a task ID (a `UPID:...`
     /// string) rather than waiting for the action to finish; poll
-    /// `/nodes/{node}/tasks/{upid}/status` (not yet exposed by this crate) to
-    /// find out when it completes.
+    /// [`ProxmoxClient::task_status`] with it to find out when it completes.
     pub async fn guest_power(
         &self,
         node: &str,
@@ -107,10 +110,151 @@ impl ProxmoxClient {
         action: PowerAction,
     ) -> Result<String> {
         let path = format!("/api2/json/nodes/{node}/{kind}/{vmid}/status/{action}");
-        let data = self.post(&path).await?;
-        data.as_str().map(str::to_string).ok_or_else(|| {
-            Error::MissingData(format!("expected a UPID string in `data`, got {data}"))
-        })
+        self.post(&path).await.and_then(Self::expect_upid)
+    }
+
+    /// `GET /nodes/{node}/{qemu,lxc}/{vmid}/config` -- one guest's current
+    /// configuration: CPU, memory, disks, network interfaces, boot order,
+    /// and everything else Proxmox stores per-guest.
+    pub async fn guest_config(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/{kind}/{vmid}/config"))
+            .await
+    }
+
+    /// `PUT /nodes/{node}/{qemu,lxc}/{vmid}/config` -- update a guest's
+    /// configuration. `fields` is the same field set Proxmox's own config
+    /// API takes (`cores`, `memory`, `net0`, `scsi0`, ...) -- passed through
+    /// as-is, since the valid field set differs between QEMU and LXC and by
+    /// what's already configured. Usually synchronous (`data` is `null`),
+    /// but some fields (e.g. a disk resize) make Proxmox run the update as
+    /// a background task instead, returning its UPID -- check the returned
+    /// value's type rather than assuming either.
+    pub async fn update_guest_config(
+        &self,
+        node: &str,
+        kind: GuestKind,
+        vmid: u32,
+        fields: Value,
+    ) -> Result<Value> {
+        self.put_json(
+            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/config"),
+            &fields,
+        )
+        .await
+    }
+
+    /// `POST /nodes/{node}/{qemu,lxc}` -- create a new guest. `fields` must
+    /// include `vmid`; the rest is the same field set Proxmox's own
+    /// create-guest API takes, and differs between QEMU (`ostype`,
+    /// `scsi0`, `net0`, ...) and LXC (`ostemplate`, `rootfs`, ...) --
+    /// passed through as-is. Runs asynchronously; returns the task UPID.
+    pub async fn create_guest(&self, node: &str, kind: GuestKind, fields: Value) -> Result<String> {
+        self.post_json(&format!("/api2/json/nodes/{node}/{kind}"), &fields)
+            .await
+            .and_then(Self::expect_upid)
+    }
+
+    /// `DELETE /nodes/{node}/{qemu,lxc}/{vmid}` -- delete a guest. Runs
+    /// asynchronously; returns the task UPID.
+    pub async fn delete_guest(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<String> {
+        self.delete(&format!("/api2/json/nodes/{node}/{kind}/{vmid}"))
+            .await
+            .and_then(Self::expect_upid)
+    }
+
+    /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/clone` -- clone a guest.
+    /// `fields` must include `newid`; common optional fields are `name`,
+    /// `full` (full vs. linked clone), `target` (a different destination
+    /// node), and `storage`. Runs asynchronously; returns the task UPID.
+    pub async fn clone_guest(
+        &self,
+        node: &str,
+        kind: GuestKind,
+        vmid: u32,
+        fields: Value,
+    ) -> Result<String> {
+        self.post_json(
+            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/clone"),
+            &fields,
+        )
+        .await
+        .and_then(Self::expect_upid)
+    }
+
+    /// `GET /nodes/{node}/{qemu,lxc}/{vmid}/snapshot` -- every snapshot
+    /// taken of a guest, with its creation time and description.
+    pub async fn list_snapshots(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/{kind}/{vmid}/snapshot"))
+            .await
+    }
+
+    /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/snapshot` -- create a
+    /// snapshot. `fields` must include `snapname`; optional `description`,
+    /// and for QEMU guests `vmstate` (also capture RAM state). Runs
+    /// asynchronously; returns the task UPID.
+    pub async fn create_snapshot(
+        &self,
+        node: &str,
+        kind: GuestKind,
+        vmid: u32,
+        fields: Value,
+    ) -> Result<String> {
+        self.post_json(
+            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/snapshot"),
+            &fields,
+        )
+        .await
+        .and_then(Self::expect_upid)
+    }
+
+    /// `DELETE /nodes/{node}/{qemu,lxc}/{vmid}/snapshot/{snapname}` --
+    /// delete a snapshot. Runs asynchronously; returns the task UPID.
+    pub async fn delete_snapshot(
+        &self,
+        node: &str,
+        kind: GuestKind,
+        vmid: u32,
+        snapname: &str,
+    ) -> Result<String> {
+        self.delete(&format!(
+            "/api2/json/nodes/{node}/{kind}/{vmid}/snapshot/{snapname}"
+        ))
+        .await
+        .and_then(Self::expect_upid)
+    }
+
+    /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/snapshot/{snapname}/rollback`
+    /// -- roll a guest back to a snapshot. Runs asynchronously; returns the
+    /// task UPID.
+    pub async fn rollback_snapshot(
+        &self,
+        node: &str,
+        kind: GuestKind,
+        vmid: u32,
+        snapname: &str,
+    ) -> Result<String> {
+        self.post(&format!(
+            "/api2/json/nodes/{node}/{kind}/{vmid}/snapshot/{snapname}/rollback"
+        ))
+        .await
+        .and_then(Self::expect_upid)
+    }
+
+    /// `GET /nodes/{node}/tasks/{upid}/status` -- whether an asynchronous
+    /// task (the UPID string returned by `guest_power` and every other
+    /// action Proxmox runs in the background) is still running, and if not,
+    /// whether it succeeded (`status: "OK"` vs. an error message).
+    pub async fn task_status(&self, node: &str, upid: &str) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/tasks/{upid}/status"))
+            .await
+    }
+
+    /// `GET /nodes/{node}/tasks/{upid}/log` -- an asynchronous task's log
+    /// output, most useful for finding out *why* a task in `task_status`
+    /// failed.
+    pub async fn task_log(&self, node: &str, upid: &str) -> Result<Value> {
+        self.get(&format!("/api2/json/nodes/{node}/tasks/{upid}/log"))
+            .await
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -131,6 +275,49 @@ impl ProxmoxClient {
             .send()
             .await?;
         Self::unwrap_data(response).await
+    }
+
+    async fn post_json(&self, path: &str, payload: &Value) -> Result<Value> {
+        let response = self
+            .http
+            .post(&format!("{}{path}", self.base_url))?
+            .header("Authorization", &self.auth_header)?
+            .header("Content-Type", "application/json")?
+            .body(serde_json::to_string(payload)?)
+            .send()
+            .await?;
+        Self::unwrap_data(response).await
+    }
+
+    async fn put_json(&self, path: &str, payload: &Value) -> Result<Value> {
+        let response = self
+            .http
+            .put(&format!("{}{path}", self.base_url))?
+            .header("Authorization", &self.auth_header)?
+            .header("Content-Type", "application/json")?
+            .body(serde_json::to_string(payload)?)
+            .send()
+            .await?;
+        Self::unwrap_data(response).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<Value> {
+        let response = self
+            .http
+            .delete(&format!("{}{path}", self.base_url))?
+            .header("Authorization", &self.auth_header)?
+            .send()
+            .await?;
+        Self::unwrap_data(response).await
+    }
+
+    /// Every asynchronous Proxmox action (guest power, create/delete/clone,
+    /// snapshot create/delete/rollback) returns its task ID as a bare
+    /// `data` string.
+    fn expect_upid(data: Value) -> Result<String> {
+        data.as_str().map(str::to_string).ok_or_else(|| {
+            Error::MissingData(format!("expected a UPID string in `data`, got {data}"))
+        })
     }
 
     async fn unwrap_data(response: rusty_request::Response) -> Result<Value> {

@@ -46,16 +46,19 @@ impl Url {
         // Fragments never reach the wire; drop them before anything else.
         let rest = rest.split('#').next().unwrap_or("");
 
-        if rest.contains('@') {
-            return Err(Error::InvalidUrl(format!(
-                "userinfo (user:pass@host) is not supported in `{input}`"
-            )));
-        }
-
+        // Userinfo syntax (`user:pass@host`) is only meaningful in the
+        // authority component -- an `@` anywhere in the path or query (an
+        // email address, a Proxmox UPID's embedded `user@realm`, ...) is
+        // ordinary, already-valid URL content and must not trip this check.
         let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         if authority.is_empty() {
             return Err(Error::InvalidUrl(format!("missing host in `{input}`")));
+        }
+        if authority.contains('@') {
+            return Err(Error::InvalidUrl(format!(
+                "userinfo (user:pass@host) is not supported in `{input}`"
+            )));
         }
         let path_and_query = &rest[authority_end..];
 
@@ -313,6 +316,21 @@ mod tests {
     #[test]
     fn rejects_unsupported_scheme() {
         assert!(Url::parse("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_userinfo_in_the_authority() {
+        let err = Url::parse("http://user:pass@example.com/a").unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)), "{err:?}");
+    }
+
+    #[test]
+    fn allows_an_at_sign_in_the_path() {
+        // e.g. a Proxmox task UPID (`...:automation@pve!token:`) embedded in
+        // a path segment -- an `@` here is ordinary content, not userinfo.
+        let u =
+            Url::parse("http://example.com/tasks/UPID:pve:automation@pve!token:/status").unwrap();
+        assert_eq!(u.path, "/tasks/UPID:pve:automation@pve!token:/status");
     }
 
     #[test]

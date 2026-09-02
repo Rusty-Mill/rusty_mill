@@ -7,6 +7,8 @@ mod support;
 // The binary's modules, compiled into the test -- `crate::` paths inside
 // them (e.g. `crate::server::HomelabServer`) resolve against this test
 // binary's own module tree, which mirrors `src/`'s exactly.
+#[path = "../src/json_result.rs"]
+mod json_result;
 #[path = "../src/server.rs"]
 mod server;
 #[path = "../src/tools/mod.rs"]
@@ -97,17 +99,48 @@ async fn every_backend_contributes_its_tools() {
     assert_eq!(
         names,
         [
+            "opnsense_apply_firewall_changes",
+            "opnsense_apply_vlan_changes",
+            "opnsense_create_firewall_rule",
+            "opnsense_create_vlan",
+            "opnsense_delete_firewall_rule",
+            "opnsense_delete_vlan",
+            "opnsense_download_backup",
+            "opnsense_get_firewall_rule",
+            "opnsense_get_vlan",
+            "opnsense_list_arp_entries",
+            "opnsense_list_backup_providers",
+            "opnsense_list_backups",
+            "opnsense_list_dhcp_leases",
             "opnsense_list_firewall_aliases",
+            "opnsense_list_firewall_rules",
             "opnsense_list_gateways",
             "opnsense_list_interfaces",
+            "opnsense_list_routes",
             "opnsense_list_services",
+            "opnsense_list_vlans",
+            "opnsense_restore_backup",
             "opnsense_service_control",
             "opnsense_system_status",
+            "opnsense_toggle_firewall_rule",
+            "opnsense_update_firewall_rule",
+            "opnsense_update_vlan",
+            "proxmox_clone_guest",
+            "proxmox_create_guest",
+            "proxmox_create_snapshot",
+            "proxmox_delete_guest",
+            "proxmox_delete_snapshot",
+            "proxmox_guest_config",
             "proxmox_guest_power",
             "proxmox_guest_status",
             "proxmox_list_guests",
             "proxmox_list_nodes",
+            "proxmox_list_snapshots",
             "proxmox_node_status",
+            "proxmox_rollback_snapshot",
+            "proxmox_task_log",
+            "proxmox_task_status",
+            "proxmox_update_guest_config",
         ]
     );
 
@@ -117,6 +150,33 @@ async fn every_backend_contributes_its_tools() {
             "tool {} is missing a description",
             tool.name
         );
+    }
+
+    client.cancel().await.expect("cancel");
+}
+
+/// MCP requires a tool's structured output -- and the `outputSchema` a
+/// client validates it against -- to be a JSON object at the top level.
+/// `serde_json::Value` on its own doesn't guarantee that (some backend
+/// endpoints return a bare array), which is exactly what broke every
+/// passthrough tool here once: a strict client (Claude Code/Cowork) rejected
+/// the whole `tools/list` result and refused to start the server at all.
+/// `JsonResult` (see `src/json_result.rs`) is the fix -- this guards it
+/// stays fixed.
+#[tokio::test]
+async fn every_declared_output_schema_is_a_json_object() {
+    let client = connect(HomelabServer::new(None, None)).await;
+
+    let tools = client.list_tools(None).await.expect("tools/list");
+    for tool in &tools.tools {
+        if let Some(schema) = &tool.output_schema {
+            assert_eq!(
+                schema.get("type").and_then(|t| t.as_str()),
+                Some("object"),
+                "tool {} has a non-object outputSchema: {schema:?}",
+                tool.name
+            );
+        }
     }
 
     client.cancel().await.expect("cancel");
@@ -153,7 +213,7 @@ async fn proxmox_list_nodes_returns_structured_data_from_the_real_client_path() 
         .expect("call proxmox_list_nodes");
 
     assert_ne!(result.is_error, Some(true));
-    assert_eq!(structured(&result)[0]["node"], "pve");
+    assert_eq!(structured(&result)["result"][0]["node"], "pve");
 
     client.cancel().await.expect("cancel");
 }
@@ -182,6 +242,31 @@ async fn a_proxmox_api_error_surfaces_as_a_protocol_error() {
 }
 
 #[tokio::test]
+async fn proxmox_task_status_returns_structured_data_from_the_real_client_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#,
+    )]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_task_status",
+            serde_json::json!({
+                "node": "pve",
+                "upid": "UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:",
+            }),
+        ))
+        .await
+        .expect("call proxmox_task_status");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["exitstatus"], "OK");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
 async fn opnsense_system_status_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
     let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
@@ -193,7 +278,164 @@ async fn opnsense_system_status_returns_structured_data_from_the_real_client_pat
         .expect("call opnsense_system_status");
 
     assert_ne!(result.is_error, Some(true));
-    assert_eq!(structured(&result)["status"], "ok");
+    assert_eq!(structured(&result)["result"]["status"], "ok");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"result":"saved","uuid":"new-uuid"}"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "opnsense_create_firewall_rule",
+            serde_json::json!({
+                "rule": {
+                    "action": "pass",
+                    "interface": "lan",
+                    "direction": "in",
+                    "protocol": "TCP",
+                    "destination_port": "22",
+                    "description": "allow ssh",
+                },
+            }),
+        ))
+        .await
+        .expect("call opnsense_create_firewall_rule");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["uuid"], "new-uuid");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"result":"saved","uuid":"new-vlan-uuid"}"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "opnsense_create_vlan",
+            serde_json::json!({
+                "vlan": { "if": "igc0", "tag": "20", "descr": "guest network" },
+            }),
+        ))
+        .await
+        .expect("call opnsense_create_vlan");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["uuid"], "new-vlan-uuid");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_download_backup_returns_the_raw_xml_as_plain_text() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "opnsense_download_backup",
+            serde_json::json!({ "host": "this" }),
+        ))
+        .await
+        .expect("call opnsense_download_backup");
+
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("download_backup returns text");
+    assert!(text.contains("<opnsense>"), "unexpected body: {text}");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"rows":[{"address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#,
+    )]);
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call("opnsense_list_dhcp_leases", serde_json::json!({})))
+        .await
+        .expect("call opnsense_list_dhcp_leases");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["rows"][0]["hostname"], "nas");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn proxmox_update_guest_config_sends_the_config_as_a_json_body() {
+    let base_url = support::spawn(vec![MockResponse::ok(r#"{"data":null}"#)]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_update_guest_config",
+            serde_json::json!({
+                "node": "pve",
+                "kind": "qemu",
+                "vmid": 100,
+                "config": { "memory": 4096 },
+            }),
+        ))
+        .await
+        .expect("call proxmox_update_guest_config");
+
+    assert_ne!(result.is_error, Some(true));
+    assert!(structured(&result)["result"].is_null());
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn proxmox_create_guest_returns_the_task_upid_as_plain_text() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmcreate:200:automation@pve!test:"}"#,
+    )]);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "proxmox_create_guest",
+            serde_json::json!({
+                "node": "pve",
+                "kind": "qemu",
+                "config": { "vmid": 200, "ostype": "l26" },
+            }),
+        ))
+        .await
+        .expect("call proxmox_create_guest");
+
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("create_guest returns text");
+    assert!(text.starts_with("UPID:pve:"), "unexpected upid: {text}");
 
     client.cancel().await.expect("cancel");
 }
