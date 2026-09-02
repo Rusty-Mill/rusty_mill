@@ -1,0 +1,12 @@
+# Pinned so a local check and CI check the same thing.
+#
+# This exists because they once did not: clippy 1.97 rejected an
+# `unnecessary_sort_by` that 1.94 accepted, so a "clippy clean" run here
+# passed while CI failed on the same commit. A floating toolchain makes that
+# a recurring surprise rather than a one-off.
+#
+# Bumping this is a deliberate change: raise the version, run the full suite,
+# and fix whatever the newer lints find in the same PR.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
