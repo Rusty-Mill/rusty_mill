@@ -4,3 +4,7 @@
 # built standalone before this workspace existed. Matching it at every
 # depth stops that from silently recurring on a future import.
 target/
+
+# Python bytecode from running .github/scripts tests locally
+__pycache__/
+*.pyc

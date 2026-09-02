@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Chore: drop committed Python bytecode, ignore it going forward
+**2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Fixed:** the previous PR ran the new `.github/scripts` unit tests
+  locally before staging and swept two `__pycache__/*.pyc` files into the
+  commit. Removed from the tree; `__pycache__/` and `*.pyc` added to
+  `.gitignore` so it cannot recur.
+
 ## CI: unit tests for the affected-crates plan step
 **2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 
