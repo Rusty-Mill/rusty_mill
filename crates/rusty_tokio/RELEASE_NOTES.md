@@ -7,6 +7,32 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Stop losing readiness edges between a `WouldBlock` and its clear
+**2026-09-02** · follow-up to [#138](https://github.com/Rusty-Mill/rusty_mill/pull/138)
+
+- **Fixed:** every `WouldBlock` path (`poll_io`, `readiness::try_io`,
+  `AsyncFdReadyGuard::clear_ready`) attempted the syscall and then cleared
+  the cached readiness bit unconditionally. Under this crate's edge-triggered
+  backends an edge delivered in between was wiped and never re-reported --
+  the next wait on that direction hung. Measured as `tests/peek.rs::
+  tcp_try_peek_fails_would_block_before_data_arrives_then_succeeds_after`
+  stalling 1 run in 60 on main (identical with or without #138, so a
+  separate bug from the connect one).
+- **How:** each direction's readiness is now one word packing an edge
+  counter above the ready bit (`ScheduledIo`), bumped atomically by every
+  `mark_ready`. Callers take a `ReadyToken` snapshot before the syscall and
+  clear through a single compare-and-swap against it; a bumped counter
+  refuses the clear, the bit stays set, and the operation retries -- the
+  same tick/generation idea tokio's `ScheduledIo` uses, in its smallest
+  form. `AsyncFdReadyGuard` captures the token when handed out, so its
+  `clear_ready` now matches tokio's documented "an event newer than the
+  guard is not cleared" behaviour.
+- **Why a CAS, not compare-then-store:** the reactor can bump the counter and
+  set the bit between the two steps, and the store would still wipe it -- the
+  exact window this change exists to close.
+- **Verified:** unit tests on the token semantics (`reactor::tests`), the
+  full Linux suite, and the peek binary run 100 times each before and after.
+
 ## Make `connect` wait for an in-flight non-blocking connect to resolve
 **2026-09-02** · [Rusty-Mill/rusty_mill#137](https://github.com/Rusty-Mill/rusty_mill/issues/137)
 

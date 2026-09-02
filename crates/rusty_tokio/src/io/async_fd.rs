@@ -23,7 +23,9 @@
 //! `new`/`with_interest` below just follow that same established
 //! convention rather than introducing a new one.
 
-use super::reactor::{clear_ready, poll_ready, Reactor, ScheduledIo};
+use super::reactor::{
+    clear_ready_if_unchanged, poll_ready, snapshot_ready, Reactor, ReadyToken, ScheduledIo,
+};
 use super::{Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
@@ -120,6 +122,7 @@ impl<T: AsRawFd> AsyncFd<T> {
             Ok(AsyncFdReadyGuard {
                 async_fd: self,
                 ready: Ready::READABLE,
+                token: snapshot_ready(&self.io, super::reactor::Interest::Read),
             })
         })
     }
@@ -142,6 +145,7 @@ impl<T: AsRawFd> AsyncFd<T> {
             Ok(AsyncFdReadyGuard {
                 async_fd: self,
                 ready: Ready::WRITABLE,
+                token: snapshot_ready(&self.io, super::reactor::Interest::Write),
             })
         })
     }
@@ -182,6 +186,11 @@ impl<T: AsRawFd> Drop for AsyncFd<T> {
 pub struct AsyncFdReadyGuard<'a, T: AsRawFd> {
     async_fd: &'a AsyncFd<T>,
     ready: Ready,
+    /// The direction's readiness as of this guard's creation -- what
+    /// [`clear_ready`](Self::clear_ready) compares against, so a fresh
+    /// edge that arrived after the guard was handed out survives the
+    /// clear (the same rule real tokio's `AsyncFdReadyGuard` follows).
+    token: ReadyToken,
 }
 
 impl<'a, T: AsRawFd> AsyncFdReadyGuard<'a, T> {
@@ -200,12 +209,28 @@ impl<'a, T: AsRawFd> AsyncFdReadyGuard<'a, T> {
     /// "still ready" off a stale signal. [`try_io`](Self::try_io) already
     /// calls this on `WouldBlock` -- only needed directly if a caller
     /// wants to signal "actually not ready" without going through it.
+    ///
+    /// If a new readiness event for this direction arrived *after* this
+    /// guard was created (say, data landed while the caller's own
+    /// syscall was returning `WouldBlock`), the readiness is left in
+    /// place rather than cleared -- that event has not been observed
+    /// yet, and clearing it would lose it for good under the
+    /// edge-triggered backends. The next `readable`/`writable` then
+    /// returns immediately.
     pub fn clear_ready(&mut self) {
         if self.ready.is_readable() {
-            clear_ready(&self.async_fd.io, super::reactor::Interest::Read);
+            clear_ready_if_unchanged(
+                &self.async_fd.io,
+                super::reactor::Interest::Read,
+                self.token,
+            );
         }
         if self.ready.is_writable() {
-            clear_ready(&self.async_fd.io, super::reactor::Interest::Write);
+            clear_ready_if_unchanged(
+                &self.async_fd.io,
+                super::reactor::Interest::Write,
+                self.token,
+            );
         }
     }
 

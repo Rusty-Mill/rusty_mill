@@ -12,7 +12,8 @@
 //! have on Windows.
 
 use super::reactor::{
-    clear_ready, poll_ready as reactor_poll_ready, Interest as ReactorInterest, ScheduledIo,
+    clear_ready_if_unchanged, poll_ready as reactor_poll_ready, snapshot_ready,
+    Interest as ReactorInterest, ScheduledIo,
 };
 use super::{Interest, Ready};
 use std::io;
@@ -55,13 +56,22 @@ pub(crate) fn try_io<R>(
     interest: Interest,
     f: impl FnOnce() -> io::Result<R>,
 ) -> io::Result<R> {
+    // Snapshot each requested direction *before* `f` runs: a readiness
+    // edge that lands during the syscall must not be wiped by the
+    // clear below (see `reactor::ScheduledIo`'s docs).
+    let read = interest
+        .is_readable()
+        .then(|| snapshot_ready(io, ReactorInterest::Read));
+    let write = interest
+        .is_writable()
+        .then(|| snapshot_ready(io, ReactorInterest::Write));
     match f() {
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-            if interest.is_readable() {
-                clear_ready(io, ReactorInterest::Read);
+            if let Some(token) = read {
+                clear_ready_if_unchanged(io, ReactorInterest::Read, token);
             }
-            if interest.is_writable() {
-                clear_ready(io, ReactorInterest::Write);
+            if let Some(token) = write {
+                clear_ready_if_unchanged(io, ReactorInterest::Write, token);
             }
             Err(e)
         }

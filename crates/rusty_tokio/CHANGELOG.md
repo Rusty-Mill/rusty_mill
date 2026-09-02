@@ -44,6 +44,24 @@ anything prior to v0.2.0.
 
 ### Fixed
 
+- Readiness is no longer lost when an edge lands between a failed
+  syscall and the clear that follows it. Every `WouldBlock` path
+  (`poll_io` behind `read`/`write`/`connect`/`accept`, `try_io` behind
+  `try_read`/`try_write`/`try_peek`/..., and `AsyncFdReadyGuard::
+  clear_ready`) used to attempt the syscall and then unconditionally
+  clear the cached readiness bit. Under the edge-triggered backends
+  (`EPOLLET`, `EV_CLEAR`, the one-shot AFD/io_uring polls) an edge the
+  reactor delivered in that window was wiped and never re-reported, so
+  the next `readable()`/`writable()` wait hung until something else
+  poked the fd -- seen as `tests/peek.rs` stalling about 1 run in 60,
+  and the plausible cause of similar rare hangs in dependents. Each
+  direction's readiness word now packs an edge counter next to the
+  ready bit; callers snapshot it before the syscall and the clear is a
+  compare-and-swap that only lands if no edge arrived since. When it is
+  refused, the bit stays set and the operation is simply retried.
+  `AsyncFdReadyGuard::clear_ready` now follows real tokio's rule: an
+  event that arrived after the guard was created survives the clear.
+
 - `TcpStream::connect`/`connect_addr`, `TcpSocket::connect`, and
   `UnixStream::connect`/`connect_addr`/`UnixSocket::connect` now wait for
   a still-in-flight non-blocking connect to actually resolve before
