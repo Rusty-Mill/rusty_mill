@@ -7,6 +7,45 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Make `connect` wait for an in-flight non-blocking connect to resolve
+**2026-09-02** · [Rusty-Mill/rusty_mill#137](https://github.com/Rusty-Mill/rusty_mill/issues/137)
+
+- **Fixed:** `TcpStream::connect`/`TcpSocket::connect`/`UnixStream::connect`
+  returned as soon as `SO_ERROR` read clean, which for a connect still in
+  flight is immediately -- the reactor registers every fd optimistically
+  writable, so the "wait for writability, then check `SO_ERROR`" sequence
+  never actually waited. A refused loopback connect on Windows (always
+  asynchronous there) therefore never reported anything; rusty-meshed's
+  "unreachable Kafka" tests sat until nextest's 600s kill.
+- **How:** the platform `connect` helpers now say whether the connect was
+  established inside the call or is still in progress
+  (`socket::ConnectOutcome`), and an in-progress one is registered with a
+  cleared writable bit (`reactor::InitialReadiness::WritePending`, a new
+  `register_with` on every backend). Chosen over clearing the bit after
+  registration because `epoll` (`EPOLLET`) and `kqueue` (`EV_CLEAR`) are
+  edge-triggered here: an edge delivered between registration and a later
+  clear would be lost for good. All four backends report an fd's current
+  state at registration time, so a connect that completes early is still
+  observed.
+- **Also fixed, found on the way:** `epoll`/`kqueue` armed the kernel
+  registration before inserting the fd into the reactor's registry, so an
+  edge dequeued in that window was dropped -- harmless while every wait
+  started optimistic, a permanent hang once a connect genuinely waits for
+  its first edge (one stall in ~20 parallel runs of the new tests). Both now
+  insert first, and roll the entry back if the kernel call fails; `io_uring`
+  and Windows already did it in that order.
+- **Why it was missed:** a Linux loopback `connect(2)` reports `EINPROGRESS`
+  but has already processed the handshake (or the RST) inside the call, so
+  the premature `SO_ERROR` check saw a settled answer; for a remote peer the
+  first `send` in `SYN_SENT` returns `EAGAIN`, so the reactor wait silently
+  moved to the first write. Every existing test passed either way.
+  The only refused-connect test upstream (`rusty_request`) rebinds the port
+  20ms later, inside Windows' SYN-retry window, so it passed there too.
+- **Verified:** Linux test suite plus `cargo check --target
+  x86_64-pc-windows-gnu`; the Windows arm's runtime behaviour is validated by
+  the new `tests/tcp_connect_refused.rs` on the Windows CI leg, since this
+  environment has no Windows hardware.
+
 ## Normalize line endings on the generated governance files
 **2026-08-15** · PR [#271](https://github.com/baileyrd/rusty_tokio/pull/271)
 

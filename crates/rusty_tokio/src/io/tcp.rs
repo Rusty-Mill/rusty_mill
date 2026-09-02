@@ -1,4 +1,5 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
+use super::reactor::InitialReadiness;
 use super::reactor::{
     poll_io, ready_io, AsRawIo, Interest as ReactorInterest, OwnedIo, Reactor, ScheduledIo,
     TryCloneIo,
@@ -331,12 +332,15 @@ impl TcpStream {
     pub async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_tcp_socket(addr)?;
-        socket::connect(fd.as_raw_io(), addr)?;
-        let io = reactor.register(fd.as_raw_io())?;
+        let outcome = socket::connect(fd.as_raw_io(), addr)?;
+        // A non-blocking connect that's still in flight completes
+        // asynchronously; the socket becoming writable is the signal
+        // to check whether it actually succeeded. Registering it
+        // write-pending is what makes that wait real -- see
+        // `InitialReadiness::for_connect` for why the optimistic
+        // default would skip it.
+        let io = reactor.register_with(fd.as_raw_io(), InitialReadiness::for_connect(outcome))?;
         let inner = PlatformTcpStream::from(fd);
-        // A non-blocking connect completes asynchronously; the socket
-        // becoming writable is the signal to check whether it actually
-        // succeeded.
         ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_io())
         })
@@ -1142,12 +1146,13 @@ impl TcpSocket {
     /// Panics if called outside a running [`crate::Runtime`].
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current().shared.reactor.clone();
-        socket::connect(self.fd.as_raw_io(), addr)?;
-        let io = reactor.register(self.fd.as_raw_io())?;
+        let outcome = socket::connect(self.fd.as_raw_io(), addr)?;
+        // Same as `TcpStream::connect`: a still-in-flight connect is
+        // registered write-pending so the writability wait below is a
+        // real one (see `InitialReadiness::for_connect`).
+        let io =
+            reactor.register_with(self.fd.as_raw_io(), InitialReadiness::for_connect(outcome))?;
         let inner = PlatformTcpStream::from(self.fd);
-        // A non-blocking connect completes asynchronously; the socket
-        // becoming writable is the signal to check whether it actually
-        // succeeded -- same as `TcpStream::connect`.
         ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_io())
         })

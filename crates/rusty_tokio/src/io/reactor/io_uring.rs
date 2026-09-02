@@ -44,7 +44,7 @@
 //! `eventfd`-based wake `epoll.rs` uses), which drains that queue and
 //! submits the corresponding `PollAdd`/`PollRemove` itself.
 
-use super::{Interest, ScheduledIo};
+use super::{InitialReadiness, Interest, ScheduledIo};
 use io_uring::{opcode, types, IoUring};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -296,7 +296,18 @@ impl Reactor {
     }
 
     pub(crate) fn register(&self, fd: RawFd) -> io::Result<Arc<ScheduledIo>> {
-        let io = Arc::new(ScheduledIo::new());
+        self.register_with(fd, InitialReadiness::Optimistic)
+    }
+
+    /// [`register`](Self::register) with an explicit starting
+    /// readiness -- see [`InitialReadiness`] for the one case (a
+    /// connect still in flight) where the optimistic default is wrong.
+    pub(crate) fn register_with(
+        &self,
+        fd: RawFd,
+        initial: InitialReadiness,
+    ) -> io::Result<Arc<ScheduledIo>> {
+        let io = Arc::new(ScheduledIo::with_initial(initial));
         self.registry.lock().unwrap().insert(fd, io.clone());
         self.pending
             .lock()

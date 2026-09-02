@@ -138,17 +138,75 @@ pub(crate) struct ScheduledIo {
     write_waker: Mutex<Option<Waker>>,
 }
 
+/// How a freshly registered fd's readiness bits start out -- the one
+/// choice a backend's `register_with` takes from its caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InitialReadiness {
+    /// Both directions assumed ready until a `WouldBlock` proves
+    /// otherwise -- right for almost every fd (see
+    /// `ScheduledIo::with_initial`), and what plain `register` uses.
+    Optimistic,
+    /// Writable starts *cleared*: the first write-side wait blocks until
+    /// the backend actually reports the fd writable (or failed). For a
+    /// non-blocking `connect` that returned in-progress, this is the
+    /// only correct start -- see [`InitialReadiness::for_connect`].
+    WritePending,
+}
+
+impl InitialReadiness {
+    /// The right initial state for a socket whose non-blocking
+    /// `connect` just returned `outcome`.
+    ///
+    /// The optimistic default is *wrong* for a connect still in flight:
+    /// `TcpStream::connect` waits for writability and then reads
+    /// `SO_ERROR` to learn whether the connect succeeded, but with the
+    /// writable bit pre-set that check runs immediately, while the
+    /// handshake is still pending, sees no error yet, and hands back a
+    /// "connected" stream that isn't -- whatever the connect later
+    /// resolves to (including refused) is never observed by `connect`
+    /// itself. Linux masked this: a loopback `connect(2)` reports
+    /// `EINPROGRESS` but has already processed the handshake -- or the
+    /// peer's RST -- inside the call, so by the time the optimistic
+    /// check ran, `SO_ERROR` and writability were already settled; and
+    /// for a remote peer the first `send` in `SYN_SENT` returns `EAGAIN`,
+    /// so the reactor wait happened on the first write instead. On
+    /// Windows a loopback connect is genuinely still pending when
+    /// `connect` returns, and a refused one sat forever
+    /// (Rusty-Mill/rusty_mill#137).
+    ///
+    /// Starting write-pending is safe even if the connect completes
+    /// before or during registration: every backend reports an fd's
+    /// *current* state at registration time (`EPOLL_CTL_ADD` with
+    /// `EPOLLET`, `EV_ADD` with `EV_CLEAR`, `IORING_OP_POLL_ADD`, and an
+    /// `IOCTL_AFD_POLL` on an already-writable socket all complete
+    /// immediately), so the writable edge is never lost. Clearing the
+    /// bit *after* registration would not be safe under those
+    /// edge-triggered backends -- an edge delivered in between would be
+    /// wiped and never re-reported -- which is why this is a
+    /// registration-time choice rather than a `clear` call.
+    pub(crate) fn for_connect(outcome: super::socket::ConnectOutcome) -> Self {
+        match outcome {
+            super::socket::ConnectOutcome::Established => InitialReadiness::Optimistic,
+            super::socket::ConnectOutcome::InProgress => InitialReadiness::WritePending,
+        }
+    }
+}
+
 impl ScheduledIo {
-    fn new() -> Self {
+    fn with_initial(initial: InitialReadiness) -> Self {
         ScheduledIo {
-            // Optimistic: assume both directions are ready until a
-            // WouldBlock proves otherwise. This matches every real fd's
-            // actual state right after it's created (a listener can
-            // usually be written to immediately, a fresh connect result
-            // is unknown either way -- either is a safe first guess
-            // since a wrong guess just costs one wasted syscall attempt).
+            // Optimistic by default: assume both directions are ready
+            // until a WouldBlock proves otherwise. This matches every
+            // real fd's actual state right after it's created (a
+            // listener can usually be written to immediately; an
+            // already-established socket is writable), and a wrong
+            // guess just costs one wasted syscall attempt. The one fd
+            // where it's *not* a safe guess -- a socket whose connect is
+            // still in flight, where the wasted attempt is the `SO_ERROR`
+            // check that decides whether `connect` succeeded -- asks for
+            // `WritePending` instead; see `InitialReadiness::for_connect`.
             readable: AtomicBool::new(true),
-            writable: AtomicBool::new(true),
+            writable: AtomicBool::new(matches!(initial, InitialReadiness::Optimistic)),
             read_waker: Mutex::new(None),
             write_waker: Mutex::new(None),
         }
