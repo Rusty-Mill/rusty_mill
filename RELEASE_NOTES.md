@@ -13,6 +13,28 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## CI: unit tests for the affected-crates plan step
+**2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Added:** `.github/scripts/test_affected_crates.py` plus a `plan-tests`
+  CI job. The plan step decides what every other job runs on a PR, and the
+  Atlas review flagged that its nested-crate ownership and
+  reverse-dependency traversal had no regression tests. Thirteen cases
+  cover: a file inside a crate, outside every crate, the manifest itself,
+  a nested crate winning over its parent, `crates/foo` not claiming
+  `crates/foobar`, direct and transitive dependents, leaf changes not
+  pulling in dependencies, non-workspace dependencies ignored, cyclic
+  dev-dependency graphs terminating, sorted/deduplicated output, and a
+  member missing from the resolve graph.
+- **Changed:** `affected_crates.py`'s graph logic moved into
+  `affected_packages(metadata, changed_files)` with type hints; the CLI
+  contract (metadata path in argv, changed files on stdin, names on
+  stdout) is unchanged and was checked against the real workspace metadata
+  for four representative inputs.
+- Known limitation: the tests use synthetic metadata; the end-to-end check
+  that CI actually scopes to the right crates remains PR #68's round-trip
+  test.
+
 ## Docs: repository-map corrections from the Atlas review
 **2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 
