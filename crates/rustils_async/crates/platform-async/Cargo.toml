@@ -8,13 +8,11 @@ publish = false
 license = "MIT"
 
 [dependencies]
-# Pinned to a rev, not a branch, matching rustils' own D-12/D-15 pattern
-# for its pinned git dependencies (rusty_libc/rusty_win32): one source of
-# truth for the sync types this workspace builds an async layer above,
-# bumped deliberately rather than floating. `rustils` is a separate repo
-# outside this monorepo's consolidation scope, so this stays a pinned
-# git dependency rather than a path dependency.
-platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+# One source of truth for the sync types this workspace builds an async
+# layer above. Was a rev-pinned git dependency while `rustils` lived in
+# its own repo; it is a workspace sibling now (`crates/rustils`), so this
+# is a path dependency like every other in-tree crate.
+platform = { path = "../../../rustils/crates/platform" }
 
 [lints.rust]
 unsafe_code = "warn"

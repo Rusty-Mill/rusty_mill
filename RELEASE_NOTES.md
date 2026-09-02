@@ -13,6 +13,31 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Retire the last `rustils` git pins to path dependencies
+**2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Changed:** `rusty_tokio`, `rusty_tls`, and `rustils_async` (root manifest
+  plus `platform-async`, `platform-async-mock`, `platform-async-linux`,
+  `coreutils-async`) depended on `platform`/`platform-linux`/
+  `platform-bsd`/`platform-windows`/`platform-mock` through rev-pinned
+  `git` dependencies on `baileyrd/rustils`, left over from before
+  `rustils` joined this workspace. All twenty-one declarations are now
+  `path` dependencies on `crates/rustils/crates/<name>`, the same
+  retirement every other first-party pin got when its crate merged.
+- **Changed:** `Cargo.lock` drops thirteen git-sourced `platform*` entries
+  (three checkouts: two at 0.27.0, `rusty_tls`'s at 0.22.1). Each crate now
+  resolves to one in-tree 0.27.0 instance, so consumers share one
+  `platform::error::PlatformError` type instead of one per checkout.
+- **Verified:** `cargo check`, `cargo clippy -D warnings`, and `cargo test`
+  with `--all-features --all-targets` across the six consumers on Linux;
+  the Windows and BSD backends are compiled only on their targets, so the
+  Windows leg of CI is the evidence for `platform-windows` and nothing
+  here exercises `platform-bsd`.
+- Known limitation: `rusty_tls` moves from platform 0.22.1 to 0.27.0 in one
+  step. It compiles and its tests pass, which is the check the versioning
+  rule asks for, but any behavioural change in those five minor versions
+  reaches `rusty_tls` with this merge.
+
 ## Chore: drop committed Python bytecode, ignore it going forward
 **2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 
