@@ -397,8 +397,20 @@ where
     let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
 
+    // Name the crypto provider explicitly, the same way `rusty_tls` does
+    // for its own configs (see its `provider.rs`): under a workspace-wide
+    // `--all-features` build, Cargo unifies rustls's provider features
+    // across every crate in the graph, so this crate's `ring` ends up
+    // compiled in alongside `aws-lc-rs` (pulled in elsewhere in the
+    // workspace via `jsonwebtoken`/`reqwest`-style dependencies). With
+    // both present, `ServerConfig::builder()`'s ambient single-provider
+    // auto-detection is ambiguous and panics ("Could not automatically
+    // determine the process-level CryptoProvider"). An explicit provider
+    // sidesteps that without installing a process-global default.
     let config = Arc::new(
-        ServerConfig::builder()
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports rustls's default protocol versions")
             .with_no_client_auth()
             .with_single_cert(vec![leaf_cert.der().clone()], key_der)
             .expect("valid test cert/key"),
