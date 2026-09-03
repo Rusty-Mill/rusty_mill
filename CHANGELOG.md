@@ -20,6 +20,11 @@ Removed / Fixed / Security, newest first.
   and a `dependency-policy` CI job enforcing `ATLAS-RWC-0050`: no workspace
   member may resolve from a git source anywhere in the dependency graph
 ### Fixed
+- `crates/rustils/crates/platform-linux`'s `LinuxPty::spawn` set a
+  session's window size *after* spawning the hosted child, racing the
+  child's own reads of its terminal size against the resize ioctl;
+  surfaced as an intermittent `sessionmgr-pty` test flake on `main`
+  (#150). Reordered to size the pty before the child starts
 - `crates/rusty_term/l13`, `crates/rusty_font`, and `crates/rusty_gpu`
   resolved `rusty_lsp`/`rusty_simd` via a pinned git dependency instead of
   the workspace's own copy of those crates; switched to path dependencies

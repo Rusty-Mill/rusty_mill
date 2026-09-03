@@ -20,6 +20,17 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.27.1
+
+- **Fixed `LinuxPty::spawn`'s resize race (`platform-linux`).** The
+  window size was set *after* `spawn_attached` returned, so the child
+  could run (e.g. `stty size`) before the parent's `TIOCSWINSZ` ioctl
+  landed, observing the pty's just-opened all-zero size instead of the
+  one it was given. Surfaced as an intermittent `sessionmgr-pty` test
+  failure/flake on `main` (Rusty-Mill/rusty_mill#150). Fixed by setting
+  the size on the master before spawning the child; no public API
+  change, hence the patch-level bump.
+
 ### 0.27.0
 
 - **`Command::detach` + `Spawner::is_alive`/`is_zombie`

@@ -13,6 +13,26 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fix `sessionmgr-pty`'s intermittent size-reporting flake
+**2026-09-03** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
+
+- **Fixed:** `LinuxPty::spawn` (`crates/rustils/crates/platform-linux`) set
+  a session's pty window size *after* spawning the hosted child, so the
+  child could run (and, in `sessionmgr-pty`'s size-reporting test, read
+  its own terminal size via `stty size`) before the parent's
+  `TIOCSWINSZ` ioctl took effect — a race that had been intermittently
+  failing `sessionmgr-pty::tests::the_terminal_reports_the_size_it_was_given`
+  on `main`'s `test (ubuntu-latest)` CI job (silently absorbed by
+  nextest's retry budget on most runs, then hard-failing it outright on
+  [PR #149](https://github.com/Rusty-Mill/rusty_mill/pull/149)), tracked
+  as [#150](https://github.com/Rusty-Mill/rusty_mill/issues/150). Fixed
+  by setting the size on the pty master before the child is spawned,
+  closing the race. `platform`/`platform-linux`/`platform-windows`/
+  `platform-mock`/`platform-bsd`/`platform-parity` bumped `0.27.0` →
+  `0.27.1` (patch-level: no public API shape changed).
+
+---
+
 ## Dependency sovereignty policy (ADR-0002) and the last workspace-member git pins
 **2026-09-03** · branch [`claude/review-recommended-changes-8kepe6`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/review-recommended-changes-8kepe6)
 
