@@ -370,6 +370,18 @@ pub(crate) struct Reactor {
 unsafe impl Send for Reactor {}
 unsafe impl Sync for Reactor {}
 
+/// Surfaces both directions ready on a socket whose AFD poll could not
+/// be re-armed, so any current or future `readable()`/`writable()` wait
+/// on it passes straight through into the caller's own syscall instead
+/// of hanging forever with no completion ever coming to wake it -- the
+/// same reasoning [`Reactor::event_loop`]'s completion-failure branch
+/// already applies for the sibling failure mode, factored out so both
+/// call it identically.
+fn mark_orphaned(scheduled_io: &ScheduledIo) {
+    scheduled_io.mark_ready(Interest::Read);
+    scheduled_io.mark_ready(Interest::Write);
+}
+
 impl Reactor {
     pub(crate) fn new() -> io::Result<Reactor> {
         // SAFETY: `INVALID_HANDLE_VALUE`/null are the documented
@@ -483,8 +495,11 @@ impl Reactor {
                     // quiet forever.
                     guard.scheduled_io.mark_ready(Interest::Read);
                     guard.scheduled_io.mark_ready(Interest::Write);
+                    let scheduled_io = guard.scheduled_io.clone();
                     drop(guard);
-                    let _ = self.submit_poll(&state);
+                    if self.submit_poll(&state).is_err() {
+                        mark_orphaned(&scheduled_io);
+                    }
                     continue;
                 }
                 let events = guard.poll_info.handles[0].events;
@@ -498,12 +513,34 @@ impl Reactor {
                 if events & WRITABLE_FLAGS != 0 {
                     guard.scheduled_io.mark_ready(Interest::Write);
                 }
+                let scheduled_io = guard.scheduled_io.clone();
                 drop(guard);
                 // Level-triggered, like every other backend (see this
                 // crate's top-level reactor docs): immediately re-arm so
                 // a future readiness flip is still observed, rather than
                 // only ever firing once per registration.
-                let _ = self.submit_poll(&state);
+                //
+                // A failed re-arm used to be silently swallowed here
+                // (`let _ = self.submit_poll(...)`): with no poll ever
+                // outstanding for this socket again, no future
+                // completion can arrive for it, so `mark_ready` would
+                // never run again and any `readable()`/`writable()` wait
+                // registered after this point -- on this socket, by this
+                // task or a later one -- would hang forever rather than
+                // erroring, indistinguishable from a real stall until
+                // nextest's own timeout finally killed it. Seen as rare,
+                // unpredictable hangs (~600s each) across otherwise
+                // unrelated Windows async-I/O tests
+                // (Rusty-Mill/rusty_mill#152) -- a transient re-arm
+                // failure under concurrent socket churn is exactly the
+                // kind of one-in-sixty event that class of bug produces.
+                // `mark_orphaned` applies the same "surface both
+                // directions ready so the caller's own syscall discovers
+                // the truth" fix the completion-failure branch above
+                // already uses for the sibling failure mode.
+                if self.submit_poll(&state).is_err() {
+                    mark_orphaned(&scheduled_io);
+                }
             }
         }
     }
