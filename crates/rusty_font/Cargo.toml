@@ -10,12 +10,11 @@ keywords = ["font", "truetype", "rasterizer", "ttf", "no-std"]
 categories = ["text-processing", "no-std"]
 
 [dependencies]
-# rusty_wire/rusty_std are now siblings in this same workspace -- plain
-# path dependencies. rusty_simd remains a pinned git dep (a `git = "..."`
-# dependency clones only that one repository, so a sibling checkout
-# doesn't exist for any external consumer) until it's merged in too.
+# rusty_wire, rusty_simd and rusty_std are all workspace members now --
+# plain path dependencies, per ATLAS-RWC-0050 (same-workspace first-party
+# dependencies must resolve to the workspace copy, not a remote source).
 rusty_wire = { path = "../rusty_wire" }
-rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
+rusty_simd = { path = "../rusty_simd" }
 rusty_std = { path = "../rusty_std" }
 
 [features]

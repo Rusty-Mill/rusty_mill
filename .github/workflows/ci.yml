@@ -46,14 +46,34 @@ jobs:
       - run: cargo fmt --all -- --check
 
   plan-tests:
-    # affected_crates.py decides what every other job runs on a PR, so its
-    # ownership and reverse-dependency logic gets its own unit tests, run
-    # against synthetic metadata (no cargo needed).
+    # affected_crates.py decides what every other job runs on a PR, and
+    # check_workspace_deps.py enforces the dependency-sovereignty policy
+    # job below -- both get unit tests, run against synthetic metadata (no
+    # cargo needed), auto-discovered from this one `unittest discover`.
     name: plan script unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
+  dependency-policy:
+    # Enforces ADR-0002 (dependency sovereignty policy): a crate that is a
+    # workspace member must not also be pinned as a git dependency
+    # elsewhere in the workspace (ATLAS-RWC-0050). Runs unconditionally --
+    # every PR, not just ones the `plan` job's affected-crate filter
+    # selects -- because this is a workspace-wide manifest invariant, not
+    # a per-crate build/test concern.
+    name: dependency policy (workspace sovereignty)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dependency-policy
+          cache-targets: false
+      - run: cargo metadata --format-version=1 --all-features > /tmp/metadata.json
+      - run: python3 .github/scripts/check_workspace_deps.py /tmp/metadata.json
 
   plan:
     name: plan (affected crates)

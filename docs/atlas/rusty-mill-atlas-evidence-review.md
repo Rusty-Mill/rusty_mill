@@ -1,5 +1,14 @@
 # Rusty Mill → Atlas Evidence Review
 
+> **Historical record, not the current assessment.** This review is pinned
+> to Rusty Mill `06ca8669` and treats PR #131 as open; #131 has since
+> merged (`main`'s `cfea436`), and the workspace has grown to 183 members.
+> It remains useful evidence for the ATLAS-300 feature-additivity trigger
+> and the other findings below, but a reader checking current state should
+> use `docs/adr/0002-dependency-sovereignty-policy.md` and the workspace's
+> present commit, not this document's counts or its "currently open PR"
+> framing.
+
 Review date: 2026-09-02 (revision 2, corrected after source verification)
 Rusty Mill evidence revision: [`06ca8669f38f80291a63308de7563bfea43caab5`](https://github.com/Rusty-Mill/rusty_mill/tree/06ca8669f38f80291a63308de7563bfea43caab5)
 Atlas authority revision: [`390d6b0f217a7bdf425cc9ea82e81c27a649cd0c`](https://github.com/baileyrd/Atlas_Engineering_Standards_Library/tree/390d6b0f217a7bdf425cc9ea82e81c27a649cd0c)

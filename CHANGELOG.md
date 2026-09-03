@@ -9,6 +9,16 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `docs/adr/0002-dependency-sovereignty-policy.md` — a Sovereign /
+  Transitional / Adapter tier classification for crate external-dependency
+  posture, plus `.github/scripts/check_workspace_deps.py` (with unit tests)
+  and a `dependency-policy` CI job enforcing `ATLAS-RWC-0050`: no workspace
+  member may resolve from a git source anywhere in the dependency graph
+### Fixed
+- `crates/rusty_term/l13`, `crates/rusty_font`, and `crates/rusty_gpu`
+  resolved `rusty_lsp`/`rusty_simd` via a pinned git dependency instead of
+  the workspace's own copy of those crates; switched to path dependencies
+### Added
 - `.github/scripts/test_affected_crates.py` — unit tests for the CI plan
   step's ownership and reverse-dependency logic (nested crates, directory
   name prefixes, transitive dependents, external deps, cycles), run by a

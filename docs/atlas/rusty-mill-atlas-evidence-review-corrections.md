@@ -1,5 +1,9 @@
 # Corrections applied to the Rusty Mill → Atlas Evidence Review (revision 1 → revision 2)
 
+> **Historical record.** Kept for the corrections trail on the evidence
+> review it patches; see that document's own staleness note before citing
+> either as the current state of the repository.
+
 Every item below was verified on 2026-09-02 against Rusty Mill `06ca8669` (local checkout), the GitHub PR/branch state, and Atlas `390d6b0f` (shallow clone). All 39 Atlas requirement IDs cited in the assessment resolve to real headings in Atlas; none are mis-cited.
 
 ## A. Factual corrections (must fix before the assessment is used)
