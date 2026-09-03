@@ -18,3 +18,4 @@
 - [ ] No secrets/credentials committed or logged
 - [ ] External input validated at the boundary
 - [ ] Diff is focused (no unrelated changes bundled in)
+- [ ] Reviewed: independent approval, or self-review recorded in the description (no independent reviewer available)

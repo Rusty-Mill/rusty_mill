@@ -13,6 +13,26 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Review policy: author self-review when no independent reviewer is available
+**2026-09-03** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Changed:** `CONTRIBUTING.md` said "at least one approval required" while
+  every PR merged on 2026-09-02 was authored, self-merged, and unreviewed
+  by the same account, which the Atlas evidence review (`docs/atlas/`)
+  recorded as an unenforced policy. The policy now matches practice
+  honestly: an independent approval when a reviewer is reasonably
+  available, otherwise a recorded author self-review against the reviewer
+  checklist after CI is green. The PR description must say no independent
+  reviewer was available; self-review is never represented as independent
+  review (the distinction Atlas `ATLAS-GOV-REVIEW-0061`/`0064` draws).
+  Security-sensitive, irreversible, or ecosystem-breaking changes still
+  wait for an independent reviewer when one can be found.
+- **Changed:** the four PR templates gain a checklist line — "Reviewed:
+  independent approval, or self-review recorded in the description" — so
+  the record is made on every PR rather than remembered.
+- Known limitation: this is documented policy, not enforcement. `main`
+  is still unprotected, so nothing stops a merge that skips the record.
+
 ## Retire the last `rustils` git pins to path dependencies
 **2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 
