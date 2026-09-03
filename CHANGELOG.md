@@ -9,12 +9,22 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/rusty_meshed/crates/rusty-meshed-trace` — reverse-trace and
+  domain-maturity model for `rusty_meshed` (maturity ladder, scenario types,
+  pure `trace()` with fidelity verdict and worst-first bottlenecks, TOML
+  scenarios via `rusty_codec`, JSON via `rusty_json`, Markdown gap summary,
+  one shipped scenario); new workspace member
 - `docs/adr/0002-dependency-sovereignty-policy.md` — a Sovereign /
   Transitional / Adapter tier classification for crate external-dependency
   posture, plus `.github/scripts/check_workspace_deps.py` (with unit tests)
   and a `dependency-policy` CI job enforcing `ATLAS-RWC-0050`: no workspace
   member may resolve from a git source anywhere in the dependency graph
 ### Fixed
+- `crates/rustils/crates/platform-linux`'s `LinuxPty::spawn` set a
+  session's window size *after* spawning the hosted child, racing the
+  child's own reads of its terminal size against the resize ioctl;
+  surfaced as an intermittent `sessionmgr-pty` test flake on `main`
+  (#150). Reordered to size the pty before the child starts
 - `crates/rusty_term/l13`, `crates/rusty_font`, and `crates/rusty_gpu`
   resolved `rusty_lsp`/`rusty_simd` via a pinned git dependency instead of
   the workspace's own copy of those crates; switched to path dependencies

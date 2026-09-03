@@ -39,6 +39,14 @@ impl Pty for LinuxPty {
 
         let resolved = crate::LinuxSpawner.resolve(&cmd.program)?;
         let (master, slave_path) = syspty::open_pty_pair()?;
+        // Sized before the child exists, not after: `spawn_attached`'s
+        // `posix_spawn` returns as soon as the child is *started*, not
+        // once it has run, so a resize placed after it races the child's
+        // own reads of its window size (e.g. `stty size`) against this
+        // ioctl. The size ends up on the same underlying tty regardless
+        // of whether it is set via the master or slave fd, so there is no
+        // ordering requirement pulling this the other way.
+        syspty::resize(&master, size)?;
         let pid = syspty::spawn_attached(
             &resolved,
             &cmd.program,
@@ -47,7 +55,6 @@ impl Pty for LinuxPty {
             &cmd.env,
             &slave_path,
         )?;
-        syspty::resize(&master, size)?;
 
         // The child is its own session leader, so its pgid == its own
         // pid — the same target `GroupSpec::NewGroup` gets in the plain
