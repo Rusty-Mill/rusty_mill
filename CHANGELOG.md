@@ -9,6 +9,11 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/rusty_meshed/crates/rusty-meshed-trace` — reverse-trace and
+  domain-maturity model for `rusty_meshed` (maturity ladder, scenario types,
+  pure `trace()` with fidelity verdict and worst-first bottlenecks, TOML
+  scenarios via `rusty_codec`, JSON via `rusty_json`, Markdown gap summary,
+  one shipped scenario); new workspace member
 - `docs/adr/0002-dependency-sovereignty-policy.md` — a Sovereign /
   Transitional / Adapter tier classification for crate external-dependency
   posture, plus `.github/scripts/check_workspace_deps.py` (with unit tests)
