@@ -60,6 +60,7 @@ members = [
     "crates/rusty_err",
     "crates/rusty_err/derive",
     "crates/rusty_request",
+    "crates/rusty_base64",
     "crates/rusty_retry",
     "crates/rusty_rsa",
     "crates/rusty_sqlite",

@@ -9,6 +9,18 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty_base64` — hand-rolled, dependency-free Base64 (RFC 4648, standard
+  and URL-safe alphabets, encode/decode) extracted from
+  `rusty_oauth::encoding::base64`, closing issue #119. `rusty_oauth` now
+  depends on it too (dogfooding); `rusty_acp`, `rusty-mcp`, and `rusty_a2a`
+  swapped their external `base64` dependency for it after their exact
+  call-site needs were verified. Chunking uses `chunks_exact`/`remainder`
+  rather than `rusty_oauth`'s original `slice::as_chunks`, which is not
+  stable at `rusty_acp`'s `rust-version = "1.86"` floor (confirmed against
+  a real `+1.86` toolchain before merging). `rusty_croc`, `adk-a2a`,
+  `agentgateway-auth`, and `agentgateway` still depend on external
+  `base64` — out of this issue's verified scope, left for separate
+  follow-up.
 - `crates/rusty_meshed/crates/rusty-meshed-trace` — reverse-trace and
   domain-maturity model for `rusty_meshed` (maturity ladder, scenario types,
   pure `trace()` with fidelity verdict and worst-first bottlenecks, TOML

@@ -13,6 +13,40 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Extract `rusty_base64`; close issue #119
+**2026-09-03** · branch [`docs/rusty-base64-extraction-issue-119`](https://github.com/Rusty-Mill/rusty_mill/tree/docs/rusty-base64-extraction-issue-119)
+
+- **Added:** `rusty_base64` — `rusty_oauth::encoding::base64`'s complete
+  surface (encode/decode, standard and URL-safe alphabets) extracted into
+  its own crate, per [issue #119](https://github.com/Rusty-Mill/rusty_mill/issues/119).
+  `rusty_request`'s own `base64.rs` was ruled out as a base: it's private,
+  encode-only, and standard-alphabet-only, and extending it would have
+  meant building a second base64 crate when `rusty_oauth`'s already
+  covered the need.
+- **Changed:** `rusty_oauth` now depends on `rusty_base64` too
+  (dogfooding) instead of keeping its own copy — its public
+  `encoding::base64::*` path is unchanged, so none of its own call sites
+  needed edits. `rusty_acp`, `rusty-mcp`, and `rusty_a2a` swapped their
+  external `base64` crate dependency for `rusty_base64` after checking
+  each call site's exact API needs (standard vs. URL-safe, padded vs.
+  unpadded, encode vs. decode) rather than assuming a blind swap would fit
+  — the same per-crate verification issue #119 itself asked for.
+- **Fixed:** the extraction rewrites `encode_with`/`decode_with`'s
+  chunking from `slice::as_chunks` (`rusty_oauth`'s original) to
+  `chunks_exact`/`remainder`. `as_chunks` is not yet stable at
+  `rusty_acp`'s own `rust-version = "1.86"` floor — confirmed against a
+  real `+1.86` toolchain before merging, since `rusty_acp`'s own CI
+  convention runs `cargo +1.86 test` and this would have silently broken
+  it. Behaviorally identical (verified via the original RFC 4648 test
+  vectors under both a `+1.86` and the workspace's default toolchain).
+- Known limitation: `rusty_croc`, `adk-a2a`, `agentgateway-auth`, and
+  `agentgateway` still depend on the external `base64` crate. They weren't
+  in issue #119's verified evidence (filed before three of them joined the
+  workspace) and weren't checked here — left for separate follow-up rather
+  than swapped without per-call-site verification.
+
+---
+
 ## Fix `sessionmgr-pty`'s intermittent size-reporting flake
 **2026-09-03** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
 
