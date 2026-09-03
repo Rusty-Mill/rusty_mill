@@ -388,6 +388,7 @@ fn push_spring(springs: &mut Vec<Spring>, points: &[RigidBody], a: usize, b: usi
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::body::CAR_HALF_EXTENTS;
 
     /// `RB-PHYSICS-001-FR-050`'s own root-cause proof: a ball straddling two
     /// net-point-like bodies, exactly left-right symmetric, so the true
@@ -710,7 +711,7 @@ mod tests {
             5,
             5,
         );
-        let mut car = RigidBody::car_box(Vec3::new(60.0, 40.0, 20.0), 1.0, start);
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 1.0, start);
         car.linear_velocity = Vec3::new(0.0, car_speed, 0.0);
         let gravity = Vec3::ZERO;
 
@@ -759,11 +760,7 @@ mod tests {
         );
         let mut ball = RigidBody::sphere(93.15, 1.0, start + Vec3::new(-400.0, 0.0, 0.0));
         ball.linear_velocity = Vec3::new(0.0, speed, 0.0);
-        let mut car = RigidBody::car_box(
-            Vec3::new(60.0, 40.0, 20.0),
-            1.0,
-            start + Vec3::new(400.0, 0.0, 0.0),
-        );
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 1.0, start + Vec3::new(400.0, 0.0, 0.0));
         car.linear_velocity = Vec3::new(0.0, speed, 0.0);
         let gravity = Vec3::ZERO;
 

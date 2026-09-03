@@ -977,6 +977,7 @@ pub fn simulate_recorded(mut world: PhysicsWorld, recorded: &[PhysicsFrame]) -> 
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::body::CAR_HALF_EXTENTS;
     use rb_domain::Quat;
 
     fn flat_ground() -> StaticPlane {
@@ -1475,11 +1476,7 @@ mod tests {
         // identically to the sphere path — same semi-implicit Euler
         // kinematics, independent of shape.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 1000.0));
-        let car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
-            180.0,
-            Vec3::new(0.0, 0.0, 1000.0),
-        );
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, Vec3::new(0.0, 0.0, 1000.0));
         let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
         let dt: f32 = 1.0 / 240.0;
         let t: f32 = 0.2;
@@ -1500,11 +1497,7 @@ mod tests {
     #[test]
     fn dropped_car_settles_flat_on_the_ground_without_tipping_over() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
-            180.0,
-            Vec3::new(0.0, 0.0, 100.0),
-        );
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, Vec3::new(0.0, 0.0, 100.0));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -1517,8 +1510,9 @@ mod tests {
         }
         let car_after = *world.cars.first().expect("car should still be present");
         assert!(
-            (car_after.position.z - 18.0).abs() < 0.5,
-            "expected the car to settle resting on its 18-unit half-height, got z={}",
+            (car_after.position.z - CAR_HALF_EXTENTS.z).abs() < 0.5,
+            "expected the car to settle resting on its own half-height ({}), got z={}",
+            CAR_HALF_EXTENTS.z,
             car_after.position.z
         );
         assert!(
@@ -1538,11 +1532,7 @@ mod tests {
     #[test]
     fn car_frame_reports_player_id_zero() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
-            180.0,
-            Vec3::new(0.0, 0.0, 18.0),
-        );
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, Vec3::new(0.0, 0.0, 18.0));
         let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
         let frame = world.frame();
         assert_eq!(frame.cars.len(), 1);
@@ -1557,7 +1547,7 @@ mod tests {
         // `PhysicsWorld::step` now resolves the two dynamic bodies against
         // each other, not just each against the ground.
         let car_position = Vec3::new(300.0, 0.0, 100.0);
-        let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let car_half_extents = CAR_HALF_EXTENTS;
         let mut car = RigidBody::car_box(car_half_extents, 180.0, car_position);
         car.restitution = 0.5;
 
@@ -1599,14 +1589,14 @@ mod tests {
     }
 
     fn some_car(position: Vec3) -> RigidBody {
-        RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, position)
+        RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, position)
     }
 
     #[test]
     fn with_car_called_twice_builds_a_two_car_scene() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
         let world = PhysicsWorld::new(ball, flat_ground())
-            .with_car(some_car(Vec3::new(0.0, 0.0, 18.0)))
+            .with_car(some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z)))
             .with_car(some_car(Vec3::new(500.0, 0.0, 18.0)));
         assert_eq!(world.cars.len(), 2);
     }
@@ -1615,7 +1605,7 @@ mod tests {
     fn frame_assigns_sequential_player_ids_across_multiple_cars() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
         let world = PhysicsWorld::new(ball, flat_ground())
-            .with_car(some_car(Vec3::new(0.0, 0.0, 18.0)))
+            .with_car(some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z)))
             .with_car(some_car(Vec3::new(500.0, 0.0, 18.0)))
             .with_car(some_car(Vec3::new(1000.0, 0.0, 18.0)));
         let frame = world.frame();
@@ -1687,7 +1677,7 @@ mod tests {
         // drawn from). All three bodies float clear of the ground with
         // gravity zeroed, isolating the three-body contact this test
         // checks.
-        let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let car_half_extents = CAR_HALF_EXTENTS;
         let ball_radius = 93.15;
         let gap = car_half_extents.x + ball_radius;
 
@@ -1738,7 +1728,7 @@ mod tests {
     #[test]
     fn a_car_with_throttle_input_drives_forward_across_the_ground() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
         world.set_car_input(
             0,
@@ -1786,7 +1776,7 @@ mod tests {
             world.step(dt);
         }
         let settled = world.cars[0];
-        assert!((settled.position.z - 18.0).abs() < 0.5);
+        assert!((settled.position.z - CAR_HALF_EXTENTS.z).abs() < 0.5);
         assert!(settled.linear_velocity.length() < 1.0);
     }
 
@@ -1828,7 +1818,7 @@ mod tests {
     #[test]
     fn a_new_car_starts_with_a_full_boost_tank() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         let world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
         assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
     }
@@ -1843,7 +1833,7 @@ mod tests {
         // settles under this port's solver — see `resting_ball_stays_at_rest`
         // — which would otherwise flicker `on_ground` off for a step).
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.friction = 0.9;
         car.restitution = 0.0;
         let ground = StaticPlane {
@@ -1889,7 +1879,7 @@ mod tests {
         // rather than in isolation.
         let run = |handbrake: bool| -> f32 {
             let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-            let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+            let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
             car.linear_velocity = Vec3::new(0.0, 1000.0, 0.0);
             // Zeroed so the car stays in continuous ground contact frame to
             // frame — a bouncy resting contact (this port's known
@@ -1929,7 +1919,7 @@ mod tests {
     #[test]
     fn a_car_with_jump_input_leaves_the_ground() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -1965,7 +1955,7 @@ mod tests {
         // confirm it settles instead of being relaunched every time it
         // touches back down.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -1993,7 +1983,7 @@ mod tests {
 
         let settled = world.cars[0];
         assert!(
-            (settled.position.z - 18.0).abs() < 1.0,
+            (settled.position.z - CAR_HALF_EXTENTS.z).abs() < 1.0,
             "expected the car to land and settle near its resting height instead of being \
              relaunched, got z={}",
             settled.position.z
@@ -2037,7 +2027,7 @@ mod tests {
         // air control must stay a no-op there, or a car resting with
         // stray pitch/yaw/roll input would spuriously spin in place.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2069,7 +2059,7 @@ mod tests {
     #[test]
     fn double_jump_after_a_ground_jump_gives_a_second_upward_kick() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2128,7 +2118,7 @@ mod tests {
         // re-pressing jump again while still airborne must not fire a third
         // impulse — it should only become available again after landing.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2441,7 +2431,7 @@ mod tests {
     #[test]
     fn a_car_dodges_forward_after_a_ground_jump_when_pitched_in_the_air() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2545,7 +2535,7 @@ mod tests {
     fn a_held_ground_jump_reaches_greater_height_than_a_tapped_one() {
         let peak_height = |held: bool| -> f32 {
             let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-            let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+            let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
             car.restitution = 0.0;
             let ground = StaticPlane {
                 restitution: 0.0,
@@ -2588,7 +2578,7 @@ mod tests {
         // acceleration into a later double jump — variable height is
         // scoped to the ground jump only.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2640,7 +2630,7 @@ mod tests {
     #[test]
     fn a_second_jump_press_cancels_a_dodges_spin_in_a_live_world() {
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2706,7 +2696,7 @@ mod tests {
         // cancelable-flip flag doesn't leak past landing and a later,
         // unrelated plain double jump into a spurious flip-cancel.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, 18.0));
+        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
@@ -2993,7 +2983,7 @@ mod tests {
         );
 
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-5000.0, 0.0, 1000.0));
-        let car_half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let car_half_extents = CAR_HALF_EXTENTS;
         let car = some_car(Vec3::new(900.0, 0.0, car_half_extents.z));
         let mut world = PhysicsWorld::new(ball, floor)
             .with_car(car)

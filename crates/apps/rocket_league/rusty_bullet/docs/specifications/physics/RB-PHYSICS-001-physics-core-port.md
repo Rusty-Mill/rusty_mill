@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.78.0
+- Version: 0.79.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5057,6 +5057,90 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     workspace-wide). The one manual end-to-end run against the real
     capture is still outstanding — numbers to be recorded in Change
     history once it happens.
+- `RB-PHYSICS-001-FR-078` (car hitbox calibration, implemented): retunes
+  every existing `car_box` call site across this crate's own test suite
+  that models a real car to `body::CAR_HALF_EXTENTS` — the confirmed real
+  Octane hitbox `FR-076` introduced but deliberately left every
+  pre-existing call site on the old placeholder (`Vec3::new(60.0, 30.0,
+  18.0)`, ~44% narrower on its Y half-extent than the real value) — rather
+  than leaving that discrepancy indefinitely deferred to "some future
+  calibration FR."
+  - **Scope and approach.** Every `car_box`/`some_car`/`car_at_origin`/
+    `stationary_car`/`car()`-style test helper across `body.rs`,
+    `collision.rs`, `drive.rs`, `net.rs`, `solver.rs`, and `world.rs` that
+    was building a *real car* stand-in (the literal old placeholder, or a
+    local variable initialized to it) was switched to
+    `body::CAR_HALF_EXTENTS` (via `RigidBody::standard_car` where mass was
+    already `180.0`, or `car_box(CAR_HALF_EXTENTS, ...)` directly
+    otherwise). A shape deliberately *not* modeling a real car — a unit
+    cube, a symmetric pair of identical boxes for a tie-break or
+    box-vs-box test, a tiny probe box for goal-window/bounded-wall
+    corner-count tests — was left untouched, since it was never
+    representing this hitbox in the first place and changing it would add
+    risk for no calibration benefit. Rather than manually recomputing
+    every downstream hardcoded expected value by hand (error-prone given
+    an anisotropic, non-uniform shape change — X changed ~0.4%, Y ~44.5%,
+    Z ~7.4%, unlike `FR-036`'s single-scalar ball-radius substitution),
+    each test's own duplicate-literal dependency on the exact half-extents
+    was refactored to read the actual half-extents used to construct that
+    test's own car (a local variable or `CAR_HALF_EXTENTS` directly)
+    rather than a hardcoded duplicate — the same "don't duplicate a
+    constant as a bare literal" fix applied throughout this port's own
+    history, which also makes the fix verifiable by construction rather
+    than by manually re-deriving trigonometry. The empirical,
+    test-driven-first approach this FR actually used: swap the
+    constructor, run the suite, and let any resulting failure name exactly
+    which assertion needs the same treatment, rather than trying to
+    predict every affected assertion by static reading alone.
+  - **What actually needed a real recompute, not just a variable
+    reference.** Only assertions checking a car's *resting height on flat
+    ground* (`position.z` settling near the car's own half-extent) were
+    genuinely dependent on the old exact value in a way a variable
+    reference alone couldn't paper over, since several of those literals
+    (`18.0`) were the *assertion's own threshold*, not a value flowing
+    into car construction — these were switched to `CAR_HALF_EXTENTS.z`
+    (`19.32955`, not `18.0`). Two solver-level tests
+    (`resolve_dynamic_manifolds_relaxes_a_shared_bodys_impulse_by_its_own_contact_degree`
+    and its sibling FR-030 test) carry doc comments citing specific
+    measured velocities (`~89.5`, `~32` units/s) for a symmetric ball-vs-
+    two-cars pinch scenario; these were re-measured after the swap and
+    confirmed unchanged (`~32.0` for the shared-relaxation figure) — a
+    purely 1D, mass/velocity-driven collision along a fixed contact
+    normal has no dependency on the absolute half-extent value the
+    contact happens to occur at, only on mass and velocity, so no comment
+    correction was needed there. `ball_center_embedded_in_car_pushes_out_
+    the_nearest_face`'s own doc comment (margin figures for each face)
+    was corrected to the real recomputed margins even though the
+    underlying assertion (which face wins) still held either way.
+  - **Non-goals (this requirement).** Does not touch car
+    restitution/friction (still the generic `0.5`/`0.5` placeholder per
+    `FR-063`'s own finding that no single real value exists to adopt).
+    Does not touch `net.rs`'s two car-in-net tests' mass (`1.0`, a
+    deliberate testing choice unrelated to the real `CAR_MASS`, left
+    alone) — only their half-extents were corrected. Does not change
+    `RigidBody::car_box`'s own generic signature or any production
+    (non-test) call site beyond `standard_car` itself, which already used
+    the corrected value since `FR-076`. Does not produce a new fidelity
+    number or feed into `FR-005`'s calibration — this is a test-suite
+    hygiene correction, not new real-data-driven physics.
+  - **Acceptance criteria.** No `car_box`/`some_car`-style test helper
+    modeling a real car anywhere in `rb_physics_bullet` constructs one
+    from the old placeholder half-extents (`Vec3::new(60.0, 30.0,
+    18.0)`) — the only surviving literal reference to it is the
+    intentional negative-comparison test
+    (`car_half_extents_deliberately_differs_from_the_crates_own_test_placeholder`)
+    and historical doc-comment citations. All 335 pre-existing
+    `rb_physics_bullet` tests still pass (no test count change — a
+    constant-correctness change with no new behavior to characterize,
+    matching `FR-036`'s own precedent); full workspace `fmt`/`clippy`/
+    `test` green (388 tests workspace-wide).
+  - **Verification plan.** No new tests, for the same reason `FR-036`
+    added none: the fix is proven by the existing suite passing unchanged
+    once the switch is made, plus the two solver-level velocity figures
+    independently re-measured and confirmed stable. `grep -rn "60.0, 30.0,
+    18.0"` across `crates/rb_physics_bullet/src/*.rs`, run after the
+    change, confirmed only the four intentional/historical references
+    remain (the negative-comparison test and three doc comments).
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6543,6 +6627,26 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.79.0 (2026-09-03): FR-078 implemented — retuned every existing
+  `car_box`-style test helper across `rb_physics_bullet` that models a
+  real car (`body.rs`/`collision.rs`/`drive.rs`/`net.rs`/`solver.rs`/
+  `world.rs`) from the old placeholder half-extents (`Vec3::new(60.0,
+  30.0, 18.0)`) to the confirmed real `body::CAR_HALF_EXTENTS`
+  `RB-PHYSICS-001-FR-076` introduced but deliberately left every
+  pre-existing call site untouched. Downstream assertions that duplicated
+  the exact half-extents as a bare literal were refactored to reference
+  the actual half-extents used to construct that test's own car instead,
+  rather than hand-recomputing each one; the small number of assertions
+  genuinely dependent on the exact resting-height value (`position.z`
+  settling on the car's own half-extent) were switched to
+  `CAR_HALF_EXTENTS.z`. Two solver-level tests' doc comments citing
+  specific measured velocities for a symmetric ball-vs-two-cars pinch
+  were re-measured and confirmed unchanged (a purely 1D, mass/velocity-
+  driven collision has no dependency on the absolute half-extent value).
+  No new tests (a constant-correctness change with no new behavior to
+  characterize, matching `FR-036`'s own precedent) — all 335 pre-existing
+  `rb_physics_bullet` tests pass unchanged; full workspace `fmt`/
+  `clippy`/`test` green (388 tests workspace-wide).
 - 0.78.0 (2026-09-03): FR-077 implemented (pending a real-capture run) —
   `rb_verify_cli` gained `score_capture_against_candidate`, a composition
   path that seeds a `PhysicsWorld` from a capture's own first grounded,

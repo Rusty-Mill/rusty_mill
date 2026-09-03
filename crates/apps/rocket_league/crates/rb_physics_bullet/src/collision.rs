@@ -1269,6 +1269,7 @@ pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::body::CAR_HALF_EXTENTS;
 
     fn ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
@@ -1353,7 +1354,7 @@ mod tests {
     }
 
     fn stationary_car() -> RigidBody {
-        RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, Vec3::ZERO)
+        RigidBody::standard_car(Vec3::ZERO)
     }
 
     #[test]
@@ -1365,7 +1366,7 @@ mod tests {
     #[test]
     fn ball_touching_car_face_has_zero_penetration() {
         // The ball's surface exactly meets the car's +X face.
-        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 93.15, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 93.15, 0.0, 0.0));
         let contacts = contacts_between(&ball, &stationary_car());
         assert_eq!(contacts.len(), 1);
         assert!(contacts[0].penetration_depth.abs() < 1e-4);
@@ -1374,7 +1375,7 @@ mod tests {
 
     #[test]
     fn ball_overlapping_car_face_has_positive_penetration() {
-        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 50.0, 0.0, 0.0));
         let contacts = contacts_between(&ball, &stationary_car());
         assert!((contacts[0].penetration_depth - (93.15 - 50.0)).abs() < 1e-4);
     }
@@ -1382,8 +1383,10 @@ mod tests {
     #[test]
     fn ball_center_embedded_in_car_pushes_out_the_nearest_face() {
         // Ball center sits inside the car box, closest to the +Z (roof)
-        // face (margin 2.0) rather than +X (margin 40.0) or +Y (margin
-        // 10.0) — the deep-penetration branch must pick +Z.
+        // face (margin ~3.33) rather than +X (margin ~40.25) or +Y (margin
+        // ~23.35) — the deep-penetration branch must pick +Z. Margins
+        // recomputed for the real `CAR_HALF_EXTENTS` (RB-PHYSICS-001-FR-078);
+        // +Z stays the smallest either way.
         let ball = RigidBody::sphere(5.0, 1.0, Vec3::new(20.0, 20.0, 16.0));
         let contacts = contacts_between(&ball, &stationary_car());
         assert!((contacts[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
@@ -1414,7 +1417,7 @@ mod tests {
 
     #[test]
     fn sphere_vs_box_contact_is_antisymmetric_in_argument_order() {
-        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0));
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 50.0, 0.0, 0.0));
         let car = stationary_car();
         let ball_car = &contacts_between(&ball, &car)[0];
         let car_ball = &contacts_between(&car, &ball)[0];
@@ -1602,11 +1605,7 @@ mod tests {
             .normalize()
             .unwrap();
         let deeply_overlapping_position = pipe.axis_point + bisector * pipe.radius;
-        let car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
-            180.0,
-            deeply_overlapping_position,
-        );
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, deeply_overlapping_position);
         let contacts = contacts_vs_quarter_pipe(&car, &pipe);
         assert!(
             !contacts.is_empty(),
@@ -1636,11 +1635,7 @@ mod tests {
         let bisector = ((pipe.sector_start + pipe.sector_end) * 0.5)
             .normalize()
             .unwrap();
-        let car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
-            180.0,
-            pipe.axis_point - bisector * 1000.0,
-        );
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, pipe.axis_point - bisector * 1000.0);
         assert!(contacts_vs_quarter_pipe(&car, &pipe).is_empty());
     }
 
@@ -1672,7 +1667,7 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
         );
 
-        let half_extents = Vec3::new(60.0, 30.0, 18.0);
+        let half_extents = CAR_HALF_EXTENTS;
         let position = Vec3::new(900.0, 0.0, half_extents.z);
 
         let dist_from_axis = |p: Vec3| -> f32 {
@@ -1812,11 +1807,7 @@ mod tests {
         let fillet = floor_two_walls_corner();
         let toward_corner = Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
         let deeply_overlapping_position = fillet.center + toward_corner * fillet.radius;
-        let car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
-            180.0,
-            deeply_overlapping_position,
-        );
+        let car = RigidBody::car_box(CAR_HALF_EXTENTS, 180.0, deeply_overlapping_position);
         let contacts = contacts_vs_corner_fillet(&car, &fillet);
         assert!(
             !contacts.is_empty(),
@@ -1841,7 +1832,7 @@ mod tests {
         let fillet = floor_two_walls_corner();
         let away_from_corner = -Vec3::new(1.0, 1.0, -1.0).normalize().unwrap();
         let car = RigidBody::car_box(
-            Vec3::new(60.0, 30.0, 18.0),
+            CAR_HALF_EXTENTS,
             180.0,
             fillet.center + away_from_corner * 1000.0,
         );
