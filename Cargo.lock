@@ -9364,7 +9364,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
  "chrono",
  "criterion 0.8.2",
  "eventsource-stream",
@@ -9373,6 +9372,7 @@ dependencies = [
  "metrics-util",
  "redis",
  "reqwest 0.13.4",
+ "rusty_base64",
  "rusty_retry",
  "serde",
  "serde_json",
@@ -9529,7 +9529,6 @@ name = "rusty-mcp"
 version = "0.5.0"
 dependencies = [
  "axum 0.8.9",
- "base64 0.22.1",
  "clap",
  "http",
  "jsonwebtoken 11.0.0",
@@ -9541,6 +9540,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp 3.1.4",
  "rsa",
+ "rusty_base64",
  "rusty_url",
  "schemars 1.2.2",
  "serde",
@@ -9869,7 +9869,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.7.9",
- "base64 0.22.1",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
@@ -9880,6 +9879,7 @@ dependencies = [
  "prost",
  "prost-types",
  "reqwest 0.12.28",
+ "rusty_base64",
  "rusty_uuid",
  "serde",
  "serde_json",
@@ -9917,6 +9917,10 @@ dependencies = [
  "rusty_std",
  "rusty_win32",
 ]
+
+[[package]]
+name = "rusty_base64"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_boot"
@@ -10135,6 +10139,7 @@ dependencies = [
 name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
+ "rusty_base64",
  "rusty_rsa",
 ]
 

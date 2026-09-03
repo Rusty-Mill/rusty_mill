@@ -65,25 +65,19 @@ impl CursorKind {
 
 /// Encode a cursor naming `key` in the `kind` sequence.
 pub fn encode_cursor(kind: CursorKind, key: &str) -> String {
-    use base64::Engine as _;
-
     let mut payload = vec![CURSOR_VERSION, kind.tag()];
     payload.extend_from_slice(key.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    rusty_base64::encode_url_safe_no_pad(&payload)
 }
 
 /// Decode a cursor, rejecting anything this server did not issue for `kind`.
 pub fn decode_cursor(kind: CursorKind, cursor: &str) -> Result<String, ErrorData> {
-    use base64::Engine as _;
-
     // Deliberately one message for every failure. Which byte was wrong is of no
     // use to a caller and only helps someone probing the encoding.
     let invalid =
         || ErrorData::invalid_params("the pagination cursor is not one this server issued", None);
 
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| invalid())?;
+    let bytes = rusty_base64::decode_url_safe(cursor).map_err(|_| invalid())?;
 
     let [version, tag, key @ ..] = bytes.as_slice() else {
         return Err(invalid());

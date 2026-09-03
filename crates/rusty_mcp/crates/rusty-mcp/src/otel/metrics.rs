@@ -413,10 +413,7 @@ fn header<ReqBody>(request: &Request<ReqBody>, name: &str) -> Option<String> {
         return Some(raw.to_string());
     };
 
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
+    let bytes = rusty_base64::decode_standard(encoded).ok()?;
     String::from_utf8(bytes).ok()
 }
 
@@ -499,8 +496,7 @@ mod tests {
 
     #[test]
     fn a_base64_wrapped_header_is_decoded() {
-        use base64::Engine as _;
-        let encoded = base64::engine::general_purpose::STANDARD.encode("a prompt");
+        let encoded = rusty_base64::encode_standard(b"a prompt");
         let wrapped = format!("{BASE64_PREFIX}{encoded}{BASE64_SUFFIX}");
 
         let service = layer_with_names(&["a prompt"]);

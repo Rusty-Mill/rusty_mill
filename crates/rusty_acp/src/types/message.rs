@@ -309,11 +309,10 @@ impl MessagePart {
         content_type: impl Into<String>,
         bytes: impl AsRef<[u8]>,
     ) -> Self {
-        use base64::Engine as _;
         Self {
             name: Some(name.into()),
             content_type: content_type.into(),
-            content: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            content: Some(rusty_base64::encode_standard(bytes.as_ref())),
             content_encoding: Some(ContentEncoding::Base64),
             ..Default::default()
         }
@@ -341,8 +340,7 @@ impl MessagePart {
         match self.encoding() {
             ContentEncoding::Plain => Ok(Some(content.as_bytes().to_vec())),
             ContentEncoding::Base64 => {
-                use base64::Engine as _;
-                base64::engine::general_purpose::STANDARD.decode(content).map(Some).map_err(|err| {
+                rusty_base64::decode_standard(content).map(Some).map_err(|err| {
                     Error::invalid_input(format!(
                         "part declares `base64` encoding but its content is not valid \
                              base64: {err}"

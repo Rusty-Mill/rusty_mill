@@ -13,8 +13,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 rusty_uuid = { path = "../rusty_uuid" }
+rusty_base64 = { path = "../rusty_base64" }
 thiserror = "1"
-base64 = "0.22"
 
 # client feature
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }

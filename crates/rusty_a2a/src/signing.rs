@@ -44,8 +44,6 @@
 //! KMS, or HSM in one of those formats, decode it with a crate suited to
 //! that (e.g. `pkcs8`) and hand this module the raw scalar/seed bytes.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use signature::{Signer, Verifier};
 
@@ -57,7 +55,7 @@ pub enum SigningError {
     #[error("failed to serialize agent card: {0}")]
     Json(#[from] serde_json::Error),
     #[error("signature or protected header is not valid base64url: {0}")]
-    InvalidBase64(#[from] base64::DecodeError),
+    InvalidBase64(#[from] rusty_base64::DecodeError),
     #[error("protected header is not a valid JSON object")]
     InvalidProtectedHeader,
     #[error("protected header's \"alg\" does not match the verifying key's algorithm")]
@@ -237,12 +235,12 @@ pub fn sign_agent_card(card: &AgentCard, key: &SigningKey, kid: Option<&str>) ->
     header.insert("typ".to_string(), json!("JOSE"));
     let kid = kid.map(str::to_string).unwrap_or_else(|| default_kid(key));
     header.insert("kid".to_string(), json!(kid));
-    let protected_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Value::Object(header))?);
+    let protected_b64 = rusty_base64::encode_url_safe_no_pad(&serde_json::to_vec(&Value::Object(header))?);
 
-    let payload_b64 = URL_SAFE_NO_PAD.encode(canonical_json(card)?);
+    let payload_b64 = rusty_base64::encode_url_safe_no_pad(canonical_json(card)?.as_bytes());
     let signing_input = format!("{protected_b64}.{payload_b64}");
 
-    let signature_b64 = URL_SAFE_NO_PAD.encode(key.sign(signing_input.as_bytes()));
+    let signature_b64 = rusty_base64::encode_url_safe_no_pad(&key.sign(signing_input.as_bytes()));
 
     Ok(AgentCardSignature {
         protected: protected_b64,
@@ -259,7 +257,7 @@ fn default_kid(key: &SigningKey) -> String {
         VerifyingKey::Es256(vk) => vk.to_sec1_bytes().to_vec(),
         VerifyingKey::Ed25519(vk) => vk.to_bytes().to_vec(),
     };
-    URL_SAFE_NO_PAD.encode(public_bytes)
+    rusty_base64::encode_url_safe_no_pad(&public_bytes)
 }
 
 /// Verifies that `signature` is a valid JWS over `card`'s canonical form,
@@ -273,7 +271,7 @@ pub fn verify_agent_card_signature(
     signature: &AgentCardSignature,
     key: &VerifyingKey,
 ) -> Result<()> {
-    let protected_json = URL_SAFE_NO_PAD.decode(&signature.protected)?;
+    let protected_json = rusty_base64::decode_url_safe(&signature.protected)?;
     let header: Value =
         serde_json::from_slice(&protected_json).map_err(|_| SigningError::InvalidProtectedHeader)?;
     let alg = header
@@ -284,10 +282,10 @@ pub fn verify_agent_card_signature(
         return Err(SigningError::AlgorithmMismatch);
     }
 
-    let payload_b64 = URL_SAFE_NO_PAD.encode(canonical_json(card)?);
+    let payload_b64 = rusty_base64::encode_url_safe_no_pad(canonical_json(card)?.as_bytes());
     let signing_input = format!("{}.{}", signature.protected, payload_b64);
 
-    let signature_bytes = URL_SAFE_NO_PAD.decode(&signature.signature)?;
+    let signature_bytes = rusty_base64::decode_url_safe(&signature.signature)?;
     key.verify(signing_input.as_bytes(), &signature_bytes)
 }
 
@@ -377,7 +375,7 @@ mod tests {
     #[test]
     fn protected_header_always_includes_typ_and_kid() {
         fn decode_protected_header(signature: &AgentCardSignature) -> Value {
-            let bytes = URL_SAFE_NO_PAD.decode(&signature.protected).unwrap();
+            let bytes = rusty_base64::decode_url_safe(&signature.protected).unwrap();
             serde_json::from_slice(&bytes).unwrap()
         }
 

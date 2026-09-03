@@ -77,8 +77,7 @@ fn generate_keys() -> TestKeys {
 }
 
 fn base64_url(bytes: Vec<u8>) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    rusty_base64::encode_url_safe_no_pad(&bytes)
 }
 
 fn now() -> u64 {
@@ -223,10 +222,14 @@ async fn rejects_an_unsigned_token() {
     let validator = validator_for(&keys).await;
 
     // `alg: none` with an empty signature — the classic downgrade attempt.
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let header = b64.encode(json!({"alg": "none", "kid": KID}).to_string());
-    let payload = b64.encode(json!({"iss": ISSUER, "exp": now() + 600}).to_string());
+    let header = rusty_base64::encode_url_safe_no_pad(
+        json!({"alg": "none", "kid": KID}).to_string().as_bytes(),
+    );
+    let payload = rusty_base64::encode_url_safe_no_pad(
+        json!({"iss": ISSUER, "exp": now() + 600})
+            .to_string()
+            .as_bytes(),
+    );
     let token = format!("{header}.{payload}.");
 
     assert!(matches!(
