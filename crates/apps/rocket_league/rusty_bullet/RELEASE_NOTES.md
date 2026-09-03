@@ -6,6 +6,43 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Wired the candidate engine into rb_verify_cli (FR-077)
+**2026-09-03** · `crates/rb_verify_cli`
+
+- **`RB-PHYSICS-001-FR-077` implemented; real-capture run pending.**
+  `rb_verify_cli` gains `score_capture_against_candidate`: seeds a
+  `PhysicsWorld` from a capture's own first grounded, neutral frame (a new
+  `is_grounded_and_neutral` heuristic — proxying for `FR-076`'s unset
+  hidden jump/double-jump/dodge state actually being accurate there),
+  simulates it forward via `FR-076`'s `world::simulate_recorded` using
+  that same capture's own recorded per-tick controller input, then scores
+  the resulting candidate against the capture's own recorded outcome from
+  that seed frame onward.
+- Unlike every `score_replay_against_capture` run to date (a replay and a
+  capture from unrelated matches, with no physical reason to resemble each
+  other), this comparison has a genuine physical reason to be small if the
+  physics core is accurate: the candidate was actually simulated from the
+  same starting state and the same input the real capture recorded.
+- A new `rb-verify --self <capture-file> [max-timestamp-delta-secs]` CLI
+  mode exposes it, alongside the existing two-file mechanical mode.
+- 3 new unit tests: a happy-path run against `rb_capture_ingest`'s
+  synthetic capture fixture (which does contain a grounded, neutral frame
+  0, exercising the whole path without needing a real capture), a
+  missing-file I/O-error case, and a hand-built capture with no
+  qualifying frame exercising the new `Malformed` error path. Full
+  workspace `fmt`/`clippy -D warnings`/`test` green (388 tests
+  workspace-wide, 6 in `rb_verify_cli`).
+- **What's still outstanding**: the one manual run this requirement's own
+  scope calls for — against the real capture from `RB-VERIFY-002-FR-001`
+  — hasn't happened yet. It needs a real Rocket League/BakkesMod
+  environment this sandbox doesn't have; running `cargo run -p
+  rb_verify_cli -- --self <real-capture-file>` there and reporting the
+  resulting numbers back is the next step. `RB-PHYSICS-001-FR-005`
+  (real-data constant calibration) doesn't start until that run produces
+  this project's first genuine fidelity number.
+
+---
+
 ## Implemented the candidate-engine plumbing scoped for FR-005 (FR-076)
 **2026-09-02** · `crates/rb_physics_bullet`
 
