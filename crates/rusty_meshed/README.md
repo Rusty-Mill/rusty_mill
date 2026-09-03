@@ -76,7 +76,7 @@ worst-first bottleneck list. Pure functions, no I/O.
   omits). One ships with the crate: `scenarios/acquisition_status.toml`, ten
   domains at *placeholder* maturity levels and four outcomes.
 - The same model round-trips through `rusty_json`, and that JSON is what the
-  source repo's `data-mesh-monitor` **Reverse Trace** tab consumes (its
+  vendored [`data-mesh-monitor/`](./data-mesh-monitor/) **Reverse Trace** tab consumes (its
   `src/reverseTrace.js` is a line-for-line port of this crate's trace, checked
   against this crate's output by its `npm test`). Regenerate the dashboard's
   copies with `cargo run -p rusty-meshed-trace --example export`.
