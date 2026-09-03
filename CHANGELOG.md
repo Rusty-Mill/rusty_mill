@@ -66,6 +66,18 @@ Removed / Fixed / Security, newest first.
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
 
 ### Changed
+- `CONTRIBUTING.md` review policy: one independent approval when a reviewer
+  is reasonably available; otherwise the author self-reviews against the
+  reviewer checklist after CI is green and records that in the PR
+  description. Self-review is never represented as independent review, and
+  security-sensitive, irreversible, or ecosystem-breaking changes still wait
+  for an independent reviewer. All four PR templates gain a matching
+  checklist line
+- The last `git` pins on `baileyrd/rustils` retired to workspace `path`
+  dependencies: `rusty_tokio` (rev `ce9259d4`), `rusty_tls` (rev `93b00ce9`,
+  platform 0.22.1), and `rustils_async`'s root plus four member crates (rev
+  `83ab7a9e`). Thirteen git-sourced `platform*` lockfile entries collapse
+  into the single in-tree 0.27.0 copy of each crate
 - Root `[workspace.dependencies]`: `tokio`'s feature list widened to the
   union `rusty_search`/`rusty_db`/`rusty_skillopt`/`rusty_adk` need (`fs`,
   `process`, `io-util`, `io-std`); `chrono` gained `serde` for

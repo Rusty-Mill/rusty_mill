@@ -13,6 +13,51 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Review policy: author self-review when no independent reviewer is available
+**2026-09-03** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Changed:** `CONTRIBUTING.md` said "at least one approval required" while
+  every PR merged on 2026-09-02 was authored, self-merged, and unreviewed
+  by the same account, which the Atlas evidence review (`docs/atlas/`)
+  recorded as an unenforced policy. The policy now matches practice
+  honestly: an independent approval when a reviewer is reasonably
+  available, otherwise a recorded author self-review against the reviewer
+  checklist after CI is green. The PR description must say no independent
+  reviewer was available; self-review is never represented as independent
+  review (the distinction Atlas `ATLAS-GOV-REVIEW-0061`/`0064` draws).
+  Security-sensitive, irreversible, or ecosystem-breaking changes still
+  wait for an independent reviewer when one can be found.
+- **Changed:** the four PR templates gain a checklist line — "Reviewed:
+  independent approval, or self-review recorded in the description" — so
+  the record is made on every PR rather than remembered.
+- Known limitation: this is documented policy, not enforcement. `main`
+  is still unprotected, so nothing stops a merge that skips the record.
+
+## Retire the last `rustils` git pins to path dependencies
+**2026-09-02** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
+
+- **Changed:** `rusty_tokio`, `rusty_tls`, and `rustils_async` (root manifest
+  plus `platform-async`, `platform-async-mock`, `platform-async-linux`,
+  `coreutils-async`) depended on `platform`/`platform-linux`/
+  `platform-bsd`/`platform-windows`/`platform-mock` through rev-pinned
+  `git` dependencies on `baileyrd/rustils`, left over from before
+  `rustils` joined this workspace. All twenty-one declarations are now
+  `path` dependencies on `crates/rustils/crates/<name>`, the same
+  retirement every other first-party pin got when its crate merged.
+- **Changed:** `Cargo.lock` drops thirteen git-sourced `platform*` entries
+  (three checkouts: two at 0.27.0, `rusty_tls`'s at 0.22.1). Each crate now
+  resolves to one in-tree 0.27.0 instance, so consumers share one
+  `platform::error::PlatformError` type instead of one per checkout.
+- **Verified:** `cargo check`, `cargo clippy -D warnings`, and `cargo test`
+  with `--all-features --all-targets` across the six consumers on Linux;
+  the Windows and BSD backends are compiled only on their targets, so the
+  Windows leg of CI is the evidence for `platform-windows` and nothing
+  here exercises `platform-bsd`.
+- Known limitation: `rusty_tls` moves from platform 0.22.1 to 0.27.0 in one
+  step. It compiles and its tests pass, which is the check the versioning
+  rule asks for, but any behavioural change in those five minor versions
+  reaches `rusty_tls` with this merge.
+
 ## rusty_meshed: reverse-trace & domain-maturity crate
 **2026-09-02** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
 

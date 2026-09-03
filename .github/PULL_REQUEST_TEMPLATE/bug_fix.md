@@ -16,3 +16,4 @@ Fixes #
 - [ ] No secrets/credentials committed or logged
 - [ ] Diff is focused (no unrelated changes bundled in)
 - [ ] Non-obvious decisions have a "why" comment
+- [ ] Reviewed: independent approval, or self-review recorded in the description (no independent reviewer available)

@@ -8,9 +8,9 @@ publish = false
 license = "MIT"
 
 [dependencies]
-# `rustils` is a separate repo outside this monorepo's consolidation
-# scope -- stays a pinned git dependency, matching platform-async's own.
-platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+# `rustils` is a workspace sibling (`crates/rustils`) -- path dependency,
+# matching platform-async's own.
+platform = { path = "../../../rustils/crates/platform" }
 platform-async = { path = "../platform-async" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

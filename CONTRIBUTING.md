@@ -26,7 +26,19 @@
 ## Review & merge
 - Every change lands through a PR — no direct pushes to the default branch.
 - CI must be green before merge.
-- At least one approval required (see CODEOWNERS if present).
-- Reviewers: check for scope creep, missing tests, and unexplained non-obvious decisions.
+- Review: one approval from someone other than the author when an independent
+  reviewer is reasonably available. When none is — this repo has a single
+  maintainer most of the time — the author self-reviews instead:
+  - re-read the whole diff against the reviewer checklist below, after CI is
+    green rather than before, so the review covers what will actually merge;
+  - say so in the PR description: that no independent reviewer was available
+    and that the change was self-reviewed. Self-review is recorded as
+    self-review, never represented as independent review.
+  - security-sensitive, irreversible, or ecosystem-breaking changes (secret or
+    credential handling, deletions, public-API breaks that cross crates,
+    CI-control changes) should still wait for an independent reviewer when one
+    can be found within a reasonable time.
+- Reviewers, independent or self: check for scope creep, missing tests, and
+  unexplained non-obvious decisions.
 - Merge with a **merge commit** ("Create a merge commit" — merge and sync). Do **not**
   squash-merge or rebase-merge: full commit history is preserved deliberately.

@@ -12,3 +12,4 @@
 - [ ] Tests still pass unmodified (or updated where mechanically necessary)
 - [ ] Lockfile/changelog updated if applicable
 - [ ] No secrets/credentials committed or logged
+- [ ] Reviewed: independent approval, or self-review recorded in the description (no independent reviewer available)

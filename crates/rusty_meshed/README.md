@@ -34,9 +34,32 @@ equivalent, so it's being hand-rolled as a new sibling crate,
 dependency — a prerequisite for most of the SDK/registry/observability
 capabilities above.
 
-The `data-mesh-monitor` Vite/React dashboard from the source repo is
-explicitly out of scope for this migration (2026-09-01, user decision) —
-it continues to run unmodified against whichever backend is live.
+The `data-mesh-monitor` Vite/React dashboard from the source repo was
+originally excluded (2026-09-01) and then brought back in (2026-09-03, user
+decision): it now lives here as a vendored app at
+[`data-mesh-monitor/`](./data-mesh-monitor/), unchanged apart from a
+configurable registry URL, running against the Rust registry -- see
+"Dashboard" below. Its `MON-*` rows in the manifest track it.
+
+## Dashboard (`data-mesh-monitor/`)
+
+The source repo's ops-center dashboard, vendored as-is (Vite 5 + React 18,
+JavaScript -- not ported to Rust; the same pattern as `rusty_term/web`).
+Three tabs: **Mesh Ops** (topology graph, live event stream, metrics bar),
+**Transformation Simulator**, and **Reverse Trace** (outcome -> domains ->
+sources, with a JS port of the `rusty-meshed-trace` model and a parity test
+against that crate's output). To run it against the Rust registry:
+
+```
+cargo run -p rusty-meshed-registry --bin meshed_registry   # serves 127.0.0.1:8100
+cd data-mesh-monitor && npm ci && npm run dev              # http://localhost:5173
+```
+
+`meshed_registry` reads the same `MESHED_*` environment as everything else
+(`MESHED_REGISTRY_DB_PATH` for the SQLite file, `MESHED_REGISTRY_BIND` to
+listen elsewhere); point the dashboard at a registry on another address with
+`MESHED_REGISTRY_URL`. `npm test` runs the reverse-trace parity check, which
+CI's `data-mesh-monitor` job also runs on every change under that directory.
 
 ## Reverse trace & domain maturity (`rusty-meshed-trace`)
 
@@ -72,10 +95,12 @@ verifies all three services are reachable.
 
 ## Status
 
-Most rows across `REG`/`XFM`/`GOV`/`SDK`/`DOM`/`CLI` are `DONE` -- see
-`capability-manifest.md` for row-by-row status. The main thing blocking full
-parity is `rusty_kafka` having no `Produce` request implementation yet (its
-own module doc explains why); everything downstream of publishing to
-Kafka -- `SLOViolationPublisher`, the domain producers/consumers,
-`OutboxRelay`, the CLI `slo` subcommand -- is tracked but not yet built for
-that reason.
+Every row in `capability-manifest.md` is `DONE` (436 source capabilities
+plus the `MON-*` dashboard rows and `REG-153`, the served registry) --
+verified by the rust-migration coverage gate. `rusty_kafka` carries the
+`Produce`, `ListOffsets` and `OffsetFetch` requests this port needed, so the
+`SLOViolationPublisher`, the domain producers and consumers, `OutboxRelay`
+and the CLI `slo` subcommand are all built and tested. Every Kafka call in
+the metrics collector and SLO monitor is bounded at 5s, the source's own
+`timeout=5.0`, so an unreachable broker reports "unavailable" instead of
+hanging.
