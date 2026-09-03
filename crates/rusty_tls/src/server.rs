@@ -198,6 +198,20 @@ impl<S: Read + Write> TlsServerStream<S> {
     pub fn negotiated_alpn_protocol(&self) -> Option<&[u8]> {
         self.conn.alpn_protocol()
     }
+
+    /// The DER-encoded end-entity certificate the client presented during
+    /// the handshake, if it has completed (see
+    /// [`TlsServerStream::complete_handshake`]) and the client sent one —
+    /// an acceptor built with [`TlsAcceptor::new_with_client_auth`]
+    /// requires one, so `None` past the handshake only happens on an
+    /// acceptor that did not ask. Raw bytes, not a parsed certificate,
+    /// for the same reason as [`TlsStream::peer_certificate_der`](crate::TlsStream::peer_certificate_der).
+    pub fn peer_certificate_der(&self) -> Option<&[u8]> {
+        self.conn
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .map(|cert| cert.as_ref())
+    }
 }
 
 impl<S: Read + Write> Read for TlsServerStream<S> {
