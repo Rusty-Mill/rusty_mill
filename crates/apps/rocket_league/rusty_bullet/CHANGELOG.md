@@ -49,12 +49,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   literal exit criterion and all four `PHASE-0-*` roadmap units. Not a
   fidelity measurement — the replay and capture are unrelated matches;
   that needs a Phase 1 candidate engine that doesn't exist yet.
-- Scoped (design only, no code) `RB-PHYSICS-001-FR-076`/`FR-077`, the
-  candidate-engine plumbing `FR-005`'s real-data calibration needs: seed a
-  `PhysicsWorld` from a recorded capture frame, simulate it forward using
-  that capture's own recorded per-tick input, and score the result
-  against the capture's own recorded outcome via `rb_verify_cli` — this
-  project's first genuine fidelity measurement once implemented.
+- `RB-PHYSICS-001-FR-076`: `rb_physics_bullet` can now seed a
+  `PhysicsWorld` from a recorded `PhysicsFrame` (`PhysicsWorld::from_frame`)
+  and simulate it forward using a recorded per-tick controller-input
+  sequence (`world::simulate_recorded`) — the candidate-engine plumbing
+  `FR-005`'s real-data calibration needs. Along the way, fetched
+  RocketSim's own real car mass/hitbox and ball mass
+  (`body::CAR_MASS`/`CAR_HALF_EXTENTS`/`BALL_MASS`, new
+  `RigidBody::standard_car`/`standard_ball`), surfacing a real ~44% width
+  discrepancy in this crate's own long-standing car hitbox test
+  placeholder, deliberately left uncorrected at existing call sites
+  pending a dedicated future calibration FR. `RB-PHYSICS-001-FR-077`
+  (wiring this into `rb_verify_cli` and running it against the real
+  capture, producing this project's first genuine fidelity measurement)
+  remains designed but not started.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation

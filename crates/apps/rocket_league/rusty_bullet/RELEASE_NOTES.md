@@ -6,6 +6,39 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Implemented the candidate-engine plumbing scoped for FR-005 (FR-076)
+**2026-09-02** · `crates/rb_physics_bullet`
+
+- **`RB-PHYSICS-001-FR-076` implemented.** `rb_physics_bullet` can now seed a
+  `PhysicsWorld` from a recorded `PhysicsFrame` (`PhysicsWorld::from_frame`)
+  and simulate it forward using a recorded per-tick controller-input
+  sequence (`world::simulate_recorded`) — the two pieces `FR-005`'s
+  real-data constant calibration needs before it can produce any fidelity
+  number at all.
+- `RigidBody::standard_ball()`/`standard_car()` centralize the car/ball
+  shape and mass constants, fetched directly from RocketSim's own source
+  rather than invented: `CAR_MASS_BT = 180.f` (confirms this crate's
+  existing placeholder), `BALL_MASS_BT = CAR_MASS_BT / 6.f = 30.0` (new —
+  existing placeholder was `1.0`), and `CAR_CONFIG_OCTANE.hitboxSize =
+  {120.507, 86.6994, 38.6591}` full-size (new — surfaces a real ~44% width
+  discrepancy against this crate's long-standing car hitbox test
+  placeholder). Deliberately left uncorrected at existing call sites: a
+  genuinely new confirmed constant doesn't get retrofitted onto pervasive
+  pre-existing test literals outside the FR that adopts it; correcting
+  those is left to a dedicated future calibration FR, matching `FR-036`'s
+  precedent for the ball radius.
+- `dt` per simulated tick is derived from each pair of consecutive recorded
+  frames' own timestamps, not a fixed rate, since no confirmed real Rocket
+  League physics-tick rate exists anywhere in this project yet.
+- 13 new unit tests (6 in `body.rs`, 7 in `world.rs`); full workspace
+  `fmt`/`clippy -D warnings`/`test` green (335 tests in `rb_physics_bullet`,
+  385 across the workspace).
+- `RB-PHYSICS-001-FR-077` (wiring this into `rb_verify_cli` and running it
+  once against the real capture, producing this project's first genuine
+  fidelity measurement) remains designed but not started.
+
+---
+
 ## Scoped the Phase 1 candidate engine FR-005 needs
 **2026-09-02** · `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
 

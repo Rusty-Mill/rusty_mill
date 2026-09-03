@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.76.0
+- Version: 0.77.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -4869,55 +4869,80 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     trigger architecture as diverging from real Rocket League.
   - **Verification plan.** Documentation-only; no new tests. All 322
     pre-existing tests (as of `FR-074`) pass unchanged.
-- `RB-PHYSICS-001-FR-076` (designed, not started): `rb_physics_bullet`
-  gains the capability to seed a `PhysicsWorld` from a recorded
-  `PhysicsFrame` and simulate it forward using a recorded per-tick
-  controller-input sequence, producing a candidate `Vec<PhysicsFrame>` —
-  the missing piece `world::simulate`'s own doc comment already named:
-  "Once `RB-VERIFY-002` capture data exists, this signature grows an
-  `inputs` parameter rather than staying input-free." That capture data
-  now exists (`PHASE-0-EXIT`, closed). This FR is the prerequisite
-  plumbing `FR-005`'s real-data calibration and `RB-VERIFY-003`'s own
-  Non-goals ("running a candidate physics engine to generate its output
-  — that's `RB-PHYSICS-001`'s composition-root responsibility") both
-  assume exists but doesn't yet.
-  - **Scope.**
-    1. Centralize the ball's and car's confirmed real shape/mass/material
-       constants that today exist only as repeated magic literals across
-       tests (ball radius `93.15`, car `half_extents = Vec3::new(60.0,
-       30.0, 18.0)` and mass `180.0`, etc.) — `RigidBody::ball(...)`
-       already applies confirmed real material properties (`restitution:
-       0.6, friction: 0.35, linear_damping: 0.03`, `FR-062`) but takes
-       radius/mass as caller-supplied parameters rather than a zero-arg
-       `standard_ball()`; `RigidBody::car_box(...)` has no equivalent at
-       all — it inherits `RigidBody::new`'s generic `0.5`/`0.5`
-       restitution/friction placeholders, never confirmed against real
-       Rocket League. Add a `RigidBody::standard_car()` (or equivalent)
-       constructor mirroring `standard_ball()`'s pattern, and confirm
-       (or, if unconfirmed, flag) the car's own real restitution/friction
-       the same way `FR-062` did for the ball.
-    2. Add a way to reconstruct a `RigidBody`'s transform/velocity state
-       (position, rotation, velocity, angular_velocity — `CarState`/
-       `BallState` carry exactly these four fields, a direct 1:1 match)
-       from a recorded `CarState`/`BallState`, combined with (1)'s
-       constants for what a `PhysicsFrame` doesn't carry at all (shape,
-       mass, material) — e.g. a `PhysicsWorld` (or free-function)
-       constructor seeding ball+cars from a `&PhysicsFrame`, using
-       `set_car_boost` for `boost_amount` (already a public setter).
-    3. Extend `world::simulate` (or add a sibling function, e.g.
-       `simulate_recorded`) to accept a per-tick recorded input+dt
-       sequence instead of running input-free: for each tick, call
-       `set_car_input` per car with that tick's recorded
-       `ControllerInput` (already the exact type `PhysicsWorld` consumes
-       — no translation layer needed, see Architecture), then `step(dt)`,
-       then record `frame()`. `dt` per tick is derived from the
-       *recording's own* consecutive `timestamp_secs` deltas, not a
-       hardcoded rate — deliberately, since no confirmed real Rocket
-       League physics-tick-rate constant exists anywhere in this crate or
-       spec today (only the empirical ~120Hz implied by a real capture's
-       own `2,818 lines / ~23.5s`, never a sourced RocketSim citation),
-       and driving the simulation by the recording's actual per-tick
-       spacing sidesteps needing that unconfirmed number at all.
+- `RB-PHYSICS-001-FR-076` (implemented): `rb_physics_bullet` gains the
+  capability to seed a `PhysicsWorld` from a recorded `PhysicsFrame` and
+  simulate it forward using a recorded per-tick controller-input sequence,
+  producing a candidate `Vec<PhysicsFrame>` — the missing piece
+  `world::simulate`'s own doc comment already named: "Once `RB-VERIFY-002`
+  capture data exists, this signature grows an `inputs` parameter rather
+  than staying input-free." That capture data now exists (`PHASE-0-EXIT`,
+  closed). This FR is the prerequisite plumbing `FR-005`'s real-data
+  calibration and `RB-VERIFY-003`'s own Non-goals ("running a candidate
+  physics engine to generate its output — that's `RB-PHYSICS-001`'s
+  composition-root responsibility") both assume exists but didn't yet.
+  - **What shipped, and where it diverged from the original scoping.**
+    1. **`body::CAR_MASS`/`CAR_HALF_EXTENTS` and `RigidBody::standard_car`**,
+       plus **`body::BALL_RADIUS`/`BALL_MASS` and `RigidBody::standard_ball`**
+       (the scoping's own item 1 anticipated `standard_car` mirroring
+       `standard_ball`, but `standard_ball` didn't exist yet either — both
+       were added together). Fetched directly from RocketSim's own real
+       source: `src/RLConst.h`'s `CAR_MASS_BT = 180.f` (already matches
+       this crate's own long-standing `180.0` test placeholder — an
+       accurate placeholder, confirmed only now) and `BALL_MASS_BT =
+       CAR_MASS_BT / 6.f = 30.0` (a **new** finding — every existing test
+       uses `1.0`), and `src/Sim/Car/CarConfig/CarConfig.cpp`'s
+       `CAR_CONFIG_OCTANE.hitboxSize = { 120.507f, 86.6994f, 38.6591f }`
+       (full size; halved to half-extents `(60.2535, 43.3497, 19.32955)`)
+       — also a **new** finding, and a substantial one: this crate's own
+       long-standing `car_box` test placeholder
+       (`Vec3::new(60.0, 30.0, 18.0)`) has the right length and height
+       but a width (`30.0` half-extent) off Octane's real `43.3497` by
+       ~31% (~44% on the full-width comparison). `BALL_RADIUS` (`93.15`)
+       reuses `FR-036`'s own already-confirmed value rather than
+       re-deriving it — RocketSim's own `BALL_REST_Z` comment ("greater
+       than ball radius because of arena mesh collision margin") means
+       93.15 isn't literally RocketSim's own collision radius either, but
+       re-litigating `FR-036`'s own settled, dedicated-FR choice is out of
+       this FR's scope. Deliberately **not** corrected at any existing
+       `car_box`/`sphere`/`ball` call site across this crate's own tests
+       — only the four new constants and two new constructors carry the
+       corrected values; retuning every dimension/mass-dependent test's
+       own expectations to match is a dedicated calibration FR of its
+       own, matching `FR-036`'s own precedent, out of this FR's scope.
+       Car restitution/friction stay at the generic `0.5`/`0.5`
+       placeholder (not "confirmed or flagged" as a single number the way
+       the scoping's own item 1 first framed it) — `FR-063` already found
+       real Rocket League has no single generic car restitution/friction
+       at all, only per-contact-pair overrides this crate's architecture
+       can't represent, so inventing one number here would be exactly the
+       "false precision" `FR-031`/`FR-040` already refused.
+    2. **`PhysicsWorld::from_frame`**, exactly as scoped: seeds ball and
+       every car's position/rotation/velocity/angular_velocity directly
+       from the frame, `boost_amount` via the existing `set_car_boost`,
+       and shape/mass/material via (1)'s new constructors. One addition
+       the original scoping missed and had to be caught during
+       implementation: `elapsed_secs` (private, so only settable from
+       inside `impl PhysicsWorld`) is seeded to `frame.timestamp_secs`,
+       not left at `PhysicsWorld::new`'s own default `0.0` — without this,
+       every candidate frame `simulate_recorded` produces would land tens
+       of seconds away from the real capture's own absolute clock, and
+       `rb_domain::divergence::score`'s nearest-timestamp alignment would
+       never match anything up (see Data/state and invariants).
+    3. **`world::simulate_recorded`**, a sibling function to `simulate`
+       (not a breaking signature change, since every existing input-free
+       call site — this crate's own tests included — has no recorded
+       input to supply): for each consecutive pair of recorded frames,
+       applies the *earlier* frame's own per-car `ControllerInput` via
+       `set_car_input`, then steps by that pair's own `timestamp_secs`
+       delta — exactly the "derive `dt` from the recording's own spacing,
+       not a hardcoded rate" the scoping called for, since no confirmed
+       real Rocket League tick-rate constant exists anywhere in this
+       project. One addition the scoping didn't anticipate: a recorded
+       car whose `player_id` doesn't index into the seeded `world.cars`
+       (more recorded cars than the seed frame carried) is silently left
+       undriven that tick rather than panicking — real mid-capture car
+       joins/leaves are unexercised territory this plumbing doesn't need
+       to solve yet (see Non-goals).
   - **Non-goals (this requirement).** Does not add setters for the
     per-car runtime state `PhysicsWorld` tracks but never exposes
     (`car_jump_held`, `car_double_jump_available`,
@@ -4931,18 +4956,29 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `FR-077`'s concern, not this one. Does not wire this capability into
     `rb_verify_cli` or run it against any real capture (`FR-077`). Does
     not calibrate any constant based on a resulting score (a later FR,
-    once `FR-077` produces a first real number).
+    once `FR-077` produces a first real number). Does not correct
+    `car_box`'s own existing call sites to the newly-confirmed real
+    hitbox — a separate, larger calibration FR (see above).
   - **Acceptance criteria.** A `PhysicsWorld` can be constructed from a
-    real capture's first recorded frame and stepped forward using that
-    same capture's remaining recorded frames' own controller input and
-    timestamp spacing, producing a `Vec<PhysicsFrame>` the existing
-    `rb_domain::divergence::score` can consume unmodified.
-  - **Verification plan.** Unit tests for the new seeding/constant
-    constructors and the extended `simulate` against hand-built
-    `PhysicsFrame`/input sequences (no real capture needed for
-    correctness — mirrors `rb_capture_ingest::wire`'s own
-    hand-built-value testing precedent). A real-capture run is `FR-077`'s
-    job, not this one's.
+    recorded `PhysicsFrame` and stepped forward using a recorded sequence's
+    own controller input and timestamp spacing, producing a
+    `Vec<PhysicsFrame>` the existing `rb_domain::divergence::score` can
+    consume unmodified, with the candidate's own timestamps landing on the
+    same absolute clock the recording used. Met.
+  - **Verification plan.** 13 new unit tests against hand-built values (no
+    real capture needed for correctness, mirroring
+    `rb_capture_ingest::wire`'s own hand-built-value testing precedent):
+    6 in `body.rs` (`standard_car`/`standard_ball`'s mass/shape/material,
+    and that both new hitbox/mass constants deliberately differ from this
+    crate's own existing test placeholders) and 7 in `world.rs`
+    (`from_frame`'s ball/car/clock seeding; `simulate_recorded`'s frame
+    count, per-pair `dt` derivation — a longer recorded interval produces
+    proportionally more fall than a shorter one, which only holds if `dt`
+    is read per-pair rather than reused from the first — actual driving
+    from recorded input, and the out-of-bounds-car skip). All 335
+    `rb_physics_bullet` tests pass (322 pre-existing + 13 new); full
+    workspace `cargo fmt`/`clippy`/`test` all green. A real-capture run is
+    `FR-077`'s job, not this one's.
 - `RB-PHYSICS-001-FR-077` (designed, not started): `rb_verify_cli` gains a
   new composition path — score a real BakkesMod capture's own recorded
   outcome against a candidate trajectory simulated from that *same*
@@ -6481,6 +6517,23 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.77.0 (2026-09-02): FR-076 implemented — `rb_physics_bullet` can now
+  seed a `PhysicsWorld` from a recorded `PhysicsFrame`
+  (`PhysicsWorld::from_frame`) and simulate it forward using a recorded
+  per-tick controller-input sequence (`world::simulate_recorded`),
+  producing a candidate trajectory `rb_domain::divergence::score` can
+  compare against the real recording it came from — the prerequisite
+  plumbing `FR-005`'s real-data calibration needs. Along the way, fetched
+  and adopted RocketSim's own real car mass/hitbox (`body::CAR_MASS`,
+  `body::CAR_HALF_EXTENTS`, `RigidBody::standard_car`) and ball mass
+  (`body::BALL_MASS`, `RigidBody::standard_ball`, reusing `FR-036`'s own
+  already-confirmed radius) — surfacing a substantial, previously-unnoticed
+  discrepancy in this crate's own long-standing car hitbox test
+  placeholder (real width ~44% wider than the placeholder), deliberately
+  left uncorrected at every existing call site (a separate calibration FR
+  of its own). 13 new unit tests (335 total, up from 322); no existing
+  test's own expectations changed. See Requirements for the full scope,
+  including where implementation diverged from the original scoping.
 - 0.76.0 (2026-09-02): Scoped (not implemented) `FR-076`/`FR-077`, the
   prerequisite plumbing `FR-005`'s real-data calibration needs now that
   `PHASE-0-EXIT` is closed: `FR-076` extends `rb_physics_bullet` to seed a
