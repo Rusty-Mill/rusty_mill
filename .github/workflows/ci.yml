@@ -81,6 +81,7 @@ jobs:
     outputs:
       full: ${{ steps.plan.outputs.full }}
       packages: ${{ steps.plan.outputs.packages }}
+      dashboard: ${{ steps.plan.outputs.dashboard }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -99,6 +100,7 @@ jobs:
             echo "Event is ${{ github.event_name }}, not pull_request -- running the full workspace sweep."
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
+            echo "dashboard=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -112,7 +114,17 @@ jobs:
             echo "A workspace-wide file changed -- running the full workspace sweep."
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
+            echo "dashboard=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          # rusty_meshed's vendored data-mesh-monitor (Vite/React) isn't a
+          # Cargo crate, so affected_crates.py can't see it -- gate its own
+          # job on a plain path match instead.
+          if echo "$changed" | grep -q '^crates/rusty_meshed/data-mesh-monitor/'; then
+            echo "dashboard=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dashboard=false" >> "$GITHUB_OUTPUT"
           fi
 
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
@@ -286,6 +298,30 @@ jobs:
               echo "No affected package declares a library target -- nothing to doc-test."
             fi
           fi
+
+  # rusty_meshed's data-mesh-monitor dashboard: a vendored Vite/React app
+  # (not a Cargo crate, so none of the cargo jobs above see it). Builds
+  # it and runs its `npm test`, which re-traces the vendored reverse-trace
+  # scenario in JS and fails if it disagrees with the Rust reference
+  # output checked in next to it (see that directory's README).
+  data-mesh-monitor:
+    name: data-mesh-monitor (npm build + trace parity)
+    needs: plan
+    if: needs.plan.outputs.dashboard == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/rusty_meshed/data-mesh-monitor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/rusty_meshed/data-mesh-monitor/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/rusty_win32/Cargo.toml) — this mirrors its own CI's
