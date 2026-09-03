@@ -265,11 +265,15 @@ snapshot). Its
 `main` (`99135f3`) but was content-identical (an empty diff between the
 two), so the swap is a pure mechanical change, not a version bump. Its
 `platform`/`platform-linux`/`platform-bsd`/`platform-windows` dependencies
-(from `baileyrd/rustils`) are still pinned `git` dependencies at rev
-`ce9259d4`, even though `rustils` has since joined this workspace as
-`crates/rustils` (fourth wave, below). Retiring those pins to `path`
-dependencies is outstanding, and the same is true of `rustils_async`'s
-and `rusty_tls`'s pins on `rustils`.
+(from `baileyrd/rustils`) stayed pinned `git` dependencies at rev
+`ce9259d4` for a while after `rustils` itself joined this workspace as
+`crates/rustils` (fourth wave, below); they retired to `path`
+dependencies in one pass together with `rustils_async`'s (rev `83ab7a9e`)
+and `rusty_tls`'s (rev `93b00ce9`, an older 0.22.1) pins. That pass also
+collapsed the three git checkouts of the `platform` crates plus the
+in-tree copy — thirteen lockfile entries — into the single in-tree
+instance, so every consumer now sees one `platform::error::PlatformError`
+type rather than one per checkout.
 
 `rusty_rusqlite` has no dependencies at all (`[dependencies]` is empty in
 its own manifest) and nothing in this repo depends on it yet, so nothing
@@ -414,14 +418,14 @@ from `.workspace = true` the same way `rusty_mcp` and `rusty_serde`
 were, since this outer root doesn't declare a `[workspace.package]`/
 `[workspace.dependencies]` for a nested workspace's fields to keep
 resolving against once it joins `members` directly. Its `platform`/
-`platform-mock`/`platform-linux` dependencies are pinned `git` revs
+`platform-mock`/`platform-linux` dependencies were pinned `git` revs
 against `baileyrd/rustils` — at the time a separate repo outside this
-monorepo's consolidation scope (it has since joined as `crates/rustils`,
-below, though these pins have not yet been retired to `path`
-dependencies), the same shape `rusty_stream`'s `rusty_wire`
-dependency used to have before `rusty_wire` itself joined this
-workspace (below) — so those stayed pinned `git` dependencies rather
-than becoming `path` dependencies; the sibling crates within this same
+monorepo's consolidation scope, the same shape `rusty_stream`'s
+`rusty_wire` dependency used to have before `rusty_wire` itself joined
+this workspace (below) — so at merge time those stayed pinned `git`
+dependencies rather than becoming `path` dependencies; they retired to
+`path` dependencies once `rustils` joined as `crates/rustils` (see the
+`rusty_tokio` note above). The sibling crates within this same
 crate group (`platform-async`, `reactor-core`, `platform-async-linux`)
 became `path` dependencies on each other. `platform-async-linux`
 self-gates its entire body behind `#![cfg(target_os = "linux")]` at

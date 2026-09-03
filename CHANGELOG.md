@@ -61,6 +61,11 @@ Removed / Fixed / Security, newest first.
   `inventory-tauri` and `inventory-core`'s Secret Service keyring backend
 
 ### Changed
+- The last `git` pins on `baileyrd/rustils` retired to workspace `path`
+  dependencies: `rusty_tokio` (rev `ce9259d4`), `rusty_tls` (rev `93b00ce9`,
+  platform 0.22.1), and `rustils_async`'s root plus four member crates (rev
+  `83ab7a9e`). Thirteen git-sourced `platform*` lockfile entries collapse
+  into the single in-tree 0.27.0 copy of each crate
 - Root `[workspace.dependencies]`: `tokio`'s feature list widened to the
   union `rusty_search`/`rusty_db`/`rusty_skillopt`/`rusty_adk` need (`fs`,
   `process`, `io-util`, `io-std`); `chrono` gained `serde` for

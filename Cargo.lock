@@ -2249,10 +2249,10 @@ dependencies = [
 name = "coreutils"
 version = "0.1.0"
 dependencies = [
- "platform 0.27.0",
- "platform-linux 0.27.0",
- "platform-mock 0.27.0",
- "platform-windows 0.27.0",
+ "platform",
+ "platform-linux",
+ "platform-mock",
+ "platform-windows",
  "rpath",
  "rusty_regx",
 ]
@@ -2261,7 +2261,7 @@ dependencies = [
 name = "coreutils-async"
 version = "0.1.0"
 dependencies = [
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
+ "platform",
  "platform-async",
  "platform-async-linux",
 ]
@@ -7577,31 +7577,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
-dependencies = [
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "platform"
 version = "0.27.0"
-dependencies = [
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "platform"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694#83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694"
-dependencies = [
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "platform"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "thiserror 1.0.69",
 ]
@@ -7610,7 +7586,7 @@ dependencies = [
 name = "platform-async"
 version = "0.1.0"
 dependencies = [
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
+ "platform",
 ]
 
 [[package]]
@@ -7618,9 +7594,9 @@ name = "platform-async-linux"
 version = "0.1.0"
 dependencies = [
  "libc",
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
+ "platform",
  "platform-async",
- "platform-linux 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
+ "platform-linux",
  "reactor-core",
 ]
 
@@ -7628,18 +7604,9 @@ dependencies = [
 name = "platform-async-mock"
 version = "0.1.0"
 dependencies = [
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
+ "platform",
  "platform-async",
- "platform-mock 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
-]
-
-[[package]]
-name = "platform-bsd"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
-dependencies = [
- "libc",
- "platform 0.22.1",
+ "platform-mock",
 ]
 
 [[package]]
@@ -7647,110 +7614,46 @@ name = "platform-bsd"
 version = "0.27.0"
 dependencies = [
  "libc",
- "platform 0.27.0",
- "platform-mock 0.27.0",
+ "platform",
+ "platform-mock",
  "platform-parity",
 ]
 
 [[package]]
-name = "platform-bsd"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
-dependencies = [
- "libc",
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
-]
-
-[[package]]
-name = "platform-linux"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
-dependencies = [
- "libc",
- "platform 0.22.1",
-]
-
-[[package]]
 name = "platform-linux"
 version = "0.27.0"
 dependencies = [
  "libc",
- "platform 0.27.0",
- "platform-mock 0.27.0",
+ "platform",
+ "platform-mock",
  "platform-parity",
  "rusty_libc",
 ]
 
 [[package]]
-name = "platform-linux"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694#83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694"
-dependencies = [
- "libc",
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
-]
-
-[[package]]
-name = "platform-linux"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
-dependencies = [
- "libc",
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
-]
-
-[[package]]
 name = "platform-mock"
 version = "0.27.0"
 dependencies = [
- "platform 0.27.0",
+ "platform",
  "platform-parity",
-]
-
-[[package]]
-name = "platform-mock"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694#83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694"
-dependencies = [
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694)",
 ]
 
 [[package]]
 name = "platform-parity"
 version = "0.27.0"
 dependencies = [
- "platform 0.27.0",
-]
-
-[[package]]
-name = "platform-windows"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
-dependencies = [
- "platform 0.22.1",
- "winargv 0.1.0 (git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d)",
- "windows-sys 0.59.0",
+ "platform",
 ]
 
 [[package]]
 name = "platform-windows"
 version = "0.27.0"
 dependencies = [
- "platform 0.27.0",
- "platform-mock 0.27.0",
+ "platform",
+ "platform-mock",
  "platform-parity",
  "rusty_win32",
- "winargv 0.1.0",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "platform-windows"
-version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
-dependencies = [
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
- "winargv 0.1.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
+ "winargv",
  "windows-sys 0.59.0",
 ]
 
@@ -10269,9 +10172,9 @@ name = "rusty_rdp"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
- "platform 0.27.0",
- "platform-linux 0.27.0",
- "platform-mock 0.27.0",
+ "platform",
+ "platform-linux",
+ "platform-mock",
  "rustls",
  "rusty_rsa",
  "rusty_tls",
@@ -10426,10 +10329,10 @@ dependencies = [
 name = "rusty_tls"
 version = "0.10.1"
 dependencies = [
- "platform 0.22.1",
- "platform-bsd 0.22.1",
- "platform-linux 0.22.1",
- "platform-windows 0.22.1",
+ "platform",
+ "platform-bsd",
+ "platform-linux",
+ "platform-windows",
  "rcgen",
  "ring",
  "rustls",
@@ -10446,10 +10349,10 @@ dependencies = [
  "futures-io",
  "io-uring",
  "libc",
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
- "platform-bsd 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
- "platform-linux 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
- "platform-windows 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
+ "platform",
+ "platform-bsd",
+ "platform-linux",
+ "platform-windows",
  "rusty_std",
  "rusty_tokio-macros",
  "tracing",
@@ -11048,9 +10951,9 @@ dependencies = [
 name = "sessionmgr-pty"
 version = "0.1.0"
 dependencies = [
- "platform 0.27.0",
- "platform-linux 0.27.0",
- "platform-windows 0.27.0",
+ "platform",
+ "platform-linux",
+ "platform-windows",
 ]
 
 [[package]]
@@ -13318,8 +13221,8 @@ dependencies = [
 name = "ts-magicsock"
 version = "0.0.1"
 dependencies = [
- "platform 0.27.0",
- "platform-linux 0.27.0",
+ "platform",
+ "platform-linux",
  "rand_core 0.6.4",
  "thiserror 1.0.69",
  "tokio",
@@ -13357,8 +13260,8 @@ dependencies = [
 name = "ts-tun"
 version = "0.0.1"
 dependencies = [
- "platform 0.27.0",
- "platform-linux 0.27.0",
+ "platform",
+ "platform-linux",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -14584,23 +14487,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 name = "winargv"
 version = "0.1.0"
 dependencies = [
- "platform 0.27.0",
-]
-
-[[package]]
-name = "winargv"
-version = "0.1.0"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
-dependencies = [
- "platform 0.22.1",
-]
-
-[[package]]
-name = "winargv"
-version = "0.1.0"
-source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
-dependencies = [
- "platform 0.27.0 (git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249)",
+ "platform",
 ]
 
 [[package]]

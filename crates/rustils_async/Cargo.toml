@@ -30,13 +30,12 @@ platform-async-mock = { path = "crates/platform-async-mock" }
 platform-async-linux = { path = "crates/platform-async-linux" }
 threading = { path = "crates/threading" }
 
-# Pinned to a rev, not a branch, matching rustils' own D-12/D-15 pattern
-# for its pinned git dependencies (rusty_libc/rusty_win32): one source of
-# truth for the sync types this workspace builds an async layer above,
-# bumped deliberately rather than floating.
-platform = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
-platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
-platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "83ab7a9ed2c4ffe90df9acdd6688cc74b7aed694" }
+# One source of truth for the sync types this workspace builds an async
+# layer above. Was a rev-pinned git dependency while `rustils` lived in
+# its own repo; it is a workspace sibling now (`crates/rustils`).
+platform = { path = "../rustils/crates/platform" }
+platform-mock = { path = "../rustils/crates/platform-mock" }
+platform-linux = { path = "../rustils/crates/platform-linux" }
 
 libc = "0.2"
 
