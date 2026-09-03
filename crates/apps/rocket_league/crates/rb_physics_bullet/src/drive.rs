@@ -1474,7 +1474,7 @@ mod tests {
     const DEFAULT_TEST_FRICTION: f32 = 0.5;
 
     fn car() -> RigidBody {
-        RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, Vec3::ZERO)
+        RigidBody::standard_car(Vec3::ZERO)
     }
 
     fn step_with_input(

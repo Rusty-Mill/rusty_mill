@@ -1668,7 +1668,7 @@ pub fn resolve_manifolds(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::body::StaticPlane;
+    use crate::body::{StaticPlane, CAR_HALF_EXTENTS};
     use crate::collision::{contacts_between, contacts_vs_plane};
 
     /// `RB-PHYSICS-001-FR-051`'s own root-cause proof: a ball wedged
@@ -2127,11 +2127,11 @@ mod tests {
     }
 
     fn car_at_origin() -> RigidBody {
-        RigidBody::car_box(Vec3::new(60.0, 30.0, 18.0), 180.0, Vec3::ZERO)
+        RigidBody::standard_car(Vec3::ZERO)
     }
 
     fn overlapping_ball() -> RigidBody {
-        RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 50.0, 0.0, 0.0))
+        RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 50.0, 0.0, 0.0))
     }
 
     /// Zero penetration on purpose: the deep overlap `overlapping_ball()`
@@ -2141,7 +2141,7 @@ mod tests {
     /// test means to check — same reasoning as `downward_impact_bounces_up_
     /// proportional_to_restitution` using an exactly-touching sphere.
     fn touching_ball() -> RigidBody {
-        RigidBody::sphere(93.15, 1.0, Vec3::new(60.0 + 93.15, 0.0, 0.0))
+        RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 93.15, 0.0, 0.0))
     }
 
     #[test]
@@ -2211,7 +2211,7 @@ mod tests {
     /// `touching_ball`, isolates the multi-body coupling this test checks
     /// from restitution bounce and Baumgarte positional correction.
     fn symmetric_pinch() -> (RigidBody, RigidBody, RigidBody) {
-        let half = Vec3::new(60.0, 30.0, 18.0);
+        let half = CAR_HALF_EXTENTS;
         let ball_radius = 93.15;
         let gap = half.x + ball_radius;
 
@@ -2318,7 +2318,12 @@ mod tests {
         // relaxing the shared ball's own contribution by 1/2 (it's touched
         // by exactly 2 manifolds this step) brings it to ~32 units/s — a
         // real, further narrowing of the gap to the true zero-velocity
-        // answer, at zero added per-step iteration cost.
+        // answer, at zero added per-step iteration cost. Unaffected by
+        // RB-PHYSICS-001-FR-078's corrected `CAR_HALF_EXTENTS`: this is a
+        // purely 1D, mass/velocity-driven symmetric collision along the
+        // contact normal, so the exact half-extent value the contact
+        // happens at doesn't change the outcome (re-measured after FR-078
+        // and confirmed at ~32.0 unchanged).
         assert!(
             combined_ball_speed < 50.0,
             "expected FR-041's shared-body relaxation to leave the sandwiched ball well below \

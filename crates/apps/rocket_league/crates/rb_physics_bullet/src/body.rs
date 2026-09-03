@@ -128,9 +128,12 @@ pub const CAR_MASS: f32 = 180.0;
 /// RocketSim's own real source (`src/Sim/Car/CarConfig/CarConfig.cpp`:
 /// `CAR_CONFIG_OCTANE`'s `hitboxSize = { 120.507f, 86.6994f, 38.6591f }`,
 /// halved here since that field is the full size, not half-extents) — see
-/// `standard_car`'s own doc comment for the full citation, including why
-/// this deliberately differs from this crate's own long-standing
-/// `car_box` test placeholder (`Vec3::new(60.0, 30.0, 18.0)`).
+/// `standard_car`'s own doc comment for the full citation. Originally
+/// (`RB-PHYSICS-001-FR-076`) this deliberately differed from this crate's
+/// own long-standing `car_box` test placeholder (`Vec3::new(60.0, 30.0,
+/// 18.0)`, whose width was off Octane's real `86.6994` half-extent by
+/// ~44%); `RB-PHYSICS-001-FR-078` retuned every one of those existing test
+/// call sites to this constant instead of the old placeholder.
 pub const CAR_HALF_EXTENTS: Vec3 = Vec3::new(60.2535, 43.3497, 19.32955);
 
 /// A dynamic rigid body: either a sphere (the ball) or a box (a car).
@@ -306,19 +309,18 @@ impl RigidBody {
     /// `hitboxSize = { 120.507f, 86.6994f, 38.6591f }` (full size, not
     /// half-extents — see `CAR_HALF_EXTENTS`). `CAR_MASS_BT` already
     /// exactly matches this crate's own long-standing test placeholder
-    /// (`180.0`, unwittingly correct); the hitbox is a genuinely new
-    /// finding — every existing `car_box` call site across this crate's
-    /// own tests (`body.rs`/`collision.rs`/`drive.rs`/`world.rs`) instead
-    /// uses `Vec3::new(60.0, 30.0, 18.0)`, whose width (`30.0` half-extent,
-    /// `60.0` full) is off Octane's real `86.6994` by ~44%. Deliberately
-    /// **not** corrected at those existing call sites, or anywhere else in
-    /// this crate: retuning every car-dimension-dependent test's own
-    /// expectations to match is a dedicated calibration FR of its own,
-    /// matching `RB-PHYSICS-001-FR-036`'s own precedent for the ball
-    /// radius — out of `FR-076`'s own scope (candidate-engine plumbing,
-    /// not a hitbox-wide recalibration). Only this new constructor uses
-    /// the corrected real value, for new callers that specifically want
-    /// it.
+    /// (`180.0`, unwittingly correct); the hitbox was a genuinely new
+    /// finding when `RB-PHYSICS-001-FR-076` introduced this constructor —
+    /// every existing `car_box` call site across this crate's own tests
+    /// (`body.rs`/`collision.rs`/`drive.rs`/`net.rs`/`solver.rs`/`world.rs`)
+    /// used `Vec3::new(60.0, 30.0, 18.0)` at the time, whose width (`30.0`
+    /// half-extent, `60.0` full) was off Octane's real `86.6994` by ~44%.
+    /// `RB-PHYSICS-001-FR-078` retuned every one of those existing call
+    /// sites that model a real car to `CAR_HALF_EXTENTS` (recomputing any
+    /// downstream test assertion that depended on the exact old literal);
+    /// an arbitrary invented shape unrelated to a real car (a unit cube, a
+    /// symmetric pair of identical boxes, etc.) was deliberately left
+    /// alone, since it was never modeling this hitbox in the first place.
     ///
     /// Restitution/friction stay at `RigidBody::new`'s generic `0.5`/`0.5`
     /// placeholders, unlike `ball`'s confirmed `0.6`/`0.35` — deliberately,

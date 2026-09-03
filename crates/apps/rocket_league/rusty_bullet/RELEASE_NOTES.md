@@ -6,6 +6,44 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Calibrated the crate's own tests to the real car hitbox (FR-078)
+**2026-09-03** · `crates/rb_physics_bullet`
+
+- **`RB-PHYSICS-001-FR-078` implemented, verified.** Every existing
+  `car_box`-style test helper across `rb_physics_bullet`
+  (`body.rs`/`collision.rs`/`drive.rs`/`net.rs`/`solver.rs`/`world.rs`)
+  that models a real car was switched from the old placeholder
+  half-extents (`Vec3::new(60.0, 30.0, 18.0)`) to the confirmed real
+  `body::CAR_HALF_EXTENTS` `FR-076` introduced but deliberately left
+  every pre-existing call site on — closing the ~44% width discrepancy
+  that FR surfaced rather than leaving it indefinitely deferred.
+- An arbitrary shape unrelated to a real car (a unit cube, a symmetric
+  pair of identical boxes for a tie-break test, a tiny corner-testing
+  probe box) was deliberately left untouched, since it was never modeling
+  this hitbox in the first place.
+- Rather than hand-recomputing every downstream hardcoded expected value
+  for an anisotropic dimension change (X +0.4%, Y +44.5%, Z +7.4%, unlike
+  `FR-036`'s single-scalar ball-radius substitution), each test's own
+  duplicate-literal dependency on the exact half-extents was refactored
+  to reference the actual half-extents it constructed its own car from —
+  then the full suite was run to find exactly which assertions still
+  needed a genuine recompute, rather than trying to predict them all by
+  static reading.
+- Only resting-height thresholds (a car's `position.z` settling on its
+  own half-extent, `18.0` → `CAR_HALF_EXTENTS.z`) turned out to need a
+  real value change. Two solver-level tests' doc comments citing specific
+  measured pinch velocities for a symmetric ball-vs-two-cars scenario
+  were re-measured after the swap and confirmed unchanged — a purely 1D,
+  mass/velocity-driven collision along a fixed contact normal has no
+  dependency on the absolute half-extent value the contact happens to
+  occur at.
+- No new tests, matching `FR-036`'s own precedent for a pure
+  constant-correctness change: all 335 pre-existing `rb_physics_bullet`
+  tests pass unchanged; full workspace `fmt`/`clippy -D warnings`/`test`
+  green (388 tests workspace-wide).
+
+---
+
 ## Wired the candidate engine into rb_verify_cli (FR-077)
 **2026-09-03** · `crates/rb_verify_cli`
 
