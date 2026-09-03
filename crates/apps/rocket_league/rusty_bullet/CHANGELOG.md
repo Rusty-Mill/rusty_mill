@@ -59,10 +59,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `RigidBody::standard_car`/`standard_ball`), surfacing a real ~44% width
   discrepancy in this crate's own long-standing car hitbox test
   placeholder, deliberately left uncorrected at existing call sites
-  pending a dedicated future calibration FR. `RB-PHYSICS-001-FR-077`
-  (wiring this into `rb_verify_cli` and running it against the real
-  capture, producing this project's first genuine fidelity measurement)
-  remains designed but not started.
+  pending a dedicated future calibration FR. `RB-PHYSICS-001-FR-077` wires
+  that capability into `rb_verify_cli`: `score_capture_against_candidate`
+  seeds a `PhysicsWorld` from a capture's own first grounded, neutral
+  frame (`is_grounded_and_neutral`) and scores a candidate simulated from
+  that capture's own recorded input against its own recorded outcome —
+  this project's first fidelity comparison with a genuine physical reason
+  to be small if the physics core is accurate — exposed via a new
+  `rb-verify --self <capture-file>` CLI mode. The one manual run against
+  the real capture that would produce this project's first genuine
+  fidelity number hasn't happened yet — it needs a real Rocket League/
+  BakkesMod environment this sandbox doesn't have.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation

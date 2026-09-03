@@ -18,3 +18,4 @@ path = "src/main.rs"
 rb_domain = { path = "../rb_domain" }
 rb_replay_ingest = { path = "../rb_replay_ingest" }
 rb_capture_ingest = { path = "../rb_capture_ingest" }
+rb_physics_bullet = { path = "../rb_physics_bullet" }

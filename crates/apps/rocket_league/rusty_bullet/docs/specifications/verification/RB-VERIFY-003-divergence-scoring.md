@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.6.0
+- Version: 0.7.0
 - Status: Draft (all three functional requirements implemented and wired
   into `rb_verify_cli`; now run end-to-end against a real replay AND a real
   BakkesMod capture, closing `PHASE-0-EXIT`'s own literal exit criterion;
@@ -219,13 +219,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   than a single caller-supplied constant — not needed yet since no real
   candidate engine exists to expose a case where a fixed value is wrong.
 - The candidate engine this section's own "good enough" question depends
-  on is now scoped (not implemented): `RB-PHYSICS-001-FR-076`/`FR-077`,
-  in `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`.
-  Once `FR-077` produces a first real score, that number — not an
-  arbitrary a-priori choice — is what should inform an answer here.
+  on is now implemented — `RB-PHYSICS-001-FR-076`/`FR-077`, in
+  `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md` — via
+  `rb_verify_cli::score_capture_against_candidate` and the `rb-verify
+  --self` CLI mode, but the one manual run against a real capture that
+  would actually produce a first real score hasn't happened yet (no real
+  Rocket League/BakkesMod environment available in this sandbox). Once it
+  does, that number — not an arbitrary a-priori choice — is what should
+  inform an answer here.
 
 ## Change history
 
+- 0.7.0 (2026-09-03): Noted that the candidate engine this spec's own
+  "good enough" fidelity question depends on is now implemented (not just
+  scoped) as `RB-PHYSICS-001-FR-076`/`FR-077`, but still hasn't produced a
+  real score — that run remains pending a real capture environment. No
+  code change here.
 - 0.6.0 (2026-09-02): Noted that the candidate engine this spec's own
   "good enough" fidelity question depends on is now scoped (not
   implemented) as `RB-PHYSICS-001-FR-076`/`FR-077` — see that spec's

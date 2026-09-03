@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.77.0
+- Version: 0.78.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -584,9 +584,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   that `RB-VERIFY-001`/`RB-VERIFY-002` produce real data (`PHASE-0-EXIT`
   closed) and a real capture exists, rather than relying on the current
   placeholder defaults. Prerequisite plumbing to actually produce a real
-  fidelity score to calibrate against is scoped as `FR-076`/`FR-077`
-  (designed, not started) — this requirement itself doesn't start until
-  those land and produce a first real number.
+  fidelity score to calibrate against is now implemented as `FR-076`/
+  `FR-077` — this requirement itself still doesn't start until a real
+  capture is actually run through `FR-077`'s new `rb_verify_cli --self`
+  path and produces a first real number, which hasn't happened yet (no
+  real Rocket League/BakkesMod environment available in this sandbox).
 - `RB-PHYSICS-001-FR-006` (car-vs-car collision, implemented): A general
   separating-axis test between two oriented boxes (`collision::box_vs_box`),
   producing either a clipped face manifold (0-4 points) or a single
@@ -4979,58 +4981,82 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `rb_physics_bullet` tests pass (322 pre-existing + 13 new); full
     workspace `cargo fmt`/`clippy`/`test` all green. A real-capture run is
     `FR-077`'s job, not this one's.
-- `RB-PHYSICS-001-FR-077` (designed, not started): `rb_verify_cli` gains a
-  new composition path — score a real BakkesMod capture's own recorded
-  outcome against a candidate trajectory simulated from that *same*
-  capture's recorded input via `FR-076`'s new `rb_physics_bullet`
-  capability — and is run once against the real capture from
-  `RB-VERIFY-002-FR-001`, producing this project's first genuine fidelity
-  number (as opposed to `rb_verify_cli::score_replay_against_capture`'s
-  existing mechanical-only comparison of two unrelated matches).
-  - **Scope.**
-    1. A new `rb_verify_cli` function (e.g.
-       `score_capture_against_candidate`) taking a capture path plus
-       tolerance, depending on `FR-076`'s new `rb_physics_bullet`
-       capability — `rb_verify_cli`'s first dependency on
-       `rb_physics_bullet` (today it depends only on `rb_domain`,
-       `rb_replay_ingest`, `rb_capture_ingest`; adding this stays inside
-       its own stated "composition root ... no domain logic of its own"
-       role per `AGENTS.md`, since the actual seeding/stepping logic
-       lives in `rb_physics_bullet` per `FR-076`, not here).
-    2. Choose a seed frame from the capture: the first frame satisfying
-       "grounded, no jump/boost/handbrake held, no dodge in progress" —
-       a heuristic proxy for "`PhysicsWorld`'s own default hidden state
-       (see `FR-076`'s Non-goals) is actually accurate here" — and trim
-       the recorded-vs-candidate comparison to start there, not
-       necessarily frame 0.
-    3. A new CLI entry point/flag distinguishing this real-fidelity mode
-       from the existing mechanical `score_replay_against_capture` path
-       (exact flag naming TBD at implementation time).
-    4. Manually run once against the real capture from
-       `RB-VERIFY-002-FR-001`; record the resulting numbers — whatever
-       they are — in this spec and `RB-VERIFY-003`'s own spec.
+- `RB-PHYSICS-001-FR-077` (implemented; real-capture run pending):
+  `rb_verify_cli` gains a new composition path — score a real BakkesMod
+  capture's own recorded outcome against a candidate trajectory simulated
+  from that *same* capture's recorded input via `FR-076`'s new
+  `rb_physics_bullet` capability — as opposed to
+  `rb_verify_cli::score_replay_against_capture`'s existing mechanical-only
+  comparison of two unrelated matches. The wiring and its own unit tests
+  are done; the one manual run against the real capture from
+  `RB-VERIFY-002-FR-001` still needs a real Rocket League/BakkesMod
+  environment this sandbox doesn't have (the same practical constraint
+  `RB-VERIFY-002` itself hit), so this project's first genuine fidelity
+  *number* doesn't exist yet.
+  - **What shipped, and where it diverged from the original scoping.**
+    1. **`rb_verify_cli::score_capture_against_candidate`**, exactly as
+       scoped: takes a capture path plus a timestamp tolerance, depends on
+       `FR-076`'s new `rb_physics_bullet` capability (`rb_verify_cli`'s
+       first dependency on it), and stays a thin composition — the actual
+       seeding/stepping logic lives in `rb_physics_bullet::world`, not
+       here, matching `AGENTS.md`'s "composition root, no domain logic of
+       its own" for this crate.
+    2. **Seed-frame heuristic**, implemented as
+       `is_grounded_and_neutral`: a frame qualifies only if every car in
+       it has `!input.jump && !input.boost && !input.handbrake` and looks
+       at rest on the ground (`position.z` within a documented tolerance
+       of `rb_physics_bullet::body::CAR_HALF_EXTENTS.z`, `velocity.z`
+       within a separate documented tolerance of zero). One thing the
+       original scoping didn't spell out: "no dodge in progress" has no
+       directly recorded signal at all (a `PhysicsFrame` doesn't carry
+       one) — the heuristic can only proxy for it via the grounded +
+       no-jump-held check, exactly the gap the Non-goals already called
+       out. A capture with no qualifying frame at all returns
+       `IngestError::Malformed` rather than silently falling back to frame
+       0 — there would be no valid seed to simulate from.
+    3. **New CLI entry point**: `rb-verify --self <capture-file>
+       [max-timestamp-delta-secs]`, alongside the existing `rb-verify
+       <replay-file> <capture-file> [...]` mechanical mode — resolved the
+       scoping's "exact flag naming TBD" to a `--self` flag (the candidate
+       is simulated from the capture itself, unlike the two-unrelated-
+       files mechanical mode).
+    4. **The real-capture run itself has not happened yet** — deliberately
+       deferred rather than scoped down, since it needs a real
+       Rocket League/BakkesMod environment. Running `cargo run -p
+       rb_verify_cli -- --self <real-capture-file>` once such an
+       environment is available, and recording the resulting numbers here
+       and in `RB-VERIFY-003`, remains this requirement's one open item.
   - **Non-goals (this requirement).** Does not pre-define a "good enough"
     divergence threshold — per `RB-VERIFY-003`'s own Open Questions, a
-    threshold gets calibrated *from* this first real run, not decided
+    threshold gets calibrated *from* the first real run, not decided
     before it. Does not change any constant based on the result (a later
-    FR). Does not solve multi-car captures beyond what already exists —
-    only a single-car freeplay capture has been recorded so far, so
-    multi-car candidate simulation is unexercised until a multi-car
-    capture exists. Does not add the missing hidden-state setters
-    `FR-076`'s Non-goals identified — only works around them via the
-    seed-frame heuristic in (2) above; if that heuristic proves
-    insufficient, adding those setters is a follow-up FR.
+    FR, once a result exists). Does not solve multi-car captures beyond
+    what already exists — only a single-car freeplay capture has been
+    recorded so far, so multi-car candidate simulation is unexercised
+    until a multi-car capture exists. Does not add the missing
+    hidden-state setters `FR-076`'s Non-goals identified — only works
+    around them via the seed-frame heuristic above; if that heuristic
+    proves insufficient once a real run happens, adding those setters is a
+    follow-up FR.
   - **Acceptance criteria.** `rb_verify_cli` produces a divergence score
     between a real capture's recorded outcome and a candidate trajectory
     `rb_physics_bullet` actually simulated from that capture's own
     recorded input — the first score in this project with a genuine
     physical reason to be small if the physics core is accurate, unlike
-    every `score_replay_against_capture` run to date.
-  - **Verification plan.** Unit tests for the new function's wiring
-    (missing-file/malformed-capture error paths, mirroring
-    `score_replay_against_capture`'s own 3 tests) plus one manual
-    end-to-end run against the real capture, numbers recorded in Change
-    history once run.
+    every `score_replay_against_capture` run to date. Met for the
+    synthetic capture fixture (see Verification plan); the real-capture
+    run this requirement's own scope calls for has not happened yet.
+  - **Verification plan.** 3 new unit tests mirroring
+    `score_replay_against_capture`'s own precedent: a happy-path run
+    against `rb_capture_ingest`'s synthetic capture fixture (which does
+    contain a grounded, neutral frame 0, so exercises the whole path
+    end-to-end without needing a real capture), a missing-file I/O-error
+    case, and a hand-built capture with no grounded/neutral frame at all
+    exercising the new `Malformed` error path. All 6 `rb_verify_cli` tests
+    pass; full workspace `cargo fmt`/`clippy`/`test` all green (388 tests
+    workspace-wide). The one manual end-to-end run against the real
+    capture is still outstanding — numbers to be recorded in Change
+    history once it happens.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6517,6 +6543,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.78.0 (2026-09-03): FR-077 implemented (pending a real-capture run) —
+  `rb_verify_cli` gained `score_capture_against_candidate`, a composition
+  path that seeds a `PhysicsWorld` from a capture's own first grounded,
+  neutral frame (`is_grounded_and_neutral`, a heuristic proxy for
+  `FR-076`'s unset hidden jump/dodge state being accurate there) and scores
+  a candidate `rb_physics_bullet` actually simulated from that capture's
+  own recorded input against the capture's own recorded outcome — this
+  project's first fidelity comparison with a genuine physical reason to be
+  small if the physics core is accurate, unlike `score_replay_against_capture`'s
+  existing mechanical-only comparison of two unrelated matches. A new
+  `rb-verify --self <capture-file>` CLI mode exposes it. 3 new unit tests
+  (happy path against the synthetic capture fixture, missing-file, and
+  no-qualifying-frame `Malformed` cases); full workspace `cargo fmt`/
+  `clippy`/`test` all green (388 tests). The one manual run this
+  requirement's own scope calls for — against the real capture from
+  `RB-VERIFY-002-FR-001` — still needs a real Rocket League/BakkesMod
+  environment this sandbox doesn't have; numbers will be recorded here
+  once it happens.
 - 0.77.0 (2026-09-02): FR-076 implemented — `rb_physics_bullet` can now
   seed a `PhysicsWorld` from a recorded `PhysicsFrame`
   (`PhysicsWorld::from_frame`) and simulate it forward using a recorded
