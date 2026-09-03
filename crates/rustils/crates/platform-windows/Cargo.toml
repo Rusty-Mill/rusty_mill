@@ -1,7 +1,7 @@
 [package]
 name = "platform-windows"
 description = "Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it."
-version = "0.27.0"
+version = "0.27.1"
 edition = "2021"
 rust-version = "1.75"
 publish = false

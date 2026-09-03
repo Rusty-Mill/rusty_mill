@@ -1,7 +1,7 @@
 [package]
 name = "platform-bsd"
 description = "BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering."
-version = "0.27.0"
+version = "0.27.1"
 edition = "2021"
 rust-version = "1.75"
 publish = false

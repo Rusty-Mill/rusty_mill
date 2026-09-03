@@ -1,7 +1,7 @@
 [package]
 name = "platform-linux"
 description = "Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated."
-version = "0.27.0"
+version = "0.27.1"
 edition = "2021"
 rust-version = "1.75"
 publish = false

@@ -1,7 +1,7 @@
 [package]
 name = "platform"
 description = "Portable trait surface and types for rustils — the api layer. No I/O, no unsafe."
-version = "0.27.0"
+version = "0.27.1"
 edition = "2021"
 rust-version = "1.75"
 publish = false

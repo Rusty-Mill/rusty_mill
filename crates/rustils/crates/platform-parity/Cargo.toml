@@ -1,7 +1,7 @@
 [package]
 name = "platform-parity"
 description = "Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate."
-version = "0.27.0"
+version = "0.27.1"
 edition = "2021"
 rust-version = "1.75"
 publish = false
