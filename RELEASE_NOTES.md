@@ -13,6 +13,33 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Dependency sovereignty policy (ADR-0002) and the last workspace-member git pins
+**2026-09-03** · branch [`claude/review-recommended-changes-8kepe6`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/review-recommended-changes-8kepe6)
+
+- **Added:** `docs/adr/0002-dependency-sovereignty-policy.md` — a three-tier
+  classification (Sovereign / Transitional / Adapter) for how a crate's
+  external dependencies relate to the workspace's dependency-minimizing
+  purpose, written in response to an external Atlas-alignment review that
+  found "no external dependencies" does not describe the monorepo as a
+  whole (114 of 199 manifests declare a direct external normal dependency).
+  A generated, per-crate ledger cross-referencing manifests to tiers is
+  tracked as follow-up, not introduced here.
+- **Fixed:** `crates/rusty_term/l13`, `crates/rusty_font`, and
+  `crates/rusty_gpu` depended on `rusty_lsp`/`rusty_simd` via a pinned git
+  URL even though both are workspace members with their own `crates/<name>`
+  directory, letting the git and workspace copies silently diverge —
+  contrary to `ATLAS-RWC-0050`. All three now use plain path dependencies.
+- **Added:** `.github/scripts/check_workspace_deps.py` (with unit tests) and
+  a new `dependency-policy` CI job that fails a PR if any workspace member's
+  name resolves from a git source anywhere in the dependency graph —
+  confirmed to catch the exact violation above by running it against the
+  pre-fix manifests.
+- Known limitation: `main` is still unprotected on GitHub (no required
+  status checks, no branch protection rule), so this new CI job — like the
+  rest of `ci.yml` — is not yet a merge gate. That requires a repository
+  admin action outside what this PR's tooling can perform; see the Atlas
+  review's `ATLAS-TOOL-0010`/`0011` findings.
+
 ## Review policy: author self-review when no independent reviewer is available
 **2026-09-03** · branch [`claude/assessment-review-corrections-nac84f`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/assessment-review-corrections-nac84f)
 

@@ -94,6 +94,99 @@ fn server_verifies_a_client_certificate_it_trusts() {
 }
 
 #[test]
+fn complete_handshake_exposes_the_clients_certificate_to_the_server() {
+    let server_ca = TestCa::generate("rusty_tls mTLS test server CA");
+    let (server_leaf_der, server_leaf_key) = server_ca.issue_leaf("localhost");
+
+    let client_ca = TestCa::generate("rusty_tls mTLS test client CA");
+    let (client_leaf_der, client_leaf_key) = client_ca.issue_leaf("test-client");
+
+    let acceptor = TlsAcceptor::new_with_client_auth(
+        vec![server_leaf_der],
+        server_leaf_key,
+        vec![client_ca.root_der()],
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let expected_client_leaf_der = client_leaf_der.clone();
+    let server = thread::spawn(move || {
+        let (tcp, _) = listener.accept().unwrap();
+        let mut tls: TlsServerStream<TcpStream> = acceptor.accept(tcp).unwrap();
+
+        // Nothing has been read off the wire yet, so there is no
+        // certificate to report -- the same "before the handshake" shape
+        // `TlsStream::peer_certificate_der` has on the client side.
+        assert!(tls.is_handshaking());
+        assert_eq!(tls.peer_certificate_der(), None);
+
+        tls.complete_handshake().unwrap();
+
+        assert!(!tls.is_handshaking());
+        assert_eq!(
+            tls.peer_certificate_der(),
+            Some(expected_client_leaf_der.as_ref())
+        );
+
+        // Completing the handshake early doesn't consume the connection:
+        // application data still flows afterward.
+        let mut buf = [0u8; "hello with mTLS".len()];
+        tls.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"hello with mTLS");
+        tls.write_all(b"verified, welcome").unwrap();
+    });
+
+    let tcp = TcpStream::connect(addr).unwrap();
+    let policy = TrustPolicy::PinnedAnchors(vec![CertificateDer::from(server_ca.root_der())]);
+    let mut tls = TlsStream::new_with_client_identity(
+        tcp,
+        "localhost",
+        &policy,
+        vec![client_leaf_der],
+        client_leaf_key,
+    )
+    .unwrap();
+    tls.complete_handshake().unwrap();
+
+    tls.write_all(b"hello with mTLS").unwrap();
+    let mut buf = [0u8; "verified, welcome".len()];
+    tls.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"verified, welcome");
+
+    server.join().unwrap();
+}
+
+#[test]
+fn server_without_client_auth_reports_no_client_certificate() {
+    let server_ca = TestCa::generate("rusty_tls mTLS test server CA");
+    let (server_leaf_der, server_leaf_key) = server_ca.issue_leaf("localhost");
+
+    // Plain `new` -- the acceptor never asks for a client certificate, so
+    // even a completed handshake has none to report.
+    let acceptor = TlsAcceptor::new(vec![server_leaf_der], server_leaf_key).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let (tcp, _) = listener.accept().unwrap();
+        let mut tls: TlsServerStream<TcpStream> = acceptor.accept(tcp).unwrap();
+        tls.complete_handshake().unwrap();
+        assert!(!tls.is_handshaking());
+        assert_eq!(tls.peer_certificate_der(), None);
+    });
+
+    let tcp = TcpStream::connect(addr).unwrap();
+    let policy = TrustPolicy::PinnedAnchors(vec![CertificateDer::from(server_ca.root_der())]);
+    let mut tls = TlsStream::new(tcp, "localhost", &policy).unwrap();
+    tls.complete_handshake().unwrap();
+
+    server.join().unwrap();
+}
+
+#[test]
 fn server_rejects_a_connection_with_no_client_certificate() {
     let server_ca = TestCa::generate("rusty_tls mTLS test server CA");
     let (server_leaf_der, server_leaf_key) = server_ca.issue_leaf("localhost");

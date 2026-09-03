@@ -6,6 +6,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 
 ### Added
+- **`TlsServerStream::peer_certificate_der`**, the server-side mirror of
+  `TlsStream::peer_certificate_der`: the DER-encoded end-entity certificate
+  the client presented during the handshake, `None` before
+  `complete_handshake()` or on an acceptor that never asked for one
+  (`TlsAcceptor::new`). Raw bytes, not a parsed certificate, for the same
+  reason as the client accessor — parsing is the caller's job. Unblocks
+  rusty_multimodal_db's "class from certificate" design (ADR-0028), which
+  needs the verified client leaf on the server side of an mTLS connection.
 - **`New-RustyTlsReleases.ps1` gained `-PublishDrafts`**, the other half of
   `-Draft`. The script could create releases and could hold them back, but had
   no way to release what it had held back — so a drafted run had to be finished

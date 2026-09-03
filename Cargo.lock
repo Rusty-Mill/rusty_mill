@@ -9857,7 +9857,7 @@ name = "rusty-whisper"
 version = "0.8.0"
 dependencies = [
  "cpal",
- "rusty_simd 0.1.0",
+ "rusty_simd",
  "rusty_std",
  "rusty_wire",
 ]
@@ -9991,7 +9991,7 @@ dependencies = [
 name = "rusty_font"
 version = "0.1.0"
 dependencies = [
- "rusty_simd 0.1.0 (git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264)",
+ "rusty_simd",
  "rusty_std",
  "rusty_wire",
 ]
@@ -10012,7 +10012,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_font",
  "rusty_gui",
- "rusty_simd 0.1.0 (git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264)",
+ "rusty_simd",
  "rusty_std",
  "rusty_win32",
 ]
@@ -10111,21 +10111,11 @@ dependencies = [
  "minijinja",
  "pollster 0.4.0",
  "rayon",
- "rusty_simd 0.1.0",
+ "rusty_simd",
  "rusty_std",
  "serde",
  "serde_json",
  "wgpu 29.0.4",
-]
-
-[[package]]
-name = "rusty_lsp"
-version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_lsp?rev=3bdbdb44046cd7e58227543eca052cc2fe564977#3bdbdb44046cd7e58227543eca052cc2fe564977"
-dependencies = [
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -10173,7 +10163,7 @@ dependencies = [
 name = "rusty_rag"
 version = "0.1.0"
 dependencies = [
- "rusty_simd 0.1.0",
+ "rusty_simd",
 ]
 
 [[package]]
@@ -10248,11 +10238,6 @@ name = "rusty_simd"
 version = "0.1.0"
 
 [[package]]
-name = "rusty_simd"
-version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_simd?rev=38d3fae033d716d8616ef37f087004816d055264#38d3fae033d716d8616ef37f087004816d055264"
-
-[[package]]
 name = "rusty_sqlite"
 version = "0.1.0"
 dependencies = [
@@ -10315,7 +10300,7 @@ dependencies = [
 name = "rusty_term_l13"
 version = "0.1.0"
 dependencies = [
- "rusty_lsp 0.1.0",
+ "rusty_lsp",
  "serde_json",
 ]
 
