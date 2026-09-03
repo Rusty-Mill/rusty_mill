@@ -10,11 +10,10 @@ keywords = ["gpu", "framebuffer", "rasterizer", "graphics", "no-std"]
 categories = ["graphics", "no-std"]
 
 [dependencies]
-# rusty_std is now a sibling in this same workspace -- plain path
-# dependency. rusty_simd remains a pinned git dep (a `git = "..."`
-# dependency clones only that one repository, so a sibling checkout
-# doesn't exist for any external consumer) until it's merged in too.
-rusty_simd = { git = "https://github.com/baileyrd/rusty_simd", rev = "38d3fae033d716d8616ef37f087004816d055264" }
+# rusty_simd and rusty_std are workspace members -- plain path
+# dependencies, per ATLAS-RWC-0050 (same-workspace first-party
+# dependencies must resolve to the workspace copy, not a remote source).
+rusty_simd = { path = "../rusty_simd" }
 rusty_gui = { path = "../rusty_gui", version = "0.1.0" }
 rusty_font = { path = "../rusty_font", version = "0.1.0" }
 rusty_std = { path = "../rusty_std" }
