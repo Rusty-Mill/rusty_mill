@@ -29,11 +29,40 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   to every car (`RB-VERIFY-001-FR-004`).
 - `rb_capture_ingest`: real capture-file parsing via a new JSON-Lines
   format (`RB-VERIFY-002-FR-002`/`NFR-001`, ADR-0005), verified against a
-  synthetic fixture. The BakkesMod-side plugin that would write a real
-  capture (`RB-VERIFY-002-FR-001`) is not yet built.
+  synthetic fixture and, now that the BakkesMod-side plugin is built, a
+  real capture too.
+- `bakkesmod-plugin/rusty_bullet_capture/`: the BakkesMod-side capture
+  plugin's C++ source (`RB-VERIFY-002-FR-001`), grounded against a real
+  `BakkesModSDK` clone and emitting ADR-0005's JSON-Lines format. Outside
+  the Cargo workspace and this repo's CI (Windows/BakkesMod/Rocket League
+  only). Built with MSVC + CMake, loaded into a real Rocket League +
+  BakkesMod session, and run in freeplay; a real capture caught and fixed a
+  bug where cars were enumerated via a PRI back-reference that's never
+  updated in freeplay, switched to `ServerWrapper::GetCars()` instead.
 - `rb_verify_cli`: `score_replay_against_capture`, wiring ingestion to
   `rb_domain::divergence::score`. Manually run end-to-end against a real
   replay fixture and a capture file; not yet a fidelity measurement.
+- Ran `rb_verify_cli` end-to-end against the real vendored replay fixture
+  and a real BakkesMod capture for the first time (343 frames compared,
+  mean ball distance 3640.81 uu, mean car position/rotation/velocity
+  distance 4714.78 uu / 2.31 rad / 2127.93 uu/s), closing `PHASE-0-EXIT`'s
+  literal exit criterion and all four `PHASE-0-*` roadmap units. Not a
+  fidelity measurement — the replay and capture are unrelated matches;
+  that needs a Phase 1 candidate engine that doesn't exist yet.
+- `RB-PHYSICS-001-FR-076`: `rb_physics_bullet` can now seed a
+  `PhysicsWorld` from a recorded `PhysicsFrame` (`PhysicsWorld::from_frame`)
+  and simulate it forward using a recorded per-tick controller-input
+  sequence (`world::simulate_recorded`) — the candidate-engine plumbing
+  `FR-005`'s real-data calibration needs. Along the way, fetched
+  RocketSim's own real car mass/hitbox and ball mass
+  (`body::CAR_MASS`/`CAR_HALF_EXTENTS`/`BALL_MASS`, new
+  `RigidBody::standard_car`/`standard_ball`), surfacing a real ~44% width
+  discrepancy in this crate's own long-standing car hitbox test
+  placeholder, deliberately left uncorrected at existing call sites
+  pending a dedicated future calibration FR. `RB-PHYSICS-001-FR-077`
+  (wiring this into `rb_verify_cli` and running it against the real
+  capture, producing this project's first genuine fidelity measurement)
+  remains designed but not started.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation

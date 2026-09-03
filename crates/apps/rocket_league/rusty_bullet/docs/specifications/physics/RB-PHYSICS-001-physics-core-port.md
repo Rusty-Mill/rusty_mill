@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.75.0
+- Version: 0.77.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -53,7 +53,7 @@
   more constants already correct, and explicitly flagged the rest as
   audited-but-still-uncalibrated rather than silently unresolved —
   implemented, and explicitly does NOT close `FR-005`'s real-data
-  calibration, still blocked on `PHASE-0-EXIT`; and, since FR-033, each
+  calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started; and, since FR-033, each
   goal gets a real mass-spring net panel catching the ball (`net::NetMesh`)
   — implemented, scoped to the ball only at the time (since `FR-038`, a
   car is caught too — see that entry); and, since FR-034, every contact's
@@ -579,10 +579,14 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   that carries both bodies' mass/inertia contributions instead of assuming
   one side is a static plane. `PhysicsWorld::step` now detects and resolves
   a ball-vs-car contact every step a car is present.
-- `RB-PHYSICS-001-FR-005` (open): Calibrate gravity/restitution/friction
-  constants against real recorded ground truth once `RB-VERIFY-001`/
-  `RB-VERIFY-002` produce real data, rather than relying on the current
-  placeholder defaults.
+- `RB-PHYSICS-001-FR-005` (open, no longer blocked): Calibrate gravity/
+  restitution/friction constants against real recorded ground truth now
+  that `RB-VERIFY-001`/`RB-VERIFY-002` produce real data (`PHASE-0-EXIT`
+  closed) and a real capture exists, rather than relying on the current
+  placeholder defaults. Prerequisite plumbing to actually produce a real
+  fidelity score to calibrate against is scoped as `FR-076`/`FR-077`
+  (designed, not started) — this requirement itself doesn't start until
+  those land and produce a first real number.
 - `RB-PHYSICS-001-FR-006` (car-vs-car collision, implemented): A general
   separating-axis test between two oriented boxes (`collision::box_vs_box`),
   producing either a clipped face manifold (0-4 points) or a single
@@ -2066,7 +2070,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     collision logic, so (matching FR-031's own precedent) no new test was
     added; the fix is proven by the existing suite still passing unchanged.
     This requirement does not touch `RB-VERIFY-002` real-data calibration,
-    still blocked on `PHASE-0-EXIT`.
+    no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `arena::CEILING_Z` reads `2048.0` and every
     ball-radius literal in `solver.rs`/`world.rs`/`net.rs`/`collision.rs`
     reads `93.15` (not `91.25`); `arena::CORNER_LENGTH` and
@@ -2335,7 +2339,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     No change to either constant's value: this requirement's entire
     contribution is confirming that no reliable value exists yet, not
     picking one. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`'s
     own doc comments, this spec's Non-goals section, and this spec's Open
     Questions section all accurately describe the current sourcing
@@ -2399,7 +2403,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     split-impulse push channel (`resolve_two_body_push_row`) — only the
     real velocity-resolving rows (normal plus both friction directions)
     are scaled. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** A body shared by `k >= 2` manifolds this step
     lands measurably closer to the true simultaneous-solve answer than
     before this requirement, on the same scenario `RB-PHYSICS-001-FR-030`'s
@@ -2494,7 +2498,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     clamped-center-point construction — only the edge-edge tangent
     sign-selection heuristic was investigated as a change candidate, and
     it wasn't adopted. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** Both validated design choices (finite-segment
     edge-edge contact point, synthesize-rather-than-drop face-clipping
     fallback) are confirmed correct or favorable relative to the real
@@ -2553,9 +2557,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `combine_restitution`/`combine_friction`'s formula — average is kept,
     not switched to product, for the identity-preservation reason above.
     Does not calibrate `RB-PHYSICS-001-FR-005`'s real-data question of
-    which combine mode (if either) matches real Rocket League — still
-    blocked on `PHASE-0-EXIT`, unaffected by this requirement's own
-    reference-source correction. Does not touch any other Bullet-reference
+    which combine mode (if either) matches real Rocket League — no longer
+    blocked on `PHASE-0-EXIT` (now closed), but not itself started,
+    unaffected by this requirement's own reference-source correction. Does not touch any other Bullet-reference
     claim elsewhere in this spec — only the one this requirement's own Open
     Questions bullet made about combine mode.
   - **Acceptance criteria.** The wrong "Bullet's default is `btMax`" claim
@@ -2677,7 +2681,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     degenerate-quaternion epsilon threshold — kept at `1e-12` for lack of a
     concrete reason to adopt Bullet's own `SIMD_EPSILON` value instead (see
     finding 4 above). Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** Every Bullet-reference claim in `integrate.rs`'s
     doc comments is now backed by a citation to the specific fetched
     reference file and line-level behavior it was checked against, not
@@ -2742,7 +2746,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     self-correction to `Mat3::from_quat` for a non-unit-length input, for
     lack of a reachable production scenario that would exercise it (see
     finding 3 above). Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** Every Bullet-reference claim in
     `body.rs`/`mat3.rs`'s doc comments is now backed by a citation to the
     specific fetched reference file and behavior it was checked against.
@@ -2825,8 +2829,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     nothing to change. Does not change `box_vs_plane` to match Bullet's
     real single-contact-plus-persistence behavior (finding 3 above; this
     port's own instantaneous exact computation is deliberately kept). Does
-    not touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still
-    blocked on `PHASE-0-EXIT`.
+    not touch `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** Every Bullet-reference claim in these four
     functions' doc comments is now backed by a citation to the specific
     fetched reference file and behavior it was checked against.
@@ -2928,8 +2931,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     restructuring, nothing to change. Does not implement velocity-aligned
     friction direction selection (finding 6 above) — left as an explicitly
     tracked open item for a dedicated future requirement. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** Every Bullet-reference claim in these four
     functions' doc comments (plus the `btContactSolverInfo` defaults'
     own) is now backed by a citation to the specific fetched reference
@@ -3006,7 +3008,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `plane_space` itself, which remains exact and is now `friction_directions`'s
     documented fallback rather than `setup_rows`/`setup_two_body_rows`'s
     unconditional choice. Does not touch `RB-PHYSICS-001-FR-005`'s
-    real-data calibration, still blocked on `PHASE-0-EXIT`.
+    real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** Friction direction 1 aligns with the
     tangential component of relative sliding velocity whenever that
     velocity is non-negligible and the resulting basis is well-defined;
@@ -3090,7 +3092,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     to lose there, the same reasoning `resolve_dynamic_manifolds`'s own doc
     comment already gives for excluding static contacts from its combined
     solve. Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration,
-    still blocked on `PHASE-0-EXIT`.
+    no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `net::NetMesh::step` resolves every
     body-vs-point contact detected in a sub-step together via
     `solver::resolve_dynamic_manifolds`, not as a sequence of independent
@@ -3168,8 +3170,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     body touching only one static shape this step (the overwhelming
     majority of contacts), since a one-manifold combined solve degenerates
     to exactly the old single-manifold loop. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `PhysicsWorld::step` resolves every one of a
     body's static-surface contacts detected in a step together via
     `solver::resolve_static_manifolds`, not as a sequence of independent
@@ -3250,7 +3251,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     warm-starting to a body's static contacts (still cold-started every
     call, the same scoping `RB-PHYSICS-001-FR-051`'s own Non-goals already
     left open). Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `PhysicsWorld::step` resolves every body's
     static-surface contacts and every dynamic manifold detected in a step
     together via `solver::resolve_manifolds`, not as two separate combined
@@ -3312,8 +3313,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     own `friction`/`restitution` fields themselves — the clamp lives only
     at the point of combining two coefficients, matching exactly where
     real Bullet's own clamp lives. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `solver::combine_friction`'s result is
     clamped to `[-10.0, 10.0]`, matching real Bullet's own
     `calculateCombinedFriction` exactly. A dedicated test confirms the
@@ -3392,8 +3392,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     Does not touch `box_vs_quarter_pipe`/`box_vs_corner_fillet` (FR-027/
     FR-032's own curved-geometry functions) — this requirement is scoped
     to the two flat-rectangle-windowed shapes only. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `box_vs_goal_wall`'s doc comment states and
     justifies the convex-hull argument closing FR-028's own open
     question, with a passing test confirming a face bigger than the
@@ -3463,7 +3462,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     still this project's own uncalibrated invention (no reference exists
     for how far into a goal's depth a real net actually hangs, only for
     the goal box's own total depth). Does not touch `RB-PHYSICS-001-FR-005`'s
-    real-data calibration, still blocked on `PHASE-0-EXIT`.
+    real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `arena::GOAL_HALF_WIDTH`/`GOAL_HEIGHT`'s own
     doc comments state they're confirmed against the RLBot wiki, not
     merely commonly-cited. The spec's own Non-goals and Open Questions
@@ -3518,8 +3517,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     fix. Does not touch `MAX_CAR_SPEED`, `JUMP_SPEED`, or any other
     `drive.rs` constant — this requirement is scoped to the boost
     acceleration split specifically. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** A grounded car's own boost acceleration is
     unchanged (`BOOST_ACCELERATION_GROUND` matches the old
     `BOOST_ACCELERATION` value exactly). An airborne car's own boost
@@ -3636,7 +3634,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     see this requirement's own findings above for why a torque constant,
     unlike an angular-speed cap, doesn't clear `RB-PHYSICS-001-FR-031`'s
     "false precision" bar. Does not touch `RB-PHYSICS-001-FR-005`'s
-    real-data calibration, still blocked on `PHASE-0-EXIT`.
+    real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `drive::MAX_CAR_ANGULAR_SPEED`'s own doc
     comment states the exact RocketSim citation and its enforcement
     scope. Sustained full-axis air control input can no longer drive a
@@ -3723,7 +3721,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     shape is adopted. Does not touch `BOOST_ACCELERATION_GROUND`/`AIR`,
     `MAX_CAR_SPEED`, `MAX_CAR_ANGULAR_SPEED`, or any other `drive.rs`
     constant. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `drive_speed_taper`'s own doc comment states
     the exact RocketSim citation, its 3 confirmed breakpoints, and why
     the shape (not the magnitude) transfers cleanly. Throttle acceleration
@@ -3814,8 +3812,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     own `dodgeDir` combines `yaw + roll`; this port's dodge direction is
     pitch/roll only, matching its own pre-existing convention) —
     (`RB-PHYSICS-001-FR-073` later closed this thread with a genuine fix).
-    Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still
-    blocked on `PHASE-0-EXIT`.
+    Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `dodge_speed_scale`/`dodge_pitch_is_backward`'s
     own doc comments state the exact RocketSim citations and their scope
     caveats. A backward pitch-dodge or a side (roll) dodge made at
@@ -3890,7 +3887,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `LANDING_AUTO_UPRIGHT_TORQUE`'s value, trigger condition, or any other
     behavior — this is a pure audit/documentation finding, not a behavioral
     fix. Does not touch `RB-PHYSICS-001-FR-005`'s real-data calibration,
-    still blocked on `PHASE-0-EXIT`.
+    no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** The `drive` module's doc comments and this
     spec's Open Questions/FR-057 Non-goals no longer describe real Rocket
     League's landing-assist trigger condition as an open "may not map...
@@ -3958,8 +3955,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     on) or introducing a new dedicated ball-construction helper, both out
     of scope for a narrow constant-adoption requirement; left as a
     candidate for a future, dedicated requirement. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** A ball launched far past `BALL_MAX_SPEED`
     never exceeds it after a step; `clamp_ball_velocity` scales down an
     over-cap linear or angular velocity while preserving direction, and
@@ -4022,8 +4018,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     a future requirement once a canonical car exists. Does not change
     `sphere`'s own generic default, or retrofit any existing test to call
     `ball` instead — this is new API surface, not a migration. Does not
-    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked
-    on `PHASE-0-EXIT`.
+    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `RigidBody::ball(radius, mass, position)`
     returns a body with `restitution == 0.6`, `friction == 0.35`, and
     `linear_damping == 0.03`, otherwise identical to
@@ -4107,8 +4102,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     average formula (still `RB-PHYSICS-001-FR-043`'s own correct-reason
     choice for the *within-model* question that finding answered — this
     requirement is about the model itself, a separate question). Does not
-    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked
-    on `PHASE-0-EXIT`.
+    touch `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `solver::combine_restitution`/
     `combine_friction`'s own doc comments and this spec's Open Questions
     no longer frame the real-Rocket-League-combine-mode question as
@@ -4256,8 +4250,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `AIR_CONTROL_TORQUE` and `FR-059`'s `DODGE_SPEED` base magnitude as
     placeholders despite a real reference existing for each. Does not
     change `STEER_TORQUE`'s own magnitude. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `drive::STEER_TORQUE`'s own doc comment
     states the confirmed real steering mechanism (a wheeled-vehicle
     raycast/tire-slip model, not a torque) and the confirmed real
@@ -4316,8 +4309,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     to the real lateral factor is not grounds to keep it as-is or change
     it without also fixing the longitudinal side, which needs the
     architecture change above. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `drive::HANDBRAKE_FRICTION_MULTIPLIER`'s own
     doc comment states both confirmed real curves, the coincidental
     (not confirming) match to the real lateral factor, and why the
@@ -4377,7 +4369,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     unfilled calibration gap. Does not change
     `WALL_JUMP_HORIZONTAL_SPEED`'s own magnitude, which remains an
     uncalibrated placeholder. Does not touch `RB-PHYSICS-001-FR-005`'s
-    real-data calibration, still blocked on `PHASE-0-EXIT`.
+    real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `drive::WALL_JUMP_HORIZONTAL_SPEED`'s own doc
     comment states the confirmed real finding (no distinct wall-jump
     mechanic or constant; the same grounded-jump impulse applied along the
@@ -4441,7 +4433,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     scoped out to keep this requirement to the confirmed, fully-characterized
     per-axis ratio alone (`RB-PHYSICS-001-FR-070` later closed this thread).
     Does not touch `RB-PHYSICS-001-FR-005`'s
-    real-data calibration, still blocked on `PHASE-0-EXIT`.
+    real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`'s
     own doc comments state the exact RocketSim citations. Full yaw input
     produces measurably less angular velocity than full pitch input (scaled
@@ -4503,8 +4495,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     matching `RB-PHYSICS-001-FR-059`'s own Non-goals, which already
     flagged this exact redesign as out of scope. Does not change
     `DODGE_ANGULAR_SPEED`'s own magnitude. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `drive::DODGE_ANGULAR_SPEED`'s own doc
     comment states the confirmed real mechanism (a continuous per-axis
     torque over a fixed 0.65s window with no decay, not an instantaneous
@@ -4563,8 +4554,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     flagged as out of scope for the dodge itself. Does not change
     `apply_driven_forces`'s flip-cancel behavior (still a jump-press-
     triggered, all-axis, outright zero). Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** The `drive` module's flip-cancel doc comment no
     longer claims to match real Rocket League's own mechanism; it instead
     states the confirmed real mechanism (continuous, pitch-stick-driven,
@@ -4612,7 +4602,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     than a documentation-scoped tweak. Remains a candidate for a future,
     dedicated requirement, exactly as `RB-PHYSICS-001-FR-068`'s own
     Non-goals already flagged. Does not touch `RB-PHYSICS-001-FR-005`'s
-    real-data calibration, still blocked on `PHASE-0-EXIT`.
+    real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** The `drive` module's air-control doc comment and
     `AIR_CONTROL_ROLL_SCALE`'s own doc comment state the confirmed real
     damping mechanism and why it isn't adopted; `RB-PHYSICS-001-FR-068`'s
@@ -4678,7 +4668,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the same normalized direction as the linear impulse but still an
     architecture mismatch `RB-PHYSICS-001-FR-069`'s own Non-goals already
     established. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** A diagonal dodge (both `pitch` and `roll` at or
     above `DODGE_DEADZONE`) produces the same total linear-impulse
     magnitude as an axis-aligned dodge in the same direction, matching real
@@ -4752,7 +4742,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     thread with a genuine fix, correcting that mis-scoping). Does not adopt
     `DODGE_SPEED`'s own real base magnitude, still independently
     uncalibrated. Does not touch `RB-PHYSICS-001-FR-005`'s real-data
-    calibration, still blocked on `PHASE-0-EXIT`.
+    calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** A dodge or wall-jump-dodge press with only
     `yaw` held (no `roll`) fires the same sideways dodge a roll-only press
     would. Equal-and-opposite `yaw` and `roll` cancel to no sideways
@@ -4822,8 +4812,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the *same* boolean decision, not a genuine architectural difference at
     all. Does not adopt `DODGE_SPEED`'s own real base magnitude,
     still independently uncalibrated. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** A dodge whose secondary stick axis, once the
     combined `(pitch, roll)` direction is normalized, falls below
     `DODGE_DIRECTION_SNAP_THRESHOLD` in magnitude now fires as a pure
@@ -4873,14 +4862,175 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     around it are unchanged; only doc comments and this spec's own prose
     are corrected. Does not adopt `DODGE_SPEED`'s own real base magnitude
     or any other still-uncalibrated constant. Does not touch
-    `RB-PHYSICS-001-FR-005`'s real-data calibration, still blocked on
-    `PHASE-0-EXIT`.
+    `RB-PHYSICS-001-FR-005`'s real-data calibration, no longer blocked on `PHASE-0-EXIT` (now closed), but not itself started.
   - **Acceptance criteria.** `DODGE_DEADZONE`'s own doc comment, this
     spec's Open Questions section, and `FR-073`'s/`FR-074`'s own Non-goals
     bullets no longer describe this constant as unreferenced or its
     trigger architecture as diverging from real Rocket League.
   - **Verification plan.** Documentation-only; no new tests. All 322
     pre-existing tests (as of `FR-074`) pass unchanged.
+- `RB-PHYSICS-001-FR-076` (implemented): `rb_physics_bullet` gains the
+  capability to seed a `PhysicsWorld` from a recorded `PhysicsFrame` and
+  simulate it forward using a recorded per-tick controller-input sequence,
+  producing a candidate `Vec<PhysicsFrame>` — the missing piece
+  `world::simulate`'s own doc comment already named: "Once `RB-VERIFY-002`
+  capture data exists, this signature grows an `inputs` parameter rather
+  than staying input-free." That capture data now exists (`PHASE-0-EXIT`,
+  closed). This FR is the prerequisite plumbing `FR-005`'s real-data
+  calibration and `RB-VERIFY-003`'s own Non-goals ("running a candidate
+  physics engine to generate its output — that's `RB-PHYSICS-001`'s
+  composition-root responsibility") both assume exists but didn't yet.
+  - **What shipped, and where it diverged from the original scoping.**
+    1. **`body::CAR_MASS`/`CAR_HALF_EXTENTS` and `RigidBody::standard_car`**,
+       plus **`body::BALL_RADIUS`/`BALL_MASS` and `RigidBody::standard_ball`**
+       (the scoping's own item 1 anticipated `standard_car` mirroring
+       `standard_ball`, but `standard_ball` didn't exist yet either — both
+       were added together). Fetched directly from RocketSim's own real
+       source: `src/RLConst.h`'s `CAR_MASS_BT = 180.f` (already matches
+       this crate's own long-standing `180.0` test placeholder — an
+       accurate placeholder, confirmed only now) and `BALL_MASS_BT =
+       CAR_MASS_BT / 6.f = 30.0` (a **new** finding — every existing test
+       uses `1.0`), and `src/Sim/Car/CarConfig/CarConfig.cpp`'s
+       `CAR_CONFIG_OCTANE.hitboxSize = { 120.507f, 86.6994f, 38.6591f }`
+       (full size; halved to half-extents `(60.2535, 43.3497, 19.32955)`)
+       — also a **new** finding, and a substantial one: this crate's own
+       long-standing `car_box` test placeholder
+       (`Vec3::new(60.0, 30.0, 18.0)`) has the right length and height
+       but a width (`30.0` half-extent) off Octane's real `43.3497` by
+       ~31% (~44% on the full-width comparison). `BALL_RADIUS` (`93.15`)
+       reuses `FR-036`'s own already-confirmed value rather than
+       re-deriving it — RocketSim's own `BALL_REST_Z` comment ("greater
+       than ball radius because of arena mesh collision margin") means
+       93.15 isn't literally RocketSim's own collision radius either, but
+       re-litigating `FR-036`'s own settled, dedicated-FR choice is out of
+       this FR's scope. Deliberately **not** corrected at any existing
+       `car_box`/`sphere`/`ball` call site across this crate's own tests
+       — only the four new constants and two new constructors carry the
+       corrected values; retuning every dimension/mass-dependent test's
+       own expectations to match is a dedicated calibration FR of its
+       own, matching `FR-036`'s own precedent, out of this FR's scope.
+       Car restitution/friction stay at the generic `0.5`/`0.5`
+       placeholder (not "confirmed or flagged" as a single number the way
+       the scoping's own item 1 first framed it) — `FR-063` already found
+       real Rocket League has no single generic car restitution/friction
+       at all, only per-contact-pair overrides this crate's architecture
+       can't represent, so inventing one number here would be exactly the
+       "false precision" `FR-031`/`FR-040` already refused.
+    2. **`PhysicsWorld::from_frame`**, exactly as scoped: seeds ball and
+       every car's position/rotation/velocity/angular_velocity directly
+       from the frame, `boost_amount` via the existing `set_car_boost`,
+       and shape/mass/material via (1)'s new constructors. One addition
+       the original scoping missed and had to be caught during
+       implementation: `elapsed_secs` (private, so only settable from
+       inside `impl PhysicsWorld`) is seeded to `frame.timestamp_secs`,
+       not left at `PhysicsWorld::new`'s own default `0.0` — without this,
+       every candidate frame `simulate_recorded` produces would land tens
+       of seconds away from the real capture's own absolute clock, and
+       `rb_domain::divergence::score`'s nearest-timestamp alignment would
+       never match anything up (see Data/state and invariants).
+    3. **`world::simulate_recorded`**, a sibling function to `simulate`
+       (not a breaking signature change, since every existing input-free
+       call site — this crate's own tests included — has no recorded
+       input to supply): for each consecutive pair of recorded frames,
+       applies the *earlier* frame's own per-car `ControllerInput` via
+       `set_car_input`, then steps by that pair's own `timestamp_secs`
+       delta — exactly the "derive `dt` from the recording's own spacing,
+       not a hardcoded rate" the scoping called for, since no confirmed
+       real Rocket League tick-rate constant exists anywhere in this
+       project. One addition the scoping didn't anticipate: a recorded
+       car whose `player_id` doesn't index into the seeded `world.cars`
+       (more recorded cars than the seed frame carried) is silently left
+       undriven that tick rather than panicking — real mid-capture car
+       joins/leaves are unexercised territory this plumbing doesn't need
+       to solve yet (see Non-goals).
+  - **Non-goals (this requirement).** Does not add setters for the
+    per-car runtime state `PhysicsWorld` tracks but never exposes
+    (`car_jump_held`, `car_double_jump_available`,
+    `car_jump_hold_time_remaining`, `car_dodge_flip_active` — all
+    initialized only to fixed defaults by `with_car`); seeding a
+    simulation therefore always assumes those defaults (not held,
+    double-jump available, zero hold time, no dodge in progress), which
+    is only accurate if the seed frame is a genuinely neutral, grounded
+    moment. Choosing *which* frame in a capture to seed from — and
+    whether a non-neutral seed frame needs those setters after all — is
+    `FR-077`'s concern, not this one. Does not wire this capability into
+    `rb_verify_cli` or run it against any real capture (`FR-077`). Does
+    not calibrate any constant based on a resulting score (a later FR,
+    once `FR-077` produces a first real number). Does not correct
+    `car_box`'s own existing call sites to the newly-confirmed real
+    hitbox — a separate, larger calibration FR (see above).
+  - **Acceptance criteria.** A `PhysicsWorld` can be constructed from a
+    recorded `PhysicsFrame` and stepped forward using a recorded sequence's
+    own controller input and timestamp spacing, producing a
+    `Vec<PhysicsFrame>` the existing `rb_domain::divergence::score` can
+    consume unmodified, with the candidate's own timestamps landing on the
+    same absolute clock the recording used. Met.
+  - **Verification plan.** 13 new unit tests against hand-built values (no
+    real capture needed for correctness, mirroring
+    `rb_capture_ingest::wire`'s own hand-built-value testing precedent):
+    6 in `body.rs` (`standard_car`/`standard_ball`'s mass/shape/material,
+    and that both new hitbox/mass constants deliberately differ from this
+    crate's own existing test placeholders) and 7 in `world.rs`
+    (`from_frame`'s ball/car/clock seeding; `simulate_recorded`'s frame
+    count, per-pair `dt` derivation — a longer recorded interval produces
+    proportionally more fall than a shorter one, which only holds if `dt`
+    is read per-pair rather than reused from the first — actual driving
+    from recorded input, and the out-of-bounds-car skip). All 335
+    `rb_physics_bullet` tests pass (322 pre-existing + 13 new); full
+    workspace `cargo fmt`/`clippy`/`test` all green. A real-capture run is
+    `FR-077`'s job, not this one's.
+- `RB-PHYSICS-001-FR-077` (designed, not started): `rb_verify_cli` gains a
+  new composition path — score a real BakkesMod capture's own recorded
+  outcome against a candidate trajectory simulated from that *same*
+  capture's recorded input via `FR-076`'s new `rb_physics_bullet`
+  capability — and is run once against the real capture from
+  `RB-VERIFY-002-FR-001`, producing this project's first genuine fidelity
+  number (as opposed to `rb_verify_cli::score_replay_against_capture`'s
+  existing mechanical-only comparison of two unrelated matches).
+  - **Scope.**
+    1. A new `rb_verify_cli` function (e.g.
+       `score_capture_against_candidate`) taking a capture path plus
+       tolerance, depending on `FR-076`'s new `rb_physics_bullet`
+       capability — `rb_verify_cli`'s first dependency on
+       `rb_physics_bullet` (today it depends only on `rb_domain`,
+       `rb_replay_ingest`, `rb_capture_ingest`; adding this stays inside
+       its own stated "composition root ... no domain logic of its own"
+       role per `AGENTS.md`, since the actual seeding/stepping logic
+       lives in `rb_physics_bullet` per `FR-076`, not here).
+    2. Choose a seed frame from the capture: the first frame satisfying
+       "grounded, no jump/boost/handbrake held, no dodge in progress" —
+       a heuristic proxy for "`PhysicsWorld`'s own default hidden state
+       (see `FR-076`'s Non-goals) is actually accurate here" — and trim
+       the recorded-vs-candidate comparison to start there, not
+       necessarily frame 0.
+    3. A new CLI entry point/flag distinguishing this real-fidelity mode
+       from the existing mechanical `score_replay_against_capture` path
+       (exact flag naming TBD at implementation time).
+    4. Manually run once against the real capture from
+       `RB-VERIFY-002-FR-001`; record the resulting numbers — whatever
+       they are — in this spec and `RB-VERIFY-003`'s own spec.
+  - **Non-goals (this requirement).** Does not pre-define a "good enough"
+    divergence threshold — per `RB-VERIFY-003`'s own Open Questions, a
+    threshold gets calibrated *from* this first real run, not decided
+    before it. Does not change any constant based on the result (a later
+    FR). Does not solve multi-car captures beyond what already exists —
+    only a single-car freeplay capture has been recorded so far, so
+    multi-car candidate simulation is unexercised until a multi-car
+    capture exists. Does not add the missing hidden-state setters
+    `FR-076`'s Non-goals identified — only works around them via the
+    seed-frame heuristic in (2) above; if that heuristic proves
+    insufficient, adding those setters is a follow-up FR.
+  - **Acceptance criteria.** `rb_verify_cli` produces a divergence score
+    between a real capture's recorded outcome and a candidate trajectory
+    `rb_physics_bullet` actually simulated from that capture's own
+    recorded input — the first score in this project with a genuine
+    physical reason to be small if the physics core is accurate, unlike
+    every `score_replay_against_capture` run to date.
+  - **Verification plan.** Unit tests for the new function's wiring
+    (missing-file/malformed-capture error paths, mirroring
+    `score_replay_against_capture`'s own 3 tests) plus one manual
+    end-to-end run against the real capture, numbers recorded in Change
+    history once run.
 - `RB-PHYSICS-001-NFR-001` (implemented): The physics core doesn't force
   Bullet-specific data modeling into `rb_domain` — `rb_domain::state`
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
@@ -6367,6 +6517,36 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.77.0 (2026-09-02): FR-076 implemented — `rb_physics_bullet` can now
+  seed a `PhysicsWorld` from a recorded `PhysicsFrame`
+  (`PhysicsWorld::from_frame`) and simulate it forward using a recorded
+  per-tick controller-input sequence (`world::simulate_recorded`),
+  producing a candidate trajectory `rb_domain::divergence::score` can
+  compare against the real recording it came from — the prerequisite
+  plumbing `FR-005`'s real-data calibration needs. Along the way, fetched
+  and adopted RocketSim's own real car mass/hitbox (`body::CAR_MASS`,
+  `body::CAR_HALF_EXTENTS`, `RigidBody::standard_car`) and ball mass
+  (`body::BALL_MASS`, `RigidBody::standard_ball`, reusing `FR-036`'s own
+  already-confirmed radius) — surfacing a substantial, previously-unnoticed
+  discrepancy in this crate's own long-standing car hitbox test
+  placeholder (real width ~44% wider than the placeholder), deliberately
+  left uncorrected at every existing call site (a separate calibration FR
+  of its own). 13 new unit tests (335 total, up from 322); no existing
+  test's own expectations changed. See Requirements for the full scope,
+  including where implementation diverged from the original scoping.
+- 0.76.0 (2026-09-02): Scoped (not implemented) `FR-076`/`FR-077`, the
+  prerequisite plumbing `FR-005`'s real-data calibration needs now that
+  `PHASE-0-EXIT` is closed: `FR-076` extends `rb_physics_bullet` to seed a
+  `PhysicsWorld` from a recorded `PhysicsFrame` and simulate it forward
+  using a recorded per-tick input sequence (the exact next step
+  `world::simulate`'s own doc comment already named); `FR-077` wires that
+  into `rb_verify_cli` and runs it once against the real capture from
+  `RB-VERIFY-002-FR-001`, producing this project's first genuine fidelity
+  number. `FR-005` itself updated to note its blocker (`PHASE-0-EXIT`) is
+  resolved but it doesn't start until `FR-076`/`FR-077` land. Also
+  corrected 35 stale "still blocked on `PHASE-0-EXIT`" Non-goals bullets
+  across earlier FR entries, now that gate is closed. No code changes; all
+  existing tests unaffected.
 - 0.75.0 (2026-09-01): FR-075 added and investigated (confirm
   `DODGE_DEADZONE` matches RocketSim's own real cancellation threshold —
   audit finding, documentation only) — this spec's own Open Questions

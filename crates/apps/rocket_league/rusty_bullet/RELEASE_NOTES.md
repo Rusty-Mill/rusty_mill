@@ -6,6 +6,145 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Implemented the candidate-engine plumbing scoped for FR-005 (FR-076)
+**2026-09-02** · `crates/rb_physics_bullet`
+
+- **`RB-PHYSICS-001-FR-076` implemented.** `rb_physics_bullet` can now seed a
+  `PhysicsWorld` from a recorded `PhysicsFrame` (`PhysicsWorld::from_frame`)
+  and simulate it forward using a recorded per-tick controller-input
+  sequence (`world::simulate_recorded`) — the two pieces `FR-005`'s
+  real-data constant calibration needs before it can produce any fidelity
+  number at all.
+- `RigidBody::standard_ball()`/`standard_car()` centralize the car/ball
+  shape and mass constants, fetched directly from RocketSim's own source
+  rather than invented: `CAR_MASS_BT = 180.f` (confirms this crate's
+  existing placeholder), `BALL_MASS_BT = CAR_MASS_BT / 6.f = 30.0` (new —
+  existing placeholder was `1.0`), and `CAR_CONFIG_OCTANE.hitboxSize =
+  {120.507, 86.6994, 38.6591}` full-size (new — surfaces a real ~44% width
+  discrepancy against this crate's long-standing car hitbox test
+  placeholder). Deliberately left uncorrected at existing call sites: a
+  genuinely new confirmed constant doesn't get retrofitted onto pervasive
+  pre-existing test literals outside the FR that adopts it; correcting
+  those is left to a dedicated future calibration FR, matching `FR-036`'s
+  precedent for the ball radius.
+- `dt` per simulated tick is derived from each pair of consecutive recorded
+  frames' own timestamps, not a fixed rate, since no confirmed real Rocket
+  League physics-tick rate exists anywhere in this project yet.
+- 13 new unit tests (6 in `body.rs`, 7 in `world.rs`); full workspace
+  `fmt`/`clippy -D warnings`/`test` green (335 tests in `rb_physics_bullet`,
+  385 across the workspace).
+- `RB-PHYSICS-001-FR-077` (wiring this into `rb_verify_cli` and running it
+  once against the real capture, producing this project's first genuine
+  fidelity measurement) remains designed but not started.
+
+---
+
+## Scoped the Phase 1 candidate engine FR-005 needs
+**2026-09-02** · `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md`
+
+- **Design only — no code.** With `PHASE-0-EXIT` closed, `RB-PHYSICS-001-FR-005`
+  ("calibrate constants against real recorded ground truth") is unblocked
+  but has no way to actually run yet: nothing feeds a capture's recorded
+  controller input into `rb_physics_bullet` to produce a candidate
+  trajectory to score. Scoped that prerequisite plumbing as two new
+  requirements.
+- **`FR-076`**: extend `rb_physics_bullet` to seed a `PhysicsWorld` from a
+  recorded `PhysicsFrame` (position/rotation/velocity/angular_velocity —
+  `CarState`/`BallState` already carry exactly these four fields) plus a
+  new `RigidBody::standard_car()` centralizing the car's confirmed real
+  shape/mass constants (mirroring `RigidBody::ball()`'s existing pattern),
+  and extend `world::simulate` to consume a recorded per-tick controller-
+  input sequence instead of running input-free — the exact next step its
+  own doc comment already named ("once `RB-VERIFY-002` capture data
+  exists, this signature grows an `inputs` parameter"). `dt` per tick is
+  derived from the recording's own consecutive timestamps, deliberately
+  sidestepping the fact that no confirmed real Rocket League physics-tick
+  rate exists anywhere in this project yet.
+- **`FR-077`**: wire `FR-076`'s capability into `rb_verify_cli` (its first
+  dependency on `rb_physics_bullet`) and run it once against the real
+  capture from `RB-VERIFY-002-FR-001`, producing this project's first
+  genuine fidelity number — scoring a capture's simulated-from-its-own-
+  input trajectory against its own recorded outcome, unlike every
+  `score_replay_against_capture` run to date (two unrelated matches).
+- **Known limitation, called out explicitly rather than glossed over**:
+  `PhysicsWorld` has no public setter for a car's mid-air jump/dodge state
+  (double-jump availability, jump-hold timer, active dodge), so seeding a
+  simulation is only accurate starting from a grounded, neutral moment.
+  `FR-077` works around this with a seed-frame heuristic rather than
+  adding those setters now; if that proves insufficient, adding them is a
+  follow-up.
+- Also corrected 35 stale "still blocked on `PHASE-0-EXIT`" Non-goals
+  bullets scattered across earlier `RB-PHYSICS-001` FR entries in this
+  same spec, now that gate is closed (the equivalent phrasing in
+  `TRACEABILITY.md` was already corrected in the previous entry below).
+
+---
+
+## Ran the verification pipeline end-to-end on real data for the first time, closing all of Phase 0
+**2026-09-02** · `crates/rb_verify_cli`
+
+- **Fed the new real BakkesMod capture into `rb_verify_cli`**: `cargo run -p
+  rb_verify_cli -- crates/rb_replay_ingest/fixtures/subtr-actor-sample.replay
+  <real capture>` — `frames compared: 343, mean ball distance: 3640.81 uu,
+  max ball distance: 6015.71 uu, car pairs compared: 343, mean car
+  position/rotation/velocity distance: 4714.78 uu / 2.31 rad / 2127.93
+  uu/s, max car position/rotation/velocity distance: 7721.40 uu / 3.14 rad
+  / 3938.20 uu/s`. No errors; ball scoring, car scoring, and
+  timestamp-tolerant alignment all engaged.
+- **This is the pipeline's literal exit criterion, now met on two
+  genuinely real inputs**: a real vendored replay and a real BakkesMod
+  recording, not a hand-authored synthetic capture. Closes `PHASE-0-EXIT`
+  and, with it, all four `PHASE-0-*` roadmap units (`BOOTSTRAP`,
+  `REPLAY-INGEST`, `CAPTURE-INGEST`, `EXIT`).
+- **The numbers themselves remain exactly as meaningless as a fidelity
+  measurement as the earlier synthetic-capture run**, for the identical
+  reason: the replay and this capture are two unrelated freeplay sessions
+  with no physical reason to resemble each other. That was never this
+  gate's own criterion — actually measuring fidelity needs a Phase 1
+  candidate physics engine that consumes a capture's recorded input and
+  produces a trajectory to compare against its recorded outcome, which
+  doesn't exist yet (`RB-PHYSICS-001-FR-005`).
+
+---
+
+## Built, loaded, and fixed the BakkesMod capture plugin against a real game
+**2026-09-02** · `bakkesmod-plugin/rusty_bullet_capture/`
+
+- **Closed the one step that couldn't happen in a sandbox**: `RB-VERIFY-002-FR-001`'s
+  BakkesMod capture plugin had only ever been source-written and grounded
+  against a real SDK clone, never actually compiled or run — this required
+  the owner's own Windows/BakkesMod/Rocket League environment. Built with
+  MSVC (VS2022 Build Tools) + CMake, loaded into a real Rocket League +
+  BakkesMod session, and run in freeplay.
+- **A real capture surfaced a genuine bug no header file could catch**:
+  the first real recording (9,358 lines) showed the ball's physics state
+  updating correctly, but the car entry frozen — identical position,
+  rotation, and all-zero input on every single line, even while the ball's
+  own recorded velocity spiked mid-session (something clearly hit it).
+  Root cause: enumerating cars via `ServerWrapper::GetPRIs()` +
+  `PriWrapper::GetCar()` never picks up the live-driven pawn in freeplay,
+  since a PRI's `Car` back-reference is meant for scoreboard/stat tracking,
+  which freeplay has none of.
+- **Fixed by switching to `ServerWrapper::GetCars()`** (inherited via
+  `GameEventWrapper`), the game's own live spawned-car-actor list — the
+  same source cameras/scoreboards use. A second real capture (2,818 lines,
+  ~23.5s) confirmed both ball and car state update correctly with real,
+  varied controller input (1,612 of 2,818 ticks with non-zero
+  throttle/steer).
+- **Verified two ways**: every line of the second capture schema-validated
+  exactly against ADR-0005 (a Python check across all 2,818 lines, zero
+  errors), and the whole file parsed end-to-end via `rb_capture_ingest`
+  through a scratch integration test (not kept in the repo — the capture is
+  the owner's own personal play data), confirming every car entry carries
+  `Some` input in chronological order. This resolves both of
+  `RB-VERIFY-002`'s former open questions (the hookable event name and
+  whether ADR-0005's format is ergonomic to emit from BakkesMod's C++ SDK).
+  `RB-VERIFY-002-FR-001`/`FR-002` are now implemented and verified; still
+  open: a manual BakkesMod-overlay single-timestamp cross-check and
+  NFR-002 (recording overhead, unmeasured).
+
+---
+
 ## Confirmed the dodge deadzone already matches real Rocket League exactly
 **2026-09-01** · [#157](https://github.com/baileyrd/rusty_bullet/pull/157) · `2f5a3eb`
 

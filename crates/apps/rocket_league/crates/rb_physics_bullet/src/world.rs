@@ -285,6 +285,67 @@ impl PhysicsWorld {
         world
     }
 
+    /// Seeds a `standard_arena` `PhysicsWorld` from a recorded
+    /// `PhysicsFrame` — the ball's and every car's position/rotation/
+    /// velocity/angular_velocity come directly from the frame (a direct
+    /// 1:1 field match with `BallState`/`CarState`), combined with
+    /// `RigidBody::standard_ball`/`standard_car`'s confirmed real
+    /// shape/mass for what a `PhysicsFrame` doesn't carry at all. Added
+    /// for `RB-PHYSICS-001-FR-076`'s candidate-engine plumbing:
+    /// `FR-077` uses this to seed a simulation from one of a real
+    /// capture's own recorded frames, then drives it forward with
+    /// `simulate_recorded` using that same capture's remaining frames.
+    ///
+    /// The returned world's own `frame().timestamp_secs` starts at
+    /// `frame.timestamp_secs` (not `0.0`) — deliberately, so the
+    /// candidate trajectory `simulate_recorded` produces lands on the
+    /// *same* absolute clock the recorded capture used, letting
+    /// `rb_domain::divergence::score`'s nearest-timestamp alignment
+    /// actually match frames up; seeding at `0.0` instead would put every
+    /// candidate frame outside any real capture's own alignment tolerance.
+    ///
+    /// Each car's `boost_amount` is seeded from the frame's own recorded
+    /// value via `set_car_boost`. Every other per-car runtime state
+    /// `PhysicsWorld` tracks but a `PhysicsFrame` doesn't carry at all
+    /// (`car_jump_held`, `car_double_jump_available`,
+    /// `car_jump_hold_time_remaining`, `car_dodge_flip_active`) is left at
+    /// `with_car`'s own fixed defaults (not held, double-jump available,
+    /// zero hold time, no dodge in progress) — accurate only if `frame`
+    /// captures a genuinely neutral, grounded moment. Choosing such a
+    /// frame is the caller's responsibility (see `RB-PHYSICS-001-FR-077`'s
+    /// own seed-frame heuristic), not this function's — `PhysicsWorld` has
+    /// no public way to seed those four fields directly at all yet.
+    ///
+    /// Cars are seeded in `frame.cars`'s own order, so a car's resulting
+    /// index in `self.cars` (and thus what `set_car_input` expects) always
+    /// matches that car's own `player_id` in `frame` — a real capture's
+    /// own `player_id` is already a per-session ordinal assigned in
+    /// exactly this order (see `RB-VERIFY-002-FR-001`'s plugin), so this
+    /// isn't a coincidence to maintain, just a fact to preserve.
+    pub fn from_frame(frame: &PhysicsFrame) -> PhysicsWorld {
+        let mut ball = RigidBody::standard_ball(frame.ball.position);
+        ball.orientation = frame.ball.rotation;
+        ball.linear_velocity = frame.ball.velocity;
+        ball.angular_velocity = frame.ball.angular_velocity;
+        ball.update_inertia_tensor();
+
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.elapsed_secs = frame.timestamp_secs;
+
+        for car_state in &frame.cars {
+            let mut car = RigidBody::standard_car(car_state.position);
+            car.orientation = car_state.rotation;
+            car.linear_velocity = car_state.velocity;
+            car.angular_velocity = car_state.angular_velocity;
+            car.update_inertia_tensor();
+            world = world.with_car(car);
+            let index = world.cars.len() - 1;
+            world.set_car_boost(index, car_state.boost_amount);
+        }
+
+        world
+    }
+
     /// Adds one arena wall to the scene — a flat `StaticPlane`, typically
     /// with a horizontal normal (e.g. `Vec3::new(1.0, 0.0, 0.0)`), though
     /// nothing here actually requires that. Callable more than once to
@@ -860,10 +921,63 @@ pub fn simulate(mut world: PhysicsWorld, duration_secs: f32, dt: f32) -> Vec<Phy
     frames
 }
 
+/// `simulate`'s own doc comment named this exact next step: "once
+/// `RB-VERIFY-002` capture data exists, this signature grows an `inputs`
+/// parameter rather than staying input-free." That data now exists
+/// (`RB-PHYSICS-001-FR-076`) — this is that grown signature, as a sibling
+/// function rather than a breaking change to `simulate` itself (every
+/// existing input-free call site — this crate's own tests included — has
+/// no recorded input to supply and shouldn't need to fabricate one).
+///
+/// Drives `world` (typically freshly built by `PhysicsWorld::from_frame`
+/// applied to `recorded[0]`) forward using `recorded`'s own per-tick
+/// controller input and timestamp spacing: for each consecutive pair of
+/// recorded frames, every car's `input` from the *earlier* frame (the
+/// input that was actually held going into that tick, matching how
+/// `RB-VERIFY-002-FR-001`'s plugin captured it) is applied via
+/// `set_car_input`, then `world` steps forward by that pair's own
+/// `timestamp_secs` delta — deliberately not a fixed/hardcoded rate,
+/// since no confirmed real Rocket League physics-tick-rate constant
+/// exists anywhere in this crate (only the empirical ~120Hz implied by a
+/// real capture's own line count over its own duration, never a sourced
+/// citation) and driving by the recording's own actual spacing sidesteps
+/// needing that number at all. A car whose `player_id` doesn't index into
+/// `world.cars` (more recorded cars than `world` was seeded with) is
+/// silently left undriven that tick rather than panicking — real
+/// mid-capture car joins/leaves are unexercised territory this plumbing
+/// doesn't need to solve yet (see `RB-PHYSICS-001-FR-077`'s own
+/// Non-goals).
+///
+/// Returns one `PhysicsFrame` per element of `recorded` (the first is
+/// `world`'s own starting `frame()`, before any step) — this is the
+/// candidate trajectory `rb_domain::divergence::score` compares against
+/// `recorded` itself for `RB-PHYSICS-001-FR-077`'s real fidelity number.
+pub fn simulate_recorded(mut world: PhysicsWorld, recorded: &[PhysicsFrame]) -> Vec<PhysicsFrame> {
+    let mut frames = Vec::with_capacity(recorded.len());
+    frames.push(world.frame());
+    for pair in recorded.windows(2) {
+        let (prev, next) = (&pair[0], &pair[1]);
+        for car_state in &prev.cars {
+            let Some(input) = car_state.input else {
+                continue;
+            };
+            let index = car_state.player_id as usize;
+            if index < world.cars.len() {
+                world.set_car_input(index, input);
+            }
+        }
+        let dt = next.timestamp_secs - prev.timestamp_secs;
+        world.step(dt);
+        frames.push(world.frame());
+    }
+    frames
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use rb_domain::Quat;
 
     fn flat_ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
@@ -1124,6 +1238,228 @@ mod tests {
         let frames = simulate(world, 1.0, 1.0 / 60.0);
         assert_eq!(frames.len(), 61);
         assert_eq!(frames[0].timestamp_secs, 0.0);
+    }
+
+    fn ball_state_at(position: Vec3) -> BallState {
+        BallState {
+            position,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        }
+    }
+
+    #[test]
+    fn simulate_recorded_returns_one_frame_per_recorded_frame() {
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 10.0,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 10.05,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 900.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 10.10,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 800.0)),
+                cars: vec![],
+            },
+        ];
+        let world = PhysicsWorld::from_frame(&recorded[0]);
+        let frames = simulate_recorded(world, &recorded);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].timestamp_secs, 10.0);
+        assert!((frames[2].timestamp_secs - 10.10).abs() < 1e-4);
+    }
+
+    #[test]
+    fn simulate_recorded_derives_dt_from_each_pairs_own_timestamps_not_a_fixed_rate() {
+        // Two consecutive pairs with different spacing (0.05s, then 0.10s),
+        // high enough above the ground to stay in free fall throughout:
+        // the ball should fall further during the longer second interval,
+        // which only happens if dt is actually read per-pair rather than
+        // reused from the first. Bypasses from_frame/standard_arena here
+        // (a plain flat ground instead) so this is a pure kinematics check,
+        // not entangled with any arena-geometry collision.
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 0.0,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 0.05,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+            PhysicsFrame {
+                timestamp_secs: 0.15,
+                ball: ball_state_at(Vec3::new(0.0, 0.0, 1000.0)),
+                cars: vec![],
+            },
+        ];
+        let world = PhysicsWorld::new(
+            RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, 0.0, 1000.0)),
+            flat_ground(),
+        );
+        let frames = simulate_recorded(world, &recorded);
+        let fall_1 = frames[0].ball.position.z - frames[1].ball.position.z;
+        let fall_2 = frames[1].ball.position.z - frames[2].ball.position.z;
+        assert!(
+            fall_2 > fall_1 * 1.5,
+            "expected the 0.10s second interval to fall further than the \
+             0.05s first one, got fall_1={fall_1} fall_2={fall_2}"
+        );
+    }
+
+    #[test]
+    fn simulate_recorded_actually_applies_each_cars_own_recorded_input() {
+        let driving_input = ControllerInput {
+            throttle: 1.0,
+            ..ControllerInput::default()
+        };
+
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 0.0,
+                ball: ball_state_at(Vec3::new(1000.0, 0.0, 1000.0)),
+                cars: vec![CarState {
+                    player_id: 0,
+                    position: Vec3::new(0.0, 0.0, 17.0),
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                    boost_amount: 0.0,
+                    input: Some(driving_input),
+                }],
+            },
+            PhysicsFrame {
+                timestamp_secs: 1.0,
+                ball: ball_state_at(Vec3::new(1000.0, 0.0, 1000.0)),
+                cars: vec![CarState {
+                    player_id: 0,
+                    position: Vec3::new(0.0, 0.0, 17.0),
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                    boost_amount: 0.0,
+                    input: Some(ControllerInput::default()),
+                }],
+            },
+        ];
+        let world = PhysicsWorld::from_frame(&recorded[0]);
+        let frames = simulate_recorded(world, &recorded);
+        assert_eq!(frames.len(), 2);
+        assert!(
+            frames[1].cars[0].velocity.x.abs() > 1.0,
+            "expected recorded throttle input to actually drive the car, got velocity {:?}",
+            frames[1].cars[0].velocity
+        );
+    }
+
+    #[test]
+    fn simulate_recorded_skips_a_recorded_car_the_world_was_not_seeded_with() {
+        // A car present in the recorded frame but beyond what the seeded
+        // world has (e.g. more cars than the seed frame carried) must not
+        // panic -- see simulate_recorded's own doc comment.
+        let recorded = vec![
+            PhysicsFrame {
+                timestamp_secs: 0.0,
+                ball: ball_state_at(Vec3::ZERO),
+                cars: vec![identity_car_state(0, Vec3::new(0.0, 0.0, 17.0), 0.0)],
+            },
+            PhysicsFrame {
+                timestamp_secs: 0.05,
+                ball: ball_state_at(Vec3::ZERO),
+                cars: vec![
+                    identity_car_state(0, Vec3::new(0.0, 0.0, 17.0), 0.0),
+                    identity_car_state(1, Vec3::new(100.0, 0.0, 17.0), 0.0),
+                ],
+            },
+        ];
+        // Seed from only the first (one-car) frame on purpose.
+        let world = PhysicsWorld::from_frame(&recorded[0]);
+        let frames = simulate_recorded(world, &recorded);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1].cars.len(), 1);
+    }
+
+    fn identity_car_state(player_id: u32, position: Vec3, boost_amount: f32) -> CarState {
+        CarState {
+            player_id,
+            position,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            boost_amount,
+            input: Some(ControllerInput::default()),
+        }
+    }
+
+    #[test]
+    fn from_frame_seeds_ball_state_directly_from_the_frame() {
+        let frame = PhysicsFrame {
+            timestamp_secs: 11.78,
+            ball: BallState {
+                position: Vec3::new(100.0, 200.0, 300.0),
+                rotation: Quat::new(0.5, 0.5, 0.5, 0.5),
+                velocity: Vec3::new(10.0, 20.0, 30.0),
+                angular_velocity: Vec3::new(1.0, 2.0, 3.0),
+            },
+            cars: vec![],
+        };
+        let world = PhysicsWorld::from_frame(&frame);
+        assert_eq!(world.ball.position, frame.ball.position);
+        assert_eq!(world.ball.orientation, frame.ball.rotation);
+        assert_eq!(world.ball.linear_velocity, frame.ball.velocity);
+        assert_eq!(world.ball.angular_velocity, frame.ball.angular_velocity);
+        assert!(world.cars.is_empty());
+    }
+
+    #[test]
+    fn from_frame_seeds_the_worlds_own_clock_from_the_frames_own_timestamp() {
+        // Critical for rb_domain::divergence::score's nearest-timestamp
+        // alignment to actually match candidate frames up against a real
+        // capture's own absolute clock -- see from_frame's own doc comment.
+        let frame = PhysicsFrame {
+            timestamp_secs: 11.78,
+            ball: BallState {
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            cars: vec![],
+        };
+        let world = PhysicsWorld::from_frame(&frame);
+        assert_eq!(world.frame().timestamp_secs, 11.78);
+    }
+
+    #[test]
+    fn from_frame_seeds_every_car_in_order_with_its_own_recorded_state() {
+        let frame = PhysicsFrame {
+            timestamp_secs: 0.0,
+            ball: BallState {
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            cars: vec![
+                identity_car_state(0, Vec3::new(1.0, 0.0, 17.0), 33.0),
+                identity_car_state(1, Vec3::new(-1.0, 0.0, 17.0), 100.0),
+            ],
+        };
+        let world = PhysicsWorld::from_frame(&frame);
+        assert_eq!(world.cars.len(), 2);
+        assert_eq!(world.cars[0].position, Vec3::new(1.0, 0.0, 17.0));
+        assert_eq!(world.cars[1].position, Vec3::new(-1.0, 0.0, 17.0));
+        let seeded = world.frame();
+        assert_eq!(seeded.cars[0].boost_amount, 33.0);
+        assert_eq!(seeded.cars[1].boost_amount, 100.0);
     }
 
     #[test]

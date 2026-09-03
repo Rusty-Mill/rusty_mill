@@ -108,6 +108,31 @@ pub const ANGULAR_SLEEP_VELOCITY_THRESHOLD: f32 = 0.5;
 /// See `LINEAR_SLEEP_VELOCITY_THRESHOLD`'s own doc comment.
 pub const SLEEP_TIME_THRESHOLD: f32 = 0.5;
 
+/// Real Rocket League's own ball radius, as already confirmed by
+/// `RB-PHYSICS-001-FR-036` (reused here, not re-derived) — see
+/// `standard_ball`'s own doc comment.
+pub const BALL_RADIUS: f32 = 93.15;
+/// Real Rocket League's own ball mass, fetched from RocketSim's own real
+/// source (`src/RLConst.h`: `BALL_MASS_BT = CAR_MASS_BT / 6.f`) — see
+/// `standard_ball`'s own doc comment for the full citation and why this
+/// deliberately differs from this crate's own long-standing test
+/// placeholder (`1.0`).
+pub const BALL_MASS: f32 = 30.0;
+
+/// Real Rocket League's own car mass, fetched from RocketSim's own real
+/// source (`src/RLConst.h`: `CAR_MASS_BT = 180.f`) — see `standard_car`'s
+/// own doc comment for the full citation and why this is exposed here
+/// rather than only inline.
+pub const CAR_MASS: f32 = 180.0;
+/// Real Rocket League's own Octane hitbox half-extents, fetched from
+/// RocketSim's own real source (`src/Sim/Car/CarConfig/CarConfig.cpp`:
+/// `CAR_CONFIG_OCTANE`'s `hitboxSize = { 120.507f, 86.6994f, 38.6591f }`,
+/// halved here since that field is the full size, not half-extents) — see
+/// `standard_car`'s own doc comment for the full citation, including why
+/// this deliberately differs from this crate's own long-standing
+/// `car_box` test placeholder (`Vec3::new(60.0, 30.0, 18.0)`).
+pub const CAR_HALF_EXTENTS: Vec3 = Vec3::new(60.2535, 43.3497, 19.32955);
+
 /// A dynamic rigid body: either a sphere (the ball) or a box (a car).
 /// Mirrors the subset of `bullet3/src/BulletDynamics/Dynamics/btRigidBody.h`'s
 /// fields this crate's integration and solver code actually needs.
@@ -244,8 +269,68 @@ impl RigidBody {
         body
     }
 
+    /// A real ball: `ball(BALL_RADIUS, BALL_MASS, position)`. Added for
+    /// `RB-PHYSICS-001-FR-076`'s candidate-engine seeding, mirroring
+    /// `standard_car`'s own pattern (see that constructor's doc comment).
+    /// `BALL_RADIUS` (`93.15`) is `RB-PHYSICS-001-FR-036`'s own already-
+    /// confirmed value — reused here, not re-derived — and already the
+    /// radius every existing test in this crate uses via `sphere`/`ball`
+    /// directly. `BALL_MASS` (`30.0`) is a genuinely new finding, fetched
+    /// directly from RocketSim's own real source (`src/RLConst.h`:
+    /// `BALL_MASS_BT = CAR_MASS_BT / 6.f`, i.e. `180.0 / 6.0 = 30.0`) —
+    /// `RB-PHYSICS-001-FR-062` deliberately left `ball`'s own `mass`
+    /// parameter free rather than adopting a real value, and every
+    /// existing test across this crate instead uses a `1.0` placeholder.
+    /// Deliberately **not** corrected at those existing call sites, for
+    /// the identical reason `standard_car`'s own doc comment gives for the
+    /// car's hitbox: retuning every mass-dependent test's own expectations
+    /// is a dedicated calibration FR of its own, out of `FR-076`'s scope.
+    pub fn standard_ball(position: Vec3) -> RigidBody {
+        RigidBody::ball(BALL_RADIUS, BALL_MASS, position)
+    }
+
     pub fn car_box(half_extents: Vec3, mass: f32, position: Vec3) -> RigidBody {
         RigidBody::new(Shape::Box { half_extents }, mass, position)
+    }
+
+    /// A box with real Rocket League's own confirmed car mass and Octane
+    /// hitbox half-extents baked in, instead of `car_box`'s fully generic
+    /// parameters — mirrors `ball`'s own pattern (`RB-PHYSICS-001-FR-062`),
+    /// added for `RB-PHYSICS-001-FR-076`'s candidate-engine seeding, which
+    /// needs "a realistically shaped/massed car" without repeating magic
+    /// numbers.
+    ///
+    /// Both values fetched directly from RocketSim's own real source:
+    /// `src/RLConst.h`'s `CAR_MASS_BT = 180.f`, and
+    /// `src/Sim/Car/CarConfig/CarConfig.cpp`'s `CAR_CONFIG_OCTANE` entry,
+    /// `hitboxSize = { 120.507f, 86.6994f, 38.6591f }` (full size, not
+    /// half-extents — see `CAR_HALF_EXTENTS`). `CAR_MASS_BT` already
+    /// exactly matches this crate's own long-standing test placeholder
+    /// (`180.0`, unwittingly correct); the hitbox is a genuinely new
+    /// finding — every existing `car_box` call site across this crate's
+    /// own tests (`body.rs`/`collision.rs`/`drive.rs`/`world.rs`) instead
+    /// uses `Vec3::new(60.0, 30.0, 18.0)`, whose width (`30.0` half-extent,
+    /// `60.0` full) is off Octane's real `86.6994` by ~44%. Deliberately
+    /// **not** corrected at those existing call sites, or anywhere else in
+    /// this crate: retuning every car-dimension-dependent test's own
+    /// expectations to match is a dedicated calibration FR of its own,
+    /// matching `RB-PHYSICS-001-FR-036`'s own precedent for the ball
+    /// radius — out of `FR-076`'s own scope (candidate-engine plumbing,
+    /// not a hitbox-wide recalibration). Only this new constructor uses
+    /// the corrected real value, for new callers that specifically want
+    /// it.
+    ///
+    /// Restitution/friction stay at `RigidBody::new`'s generic `0.5`/`0.5`
+    /// placeholders, unlike `ball`'s confirmed `0.6`/`0.35` — deliberately,
+    /// since `RB-PHYSICS-001-FR-063` already found real Rocket League has
+    /// no single generic car restitution/friction at all: it hardcodes
+    /// distinct overrides per contact-pair type (car-vs-ball, car-vs-world,
+    /// ...), which this crate's own one-restitution-one-friction-per-body
+    /// architecture has no way to represent. Inventing a single number
+    /// here would be exactly the "false precision"
+    /// `RB-PHYSICS-001-FR-031`/`FR-040` already refused to do.
+    pub fn standard_car(position: Vec3) -> RigidBody {
+        RigidBody::car_box(CAR_HALF_EXTENTS, CAR_MASS, position)
     }
 
     /// Recomputes `inv_inertia_world` from the body's current `orientation`
@@ -798,6 +883,42 @@ mod tests {
     }
 
     #[test]
+    fn standard_ball_uses_confirmed_real_radius_and_mass() {
+        let position = Vec3::new(1.0, 2.0, 3.0);
+        let ball = RigidBody::standard_ball(position);
+        assert_eq!(
+            ball.shape,
+            Shape::Sphere {
+                radius: BALL_RADIUS
+            }
+        );
+        assert_eq!(ball.position, position);
+        assert!(
+            (ball.mass() - BALL_MASS).abs() < 1e-4,
+            "expected RigidBody::standard_ball to use the confirmed real BALL_MASS_BT ({}), got {}",
+            BALL_MASS,
+            ball.mass()
+        );
+    }
+
+    #[test]
+    fn standard_ball_still_sets_confirmed_real_material_properties() {
+        let ball = RigidBody::standard_ball(Vec3::ZERO);
+        assert_eq!(ball.restitution, 0.6);
+        assert_eq!(ball.friction, 0.35);
+        assert_eq!(ball.linear_damping, 0.03);
+    }
+
+    #[test]
+    fn ball_mass_deliberately_differs_from_the_crates_own_test_placeholder() {
+        // Confirms this new constant is the corrected real value, not an
+        // accidental restatement of the existing uncorrected `1.0`
+        // placeholder scattered across this crate's own other tests -- see
+        // standard_ball's own doc comment.
+        assert_ne!(BALL_MASS, 1.0);
+    }
+
+    #[test]
     fn ball_otherwise_behaves_identically_to_sphere() {
         let position = Vec3::new(1.0, 2.0, 3.0);
         let ball = RigidBody::ball(93.15, 5.0, position);
@@ -817,6 +938,45 @@ mod tests {
         assert_eq!(s.restitution, 0.5);
         assert_eq!(s.friction, 0.5);
         assert_eq!(s.linear_damping, 0.0);
+    }
+
+    #[test]
+    fn standard_car_uses_confirmed_real_mass_and_octane_half_extents() {
+        let position = Vec3::new(1.0, 2.0, 3.0);
+        let car = RigidBody::standard_car(position);
+        assert_eq!(
+            car.shape,
+            Shape::Box {
+                half_extents: CAR_HALF_EXTENTS
+            }
+        );
+        assert_eq!(car.position, position);
+        assert_eq!(
+            car.mass(),
+            CAR_MASS,
+            "expected RigidBody::standard_car to use the confirmed real CAR_MASS_BT, got {}",
+            car.mass()
+        );
+    }
+
+    #[test]
+    fn standard_car_leaves_material_properties_at_the_generic_placeholder() {
+        // Unlike RigidBody::ball, no single real restitution/friction exists
+        // to adopt here (RB-PHYSICS-001-FR-063) -- standard_car must not
+        // invent one.
+        let car = RigidBody::standard_car(Vec3::ZERO);
+        assert_eq!(car.restitution, 0.5);
+        assert_eq!(car.friction, 0.5);
+    }
+
+    #[test]
+    fn car_half_extents_deliberately_differs_from_the_crates_own_test_placeholder() {
+        // Confirms this new constant is the corrected real value, not an
+        // accidental restatement of the existing uncorrected placeholder
+        // (Vec3::new(60.0, 30.0, 18.0)) scattered across this crate's own
+        // other tests -- see standard_car's own doc comment.
+        let old_placeholder = Vec3::new(60.0, 30.0, 18.0);
+        assert_ne!(CAR_HALF_EXTENTS, old_placeholder);
     }
 
     #[test]
