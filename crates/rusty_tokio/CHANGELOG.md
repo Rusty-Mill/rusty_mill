@@ -44,6 +44,20 @@ anything prior to v0.2.0.
 
 ### Fixed
 
+- The Windows reactor could permanently stop monitoring a socket if the
+  `IOCTL_AFD_POLL` re-arm submitted after a completion (AFD poll is
+  one-shot, unlike `epoll`/`kqueue`) itself failed -- the failure was
+  silently discarded (`let _ = self.submit_poll(&state)`), so no further
+  completion would ever arrive for that socket and any
+  `readable()`/`writable()` wait registered on it afterward hung
+  forever, observed only as nextest's own ~600s slow-timeout killing an
+  otherwise-unrelated test (Rusty-Mill/rusty_mill#153). Both `event_loop`
+  call sites now check the resubmission's result and, on failure, mark
+  both directions ready (a `mark_orphaned` helper mirroring the existing
+  bad-completion-status branch) so the caller's own next syscall
+  discovers the real problem instead of the wait hanging with nothing
+  left to wake it.
+
 - Readiness is no longer lost when an edge lands between a failed
   syscall and the clear that follows it. Every `WouldBlock` path
   (`poll_io` behind `read`/`write`/`connect`/`accept`, `try_io` behind

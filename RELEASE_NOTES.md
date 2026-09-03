@@ -13,6 +13,39 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Fix `rusty_tokio`'s Windows reactor orphaning a socket on a failed AFD re-arm
+**2026-09-03** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
+
+- **Fixed:** `crates/rusty_tokio/src/io/reactor/windows.rs`'s `event_loop`
+  discarded the result of resubmitting a socket's one-shot
+  `IOCTL_AFD_POLL` after every completion (`let _ =
+  self.submit_poll(&state)`, at both call sites). If that resubmission
+  itself failed, no further completion would ever arrive for that
+  socket, so a `readable()`/`writable()` wait registered on it
+  afterward hung forever with nothing left to wake it — observed as
+  four unrelated `rusty_tokio`/`rusty_tls` tests intermittently timing
+  out at nextest's ~600s slow-timeout on `test (windows-latest)`, then
+  passing in milliseconds on the very next retry ([#153](https://github.com/Rusty-Mill/rusty_mill/issues/153)).
+- **Why not the earlier readiness-edge fix ([#140](https://github.com/Rusty-Mill/rusty_mill/pull/140)):** all four
+  occurrences happened on runs *after* #140 had already merged, and its
+  fix targets a different failure shape (a bit cleared out from under a
+  fresh edge) than this one (no bit update ever happens again because
+  nothing is watching the socket anymore).
+- **How:** both re-arm call sites now check `submit_poll`'s result and,
+  on failure, mark both directions ready via a new `mark_orphaned`
+  helper — the same "surface both directions so the caller's own next
+  syscall discovers the truth" pattern `event_loop`'s sibling
+  bad-completion-status branch already used for a different failure
+  mode, extended to cover this one.
+- **Verified:** `cargo check`/`clippy -D warnings` clean on
+  `x86_64-pc-windows-gnu` (cross-compiled from this Linux sandbox, which
+  cannot execute Windows tests); the full Linux `rusty_tokio` suite
+  passes unaffected (the changed code is `#[cfg(windows)]`-only). Real
+  verification comes from `windows-latest` CI itself, the same oracle
+  #137/#138/#140 relied on.
+
+---
+
 ## Fix `sessionmgr-pty`'s intermittent size-reporting flake
 **2026-09-03** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
 

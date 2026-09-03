@@ -7,6 +7,40 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Stop orphaning a socket when its Windows AFD-poll re-arm fails
+**2026-09-03** · [Rusty-Mill/rusty_mill#153](https://github.com/Rusty-Mill/rusty_mill/issues/153)
+
+- **Fixed:** unlike `epoll`/`kqueue`, the Windows reactor's `IOCTL_AFD_POLL`
+  is one-shot and must be explicitly resubmitted after every completion.
+  Both call sites in `Reactor::event_loop` discarded that resubmission's
+  result (`let _ = self.submit_poll(&state)`); if it failed, no further
+  completion would ever arrive for that socket, so any
+  `readable()`/`writable()` wait registered on it afterward hung forever
+  with nothing left to wake it.
+- **How found:** `many_concurrent_tcp_connections` and three unrelated
+  `rusty_tls` handshake tests were intermittently timing out at exactly
+  nextest's ~600s slow-timeout on `test (windows-latest)`, then passing
+  in milliseconds on the very next retry -- the signature of a lost
+  wakeup, not a real failure. All four occurred *after* the earlier
+  readiness-edge fix (#140) had already merged, so this is a distinct
+  bug, not a recurrence of that one. Traced by reading
+  `io/reactor/windows.rs`'s completion-handling loop rather than by
+  reproducing locally -- this sandbox can cross-compile-check the crate
+  for `x86_64-pc-windows-gnu` but cannot execute Windows tests, so real
+  verification comes from `windows-latest` CI itself.
+- **Fix:** both re-arm call sites now check `submit_poll`'s result and,
+  on failure, mark both directions ready via a new `mark_orphaned`
+  helper -- exactly the same "surface both directions so the caller's
+  own next syscall discovers the truth" pattern `event_loop`'s sibling
+  bad-completion-status branch already used, just extended to cover the
+  re-arm-itself-failed case that branch didn't.
+- **Verified:** `cargo check`/`clippy -D warnings` clean on
+  `x86_64-pc-windows-gnu`; the full Linux `rusty_tokio` suite passes
+  unaffected (the changed code is `#[cfg(windows)]`-only, so it isn't
+  compiled or exercised on Linux at all).
+
+---
+
 ## Stop losing readiness edges between a `WouldBlock` and its clear
 **2026-09-02** · follow-up to [#138](https://github.com/Rusty-Mill/rusty_mill/pull/138)
 

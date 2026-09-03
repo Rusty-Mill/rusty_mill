@@ -20,6 +20,13 @@ Removed / Fixed / Security, newest first.
   and a `dependency-policy` CI job enforcing `ATLAS-RWC-0050`: no workspace
   member may resolve from a git source anywhere in the dependency graph
 ### Fixed
+- `crates/rusty_tokio`'s Windows reactor discarded the result of
+  re-arming a socket's one-shot `IOCTL_AFD_POLL` after every completion;
+  a failed re-arm silently stopped monitoring that socket forever,
+  hanging any later `readable()`/`writable()` wait on it — surfaced as
+  intermittent ~600s timeouts on unrelated `rusty_tokio`/`rusty_tls`
+  tests on `test (windows-latest)` (#153). Both re-arm sites now mark
+  both directions ready on a failed resubmission instead of hanging
 - `crates/rustils/crates/platform-linux`'s `LinuxPty::spawn` set a
   session's window size *after* spawning the hosted child, racing the
   child's own reads of its terminal size against the resize ioctl;
