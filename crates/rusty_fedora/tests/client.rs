@@ -62,7 +62,12 @@ async fn read_journal_with_every_filter_set() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"[{"line":"hello"}]"#)]);
 
     let lines = client(base_url)
-        .read_journal(Some("ollama.service"), Some(50), Some("1 hour ago"), Some(Priority::Err))
+        .read_journal(
+            Some("ollama.service"),
+            Some(50),
+            Some("1 hour ago"),
+            Some(Priority::Err),
+        )
         .await
         .expect("read_journal");
 
@@ -87,7 +92,10 @@ async fn task_status_returns_the_body_as_is() {
         r#"{"id":"task-1","state":"succeeded","exit_code":0}"#,
     )]);
 
-    let status = client(base_url).task_status("task-1").await.expect("task_status");
+    let status = client(base_url)
+        .task_status("task-1")
+        .await
+        .expect("task_status");
 
     assert_eq!(status["state"], "succeeded");
 }
@@ -109,7 +117,11 @@ async fn write_config_puts_the_full_body() {
     let base_url = support::spawn(vec![MockResponse::ok("{}")]);
 
     client(base_url)
-        .write_config("/etc/systemd/system/ollama.service.d/override.conf", "Hello=World\n", true)
+        .write_config(
+            "/etc/systemd/system/ollama.service.d/override.conf",
+            "Hello=World\n",
+            true,
+        )
         .await
         .expect("write_config");
 }

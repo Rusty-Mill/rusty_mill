@@ -123,10 +123,12 @@ impl HomelabCli {
     /// has no auth of its own, so there's nothing a half-set combination
     /// could mean.
     pub fn fedora_config(&self) -> Option<FedoraAgentConfig> {
-        self.fedora_agent_url.clone().map(|base_url| FedoraAgentConfig {
-            base_url,
-            timeout: None,
-        })
+        self.fedora_agent_url
+            .clone()
+            .map(|base_url| FedoraAgentConfig {
+                base_url,
+                timeout: None,
+            })
     }
 }
 
@@ -144,12 +146,9 @@ mod tests {
 
     #[test]
     fn a_fedora_agent_url_builds_a_config() {
-        let cli = HomelabCli::try_parse_from([
-            "homelab",
-            "--fedora-agent-url",
-            "http://100.64.0.1:8765",
-        ])
-        .expect("parses");
+        let cli =
+            HomelabCli::try_parse_from(["homelab", "--fedora-agent-url", "http://100.64.0.1:8765"])
+                .expect("parses");
 
         let config = cli.fedora_config().expect("fedora is configured");
         assert_eq!(config.base_url, "http://100.64.0.1:8765");

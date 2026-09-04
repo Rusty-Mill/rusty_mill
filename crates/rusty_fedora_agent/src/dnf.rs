@@ -46,7 +46,12 @@ impl DnfController {
     /// rejected if any one package fails, rather than silently dropping it
     /// from the command -- then spawns a background thread that runs
     /// `dnf <verb> -y <packages...>` and records the outcome.
-    fn run_dnf(&self, verb: &'static str, op: &'static str, packages: &[String]) -> Result<TaskId, AgentError> {
+    fn run_dnf(
+        &self,
+        verb: &'static str,
+        op: &'static str,
+        packages: &[String],
+    ) -> Result<TaskId, AgentError> {
         if packages.is_empty() {
             return Err(AgentError::InvalidRequest(
                 "packages must not be empty".to_string(),
@@ -156,7 +161,9 @@ fn lock_tasks(tasks: &TaskRegistry) -> MutexGuard<'_, HashMap<TaskId, TaskStatus
     // Recover rather than panic if a previous task thread poisoned the
     // lock -- a lost stdout/stderr capture on one crashed task shouldn't
     // wedge every later `install`/`remove`/`task_status` call.
-    tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn exit_code_of(status: ExitStatus) -> Option<i32> {
@@ -252,9 +259,12 @@ mod tests {
 
     #[test]
     fn a_successful_install_task_transitions_to_succeeded() {
-        let spawner: Arc<dyn Spawner + Send + Sync> = Arc::new(
-            MockSpawner::new().script_with_output("dnf", ExitStatus::Code(0), b"Installed: htop\n".to_vec()),
-        );
+        let spawner: Arc<dyn Spawner + Send + Sync> =
+            Arc::new(MockSpawner::new().script_with_output(
+                "dnf",
+                ExitStatus::Code(0),
+                b"Installed: htop\n".to_vec(),
+            ));
         let controller = DnfController::new(spawner, allowlist(&["htop"]));
 
         let task_id = controller
@@ -308,7 +318,7 @@ mod tests {
             htop.x86_64                3.3.1-1.fc43            updates\n\
             Obsoleting Packages\n\
             \n"
-            .to_vec();
+        .to_vec();
         let spawner: Arc<dyn Spawner + Send + Sync> =
             Arc::new(MockSpawner::new().script_with_output("dnf", ExitStatus::Code(100), stdout));
         let controller = DnfController::new(spawner, allowlist(&[]));
@@ -324,11 +334,12 @@ mod tests {
     fn list_updates_with_exit_100_but_no_parseable_rows_is_a_dnf_parse_error() {
         // Exit 100 promises updates are available; output this parser
         // can't make sense of contradicts that rather than meaning zero.
-        let spawner: Arc<dyn Spawner + Send + Sync> = Arc::new(MockSpawner::new().script_with_output(
-            "dnf",
-            ExitStatus::Code(100),
-            b"some future dnf output format we don't understand\n".to_vec(),
-        ));
+        let spawner: Arc<dyn Spawner + Send + Sync> =
+            Arc::new(MockSpawner::new().script_with_output(
+                "dnf",
+                ExitStatus::Code(100),
+                b"some future dnf output format we don't understand\n".to_vec(),
+            ));
         let controller = DnfController::new(spawner, allowlist(&[]));
 
         let err = controller

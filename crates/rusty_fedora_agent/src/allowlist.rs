@@ -93,10 +93,7 @@ impl Allowlist {
         if !path.is_absolute() {
             return Err(AgentError::PathNotAllowed(path.display().to_string()));
         }
-        if path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-        {
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(AgentError::PathNotAllowed(path.display().to_string()));
         }
         if self
@@ -165,7 +162,9 @@ mod tests {
     fn path_under_an_allowed_prefix_passes() {
         assert!(
             allowlist()
-                .check_config_path(Path::new("/etc/systemd/system/ollama.service.d/override.conf"))
+                .check_config_path(Path::new(
+                    "/etc/systemd/system/ollama.service.d/override.conf"
+                ))
                 .is_ok()
         );
     }

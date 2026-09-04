@@ -71,7 +71,11 @@ where
     if matches!(method, Method::Post | Method::Put)
         && request.as_reader().read_to_string(&mut body).is_err()
     {
-        respond(request, 400, &error_body("request body was not valid utf-8"));
+        respond(
+            request,
+            400,
+            &error_body("request body was not valid utf-8"),
+        );
         return;
     }
 
@@ -132,23 +136,27 @@ where
             Ok(serde_json::json!({ "task_id": task_id.0 }))
         }
 
-        (Method::Get, ["tasks", id]) => {
-            to_value(state.dnf.task_status(&crate::domain::TaskId(id.to_string()))?)
-        }
+        (Method::Get, ["tasks", id]) => to_value(
+            state
+                .dnf
+                .task_status(&crate::domain::TaskId(id.to_string()))?,
+        ),
 
         (Method::Get, ["config"]) => {
-            let path = params
-                .get("path")
-                .ok_or_else(|| AgentError::InvalidRequest("missing 'path' query parameter".to_string()))?;
+            let path = params.get("path").ok_or_else(|| {
+                AgentError::InvalidRequest("missing 'path' query parameter".to_string())
+            })?;
             let content = state.config.read(path)?;
             Ok(serde_json::json!({ "content": content }))
         }
 
         (Method::Put, ["config"]) => {
             let request: WriteConfigBody = parse_json_body(body)?;
-            state
-                .config
-                .write(&request.path, &request.content, request.backup.unwrap_or(true))?;
+            state.config.write(
+                &request.path,
+                &request.content,
+                request.backup.unwrap_or(true),
+            )?;
             Ok(serde_json::json!({}))
         }
 
@@ -316,7 +324,10 @@ mod tests {
     #[test]
     fn parse_query_splits_pairs() {
         let params = parse_query("unit=ollama.service&lines=50");
-        assert_eq!(params.get("unit").map(String::as_str), Some("ollama.service"));
+        assert_eq!(
+            params.get("unit").map(String::as_str),
+            Some("ollama.service")
+        );
         assert_eq!(params.get("lines").map(String::as_str), Some("50"));
     }
 
@@ -335,7 +346,10 @@ mod tests {
 
     #[test]
     fn known_unit_types_parse() {
-        assert_eq!(parse_unit_type("service").expect("valid"), UnitType::Service);
+        assert_eq!(
+            parse_unit_type("service").expect("valid"),
+            UnitType::Service
+        );
         assert_eq!(parse_unit_type("timer").expect("valid"), UnitType::Timer);
         assert_eq!(parse_unit_type("socket").expect("valid"), UnitType::Socket);
     }

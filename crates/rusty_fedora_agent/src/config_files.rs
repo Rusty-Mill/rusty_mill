@@ -83,7 +83,10 @@ mod tests {
         store
             .write(path_str, "hello=world\n", false)
             .expect("write succeeds");
-        assert_eq!(store.read(path_str).expect("read succeeds"), "hello=world\n");
+        assert_eq!(
+            store.read(path_str).expect("read succeeds"),
+            "hello=world\n"
+        );
     }
 
     #[test]
@@ -93,8 +96,12 @@ mod tests {
         let path = dir.join("test.conf");
         let path_str = path.to_str().expect("utf8 path");
 
-        store.write(path_str, "version=1\n", true).expect("first write");
-        store.write(path_str, "version=2\n", true).expect("second write, backed up");
+        store
+            .write(path_str, "version=1\n", true)
+            .expect("first write");
+        store
+            .write(path_str, "version=2\n", true)
+            .expect("second write, backed up");
 
         assert_eq!(store.read(path_str).expect("read current"), "version=2\n");
         let bak = std::fs::read_to_string(format!("{path_str}.bak")).expect("read backup");
@@ -119,7 +126,9 @@ mod tests {
         let (allowlist, _dir) = sandbox();
         let store = ConfigStore::new(allowlist);
 
-        let err = store.read("/etc/shadow").expect_err("outside the allowlist");
+        let err = store
+            .read("/etc/shadow")
+            .expect_err("outside the allowlist");
         assert!(matches!(err, AgentError::PathNotAllowed(_)));
     }
 

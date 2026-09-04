@@ -70,9 +70,10 @@ impl AgentError {
             | AgentError::PathNotAllowed(_)
             | AgentError::InvalidRequest(_) => 400,
             AgentError::UnknownTask(_) => 404,
-            AgentError::Platform { .. } | AgentError::CommandFailed { .. } | AgentError::DnfParse(_) | AgentError::Io(_) => {
-                500
-            }
+            AgentError::Platform { .. }
+            | AgentError::CommandFailed { .. }
+            | AgentError::DnfParse(_)
+            | AgentError::Io(_) => 500,
         }
     }
 }

@@ -39,7 +39,9 @@ pub fn run_captured(
     cmd.stdout = Stdio::Pipe;
     cmd.stderr = Stdio::Pipe;
 
-    let mut child = spawner.spawn(&cmd).map_err(|source| platform_err(op, source))?;
+    let mut child = spawner
+        .spawn(&cmd)
+        .map_err(|source| platform_err(op, source))?;
 
     let mut stderr_pipe = child
         .take_stderr()
@@ -120,11 +122,19 @@ mod tests {
 
     #[test]
     fn a_successful_command_returns_captured_stdout() {
-        let spawner =
-            MockSpawner::new().script_with_output("systemctl", ExitStatus::Code(0), b"active\n".to_vec());
+        let spawner = MockSpawner::new().script_with_output(
+            "systemctl",
+            ExitStatus::Code(0),
+            b"active\n".to_vec(),
+        );
 
-        let output = run_checked(&spawner, "systemctl", "systemctl", &["is-active".to_string()])
-            .expect("mocked command succeeds");
+        let output = run_checked(
+            &spawner,
+            "systemctl",
+            "systemctl",
+            &["is-active".to_string()],
+        )
+        .expect("mocked command succeeds");
         assert_eq!(output, "active\n");
     }
 

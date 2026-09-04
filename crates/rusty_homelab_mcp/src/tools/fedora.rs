@@ -238,7 +238,12 @@ impl HomelabServer {
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
             self.fedora()?
-                .read_journal(unit.as_deref(), lines, since.as_deref(), priority.map(Into::into))
+                .read_journal(
+                    unit.as_deref(),
+                    lines,
+                    since.as_deref(),
+                    priority.map(Into::into),
+                )
                 .await
                 .map_err(fedora_error)?
                 .into(),

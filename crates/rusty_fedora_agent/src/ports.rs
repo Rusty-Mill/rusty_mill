@@ -6,17 +6,15 @@
 //! real, `rustils`-backed implementations.
 
 use crate::domain::{
-    JournalLine, JournalQuery, PackageUpdate, ServiceAction, ServiceSummary, SystemStatus,
-    TaskId, TaskStatus, UnitType,
+    JournalLine, JournalQuery, PackageUpdate, ServiceAction, ServiceSummary, SystemStatus, TaskId,
+    TaskStatus, UnitType,
 };
 use crate::error::AgentError;
 
 /// systemd read/control operations.
 pub trait SystemController {
-    fn list_services(
-        &self,
-        unit_type: Option<UnitType>,
-    ) -> Result<Vec<ServiceSummary>, AgentError>;
+    fn list_services(&self, unit_type: Option<UnitType>)
+    -> Result<Vec<ServiceSummary>, AgentError>;
     fn control_service(&self, name: &str, action: ServiceAction) -> Result<(), AgentError>;
     fn read_journal(&self, query: JournalQuery) -> Result<Vec<JournalLine>, AgentError>;
     fn system_status(&self) -> Result<SystemStatus, AgentError>;

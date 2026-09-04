@@ -62,9 +62,7 @@ impl FedoraAgentClient {
     /// services, timers, and sockets together.
     pub async fn list_services(&self, unit_type: Option<UnitType>) -> Result<Value> {
         match unit_type {
-            Some(unit_type) => {
-                self.get(&format!("/services?unit_type={unit_type}")).await
-            }
+            Some(unit_type) => self.get(&format!("/services?unit_type={unit_type}")).await,
             None => self.get("/services").await,
         }
     }
@@ -163,7 +161,11 @@ impl FedoraAgentClient {
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
-        let response = self.http.get(&format!("{}{path}", self.base_url))?.send().await?;
+        let response = self
+            .http
+            .get(&format!("{}{path}", self.base_url))?
+            .send()
+            .await?;
         Self::parse(response).await
     }
 
@@ -206,7 +208,9 @@ impl FedoraAgentClient {
 /// name, a task id) -- narrower than [`encode_query_value`] since a path
 /// segment must not contain a literal `/`.
 fn encode_path_segment(value: &str) -> String {
-    encode(value, |c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+    encode(value, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
+    })
 }
 
 /// Percent-encodes a query-string value, matching the decoding

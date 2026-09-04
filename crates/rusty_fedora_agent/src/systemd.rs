@@ -47,7 +47,12 @@ impl SystemController for SystemdAdapter {
             "--plain".to_string(),
             format!("--type={type_arg}"),
         ];
-        let stdout = run_checked(self.spawner.as_ref(), "systemctl list-units", "systemctl", &args)?;
+        let stdout = run_checked(
+            self.spawner.as_ref(),
+            "systemctl list-units",
+            "systemctl",
+            &args,
+        )?;
         Ok(parse_list_units(&stdout))
     }
 
@@ -57,12 +62,21 @@ impl SystemController for SystemdAdapter {
         self.allowlist.check_unit(name)?;
 
         let args = vec![action.as_systemctl_verb().to_string(), name.to_string()];
-        run_checked(self.spawner.as_ref(), "systemctl control", "systemctl", &args)?;
+        run_checked(
+            self.spawner.as_ref(),
+            "systemctl control",
+            "systemctl",
+            &args,
+        )?;
         Ok(())
     }
 
     fn read_journal(&self, query: JournalQuery) -> Result<Vec<JournalLine>, AgentError> {
-        let mut args = vec!["--no-pager".to_string(), "-o".to_string(), "short-iso".to_string()];
+        let mut args = vec![
+            "--no-pager".to_string(),
+            "-o".to_string(),
+            "short-iso".to_string(),
+        ];
         if let Some(unit) = &query.unit {
             args.push("-u".to_string());
             args.push(unit.clone());
@@ -133,9 +147,10 @@ fn parse_list_units(stdout: &str) -> Vec<ServiceSummary> {
 
 fn read_uptime_seconds() -> Result<u64, AgentError> {
     let text = std::fs::read_to_string("/proc/uptime")?;
-    let first = text.split_whitespace().next().ok_or_else(|| {
-        AgentError::InvalidRequest("/proc/uptime had no fields".to_string())
-    })?;
+    let first = text
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| AgentError::InvalidRequest("/proc/uptime had no fields".to_string()))?;
     let seconds: f64 = first
         .parse()
         .map_err(|_| AgentError::InvalidRequest(format!("unparseable /proc/uptime: {first}")))?;
@@ -148,7 +163,9 @@ fn read_load_average() -> Result<(f64, f64, f64), AgentError> {
     let parse_next = |fields: &mut std::str::SplitWhitespace| -> Result<f64, AgentError> {
         fields
             .next()
-            .ok_or_else(|| AgentError::InvalidRequest("/proc/loadavg had too few fields".to_string()))?
+            .ok_or_else(|| {
+                AgentError::InvalidRequest("/proc/loadavg had too few fields".to_string())
+            })?
             .parse()
             .map_err(|_| AgentError::InvalidRequest("unparseable /proc/loadavg".to_string()))
     };
@@ -246,9 +263,8 @@ mod tests {
 
     #[test]
     fn control_service_allows_an_allowlisted_unit() {
-        let spawner: Arc<dyn Spawner + Send + Sync> = Arc::new(
-            MockSpawner::new().script("systemctl", ExitStatus::Code(0)),
-        );
+        let spawner: Arc<dyn Spawner + Send + Sync> =
+            Arc::new(MockSpawner::new().script("systemctl", ExitStatus::Code(0)));
         let adapter = SystemdAdapter::new(spawner, allowlist(&["ollama.service"]));
 
         adapter
@@ -258,11 +274,12 @@ mod tests {
 
     #[test]
     fn read_journal_parses_lines() {
-        let spawner: Arc<dyn Spawner + Send + Sync> = Arc::new(MockSpawner::new().script_with_output(
-            "journalctl",
-            ExitStatus::Code(0),
-            b"line one\nline two\n".to_vec(),
-        ));
+        let spawner: Arc<dyn Spawner + Send + Sync> =
+            Arc::new(MockSpawner::new().script_with_output(
+                "journalctl",
+                ExitStatus::Code(0),
+                b"line one\nline two\n".to_vec(),
+            ));
         let adapter = SystemdAdapter::new(spawner, allowlist(&[]));
 
         let lines = adapter

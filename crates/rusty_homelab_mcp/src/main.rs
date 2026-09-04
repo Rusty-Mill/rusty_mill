@@ -66,7 +66,13 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
     let fedora = fedora_config.map(FedoraAgentClient::new);
 
     rusty_mcp::serve(
-        move || Ok(HomelabServer::new(proxmox.clone(), opnsense.clone(), fedora.clone())),
+        move || {
+            Ok(HomelabServer::new(
+                proxmox.clone(),
+                opnsense.clone(),
+                fedora.clone(),
+            ))
+        },
         server_config,
     )
     .await
