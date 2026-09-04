@@ -6,6 +6,12 @@
 //! (systemd unit, polkit rule, sudoers entry, allowlist config) meant to
 //! be reviewed and applied by hand -- this binary does not apply them
 //! itself.
+//!
+//! Linux-only, like the `systemctl`/`journalctl`/`dnf` it shells out to --
+//! excluded from `windows-latest` CI in `.github/workflows/ci.yml`
+//! (`windows-exclude: rusty_fedora_agent`) rather than cfg-gated into a
+//! portable shim, the same treatment `rusty_stream` (built on `io_uring`)
+//! already gets there.
 
 mod allowlist;
 mod config_files;
