@@ -6,5 +6,6 @@
 //! with `+`. Adding a new backend (Home Assistant, UniFi, ...) means adding a
 //! module here plus one more `+` term there -- nothing else changes.
 
+pub mod fedora;
 pub mod opnsense;
 pub mod proxmox;

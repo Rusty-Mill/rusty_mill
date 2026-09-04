@@ -173,12 +173,14 @@ jobs:
       # rusty_stream is built on io_uring, a Linux-only kernel interface --
       # excluded on windows-latest rather than making its internals
       # cfg-gated portable shims like rusty_win32 does the other way.
+      # rusty_fedora_agent gets the same treatment: it shells out to
+      # systemctl/journalctl/dnf, none of which exist on Windows either.
       - uses: ./.github/actions/select-packages
         id: scope
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
-          windows-exclude: rusty_stream
+          windows-exclude: rusty_stream rusty_fedora_agent
 
       - name: Clippy
         if: steps.scope.outputs.args != ''
@@ -204,7 +206,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
-          windows-exclude: rusty_stream
+          windows-exclude: rusty_stream rusty_fedora_agent
 
       # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
       # walking target/{debug,release} at runtime rather than through a

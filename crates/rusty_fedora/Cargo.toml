@@ -1,0 +1,23 @@
+[package]
+name = "rusty_fedora"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write."
+repository = "https://github.com/baileyrd/rusty_fedora"
+authors = ["rusty_fedora contributors"]
+readme = "README.md"
+keywords = ["fedora", "systemd", "homelab", "dnf"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+# rusty_opnsense/rusty_proxmox both run under a real tokio runtime and
+# require the "tokio" feature rather than leaving it optional -- same
+# reasoning here.
+rusty_request = { path = "../rusty_request", features = ["tokio"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

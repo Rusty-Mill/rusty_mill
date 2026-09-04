@@ -19,6 +19,7 @@ use rmcp::{
     model::{CallToolRequestParams, ClientInfo, ProtocolVersion},
     service::RunningService,
 };
+use rusty_fedora::{FedoraAgentClient, FedoraAgentConfig};
 use rusty_opnsense::{OpnsenseClient, OpnsenseConfig};
 use rusty_proxmox::{ProxmoxClient, ProxmoxConfig};
 use server::HomelabServer;
@@ -88,9 +89,16 @@ fn opnsense_client(base_url: String) -> OpnsenseClient {
     })
 }
 
+fn fedora_client(base_url: String) -> FedoraAgentClient {
+    FedoraAgentClient::new(FedoraAgentConfig {
+        base_url,
+        timeout: None,
+    })
+}
+
 #[tokio::test]
 async fn every_backend_contributes_its_tools() {
-    let client = connect(HomelabServer::new(None, None)).await;
+    let client = connect(HomelabServer::new(None, None, None)).await;
 
     let tools = client.list_tools(None).await.expect("tools/list");
     let mut names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
@@ -99,6 +107,16 @@ async fn every_backend_contributes_its_tools() {
     assert_eq!(
         names,
         [
+            "fedora_dnf_install",
+            "fedora_dnf_list_updates",
+            "fedora_dnf_remove",
+            "fedora_list_services",
+            "fedora_read_config",
+            "fedora_read_journal",
+            "fedora_service_control",
+            "fedora_system_status",
+            "fedora_task_status",
+            "fedora_write_config",
             "opnsense_apply_firewall_changes",
             "opnsense_apply_vlan_changes",
             "opnsense_create_firewall_rule",
@@ -171,7 +189,7 @@ async fn every_backend_contributes_its_tools() {
 /// stays fixed.
 #[tokio::test]
 async fn every_declared_output_schema_is_a_json_object() {
-    let client = connect(HomelabServer::new(None, None)).await;
+    let client = connect(HomelabServer::new(None, None, None)).await;
 
     let tools = client.list_tools(None).await.expect("tools/list");
     for tool in &tools.tools {
@@ -190,7 +208,7 @@ async fn every_declared_output_schema_is_a_json_object() {
 
 #[tokio::test]
 async fn an_unconfigured_backend_fails_with_a_clear_error() {
-    let client = connect(HomelabServer::new(None, None)).await;
+    let client = connect(HomelabServer::new(None, None, None)).await;
 
     let err = client
         .call_tool(call("proxmox_list_nodes", serde_json::json!({})))
@@ -210,7 +228,7 @@ async fn proxmox_list_nodes_returns_structured_data_from_the_real_client_path() 
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"node":"pve","status":"online"}]}"#,
     )]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let result = client
@@ -231,7 +249,7 @@ async fn a_proxmox_api_error_surfaces_as_a_protocol_error() {
         "Unauthorized",
         r#"{"data":null,"errors":{"token":"invalid API token"}}"#,
     )]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let err = client
@@ -252,7 +270,7 @@ async fn proxmox_task_status_returns_structured_data_from_the_real_client_path()
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#,
     )]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let result = client
@@ -275,7 +293,7 @@ async fn proxmox_task_status_returns_structured_data_from_the_real_client_path()
 #[tokio::test]
 async fn opnsense_system_status_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), None);
     let client = connect(server).await;
 
     let result = client
@@ -294,7 +312,7 @@ async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-uuid"}"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), None);
     let client = connect(server).await;
 
     let result = client
@@ -325,7 +343,7 @@ async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-vlan-uuid"}"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), None);
     let client = connect(server).await;
 
     let result = client
@@ -349,7 +367,7 @@ async fn opnsense_download_backup_returns_the_raw_xml_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), None);
     let client = connect(server).await;
 
     let result = client
@@ -376,7 +394,7 @@ async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)));
+    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), None);
     let client = connect(server).await;
 
     let result = client
@@ -393,7 +411,7 @@ async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_
 #[tokio::test]
 async fn proxmox_update_guest_config_sends_the_config_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"data":null}"#)]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let result = client
@@ -420,7 +438,7 @@ async fn proxmox_create_guest_returns_the_task_upid_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmcreate:200:automation@pve!test:"}"#,
     )]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let result = client
@@ -451,7 +469,7 @@ async fn proxmox_cluster_resources_with_a_filter_returns_structured_data() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":[{"type":"storage","storage":"local"}]}"#,
     )]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let result = client
@@ -473,7 +491,7 @@ async fn proxmox_guest_power_returns_the_task_upid_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"data":"UPID:pve:00001234:0000ABCD:00000000:qmstart:100:automation@pve!test:"}"#,
     )]);
-    let server = HomelabServer::new(Some(proxmox_client(base_url)), None);
+    let server = HomelabServer::new(Some(proxmox_client(base_url)), None, None);
     let client = connect(server).await;
 
     let result = client
@@ -491,6 +509,107 @@ async fn proxmox_guest_power_returns_the_task_upid_as_plain_text() {
         .map(|t| t.text.clone())
         .expect("guest_power returns text");
     assert!(text.starts_with("UPID:pve:"), "unexpected upid: {text}");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn fedora_system_status_returns_structured_data_from_the_real_client_path() {
+    let base_url = support::spawn(vec![MockResponse::ok(
+        r#"{"hostname":"baileyai","uptime_seconds":12345}"#,
+    )]);
+    let server = HomelabServer::new(None, None, Some(fedora_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call("fedora_system_status", serde_json::json!({})))
+        .await
+        .expect("call fedora_system_status");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["hostname"], "baileyai");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn fedora_service_control_posts_the_action_body() {
+    let base_url = support::spawn(vec![MockResponse::ok("{}")]);
+    let server = HomelabServer::new(None, None, Some(fedora_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "fedora_service_control",
+            serde_json::json!({ "name": "ollama.service", "action": "restart" }),
+        ))
+        .await
+        .expect("call fedora_service_control");
+
+    assert_ne!(result.is_error, Some(true));
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn a_disallowed_fedora_unit_surfaces_as_a_protocol_error() {
+    let base_url = support::spawn(vec![MockResponse::status(
+        400,
+        "Bad Request",
+        r#"{"error":"unit 'sshd.service' is not in the allowlist"}"#,
+    )]);
+    let server = HomelabServer::new(None, None, Some(fedora_client(base_url)));
+    let client = connect(server).await;
+
+    let err = client
+        .call_tool(call(
+            "fedora_service_control",
+            serde_json::json!({ "name": "sshd.service", "action": "stop" }),
+        ))
+        .await
+        .expect_err("a unit outside the agent's allowlist should fail");
+
+    assert!(
+        err.to_string().contains("not in the allowlist"),
+        "unexpected error: {err}"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn fedora_dnf_install_returns_the_task_id() {
+    let base_url = support::spawn(vec![MockResponse::ok(r#"{"task_id":"task-1"}"#)]);
+    let server = HomelabServer::new(None, None, Some(fedora_client(base_url)));
+    let client = connect(server).await;
+
+    let result = client
+        .call_tool(call(
+            "fedora_dnf_install",
+            serde_json::json!({ "packages": ["htop"] }),
+        ))
+        .await
+        .expect("call fedora_dnf_install");
+
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["result"]["task_id"], "task-1");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn an_unconfigured_fedora_backend_fails_with_a_clear_error() {
+    let client = connect(HomelabServer::new(None, None, None)).await;
+
+    let err = client
+        .call_tool(call("fedora_system_status", serde_json::json!({})))
+        .await
+        .expect_err("fedora_system_status should fail when Fedora isn't configured");
+
+    assert!(
+        err.to_string().contains("Fedora is not configured"),
+        "unexpected error: {err}"
+    );
 
     client.cancel().await.expect("cancel");
 }

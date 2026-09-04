@@ -3,12 +3,12 @@ name = "rusty_homelab_mcp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "An MCP server for controlling a homelab -- Proxmox VE and OPNsense today, more backends welcome."
+description = "An MCP server for controlling a homelab -- Proxmox VE, OPNsense, and Fedora (via rusty_fedora_agent) today, more backends welcome."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_homelab_mcp"
 authors = ["rusty_homelab_mcp contributors"]
 readme = "README.md"
-keywords = ["mcp", "homelab", "proxmox", "opnsense"]
+keywords = ["mcp", "homelab", "proxmox", "opnsense", "fedora"]
 categories = ["network-programming"]
 # An application binary consuming the rusty-mcp scaffold, not a library
 # meant to be depended on -- same convention as rusty-mcp-demo.
@@ -32,6 +32,7 @@ unwrap_used = "warn"
 rusty-mcp = { path = "../rusty_mcp/crates/rusty-mcp" }
 rusty_proxmox = { path = "../rusty_proxmox" }
 rusty_opnsense = { path = "../rusty_opnsense" }
+rusty_fedora = { path = "../rusty_fedora" }
 rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "macros",
