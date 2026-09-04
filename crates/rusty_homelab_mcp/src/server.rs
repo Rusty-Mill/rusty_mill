@@ -7,34 +7,41 @@ use rmcp::{
     model::{ErrorData, ServerCapabilities, ServerInfo},
     tool_handler,
 };
+use rusty_fedora::FedoraAgentClient;
 use rusty_mcp::ToolError;
 use rusty_opnsense::OpnsenseClient;
 use rusty_proxmox::ProxmoxClient;
 
 /// The MCP server handler for `rusty_homelab_mcp`.
 ///
-/// Holds the two backend clients, each `None` if its flags weren't set at
-/// startup (see [`crate::config::HomelabCli`]). Cheap to clone: both clients share
-/// their own connection pools underneath, so cloning this only clones the
-/// `Option` wrappers and the tool router.
+/// Holds the three backend clients, each `None` if its flags weren't set
+/// at startup (see [`crate::config::HomelabCli`]). Cheap to clone: every
+/// client shares its own connection pool underneath, so cloning this only
+/// clones the `Option` wrappers and the tool router.
 #[derive(Clone)]
 pub struct HomelabServer {
     proxmox: Option<ProxmoxClient>,
     opnsense: Option<OpnsenseClient>,
+    fedora: Option<FedoraAgentClient>,
     tool_router: ToolRouter<Self>,
 }
 
 impl HomelabServer {
-    /// Build a server. Neither client connects here -- the first real
+    /// Build a server. None of the clients connect here -- the first real
     /// network request is whichever tool is called first.
-    pub fn new(proxmox: Option<ProxmoxClient>, opnsense: Option<OpnsenseClient>) -> Self {
+    pub fn new(
+        proxmox: Option<ProxmoxClient>,
+        opnsense: Option<OpnsenseClient>,
+        fedora: Option<FedoraAgentClient>,
+    ) -> Self {
         Self {
             proxmox,
             opnsense,
+            fedora,
             // Each backend contributes its own router; `+` merges them.
-            // Adding a third backend (Home Assistant, UniFi, ...) is one
+            // Adding a fourth backend (Home Assistant, UniFi, ...) is one
             // more module and one more term here.
-            tool_router: Self::proxmox_tools() + Self::opnsense_tools(),
+            tool_router: Self::proxmox_tools() + Self::opnsense_tools() + Self::fedora_tools(),
         }
     }
 
@@ -67,6 +74,19 @@ impl HomelabServer {
         })
     }
 
+    /// The configured Fedora agent client, or a protocol error naming the
+    /// flag to set.
+    pub(crate) fn fedora(&self) -> Result<&FedoraAgentClient, ErrorData> {
+        self.fedora.as_ref().ok_or_else(|| {
+            ToolError::invalid(
+                "Fedora is not configured on this server -- set --fedora-agent-url \
+                 (or the matching FEDORA_AGENT_URL environment variable) at startup, \
+                 pointing at a rusty_fedora_agent instance.",
+            )
+            .into()
+        })
+    }
+
     fn instructions(&self) -> String {
         let proxmox = if self.proxmox.is_some() {
             "configured"
@@ -78,13 +98,22 @@ impl HomelabServer {
         } else {
             "not configured"
         };
+        let fedora = if self.fedora.is_some() {
+            "configured"
+        } else {
+            "not configured"
+        };
         format!(
             "Control a homelab's infrastructure. Proxmox VE ({proxmox}): node and \
              guest (QEMU VM / LXC container) listing, status, and power control. \
              OPNsense ({opnsense}): system status, service control, interfaces, \
-             firewall aliases, and gateways. Calling a tool for an unconfigured \
-             backend returns an error explaining which flags or environment \
-             variables to set, rather than failing silently or omitting the tool."
+             firewall aliases, and gateways. Fedora ({fedora}): system status, \
+             systemd service listing/control, journal reads, dnf update listing/ \
+             install/remove, and allowlisted config file read/write, via a \
+             rusty_fedora_agent instance running on the managed host. Calling a \
+             tool for an unconfigured backend returns an error explaining which \
+             flags or environment variables to set, rather than failing silently \
+             or omitting the tool."
         )
     }
 }

@@ -2,18 +2,20 @@
 //! scaffold's standard transport/logging flags.
 
 use clap::Parser;
+use rusty_fedora::FedoraAgentConfig;
 use rusty_opnsense::OpnsenseConfig;
 use rusty_proxmox::ProxmoxConfig;
 
 /// This server's CLI: the scaffold's standard flags (`--transport`,
-/// `--bind`, `--log`, ...) plus where to find Proxmox and/or OPNsense.
+/// `--bind`, `--log`, ...) plus where to find Proxmox, OPNsense, and/or a
+/// `rusty_fedora_agent` instance.
 ///
-/// Both backends are optional -- set only the URL/credential flags for
+/// Every backend is optional -- set only the URL/credential flags for
 /// whichever homelab service is reachable from wherever this server runs.
 /// Every tool is always listed regardless of what's configured; a tool
 /// call against an unconfigured backend fails with a protocol error naming
 /// the flags to set, rather than the tool silently vanishing from the list
-/// (see [`crate::server::HomelabServer::proxmox`]/`::opnsense`).
+/// (see [`crate::server::HomelabServer::proxmox`]/`::opnsense`/`::fedora`).
 #[derive(Debug, Clone, Parser)]
 pub struct HomelabCli {
     /// The scaffold's own flags: transport, bind address, logging, etc.
@@ -55,6 +57,12 @@ pub struct HomelabCli {
     /// a host reachable outside a trusted network.
     #[arg(long, env = "OPNSENSE_INSECURE")]
     pub opnsense_insecure: bool,
+
+    /// `rusty_fedora_agent` base URL, e.g. `http://100.x.y.z:8765`. The
+    /// agent has no authentication of its own, so this should always be a
+    /// private/Tailscale address.
+    #[arg(long, env = "FEDORA_AGENT_URL")]
+    pub fedora_agent_url: Option<String>,
 }
 
 impl HomelabCli {
@@ -109,6 +117,17 @@ impl HomelabCli {
             ),
         }
     }
+
+    /// Builds a Fedora agent client config if `--fedora-agent-url` is set;
+    /// `None` otherwise. No credential pair to cross-check -- the agent
+    /// has no auth of its own, so there's nothing a half-set combination
+    /// could mean.
+    pub fn fedora_config(&self) -> Option<FedoraAgentConfig> {
+        self.fedora_agent_url.clone().map(|base_url| FedoraAgentConfig {
+            base_url,
+            timeout: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +139,20 @@ mod tests {
         let cli = HomelabCli::try_parse_from(["homelab"]).expect("parses");
         assert!(cli.proxmox_config().expect("no error").is_none());
         assert!(cli.opnsense_config().expect("no error").is_none());
+        assert!(cli.fedora_config().is_none());
+    }
+
+    #[test]
+    fn a_fedora_agent_url_builds_a_config() {
+        let cli = HomelabCli::try_parse_from([
+            "homelab",
+            "--fedora-agent-url",
+            "http://100.64.0.1:8765",
+        ])
+        .expect("parses");
+
+        let config = cli.fedora_config().expect("fedora is configured");
+        assert_eq!(config.base_url, "http://100.64.0.1:8765");
     }
 
     #[test]

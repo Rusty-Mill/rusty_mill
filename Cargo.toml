@@ -48,7 +48,9 @@ members = [
     "crates/rusty_oauth",
     "crates/rusty_proxmox",
     "crates/rusty_opnsense",
+    "crates/rusty_fedora",
     "crates/rusty_homelab_mcp",
+    "crates/rusty_fedora_agent",
     "crates/rustils_async/crates/reactor-core",
     "crates/rustils_async/crates/platform-async",
     "crates/rustils_async/crates/platform-async-mock",
@@ -385,6 +387,13 @@ rk-compose = { path = "crates/rusty_key/crates/compose" }
 aisdk = "0.5.2"
 schemars = "1.0.4"
 toml = "0.8"
+# rusty_fedora_agent's own HTTP server: a small *synchronous* server for a
+# single unprivileged local agent handling occasional requests -- no real
+# concurrent I/O to exploit, so it deliberately does not pull tokio/axum in
+# (the same reasoning rustils' own platform crate already applies to keep
+# tokio out of the platform layer, see the `rustils` block below). Not used
+# anywhere else in the workspace yet.
+tiny_http = "0.12"
 
 # Hoisted from rusty_tailscale's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `version` (0.0.1), `edition` (2024) and

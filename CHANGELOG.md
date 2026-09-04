@@ -9,6 +9,29 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/rusty_fedora_agent` — new workspace member: an unprivileged local
+  agent exposing scoped systemd/dnf/config-file control over a small
+  synchronous (`tiny_http`) HTTP API, for managing a Fedora Server host
+  (e.g. baileyai) that has no REST management API of its own. Built on
+  `rustils`' `platform`/`platform-linux` process-spawning layer
+  (`SystemController`/`PackageController` ports, `SystemdAdapter`/
+  `DnfController` adapters); privilege scoping (polkit unit allowlist,
+  sudoers-scoped `dnf install`/`remove`, config-path allowlist with
+  automatic `.bak` on write) ships as reviewable templates under
+  `deploy/`, not applied automatically. `tiny_http` is a new external
+  dependency (workspace-hoisted) — deliberately synchronous, no
+  tokio/axum, matching `rustils`' own reasoning for keeping tokio out of
+  its platform layer.
+- `crates/rusty_fedora` — new workspace member: async typed client for
+  `rusty_fedora_agent`'s HTTP API, same shape as `rusty_opnsense`/
+  `rusty_proxmox` (built on `rusty_request`, passthrough JSON).
+- `rusty_homelab_mcp` gained a `fedora` module: 10 new tools
+  (`fedora_system_status`, `fedora_list_services`,
+  `fedora_service_control`, `fedora_read_journal`,
+  `fedora_dnf_list_updates`, `fedora_dnf_install`/`fedora_dnf_remove`,
+  `fedora_task_status`, `fedora_read_config`/`fedora_write_config`),
+  following the existing OPNsense/Proxmox discovery-then-mutate and
+  `$defs` enum conventions exactly.
 - `rusty_base64` — hand-rolled, dependency-free Base64 (RFC 4648, standard
   and URL-safe alphabets, encode/decode) extracted from
   `rusty_oauth::encoding::base64`, closing issue #119. `rusty_oauth` now

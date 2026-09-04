@@ -1,18 +1,31 @@
 # rusty_homelab_mcp
 
-An MCP server for controlling a homelab: [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment)
-and [OPNsense](https://opnsense.org/) today, more backends welcome. Built on
-[`rusty-mcp`](../rusty_mcp/crates/rusty-mcp), this workspace's own scaffold
-for MCP servers, targeting spec 2026-07-28.
+An MCP server for controlling a homelab: [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment),
+[OPNsense](https://opnsense.org/), and Fedora/systemd hosts (via
+[`rusty_fedora_agent`](../rusty_fedora_agent)) today, more backends welcome.
+Built on [`rusty-mcp`](../rusty_mcp/crates/rusty-mcp), this workspace's own
+scaffold for MCP servers, targeting spec 2026-07-28.
 
-The Proxmox and OPNsense API clients themselves live in their own reusable
-crates, [`rusty_proxmox`](../rusty_proxmox) and [`rusty_opnsense`](../rusty_opnsense)
+The Proxmox, OPNsense, and Fedora API clients themselves live in their own
+reusable crates, [`rusty_proxmox`](../rusty_proxmox),
+[`rusty_opnsense`](../rusty_opnsense), and [`rusty_fedora`](../rusty_fedora)
 -- this crate is the thin MCP layer on top: argument schemas, tool
 descriptions, and wiring, nothing HTTP-specific.
 
+Unlike Proxmox/OPNsense, Fedora has no management REST API of its own, so
+`rusty_fedora` doesn't talk to Fedora directly -- it talks to
+`rusty_fedora_agent`, a small unprivileged daemon that runs *on* the managed
+Fedora host and exposes scoped systemd/dnf/config-file control over a local
+HTTP API. That keeps this server uniform (one calling convention -- typed
+REST -- across every backend) instead of growing a second mechanism
+(SSH+exec) alongside the REST one it already has. See
+`rusty_fedora_agent/README.md` for that agent's own privilege model
+(unprivileged user, polkit-scoped service control, sudoers-scoped dnf,
+allowlisted config paths).
+
 ## Running it
 
-Both backends are optional and independent -- configure whichever ones are
+Every backend is optional and independent -- configure whichever ones are
 reachable from wherever this server runs. Every tool is always listed
 regardless of what's configured; calling one against an unconfigured backend
 returns a clear error naming the flags to set, rather than the tool silently
@@ -29,20 +42,22 @@ cargo run -p rusty_homelab_mcp -- \
     --opnsense-url https://opnsense.lan \
     --opnsense-key xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
     --opnsense-secret yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy \
-    --opnsense-insecure
+    --opnsense-insecure \
+    --fedora-agent-url http://100.x.y.z:8765
 ```
 
 Over Streamable HTTP: add `--transport http --bind 127.0.0.1:8080`.
 
 Every flag has an environment fallback (`PROXMOX_URL`, `PROXMOX_TOKEN_ID`,
 `PROXMOX_TOKEN_SECRET`, `PROXMOX_INSECURE`, `OPNSENSE_URL`, `OPNSENSE_KEY`,
-`OPNSENSE_SECRET`, `OPNSENSE_INSECURE`, plus the scaffold's own
-`MCP_TRANSPORT`/`MCP_BIND`/...) -- `--help` lists the rest.
+`OPNSENSE_SECRET`, `OPNSENSE_INSECURE`, `FEDORA_AGENT_URL`, plus the
+scaffold's own `MCP_TRANSPORT`/`MCP_BIND`/...) -- `--help` lists the rest.
 
 `--proxmox-insecure`/`--opnsense-insecure` skip TLS certificate verification.
 Both Proxmox and OPNsense ship a self-signed certificate by default, which
 most homelabs never replace; never set these for a host reachable outside a
-trusted network.
+trusted network. `rusty_fedora_agent` has no TLS or auth of its own --
+`--fedora-agent-url` should always point at a private/Tailscale address.
 
 ### Getting credentials
 
@@ -51,6 +66,9 @@ trusted network.
   `<user>@<realm>!<token-id>` form, e.g. `automation@pve!homelab-mcp`.
 - **OPNsense**: System -> Access -> Users -> (your user) -> API keys. The
   secret is shown once, at creation time.
+- **Fedora**: no credentials -- deploy `rusty_fedora_agent` on the managed
+  host per `rusty_fedora_agent/deploy/README.md` and point
+  `--fedora-agent-url` at its bind address.
 
 ## Wiring it into a client
 
@@ -98,6 +116,15 @@ CRUD -- none of these take effect until `opnsense_apply_vlan_changes` is
 called), `opnsense_list_arp_entries`, `opnsense_list_routes`,
 `opnsense_list_backup_providers`/`opnsense_list_backups`/
 `opnsense_download_backup`/`opnsense_restore_backup`.
+
+**Fedora** (`rusty_fedora`, against a `rusty_fedora_agent` instance):
+`fedora_system_status`, `fedora_list_services` (services/timers/sockets),
+`fedora_service_control` (start/stop/restart/enable/disable -- refused by the
+agent for any unit outside its own allowlist), `fedora_read_journal`,
+`fedora_dnf_list_updates`, `fedora_dnf_install`/`fedora_dnf_remove` (return a
+task id -- installs can run long; poll `fedora_task_status`), `fedora_task_status`,
+`fedora_read_config`/`fedora_write_config` (refused by the agent for any path
+outside its own allowlisted config-path prefixes).
 
 Most tools return the backend's own JSON as structured content under a
 `result` field (`{"result": ...}`), unopinionated about the shape of `result`

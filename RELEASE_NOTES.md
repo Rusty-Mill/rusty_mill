@@ -13,6 +13,53 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Add a Fedora/systemd module to rusty_homelab_mcp
+**2026-09-04** · branch [`claude/fedora-systemd-module-hb7vxv`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/fedora-systemd-module-hb7vxv)
+
+- **Added:** `crates/rusty_fedora_agent` — an unprivileged local agent for
+  a Fedora Server host with no REST management API of its own (e.g.
+  baileyai). Exposes `fedora_system_status`/`fedora_list_services`/
+  `fedora_service_control`/`fedora_read_journal`/`fedora_dnf_list_updates`/
+  `fedora_dnf_install`/`fedora_dnf_remove`/`fedora_task_status`/
+  `fedora_read_config`/`fedora_write_config`'s ten operations over a small
+  synchronous HTTP API (`tiny_http`), built on `rustils`'
+  `platform`/`platform-linux` `Spawner`/`Command` for `systemctl`/
+  `journalctl`/`dnf`, with `SystemController`/`PackageController` domain
+  ports so tool-handling logic can be tested against `platform-mock`'s
+  scripted spawner without a real Fedora box.
+- **Added:** `crates/rusty_fedora` — async typed client for that agent's
+  HTTP API, matching `rusty_opnsense`/`rusty_proxmox`'s shape exactly
+  (built on `rusty_request`, passthrough JSON, no MCP dependency).
+- **Added:** `rusty_homelab_mcp` gained a `fedora` module: the ten tools
+  above, following the existing OPNsense/Proxmox discovery-then-mutate
+  pattern and `$defs` oneOf-enum style (`ServiceActionArg`, `UnitTypeArg`,
+  `PriorityArg`) exactly. `HomelabServer::new` now takes a third,
+  independent, optional `FedoraAgentClient`.
+- **Not a new repo:** the handoff brief for this task assumed
+  `rusty_homelab_mcp`/`rustils` were still separate GitHub repos (as they
+  were before this monorepo's consolidation) and proposed a new
+  standalone `rusty_fedora_agent` repo. Verified against the actual repo
+  before writing anything and built it as a workspace crate instead —
+  `ARCHITECTURE.md` documents this monorepo deliberately consolidating
+  ~90+ formerly-independent repos for one CI/one place to de-duplicate,
+  and a new standalone repo would fight that policy on day one.
+- **Privilege scoping is deliberately not applied automatically:**
+  `crates/rusty_fedora_agent/deploy/` ships a systemd unit, a polkit rule
+  (unit allowlist), a sudoers `NOPASSWD` entry (`dnf install`/`remove`
+  only, package-name scoping enforced inside the agent before `dnf` is
+  ever invoked), and an allowlist config — all reviewable templates a
+  human applies to the target host by hand, with an **empty** allowlist
+  by default (nothing permitted until deliberately added). This session
+  has no access to the real target host (baileyai), so the "real
+  happy-path run against baileyai" a full rollout calls for is left to
+  whoever applies `deploy/`.
+- **Verified:** `cargo check --workspace` and `cargo test -p
+  rusty_fedora_agent -p rusty_fedora -p rusty_homelab_mcp` (allowlist
+  rejection tests, scripted-spawner happy-path tests, and mock-HTTP MCP
+  tool-dispatch tests).
+
+---
+
 ## Fix `rusty_tokio`'s Windows reactor orphaning a socket on a failed AFD re-arm
 **2026-09-03** · branch [`claude/rusty-meshed-crate-migration-zy7k1n`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/rusty-meshed-crate-migration-zy7k1n)
 
