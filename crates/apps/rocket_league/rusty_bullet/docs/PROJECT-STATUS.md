@@ -1928,6 +1928,26 @@
   half-extent value). No new tests — all 335 pre-existing
   `rb_physics_bullet` tests pass unchanged; full workspace `fmt`/
   `clippy`/`test` green (388 tests).
+- `RB-VERIFY-003-FR-004` (divergence-growth diagnostic, implemented,
+  sanity-checked): a new `rb_domain::divergence::score_windows`
+  partitions the same nearest-timestamp-matched pairs the existing
+  whole-run `score` uses (both now share a private `matched_pairs`/
+  `score_pairs` pipeline) into consecutive `window_secs`-wide time
+  buckets and scores each independently, so a single run's divergence can
+  be read window-by-window instead of collapsed into one mean/max pair —
+  the follow-up `RB-PHYSICS-001-FR-077`'s own real-capture run
+  recommended, to tell gradual compounding error apart from an abrupt
+  early derailment before `FR-005` calibrates against it. A new
+  `rb_verify_cli::score_capture_growth` and `rb-verify --self-growth
+  <capture-file> [window-secs] [max-timestamp-delta-secs]` CLI mode
+  expose it, sharing a new private `seed_and_simulate` helper with the
+  existing `score_capture_against_candidate`/`--self` mode. 4 new
+  `rb_domain::divergence` tests (14 total) and 3 new `rb_verify_cli`
+  tests (9 total); full workspace `fmt`/`clippy`/`test` green (395
+  tests). Manually run once against the synthetic capture fixture,
+  confirming the CLI mode runs end-to-end — the real run this diagnostic
+  exists for, against `FR-077`'s own `test2.jsonl`, is still pending the
+  owner's own machine (see Next).
 
 ## In progress
 
@@ -1961,26 +1981,29 @@
 1. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
-2. A follow-up diagnostic into `FR-077`'s own real-capture result: how
-   divergence grows *within* that run (frame-by-frame or over short
-   windows from the seed frame) rather than only the whole-run total
-   already measured — needed to tell whether the divergence is gradual
-   (many small modeling errors compounding, pointing at broad constant
-   calibration) or abrupt (one specific early mechanic mismatch
-   derailing the whole run, pointing at a targeted fix instead). Not yet
-   scoped as its own FR; recommended before `RB-PHYSICS-001-FR-005`
-   (real-data constant calibration) starts, since blind curve-fitting
-   against a fully-decorrelated trajectory isn't sound.
+2. Running the now-implemented `RB-VERIFY-003-FR-004` divergence-growth
+   diagnostic (`rb-verify --self-growth`) against `FR-077`'s own real
+   capture (`test2.jsonl`) on the owner's machine — the run that would
+   actually show whether that run's divergence grew gradually (many
+   small modeling errors compounding, pointing at broad constant
+   calibration) or abruptly (one specific early mechanic mismatch
+   derailing the whole run, pointing at a targeted fix instead). Only
+   sanity-checked so far against the synthetic capture fixture (see
+   Validation); recommended before `RB-PHYSICS-001-FR-005` (real-data
+   constant calibration) starts, since blind curve-fitting against a
+   fully-decorrelated trajectory isn't sound.
 
 ## Validation
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (388 tests: 23 in `rb_domain`, 335 in
+- `cargo test --workspace`: pass (395 tests: 27 in `rb_domain` (incl. 4
+  new `score_windows` tests, `RB-VERIFY-003-FR-004`), 335 in
   `rb_physics_bullet`, 14 in `rb_replay_ingest` (incl. real-fixture
   integration test), 10 in `rb_capture_ingest` (incl. synthetic-fixture
-  test), 6 in `rb_verify_cli` (incl. `score_capture_against_candidate`'s
-  happy-path run against the synthetic capture fixture), plus doc-tests)
+  test), 9 in `rb_verify_cli` (incl. `score_capture_against_candidate`'s
+  and `score_capture_growth`'s happy-path runs against the synthetic
+  capture fixture), plus doc-tests)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`
@@ -2001,6 +2024,15 @@
   unrelated match); see FR-077's own Completed entry and
   `RB-PHYSICS-001`'s Interpretation note for what this large a divergence
   does and doesn't establish.
+- `cargo run -p rb_verify_cli --bin rb-verify -- --self-growth
+  crates/rb_capture_ingest/fixtures/example.capture.jsonl` (manual,
+  2026-09-04, default `window_secs = 1.0`, `RB-VERIFY-003-FR-004`): `t=
+  11.78s frames= 5 ball mean/max= 0.75/ 2.17 uu car mean pos/rot/vel=
+  58.75 uu / 0.05 rad / 600.40 uu/s` — a single window, since the
+  fixture's own 5 frames all fall within one second; confirms the new
+  `--self-growth` CLI mode runs end-to-end. Not the diagnostic's real
+  purpose — running it against `FR-077`'s own real capture is still
+  pending the owner's own machine (see Next).
 
 ## Risks and decisions needed
 

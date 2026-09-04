@@ -78,7 +78,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   consistent with near-total trajectory decorrelation over the run's own
   ~23-second span, not yet the right shape of evidence to calibrate
   `RB-PHYSICS-001-FR-005`'s constants from (see that spec's own
-  Interpretation note).
+  Interpretation note). The recommended follow-up — a diagnostic into how
+  that divergence grows *within* the run, not just its whole-run total —
+  is now implemented as `RB-VERIFY-003-FR-004`: a windowed
+  `rb_domain::divergence::score_windows` (sharing a `matched_pairs`/
+  `score_pairs` pipeline with the existing `score`, so the two can't
+  drift apart) and a new `rb-verify --self-growth` CLI mode, sanity-checked
+  against the synthetic capture fixture. Running it against `FR-077`'s own
+  real capture — the run that would actually answer gradual-vs-abrupt —
+  is still pending the owner's own machine.
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation

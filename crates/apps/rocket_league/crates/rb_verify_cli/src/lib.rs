@@ -115,6 +115,52 @@ pub fn score_capture_against_candidate(
     capture_path: impl AsRef<Path>,
     max_timestamp_delta_secs: f32,
 ) -> Result<DivergenceScore, IngestError> {
+    let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    Ok(rb_domain::divergence::score(
+        &recorded,
+        &candidate,
+        max_timestamp_delta_secs,
+    ))
+}
+
+/// Default window width (seconds) `rb-verify --self-growth` uses when the
+/// caller doesn't supply one explicitly. Chosen so the one real capture run
+/// recorded so far (~23 seconds, 2,818 frames) prints as roughly 23 rows —
+/// small enough to read on one screen, fine enough to localize an abrupt
+/// derailment to roughly which second it started. Not empirically tuned;
+/// revisit if a real run makes it too coarse or too noisy to read.
+pub const DEFAULT_GROWTH_WINDOW_SECS: f32 = 1.0;
+
+/// A divergence-growth diagnostic (`RB-VERIFY-003-FR-004`): the same
+/// seed-frame selection and `simulate_recorded` call
+/// [`score_capture_against_candidate`] performs, but scored with
+/// [`rb_domain::divergence::score_windows`] instead of the whole-run
+/// [`rb_domain::divergence::score`] — reporting how divergence changes
+/// *within* the run instead of collapsing it to one mean/max pair. See
+/// `score_windows`'s own doc comment for the windowing rule.
+pub fn score_capture_growth(
+    capture_path: impl AsRef<Path>,
+    max_timestamp_delta_secs: f32,
+    window_secs: f32,
+) -> Result<Vec<(f32, DivergenceScore)>, IngestError> {
+    let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    Ok(rb_domain::divergence::score_windows(
+        &recorded,
+        &candidate,
+        max_timestamp_delta_secs,
+        window_secs,
+    ))
+}
+
+/// Shared plumbing behind [`score_capture_against_candidate`] and
+/// [`score_capture_growth`]: ingest the capture, find its first grounded,
+/// neutral frame (`is_grounded_and_neutral`), and simulate a candidate
+/// trajectory forward from there using that capture's own recorded input.
+/// Returns the recorded ground truth from the seed frame onward alongside
+/// the simulated candidate, both ready to hand to either scoring function.
+fn seed_and_simulate(
+    capture_path: impl AsRef<Path>,
+) -> Result<(Vec<PhysicsFrame>, Vec<PhysicsFrame>), IngestError> {
     let captured = CaptureFileSource::new(capture_path.as_ref()).frames()?;
 
     let seed_index = captured
@@ -126,15 +172,11 @@ pub fn score_capture_against_candidate(
             )
         })?;
 
-    let recorded = &captured[seed_index..];
+    let recorded = captured[seed_index..].to_vec();
     let world = PhysicsWorld::from_frame(&recorded[0]);
-    let candidate = simulate_recorded(world, recorded);
+    let candidate = simulate_recorded(world, &recorded);
 
-    Ok(rb_domain::divergence::score(
-        recorded,
-        &candidate,
-        max_timestamp_delta_secs,
-    ))
+    Ok((recorded, candidate))
 }
 
 #[cfg(test)]
@@ -214,6 +256,47 @@ mod tests {
         std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
 
         let result = score_capture_against_candidate(&path, DEFAULT_MAX_TIMESTAMP_DELTA_SECS);
+
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(result, Err(IngestError::Malformed(_))));
+    }
+
+    #[test]
+    fn growth_diagnostic_runs_against_the_synthetic_capture_fixture_without_erroring() {
+        let windows = score_capture_growth(
+            capture_fixture(),
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+            DEFAULT_GROWTH_WINDOW_SECS,
+        )
+        .unwrap();
+        assert!(!windows.is_empty());
+        let total_frames_compared: usize =
+            windows.iter().map(|(_, score)| score.frames_compared).sum();
+        assert!(total_frames_compared > 0);
+    }
+
+    #[test]
+    fn growth_diagnostic_missing_file_reports_io_error() {
+        let result = score_capture_growth(
+            "does-not-exist.capture.jsonl",
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+            DEFAULT_GROWTH_WINDOW_SECS,
+        );
+        assert!(matches!(result, Err(IngestError::Io(_))));
+    }
+
+    #[test]
+    fn growth_diagnostic_with_no_grounded_neutral_frame_reports_malformed() {
+        let line = r#"{"timestamp_secs":0.0,"ball":{"position":{"x":0.0,"y":0.0,"z":93.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":0.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0}},"cars":[{"player_id":0,"position":{"x":0.0,"y":0.0,"z":17.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":0.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0},"boost_amount":33.0,"input":{"throttle":0.0,"steer":0.0,"pitch":0.0,"yaw":0.0,"roll":0.0,"jump":true,"boost":false,"handbrake":false}}]}"#;
+        let path =
+            std::env::temp_dir().join("rb_verify_cli_test_growth_no_grounded_neutral_frame.jsonl");
+        std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
+
+        let result = score_capture_growth(
+            &path,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+            DEFAULT_GROWTH_WINDOW_SECS,
+        );
 
         std::fs::remove_file(&path).ok();
         assert!(matches!(result, Err(IngestError::Malformed(_))));

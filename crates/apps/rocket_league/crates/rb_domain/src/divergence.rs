@@ -76,14 +76,20 @@ fn advance_to_nearest(candidate: &[PhysicsFrame], candidate_idx: &mut usize, tar
     }
 }
 
-/// Compares two frame sequences by nearest timestamp, not list index
-/// (`RB-VERIFY-003-FR-003`) — tolerant of the two sequences being sampled
-/// at different tick rates, or one running slightly ahead/behind the
-/// other, which the original index-pairwise comparison assumed away.
+/// A recorded frame matched to its nearest-in-time candidate frame (see
+/// `matched_pairs`) — the shared unit both `score` and `score_windows`
+/// (`RB-VERIFY-003-FR-004`) aggregate over.
+type MatchedPair<'a> = (&'a PhysicsFrame, &'a PhysicsFrame);
+
+/// Matches `recorded` frames to their nearest `candidate` frame by
+/// timestamp (`RB-VERIFY-003-FR-003`) — tolerant of the two sequences
+/// being sampled at different tick rates, or one running slightly
+/// ahead/behind the other, which the original index-pairwise comparison
+/// assumed away.
 ///
 /// For each `recorded` frame (walked in chronological order), the nearest
 /// `candidate` frame by `timestamp_secs` is found in amortized-constant
-/// time per frame (`advance_to_nearest`). A match is only scored if the two
+/// time per frame (`advance_to_nearest`). A match is only kept if the two
 /// frames' timestamps are within `max_timestamp_delta_secs` of each other;
 /// a `recorded` frame with no `candidate` frame that close is skipped
 /// entirely, not force-matched to the nearest-but-still-distant one — the
@@ -92,14 +98,36 @@ fn advance_to_nearest(candidate: &[PhysicsFrame], candidate_idx: &mut usize, tar
 /// actual sampling rates, so this is a required parameter, not a baked-in
 /// default — see `rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS` for the
 /// value the CLI actually uses and why.
-pub fn score(
-    recorded: &[PhysicsFrame],
-    candidate: &[PhysicsFrame],
+fn matched_pairs<'a>(
+    recorded: &'a [PhysicsFrame],
+    candidate: &'a [PhysicsFrame],
     max_timestamp_delta_secs: f32,
-) -> DivergenceScore {
+) -> Vec<MatchedPair<'a>> {
+    let mut pairs = Vec::new();
+    if candidate.is_empty() {
+        return pairs;
+    }
+
+    let mut candidate_idx = 0usize;
+    for r in recorded {
+        advance_to_nearest(candidate, &mut candidate_idx, r.timestamp_secs);
+        let c = &candidate[candidate_idx];
+        if (c.timestamp_secs - r.timestamp_secs).abs() > max_timestamp_delta_secs {
+            continue;
+        }
+        pairs.push((r, c));
+    }
+    pairs
+}
+
+/// Aggregates an already-matched sequence of recorded/candidate frame
+/// pairs into a single `DivergenceScore` — the same aggregation `score`
+/// performs over the whole run's own matched pairs, factored out so
+/// `score_windows` (`RB-VERIFY-003-FR-004`) can apply it per time window
+/// instead of once over the entire run.
+fn score_pairs(pairs: &[MatchedPair<'_>]) -> DivergenceScore {
     let mut ball_sum = 0.0;
     let mut ball_max = 0.0f32;
-    let mut frames_compared = 0usize;
 
     let mut position_sum = 0.0;
     let mut position_max = 0.0f32;
@@ -109,19 +137,7 @@ pub fn score(
     let mut velocity_max = 0.0f32;
     let mut pairs_compared = 0usize;
 
-    let mut candidate_idx = 0usize;
-
-    for r in recorded {
-        if candidate.is_empty() {
-            break;
-        }
-        advance_to_nearest(candidate, &mut candidate_idx, r.timestamp_secs);
-        let c = &candidate[candidate_idx];
-        if (c.timestamp_secs - r.timestamp_secs).abs() > max_timestamp_delta_secs {
-            continue;
-        }
-        frames_compared += 1;
-
+    for (r, c) in pairs {
         let d = r.ball.position.distance(&c.ball.position);
         ball_sum += d;
         ball_max = ball_max.max(d);
@@ -150,6 +166,7 @@ pub fn score(
         }
     }
 
+    let frames_compared = pairs.len();
     let mean_ball_distance = if frames_compared == 0 {
         0.0
     } else {
@@ -178,6 +195,71 @@ pub fn score(
             pairs_compared,
         },
     }
+}
+
+/// Compares two frame sequences by nearest timestamp, not list index
+/// (`RB-VERIFY-003-FR-003`) — tolerant of the two sequences being sampled
+/// at different tick rates, or one running slightly ahead/behind the
+/// other, which the original index-pairwise comparison assumed away. See
+/// `matched_pairs` for the matching rule and `score_pairs` for the
+/// aggregation; `score` is just that pipeline run once over the whole run.
+pub fn score(
+    recorded: &[PhysicsFrame],
+    candidate: &[PhysicsFrame],
+    max_timestamp_delta_secs: f32,
+) -> DivergenceScore {
+    score_pairs(&matched_pairs(
+        recorded,
+        candidate,
+        max_timestamp_delta_secs,
+    ))
+}
+
+/// A divergence-growth diagnostic (`RB-VERIFY-003-FR-004`): partitions the
+/// same nearest-timestamp-matched pairs `score` computes (see
+/// `matched_pairs`) into consecutive, non-overlapping `window_secs`-wide
+/// buckets keyed by each pair's own recorded timestamp — the first window
+/// starts at the first matched pair's own timestamp, not a fixed `0.0`, so
+/// a mid-file seed frame doesn't produce a mostly-empty leading window —
+/// and scores each bucket independently (`score_pairs`), returning each
+/// window's start time paired with its own score.
+///
+/// This exposes how divergence changes *within* a run instead of
+/// collapsing it to one whole-run mean/max pair: a run whose matched pairs
+/// all fall within a single window reproduces exactly the same numbers
+/// `score` computes on the same input, since both build on the identical
+/// matched pairs and the identical aggregation.
+///
+/// Windows with no matched pairs are omitted, not zero-filled — consistent
+/// with `score`'s own "empty means `0.0`, not an error" contract, but
+/// avoiding a wall of meaningless zero rows for a run with a long gap.
+/// `window_secs` must be positive; choosing a sensible width is the
+/// caller's responsibility (see `rb_verify_cli`'s own CLI default).
+pub fn score_windows(
+    recorded: &[PhysicsFrame],
+    candidate: &[PhysicsFrame],
+    max_timestamp_delta_secs: f32,
+    window_secs: f32,
+) -> Vec<(f32, DivergenceScore)> {
+    let pairs = matched_pairs(recorded, candidate, max_timestamp_delta_secs);
+    let Some((first, _)) = pairs.first() else {
+        return Vec::new();
+    };
+    let origin = first.timestamp_secs;
+
+    let mut windows: Vec<(i64, Vec<MatchedPair<'_>>)> = Vec::new();
+    for pair in pairs {
+        let index = ((pair.0.timestamp_secs - origin) / window_secs).floor() as i64;
+        match windows.last_mut() {
+            Some((window_index, bucket)) if *window_index == index => bucket.push(pair),
+            _ => windows.push((index, vec![pair])),
+        }
+    }
+
+    windows
+        .into_iter()
+        .map(|(index, bucket)| (origin + index as f32 * window_secs, score_pairs(&bucket)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -357,5 +439,83 @@ mod tests {
         let candidate = vec![frame_with_cars(0.0, vec![car(1, 0.0, Quat::IDENTITY, 0.0)])];
         let result = score(&recorded, &candidate, GENEROUS_TOLERANCE);
         assert_eq!(result.cars.pairs_compared, 1);
+    }
+
+    #[test]
+    fn score_windows_on_a_single_window_run_reproduces_scores_own_numbers() {
+        let recorded = vec![
+            frame_with_ball_x(0.0, 0.0),
+            frame_with_ball_x(0.2, 0.0),
+            frame_with_ball_x(0.4, 0.0),
+        ];
+        let candidate = vec![
+            frame_with_ball_x(0.0, 3.0),
+            frame_with_ball_x(0.2, 5.0),
+            frame_with_ball_x(0.4, 7.0),
+        ];
+        let whole_run = score(&recorded, &candidate, GENEROUS_TOLERANCE);
+
+        // A single window wide enough to hold the whole ~0.4s run.
+        let windows = score_windows(&recorded, &candidate, GENEROUS_TOLERANCE, 10.0);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].0, 0.0);
+        assert_eq!(windows[0].1, whole_run);
+    }
+
+    #[test]
+    fn score_windows_splits_a_run_into_separate_windows_by_time() {
+        // First window (t in [0.0, 1.0)): identical trajectories, zero
+        // divergence. Second window (t in [1.0, 2.0)): a known constant
+        // offset of 5.0.
+        let recorded = vec![
+            frame_with_ball_x(0.0, 0.0),
+            frame_with_ball_x(0.5, 0.0),
+            frame_with_ball_x(1.0, 0.0),
+            frame_with_ball_x(1.5, 0.0),
+        ];
+        let candidate = vec![
+            frame_with_ball_x(0.0, 0.0),
+            frame_with_ball_x(0.5, 0.0),
+            frame_with_ball_x(1.0, 5.0),
+            frame_with_ball_x(1.5, 5.0),
+        ];
+        let windows = score_windows(&recorded, &candidate, GENEROUS_TOLERANCE, 1.0);
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].0, 0.0);
+        assert_eq!(windows[0].1.frames_compared, 2);
+        assert_eq!(windows[0].1.mean_ball_distance, 0.0);
+        assert_eq!(windows[1].0, 1.0);
+        assert_eq!(windows[1].1.frames_compared, 2);
+        assert_eq!(windows[1].1.mean_ball_distance, 5.0);
+    }
+
+    #[test]
+    fn score_windows_starts_the_first_window_at_the_first_matched_pairs_own_timestamp() {
+        // The recorded sequence starts well before the candidate does, so
+        // the first several recorded frames have no match within
+        // tolerance — the first window must start at the first frame that
+        // actually matched (t=10.0), not at t=0.0.
+        let recorded = vec![
+            frame_with_ball_x(0.0, 0.0),
+            frame_with_ball_x(5.0, 0.0),
+            frame_with_ball_x(10.0, 0.0),
+            frame_with_ball_x(10.5, 0.0),
+        ];
+        let candidate = vec![frame_with_ball_x(10.0, 2.0), frame_with_ball_x(10.5, 2.0)];
+        let windows = score_windows(&recorded, &candidate, 0.1, 1.0);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].0, 10.0);
+        assert_eq!(windows[0].1.frames_compared, 2);
+    }
+
+    #[test]
+    fn score_windows_on_no_matched_pairs_returns_no_windows() {
+        let recorded = vec![frame_with_ball_x(0.0, 0.0)];
+        let candidate = vec![frame_with_ball_x(100.0, 0.0)];
+        let windows = score_windows(&recorded, &candidate, 0.1, 1.0);
+        assert!(windows.is_empty());
     }
 }

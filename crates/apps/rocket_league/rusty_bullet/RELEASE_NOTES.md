@@ -6,6 +6,77 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Implemented the divergence-growth diagnostic
+**2026-09-04** · `RB-VERIFY-003-FR-004`
+
+- Built out the diagnostic scoped in the previous entry: a new
+  `rb_domain::divergence::score_windows(recorded, candidate,
+  max_timestamp_delta_secs, window_secs) -> Vec<(f32, DivergenceScore)>`
+  partitions the same nearest-timestamp-matched frame pairs the existing
+  whole-run `score` uses into consecutive `window_secs`-wide time
+  buckets and scores each independently. `score` and `score_windows` now
+  share a private `matched_pairs`/`score_pairs` pipeline internally, so a
+  single-window run is guaranteed to reproduce `score`'s own numbers
+  exactly — verified directly by a unit test rather than just asserted in
+  the doc comment.
+- A new `rb_verify_cli::score_capture_growth` and `rb-verify
+  --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]`
+  CLI mode expose it, sharing the same seed-frame selection and
+  `simulate_recorded` call the existing `--self` mode uses (both now call
+  a shared `seed_and_simulate` helper). Prints one line per window:
+  start time, frames compared, mean/max ball distance, mean car
+  position/rotation/velocity distance.
+- 4 new tests in `rb_domain::divergence` (14 total: single-window run
+  reproduces `score` exactly, a two-window run with a known offset in
+  only the second window, a run whose earliest recorded frames have no
+  match confirming the first window starts at the first *matched* pair's
+  timestamp, and a run with no matched pairs returning no windows) and 3
+  new tests in `rb_verify_cli` (9 total). Full workspace `fmt`/`clippy`/
+  `test` green (395 tests).
+- Manually run once against `rb_capture_ingest`'s synthetic capture
+  fixture, confirming the CLI mode runs end-to-end: `t=11.78s frames=5
+  ball mean/max=0.75/2.17 uu car mean pos/rot/vel=58.75 uu / 0.05 rad /
+  600.40 uu/s` (a single window, since the fixture's 5 frames all fall
+  within one second). This is **not** yet the diagnostic's real purpose:
+  running it against `RB-PHYSICS-001-FR-077`'s own real capture
+  (`test2.jsonl`, ~23 seconds) — the run that would actually show whether
+  that run's large divergence grew gradually or abruptly — still needs
+  the owner to do that on their own machine, the same as `FR-077`'s own
+  run did.
+
+---
+
+## Scoped a divergence-growth diagnostic
+**2026-09-04** · `RB-VERIFY-003-FR-004`
+
+- The whole-run fidelity number from the previous entry (mean car position
+  distance `4508.71` uu) can't tell us *why* the candidate engine diverged
+  that much — a single mean/max pair over an entire ~23-second run
+  collapses "many small modeling errors compounding" and "one early
+  mechanic mismatch derailing everything after it" into the same number.
+  Distinguishing those matters: `RB-PHYSICS-001-FR-005` (real-data
+  constant calibration) needs to know which one it's looking at before it
+  can decide what to tune first.
+- Scoped (not yet implemented) `RB-VERIFY-003-FR-004`: a windowed variant
+  of the existing scoring algorithm, `rb_domain::divergence::score_windows`,
+  that partitions the same nearest-timestamp-matched frame pairs `FR-003`
+  already computes into consecutive ~1-second time windows and reports a
+  full divergence score for each — reusing the exact same matching logic,
+  so a run whose pairs all land in one window reproduces the existing
+  whole-run `score`'s own numbers exactly.
+- Also scoped a new `rb-verify --self-growth <capture-file> [window-secs]
+  [max-timestamp-delta-secs]` CLI mode, printing one line per window so
+  the shape of the divergence — gradual or abrupt — can be read directly
+  off the terminal, the same "read together" interpretive approach the
+  previous entry's whole-run number already relied on. No automatic
+  gradual-vs-abrupt classification is planned; a human reads the table.
+- Recorded in `RB-VERIFY-003` (new Requirements entry, Open Questions
+  updated) and cross-referenced from `RB-PHYSICS-001-FR-005`/`FR-077`. No
+  code change yet — implementation is the next step, then a re-run
+  against the same real capture from the previous entry.
+
+---
+
 ## Ran the candidate engine against a real capture — this project's first genuine fidelity number
 **2026-09-04** · `RB-PHYSICS-001-FR-077`
 

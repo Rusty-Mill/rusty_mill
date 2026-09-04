@@ -1,11 +1,13 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.8.0
-- Status: Draft (all three functional requirements implemented and wired
-  into `rb_verify_cli`; now run end-to-end against a real replay AND a real
-  BakkesMod capture, closing `PHASE-0-EXIT`'s own literal exit criterion;
-  open questions remain about calibrating an actual "good enough"
-  threshold, see Open questions)
+- Version: 0.10.0
+- Status: Draft (all four functional requirements implemented and wired
+  into `rb_verify_cli`; the first three run end-to-end against a real
+  replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
+  literal exit criterion; the fourth, a divergence-growth diagnostic, is
+  implemented and sanity-checked against the synthetic capture fixture
+  but not yet run against the real capture; open questions remain about
+  calibrating an actual "good enough" threshold, see Open questions)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-001, RB-VERIFY-002
 - Supersedes: none
@@ -66,6 +68,58 @@ them.
   nearest-but-still-distant. See Architecture and interfaces.
 - `RB-VERIFY-003-NFR-001` (implemented): Scoring an empty or
   mismatched-length pair of sequences never panics or produces `NaN`.
+- `RB-VERIFY-003-FR-004` (implemented): A divergence-growth diagnostic —
+  report how divergence changes *within* a single run, instead of only
+  the one whole-run mean/max pair `score` already produces. Needed
+  because `RB-PHYSICS-001-FR-077`'s first real candidate-vs-capture run
+  produced a whole-run number consistent with near-total trajectory
+  divergence, which cannot by itself distinguish gradual compounding
+  error (many small modeling gaps adding up) from an abrupt one (a
+  specific early mechanic mismatch derailing everything after it) — a
+  distinction `RB-PHYSICS-001-FR-005`'s eventual constant calibration
+  needs answered first, per that run's own Interpretation note.
+  - **Design, as implemented**: `rb_domain::divergence::score_windows(
+    recorded: &[PhysicsFrame], candidate: &[PhysicsFrame],
+    max_timestamp_delta_secs: f32, window_secs: f32) -> Vec<(f32,
+    DivergenceScore)>`, reusing exactly the same nearest-timestamp
+    matching `FR-003` already established (both `score` and
+    `score_windows` now build on a shared internal `matched_pairs`/
+    `score_pairs` pipeline, so the two can never silently drift apart),
+    partitioning the matched pairs into consecutive, non-overlapping
+    `window_secs`-wide buckets keyed by each pair's own recorded
+    timestamp (the first window starts at the first compared pair's
+    timestamp, not a fixed `0.0`, so a mid-file seed frame doesn't
+    produce a mostly-empty leading window). A run whose pairs all fall in
+    one window reproduces exactly the same numbers `score` computes on
+    the same input, verified directly by a unit test.
+  - **CLI wiring, as implemented**: `rb_verify_cli::score_capture_growth`,
+    a sibling entry point sharing the exact seed-frame selection and
+    `simulate_recorded` call `score_capture_against_candidate` already
+    used (both now call a shared private `seed_and_simulate` helper), and
+    a new `rb-verify --self-growth <capture-file> [window-secs]
+    [max-timestamp-delta-secs]` mode printing one line per window (window
+    start time, frames compared, mean/max ball distance, mean car
+    position/rotation/velocity distance) alongside the existing `--self`
+    mode.
+  - **Default `window_secs`**: `rb_verify_cli::DEFAULT_GROWTH_WINDOW_SECS
+    = 1.0` — the one real capture run recorded so far (~23 seconds, 2,818
+    frames) prints as roughly 23 rows: small enough to read on one
+    screen, fine enough to localize an abrupt derailment to roughly which
+    second it started.
+  - **Non-goals**: no automatic gradual-vs-abrupt classification
+    (changepoint detection, curve fitting) — a human reads the printed
+    series and judges its shape, the same "read together" interpretive
+    convention `FR-077`'s own Interpretation note already established.
+    No new output format (CSV/file export) — stdout table only, matching
+    every existing `rb-verify` mode. Does not itself perform
+    `RB-PHYSICS-001-FR-005`'s real-data calibration or change any physics
+    constant or the seed-frame heuristic — purely a diagnostic read of
+    the one real run already recorded, and this FR does not itself run
+    it against that real capture (the owner still needs to do that on
+    their own machine, the same as `FR-077`'s own run). Only exercises
+    the existing single-car freeplay capture; multi-car growth
+    diagnostics stay out of scope until a multi-car capture exists, the
+    same limit `FR-077` already carries.
 
 ## Architecture and interfaces
 
@@ -75,15 +129,28 @@ function, no I/O — callable from `rb_verify_cli` or any future test
 harness. `max_timestamp_delta_secs` is a required parameter, not a baked-in
 default: what counts as "the same instant" depends on both sequences'
 actual sampling rates, which this function has no way to know on its own.
+`rb_domain::divergence::score_windows` (`RB-VERIFY-003-FR-004`) has the
+same signature plus a `window_secs: f32` parameter and returns `Vec<(f32,
+DivergenceScore)>` instead — one score per non-empty time window rather
+than one for the whole run. Both functions share a private
+`matched_pairs`/`score_pairs` pipeline internally, so `score` is exactly
+`score_windows`'s per-window aggregation applied once to every matched
+pair.
+
 `rb_verify_cli::score_replay_against_capture` (in
 `crates/rb_verify_cli/src/lib.rs`) is the actual composition-root wiring:
 it ingests a replay file via `rb_replay_ingest` as the "recorded" sequence
 and a capture file via `rb_capture_ingest` as the "candidate" sequence,
-then calls `score`. The `rb-verify` binary (`main.rs`) is a thin
-argument-parsing/output wrapper over that function (an optional third CLI
-argument overrides `rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`),
-kept separate so the wiring itself is unit-testable without spawning a
-process.
+then calls `score`. `rb_verify_cli::score_capture_against_candidate` and
+`score_capture_growth` share a private `seed_and_simulate` helper (ingest
+a capture, find its first grounded/neutral frame, simulate a candidate
+forward from there) and differ only in which `rb_domain::divergence`
+function they call on the result. The `rb-verify` binary (`main.rs`) is a
+thin argument-parsing/output wrapper over these functions (an optional
+third CLI argument overrides `rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`
+in every mode; `--self-growth`'s own second argument overrides
+`DEFAULT_GROWTH_WINDOW_SECS`), kept separate so the wiring itself is
+unit-testable without spawning a process.
 
 ## Data/state and invariants
 
@@ -131,6 +198,17 @@ None beyond what applies to the frame data itself (see
   `min(len, len)`); frames whose nearest available match still exceeds
   `max_timestamp_delta_secs` are skipped, not force-matched. (Covered by
   unit tests in `rb_domain::divergence::tests`.)
+- Implemented (divergence-growth diagnostic, FR-004): `score_windows` on
+  a run whose pairs all fall within one window reproduces `score`'s own
+  numbers on the same input exactly; a synthetic two-window case (first
+  window's pairs all identical, second window's pairs all offset by a
+  known distance) produces exactly the expected per-window means; the
+  first window starts at the first matched pair's own timestamp even
+  when earlier recorded frames had no match; a run with no matched pairs
+  returns no windows. `rb-verify --self-growth` was run manually against
+  the synthetic capture fixture end-to-end without erroring (see
+  Verification plan); the real capture run itself is still pending the
+  owner's own machine.
 
 ## Verification plan
 
@@ -202,6 +280,27 @@ Phase 1 candidate engine that consumes the capture's own recorded input
 and produces a trajectory to compare against the capture's own recorded
 outcome — genuinely out of this phase's scope, not a Phase 0 exit blocker.
 
+`RB-VERIFY-003-FR-004`'s divergence-growth diagnostic added 4 unit tests
+to `rb_domain::divergence` (14 total) — a single-window run reproducing
+`score`'s own numbers exactly, a two-window run with a known offset in
+only the second window, a run whose first several recorded frames have no
+match (confirming the first window starts at the first *matched* pair's
+timestamp, not the first recorded frame's), and a run with no matched
+pairs returning no windows — and 3 to `rb_verify_cli` (9 total): a
+happy-path run against the synthetic capture fixture, a missing-file case,
+and the same no-grounded-neutral-frame case `score_capture_against_candidate`
+already covered. Manually run once (`cargo run -p rb_verify_cli --bin
+rb-verify -- --self-growth crates/rb_capture_ingest/fixtures/example.capture.jsonl`,
+2026-09-04, default `window_secs = 1.0`) against the synthetic capture
+fixture: `t=11.78s frames=5 ball mean/max=0.75/2.17 uu car mean
+pos/rot/vel=58.75 uu / 0.05 rad / 600.40 uu/s` — a single window, since the
+fixture's own 5 frames all fall within one second, proving the CLI mode
+runs end-to-end without erroring. This is not yet the diagnostic's real
+purpose: running it against `RB-PHYSICS-001-FR-077`'s own real capture
+(`test2.jsonl`, ~23 seconds) — the run that would actually show whether
+that run's divergence grew gradually or abruptly — still needs the owner
+to do that on their own machine, the same as `FR-077`'s own run did.
+
 ## Traceability
 
 See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
@@ -217,9 +316,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   this question yet: the divergence is consistent with total trajectory
   decorrelation over the run's own ~23-second span, not a bounded gap a
   threshold could meaningfully separate "good" from "bad" against. This
-  question stays open until a follow-up diagnostic (divergence growth
-  within a run, not another whole-run total) gives a number this question
-  can actually be answered from. Applies to ball scoring, car scoring, and
+  question stays open until the divergence-growth diagnostic now
+  implemented as `RB-VERIFY-003-FR-004` (see Requirements) is actually
+  run against that same real capture, giving a number this question can
+  actually be answered from. Applies to ball scoring, car scoring, and
   the timestamp-alignment tolerance
   (`rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`) alike — all three
   are currently reasoned defaults, not empirically tuned ones.
@@ -230,6 +330,25 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.10.0 (2026-09-04): `RB-VERIFY-003-FR-004` implemented — a new
+  `rb_domain::divergence::score_windows` partitions the same
+  nearest-timestamp-matched pairs `score` uses into consecutive
+  `window_secs`-wide time buckets and scores each one independently
+  (`score` and `score_windows` now share a private `matched_pairs`/
+  `score_pairs` pipeline, so they can't silently drift apart); a new
+  `rb_verify_cli::score_capture_growth` and `rb-verify --self-growth`
+  CLI mode expose it. 4 new `rb_domain::divergence` tests (14 total), 3
+  new `rb_verify_cli` tests (9 total). Manually run once against the
+  synthetic capture fixture, confirming the CLI mode runs end-to-end; the
+  real capture run this diagnostic actually exists for is still pending
+  the owner's own machine (see Verification plan).
+- 0.9.0 (2026-09-04): Scoped `RB-VERIFY-003-FR-004`, a divergence-growth
+  diagnostic — a windowed variant of `score` (`score_windows`) reporting
+  divergence within successive time slices of a single run, plus a new
+  `rb-verify --self-growth` CLI mode, needed to tell whether `FR-077`'s
+  real-run divergence is gradual or abrupt before `RB-PHYSICS-001-FR-005`
+  calibrates against it. See Requirements for the full design. Not yet
+  implemented — no code change.
 - 0.8.0 (2026-09-04): Recorded `RB-PHYSICS-001-FR-077`'s real-capture run
   — this spec's own "good enough" Open Question now has a first real
   number to react to, but the number itself (consistent with near-total

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.80.0
+- Version: 0.82.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -595,7 +595,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   the natural next step is a diagnostic look at how divergence grows
   frame-by-frame within that same run (gradual compounding vs. an abrupt
   early derailment), not blindly curve-fitting constants against a
-  fully-decorrelated trajectory.
+  fully-decorrelated trajectory. That diagnostic is now implemented as
+  `RB-VERIFY-003-FR-004` (see that spec's Requirements) — it still needs
+  to be run against this same real capture before this requirement
+  starts.
 - `RB-PHYSICS-001-FR-006` (car-vs-car collision, implemented): A general
   separating-axis test between two oriented boxes (`collision::box_vs_box`),
   producing either a clipped face manifold (0-4 points) or a single
@@ -5036,7 +5039,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   mechanic mismatch derailing the whole run) — that distinction matters
   for what `FR-005`'s actual calibration work should target first, and
   needs a follow-up investigation into divergence *growth over time*
-  within this same run, not a second full-run number.
+  within this same run, not a second full-run number — now scoped as
+  `RB-VERIFY-003-FR-004`.
   - **What shipped, and where it diverged from the original scoping.**
     1. **`rb_verify_cli::score_capture_against_candidate`**, exactly as
        scoped: takes a capture path plus a timestamp tolerance, depends on
@@ -5073,8 +5077,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     divergence threshold — per `RB-VERIFY-003`'s own Open Questions, a
     threshold gets calibrated *from* the first real run, not decided
     before it; the number now exists but a threshold decision is deferred
-    to `FR-005` (or a dedicated diagnostic FR — see the Interpretation
-    note above). Does not change any constant based on the result — that
+    to `FR-005`, after the divergence-growth diagnostic now implemented
+    as `RB-VERIFY-003-FR-004` actually runs against this same result (see
+    the Interpretation note above). Does not change any constant based on the result — that
     is explicitly `FR-005`'s job, not this one's, and this result alone
     (whole-run divergence, no per-frame breakdown) isn't yet the right
     shape of evidence to calibrate individual constants from. Does not
@@ -5085,9 +5090,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     identified — only works around them via the seed-frame heuristic
     above; given how total this run's own divergence turned out to be,
     whether that heuristic (rather than the seed frame's own hidden-state
-    gap) is even a meaningful contributor is itself an open question a
-    follow-up diagnostic FR should investigate before assuming it needs
-    fixing.
+    gap) is even a meaningful contributor is itself an open question
+    `RB-VERIFY-003-FR-004`'s diagnostic should shed light on before
+    assuming it needs fixing.
   - **Acceptance criteria.** `rb_verify_cli` produces a divergence score
     between a real capture's recorded outcome and a candidate trajectory
     `rb_physics_bullet` actually simulated from that capture's own
@@ -6677,6 +6682,22 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.82.0 (2026-09-04): `RB-VERIFY-003-FR-004`'s divergence-growth
+  diagnostic (referenced from `FR-005`'s own entry and `FR-077`'s
+  Non-goals) is now implemented — `rb_domain::divergence::score_windows`
+  and `rb-verify --self-growth`, sanity-checked against the synthetic
+  capture fixture. It still needs to run against `FR-077`'s own real
+  capture before `FR-005` can start; that run is pending the owner's own
+  machine. No change to this spec's own code (the diagnostic lives in
+  `RB-VERIFY-003`); cross-references updated from "scoped" to
+  "implemented" accordingly.
+- 0.81.0 (2026-09-04): `FR-005`'s own entry, and `FR-077`'s Non-goals,
+  updated to name the divergence-growth diagnostic they'd both flagged as
+  a follow-up — now scoped concretely as `RB-VERIFY-003-FR-004` (a
+  windowed variant of `rb_domain::divergence::score`, plus a new
+  `rb-verify --self-growth` CLI mode; see that spec's Requirements for
+  the full design). No code change here; the diagnostic itself is not yet
+  implemented.
 - 0.80.0 (2026-09-04): FR-077's real-capture run, done — the owner ran
   `cargo run -p rb_verify_cli -- --self test2.jsonl` on their own machine
   against the real capture from `RB-VERIFY-002-FR-001` (2,818 frames) and
