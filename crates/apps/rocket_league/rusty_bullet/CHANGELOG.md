@@ -65,15 +65,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   capture's own recorded input against its own recorded outcome — this
   project's first fidelity comparison with a genuine physical reason to
   be small if the physics core is accurate — exposed via a new `rb-verify
-  --self <capture-file>` CLI mode. The one manual run against the real
-  capture that would produce this project's first genuine fidelity number
-  hasn't happened yet — it needs a real Rocket League/BakkesMod
-  environment this sandbox doesn't have. `RB-PHYSICS-001-FR-078` then
-  retuned every existing test that models a real car (across
+  --self <capture-file>` CLI mode. `RB-PHYSICS-001-FR-078` then retuned
+  every existing test that models a real car (across
   `body.rs`/`collision.rs`/`drive.rs`/`net.rs`/`solver.rs`/`world.rs`)
   from that old placeholder to `CAR_HALF_EXTENTS`, closing the
   discrepancy FR-076 had deliberately left open — no test count change,
-  all 335 `rb_physics_bullet` tests still pass.
+  all 335 `rb_physics_bullet` tests still pass. The owner then ran
+  `rb-verify --self` against the real capture on their own machine,
+  producing this project's first genuine fidelity number (2,818 frames:
+  mean ball distance 2206.08 uu, mean car position/rotation/velocity
+  distance 4508.71 uu / 2.12 rad / 1421.73 uu/s) — a large divergence
+  consistent with near-total trajectory decorrelation over the run's own
+  ~23-second span, not yet the right shape of evidence to calibrate
+  `RB-PHYSICS-001-FR-005`'s constants from (see that spec's own
+  Interpretation note).
 - `rb_domain::divergence::score` now also scores car position/rotation/
   velocity divergence (`RB-VERIFY-003-FR-002`), matching cars between
   sequences by `player_id`. New `Quat::angle_to` computes rotation

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.79.0
+- Version: 0.80.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -579,16 +579,23 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   that carries both bodies' mass/inertia contributions instead of assuming
   one side is a static plane. `PhysicsWorld::step` now detects and resolves
   a ball-vs-car contact every step a car is present.
-- `RB-PHYSICS-001-FR-005` (open, no longer blocked): Calibrate gravity/
-  restitution/friction constants against real recorded ground truth now
-  that `RB-VERIFY-001`/`RB-VERIFY-002` produce real data (`PHASE-0-EXIT`
-  closed) and a real capture exists, rather than relying on the current
-  placeholder defaults. Prerequisite plumbing to actually produce a real
-  fidelity score to calibrate against is now implemented as `FR-076`/
-  `FR-077` — this requirement itself still doesn't start until a real
-  capture is actually run through `FR-077`'s new `rb_verify_cli --self`
-  path and produces a first real number, which hasn't happened yet (no
-  real Rocket League/BakkesMod environment available in this sandbox).
+- `RB-PHYSICS-001-FR-005` (open, unblocked, not yet started): Calibrate
+  gravity/restitution/friction constants against real recorded ground
+  truth now that `RB-VERIFY-001`/`RB-VERIFY-002` produce real data
+  (`PHASE-0-EXIT` closed) and a real capture exists, rather than relying
+  on the current placeholder defaults. Prerequisite plumbing to actually
+  produce a real fidelity score is implemented as `FR-076`/`FR-077`, and
+  `FR-077`'s own first real run against the real capture now exists (see
+  that entry's Interpretation note) — a very large whole-run divergence
+  (mean car position distance `4508.71` uu against a `5120`-uu
+  half-length field), consistent with total trajectory divergence rather
+  than a small, directly-calibratable gap. This requirement still hasn't
+  started: per `FR-077`'s own Non-goals, a single whole-run number isn't
+  yet the right shape of evidence to tune individual constants from —
+  the natural next step is a diagnostic look at how divergence grows
+  frame-by-frame within that same run (gradual compounding vs. an abrupt
+  early derailment), not blindly curve-fitting constants against a
+  fully-decorrelated trajectory.
 - `RB-PHYSICS-001-FR-006` (car-vs-car collision, implemented): A general
   separating-axis test between two oriented boxes (`collision::box_vs_box`),
   producing either a clipped face manifold (0-4 points) or a single
@@ -4981,18 +4988,55 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `rb_physics_bullet` tests pass (322 pre-existing + 13 new); full
     workspace `cargo fmt`/`clippy`/`test` all green. A real-capture run is
     `FR-077`'s job, not this one's.
-- `RB-PHYSICS-001-FR-077` (implemented; real-capture run pending):
+- `RB-PHYSICS-001-FR-077` (implemented, verified against a real capture):
   `rb_verify_cli` gains a new composition path — score a real BakkesMod
   capture's own recorded outcome against a candidate trajectory simulated
   from that *same* capture's recorded input via `FR-076`'s new
   `rb_physics_bullet` capability — as opposed to
   `rb_verify_cli::score_replay_against_capture`'s existing mechanical-only
   comparison of two unrelated matches. The wiring and its own unit tests
-  are done; the one manual run against the real capture from
-  `RB-VERIFY-002-FR-001` still needs a real Rocket League/BakkesMod
-  environment this sandbox doesn't have (the same practical constraint
-  `RB-VERIFY-002` itself hit), so this project's first genuine fidelity
-  *number* doesn't exist yet.
+  were done first (this sandbox has no real Rocket League/BakkesMod
+  environment); the owner then ran `cargo run -p rb_verify_cli -- --self
+  test2.jsonl` (the real capture from `RB-VERIFY-002-FR-001`, 2,818
+  frames) on their own machine and reported back this project's first
+  genuine fidelity number:
+  ```
+  frames compared:    2818
+  mean ball distance: 2206.08 uu
+  max ball distance:  5673.98 uu
+  car pairs compared: 2818
+  mean car position/rotation/velocity distance: 4508.71 uu / 2.12 rad / 1421.73 uu/s
+  max  car position/rotation/velocity distance: 8798.56 uu / 3.14 rad / 3643.64 uu/s
+  ```
+  **Interpretation.** This is a large divergence — for scale, the
+  standard arena's own half-width is `arena::SIDE_WALL_X = 4096.0` and
+  half-length `arena::BACK_WALL_Y = 5120.0`; a mean car position distance
+  of `4508.71` and mean ball distance of `2206.08` mean the candidate
+  trajectory ends up, on average, in a substantially different part of
+  the field than the real one. The mean car *rotation* distance
+  (`2.12` rad) is more damning still: `Quat::angle_to`'s range is `[0,
+  π]` (`π ≈ 3.14159`, confirmed as this run's own *max* rotation
+  distance), and `2.12` is well past `π/2 ≈ 1.57` — the average car
+  orientation isn't merely uncorrelated with the real one, it's
+  systematically *further* from it than a uniformly random orientation
+  would be on average. Read together, this is consistent with essentially
+  total trajectory divergence over the run's own ~23-second span (2,818
+  frames), not a small, bounded fidelity gap. This is unsurprising rather
+  than alarming, for two compounding reasons neither of which this single
+  number can separate: (1) physics simulation is chaotic — any modeling
+  error, however small, compounds exponentially over dozens of seconds of
+  free simulation from one seed frame, and (2) this port's own extensive
+  self-documented gap list (uncalibrated `drive`/`arena` placeholder
+  constants per `FR-031`; no tire-slip steering model per `FR-065`; no
+  per-axis air-control damping per `FR-071`; anisotropic handbrake
+  friction unmodeled per `FR-066`; among others) guarantees real modeling
+  error exists, not just floating-point noise. **What this number does
+  *not* yet establish**: whether the simulation diverges gradually
+  (small per-step error compounding) or abruptly (a specific early
+  mechanic mismatch derailing the whole run) — that distinction matters
+  for what `FR-005`'s actual calibration work should target first, and
+  needs a follow-up investigation into divergence *growth over time*
+  within this same run, not a second full-run number.
   - **What shipped, and where it diverged from the original scoping.**
     1. **`rb_verify_cli::score_capture_against_candidate`**, exactly as
        scoped: takes a capture path plus a timestamp tolerance, depends on
@@ -5020,32 +5064,39 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
        scoping's "exact flag naming TBD" to a `--self` flag (the candidate
        is simulated from the capture itself, unlike the two-unrelated-
        files mechanical mode).
-    4. **The real-capture run itself has not happened yet** — deliberately
-       deferred rather than scoped down, since it needs a real
-       Rocket League/BakkesMod environment. Running `cargo run -p
-       rb_verify_cli -- --self <real-capture-file>` once such an
-       environment is available, and recording the resulting numbers here
-       and in `RB-VERIFY-003`, remains this requirement's one open item.
+    4. **The real-capture run**, done: the owner ran `cargo run -p
+       rb_verify_cli -- --self test2.jsonl` against the real capture from
+       `RB-VERIFY-002-FR-001` on their own machine and reported back the
+       numbers quoted above — see the Interpretation note above this
+       list.
   - **Non-goals (this requirement).** Does not pre-define a "good enough"
     divergence threshold — per `RB-VERIFY-003`'s own Open Questions, a
     threshold gets calibrated *from* the first real run, not decided
-    before it. Does not change any constant based on the result (a later
-    FR, once a result exists). Does not solve multi-car captures beyond
-    what already exists — only a single-car freeplay capture has been
-    recorded so far, so multi-car candidate simulation is unexercised
-    until a multi-car capture exists. Does not add the missing
-    hidden-state setters `FR-076`'s Non-goals identified — only works
-    around them via the seed-frame heuristic above; if that heuristic
-    proves insufficient once a real run happens, adding those setters is a
-    follow-up FR.
+    before it; the number now exists but a threshold decision is deferred
+    to `FR-005` (or a dedicated diagnostic FR — see the Interpretation
+    note above). Does not change any constant based on the result — that
+    is explicitly `FR-005`'s job, not this one's, and this result alone
+    (whole-run divergence, no per-frame breakdown) isn't yet the right
+    shape of evidence to calibrate individual constants from. Does not
+    solve multi-car captures beyond what already exists — only a
+    single-car freeplay capture has been recorded so far, so multi-car
+    candidate simulation is unexercised until a multi-car capture exists.
+    Does not add the missing hidden-state setters `FR-076`'s Non-goals
+    identified — only works around them via the seed-frame heuristic
+    above; given how total this run's own divergence turned out to be,
+    whether that heuristic (rather than the seed frame's own hidden-state
+    gap) is even a meaningful contributor is itself an open question a
+    follow-up diagnostic FR should investigate before assuming it needs
+    fixing.
   - **Acceptance criteria.** `rb_verify_cli` produces a divergence score
     between a real capture's recorded outcome and a candidate trajectory
     `rb_physics_bullet` actually simulated from that capture's own
     recorded input — the first score in this project with a genuine
     physical reason to be small if the physics core is accurate, unlike
-    every `score_replay_against_capture` run to date. Met for the
-    synthetic capture fixture (see Verification plan); the real-capture
-    run this requirement's own scope calls for has not happened yet.
+    every `score_replay_against_capture` run to date. Met: both for the
+    synthetic capture fixture (see Verification plan) and for the real
+    capture (numbers above) — the score exists and is fully wired, even
+    though the number itself is large.
   - **Verification plan.** 3 new unit tests mirroring
     `score_replay_against_capture`'s own precedent: a happy-path run
     against `rb_capture_ingest`'s synthetic capture fixture (which does
@@ -5054,9 +5105,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     case, and a hand-built capture with no grounded/neutral frame at all
     exercising the new `Malformed` error path. All 6 `rb_verify_cli` tests
     pass; full workspace `cargo fmt`/`clippy`/`test` all green (388 tests
-    workspace-wide). The one manual end-to-end run against the real
-    capture is still outstanding — numbers to be recorded in Change
-    history once it happens.
+    workspace-wide). The manual end-to-end run against the real capture
+    is done — numbers recorded above and in Change history.
 - `RB-PHYSICS-001-FR-078` (car hitbox calibration, implemented): retunes
   every existing `car_box` call site across this crate's own test suite
   that models a real car to `body::CAR_HALF_EXTENTS` — the confirmed real
@@ -6627,6 +6677,24 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.80.0 (2026-09-04): FR-077's real-capture run, done — the owner ran
+  `cargo run -p rb_verify_cli -- --self test2.jsonl` on their own machine
+  against the real capture from `RB-VERIFY-002-FR-001` (2,818 frames) and
+  reported this project's first genuine fidelity number: `frames
+  compared: 2818, mean ball distance: 2206.08 uu, max ball distance:
+  5673.98 uu, car pairs compared: 2818, mean car position/rotation/
+  velocity distance: 4508.71 uu / 2.12 rad / 1421.73 uu/s, max car
+  position/rotation/velocity distance: 8798.56 uu / 3.14 rad / 3643.64
+  uu/s`. A large divergence — consistent with essentially total
+  trajectory decorrelation over the run's ~23-second span rather than a
+  small, directly-calibratable gap (see FR-077's own Interpretation note
+  for the full reasoning, including why this doesn't yet tell us whether
+  the divergence is gradual or abrupt). `RB-PHYSICS-001-FR-005` remains
+  not started: this single whole-run number isn't yet the right shape of
+  evidence to calibrate individual constants from — a follow-up
+  diagnostic into divergence growth over time is the recommended next
+  step, not blind curve-fitting. No code change; `RB-VERIFY-003` updated
+  in the same pass.
 - 0.79.0 (2026-09-03): FR-078 implemented — retuned every existing
   `car_box`-style test helper across `rb_physics_bullet` that models a
   real car (`body.rs`/`collision.rs`/`drive.rs`/`net.rs`/`solver.rs`/

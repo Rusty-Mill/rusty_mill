@@ -6,6 +6,57 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Ran the candidate engine against a real capture — this project's first genuine fidelity number
+**2026-09-04** · `RB-PHYSICS-001-FR-077`
+
+- The owner ran `cargo run -p rb_verify_cli -- --self test2.jsonl` on
+  their own machine against the real BakkesMod capture from
+  `RB-VERIFY-002-FR-001` (2,818 frames), producing this project's first
+  genuine fidelity number — a candidate trajectory actually simulated
+  from the capture's own recorded input, scored against that same
+  capture's own recorded outcome, unlike every prior `rb-verify` run
+  (mechanical comparisons of two unrelated matches):
+  ```
+  frames compared:    2818
+  mean ball distance: 2206.08 uu
+  max ball distance:  5673.98 uu
+  car pairs compared: 2818
+  mean car position/rotation/velocity distance: 4508.71 uu / 2.12 rad / 1421.73 uu/s
+  max  car position/rotation/velocity distance: 8798.56 uu / 3.14 rad / 3643.64 uu/s
+  ```
+- **A large divergence.** For scale, the standard arena's own half-width
+  is `4096.0` uu and half-length `5120.0` uu; a mean car position
+  distance of `4508.71` uu means the candidate ends up, on average, in a
+  substantially different part of the field than the real recording.
+  `Quat::angle_to`'s range is `[0, π]` (confirmed by this run's own max
+  rotation distance of `3.14`), and the mean car rotation distance
+  (`2.12`) is past `π/2` — worse than a uniformly random orientation
+  would average. Read together, this is consistent with near-total
+  trajectory decorrelation over the run's own ~23-second span, not a
+  small, bounded fidelity gap.
+- **Expected, not alarming.** Physics simulation is chaotic — any
+  modeling error compounds over dozens of seconds of free simulation
+  from one seed frame — and this port's own extensively self-documented
+  gap list (uncalibrated placeholder constants, no tire-slip steering
+  model, no per-axis air-control damping, anisotropic handbrake friction
+  unmodeled, among others found across `FR-031` through `FR-075`)
+  guarantees real modeling error exists. What this single number does
+  *not* establish: whether the divergence is gradual (many small errors
+  compounding) or abrupt (one early mechanic mismatch derailing the
+  whole run) — that distinction matters for what constant calibration
+  should target first.
+- **`RB-PHYSICS-001-FR-005`** (real-data constant calibration) still
+  hasn't started: this whole-run number isn't yet the right shape of
+  evidence to tune individual constants from. A follow-up diagnostic
+  into divergence growth *within* this same run is the recommended next
+  step, not blind curve-fitting against a fully-decorrelated trajectory.
+- Recorded in `RB-PHYSICS-001` (FR-077's own entry gains a full
+  Interpretation note) and `RB-VERIFY-003` (its "good enough threshold"
+  Open Question updated to reflect that a first number now exists but
+  doesn't resolve the question). No code change.
+
+---
+
 ## Calibrated the crate's own tests to the real car hitbox (FR-078)
 **2026-09-03** · `crates/rb_physics_bullet`
 
