@@ -1,11 +1,12 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.8.0
+- Version: 0.9.0
 - Status: Draft (all three functional requirements implemented and wired
   into `rb_verify_cli`; now run end-to-end against a real replay AND a real
   BakkesMod capture, closing `PHASE-0-EXIT`'s own literal exit criterion;
-  open questions remain about calibrating an actual "good enough"
-  threshold, see Open questions)
+  a fourth requirement — a divergence-growth diagnostic — is now scoped,
+  not yet implemented; open questions remain about calibrating an actual
+  "good enough" threshold, see Open questions)
 - Owners: baileyrd
 - Depends on: RB-VERIFY-001, RB-VERIFY-002
 - Supersedes: none
@@ -66,6 +67,55 @@ them.
   nearest-but-still-distant. See Architecture and interfaces.
 - `RB-VERIFY-003-NFR-001` (implemented): Scoring an empty or
   mismatched-length pair of sequences never panics or produces `NaN`.
+- `RB-VERIFY-003-FR-004` (scoped, not yet implemented): A divergence-growth
+  diagnostic — report how divergence changes *within* a single run,
+  instead of only the one whole-run mean/max pair `score` already
+  produces. Needed because `RB-PHYSICS-001-FR-077`'s first real
+  candidate-vs-capture run produced a whole-run number consistent with
+  near-total trajectory divergence, which cannot by itself distinguish
+  gradual compounding error (many small modeling gaps adding up) from an
+  abrupt one (a specific early mechanic mismatch derailing everything
+  after it) — a distinction `RB-PHYSICS-001-FR-005`'s eventual constant
+  calibration needs answered first, per that run's own Interpretation
+  note.
+  - **Design**: a new pure function, `rb_domain::divergence::score_windows(
+    recorded: &[PhysicsFrame], candidate: &[PhysicsFrame],
+    max_timestamp_delta_secs: f32, window_secs: f32) -> Vec<(f32,
+    DivergenceScore)>`, reusing exactly the same nearest-timestamp
+    matching `FR-003` already established, just partitioning the matched
+    pairs into consecutive, non-overlapping `window_secs`-wide buckets
+    keyed by each pair's own recorded timestamp (the first window starts
+    at the first compared pair's timestamp, not a fixed `0.0`, so a
+    mid-file seed frame doesn't produce a mostly-empty leading window),
+    computing one full `DivergenceScore` per non-empty bucket and pairing
+    it with that bucket's own start time. A run whose pairs all fall in
+    one window must reproduce exactly the same numbers `score` already
+    computes on the same input — this is a partitioning of the same
+    underlying comparison, not a different algorithm.
+  - **CLI wiring**: a sibling `rb_verify_cli` entry point next to
+    `score_capture_against_candidate` (same seed-frame selection and
+    `simulate_recorded` call, unchanged), plus a new `rb-verify
+    --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]`
+    mode printing one line per window (window start time, frames
+    compared, mean/max ball distance, mean car position/rotation/velocity
+    distance) alongside the existing `--self` mode.
+  - **Default `window_secs`**: `1.0` — the one real capture run recorded
+    so far (~23 seconds, 2,818 frames) prints as roughly 23 rows: small
+    enough to read on one screen, fine enough to localize an abrupt
+    derailment to roughly which second it started.
+  - **Non-goals**: no automatic gradual-vs-abrupt classification
+    (changepoint detection, curve fitting) — a human reads the printed
+    series and judges its shape, the same "read together" interpretive
+    convention `FR-077`'s own Interpretation note already established;
+    automating that judgment is future work only if a printed table
+    proves insufficient. No new output format (CSV/file export) — stdout
+    table only, matching every existing `rb-verify` mode. Does not itself
+    perform `RB-PHYSICS-001-FR-005`'s real-data calibration or change any
+    physics constant or the seed-frame heuristic — purely a diagnostic
+    read of the one real run already recorded. Only exercises the
+    existing single-car freeplay capture; multi-car growth diagnostics
+    stay out of scope until a multi-car capture exists, the same limit
+    `FR-077` already carries.
 
 ## Architecture and interfaces
 
@@ -131,6 +181,13 @@ None beyond what applies to the frame data itself (see
   `min(len, len)`); frames whose nearest available match still exceeds
   `max_timestamp_delta_secs` are skipped, not force-matched. (Covered by
   unit tests in `rb_domain::divergence::tests`.)
+- Scoped, not yet implemented (divergence-growth diagnostic, FR-004):
+  `score_windows` on a run whose pairs all fall within one window
+  reproduces `score`'s own numbers on the same input exactly; a synthetic
+  two-window case (first window's pairs all identical, second window's
+  pairs all offset by a known distance) produces exactly the expected
+  per-window means; `rb-verify --self-growth` runs against the real
+  capture end-to-end without erroring.
 
 ## Verification plan
 
@@ -217,9 +274,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   this question yet: the divergence is consistent with total trajectory
   decorrelation over the run's own ~23-second span, not a bounded gap a
   threshold could meaningfully separate "good" from "bad" against. This
-  question stays open until a follow-up diagnostic (divergence growth
-  within a run, not another whole-run total) gives a number this question
-  can actually be answered from. Applies to ball scoring, car scoring, and
+  question stays open until the divergence-growth diagnostic now scoped
+  as `RB-VERIFY-003-FR-004` (see Requirements) is implemented and run
+  against that same real capture, giving a number this question can
+  actually be answered from. Applies to ball scoring, car scoring, and
   the timestamp-alignment tolerance
   (`rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`) alike — all three
   are currently reasoned defaults, not empirically tuned ones.
@@ -230,6 +288,13 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.9.0 (2026-09-04): Scoped `RB-VERIFY-003-FR-004`, a divergence-growth
+  diagnostic — a windowed variant of `score` (`score_windows`) reporting
+  divergence within successive time slices of a single run, plus a new
+  `rb-verify --self-growth` CLI mode, needed to tell whether `FR-077`'s
+  real-run divergence is gradual or abrupt before `RB-PHYSICS-001-FR-005`
+  calibrates against it. See Requirements for the full design. Not yet
+  implemented — no code change.
 - 0.8.0 (2026-09-04): Recorded `RB-PHYSICS-001-FR-077`'s real-capture run
   — this spec's own "good enough" Open Question now has a first real
   number to react to, but the number itself (consistent with near-total

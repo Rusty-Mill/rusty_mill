@@ -1962,15 +1962,18 @@
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
 2. A follow-up diagnostic into `FR-077`'s own real-capture result: how
-   divergence grows *within* that run (frame-by-frame or over short
-   windows from the seed frame) rather than only the whole-run total
-   already measured — needed to tell whether the divergence is gradual
-   (many small modeling errors compounding, pointing at broad constant
-   calibration) or abrupt (one specific early mechanic mismatch
-   derailing the whole run, pointing at a targeted fix instead). Not yet
-   scoped as its own FR; recommended before `RB-PHYSICS-001-FR-005`
-   (real-data constant calibration) starts, since blind curve-fitting
-   against a fully-decorrelated trajectory isn't sound.
+   divergence grows *within* that run (over successive time windows from
+   the seed frame) rather than only the whole-run total already measured
+   — needed to tell whether the divergence is gradual (many small
+   modeling errors compounding, pointing at broad constant calibration)
+   or abrupt (one specific early mechanic mismatch derailing the whole
+   run, pointing at a targeted fix instead). Now scoped as
+   `RB-VERIFY-003-FR-004` (a windowed variant of
+   `rb_domain::divergence::score`, plus a new `rb-verify --self-growth`
+   CLI mode — see that spec's Requirements for the full design), not yet
+   implemented; recommended before `RB-PHYSICS-001-FR-005` (real-data
+   constant calibration) starts, since blind curve-fitting against a
+   fully-decorrelated trajectory isn't sound.
 
 ## Validation
 

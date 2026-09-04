@@ -6,6 +6,37 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Scoped a divergence-growth diagnostic
+**2026-09-04** · `RB-VERIFY-003-FR-004`
+
+- The whole-run fidelity number from the previous entry (mean car position
+  distance `4508.71` uu) can't tell us *why* the candidate engine diverged
+  that much — a single mean/max pair over an entire ~23-second run
+  collapses "many small modeling errors compounding" and "one early
+  mechanic mismatch derailing everything after it" into the same number.
+  Distinguishing those matters: `RB-PHYSICS-001-FR-005` (real-data
+  constant calibration) needs to know which one it's looking at before it
+  can decide what to tune first.
+- Scoped (not yet implemented) `RB-VERIFY-003-FR-004`: a windowed variant
+  of the existing scoring algorithm, `rb_domain::divergence::score_windows`,
+  that partitions the same nearest-timestamp-matched frame pairs `FR-003`
+  already computes into consecutive ~1-second time windows and reports a
+  full divergence score for each — reusing the exact same matching logic,
+  so a run whose pairs all land in one window reproduces the existing
+  whole-run `score`'s own numbers exactly.
+- Also scoped a new `rb-verify --self-growth <capture-file> [window-secs]
+  [max-timestamp-delta-secs]` CLI mode, printing one line per window so
+  the shape of the divergence — gradual or abrupt — can be read directly
+  off the terminal, the same "read together" interpretive approach the
+  previous entry's whole-run number already relied on. No automatic
+  gradual-vs-abrupt classification is planned; a human reads the table.
+- Recorded in `RB-VERIFY-003` (new Requirements entry, Open Questions
+  updated) and cross-referenced from `RB-PHYSICS-001-FR-005`/`FR-077`. No
+  code change yet — implementation is the next step, then a re-run
+  against the same real capture from the previous entry.
+
+---
+
 ## Ran the candidate engine against a real capture — this project's first genuine fidelity number
 **2026-09-04** · `RB-PHYSICS-001-FR-077`
 
