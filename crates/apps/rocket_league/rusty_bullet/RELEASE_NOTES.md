@@ -6,6 +6,46 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Implemented the divergence-growth diagnostic
+**2026-09-04** · `RB-VERIFY-003-FR-004`
+
+- Built out the diagnostic scoped in the previous entry: a new
+  `rb_domain::divergence::score_windows(recorded, candidate,
+  max_timestamp_delta_secs, window_secs) -> Vec<(f32, DivergenceScore)>`
+  partitions the same nearest-timestamp-matched frame pairs the existing
+  whole-run `score` uses into consecutive `window_secs`-wide time
+  buckets and scores each independently. `score` and `score_windows` now
+  share a private `matched_pairs`/`score_pairs` pipeline internally, so a
+  single-window run is guaranteed to reproduce `score`'s own numbers
+  exactly — verified directly by a unit test rather than just asserted in
+  the doc comment.
+- A new `rb_verify_cli::score_capture_growth` and `rb-verify
+  --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]`
+  CLI mode expose it, sharing the same seed-frame selection and
+  `simulate_recorded` call the existing `--self` mode uses (both now call
+  a shared `seed_and_simulate` helper). Prints one line per window:
+  start time, frames compared, mean/max ball distance, mean car
+  position/rotation/velocity distance.
+- 4 new tests in `rb_domain::divergence` (14 total: single-window run
+  reproduces `score` exactly, a two-window run with a known offset in
+  only the second window, a run whose earliest recorded frames have no
+  match confirming the first window starts at the first *matched* pair's
+  timestamp, and a run with no matched pairs returning no windows) and 3
+  new tests in `rb_verify_cli` (9 total). Full workspace `fmt`/`clippy`/
+  `test` green (395 tests).
+- Manually run once against `rb_capture_ingest`'s synthetic capture
+  fixture, confirming the CLI mode runs end-to-end: `t=11.78s frames=5
+  ball mean/max=0.75/2.17 uu car mean pos/rot/vel=58.75 uu / 0.05 rad /
+  600.40 uu/s` (a single window, since the fixture's 5 frames all fall
+  within one second). This is **not** yet the diagnostic's real purpose:
+  running it against `RB-PHYSICS-001-FR-077`'s own real capture
+  (`test2.jsonl`, ~23 seconds) — the run that would actually show whether
+  that run's large divergence grew gradually or abruptly — still needs
+  the owner to do that on their own machine, the same as `FR-077`'s own
+  run did.
+
+---
+
 ## Scoped a divergence-growth diagnostic
 **2026-09-04** · `RB-VERIFY-003-FR-004`
 
