@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.7.0
+- Version: 0.8.0
 - Status: Draft (all three functional requirements implemented and wired
   into `rb_verify_cli`; now run end-to-end against a real replay AND a real
   BakkesMod capture, closing `PHASE-0-EXIT`'s own literal exit criterion;
@@ -209,27 +209,33 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 ## Open questions
 
 - What divergence threshold counts as "good enough" fidelity for Phase 1 to
-  exit — not yet defined; likely needs a first real candidate engine run to
-  calibrate against, rather than an arbitrary number chosen in advance.
-  Applies to ball scoring, car scoring, and now the timestamp-alignment
-  tolerance (`rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`) alike —
-  all three are currently reasoned defaults, not empirically tuned ones.
+  exit — a first real candidate-engine run now exists
+  (`RB-PHYSICS-001-FR-077`: `frames compared: 2818, mean ball distance:
+  2206.08 uu, ..., mean car position/rotation/velocity distance: 4508.71
+  uu / 2.12 rad / 1421.73 uu/s, ...` — see that spec's own Interpretation
+  note for the full numbers and reasoning), but it doesn't actually answer
+  this question yet: the divergence is consistent with total trajectory
+  decorrelation over the run's own ~23-second span, not a bounded gap a
+  threshold could meaningfully separate "good" from "bad" against. This
+  question stays open until a follow-up diagnostic (divergence growth
+  within a run, not another whole-run total) gives a number this question
+  can actually be answered from. Applies to ball scoring, car scoring, and
+  the timestamp-alignment tolerance
+  (`rb_verify_cli::DEFAULT_MAX_TIMESTAMP_DELTA_SECS`) alike — all three
+  are currently reasoned defaults, not empirically tuned ones.
 - Whether `max_timestamp_delta_secs` should ever become adaptive (e.g.
   derived from each sequence's own observed average tick interval) rather
   than a single caller-supplied constant — not needed yet since no real
   candidate engine exists to expose a case where a fixed value is wrong.
-- The candidate engine this section's own "good enough" question depends
-  on is now implemented — `RB-PHYSICS-001-FR-076`/`FR-077`, in
-  `docs/specifications/physics/RB-PHYSICS-001-physics-core-port.md` — via
-  `rb_verify_cli::score_capture_against_candidate` and the `rb-verify
-  --self` CLI mode, but the one manual run against a real capture that
-  would actually produce a first real score hasn't happened yet (no real
-  Rocket League/BakkesMod environment available in this sandbox). Once it
-  does, that number — not an arbitrary a-priori choice — is what should
-  inform an answer here.
 
 ## Change history
 
+- 0.8.0 (2026-09-04): Recorded `RB-PHYSICS-001-FR-077`'s real-capture run
+  — this spec's own "good enough" Open Question now has a first real
+  number to react to, but the number itself (consistent with near-total
+  trajectory divergence) doesn't resolve the question; folded into that
+  Open Question's own text rather than kept as a separate bullet. No code
+  change.
 - 0.7.0 (2026-09-03): Noted that the candidate engine this spec's own
   "good enough" fidelity question depends on is now implemented (not just
   scoped) as `RB-PHYSICS-001-FR-076`/`FR-077`, but still hasn't produced a
