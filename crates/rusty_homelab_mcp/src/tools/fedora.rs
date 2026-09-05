@@ -96,6 +96,16 @@ impl From<PriorityArg> for Priority {
     }
 }
 
+/// Arguments carrying only an optional host selector.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HostArgs {
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// Arguments for listing services.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListServicesArgs {
@@ -103,6 +113,11 @@ pub struct ListServicesArgs {
     /// sockets together.
     #[serde(default)]
     pub unit_type: Option<UnitTypeArg>,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Arguments for a service control call.
@@ -113,6 +128,11 @@ pub struct FedoraServiceControlArgs {
     pub name: String,
     /// The action to perform.
     pub action: ServiceActionArg,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Arguments for reading the journal.
@@ -133,6 +153,11 @@ pub struct ReadJournalArgs {
     /// Only lines at or above this severity.
     #[serde(default)]
     pub priority: Option<PriorityArg>,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Arguments naming a set of packages.
@@ -142,6 +167,11 @@ pub struct PackagesArgs {
     /// otherwise known ahead of time. Must all be in the agent's package
     /// allowlist -- the whole call is refused if any one isn't.
     pub packages: Vec<String>,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Arguments naming a task by id.
@@ -149,6 +179,11 @@ pub struct PackagesArgs {
 pub struct TaskIdArgs {
     /// The task id, as returned by `fedora_dnf_install`/`fedora_dnf_remove`.
     pub task_id: String,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Arguments for reading a config file.
@@ -157,6 +192,11 @@ pub struct ReadConfigArgs {
     /// Absolute path to the config file. Must be under one of the
     /// agent's allowlisted config-path prefixes.
     pub path: String,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Arguments for writing a config file.
@@ -171,6 +211,11 @@ pub struct WriteConfigArgs {
     /// already exists. Defaults to `true`.
     #[serde(default)]
     pub backup: Option<bool>,
+    /// Which managed Fedora host to target, e.g. "samba-lxc-101", as
+    /// configured on the server via `--fedora-hosts-file`. Defaults to
+    /// "baileyai".
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 #[tool_router(router = fedora_tools, vis = "pub(crate)")]
@@ -179,9 +224,12 @@ impl HomelabServer {
     #[tool(
         description = "Get the managed Fedora host's overall system status: uptime, load average, memory, and kernel/OS release."
     )]
-    pub async fn fedora_system_status(&self) -> Result<Json<JsonResult>, ErrorData> {
+    pub async fn fedora_system_status(
+        &self,
+        Parameters(HostArgs { host }): Parameters<HostArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .system_status()
                 .await
                 .map_err(fedora_error)?
@@ -195,10 +243,10 @@ impl HomelabServer {
     )]
     pub async fn fedora_list_services(
         &self,
-        Parameters(ListServicesArgs { unit_type }): Parameters<ListServicesArgs>,
+        Parameters(ListServicesArgs { unit_type, host }): Parameters<ListServicesArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .list_services(unit_type.map(Into::into))
                 .await
                 .map_err(fedora_error)?
@@ -212,10 +260,12 @@ impl HomelabServer {
     )]
     pub async fn fedora_service_control(
         &self,
-        Parameters(FedoraServiceControlArgs { name, action }): Parameters<FedoraServiceControlArgs>,
+        Parameters(FedoraServiceControlArgs { name, action, host }): Parameters<
+            FedoraServiceControlArgs,
+        >,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .service_control(&name, action.into())
                 .await
                 .map_err(fedora_error)?
@@ -234,10 +284,11 @@ impl HomelabServer {
             lines,
             since,
             priority,
+            host,
         }): Parameters<ReadJournalArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .read_journal(
                     unit.as_deref(),
                     lines,
@@ -254,9 +305,12 @@ impl HomelabServer {
     #[tool(
         description = "List every package with a dnf update available on the managed Fedora host. Call this before fedora_dnf_install to upgrade something."
     )]
-    pub async fn fedora_dnf_list_updates(&self) -> Result<Json<JsonResult>, ErrorData> {
+    pub async fn fedora_dnf_list_updates(
+        &self,
+        Parameters(HostArgs { host }): Parameters<HostArgs>,
+    ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .dnf_list_updates()
                 .await
                 .map_err(fedora_error)?
@@ -270,10 +324,10 @@ impl HomelabServer {
     )]
     pub async fn fedora_dnf_install(
         &self,
-        Parameters(PackagesArgs { packages }): Parameters<PackagesArgs>,
+        Parameters(PackagesArgs { packages, host }): Parameters<PackagesArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .dnf_install(&packages)
                 .await
                 .map_err(fedora_error)?
@@ -287,10 +341,10 @@ impl HomelabServer {
     )]
     pub async fn fedora_dnf_remove(
         &self,
-        Parameters(PackagesArgs { packages }): Parameters<PackagesArgs>,
+        Parameters(PackagesArgs { packages, host }): Parameters<PackagesArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .dnf_remove(&packages)
                 .await
                 .map_err(fedora_error)?
@@ -304,10 +358,10 @@ impl HomelabServer {
     )]
     pub async fn fedora_task_status(
         &self,
-        Parameters(TaskIdArgs { task_id }): Parameters<TaskIdArgs>,
+        Parameters(TaskIdArgs { task_id, host }): Parameters<TaskIdArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .task_status(&task_id)
                 .await
                 .map_err(fedora_error)?
@@ -321,10 +375,10 @@ impl HomelabServer {
     )]
     pub async fn fedora_read_config(
         &self,
-        Parameters(ReadConfigArgs { path }): Parameters<ReadConfigArgs>,
+        Parameters(ReadConfigArgs { path, host }): Parameters<ReadConfigArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .read_config(&path)
                 .await
                 .map_err(fedora_error)?
@@ -342,10 +396,11 @@ impl HomelabServer {
             path,
             content,
             backup,
+            host,
         }): Parameters<WriteConfigArgs>,
     ) -> Result<Json<JsonResult>, ErrorData> {
         Ok(Json(
-            self.fedora()?
+            self.fedora(host.as_deref())?
                 .write_config(&path, &content, backup.unwrap_or(true))
                 .await
                 .map_err(fedora_error)?
