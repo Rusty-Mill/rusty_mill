@@ -16,12 +16,12 @@ mod server;
 #[path = "../src/tools/mod.rs"]
 mod tools;
 
+use hosts::FedoraHosts;
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{CallToolRequestParams, ClientInfo, ProtocolVersion},
     service::RunningService,
 };
-use hosts::FedoraHosts;
 use rusty_opnsense::{OpnsenseClient, OpnsenseConfig};
 use rusty_proxmox::{ProxmoxClient, ProxmoxConfig};
 use server::HomelabServer;
@@ -292,7 +292,11 @@ async fn proxmox_task_status_returns_structured_data_from_the_real_client_path()
 #[tokio::test]
 async fn opnsense_system_status_returns_structured_data_from_the_real_client_path() {
     let base_url = support::spawn(vec![MockResponse::ok(r#"{"status":"ok"}"#)]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), FedoraHosts::default());
+    let server = HomelabServer::new(
+        None,
+        Some(opnsense_client(base_url)),
+        FedoraHosts::default(),
+    );
     let client = connect(server).await;
 
     let result = client
@@ -311,7 +315,11 @@ async fn opnsense_create_firewall_rule_sends_the_rule_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-uuid"}"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), FedoraHosts::default());
+    let server = HomelabServer::new(
+        None,
+        Some(opnsense_client(base_url)),
+        FedoraHosts::default(),
+    );
     let client = connect(server).await;
 
     let result = client
@@ -342,7 +350,11 @@ async fn opnsense_create_vlan_sends_the_vlan_as_a_json_body() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"result":"saved","uuid":"new-vlan-uuid"}"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), FedoraHosts::default());
+    let server = HomelabServer::new(
+        None,
+        Some(opnsense_client(base_url)),
+        FedoraHosts::default(),
+    );
     let client = connect(server).await;
 
     let result = client
@@ -366,7 +378,11 @@ async fn opnsense_download_backup_returns_the_raw_xml_as_plain_text() {
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"<?xml version="1.0"?><opnsense><version>25.7</version></opnsense>"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), FedoraHosts::default());
+    let server = HomelabServer::new(
+        None,
+        Some(opnsense_client(base_url)),
+        FedoraHosts::default(),
+    );
     let client = connect(server).await;
 
     let result = client
@@ -393,7 +409,11 @@ async fn opnsense_list_dhcp_leases_returns_structured_data_from_the_real_client_
     let base_url = support::spawn(vec![MockResponse::ok(
         r#"{"rows":[{"address":"10.0.0.42","hostname":"nas"}],"rowCount":1}"#,
     )]);
-    let server = HomelabServer::new(None, Some(opnsense_client(base_url)), FedoraHosts::default());
+    let server = HomelabServer::new(
+        None,
+        Some(opnsense_client(base_url)),
+        FedoraHosts::default(),
+    );
     let client = connect(server).await;
 
     let result = client

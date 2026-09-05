@@ -75,12 +75,8 @@ impl FedoraHosts {
             let text = std::fs::read_to_string(path).map_err(|err| {
                 format!("failed to read Fedora hosts file {}: {err}", path.display())
             })?;
-            let file: HostsFile = toml::from_str(&text).map_err(|err| {
-                format!(
-                    "malformed Fedora hosts file {}: {err}",
-                    path.display()
-                )
-            })?;
+            let file: HostsFile = toml::from_str(&text)
+                .map_err(|err| format!("malformed Fedora hosts file {}: {err}", path.display()))?;
             for (id, entry) in file.hosts {
                 clients.insert(id, build_client(entry.base_url));
             }
