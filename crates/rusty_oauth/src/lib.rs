@@ -3,8 +3,10 @@
 //!
 //! Every primitive this crate needs -- SHA-256, HMAC-SHA256, Base64,
 //! percent-encoding, a JSON reader/writer, and a CSPRNG -- is implemented
-//! from scratch in-tree (see [`crypto`], [`encoding`], [`json`], and
-//! [`rand`]), so the crate has **no runtime dependencies**.
+//! from scratch, either in-tree (see [`crypto`], [`encoding`], [`json`],
+//! and [`rand`]) or in a dependency-free workspace sibling extracted from
+//! this crate's own former copy (`rusty_base64`, `rusty_rsa`,
+//! `rusty_rand`), so the crate has **no external runtime dependencies**.
 //!
 //! # Scope: protocol logic, not transport
 //!

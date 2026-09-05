@@ -1,4 +1,4 @@
-mod support;
+use rusty_wiremock::canned as support;
 
 use rusty_opnsense::{Error, OpnsenseClient, OpnsenseConfig, ServiceAction};
 use support::MockResponse;

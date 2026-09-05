@@ -5,7 +5,6 @@
 //! they can be read — and tested — in one place.
 
 use adk_core::{Blob, Content, FileData, Part as AdkPart, Role as AdkRole};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusty_a2a::types::{Message as A2aMessage, Part as A2aPart, PartContent, Role as A2aRole};
 
 /// Converts an inbound A2A message into the ADK content an agent reads.
@@ -37,7 +36,7 @@ pub fn part_to_adk(part: &A2aPart) -> AdkPart {
             mime_type: mime("application/octet-stream"),
             // ADK holds inline bytes already base64-encoded, matching the
             // `google.genai` wire format; A2A hands them over decoded.
-            data: STANDARD.encode(raw),
+            data: rusty_base64::encode_standard(raw),
         }),
         PartContent::Url { url } => AdkPart::FileData(FileData {
             mime_type: mime("application/octet-stream"),
@@ -60,7 +59,7 @@ pub fn part_to_a2a(part: &AdkPart) -> Option<A2aPart> {
             // ADK stores base64; A2A wants the bytes, and re-encodes them
             // itself on the wire. A payload ADK could not decode is passed
             // through as text rather than silently dropped.
-            match STANDARD.decode(blob.data.as_bytes()) {
+            match rusty_base64::decode_standard(&blob.data) {
                 Ok(bytes) => Some(A2aPart::raw(bytes).with_media_type(&blob.mime_type)),
                 Err(_) => Some(A2aPart::text(&blob.data).with_media_type(&blob.mime_type)),
             }
@@ -123,7 +122,7 @@ mod tests {
             panic!("expected inline data, got {adk:?}");
         };
         assert_eq!(blob.mime_type, "image/png");
-        assert_eq!(STANDARD.decode(&blob.data).unwrap(), bytes);
+        assert_eq!(rusty_base64::decode_standard(&blob.data).unwrap(), bytes);
 
         // ...and the round trip returns the original bytes, not the base64.
         let back = part_to_a2a(&adk).unwrap();

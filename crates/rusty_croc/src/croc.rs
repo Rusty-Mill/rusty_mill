@@ -29,8 +29,6 @@ use crate::models;
 use crate::pake::Pake;
 use crate::tcp;
 use crate::utils;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -208,14 +206,14 @@ impl Throttle {
     }
 }
 
-fn b64ser<S: Serializer>(b: &Vec<u8>, s: S) -> std::result::Result<S::Ok, S::Error> {
-    s.serialize_str(&BASE64.encode(b))
+fn b64ser<S: Serializer>(b: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_str(&rusty_base64::encode_standard(b))
 }
 
 fn b64de<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<u8>, D::Error> {
     let o: Option<String> = Option::deserialize(d)?;
     match o {
-        Some(s) => BASE64.decode(s).map_err(serde::de::Error::custom),
+        Some(s) => rusty_base64::decode_standard(&s).map_err(serde::de::Error::custom),
         None => Ok(Vec::new()),
     }
 }

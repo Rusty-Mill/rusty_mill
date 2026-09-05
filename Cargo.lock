@@ -151,9 +151,9 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.7.9",
- "base64 0.22.1",
  "futures",
  "rusty_a2a",
+ "rusty_base64",
  "serde_json",
  "tokio",
  "tokio-test",
@@ -185,11 +185,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "rusty_uuid",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -357,7 +357,6 @@ dependencies = [
  "agentgateway-tls",
  "anyhow",
  "axum 0.8.9",
- "base64 0.22.1",
  "bytes",
  "clap",
  "fs4",
@@ -374,6 +373,7 @@ dependencies = [
  "rmcp 3.1.4",
  "rsa",
  "rusty-mcp",
+ "rusty_base64",
  "serde_json",
  "tempfile",
  "tokio",
@@ -406,13 +406,13 @@ name = "agentgateway-auth"
 version = "0.1.0"
 dependencies = [
  "agentgateway-config",
- "base64 0.22.1",
  "http",
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "reqwest 0.13.4",
  "rsa",
  "rusty-mcp",
+ "rusty_base64",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -8900,12 +8900,12 @@ dependencies = [
  "rk-constrain",
  "rk-observe",
  "rusqlite",
+ "rusty_url",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "url",
 ]
 
 [[package]]
@@ -9424,7 +9424,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
- "base64 0.22.1",
  "chacha20poly1305",
  "clap",
  "crypto-bigint 0.7.5",
@@ -9445,6 +9444,7 @@ dependencies = [
  "pbkdf2",
  "qrcode",
  "rand 0.8.8",
+ "rusty_base64",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -10008,6 +10008,7 @@ name = "rusty_fedora"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -10082,6 +10083,7 @@ dependencies = [
  "rusty_fedora",
  "rusty_opnsense",
  "rusty_proxmox",
+ "rusty_wiremock",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -10178,6 +10180,7 @@ name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
  "rusty_base64",
+ "rusty_rand",
  "rusty_rsa",
 ]
 
@@ -10186,6 +10189,7 @@ name = "rusty_opnsense"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_wiremock",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -10196,6 +10200,7 @@ name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [
  "rusty_request",
+ "rusty_wiremock",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -10208,6 +10213,10 @@ version = "0.1.0"
 dependencies = [
  "rusty_simd",
 ]
+
+[[package]]
+name = "rusty_rand"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_rdp"
@@ -10237,6 +10246,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "rusty_base64",
  "rusty_http",
  "rusty_retry",
  "rusty_tls",
@@ -10415,6 +10425,9 @@ dependencies = [
 [[package]]
 name = "rusty_uuid"
 version = "0.1.0"
+dependencies = [
+ "rusty_rand",
+]
 
 [[package]]
 name = "rusty_voice"
@@ -10970,6 +10983,7 @@ name = "sessionmgr-proc"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rusty_rand",
  "rusty_tokio",
  "sessionmgr-core",
  "windows-sys 0.59.0",
@@ -10979,6 +10993,7 @@ dependencies = [
 name = "sessionmgr-protocol"
 version = "0.1.0"
 dependencies = [
+ "rusty_base64",
  "serde",
  "serde_json",
  "sessionmgr-core",
@@ -13162,6 +13177,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rusty_base64",
  "rusty_http",
  "serde",
  "serde_json",

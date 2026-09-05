@@ -51,8 +51,7 @@ fn generate_keys() -> (Vec<u8>, Value) {
 }
 
 fn base64_url(bytes: Vec<u8>) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    rusty_base64::encode_url_safe_no_pad(&bytes)
 }
 
 fn now() -> u64 {
@@ -233,10 +232,7 @@ async fn an_unsigned_token_is_rejected() {
     let (auth, _dir) = authenticator(&[RESOURCE]);
     let claims = valid_claims();
 
-    use base64::Engine as _;
-    let b64 = |v: &Value| {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string().as_bytes())
-    };
+    let b64 = |v: &Value| rusty_base64::encode_url_safe_no_pad(v.to_string().as_bytes());
     let unsigned = format!(
         "{}.{}.",
         b64(&json!({"alg": "none", "typ": "JWT", "kid": KID})),

@@ -1,108 +1,39 @@
-//! Cryptographically secure random byte generation, with zero external
-//! dependencies. Used for PKCE code verifiers (RFC 7636), `state` and
-//! `nonce` values (RFC 6749 §10.12 / OIDC), and any other value that must
-//! be unguessable.
+//! Cryptographically secure random byte generation. Used for PKCE code
+//! verifiers (RFC 7636), `state` and `nonce` values (RFC 6749 §10.12 /
+//! OIDC), and any other value that must be unguessable.
 //!
-//! Sourced directly from the operating system's CSPRNG:
-//! - Unix: reads from `/dev/urandom`.
-//! - Windows: calls `BCryptGenRandom` via a manually declared FFI binding
-//!   to `bcrypt.dll` (part of the Windows CNG API) — no crate required.
+//! The OS CSPRNG plumbing itself (`/dev/urandom` on Unix, `BCryptGenRandom`
+//! on Windows) lives in [`rusty_rand`], a workspace sibling with no
+//! external dependencies that was extracted from this module and
+//! `rusty_uuid`'s identical copy of it. This module keeps the crate's own
+//! error type and function names so callers are unchanged.
 
 use std::fmt;
 
+/// The OS could not supply secure random bytes.
 #[derive(Debug)]
-pub struct RandError(String);
+pub struct RandError(rusty_rand::Error);
 
 impl fmt::Display for RandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "failed to obtain secure random bytes: {}", self.0)
+        self.0.fmt(f)
     }
 }
 
-impl std::error::Error for RandError {}
+impl std::error::Error for RandError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
 
 /// Fills `buf` with cryptographically secure random bytes from the OS CSPRNG.
 pub fn fill_random(buf: &mut [u8]) -> Result<(), RandError> {
-    imp::fill_random(buf)
+    rusty_rand::fill(buf).map_err(RandError)
 }
 
 /// Returns `len` cryptographically secure random bytes.
 pub fn random_bytes(len: usize) -> Result<Vec<u8>, RandError> {
-    let mut buf = vec![0u8; len];
-    fill_random(&mut buf)?;
-    Ok(buf)
-}
-
-#[cfg(unix)]
-mod imp {
-    use super::RandError;
-    use std::fs::File;
-    use std::io::Read;
-
-    pub fn fill_random(buf: &mut [u8]) -> Result<(), RandError> {
-        let mut file =
-            File::open("/dev/urandom").map_err(|e| RandError(format!("open /dev/urandom: {e}")))?;
-        file.read_exact(buf)
-            .map_err(|e| RandError(format!("read /dev/urandom: {e}")))?;
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-mod imp {
-    use super::RandError;
-
-    // Named to match the Windows API exactly, not Rust convention -- an
-    // FFI binding is clearer when it reads the way the real API docs do.
-    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
-    type NTSTATUS = i32;
-    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
-    type ULONG = u32;
-    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
-    type PUCHAR = *mut u8;
-    #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
-    type PVOID = *mut core::ffi::c_void;
-
-    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: ULONG = 0x0000_0002;
-
-    #[link(name = "bcrypt")]
-    extern "system" {
-        fn BCryptGenRandom(
-            h_algorithm: PVOID,
-            pb_buffer: PUCHAR,
-            cb_buffer: ULONG,
-            dw_flags: ULONG,
-        ) -> NTSTATUS;
-    }
-
-    pub fn fill_random(buf: &mut [u8]) -> Result<(), RandError> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-        let status = unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                buf.as_mut_ptr(),
-                buf.len() as ULONG,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        };
-        if status != 0 {
-            return Err(RandError(format!("BCryptGenRandom failed: 0x{status:08x}")));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-mod imp {
-    use super::RandError;
-
-    pub fn fill_random(_buf: &mut [u8]) -> Result<(), RandError> {
-        Err(RandError(
-            "no supported OS CSPRNG source on this platform".to_string(),
-        ))
-    }
+    rusty_rand::bytes(len).map_err(RandError)
 }
 
 #[cfg(test)]

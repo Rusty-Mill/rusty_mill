@@ -2,7 +2,7 @@
 //! in-memory duplex pipe, exercising the same code path as the stdio
 //! transport.
 
-mod support;
+use rusty_wiremock::canned as support;
 
 // The binary's modules, compiled into the test -- `crate::` paths inside
 // them (e.g. `crate::server::HomelabServer`) resolve against this test

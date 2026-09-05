@@ -18,7 +18,6 @@ use rusty_http::head::RequestHead;
 use rusty_http::tokio_native::{AsyncTransport, Replay};
 use rusty_http::{HeaderMap, Method, Version};
 
-use crate::base64;
 use crate::controlbase::{self, Conn, ConnectError, client_initiation};
 
 const UPGRADE_PATH: &str = "/ts2021";
@@ -161,7 +160,7 @@ pub async fn dial(
         .insert("Connection", "upgrade")
         .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
     headers
-        .insert(HANDSHAKE_HEADER, &base64::encode(&init))
+        .insert(HANDSHAKE_HEADER, &rusty_base64::encode_standard(&init))
         .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
     headers
         .insert("Content-Length", "0")

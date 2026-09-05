@@ -46,6 +46,9 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 tracing = "0.1"
 
 [dev-dependencies]
+# The canned-response HTTP mock server the client tests drive against
+# (was an identical copy under tests/support/ in each REST-client crate).
+rusty_wiremock = { path = "../rusty_wiremock", features = ["std"] }
 rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "client",

@@ -180,61 +180,11 @@ pub fn dequant_block(ty: GgmlType, chunk: &[u8], out: &mut [f32]) {
 
 // --- IEEE 754 half precision ------------------------------------------------
 
-/// Convert an IEEE-754 binary16 value to `f32`.
-pub fn f16_to_f32(h: u16) -> f32 {
-    let sign = (h >> 15) & 1;
-    let exp = (h >> 10) & 0x1f;
-    let mant = h & 0x3ff;
-    let val = if exp == 0 {
-        (mant as f32) * 2.0f32.powi(-24)
-    } else if exp == 0x1f {
-        if mant == 0 {
-            f32::INFINITY
-        } else {
-            f32::NAN
-        }
-    } else {
-        (1.0 + mant as f32 / 1024.0) * 2.0f32.powi(exp as i32 - 15)
-    };
-    if sign == 1 {
-        -val
-    } else {
-        val
-    }
-}
-
-/// Convert an `f32` to IEEE-754 binary16 (round to nearest, ties to even).
-///
-/// Used to build quantized test fixtures; not on any hot path.
-pub fn f32_to_f16(f: f32) -> u16 {
-    let bits = f.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
-    let mant = bits & 0x7f_ffff;
-
-    if exp <= 0 {
-        if exp < -10 {
-            return sign;
-        }
-        let m = mant | 0x80_0000;
-        let shift = (14 - exp) as u32;
-        let mut half = (m >> shift) as u16;
-        let round_bit = 1u32 << (shift - 1);
-        if m & round_bit != 0 && (m & (round_bit - 1) != 0 || half & 1 != 0) {
-            half += 1;
-        }
-        sign | half
-    } else if exp >= 0x1f {
-        sign | 0x7c00
-    } else {
-        let mut half = ((exp as u16) << 10) | ((mant >> 13) as u16);
-        let round_bit = 1u32 << 12;
-        if mant & round_bit != 0 && (mant & (round_bit - 1) != 0 || half & 1 != 0) {
-            half += 1;
-        }
-        sign | half
-    }
-}
+// Both directions come from `rusty_simd`, this crate's own dequantization
+// dependency, which is also where `rusty_whisper` gets them: one shared
+// implementation (round-to-nearest-even on the way down, full subnormal
+// handling on the way up) instead of a copy per model loader.
+pub use rusty_simd::{f16_to_f32, f32_to_f16};
 
 // --- per-block dequantizers -------------------------------------------------
 

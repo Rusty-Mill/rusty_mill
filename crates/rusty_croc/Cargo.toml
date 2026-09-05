@@ -19,7 +19,9 @@ serde = { version = "1", features = ["derive"] }
 # `arbitrary_precision` is a workspace-wide behaviour change once cargo unifies
 # features across this monorepo's members.
 serde_json = { version = "1", features = ["raw_value"] }
-base64 = "0.22"
+# The workspace's own dependency-free base64 (RFC 4648 standard alphabet),
+# for the wire message's byte fields; replaced the external `base64` crate.
+rusty_base64 = { path = "../rusty_base64" }
 num-bigint = "0.4"
 num-traits = "0.2"
 p256 = { version = "0.13", features = ["arithmetic"] }

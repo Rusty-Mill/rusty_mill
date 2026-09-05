@@ -17,6 +17,51 @@ newly-merged product families (`rusty_adk`/`adk-*`, `rusty_agent_gateway`/
 family). Both sections below are restated in full against the current tree
 rather than diffed against the stale version.
 
+## Disposition — worked through on 2026-09-05 (branch `claude/repo-inspector-report-wgoocq`)
+
+Every row below was acted on, or deliberately not, against `main` at
+`c2c3ea0` (two days after this report's `82e068c`). Two things had already
+moved in between and are folded in here rather than restated as findings:
+[PR #155](https://github.com/Rusty-Mill/rusty_mill/pull/155) extracted
+`rusty_base64` and closed issue #119 (so Section 1 row 5's "if/when that
+extraction happens" had happened), and `rusty_fedora` landed with a fourth
+copy of Section 1 row 8's `MockResponse`.
+
+### Section 1 — duplication clusters
+
+| # | Cluster | Disposition | What changed / why not |
+| --- | --- | --- | --- |
+| 1 | `RsaPublicKey` | **no action** (as recommended) | Endianness split is documented in-source as deliberate; the shared `BigUint` already covers the arithmetic. Re-open on a third consumer. |
+| 2 | Retry policy | **no action, and narrower than reported** | `rusty_request::retry::Backoff::delay_for` and `rusty_acp::client::RetryPolicy::backoff_for` *already* delegate the backoff math to `rusty_retry` (PR #116) — the report's "none of the four diff the actual backoff algorithm" was stale for those two. What remains is `agentgateway-core::retry` (plain doubling, capped, no jitter, driven by a serde-shaped config) and `rp-router`'s `pub(crate)` webhook policy. Moving either onto `rusty_retry::Backoff` would change behaviour (add jitter) with no bug to fix; that is the human call the report said it was, and it is left as one. |
+| 3 | `f16_to_f32` | **done** | `rusty_llama::quant` re-exports `rusty_simd::f16_to_f32`; its own copy is deleted. |
+| 4 | `f32_to_f16` | **done** | Added `rusty_simd::f32_to_f16` (round-to-nearest-even, NaN preserved as quiet NaN, overflow → ∞, with an exhaustive every-f16-round-trips test); `rusty_llama` and `rusty_whisper` re-export it. Worth knowing: the two deleted copies disagreed — `rusty_whisper`'s rounded half-up, `rusty_llama`'s turned NaN into infinity. Both call sites are test-fixture-only, so neither difference reached a real code path. |
+| 5 | Hand-rolled base64 ×3 | **done** | `rusty_request`, `ts-control`, and `sessionmgr-protocol` all use `rusty_base64` now; the three `src/base64.rs` files are deleted. `sessionmgr-protocol`'s strictness ("reject, never guess") was kept by hardening `rusty_base64`'s decoder rather than lowering the bar: it now rejects misplaced or excess `=` and reports the offending index/byte in `DecodeError`, and `sessionmgr-protocol::base64::decode` keeps its own one-line "padded wire, so length must be 4-aligned" guard on top. `ts-control`'s DESIGN.md dependency table gained the required justification row. |
+| 6 | OS CSPRNG | **done** | New `crates/rusty_rand` (`fill`/`bytes`, `Result`-returning; cached `/dev/urandom` handle on Unix, hand-declared `BCryptGenRandom` on Windows). `rusty_oauth::rand` and `rusty_uuid`'s private `rand` are thin wrappers over it, public APIs unchanged. A **third** copy the report did not see (`sessionmgr-proc::os_random`, indexed under a different name) is swapped too, which also drops `windows-sys`'s `Win32_Security_Cryptography` feature from that crate. |
+| 6a | `platform`/`rusty_libc` `getrandom(2)` | **no action** (as recommended) | `rusty_rand` deliberately stays file/CNG-based so it serves macOS/BSD through the same path; not a `platform` consumer. |
+| 7 | Hand-rolled JSON `Value` ×2 | **not done — blocked on a premise error** | `rusty_json` is not dependency-free: it has a non-optional `serde` dependency, and its `de`/`ser` modules *are* serde trait implementations (it is a from-scratch `serde_json`, not a serde-free JSON library). `rusty_oauth`'s and `rusty_request`'s own doc comments give "no `serde`" as the exact reason they hand-roll. Adopting `rusty_json` as-is would put `serde` into two crates whose stated contract is its absence. Prerequisite before this row can move: a serde-free `Value` + parser/writer surface in `rusty_json` (feature-gate `serde`), which is a `rusty_json` design change to make first, not a mechanical swap. |
+| 8 | `MockResponse` ×3 (actually ×4) | **done** | `rusty_wiremock` — whose own stated purpose is "sovereign HTTP mock server for Rusty Mill test suites", and which each copy's doc comment named as the intended home while calling it a stub — gained a `std` feature and a working `canned` module (`MockResponse`, `spawn`, with its own tests). `rusty_proxmox`, `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp` now take it as a dev-dependency; their four identical `tests/support/mod.rs` are deleted. The pre-existing matcher/template scaffold in `rusty_wiremock` is untouched. |
+| 9 | HMAC | **no action** (logged) | Confirmed again: `grep -c 'fn hmac_sha256' crates/rusty_rdp/src/crypto/hmac.rs` → 0. |
+| 10–13 | `AnsiParser`, SQL DDL names, `SystemClock`, `ServerConfig` | **no action** (logged) | Coincidental or too small to be worth a dependency edge, as the report says. |
+
+### Section 2 — sovereignty findings
+
+| Dependency | Disposition | What changed / why not |
+| --- | --- | --- |
+| `serde` / `serde_json` | **no action** | 66-crate migration is not one PR's work; ADR-0002's per-crate tier ledger is the prerequisite for even deciding which of the new families are Adapter-tier by intent. Unchanged. |
+| `tokio` | **keep external** | As the report and `rusty_tokio`'s own README say. |
+| `thiserror` | **no further action** | The `cargo tree -i thiserror` reachability check the report asks for is exactly what issue #121 already did; its conclusion (only `rusty-acp`/`rusty_a2a` are real swap candidates) stands. |
+| `tracing`, `async-trait` | **no action** | Adapter-layer / compiler-shim, as noted. |
+| `uuid` | **partial: `adk-core` done** | `adk-core::new_id` uses `rusty_uuid::Uuid::new_v4()` (only `new_v4` + `Display` were used); external `uuid` is out of that crate. `rusty-acp` (needs `serde` on `Uuid`, `.simple()` formatting, and `sqlx`'s `uuid` column mapping) and `rusty-db-core` (`pub use uuid::Uuid` is public API, plus the same `sqlx` mapping) are not swappable until `rusty_uuid` grows serde + sqlx support — a `rusty_uuid` feature request, not a call-site edit. |
+| `url` | **done** | `rk-feed::web::validate_public_url` parses with `rusty_url::Url` (`scheme`/`host_str`/`port_or_known_default` all exist there). Direct edge retired; `reqwest` still pulls external `url` transitively. |
+| `base64` (external) | **done — zero remaining users** | `adk-a2a` and `rusty-croc` swapped; so were `agentgateway-auth` and `agentgateway`, two dev-dependency users the report's scan (which excludes dev-deps) did not list. No workspace manifest declares external `base64` any more. |
+| `libc` | **not done** | `sessionmgr-proc` needs `setsid`, `fcntl(F_SETFD, FD_CLOEXEC)`, `kill`, and `ESRCH`/`EPERM`/`SIGTERM` — `rusty_libc` has all of them, but `sessionmgr-proc` is `cfg(unix)` including macOS and `rusty_libc` is Linux-only, so it needs the same target-selected dual-backend ("Track P") scaffolding issue #120 asks a maintainer to decide on for `rusty_term`. Same decision, so left with #120. |
+| `rustls` | **no action (checked for fit)** | `agentgateway-tls` uses `rustls` for one thing: installing the `ring` `CryptoProvider` process-wide for the `reqwest`/`tokio-rustls` stack in its graph. `rp-router` builds a `rustls::ClientConfig` to hand to `tokio-postgres-rustls`. `rusty_tls` exposes neither a `ClientConfig` nor a provider hook (it wraps its own streams), so there is no fit today. `rusty_rdp` stays with #118. |
+| `sqlx` | **no action** | Parity-loop candidate, as recommended; out of scope here. |
+| `rusqlite` | **no action (checked for fit)** | `rusty_sqlite` re-exports `rusqlite` rather than replacing it, and the four direct users (`adk-sessions`, `inventory-core`, `rk-feed`, `rp-router`) use only `Connection`/`params!`/`Row`/`Result` — none of the wrapper's pragmas/migrations/pool. Swapping would rename the import path and change nothing; versions are already unified at `0.32`. |
+| `clap`, `unicode-width` | **no action** | As recommended. |
+| `toml` | **not swappable today** | Six users now (`rusty_fedora_agent` is a sixth). All six deserialize via `#[derive(Deserialize)]` + `toml::from_str`; five of six use `[[array-of-tables]]`; `rp-cli` also edits `toml::Value` and re-serializes. `rusty_codec`'s TOML has no serde `Deserializer`, no `[[...]]`, no serializer. Prerequisites named; nothing to swap until they exist. |
+| `rmcp`, `axum`/`hyper`/`http`/`tower` | **no action** | ADR-decided Adapter tier / no sovereign server framework, as noted. |
+
 ## Before you read this: prior duplication/sovereignty work already ran here
 
 Per the review context this run was given, none of the following are

@@ -1,4 +1,4 @@
-mod support;
+use rusty_wiremock::canned as support;
 
 use rusty_fedora::{FedoraAgentClient, FedoraAgentConfig, Priority, ServiceAction, UnitType};
 use support::MockResponse;

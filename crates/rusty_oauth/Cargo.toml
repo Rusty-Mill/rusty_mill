@@ -11,6 +11,7 @@ categories = ["authentication", "web-programming"]
 
 [dependencies]
 rusty_base64 = { path = "../rusty_base64" }
+rusty_rand = { path = "../rusty_rand" }
 rusty_rsa = { path = "../rusty_rsa" }
 
 [dev-dependencies]

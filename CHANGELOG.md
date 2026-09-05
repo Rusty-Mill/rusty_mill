@@ -9,6 +9,38 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/rusty_rand` — new workspace member: OS-backed CSPRNG bytes
+  (`fill`/`bytes`, `Result`-returning; cached `/dev/urandom` handle on
+  Unix, hand-declared `BCryptGenRandom` FFI on Windows), no external
+  dependencies. Extracted from three identical copies in `rusty_oauth`,
+  `rusty_uuid`, and `sessionmgr-proc`, all of which now wrap it
+  (repo-inspector Section 1 row 6).
+- `rusty_simd::f32_to_f16` — the reverse of the existing `f16_to_f32`
+  (round-to-nearest-even, NaN preserved, overflow → ∞, exhaustive
+  round-trip test); `rusty_llama` and `rusty_whisper` re-export both
+  directions instead of carrying their own (rows 3–4).
+- `rusty_wiremock::canned` (behind a new `std` feature) — a working
+  sequential canned-response HTTP mock server, moved out of the four
+  identical `tests/support/mod.rs` copies in `rusty_proxmox`,
+  `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp` (row 8).
+- `repo-inspector-report.md` gained a **Disposition** section recording
+  what was done, or deliberately not, for every row of both sections.
+### Changed
+- `rusty_base64`'s decoder now rejects misplaced or excess `=` padding
+  (`Z=9v`, `Zm9v====`, `Zg==Zg==`) and a padded input that is not
+  4-aligned, instead of stripping every `=` and guessing; `DecodeError`
+  variants carry the offending index/byte/length. Missing padding is
+  still accepted (base64url needs it).
+- The last three hand-rolled base64 copies (`rusty_request`, `ts-control`,
+  `sessionmgr-protocol`) and the last four external `base64` crate users
+  (`adk-a2a`, `rusty-croc`, and `agentgateway`/`agentgateway-auth`'s test
+  suites) all use `rusty_base64`; external `base64` is gone from every
+  workspace manifest (Section 1 row 5 + Section 2 `base64`).
+- `adk-core` mints ids with `rusty_uuid` instead of external `uuid`;
+  `rk-feed` validates egress URLs with `rusty_url` instead of external
+  `url` (Section 2 `uuid`/`url`).
+- `sessionmgr-proc` no longer needs `windows-sys`'s
+  `Win32_Security_Cryptography` feature (its `os_random` is `rusty_rand`).
 - `crates/rusty_fedora_agent` — new workspace member: an unprivileged local
   agent exposing scoped systemd/dnf/config-file control over a small
   synchronous (`tiny_http`) HTTP API, for managing a Fedora Server host
