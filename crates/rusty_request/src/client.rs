@@ -1018,7 +1018,7 @@ fn redirect_method_and_body(status: u16, method: Method, body: Body) -> (Method,
 fn basic_auth_header(username: &str, password: &str) -> String {
     format!(
         "Basic {}",
-        crate::base64::encode(format!("{username}:{password}").as_bytes())
+        rusty_base64::encode_standard(format!("{username}:{password}").as_bytes())
     )
 }
 

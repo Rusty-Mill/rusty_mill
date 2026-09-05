@@ -1,4 +1,4 @@
-mod support;
+use rusty_wiremock::canned as support;
 
 use rusty_proxmox::{Error, GuestKind, PowerAction, ProxmoxClient, ProxmoxConfig};
 use support::MockResponse;

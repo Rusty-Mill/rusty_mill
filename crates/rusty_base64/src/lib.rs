@@ -71,69 +71,106 @@ fn decode_char(c: u8, alphabet: &[u8; 64]) -> Option<u8> {
 }
 
 fn decode_with(data: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, DecodeError> {
-    let bytes: Vec<u8> = data.bytes().filter(|&b| b != b'=').collect();
-    if bytes.iter().any(|&b| decode_char(b, alphabet).is_none()) {
-        return Err(DecodeError::InvalidCharacter);
+    let bytes = data.as_bytes();
+
+    // Padding, when present, is only ever the last one or two characters
+    // (RFC 4648 §4). Anything else that looks like padding is corruption,
+    // not something to strip and guess past: a decoder that silently
+    // accepted `Z=9v` would push the corruption downstream.
+    let padding = bytes.iter().rev().take_while(|&&b| b == b'=').count();
+    if padding > 2 {
+        return Err(DecodeError::MisplacedPadding {
+            index: bytes.len() - padding,
+        });
+    }
+    let payload = &bytes[..bytes.len() - padding];
+    if let Some(index) = payload.iter().position(|&b| b == b'=') {
+        return Err(DecodeError::MisplacedPadding { index });
+    }
+    if let Some(index) = payload
+        .iter()
+        .position(|&b| decode_char(b, alphabet).is_none())
+    {
+        return Err(DecodeError::InvalidCharacter {
+            byte: payload[index],
+            index,
+        });
     }
 
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    let chunks = bytes.chunks_exact(4);
+    // Padded input must be a whole number of 4-character groups. Unpadded
+    // input (base64url per RFC 7515 App. C, and standard-alphabet callers
+    // that simply omit it) is accepted as-is -- but a single trailing
+    // character can never carry a whole byte, padded or not.
+    if padding > 0 && bytes.len() % 4 != 0 {
+        return Err(DecodeError::InvalidLength { len: bytes.len() });
+    }
+    if payload.len() % 4 == 1 {
+        return Err(DecodeError::InvalidLength { len: bytes.len() });
+    }
+
+    let mut out = Vec::with_capacity(payload.len() * 3 / 4);
+    let chunks = payload.chunks_exact(4);
     let rem = chunks.remainder();
 
+    // Every byte of `payload` was validated against `alphabet` above, so
+    // `decode_char` cannot fail below; `unwrap_or(0)` only spells that out
+    // without a panic path.
+    let val = |c: u8| decode_char(c, alphabet).unwrap_or(0) as u32;
+
     for chunk in chunks {
-        let vals: [u8; 4] = [
-            decode_char(chunk[0], alphabet).unwrap(),
-            decode_char(chunk[1], alphabet).unwrap(),
-            decode_char(chunk[2], alphabet).unwrap(),
-            decode_char(chunk[3], alphabet).unwrap(),
-        ];
-        let n = (vals[0] as u32) << 18
-            | (vals[1] as u32) << 12
-            | (vals[2] as u32) << 6
-            | vals[3] as u32;
+        let n = val(chunk[0]) << 18 | val(chunk[1]) << 12 | val(chunk[2]) << 6 | val(chunk[3]);
         out.push((n >> 16) as u8);
         out.push((n >> 8) as u8);
         out.push(n as u8);
     }
 
     match rem.len() {
-        0 => {}
         2 => {
-            let vals = [
-                decode_char(rem[0], alphabet).unwrap(),
-                decode_char(rem[1], alphabet).unwrap(),
-            ];
-            let n = (vals[0] as u32) << 18 | (vals[1] as u32) << 12;
+            let n = val(rem[0]) << 18 | val(rem[1]) << 12;
             out.push((n >> 16) as u8);
         }
         3 => {
-            let vals = [
-                decode_char(rem[0], alphabet).unwrap(),
-                decode_char(rem[1], alphabet).unwrap(),
-                decode_char(rem[2], alphabet).unwrap(),
-            ];
-            let n = (vals[0] as u32) << 18 | (vals[1] as u32) << 12 | (vals[2] as u32) << 6;
+            let n = val(rem[0]) << 18 | val(rem[1]) << 12 | val(rem[2]) << 6;
             out.push((n >> 16) as u8);
             out.push((n >> 8) as u8);
         }
-        _ => return Err(DecodeError::InvalidLength),
+        _ => {}
     }
 
     Ok(out)
 }
 
-/// Why a decode failed.
+/// Why a decode failed. Every variant names where in the input the
+/// problem is, so a caller relaying the error (a wire-protocol peer's
+/// corrupt payload, a malformed JWT segment) can say more than "bad
+/// base64".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
-    InvalidCharacter,
-    InvalidLength,
+    /// A byte outside the alphabet (and not `=`) at `index`.
+    InvalidCharacter { byte: u8, index: usize },
+    /// The input's total length (`len`, padding included) cannot be valid
+    /// Base64: a padded input that is not a whole number of 4-character
+    /// groups, or an unpadded one with a single trailing character.
+    InvalidLength { len: usize },
+    /// A `=` somewhere other than the last one or two characters, or more
+    /// than two of them; `index` is the first offending position.
+    MisplacedPadding { index: usize },
 }
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DecodeError::InvalidCharacter => write!(f, "invalid base64 character"),
-            DecodeError::InvalidLength => write!(f, "invalid base64 length"),
+            DecodeError::InvalidCharacter { byte, index } => write!(
+                f,
+                "invalid base64 character {:?} at index {index}",
+                char::from(*byte)
+            ),
+            DecodeError::InvalidLength { len } => {
+                write!(f, "invalid base64 length {len}")
+            }
+            DecodeError::MisplacedPadding { index } => {
+                write!(f, "misplaced base64 padding at index {index}")
+            }
         }
     }
 }
@@ -207,7 +244,29 @@ mod tests {
 
     #[test]
     fn decode_rejects_invalid_chars() {
-        assert_eq!(decode_standard("!!!!"), Err(DecodeError::InvalidCharacter));
+        assert_eq!(
+            decode_standard("!!!!"),
+            Err(DecodeError::InvalidCharacter {
+                byte: b'!',
+                index: 0
+            })
+        );
+        assert_eq!(
+            decode_standard("Zm9*"),
+            Err(DecodeError::InvalidCharacter {
+                byte: b'*',
+                index: 3
+            })
+        );
+        // The URL-safe alphabet's `-`/`_` are not standard, and vice versa.
+        assert!(matches!(
+            decode_standard("-_-_"),
+            Err(DecodeError::InvalidCharacter { .. })
+        ));
+        assert!(matches!(
+            decode_url_safe("+/+/"),
+            Err(DecodeError::InvalidCharacter { .. })
+        ));
     }
 
     #[test]
@@ -215,18 +274,101 @@ mod tests {
         // Two leftover chars decode fine (see url_safe_no_pad_roundtrip's
         // "e" tail), but one leftover char is never valid Base64 -- 6 bits
         // can't recover a whole byte.
-        assert_eq!(decode_standard("A"), Err(DecodeError::InvalidLength));
+        assert_eq!(
+            decode_standard("A"),
+            Err(DecodeError::InvalidLength { len: 1 })
+        );
+        assert_eq!(
+            decode_standard("Zm9vY"),
+            Err(DecodeError::InvalidLength { len: 5 })
+        );
+        // Once padding is present the whole thing has to be 4-aligned:
+        // one `=` where two are needed, or padding on an already-complete
+        // group, are both malformed.
+        assert_eq!(
+            decode_standard("Zg="),
+            Err(DecodeError::InvalidLength { len: 3 })
+        );
+        assert_eq!(
+            decode_standard("Zm9v="),
+            Err(DecodeError::InvalidLength { len: 5 })
+        );
+    }
+
+    #[test]
+    fn decode_accepts_missing_padding() {
+        assert_eq!(decode_standard("Zg").unwrap(), b"f");
+        assert_eq!(decode_standard("Zm8").unwrap(), b"fo");
+        assert_eq!(decode_standard("Zm9vYg").unwrap(), b"foob");
+    }
+
+    #[test]
+    fn decode_rejects_misplaced_padding() {
+        assert_eq!(
+            decode_standard("Z=9v"),
+            Err(DecodeError::MisplacedPadding { index: 1 })
+        );
+        assert_eq!(
+            decode_standard("Zm=v"),
+            Err(DecodeError::MisplacedPadding { index: 2 })
+        );
+        // Padding in the middle of an otherwise-valid concatenation.
+        assert_eq!(
+            decode_standard("Zg==Zg=="),
+            Err(DecodeError::MisplacedPadding { index: 2 })
+        );
+        // More than two trailing `=`.
+        assert_eq!(
+            decode_standard("Zm9v===="),
+            Err(DecodeError::MisplacedPadding { index: 4 })
+        );
+    }
+
+    #[test]
+    fn decode_round_trips_every_length_remainder_and_every_byte() {
+        for input in [
+            &b""[..],
+            &b"f"[..],
+            &b"fo"[..],
+            &b"foo"[..],
+            &b"foob"[..],
+            &b"fooba"[..],
+            &b"foobar"[..],
+        ] {
+            assert_eq!(decode_standard(&encode_standard(input)).unwrap(), input);
+            assert_eq!(
+                decode_url_safe(&encode_url_safe_no_pad(input)).unwrap(),
+                input
+            );
+        }
+        let all_bytes: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(
+            decode_standard(&encode_standard(&all_bytes)).unwrap(),
+            all_bytes
+        );
+        assert_eq!(
+            decode_url_safe(&encode_url_safe(&all_bytes)).unwrap(),
+            all_bytes
+        );
     }
 
     #[test]
     fn decode_error_display() {
         assert_eq!(
-            DecodeError::InvalidCharacter.to_string(),
-            "invalid base64 character"
+            DecodeError::InvalidCharacter {
+                byte: b'*',
+                index: 3
+            }
+            .to_string(),
+            "invalid base64 character '*' at index 3"
         );
         assert_eq!(
-            DecodeError::InvalidLength.to_string(),
-            "invalid base64 length"
+            DecodeError::InvalidLength { len: 5 }.to_string(),
+            "invalid base64 length 5"
+        );
+        assert_eq!(
+            DecodeError::MisplacedPadding { index: 1 }.to_string(),
+            "misplaced base64 padding at index 1"
         );
     }
 }

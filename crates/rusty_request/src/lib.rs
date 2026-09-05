@@ -19,7 +19,7 @@
 //!   `.error_for_status()`.
 //! - Auth helpers: `.basic_auth(user, pass)`/`.bearer_auth(token)` on
 //!   both `RequestBuilder` and `ClientBuilder` (RFC 7617 Basic auth
-//!   uses a small hand-rolled base64 encoder -- no `base64` crate).
+//!   uses `rusty_base64`, the workspace's own encoder -- no `base64` crate).
 //! - Automatic redirect following (301/302/303/307/308, capped at 30
 //!   hops by default via `.max_redirects(n)`/`.no_redirects()` on
 //!   either `RequestBuilder` or `ClientBuilder`), with the
@@ -101,7 +101,6 @@
 //! # }
 //! ```
 
-mod base64;
 mod body;
 mod client;
 mod error;

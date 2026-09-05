@@ -6,8 +6,6 @@
 //! [`crate::crypt`].
 
 use crate::{compress, crypt};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // Message type constants, mirroring the Go `message.Type` values.
@@ -24,13 +22,13 @@ fn is_zero(n: &i64) -> bool {
     *n == 0
 }
 
-fn as_base64<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&BASE64.encode(bytes))
+fn as_base64<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&rusty_base64::encode_standard(bytes))
 }
 
 fn from_base64<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
     let s = String::deserialize(d)?;
-    BASE64.decode(s).map_err(serde::de::Error::custom)
+    rusty_base64::decode_standard(&s).map_err(serde::de::Error::custom)
 }
 
 /// Mirrors Go's `message.Message` including its `omitempty` JSON behavior.

@@ -62,7 +62,7 @@ pub const TOOL_CONFIRMATION_FUNCTION_NAME: &str = "adk_request_confirmation";
 
 /// Generates a prefixed unique id, e.g. `evt-9f2c…`.
 pub fn new_id(prefix: &str) -> String {
-    format!("{prefix}-{}", uuid::Uuid::new_v4())
+    format!("{prefix}-{}", rusty_uuid::Uuid::new_v4())
 }
 
 /// The current time in seconds since the Unix epoch.

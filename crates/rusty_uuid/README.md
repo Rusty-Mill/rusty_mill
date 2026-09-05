@@ -19,7 +19,9 @@ let id = document.id.clone().unwrap_or_else(|| rusty_uuid::Uuid::new_v4().to_str
 
 `rusty_uuid` covers that case with zero external dependencies. Randomness
 comes straight from the OS: `/dev/urandom` on Unix, `BCryptGenRandom` on
-Windows — both non-blocking on modern platforms.
+Windows — both non-blocking on modern platforms — via `rusty_rand`, the
+sibling workspace crate (same zero-external-dependency posture) that was
+extracted from this crate's own former copy of that plumbing.
 
 ## Features
 

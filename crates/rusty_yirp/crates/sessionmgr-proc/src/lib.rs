@@ -430,46 +430,19 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     }
 }
 
-/// `len` bytes from the OS CSPRNG.
+/// Fills `buf` from the OS CSPRNG.
 ///
 /// The platform directly rather than a `rand`-shaped dependency, matching
-/// the sibling projects' posture: `/dev/urandom` needs no dependency at
-/// all on Unix, and `BCryptGenRandom` is one call on Windows.
+/// the sibling projects' posture -- via [`rusty_rand`], the workspace's
+/// one dependency-free copy of that plumbing (`/dev/urandom` on Unix,
+/// `BCryptGenRandom` on Windows), which replaced this crate's own
+/// identical arm-per-platform implementation.
 ///
 /// Returns `Err` rather than silently falling back to a weak source. The
 /// caller ([`session_id`]) decides what to do about it, and does so
 /// visibly.
 pub fn os_random(buf: &mut [u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut f = std::fs::File::open("/dev/urandom")?;
-        f.read_exact(buf)
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Security::Cryptography::{
-            BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        };
-        // SAFETY: `BCryptGenRandom` with a null algorithm handle and
-        // `BCRYPT_USE_SYSTEM_PREFERRED_RNG` writes exactly `buf.len()`
-        // bytes into the caller's live, mutable buffer.
-        let status = unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "BCryptGenRandom failed with NTSTATUS 0x{status:08x}"
-            )))
-        }
-    }
+    Ok(rusty_rand::fill(buf)?)
 }
 
 /// Milliseconds since the Unix epoch.

@@ -85,7 +85,7 @@ tokio-util = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-base64 = "0.22"
+rusty_base64 = { path = "../../../rusty_base64" }
 rsa = "0.9"
 rand = "0.8"
 tempfile = "3"

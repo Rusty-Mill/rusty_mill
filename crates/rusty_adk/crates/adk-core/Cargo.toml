@@ -14,7 +14,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror = "2"
 tokio = { workspace = true }
-uuid.workspace = true
+# v4 ids for events/sessions; the workspace's own dependency-free UUID
+# crate replaced the external `uuid` (only `new_v4` + `Display` were used).
+rusty_uuid = { path = "../../../rusty_uuid" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

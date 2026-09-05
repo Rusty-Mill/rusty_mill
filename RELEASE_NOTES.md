@@ -13,6 +13,57 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Work through the repo-inspector report's duplication and sovereignty rows
+**2026-09-05** · branch [`claude/repo-inspector-report-wgoocq`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/repo-inspector-report-wgoocq)
+
+Every row of `repo-inspector-report.md` (regenerated in #152) now has a
+recorded disposition in a new **Disposition** section at the top of the
+report; the actionable ones landed here.
+
+- **Added:** `crates/rusty_rand` — one dependency-free OS CSPRNG
+  (`/dev/urandom` cached handle / `BCryptGenRandom`) replacing three
+  identical copies in `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc`
+  (the third was not in the report; it was indexed under `os_random`).
+  Public APIs of all three consumers are unchanged.
+- **Added:** `rusty_simd::f32_to_f16`; `rusty_llama` and `rusty_whisper`
+  re-export both f16 directions from `rusty_simd` and delete their own.
+  The two deleted `f32_to_f16` copies disagreed (half-up rounding vs.
+  ties-to-even; one mapped NaN to infinity) — both were test-fixture-only,
+  so no shipped code path changes.
+- **Added:** `rusty_wiremock::canned` behind a `std` feature — the
+  sequential canned-response mock server that `rusty_proxmox`,
+  `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp` each carried
+  an identical copy of; all four now dev-depend on it. `rusty_wiremock`
+  was the home each copy's own doc comment named while calling it a stub.
+- **Changed:** `rusty_base64` decodes strictly (misplaced/excess padding
+  and non-4-aligned padded input are errors; `DecodeError` carries
+  positions) so `sessionmgr-protocol` could adopt it without giving up its
+  "reject, never guess" rule. With that, the last three hand-rolled base64
+  copies and the last four external `base64` users are gone: no workspace
+  manifest declares external `base64` any more.
+- **Changed:** `adk-core` → `rusty_uuid`; `rk-feed` → `rusty_url`
+  (direct edge only — `reqwest` keeps external `url` transitively).
+- **Not done, with reasons recorded in the report:** row 7 (JSON `Value`)
+  is blocked because `rusty_json` has a non-optional `serde` dependency,
+  which is the one thing `rusty_oauth`/`rusty_request` hand-roll to avoid
+  — a serde-free `rusty_json` surface is the prerequisite. `rusty-acp`/
+  `rusty-db-core` keep external `uuid` (serde + `sqlx` type mapping on the
+  `Uuid` type); `sessionmgr-proc` keeps `libc` (same Track P
+  dual-backend decision as #120); `rustls` in `agentgateway-tls`/
+  `rp-router` and `rusqlite` in four crates were checked for fit against
+  `rusty_tls`/`rusty_sqlite` and there is none today; `toml` needs a serde
+  `Deserializer` and `[[array-of-tables]]` in `rusty_codec` first. Row 2
+  (retry) turned out narrower than reported: `rusty_request` and
+  `rusty_acp` already delegate backoff to `rusty_retry`.
+- **Verified:** `cargo test` on every touched crate plus every
+  `rusty_base64::DecodeError` consumer (`rusty_a2a`, `rusty-acp`,
+  `rusty-mcp`) and `sessionmgr-daemon` (the one test that drives a real
+  `claude` binary was skipped as environment-dependent); `cargo fmt --all
+  -- --check`; `cargo clippy --all-targets --all-features -- -D warnings`
+  on all touched crates; `.github/scripts/check_workspace_deps.py` clean.
+
+---
+
 ## Add a Fedora/systemd module to rusty_homelab_mcp
 **2026-09-04** · branch [`claude/fedora-systemd-module-hb7vxv`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/fedora-systemd-module-hb7vxv)
 

@@ -61,8 +61,8 @@ fn is_public_v6(ip: &Ipv6Addr) -> bool {
 /// Validate a URL for egress: http(s) scheme + all resolved IPs public.
 /// Returns the validated URL string on success.
 pub fn validate_public_url(raw: &str) -> Result<String, ToolError> {
-    let parsed =
-        url::Url::parse(raw).map_err(|e| ToolError::InvalidArgs(format!("invalid url: {e}")))?;
+    let parsed = rusty_url::Url::parse(raw)
+        .map_err(|e| ToolError::InvalidArgs(format!("invalid url: {e}")))?;
     match parsed.scheme() {
         "http" | "https" => {}
         s => return Err(ToolError::InvalidArgs(format!("unsupported scheme '{s}'"))),

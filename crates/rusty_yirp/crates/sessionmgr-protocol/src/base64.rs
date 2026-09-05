@@ -13,42 +13,25 @@
 //! roughly **4 bytes of JSON per byte of output** and unreadable. Base64
 //! costs 1.33x and stays on one line, which the framing requires.
 //!
-//! # Why hand-rolled
+//! # Why not the `base64` crate
 //!
-//! It is forty lines of well-understood table lookup with exhaustive
-//! tests, against a dependency this project would otherwise carry
-//! forever. That matches the minimal-dependency line the sibling projects
-//! hold, and unlike most hand-rolled crypto-adjacent code, base64 has no
-//! security-sensitive failure mode: it is an encoding, not a cipher.
+//! It is forty lines of well-understood table lookup, against a
+//! dependency this project would otherwise carry forever. That matches
+//! the minimal-dependency line the sibling projects hold, and unlike most
+//! hand-rolled crypto-adjacent code, base64 has no security-sensitive
+//! failure mode: it is an encoding, not a cipher. This module used to be
+//! that hand-rolled copy; the encoding itself now comes from
+//! `rusty_base64`, the workspace's one dependency-free implementation,
+//! and what stays here is this wire format's own strictness rule and the
+//! serde glue.
 
 use serde::{Deserialize, Deserializer, Serializer};
 
-const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const PAD: u8 = b'=';
+pub use rusty_base64::DecodeError;
 
+/// Standard base64 with `=` padding (RFC 4648 §4).
 pub fn encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
-        out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
-        // The last group is padded rather than truncated, so the encoded
-        // length always reveals the decoded length.
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(triple >> 6) as usize & 0x3f] as char
-        } else {
-            PAD as char
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[triple as usize & 0x3f] as char
-        } else {
-            PAD as char
-        });
-    }
-    out
+    rusty_base64::encode_standard(input)
 }
 
 /// Decodes, rejecting anything malformed rather than guessing.
@@ -56,66 +39,17 @@ pub fn encode(input: &[u8]) -> String {
 /// A peer that sends a corrupt payload is a bug or an attack; silently
 /// decoding it to *something* would push the corruption downstream into
 /// a terminal, which interprets what it is given.
+///
+/// Stricter than `rusty_base64::decode_standard` in one respect: that
+/// decoder tolerates missing padding (base64url consumers need it), but
+/// [`encode`] always pads, so on this wire a length that is not a
+/// multiple of 4 can only be a truncated or corrupt message.
 pub fn decode(input: &str) -> Result<Vec<u8>, DecodeError> {
-    let bytes = input.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
-        return Err(DecodeError::BadLength { got: bytes.len() });
+    if !input.len().is_multiple_of(4) {
+        return Err(DecodeError::InvalidLength { len: input.len() });
     }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for group in bytes.chunks(4) {
-        let mut value = 0u32;
-        let mut real = 0usize;
-        for (index, byte) in group.iter().enumerate() {
-            if *byte == PAD {
-                // Padding is only ever the last one or two characters.
-                if index < 2 || group[index..].iter().any(|b| *b != PAD) {
-                    return Err(DecodeError::MisplacedPadding);
-                }
-                value <<= 6;
-                continue;
-            }
-            let Some(position) = ALPHABET.iter().position(|c| c == byte) else {
-                return Err(DecodeError::BadCharacter { got: *byte as char });
-            };
-            value = (value << 6) | position as u32;
-            real += 1;
-        }
-        // Every group accumulates a full 24 bits (padding shifts in
-        // zeroes), so the decoded bytes are always the **high** bytes,
-        // taken most-significant first: 2 encoded characters carry 1
-        // byte, 3 carry 2, 4 carry 3.
-        //
-        // Taking the low bytes instead is the easy mistake, and it is
-        // invisible on any input whose length is a multiple of 3 --
-        // which is most casual test data. The round-trip test covers all
-        // three remainders precisely because of that.
-        for index in 0..real.saturating_sub(1) {
-            out.push((value >> (16 - 8 * index)) as u8);
-        }
-    }
-    Ok(out)
+    rusty_base64::decode_standard(input)
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecodeError {
-    BadLength { got: usize },
-    BadCharacter { got: char },
-    MisplacedPadding,
-}
-
-impl std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DecodeError::BadLength { got } => {
-                write!(f, "base64 length {got} is not a multiple of 4")
-            }
-            DecodeError::BadCharacter { got } => write!(f, "invalid base64 character `{got}`"),
-            DecodeError::MisplacedPadding => f.write_str("base64 padding is misplaced"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {}
 
 /// `#[serde(with = "crate::base64::bytes")]` on any `Vec<u8>` field.
 pub mod bytes {
@@ -193,13 +127,20 @@ mod tests {
 
     #[test]
     fn malformed_input_is_rejected_rather_than_guessed_at() {
-        assert_eq!(decode("Zm9"), Err(DecodeError::BadLength { got: 3 }));
+        // Unpadded: fine for base64url elsewhere, truncation here.
+        assert_eq!(decode("Zm9"), Err(DecodeError::InvalidLength { len: 3 }));
         assert!(matches!(
             decode("Zm9*"),
-            Err(DecodeError::BadCharacter { got: '*' })
+            Err(DecodeError::InvalidCharacter { byte: b'*', .. })
         ));
         // Padding in the middle of a group.
-        assert_eq!(decode("Z=9v"), Err(DecodeError::MisplacedPadding));
-        assert_eq!(decode("Zm=v"), Err(DecodeError::MisplacedPadding));
+        assert_eq!(
+            decode("Z=9v"),
+            Err(DecodeError::MisplacedPadding { index: 1 })
+        );
+        assert_eq!(
+            decode("Zm=v"),
+            Err(DecodeError::MisplacedPadding { index: 2 })
+        );
     }
 }

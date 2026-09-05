@@ -22,7 +22,6 @@ static PRIMARY: std::sync::OnceLock<(Vec<u8>, Value)> = std::sync::OnceLock::new
 
 fn keys() -> (EncodingKey, Value) {
     let (der, jwks) = PRIMARY.get_or_init(|| {
-        use base64::Engine as _;
         use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 
         let mut rng = rand::thread_rng();
@@ -32,7 +31,7 @@ fn keys() -> (EncodingKey, Value) {
             .expect("should encode")
             .as_bytes()
             .to_vec();
-        let b64 = |bytes: Vec<u8>| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let b64 = |bytes: Vec<u8>| rusty_base64::encode_url_safe_no_pad(&bytes);
 
         let jwks = json!({
             "keys": [{

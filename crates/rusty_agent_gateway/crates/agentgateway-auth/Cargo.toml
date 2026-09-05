@@ -33,7 +33,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-base64 = "0.22"
+rusty_base64 = { path = "../../../rusty_base64" }
 rsa = "0.9"
 rand = "0.8"
 tempfile = "3"

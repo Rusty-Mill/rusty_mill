@@ -14,7 +14,9 @@ adk-graph.workspace = true
 adk-runner.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
-base64 = "0.22"
+# Inline-data parts cross the ADK/A2A boundary as standard base64; the
+# workspace's own dependency-free implementation replaced the external crate.
+rusty_base64 = { path = "../../../rusty_base64" }
 futures.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros"] }

@@ -1,25 +1,39 @@
-//! A minimal HTTP/1.1 mock server for client tests.
+//! A minimal HTTP/1.1 mock server that answers a fixed sequence of canned
+//! responses, for driving a real HTTP client end to end in tests.
 //!
-//! `rusty_wiremock` (this workspace's own mock-server crate) is still a
-//! stub -- `MockServer::register` is a no-op and nothing actually binds a
-//! listener -- so this hand-rolls just enough to drive `OpnsenseClient`
-//! end to end: a background OS thread that accepts one connection per
-//! queued response and writes back a fixed status/body. Blocking `std`
-//! I/O on its own thread, not async, so it needs no runtime of its own and
-//! can't collide with the `tokio` runtime the test itself runs under.
+//! A background OS thread accepts one connection per queued response and
+//! writes back a fixed status/body. Blocking `std` I/O on its own thread,
+//! not async, so it needs no runtime of its own and can't collide with
+//! whatever runtime the test itself runs under (`tokio`, `rusty_tokio`).
+//!
+//! ```no_run
+//! use rusty_wiremock::canned::{spawn, MockResponse};
+//!
+//! let base_url = spawn(vec![
+//!     MockResponse::ok(r#"{"data":[]}"#),
+//!     MockResponse::status(401, "Unauthorized", r#"{"error":"nope"}"#),
+//! ]);
+//! // point a client at `base_url`; the first request gets the 200, the
+//! // second the 401, and the server thread exits.
+//! ```
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
 /// One canned response: status code, reason phrase, and JSON body.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockResponse {
+    /// HTTP status code, e.g. `200`.
     pub status: u16,
+    /// Reason phrase written after the status code, e.g. `"OK"`.
     pub reason: &'static str,
+    /// Response body, sent as `application/json`.
     pub body: String,
 }
 
 impl MockResponse {
+    /// A `200 OK` with `body`.
     pub fn ok(body: impl Into<String>) -> Self {
         Self {
             status: 200,
@@ -28,6 +42,7 @@ impl MockResponse {
         }
     }
 
+    /// An arbitrary status/reason with `body`.
     pub fn status(status: u16, reason: &'static str, body: impl Into<String>) -> Self {
         Self {
             status,
@@ -114,4 +129,53 @@ fn content_length(head: &[u8]) -> usize {
                 .flatten()
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    fn request(base_url: &str, body: &str) -> String {
+        let addr = base_url.trim_start_matches("http://");
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write request");
+        let mut out = String::new();
+        stream.read_to_string(&mut out).expect("read response");
+        out
+    }
+
+    #[test]
+    fn serves_responses_in_order_then_exits() {
+        let base_url = spawn(vec![
+            MockResponse::ok(r#"{"a":1}"#),
+            MockResponse::status(404, "Not Found", r#"{"err":"x"}"#),
+        ]);
+        let first = request(&base_url, "");
+        assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "{first}");
+        assert!(first.ends_with(r#"{"a":1}"#), "{first}");
+        let second = request(&base_url, r#"{"body":"present"}"#);
+        assert!(second.starts_with("HTTP/1.1 404 Not Found\r\n"), "{second}");
+        assert!(second.contains("Content-Length: 11\r\n"), "{second}");
+    }
+
+    #[test]
+    fn content_length_parsing_is_case_insensitive_and_defaults_to_zero() {
+        assert_eq!(
+            content_length(b"POST / HTTP/1.1\r\ncontent-length: 12\r\n\r\n"),
+            12
+        );
+        assert_eq!(content_length(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), 0);
+        assert_eq!(
+            content_length(b"GET / HTTP/1.1\r\nContent-Length: nope\r\n\r\n"),
+            0
+        );
+    }
 }

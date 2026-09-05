@@ -14,6 +14,9 @@ path = "src/lib.rs"
 [dependencies]
 sessionmgr-core = { workspace = true }
 serde = { workspace = true }
+# The base64 behind `SessionEvent`'s byte payloads (see `src/base64.rs`);
+# replaced this crate's own hand-rolled copy.
+rusty_base64 = { path = "../../../rusty_base64" }
 
 [dev-dependencies]
 # Tests only. The crate itself is serialization-format-agnostic -- it

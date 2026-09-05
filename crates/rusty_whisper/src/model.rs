@@ -65,36 +65,9 @@ pub struct Model {
     pub tensors: HashMap<String, Weight>,
 }
 
-pub use rusty_simd::f16_to_f32;
-
-/// f32 -> f16 bits, round-to-nearest. (Only tests produce f16 today; the
-/// loader just reads them.)
-pub fn f32_to_f16(x: f32) -> u16 {
-    let bits = x.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let frac = bits & 0x007f_ffff;
-    if exp == 0xff {
-        return sign | 0x7c00 | if frac != 0 { 0x200 } else { 0 };
-    }
-    let e = exp - 127 + 15;
-    if e >= 0x1f {
-        return sign | 0x7c00; // overflow -> inf
-    }
-    if e <= 0 {
-        if e < -10 {
-            return sign; // underflow -> zero
-        }
-        let frac = frac | 0x0080_0000; // implicit bit
-        let shift = (14 - e) as u32;
-        let half = (frac >> shift) as u16;
-        let round = ((frac >> (shift - 1)) & 1) as u16;
-        return sign | (half + round);
-    }
-    let half = (((e as u32) << 10) | (frac >> 13)) as u16;
-    let round = ((frac >> 12) & 1) as u16;
-    sign | (half + round)
-}
+// Both directions come from `rusty_simd`, shared with `rusty_llama`. Only
+// tests produce f16 in this crate today; the loader just reads it.
+pub use rusty_simd::{f16_to_f32, f32_to_f16};
 
 fn read_i32(r: &mut impl Read) -> io::Result<i32> {
     let mut b = [0u8; 4];

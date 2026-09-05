@@ -1,12 +1,23 @@
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
 
 //! # `rusty_wiremock`
 //!
 //! A `#![no_std]` + `alloc` sovereign HTTP mock server, request matcher,
 //! and response generator for test harnesses in the **Rusty Mill** ecosystem.
+//!
+//! The matcher/template API below is still a scaffold (`MockServer::start`
+//! binds nothing yet). The [`canned`] module, behind the `std` feature, is
+//! the working part: a blocking `std::net` server that answers a fixed
+//! sequence of canned responses, which is what `rusty_proxmox`,
+//! `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp`'s client tests
+//! all drive their clients against (each used to carry its own identical
+//! copy under `tests/support/`).
 
 extern crate alloc;
+
+#[cfg(feature = "std")]
+pub mod canned;
 
 use alloc::string::String;
 use alloc::vec::Vec;

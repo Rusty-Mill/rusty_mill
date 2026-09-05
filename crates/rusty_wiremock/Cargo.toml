@@ -16,3 +16,7 @@ rusty_std = { path = "../rusty_std" }
 
 [features]
 default = []
+# `canned`: a real, blocking `std::net` mock server that answers a fixed
+# sequence of responses -- what the workspace's REST-client test suites
+# actually need today. Off by default so the `no_std` core stays `no_std`.
+std = []
