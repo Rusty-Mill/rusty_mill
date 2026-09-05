@@ -1,8 +1,9 @@
 //! `rusty_homelab_mcp`: an MCP server for controlling a homelab.
 //!
-//! Proxmox VE, OPNsense, and Fedora (via a `rusty_fedora_agent` instance)
-//! today; every backend is optional and independent of the others, and
-//! more are welcome (see `src/tools/mod.rs`).
+//! Proxmox VE, OPNsense, and Fedora (via one or more `rusty_fedora_agent`
+//! instances -- see [`hosts`]) today; every backend is optional and
+//! independent of the others, and more are welcome (see
+//! `src/tools/mod.rs`).
 //!
 //! Run it over stdio -- what a desktop client launches:
 //!
@@ -16,16 +17,17 @@
 //!
 //! or over Streamable HTTP with `--transport http --bind 127.0.0.1:8080`.
 //! Every flag has an environment fallback (`PROXMOX_URL`, `OPNSENSE_URL`,
-//! `FEDORA_AGENT_URL`, ...); see `--help` for the full list.
+//! `FEDORA_AGENT_URL`, `FEDORA_HOSTS_FILE`, ...); see `--help` for the
+//! full list.
 
 mod config;
+mod hosts;
 mod json_result;
 mod server;
 mod tools;
 
 use clap::Parser as _;
 use config::HomelabCli;
-use rusty_fedora::FedoraAgentClient;
 use rusty_opnsense::OpnsenseClient;
 use rusty_proxmox::ProxmoxClient;
 use server::HomelabServer;
@@ -46,15 +48,19 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
         eprintln!("error: {msg}");
         std::process::exit(2);
     });
-    let fedora_config = cli.fedora_config();
+    let fedora_hosts = cli.fedora_hosts().unwrap_or_else(|msg| {
+        eprintln!("error: {msg}");
+        std::process::exit(2);
+    });
 
     let server_config: rusty_mcp::ServerConfig = cli.mcp.into();
     rusty_mcp::telemetry::init(&server_config.log_filter);
 
-    if proxmox_config.is_none() && opnsense_config.is_none() && fedora_config.is_none() {
+    if proxmox_config.is_none() && opnsense_config.is_none() && fedora_hosts.is_empty() {
         tracing::warn!(
             "no backend is configured -- every tool call will fail until PROXMOX_*, \
-             OPNSENSE_*, and/or FEDORA_AGENT_URL flags or environment variables are set"
+             OPNSENSE_*, and/or FEDORA_AGENT_URL/FEDORA_HOSTS_FILE flags or environment \
+             variables are set"
         );
     }
 
@@ -63,14 +69,13 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
     // pool) should be shared across every call, not rebuilt each time.
     let proxmox = proxmox_config.map(ProxmoxClient::new);
     let opnsense = opnsense_config.map(OpnsenseClient::new);
-    let fedora = fedora_config.map(FedoraAgentClient::new);
 
     rusty_mcp::serve(
         move || {
             Ok(HomelabServer::new(
                 proxmox.clone(),
                 opnsense.clone(),
-                fedora.clone(),
+                fedora_hosts.clone(),
             ))
         },
         server_config,

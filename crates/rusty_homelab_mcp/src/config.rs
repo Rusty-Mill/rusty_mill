@@ -1,10 +1,13 @@
 //! Extra CLI flags: where to find Proxmox and/or OPNsense, on top of the
 //! scaffold's standard transport/logging flags.
 
+use std::path::PathBuf;
+
 use clap::Parser;
-use rusty_fedora::FedoraAgentConfig;
 use rusty_opnsense::OpnsenseConfig;
 use rusty_proxmox::ProxmoxConfig;
+
+use crate::hosts::FedoraHosts;
 
 /// This server's CLI: the scaffold's standard flags (`--transport`,
 /// `--bind`, `--log`, ...) plus where to find Proxmox, OPNsense, and/or a
@@ -58,11 +61,22 @@ pub struct HomelabCli {
     #[arg(long, env = "OPNSENSE_INSECURE")]
     pub opnsense_insecure: bool,
 
-    /// `rusty_fedora_agent` base URL, e.g. `http://100.x.y.z:8765`. The
-    /// agent has no authentication of its own, so this should always be a
-    /// private/Tailscale address.
+    /// `rusty_fedora_agent` base URL, e.g. `http://100.x.y.z:8765`, for the
+    /// default host id ("baileyai"). The agent has no authentication of
+    /// its own, so this should always be a private/Tailscale address.
+    /// Kept as its own flag for backward compatibility -- an entry for
+    /// "baileyai" in `--fedora-hosts-file` takes precedence if both are
+    /// set.
     #[arg(long, env = "FEDORA_AGENT_URL")]
     pub fedora_agent_url: Option<String>,
+
+    /// Path to a `hosts.toml` registry mapping additional Fedora host ids
+    /// (e.g. `samba-lxc-101`) to their own `rusty_fedora_agent` base URLs.
+    /// Every `fedora_*` tool takes an optional `host` argument resolved
+    /// against this registry, defaulting to "baileyai" if omitted. See
+    /// `deploy/hosts.toml.example`.
+    #[arg(long, env = "FEDORA_HOSTS_FILE")]
+    pub fedora_hosts_file: Option<PathBuf>,
 }
 
 impl HomelabCli {
@@ -118,17 +132,16 @@ impl HomelabCli {
         }
     }
 
-    /// Builds a Fedora agent client config if `--fedora-agent-url` is set;
-    /// `None` otherwise. No credential pair to cross-check -- the agent
-    /// has no auth of its own, so there's nothing a half-set combination
-    /// could mean.
-    pub fn fedora_config(&self) -> Option<FedoraAgentConfig> {
-        self.fedora_agent_url
-            .clone()
-            .map(|base_url| FedoraAgentConfig {
-                base_url,
-                timeout: None,
-            })
+    /// Builds the Fedora host registry from `--fedora-agent-url` and/or
+    /// `--fedora-hosts-file`. An empty registry (neither flag set) is not
+    /// an error -- Fedora is simply unconfigured, same as the other
+    /// backends. A `--fedora-hosts-file` that's missing or malformed is a
+    /// startup error, not a silently-empty registry.
+    pub fn fedora_hosts(&self) -> Result<FedoraHosts, String> {
+        FedoraHosts::load(
+            self.fedora_hosts_file.as_deref(),
+            self.fedora_agent_url.clone(),
+        )
     }
 }
 
@@ -141,17 +154,17 @@ mod tests {
         let cli = HomelabCli::try_parse_from(["homelab"]).expect("parses");
         assert!(cli.proxmox_config().expect("no error").is_none());
         assert!(cli.opnsense_config().expect("no error").is_none());
-        assert!(cli.fedora_config().is_none());
+        assert!(cli.fedora_hosts().expect("no error").is_empty());
     }
 
     #[test]
-    fn a_fedora_agent_url_builds_a_config() {
+    fn a_fedora_agent_url_registers_the_default_host() {
         let cli =
             HomelabCli::try_parse_from(["homelab", "--fedora-agent-url", "http://100.64.0.1:8765"])
                 .expect("parses");
 
-        let config = cli.fedora_config().expect("fedora is configured");
-        assert_eq!(config.base_url, "http://100.64.0.1:8765");
+        let hosts = cli.fedora_hosts().expect("fedora is configured");
+        assert!(hosts.resolve(None).is_ok());
     }
 
     #[test]

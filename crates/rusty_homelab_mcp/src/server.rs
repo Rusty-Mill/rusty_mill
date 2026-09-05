@@ -12,17 +12,21 @@ use rusty_mcp::ToolError;
 use rusty_opnsense::OpnsenseClient;
 use rusty_proxmox::ProxmoxClient;
 
+use crate::hosts::FedoraHosts;
+
 /// The MCP server handler for `rusty_homelab_mcp`.
 ///
-/// Holds the three backend clients, each `None` if its flags weren't set
-/// at startup (see [`crate::config::HomelabCli`]). Cheap to clone: every
-/// client shares its own connection pool underneath, so cloning this only
-/// clones the `Option` wrappers and the tool router.
+/// Holds the three backends: Proxmox and OPNsense are each `None` if
+/// their flags weren't set at startup, and Fedora is a
+/// [`FedoraHosts`] registry that's empty in the same case (see
+/// [`crate::config::HomelabCli`]). Cheap to clone: every client shares
+/// its own connection pool underneath, so cloning this only clones the
+/// `Option`/registry wrappers and the tool router.
 #[derive(Clone)]
 pub struct HomelabServer {
     proxmox: Option<ProxmoxClient>,
     opnsense: Option<OpnsenseClient>,
-    fedora: Option<FedoraAgentClient>,
+    fedora: FedoraHosts,
     tool_router: ToolRouter<Self>,
 }
 
@@ -32,7 +36,7 @@ impl HomelabServer {
     pub fn new(
         proxmox: Option<ProxmoxClient>,
         opnsense: Option<OpnsenseClient>,
-        fedora: Option<FedoraAgentClient>,
+        fedora: FedoraHosts,
     ) -> Self {
         Self {
             proxmox,
@@ -74,17 +78,23 @@ impl HomelabServer {
         })
     }
 
-    /// The configured Fedora agent client, or a protocol error naming the
-    /// flag to set.
-    pub(crate) fn fedora(&self) -> Result<&FedoraAgentClient, ErrorData> {
-        self.fedora.as_ref().ok_or_else(|| {
-            ToolError::invalid(
+    /// The `rusty_fedora_agent` client for `host` (or the default host,
+    /// "baileyai", if `host` is `None`), or a protocol error -- naming the
+    /// flags to set if no Fedora host is configured at all, or naming the
+    /// known host ids if `host` doesn't match any of them.
+    pub(crate) fn fedora(&self, host: Option<&str>) -> Result<&FedoraAgentClient, ErrorData> {
+        if self.fedora.is_empty() {
+            return Err(ToolError::invalid(
                 "Fedora is not configured on this server -- set --fedora-agent-url \
-                 (or the matching FEDORA_AGENT_URL environment variable) at startup, \
-                 pointing at a rusty_fedora_agent instance.",
+                 and/or --fedora-hosts-file (or the matching FEDORA_AGENT_URL/ \
+                 FEDORA_HOSTS_FILE environment variables) at startup, pointing at \
+                 one or more rusty_fedora_agent instances.",
             )
-            .into()
-        })
+            .into());
+        }
+        self.fedora
+            .resolve(host)
+            .map_err(|msg| ToolError::invalid(msg).into())
     }
 
     fn instructions(&self) -> String {
@@ -98,10 +108,10 @@ impl HomelabServer {
         } else {
             "not configured"
         };
-        let fedora = if self.fedora.is_some() {
-            "configured"
-        } else {
+        let fedora = if self.fedora.is_empty() {
             "not configured"
+        } else {
+            "configured"
         };
         format!(
             "Control a homelab's infrastructure. Proxmox VE ({proxmox}): node and \
@@ -109,11 +119,13 @@ impl HomelabServer {
              OPNsense ({opnsense}): system status, service control, interfaces, \
              firewall aliases, and gateways. Fedora ({fedora}): system status, \
              systemd service listing/control, journal reads, dnf update listing/ \
-             install/remove, and allowlisted config file read/write, via a \
-             rusty_fedora_agent instance running on the managed host. Calling a \
-             tool for an unconfigured backend returns an error explaining which \
-             flags or environment variables to set, rather than failing silently \
-             or omitting the tool."
+             install/remove, and allowlisted config file read/write, via one or \
+             more rusty_fedora_agent instances -- one per managed host, selected \
+             with each tool's optional `host` argument (defaults to \"baileyai\"). \
+             Calling a tool for an unconfigured backend, or naming an unknown \
+             Fedora host, returns an error explaining which flags to set or which \
+             host ids are known, rather than failing silently or omitting the \
+             tool."
         )
     }
 }

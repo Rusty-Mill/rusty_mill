@@ -23,6 +23,14 @@ REST -- across every backend) instead of growing a second mechanism
 (unprivileged user, polkit-scoped service control, sudoers-scoped dnf,
 allowlisted config paths).
 
+Each managed Fedora host runs its own `rusty_fedora_agent` instance -- its
+own unit/package/config-path allowlist, scoped to what that host actually
+does. `rusty_homelab_mcp` reaches all of them through one Fedora host
+registry (see [`hosts.rs`](src/hosts.rs)), and every `fedora_*` tool takes
+an optional `host` argument resolved against it, defaulting to
+`"baileyai"` so calls made before multi-host support existed keep working
+unchanged.
+
 ## Running it
 
 Every backend is optional and independent -- configure whichever ones are
@@ -43,15 +51,24 @@ cargo run -p rusty_homelab_mcp -- \
     --opnsense-key xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
     --opnsense-secret yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy \
     --opnsense-insecure \
-    --fedora-agent-url http://100.x.y.z:8765
+    --fedora-agent-url http://100.x.y.z:8765 \
+    --fedora-hosts-file /etc/rusty-homelab-mcp/hosts.toml
 ```
+
+`--fedora-agent-url` alone is enough for a single Fedora host (it always
+registers as the default host, `"baileyai"`); add `--fedora-hosts-file`
+once there's a second one to reach (see
+[`deploy/hosts.toml.example`](deploy/hosts.toml.example)) -- an entry for
+`"baileyai"` in that file takes precedence over `--fedora-agent-url` if
+both are set.
 
 Over Streamable HTTP: add `--transport http --bind 127.0.0.1:8080`.
 
 Every flag has an environment fallback (`PROXMOX_URL`, `PROXMOX_TOKEN_ID`,
 `PROXMOX_TOKEN_SECRET`, `PROXMOX_INSECURE`, `OPNSENSE_URL`, `OPNSENSE_KEY`,
-`OPNSENSE_SECRET`, `OPNSENSE_INSECURE`, `FEDORA_AGENT_URL`, plus the
-scaffold's own `MCP_TRANSPORT`/`MCP_BIND`/...) -- `--help` lists the rest.
+`OPNSENSE_SECRET`, `OPNSENSE_INSECURE`, `FEDORA_AGENT_URL`,
+`FEDORA_HOSTS_FILE`, plus the scaffold's own `MCP_TRANSPORT`/`MCP_BIND`/...)
+-- `--help` lists the rest.
 
 `--proxmox-insecure`/`--opnsense-insecure` skip TLS certificate verification.
 Both Proxmox and OPNsense ship a self-signed certificate by default, which
@@ -117,7 +134,9 @@ called), `opnsense_list_arp_entries`, `opnsense_list_routes`,
 `opnsense_list_backup_providers`/`opnsense_list_backups`/
 `opnsense_download_backup`/`opnsense_restore_backup`.
 
-**Fedora** (`rusty_fedora`, against a `rusty_fedora_agent` instance):
+**Fedora** (`rusty_fedora`, against one or more `rusty_fedora_agent`
+instances -- every tool below also takes an optional `host` argument,
+defaulting to `"baileyai"`, see [Running it](#running-it)):
 `fedora_system_status`, `fedora_list_services` (services/timers/sockets),
 `fedora_service_control` (start/stop/restart/enable/disable -- refused by the
 agent for any unit outside its own allowlist), `fedora_read_journal`,
