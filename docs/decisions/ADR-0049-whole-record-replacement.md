@@ -1,8 +1,13 @@
 # ADR-0049: Whole-record replacement — `Replace<R>` over the insert log, `Request::Replace` at protocol 15
 
-- Status: **Proposed** (2026-09-06; implemented on the same branch,
-  the `ADR-0046`/`ADR-0047`/`ADR-0048` cadence — the owner accepts or
-  amends a working, tested shape). See "Considered options".
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-06 — the owner's "accept as designed", option (a): whole
+  replace over the insert log, `Insert`'s body and gates,
+  `UpdateField`'s reply, a client-side `upsert`; (b) partial update,
+  (c) delete-then-insert, (d) a server-side `Upsert`, and (e) decline
+  all declined. Recorded in "Acceptance and implementation" below.)
+  Proposed and implemented on one branch, the `ADR-0046`/`ADR-0047`/
+  `ADR-0048` cadence.
 - Date: 2026-09-06
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-REPLACE-DESIGN.md` (the full design),
@@ -79,3 +84,7 @@ measured. **(e) Decline.**
   version` +1, `server_dog_integration` +1, `server_auth_integration`/
   `server_transaction_integration`/`server_python_client` extended;
   every acceptance criterion 1–4 holds. (This PR.)
+- 2026-09-06: accepted as designed (option (a); (b)–(e) declined). No
+  change to the implementation. Next in the line: the `ADR-0045`
+  implementation round (`memory_entities` as the first cross-table
+  link); runtime deletion stays the last standing clause.

@@ -1,9 +1,11 @@
-# Server Whole-Record Replacement Design (Proposed)
+# Server Whole-Record Replacement Design (Accepted)
 
-- Status: **Proposed** (2026-09-06; implementation follows on the same
-  branch — the `ADR-0046`/`ADR-0047`/`ADR-0048` cadence — so the owner
-  accepts or amends a working, tested shape). Options at acceptance:
-  see `ADR-0049`.
+- Status: **Accepted** (2026-09-06, `ADR-0049` option (a), as designed —
+  whole replace over the insert log, `Insert`'s body and gates,
+  `UpdateField`'s reply, a client-side `upsert`; partial update,
+  delete-then-insert, a server-side `Upsert`, and declining all
+  declined). Implemented on the same branch as `SERVER-001` v0.39.0 /
+  FR-049, `SERVER-002` v0.4.0.
 - Date: 2026-09-06
 - Related: `ADR-0046`/`docs/design/SERVER-INSERT-DESIGN.md` (runtime
   record insertion — the insert log this design reuses for the new
@@ -260,6 +262,9 @@ on the same three; `cargo fmt --check`; the Python vector suite;
 
 ## Change history
 
+- 2026-09-06: Accepted as designed (option (a)). No content change.
+- 2026-09-06: Implemented as `SERVER-001` v0.39.0 / FR-049, landed as
+  designed.
 - 2026-09-06: Initial proposal; implementation follows on the same
   branch. The fourteenth round in the `rusty_remind_me`-motivated line;
   the one `ADR-0048` named as next.
