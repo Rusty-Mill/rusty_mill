@@ -29,6 +29,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # `--all-features` alone lets dead code hide behind `research`-gated callers (PR #196):
+      # a definition used only from `generic_spike` is "never used" in the default and
+      # `client` builds, which is what consumers actually compile. Lint each front-door
+      # feature set so the crate is warning-free under every one, not just the union.
+      - name: cargo clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy (client feature only)
+        run: cargo clippy --all-targets --features client -- -D warnings
       # `ECO-FR-008` (ADR-0043): the Python reference client's offline conformance test —
       # every line of tests/fixtures/wire-vectors.txt decodes and re-encodes byte-for-byte.
       # Its own step so a failure is attributed to the client, not to Rust; `python3` is
