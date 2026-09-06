@@ -57,7 +57,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(test, feature = "research"))]
+use std::path::PathBuf;
 
 /// Identifies a file as one [`EdgeBlob::encode`] produced — distinct from
 /// `DOGBLOB\0` (the `ProductionStore` companion), `GENBLOB\0` (the
@@ -73,6 +75,7 @@ const BLOB_VERSION: u32 = 2;
 
 /// The suffix appended to a stack's primary path to name the
 /// single-relation edge blob — see [`edges_path`].
+#[cfg(any(test, feature = "research"))]
 const EDGES_SUFFIX: &str = ".edges";
 
 /// The edge list a `Symmetric` layer was built from, exactly as
@@ -188,6 +191,12 @@ where
 /// relations over one store needs two distinct paths and must derive them
 /// itself — `Symmetric` takes the path as an argument for exactly that
 /// reason.
+///
+/// Only the research-gated `generic_spike` stacks and this module's tests
+/// use the convention; the front-door `Symmetric` layer derives its own
+/// `<path>.<label>.edges` names (`store::labeled_edges_path`), so the
+/// helper is gated to keep the default and `client` builds warning-free.
+#[cfg(any(test, feature = "research"))]
 pub(crate) fn edges_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(EDGES_SUFFIX);
