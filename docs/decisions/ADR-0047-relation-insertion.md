@@ -1,9 +1,12 @@
 # ADR-0047: Runtime relation insertion — `Link`/`MultiLink`, the edge log, open labels, `Request::Link` at protocol 14
 
-- Status: **Proposed** (2026-09-06), with the implementation to follow
-  on the same branch under the owner's standing mandate and the
-  `ADR-0011`/`ADR-0046` precedent; every piece additive and reversible.
-  The owner picks an option below.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-06 — the owner's "Accept as designed", option (a): open
+  labels with a manifest, symmetric edges, insert-or-ignore on the
+  wire; (b), (c), and (d) declined. Recorded in "Acceptance and
+  implementation" below.) Proposed and implemented on one branch under
+  the owner's standing mandate and the `ADR-0011`/`ADR-0046`
+  precedent; every piece additive and reversible.
 - Date: 2026-09-06
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-LINK-DESIGN.md` (the full design),
@@ -79,13 +82,12 @@ Adopt `docs/design/SERVER-LINK-DESIGN.md`:
   kind is its own round.
 - Cost, named: edge logs, like the record log, grow until the next
   open; the same revisit trigger.
-- Named, not hidden: the implementation will land before acceptance,
-  as `ADR-0046`'s did; its file list goes in `SERVER-001-FR-047` so a
-  revert is mechanical.
+- Named, not hidden: the implementation landed before acceptance, as
+  `ADR-0046`'s did; its file list is in `SERVER-001-FR-047`.
 
 ## Considered options
 
-- **(a) (proposed)** The design as written: open labels
+- **(a) (proposed, accepted)** The design as written: open labels
   with a manifest, symmetric edges, insert-or-ignore on the wire.
 - **(b)** Fixed labels only — no manifest, no label creation; `link`
   under an unknown label is `Malformed`. Cheaper; leaves the mismatch
@@ -100,3 +102,11 @@ Adopt `docs/design/SERVER-LINK-DESIGN.md`:
   **(c)** store layer only, no wire; **(d)** decline.
 - 2026-09-06: proposed. Implementation follows as `SERVER-001-FR-047`
   (v0.37.0) on the same branch.
+- 2026-09-06: implemented as `SERVER-001-FR-047` (v0.37.0), landed as
+  designed with no deviation — see that requirement's entry and
+  `docs/PROJECT-STATUS.md` item 137.
+- 2026-09-06: **accepted as designed** (option (a)) — the owner's
+  "Accept as designed" on PR #199, on this session's recommendation
+  (open labels are the model the consumer actually has; the manifest
+  is one small file). (b), (c), (d) declined. No change to the
+  implementation.

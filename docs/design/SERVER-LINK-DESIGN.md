@@ -1,10 +1,11 @@
 # Server Relation Insertion — `Link`, the edge log, open labels (Proposed)
 
-- Status: **Proposed** (2026-09-06). Implementation follows on the
-  same branch under the owner's standing mandate for this line ("start
-  the relation insertion round"), the `ADR-0046` cadence — design
-  first, then the code in its own commit, every piece additive and
-  reversible; the acceptance options are `ADR-0047`'s.
+- Status: **Accepted** (2026-09-06, option (a), as designed — the
+  owner's "Accept as designed" on PR #199). Proposed and implemented
+  on the same branch under the owner's standing mandate for this line
+  ("start the relation insertion round"), the `ADR-0046` cadence —
+  design first, then the code in its own commit, every piece additive
+  and reversible.
 - Date: 2026-09-06
 - Related: `ADR-0046`/`docs/design/SERVER-INSERT-DESIGN.md` (the
   round this completes — an inserted `Entity` had no edges and no way
@@ -373,6 +374,10 @@ transaction_integration`, `server_python_client`.
 
 ## Change history
 
+- 2026-09-06: Accepted as designed (option (a)), PR #199. No content
+  change.
+- 2026-09-06: Implemented as `SERVER-001` v0.37.0 / FR-047, landed as
+  designed.
 - 2026-09-06: Initial proposal; implementation follows on the same branch. The
   twelfth round in the `rusty_remind_me`-motivated line; the one
   `ADR-0042` F3 named.
