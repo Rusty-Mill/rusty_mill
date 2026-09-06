@@ -1,9 +1,10 @@
-# Server Memory Domain Design (Proposed)
+# Server Memory Domain Design (Accepted)
 
-- Status: **Proposed** (2026-09-06; implementation follows on the same
-  branch — the `ADR-0046`/`ADR-0047` cadence — so the owner accepts or
-  amends a working, tested shape rather than a sketch). Options at
-  acceptance: see `ADR-0048`.
+- Status: **Accepted** (2026-09-06, `ADR-0048` option (a), as designed —
+  the eleven-field projection, `Reminder`'s stack, no wire change; the
+  whole table, `memory_associations` now, replacement first, and
+  declining all declined). Implemented on the same branch as
+  `SERVER-001` v0.38.0 / FR-048, PR #200.
 - Date: 2026-09-06
 - Related: `ADR-0036`/`docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md`
   (the round that scoped `Memory` *out* — "schema-less memory content …
@@ -275,6 +276,10 @@ Python vector suite (unchanged, proving criterion 4), `cargo doc
 
 ## Change history
 
+- 2026-09-06: Accepted as designed (option (a)), after PR #200. No
+  content change.
+- 2026-09-06: Implemented as `SERVER-001` v0.38.0 / FR-048, landed as
+  designed (PR #200).
 - 2026-09-06: Initial proposal; implementation follows on the same
   branch. The thirteenth round in the `rusty_remind_me`-motivated
   line; `ADR-0045` gate (ii) met.
