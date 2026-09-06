@@ -211,6 +211,22 @@ class Client:
             return False
         raise ProtocolError(type(reply).__name__)
 
+    def insert(self, record_id: uuid.UUID, fields: Sequence[Tuple[str, Any]]) -> None:
+        """Add one record (INS-FR-008, protocol 13). ``record_id`` is the
+        caller's; ``fields`` names every field of the domain by schema name,
+        each value coerced by the field's kind. A duplicate id is
+        ``ServerError`` with ``ErrorCode.Duplicate``; below 13,
+        ``UnsupportedError`` with no frame sent."""
+        need = p.REQUEST_INTRODUCED_AT[p.Insert]
+        if self.server_protocol_version < need:
+            # Before the names are resolved: below 13 the schema may not
+            # even describe every field this build's domain has (rule 3
+            # strips `aliases` below 11), and the honest answer is the
+            # version, not an unknown field.
+            raise UnsupportedError(f"Insert needs protocol {need}, negotiated {self.server_protocol_version}")
+        tagged = tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
+        _expect_ok(self._roundtrip(p.Insert(record_id, tagged)))
+
     def transaction(self, updates: Sequence[Tuple[uuid.UUID, str, Any]]) -> None:
         ops = []
         for record_id, field_name, value in updates:

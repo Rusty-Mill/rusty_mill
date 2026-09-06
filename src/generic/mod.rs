@@ -99,6 +99,7 @@ pub(crate) mod edge_blob;
 /// ADR-0037), and its first with a `SymmetricRelation`. See this
 /// module's own doc comment for the full account.
 pub mod entity;
+pub(crate) mod insert_log;
 pub mod mmap_field;
 pub mod mmap_scanned;
 pub mod mmap_store;
@@ -130,6 +131,7 @@ pub use order_customer::{
 };
 pub use production::GenericProductionStore;
 
+use crate::durability::DurabilityError;
 use std::fmt;
 
 /// Error returned by [`query::UpdateField::update`] when `id` has no
@@ -144,3 +146,39 @@ impl<Id: fmt::Debug> fmt::Display for NotFound<Id> {
 }
 
 impl<Id: fmt::Debug> std::error::Error for NotFound<Id> {}
+
+/// Error returned by [`query::Insert::insert`] (`INS-FR-001`, ADR-0046):
+/// either `id` already has a record — nothing was written, at any layer
+/// — or the innermost durable store could not make the new record
+/// durable (its insert log or slot append failed).
+#[derive(Debug)]
+pub enum InsertError<Id> {
+    /// `id` already has a record. Nothing was written.
+    Duplicate(Id),
+    /// The record could not be made durable; see the inner error.
+    Durability(DurabilityError),
+}
+
+impl<Id: fmt::Debug> fmt::Display for InsertError<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InsertError::Duplicate(id) => write!(f, "a record with id {id:?} already exists"),
+            InsertError::Durability(e) => write!(f, "insert could not be made durable: {e}"),
+        }
+    }
+}
+
+impl<Id: fmt::Debug> std::error::Error for InsertError<Id> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            InsertError::Duplicate(_) => None,
+            InsertError::Durability(e) => Some(e),
+        }
+    }
+}
+
+impl<Id> From<DurabilityError> for InsertError<Id> {
+    fn from(e: DurabilityError) -> Self {
+        InsertError::Durability(e)
+    }
+}

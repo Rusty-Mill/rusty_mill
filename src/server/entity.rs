@@ -51,10 +51,11 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::ConnectionStore;
+use super::{ConnectionStore, InsertOutcome};
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
+use crate::generic::InsertError;
 use std::path::Path;
 
 pub const FIELD_LABEL: FieldRef = 0;
@@ -136,6 +137,52 @@ impl EntityConnectionStore {
             }
         }
         Ok(())
+    }
+
+    /// `INS-FR-006` (ADR-0046): the whole field list against this
+    /// domain's schema, before any write — all four tags exactly once
+    /// with a value of its kind, `aliases` as a `StrList` (the first
+    /// *write* of one: `ENT4-FR-003`'s read-only rule describes
+    /// `UpdateField`, not a whole record set at creation — the blob and
+    /// the insert log carry `Vec<Entity>` whole, so aliases are durable
+    /// on the same terms as at `create`). `Malformed` for a missing,
+    /// repeated, or wrong-kind field; `UnknownField` for a tag this
+    /// domain doesn't have. Relations: none — an inserted entity has no
+    /// neighbors under either label until the relation-insertion round.
+    fn entity_from_fields(
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<Entity, ErrorCode> {
+        let mut label = None;
+        let mut kind = None;
+        let mut mention_count = None;
+        let mut aliases = None;
+        for (tag, value) in fields {
+            match (tag, value) {
+                (FIELD_LABEL, ScanValue::Str(v)) if label.is_none() => label = Some(v),
+                (FIELD_KIND, ScanValue::Str(v)) if kind.is_none() => kind = Some(v),
+                (FIELD_MENTION_COUNT, ScanValue::I64(v)) if mention_count.is_none() => {
+                    mention_count = Some(v)
+                }
+                (FIELD_ALIASES, ScanValue::StrList(v)) if aliases.is_none() => aliases = Some(v),
+                (FIELD_LABEL | FIELD_KIND | FIELD_MENTION_COUNT | FIELD_ALIASES, _) => {
+                    return Err(ErrorCode::Malformed)
+                }
+                _ => return Err(ErrorCode::UnknownField),
+            }
+        }
+        let (Some(label), Some(kind), Some(mention_count), Some(aliases)) =
+            (label, kind, mention_count, aliases)
+        else {
+            return Err(ErrorCode::Malformed);
+        };
+        Ok(Entity {
+            id,
+            label,
+            kind,
+            mention_count,
+            aliases,
+        })
     }
 
     /// `ISO-FR-002`/`ISO-FR-006` — see `DogConnectionStore::check_read_set`
@@ -229,6 +276,23 @@ impl ConnectionStore for EntityConnectionStore {
             (FIELD_MENTION_COUNT, _) => Err(ErrorCode::Malformed),
             (FIELD_LABEL | FIELD_KIND | FIELD_ALIASES, _) => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
+        }
+    }
+
+    /// `INS-FR-006` (ADR-0046): validate, then one write under the
+    /// store's own lock — through `NameIndex` (its keys added) and
+    /// `MultiSymmetric` (no edges) down to the durable core. A duplicate
+    /// is the normal outcome; a durability failure is `Journal`.
+    fn insert_record(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<InsertOutcome, ErrorCode> {
+        let entity = Self::entity_from_fields(id, fields)?;
+        match self.store.insert(entity) {
+            Ok(()) => Ok(InsertOutcome::Inserted),
+            Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
+            Err(InsertError::Durability(_)) => Err(ErrorCode::Journal),
         }
     }
 
@@ -617,5 +681,54 @@ mod tests {
         );
         assert!(schema.relations.neighbors);
         assert!(!schema.relations.parent_children);
+    }
+    /// `INS-FR-006` (ADR-0046): all four fields, `aliases` as a
+    /// `StrList`, validated before any write; the inserted entity is then
+    /// found by label and alias through `filter_eq` on `label`; the
+    /// repeat is a duplicate; a wrong-kind `aliases` is `Malformed`.
+    #[test]
+    fn insert_record_takes_aliases_as_a_str_list_and_indexes_them() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(77);
+        let fields = vec![
+            (FIELD_LABEL, ScanValue::Str("Grace Hopper".into())),
+            (FIELD_KIND, ScanValue::Str("person".into())),
+            (FIELD_MENTION_COUNT, ScanValue::I64(1)),
+            (
+                FIELD_ALIASES,
+                ScanValue::StrList(vec!["Amazing Grace".into()]),
+            ),
+        ];
+        assert_eq!(
+            adapter.insert_record(id, fields.clone()),
+            Ok(InsertOutcome::Inserted)
+        );
+        assert_eq!(adapter.get(id).unwrap(), fields);
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("amazing grace".into())),
+            Ok(vec![id])
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("GRACE HOPPER".into())),
+            Ok(vec![id])
+        );
+        assert_eq!(adapter.neighbors(id), Ok(vec![]));
+        assert_eq!(
+            adapter.insert_record(id, fields.clone()),
+            Ok(InsertOutcome::Duplicate)
+        );
+
+        let mut wrong_aliases = fields.clone();
+        wrong_aliases[3] = (FIELD_ALIASES, ScanValue::Str("Amazing Grace".into()));
+        assert_eq!(
+            adapter.insert_record(Uuid::from_u128(78), wrong_aliases),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            adapter.insert_record(Uuid::from_u128(78), fields[..3].to_vec()),
+            Err(ErrorCode::Malformed),
+            "aliases is required, an empty list is the way to say none"
+        );
+        assert!(adapter.get(Uuid::from_u128(78)).is_none());
     }
 }

@@ -36,6 +36,18 @@ use std::time::{Duration, Instant};
 /// against, matching this project's own "validate against a second,
 /// structurally different domain" discipline
 /// (`docs/decisions/ADR-0009-generic-schema-design-proposal.md`).
+/// What [`ConnectionStore::insert_record`] did (`INS-FR-006`, ADR-0046):
+/// the record is now stored, or its id already had one and nothing was
+/// written — the normal-outcome pair `dispatch` maps to [`Response::Ok`]
+/// / `Err { Duplicate }`, kept apart from the `ErrorCode` refusals
+/// (`Malformed`, `UnknownField`, `Unsupported`) the same way
+/// `update_field`'s `Ok(false)` is kept apart from its errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    Duplicate,
+}
+
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
     /// outcome, not an error, matching [`crate::store::DogStore::get`]'s
@@ -122,6 +134,30 @@ pub trait ConnectionStore: Send + Sync {
         default_relation_descriptors(&self.describe(), self.list_relation_kinds())
     }
 
+    /// `INS-FR-006` (ADR-0046, protocol 13): add one whole record to
+    /// this table at runtime. `fields` is [`Response::Record`]'s own
+    /// shape; an implementor validates it against its own schema
+    /// **before any write** — every described tag present exactly once
+    /// with a value of its `ValueKind` (`Malformed` for a missing,
+    /// repeated, or wrong-kind field; `UnknownField` for a tag the
+    /// schema doesn't describe), then its domain's own rule (`Reminder`:
+    /// the `status` discriminant) — and answers
+    /// [`InsertOutcome::Duplicate`] when `id` already has a record, with
+    /// nothing written. The default answers `Unsupported`: `Dog`'s
+    /// bespoke `ProductionStore` has no insert, and `Order`/`Employee`
+    /// are `research`-gated reference material; `Reminder` and `Entity`
+    /// implement it. A durability failure — the insert log or slot
+    /// append failed, nothing applied — is `ErrorCode::Journal`, whose
+    /// documented meaning is exactly that (see the design's "Proposed
+    /// shape" for why no new code was added for it).
+    fn insert_record(
+        &self,
+        _id: RecordId,
+        _fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<InsertOutcome, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// This domain's schema, for a client that doesn't know it at compile
     /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
     /// knows its own field/relation shape unconditionally, no store access
@@ -193,6 +229,7 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::Conflict => {
             "this session's read set no longer matches current state; nothing was applied"
         }
+        ErrorCode::Duplicate => "a record with this id already exists; nothing was written",
     }
 }
 
@@ -825,9 +862,10 @@ fn outcome_of(resp: &Response) -> access::Outcome {
 
 /// The two static permission classes a configured token can grant — see
 /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012. Deliberately coarse:
-/// `ReadOnly` is blocked only from [`Request::UpdateField`] and
+/// `ReadOnly` is blocked only from [`Request::UpdateField`],
 /// [`Request::Transaction`] (`TXN-FR-004` extends `AUTH-FR-003`'s rule to
-/// the latter); both classes can do everything else, including
+/// the latter), and — since protocol 13 — [`Request::Insert`]
+/// (`INS-FR-007`); both classes can do everything else, including
 /// `DescribeSchema` (`AUTH-FR-003`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenClass {
@@ -1604,6 +1642,16 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         Request::DescribeRelations => Response::Relations {
             relations: store.describe_relations(),
         },
+        // `INS-FR-006`/`007` (ADR-0046): the adapter validates the whole
+        // field list before writing; a duplicate id is a normal outcome
+        // carried as the one new error code. Gated server-side in
+        // `handle_connection` (`Malformed` below 13, `Unauthorized` for
+        // `ReadOnly`, `SessionOpen` inside a session).
+        Request::Insert { id, fields } => match store.insert_record(id, fields) {
+            Ok(InsertOutcome::Inserted) => Response::Ok,
+            Ok(InsertOutcome::Duplicate) => err_response(ErrorCode::Duplicate),
+            Err(code) => err_response(code),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -1983,7 +2031,10 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         if class == TokenClass::ReadOnly
             && matches!(
                 req,
-                Request::UpdateField { .. } | Request::Transaction { .. } | Request::Commit
+                Request::UpdateField { .. }
+                    | Request::Transaction { .. }
+                    | Request::Commit
+                    | Request::Insert { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2141,6 +2192,11 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             Request::Transaction { .. } if session.is_some() => {
                 err_response(ErrorCode::SessionOpen)
             }
+            // `INS-FR-007` (ADR-0046): an insert is never staged — the
+            // `Transaction`-inside-a-session rule — and, as a write, is
+            // gated server-side below 13 like the session requests.
+            Request::Insert { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Insert { .. } if negotiated < 13 => err_response(ErrorCode::Malformed),
             // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
             // protocol-12 requests are unknown to a connection negotiated
             // below 12 — the session precedent, not `Query`'s client-only
@@ -4144,5 +4200,109 @@ mod tests {
             Response::Relations { relations } => assert_eq!(relations.len(), 5),
             other => panic!("expected Relations, got {other:?}"),
         }
+    }
+    /// `INS-FR-006`/`007` (ADR-0046): `dispatch` maps the adapter's two
+    /// normal outcomes to `Ok`/`Err { Duplicate }`, its refusals to the
+    /// code it gave, and the trait's default to `Unsupported`.
+    #[test]
+    fn dispatch_answers_insert_per_the_adapter_and_unsupported_by_default() {
+        struct InsertFixture;
+        impl ConnectionStore for InsertFixture {
+            fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
+                FixtureStore.get(id)
+            }
+            fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+                FixtureStore.scan_all()
+            }
+            fn filter_eq(&self, f: FieldRef, v: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.filter_eq(f, v)
+            }
+            fn scan_field(&self, f: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
+                FixtureStore.scan_field(f)
+            }
+            fn update_field(
+                &self,
+                id: RecordId,
+                f: FieldRef,
+                v: ScanValue,
+            ) -> Result<bool, ErrorCode> {
+                FixtureStore.update_field(id, f, v)
+            }
+            fn parent(&self, id: RecordId) -> Result<ParentLookup, ErrorCode> {
+                FixtureStore.parent(id)
+            }
+            fn children(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.children(id)
+            }
+            fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.neighbors(id)
+            }
+            fn neighbors_by_relation(
+                &self,
+                id: RecordId,
+                r: &str,
+            ) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.neighbors_by_relation(id, r)
+            }
+            fn list_relation_kinds(&self) -> Vec<String> {
+                FixtureStore.list_relation_kinds()
+            }
+            fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {
+                FixtureStore.validate_op(op)
+            }
+            fn describe(&self) -> DomainSchema {
+                FixtureStore.describe()
+            }
+            fn apply_transaction(
+                &self,
+                u: &[TransactionOp],
+                r: &[(RecordId, FieldRef, ScanValue)],
+            ) -> Result<(), (usize, ErrorCode)> {
+                FixtureStore.apply_transaction(u, r)
+            }
+            fn insert_record(
+                &self,
+                id: RecordId,
+                fields: Vec<(FieldRef, ScanValue)>,
+            ) -> Result<InsertOutcome, ErrorCode> {
+                match fields.as_slice() {
+                    [(FIELD_A, ScanValue::U32(_))] if id == RecordId::from_u128(1) => {
+                        Ok(InsertOutcome::Duplicate)
+                    }
+                    [(FIELD_A, ScanValue::U32(_))] => Ok(InsertOutcome::Inserted),
+                    [(FIELD_A, _)] => Err(ErrorCode::Malformed),
+                    _ => Err(ErrorCode::UnknownField),
+                }
+            }
+        }
+        let fields = vec![(FIELD_A, ScanValue::U32(9))];
+        let insert = |id: u128, fields: Vec<(FieldRef, ScanValue)>| Request::Insert {
+            id: RecordId::from_u128(id),
+            fields,
+        };
+        assert_eq!(
+            dispatch(&InsertFixture, insert(2, fields.clone())),
+            Response::Ok
+        );
+        assert_eq!(
+            dispatch(&InsertFixture, insert(1, fields.clone())),
+            err_response(ErrorCode::Duplicate)
+        );
+        assert_eq!(
+            dispatch(
+                &InsertFixture,
+                insert(2, vec![(FIELD_A, ScanValue::Str("x".into()))])
+            ),
+            err_response(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            dispatch(&InsertFixture, insert(2, vec![(7, ScanValue::U32(1))])),
+            err_response(ErrorCode::UnknownField)
+        );
+        assert_eq!(
+            dispatch(&FixtureStore, insert(2, fields)),
+            err_response(ErrorCode::Unsupported),
+            "the trait's default"
+        );
     }
 }

@@ -415,13 +415,14 @@
 //! behaviour keeps, deliberately, so nothing that opened before still
 //! fails now.
 
+use super::insert_log;
 use super::mmap_field::MmapFieldValue;
-use super::query::{AllIds, FilterEq, GetById, ScanField, UpdateField};
+use super::query::{AllIds, FilterEq, GetById, Insert, ScanField, UpdateField};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{IndexedField, ScannableField, SchemaTag};
-use super::NotFound;
+use super::{InsertError, NotFound};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -563,6 +564,10 @@ where
     pub fn create(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
         let encoded_blob = GenericRecordBlob::new(&records).encode()?;
         let indexes = Self::build_indexes(&records);
+        // `INS-FR-004`: a fresh store starts with no insert log — a stale
+        // one left at this path by an earlier store would otherwise be
+        // folded into the next `open` as if it belonged to this one.
+        insert_log::clear(&insert_log::log_path(path))?;
 
         // Slot `i` holds record `i`, in `records`' own order — which is
         // exactly the position index, before the file even exists.
@@ -599,6 +604,17 @@ where
     /// `O_APPEND` handle, not written at a locally-computed position; see
     /// module docs' "next free slot" race section for why.
     ///
+    /// Since `INS-FR-004` (ADR-0046) the insert log at `<path>.inserts`
+    /// is folded in first: every logged record whose id `records` does
+    /// not hold is appended to it (log order), so a caller-supplied
+    /// list need not know about runtime inserts — but a *relationship
+    /// layer* built from that same caller list (`Reversed::new`,
+    /// `MmapScanned::open`) would not know them either. A layered stack
+    /// therefore builds from [`Self::read_portable_records`] (which
+    /// includes the log) exactly as every `*_portable` domain helper
+    /// does, not from a list the caller kept from before the inserts.
+    /// The log is removed only after the blob below is current.
+    ///
     /// Also keeps the companion blob at `<path>.records` current with
     /// `records`: its header fingerprint is compared against `records`
     /// first, and only if they differ (a changed dataset, a missing or
@@ -620,6 +636,12 @@ where
     /// [`DurabilityError::Serde`] if a stale blob's records can't be
     /// serialized.
     pub fn open(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
+        // `INS-FR-004`: fold the insert log into the record set first, so
+        // the blob rewrite below (which fires whenever the set differs
+        // from the blob) covers every runtime insert since the last
+        // fold, and the log can then be cleared.
+        let log = insert_log::log_path(path);
+        let records = Self::merge_log(records, insert_log::read(&log)?);
         let companion = blob_path(path);
         let stale_blob = {
             let blob = GenericRecordBlob::new(&records);
@@ -683,6 +705,10 @@ where
         if let Some(encoded) = stale_blob {
             encoded.write(&companion)?;
         }
+        // Only now that the blob holds every logged record: a fold that
+        // stops between these two steps leaves log entries the blob
+        // already has, which `merge_log` skips by id on the next open.
+        insert_log::clear(&log)?;
 
         Ok(Self {
             records: indexes.records,
@@ -693,12 +719,74 @@ where
         })
     }
 
+    /// `INS-FR-004`: `records` followed by every `logged` record whose
+    /// id `records` does not already hold, in log order. The skip is
+    /// what makes a fold idempotent: a blob rewritten but not yet
+    /// cleared of its log replays without duplicates.
+    fn merge_log(mut records: Vec<R>, logged: Vec<R>) -> Vec<R> {
+        if logged.is_empty() {
+            return records;
+        }
+        let mut seen: std::collections::HashSet<R::Id> =
+            records.iter().map(|record| record.id()).collect();
+        for record in logged {
+            if seen.insert(record.id()) {
+                records.push(record);
+            }
+        }
+        records
+    }
+
+    /// Add one record at runtime (`INS-FR-002`, ADR-0046): refuse a
+    /// duplicate id with nothing written; append the record to the
+    /// insert log at `<path>.inserts` and `sync_data` it; append one
+    /// committed `(id, value)` slot through the same `O_APPEND` path
+    /// [`Self::open`] uses for a record it has never seen; then index
+    /// it. `Ok` means the record is durable: a crash after the log entry
+    /// landed and before the slot did is exactly the state `open`
+    /// already reconciles (a record with no slot gets one appended).
+    /// Reads see the record immediately — [`GetById`], [`FilterEq`],
+    /// [`ScanField`], [`AllIds`] — and [`UpdateField`] works on it.
+    ///
+    /// The log grows by one entry per insert until the next [`Self::open`]
+    /// folds it into the blob; there is no runtime compaction (see the
+    /// design's Non-goals).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InsertError::Duplicate`] if `record.id()` already has a
+    /// record; [`InsertError::Durability`] wrapping
+    /// [`DurabilityError::Serde`] if the record can't be serialized or
+    /// [`DurabilityError::Io`] if the log or slot append fails.
+    pub fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let id = record.id();
+        if self.records.contains_key(&id) {
+            return Err(InsertError::Duplicate(id));
+        }
+        insert_log::append(&insert_log::log_path(self.file.path()), &record)?;
+        let positions = self
+            .file
+            .append_committed_slots([(id, record.scannable_value())])?;
+        let position = positions.first().copied().ok_or_else(|| {
+            DurabilityError::Io(std::io::Error::other("slot append reported no position"))
+        })?;
+        self.index
+            .entry(record.indexed_value().clone())
+            .or_default()
+            .push(id);
+        self.position_index.insert(id, position);
+        self.records.insert(id, record);
+        Ok(())
+    }
+
     /// The record set persisted in the companion blob at `<path>.records`,
-    /// in the order it was written — the `Vec<R>` a later [`Self::open`]
+    /// in the order it was written, followed by every record the insert
+    /// log at `<path>.inserts` holds that the blob does not, in log order
+    /// (`INS-FR-004`) — the `Vec<R>` a later [`Self::open`]
     /// (or a relationship layer built above the store, which needs that
     /// order to be deterministic) would otherwise have had to be handed
-    /// by the caller. Reads only the blob; never touches the mmap file,
-    /// never writes anything.
+    /// by the caller. Reads only the blob and the log; never touches the
+    /// mmap file, never writes anything.
     ///
     /// # Errors
     ///
@@ -710,7 +798,9 @@ where
     /// hash found), doesn't decode, or doesn't match its own header
     /// fingerprint (`STORAGE-015-FR-005`).
     pub fn read_portable_records(path: &Path) -> Result<Vec<R>, DurabilityError> {
-        record_blob::read(&blob_path(path))
+        let persisted = record_blob::read(&blob_path(path))?;
+        let logged = insert_log::read(&insert_log::log_path(path))?;
+        Ok(Self::merge_log(persisted, logged))
     }
 
     /// Reopen a store from its two files alone — exactly
@@ -848,6 +938,24 @@ where
         let position = *self.position_index.get(&id).ok_or(NotFound(id))?;
         self.file.write_value(position, value);
         Ok(())
+    }
+}
+
+impl<R, IndexMarker, ScanMarker> Insert<R> for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned
+        + SchemaTag,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+{
+    /// `INS-FR-002` — the inherent [`GenericMmapStore::insert`], reached
+    /// through the trait every composition layer forwards.
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        GenericMmapStore::insert(self, record)
     }
 }
 
@@ -1448,6 +1556,106 @@ mod tests {
         assert_eq!(std::fs::read(&companion).unwrap(), current);
         GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    type OrderCore = GenericMmapStore<Order, Status, Amount>;
+
+    fn order(n: u128) -> Order {
+        Order {
+            id: uuid::Uuid::from_u128(n),
+            customer_id: uuid::Uuid::from_u128(100),
+            amount_cents: 1,
+            status: OrderStatus::Pending,
+            created_at_unix_ms: 1,
+            discount_cents: 0,
+        }
+    }
+
+    /// `INS-FR-004` (ADR-0046): a log entry with no slot — the state a
+    /// crash between the log append and the slot append leaves — is
+    /// reconciled by `open` exactly like any record with no slot: a slot
+    /// is appended, the blob rewritten, the log removed.
+    #[test]
+    fn a_logged_record_with_no_slot_is_healed_by_open() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_no_slot").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        drop(OrderCore::create(sample(), &path).unwrap());
+        insert_log::append(&log, &order(3)).unwrap();
+
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert_eq!(reopened.get(uuid::Uuid::from_u128(3)), Some(order(3)));
+        assert_eq!(reopened.all_ids().len(), 3);
+        assert!(reopened.is_gapless(), "its slot was appended");
+        assert!(!log.exists());
+        assert_eq!(OrderCore::read_portable_records(&path).unwrap().len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `INS-FR-004`: a fold that stopped after the blob rewrite and
+    /// before the log was cleared leaves entries the blob already holds
+    /// — replayed without duplicates, by id.
+    #[test]
+    fn a_log_entry_the_blob_already_holds_is_skipped() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_dup").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        drop(OrderCore::create(sample(), &path).unwrap());
+        insert_log::append(&log, &order(2)).unwrap();
+        insert_log::append(&log, &order(3)).unwrap();
+        insert_log::append(&log, &order(3)).unwrap();
+
+        let records = OrderCore::read_portable_records(&path).unwrap();
+        let ids: Vec<u128> = records.iter().map(|o| o.id.as_u128()).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert_eq!(reopened.all_ids().len(), 3);
+        assert!(!log.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `INS-FR-004`: `create` starts with no log — a stale one at the
+    /// path belongs to a store that no longer exists.
+    #[test]
+    fn create_removes_a_stale_insert_log() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_stale").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        insert_log::append(&log, &order(9)).unwrap();
+        let store = OrderCore::create(sample(), &path).unwrap();
+        assert!(!log.exists());
+        assert_eq!(store.all_ids().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `INS-FR-002`: the same `open` that fails the header check never
+    /// reaches the log, and a foreign log is refused by name before the
+    /// mmap file is touched.
+    #[test]
+    fn a_foreign_insert_log_is_refused_by_name_from_open_and_read_portable() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_foreign").unwrap();
+        let path = dir.join("orders.mmap");
+        drop(OrderCore::create(sample(), &path).unwrap());
+        let employee = Employee {
+            id: uuid::Uuid::from_u128(1),
+            name: "x".into(),
+            department: Department::Engineering,
+            salary_cents: 1,
+            manager_id: None,
+        };
+        insert_log::append(&insert_log::log_path(&path), &employee).unwrap();
+        for result in [
+            OrderCore::read_portable_records(&path).map(|_| ()),
+            OrderCore::open(sample(), &path).map(|_| ()),
+        ] {
+            match result {
+                Err(DurabilityError::RecordBlobUnreadable { path: p, cause }) => {
+                    assert!(p.ends_with("orders.mmap.inserts"), "{p:?}");
+                    assert!(cause.contains("schema tag mismatch"), "{cause}");
+                }
+                other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

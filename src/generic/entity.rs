@@ -596,4 +596,74 @@ mod tests {
             ]
         );
     }
+    /// `INS` acceptance criterion 3 (ADR-0046) for the richest front-door
+    /// stack: an inserted entity is found by `find_by_name` under its
+    /// label and every alias, has no neighbors under either label, is
+    /// refused on repeat, and survives `open_entity_production_stack_
+    /// portable` with the edge blobs untouched.
+    #[test]
+    fn insert_through_name_index_and_multi_symmetric_survives_portable_reopen() {
+        use crate::generic::query::{AllIds, Insert};
+        let dir = fresh_temp_dir("generic_entity_insert").unwrap();
+        let path = dir.join("entities.mmap");
+        let grace = Entity {
+            id: entity_id("Grace Hopper"),
+            label: "Grace Hopper".into(),
+            kind: "person".into(),
+            mention_count: 1,
+            aliases: vec!["Amazing Grace".into()],
+        };
+        {
+            let mut stack = create_entity_production_stack(
+                sample_entities(),
+                &sample_relates_to(),
+                &sample_mentioned_with(),
+                &path,
+            )
+            .unwrap();
+            Insert::<Entity>::insert(&mut stack, grace.clone()).unwrap();
+            assert_eq!(
+                FindByName::<Entity>::find_by_name(&stack, "  grace   HOPPER "),
+                vec![grace.id]
+            );
+            assert_eq!(
+                FindByName::<Entity>::find_by_name(&stack, "amazing grace"),
+                vec![grace.id]
+            );
+            assert_eq!(
+                FilterEq::<Entity, KindField>::filter_eq(&stack, &"person".to_string()).len(),
+                2
+            );
+            assert_eq!(
+                MultiNeighbors::<Entity>::neighbors_by_relation(&stack, "relates_to", grace.id),
+                Some(vec![])
+            );
+            assert!(MultiNeighbors::<Entity>::all_neighbors(&stack, grace.id).is_empty());
+            match Insert::<Entity>::insert(&mut stack, grace.clone()) {
+                Err(crate::generic::InsertError::Duplicate(id)) => assert_eq!(id, grace.id),
+                other => panic!("expected Duplicate, got {other:?}"),
+            }
+            assert_eq!(AllIds::<Entity>::all_ids(&stack).len(), 4);
+        }
+
+        let reopened = open_entity_production_stack_portable(&path).unwrap();
+        assert_eq!(
+            GetById::<Entity>::get(&reopened, grace.id),
+            Some(grace.clone())
+        );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&reopened, "Amazing Grace"),
+            vec![grace.id]
+        );
+        assert_eq!(
+            MultiNeighbors::<Entity>::neighbors_by_relation(
+                &reopened,
+                "relates_to",
+                Uuid::from_u128(1)
+            ),
+            Some(vec![Uuid::from_u128(2)]),
+            "existing edges intact"
+        );
+        assert!(!crate::generic::insert_log::log_path(&path).exists());
+    }
 }

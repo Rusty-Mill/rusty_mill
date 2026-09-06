@@ -13,7 +13,7 @@ import uuid
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 
-from rusty_multimodal_db import Client, AggregateFn, CompareOp, UnsupportedError  # noqa: E402
+from rusty_multimodal_db import Client, AggregateFn, CompareOp, ServerError, UnsupportedError  # noqa: E402
 
 
 def main() -> int:
@@ -54,6 +54,20 @@ def main() -> int:
             print(f"join_rows={len(joined)}")
         except UnsupportedError as e:
             print(f"join_rows=unsupported:{e}")
+
+        # Protocol 13 (INS-FR-008): one insert, then the duplicate refusal.
+        new = uuid.UUID(int=77)
+        try:
+            c.insert(new, [("label", "Grace Hopper"), ("kind", "person"), ("mention_count", 1), ("aliases", ["Amazing Grace"])])
+            print("insert=ok")
+            try:
+                c.insert(new, [("label", "Grace Hopper"), ("kind", "person"), ("mention_count", 1), ("aliases", [])])
+                print("insert_again=ok")
+            except ServerError as e:
+                print(f"insert_again={e.code.name}")
+            print(f"insert_get={len(c.get(new))}")
+        except UnsupportedError as e:
+            print(f"insert=unsupported:{e}")
     return 0
 
 

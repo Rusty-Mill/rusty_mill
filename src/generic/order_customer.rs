@@ -635,4 +635,91 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// `INS-FR-005` (ADR-0046) through the in-memory stack — `Reversed`
+    /// over three `Scanned` layers over `Indexed` over `BaseStore`: an
+    /// inserted order is readable, indexed under its status, present in
+    /// every scan, and listed under its customer's children.
+    #[test]
+    fn insert_forwards_through_every_in_memory_layer() {
+        use super::super::query::Insert;
+        let mut store = build_order_generic_store(&sample());
+        let new = Order {
+            id: Uuid::from_u128(4),
+            customer_id: Uuid::from_u128(200),
+            amount_cents: 10,
+            status: OrderStatus::Pending,
+            created_at_unix_ms: 4_000,
+            discount_cents: 5,
+        };
+        Insert::<Order>::insert(&mut store, new.clone()).unwrap();
+        assert_eq!(
+            GetById::<Order>::get(&store, Uuid::from_u128(4)),
+            Some(new.clone())
+        );
+        let mut pending = FilterEq::<Order, Status>::filter_eq(&store, &OrderStatus::Pending);
+        pending.sort();
+        assert_eq!(pending, vec![Uuid::from_u128(2), Uuid::from_u128(4)]);
+        assert_eq!(ScanField::<Order, Amount>::scan(&store).len(), 4);
+        assert_eq!(ScanField::<Order, CreatedAt>::scan(&store).len(), 4);
+        assert_eq!(ScanField::<Order, DiscountCents>::scan(&store).len(), 4);
+        UpdateField::<Order, DiscountCents>::update(&mut store, Uuid::from_u128(4), 7).unwrap();
+        assert_eq!(
+            GetById::<Order>::get(&store, Uuid::from_u128(4))
+                .unwrap()
+                .discount_cents,
+            7
+        );
+        let mut customer_200 =
+            Children::<Customer, Order, BelongsToCustomer>::children(&store, Uuid::from_u128(200));
+        customer_200.sort();
+        assert_eq!(customer_200, vec![Uuid::from_u128(3), Uuid::from_u128(4)]);
+        assert!(matches!(
+            Insert::<Order>::insert(&mut store, new),
+            Err(super::super::InsertError::Duplicate(_))
+        ));
+    }
+
+    /// `INS` acceptance criterion 3 (ADR-0046) through the durable stack
+    /// — `Reversed<MmapScanned<GenericMmapStore>>`: both durable fields
+    /// of an inserted order (its own slot in each file) update and
+    /// survive a reopen from the files alone, and it is listed under its
+    /// customer after the reopen.
+    #[test]
+    fn insert_through_the_production_stack_survives_open_portable_with_both_durable_fields() {
+        use super::super::query::Insert;
+        let dir = crate::bench_support::fresh_temp_dir("order_production_insert").unwrap();
+        let path = dir.join("amount.mmap");
+        let new = Order {
+            id: Uuid::from_u128(4),
+            customer_id: Uuid::from_u128(200),
+            amount_cents: 10,
+            status: OrderStatus::Pending,
+            created_at_unix_ms: 4_000,
+            discount_cents: 5,
+        };
+        {
+            let mut stack = create_order_production_stack(sample(), &path).unwrap();
+            Insert::<Order>::insert(&mut stack, new.clone()).unwrap();
+            UpdateField::<Order, Amount>::update(&mut stack, Uuid::from_u128(4), 11).unwrap();
+            UpdateField::<Order, DiscountCents>::update(&mut stack, Uuid::from_u128(4), 6).unwrap();
+            let got = GetById::<Order>::get(&stack, Uuid::from_u128(4)).unwrap();
+            assert_eq!((got.amount_cents, got.discount_cents), (11, 6));
+        }
+        let reopened = open_order_production_stack_portable(&path).unwrap();
+        let got = GetById::<Order>::get(&reopened, Uuid::from_u128(4)).unwrap();
+        assert_eq!(got.amount_cents, 11, "the core's slot");
+        assert_eq!(got.discount_cents, 6, "the MmapScanned layer's slot");
+        assert_eq!(got.created_at_unix_ms, 4_000, "from the folded blob");
+        assert_eq!(
+            Parent::<Order, BelongsToCustomer>::parent(&reopened, Uuid::from_u128(4)),
+            Ok(Some(Uuid::from_u128(200)))
+        );
+        let mut customer_200 = Children::<Customer, Order, BelongsToCustomer>::children(
+            &reopened,
+            Uuid::from_u128(200),
+        );
+        customer_200.sort();
+        assert_eq!(customer_200, vec![Uuid::from_u128(3), Uuid::from_u128(4)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

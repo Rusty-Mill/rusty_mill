@@ -1,7 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.1.0 (protocol version 12 — `SERVER-001` v0.35.0; `ECO-FR-004`,
-  ADR-0043)
+- Version: 0.2.0 (protocol version 13 — `SERVER-001` v0.36.0, `INS-FR-009`,
+  ADR-0046; 0.1.0 was protocol 12, `ECO-FR-004`, ADR-0043)
 - Status: Accepted / Implemented / Verified
 - Owner: baileyrd
 - Depends on: `SERVER-001` (the protocol this document describes),
@@ -74,7 +74,7 @@ are no type tags, field names, alignment, or varints.
 |---|---|---|
 | `u8` | 1 byte | `01` |
 | `u16` | 2 bytes LE | `03 00` |
-| `u32` | 4 bytes LE | `0c 00 00 00` (12) |
+| `u32` | 4 bytes LE | `0d 00 00 00` (13) |
 | `u64`, `usize` | 8 bytes LE | `02 00 00 00 00 00 00 00` |
 | `i64` | 8 bytes LE, two's complement | `fb ff ff ff ff ff ff ff` (-5) |
 | `f64` | 8 bytes IEEE 754 binary64, LE | `00 00 00 00 00 00 04 40` (2.5) |
@@ -89,13 +89,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 12 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `0c 00 00 00` (12).
+- `Request::Hello { protocol_version: 13 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `0d 00 00 00` (13).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 12
+## 5. Types at protocol version 13
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -109,12 +109,12 @@ unmarked is version 1.
 
 ### 5.2 Fieldless enums (a `u32` index)
 
-| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | |
-| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | |
-| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | |
-| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) |
+| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | |
+| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | |
+| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | |
+| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) |
 
 ### 5.3 `ScanValue` — a field's value
 
@@ -177,6 +177,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 18 | `ListRelationKinds` | — | 10 | `RelationKinds` |
 | 19 | `Join` | `JoinSpec` (a newtype: the struct's fields directly) | 12 | `JoinedRows` |
 | 20 | `DescribeRelations` | — | 12 | `Relations` |
+| 21 | `Insert` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>` | 13 | `Ok` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -329,6 +330,20 @@ Each item names the `SERVER-001` requirement that owns it.
    otherwise); one listed with a `target_table` is `Unsupported`;
    `right_table: Some` is `Malformed` at 12. **`DescribeRelations`**
    (12) — the list; a domain may list nothing. (`FR-045`)
+10. **`Insert`** (13) — add one whole record; `id` is the client's;
+   `fields` is `Record`'s own shape and must name every field
+   `DescribeSchema` reported exactly once with a value of its kind
+   (`Malformed` otherwise; a tag the schema does not describe is
+   `UnknownField`); a domain's own rule applies (`Reminder`'s `status`
+   must be a known discriminant; `Entity`'s `aliases` must be a
+   `StrList`). `Ok` when stored — durable before the reply; `Err {
+   Duplicate }` when `id` already has a record, nothing written;
+   `Unsupported` from a domain that does not accept inserts (`Dog`);
+   `Journal` if the record could not be made durable. Refused
+   `Unauthorized` for a read-only token and `SessionOpen` while a
+   session is open — it is never staged. `Malformed` below 13. No
+   relation is created: an inserted record has no neighbors, no
+   parent, no children. (`FR-046`)
 
 ### 7.6 `BeginWith` flags
 
@@ -356,6 +371,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 10 | v0.31.0 | `NeighborsByRelation` (17), `ListRelationKinds` (18), `RelationKinds` (14) |
 | 11 | v0.34.0 | `ScanValue::StrList` (5), `ValueKind::StrList` (4) — stripped from `Record`/`Rows`/`Schema` for connections below 11 |
 | 12 | v0.35.0 | `Join` (19), `DescribeRelations` (20), `JoinedRows` (15), `Relations` (16), `JoinRelation`, `JoinSpec`, `JoinedRow`, `RelationDescriptor` |
+| 13 | v0.36.0 | `Insert` (21), `ErrorCode::Duplicate` (11) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -367,7 +383,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -397,10 +413,15 @@ byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
 client; it needs only `python3`. The live half —
 `tests/server_python_client.rs` — drives the reference client against a
-real server at 12 and at a hand-negotiated 10.
+real server at 13 and at a hand-negotiated 10.
 
 ## 10. Change history
 
+- 0.2.0 (`SERVER-001` v0.36.0, ADR-0046, `INS-FR-009`): protocol version
+  13 — `Request::Insert` (21) and `ErrorCode::Duplicate` (11); §5.2,
+  §5.6, §7 item 10, §8 row 13 and rule 3's list; fixture at 50 vectors
+  (`Request/Insert`, `Response/Err(Duplicate)`); the reference client
+  gains `Client.insert` and declares 13.
 - 0.1.0 (`SERVER-001` v0.35.1 patch entry, ADR-0043, `ECO-FR-004`–`006`):
   initial specification at protocol version 12, transcribed from
   `src/server/protocol.rs`, `src/server/framing.rs`, `src/codec.rs`, and

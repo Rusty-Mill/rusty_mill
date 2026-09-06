@@ -1475,6 +1475,41 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// Add one record (`INS-FR-008`, ADR-0046, protocol 13): `id` is the
+    /// caller's — the consumer mints its own on every path, and
+    /// [`crate::generic::entity::entity_id`] exists for a derived one —
+    /// and `fields` names every field of the domain by its schema name.
+    /// Names are resolved through the discovered schema, so an unknown
+    /// name is [`ClientError::UnknownField`] locally with no frame sent;
+    /// no capability flag is consulted, because `update`/`scan`/
+    /// `filter_eq` describe what can be done *to* a stored field, not
+    /// whether it can be set at creation — every field can. A missing,
+    /// repeated, or wrong-kind field, or a domain rule (`Reminder`'s
+    /// `status` discriminant), is the server's `Malformed`; an id that
+    /// already has a record is [`ClientError::Server`] with
+    /// [`ErrorCode::Duplicate`]; a domain with no insert (`Dog`) is
+    /// `Server(Unsupported, _)`. [`ClientError::Unsupported`]`("insert")`
+    /// below 13 with no frame sent (rule 4). Never inside a
+    /// [`Session`] — the server answers `SessionOpen`.
+    pub fn insert(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<(), ClientError> {
+        if self.server_protocol_version() < 13 {
+            return Err(ClientError::Unsupported("insert"));
+        }
+        let mut tagged = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            tagged.push((self.field(name)?.tag, value.clone()));
+        }
+        match self.roundtrip(Request::Insert { id, fields: tagged })? {
+            Response::Ok => Ok(()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Ok")),
+        }
+    }
+
     /// The directed relation's "one hop up" — see [`ParentLookup`]'s own
     /// doc comment for the three-way not-found/no-parent/parent
     /// distinction this preserves. `Err(ClientError::Unsupported)`

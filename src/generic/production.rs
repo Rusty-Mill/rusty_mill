@@ -30,11 +30,11 @@
 //! real implementation strategy (take the lock, delegate).
 
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Neighbors, Parent, ScanField, UpdateField,
 };
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
-use super::NotFound;
+use super::{InsertError, NotFound};
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
 
@@ -234,6 +234,29 @@ impl<S> GenericProductionStore<S> {
         S: UpdateField<R, Marker>,
     {
         self.inner.write().expect(LOCK_POISONED).update(id, value)
+    }
+
+    /// Add one record at runtime (`INS-FR-005`, ADR-0046) under the
+    /// write lock — the [`Self::update`] shape, for the record set
+    /// rather than one field. See [`Insert`] and
+    /// [`super::mmap_store::GenericMmapStore::insert`] for what `Ok`
+    /// guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InsertError::Duplicate`] if the id already has a
+    /// record, [`InsertError::Durability`] if the durable core could not
+    /// persist it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn insert<R>(&self, record: R) -> Result<(), InsertError<R::Id>>
+    where
+        R: Record,
+        S: Insert<R>,
+    {
+        self.inner.write().expect(LOCK_POISONED).insert(record)
     }
 
     /// # Errors
