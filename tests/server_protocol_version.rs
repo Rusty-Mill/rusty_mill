@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 13);
+    assert_eq!(dog.server_protocol_version(), 14);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -776,5 +776,86 @@ fn insert_is_malformed_below_version_13() {
             ]
         ),
         Err(ClientError::Unsupported("insert"))
+    ));
+}
+
+/// `LNK-FR-010` (ADR-0047), rule 3: `Link` is protocol 14 — a connection
+/// negotiated at 13 (and a silent one) is answered `Malformed` with
+/// nothing linked; at 14 it is served. Rule 4: the Rust client refuses
+/// below 14 with no frame.
+#[test]
+fn link_is_malformed_below_version_14() {
+    let addr = start_entity_server();
+    let link = Request::Link {
+        left: RecordId::from_u128(1),
+        right: RecordId::from_u128(1),
+        relation: "relates_to".into(),
+    };
+    for hello in [Some(13u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &link),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            Response::Schema(_)
+        ));
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    // Served at 14 — a self-loop, so the adapter (not the gate) refuses it.
+    assert!(matches!(
+        roundtrip(&mut reader, &mut writer, &link),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+    match roundtrip(&mut reader, &mut writer, &Request::ListRelationKinds) {
+        Response::RelationKinds { kinds } => assert_eq!(kinds.len(), 2, "nothing created"),
+        other => panic!("expected RelationKinds, got {other:?}"),
+    }
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.link(
+            RecordId::from_u128(1),
+            RecordId::from_u128(2),
+            "littermate_of"
+        ),
+        Err(ClientError::Unsupported("link"))
     ));
 }

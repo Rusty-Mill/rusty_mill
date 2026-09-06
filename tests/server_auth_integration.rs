@@ -316,6 +316,11 @@ fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
         Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
         other => panic!("expected Unauthorized for a ReadOnly insert, got {other:?}"),
     }
+    // `LNK-FR-010` (ADR-0047): and the fourth write, `Link`.
+    match client.link(Uuid::from_u128(1), Uuid::from_u128(2), "littermate_of") {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a ReadOnly link, got {other:?}"),
+    }
 
     client.authenticate("write-token").unwrap();
     assert!(client

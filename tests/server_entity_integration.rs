@@ -9,7 +9,9 @@
 //! ["server"]` only, no `research` — `Entity` is front-door, matching
 //! `tests/server_reminder_integration.rs`'s own precedent.
 
-use rusty_multimodal_db::generic::entity::{create_entity_production_stack, entity_id, Entity};
+use rusty_multimodal_db::generic::entity::{
+    create_entity_production_stack, entity_id, open_entity_production_stack_portable, Entity,
+};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::reminder::{
     create_reminder_production_stack, Reminder, ReminderStatus,
@@ -102,16 +104,26 @@ fn sample_mentioned_with_edges() -> Vec<(Uuid, Uuid)> {
 }
 
 fn start_server() -> SocketAddr {
-    let dir = unique_dir("entity_v2_integration");
+    start_server_at(unique_dir("entity_v2_integration"))
+}
+
+/// `start_server` on a directory a previous server may already have
+/// written — reopened from the files alone when so (`LNK`/`INS` criterion:
+/// a restart serves what the last process inserted and linked).
+fn start_server_at(dir: std::path::PathBuf) -> SocketAddr {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("entities.mmap");
-    let stack = create_entity_production_stack(
-        sample_entities(),
-        &sample_relates_to_edges(),
-        &sample_mentioned_with_edges(),
-        &path,
-    )
-    .unwrap();
+    let stack = if path.exists() {
+        open_entity_production_stack_portable(&path).unwrap()
+    } else {
+        create_entity_production_stack(
+            sample_entities(),
+            &sample_relates_to_edges(),
+            &sample_mentioned_with_edges(),
+            &path,
+        )
+        .unwrap()
+    };
     let connection_store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
         stack,
     )));
@@ -1221,4 +1233,146 @@ fn insert_an_entity_by_derived_id_with_aliases_then_resolve_it_by_name() {
         other => panic!("expected Malformed, got {other:?}"),
     }
     assert!(client.get(Uuid::from_u128(99)).unwrap().is_none());
+}
+
+/// `LNK` acceptance criterion 3 (ADR-0047) on `Entity` over a socket: a
+/// link under an existing label and under a brand-new one; every read —
+/// `neighbors`, `neighbors_by_relation`, `list_relation_kinds`,
+/// `relations()`, `JOIN … ON <new label>`, `traverse` — sees it at once;
+/// the repeat is `Ok`; an unknown endpoint is `RecordNotFound`; a
+/// self-loop and a bad label are `Malformed`; inside a session
+/// `SessionOpen`; and a server restarted on the same directory serves
+/// the edge and the label.
+#[test]
+fn link_over_the_wire_creates_labels_every_read_sees_and_a_restart_serves() {
+    let dir = unique_dir("entity_link");
+    let addr = start_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let (ada, engine, london) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+    let grace = entity_id("Grace Hopper");
+    client
+        .insert(
+            grace,
+            &[
+                ("label", ScanValue::Str("Grace Hopper".into())),
+                ("kind", ScanValue::Str("person".into())),
+                ("mention_count", ScanValue::I64(0)),
+                ("aliases", ScanValue::StrList(vec![])),
+            ],
+        )
+        .unwrap();
+    assert!(
+        client.neighbors(grace).unwrap().is_empty(),
+        "an island, before this round"
+    );
+
+    // An existing label.
+    client.link(grace, ada, "relates_to").unwrap();
+    assert_eq!(
+        client.neighbors_by_relation(grace, "relates_to").unwrap(),
+        vec![ada]
+    );
+    assert!(client.neighbors(ada).unwrap().contains(&grace));
+    // A new label, created by the link.
+    assert!(!client.relations().iter().any(|r| r.name == "mentored_by"));
+    client.link(grace, engine, "mentored_by").unwrap();
+    assert!(
+        client.relations().iter().any(|r| r.name == "mentored_by"),
+        "re-fetched"
+    );
+    let mut kinds = client.list_relation_kinds().unwrap();
+    kinds.sort();
+    assert_eq!(kinds, vec!["mentioned_with", "mentored_by", "relates_to"]);
+    assert_eq!(
+        client.neighbors_by_relation(engine, "mentored_by").unwrap(),
+        vec![grace]
+    );
+    match client
+        .query("SELECT a.label, b.label FROM entity a JOIN entity b ON mentored_by")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => assert_eq!(rows.len(), 2, "both orientations"),
+        other => panic!("expected Joined, got {other:?}"),
+    }
+    let walked = client.traverse(grace, 1, 10, Some("mentored_by")).unwrap();
+    assert!(walked
+        .iter()
+        .any(|(id, depth)| *id == engine && *depth == 1));
+
+    // Insert-or-ignore, and the refusals.
+    client.link(engine, grace, "mentored_by").unwrap();
+    assert_eq!(
+        client.neighbors_by_relation(engine, "mentored_by").unwrap(),
+        vec![grace]
+    );
+    match client.link(grace, Uuid::from_u128(99), "relates_to") {
+        Err(ClientError::Server(ErrorCode::RecordNotFound, _)) => {}
+        other => panic!("expected RecordNotFound, got {other:?}"),
+    }
+    for (l, r, label) in [
+        (grace, grace, "relates_to"),
+        (grace, london, "no spaces"),
+        (grace, london, "../x"),
+        (grace, london, ""),
+    ] {
+        match client.link(l, r, label) {
+            Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+            other => panic!("expected Malformed for {label:?}, got {other:?}"),
+        }
+    }
+    assert!(
+        client
+            .neighbors_by_relation(grace, "relates_to")
+            .unwrap()
+            .len()
+            == 1
+    );
+
+    // Inside a session: refused; the session still commits.
+    let mut raw = TcpStream::connect(addr).unwrap();
+    write_message(
+        &mut raw,
+        &Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .unwrap();
+    let _: Response = read_message(&mut raw).unwrap();
+    write_message(&mut raw, &Request::Begin).unwrap();
+    assert_eq!(read_message::<_, Response>(&mut raw).unwrap(), Response::Ok);
+    write_message(
+        &mut raw,
+        &Request::Link {
+            left: grace,
+            right: london,
+            relation: "relates_to".into(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        read_message::<_, Response>(&mut raw).unwrap(),
+        Response::Err {
+            code: ErrorCode::SessionOpen,
+            ..
+        }
+    ));
+    write_message(&mut raw, &Request::Commit).unwrap();
+    assert_eq!(read_message::<_, Response>(&mut raw).unwrap(), Response::Ok);
+    drop(raw);
+    drop(client);
+
+    // A new server process on the same directory: the folds carry both
+    // the record and the edges, and the manifest carries the label.
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert!(client.relations().iter().any(|r| r.name == "mentored_by"));
+    assert_eq!(
+        client.neighbors_by_relation(engine, "mentored_by").unwrap(),
+        vec![grace]
+    );
+    assert_eq!(
+        client.neighbors_by_relation(grace, "relates_to").unwrap(),
+        vec![ada]
+    );
+    assert!(client.neighbors(ada).unwrap().contains(&grace));
 }

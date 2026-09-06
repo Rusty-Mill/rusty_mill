@@ -51,11 +51,12 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome};
+use super::{ConnectionStore, InsertOutcome, LinkOutcome};
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
-use crate::generic::InsertError;
+use crate::generic::store::valid_relation_label;
+use crate::generic::{InsertError, LinkError};
 use std::path::Path;
 
 pub const FIELD_LABEL: FieldRef = 0;
@@ -293,6 +294,27 @@ impl ConnectionStore for EntityConnectionStore {
             Ok(()) => Ok(InsertOutcome::Inserted),
             Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
             Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `LNK-FR-009` (ADR-0047): open labels — any valid label is
+    /// accepted and created at first use by the `MultiSymmetric` layer
+    /// beneath; `ListRelationKinds`/`DescribeRelations` list it at once.
+    fn link_records(
+        &self,
+        left: RecordId,
+        right: RecordId,
+        relation: &str,
+    ) -> Result<LinkOutcome, ErrorCode> {
+        if !valid_relation_label(relation) {
+            return Err(ErrorCode::Malformed);
+        }
+        match self.store.link_by_relation::<Entity>(relation, left, right) {
+            Ok(crate::generic::LinkOutcome::Linked) => Ok(LinkOutcome::Linked),
+            Ok(crate::generic::LinkOutcome::AlreadyLinked) => Ok(LinkOutcome::AlreadyLinked),
+            Err(LinkError::UnknownRecord(_)) => Err(ErrorCode::RecordNotFound),
+            Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => Err(ErrorCode::Malformed),
+            Err(LinkError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -730,5 +752,48 @@ mod tests {
             "aliases is required, an empty list is the way to say none"
         );
         assert!(adapter.get(Uuid::from_u128(78)).is_none());
+    }
+    /// `LNK-FR-009` (ADR-0047): open labels through the adapter — a link
+    /// under a new label lands, `list_relation_kinds` and
+    /// `neighbors_by_relation` see it, the repeat is `AlreadyLinked`, and
+    /// every refusal maps to its code with nothing written.
+    #[test]
+    fn link_records_accepts_any_valid_label_and_maps_every_refusal() {
+        let adapter = sample_adapter();
+        let (ada, engine) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        assert_eq!(
+            adapter.link_records(ada, engine, "invented_by"),
+            Ok(LinkOutcome::Linked)
+        );
+        assert_eq!(
+            adapter.link_records(engine, ada, "invented_by"),
+            Ok(LinkOutcome::AlreadyLinked)
+        );
+        assert_eq!(
+            adapter.neighbors_by_relation(engine, "invented_by"),
+            Ok(vec![ada])
+        );
+        assert!(adapter
+            .list_relation_kinds()
+            .contains(&"invented_by".to_string()));
+        assert_eq!(
+            adapter.link_records(ada, Uuid::from_u128(99), "invented_by"),
+            Err(ErrorCode::RecordNotFound)
+        );
+        assert_eq!(
+            adapter.link_records(ada, ada, "relates_to"),
+            Err(ErrorCode::Malformed)
+        );
+        for bad in ["", "no spaces", "../x"] {
+            assert_eq!(
+                adapter.link_records(ada, engine, bad),
+                Err(ErrorCode::Malformed),
+                "{bad:?}"
+            );
+        }
+        assert!(!adapter
+            .list_relation_kinds()
+            .iter()
+            .any(|k| k.contains(' ')));
     }
 }

@@ -85,12 +85,12 @@
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Neighbors, ScanField, UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Link, Neighbors, ScanField, UpdateField,
 };
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{InsertError, NotFound};
+use super::{InsertError, LinkError, LinkOutcome, NotFound};
 use crate::durability::DurabilityError;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -384,6 +384,20 @@ where
 {
     fn neighbors(&self, id: Rel::Id) -> Vec<Rel::Id> {
         self.inner.neighbors(id)
+    }
+}
+
+// `LNK-FR-008`: forwards `Link` exactly as `Neighbors` above.
+impl<S, R, Marker, Rel, RelMarker> Link<Rel, RelMarker> for MmapScanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+    Rel: SymmetricRelation<RelMarker>,
+    S: Link<Rel, RelMarker>,
+{
+    fn link(&mut self, a: Rel::Id, b: Rel::Id) -> Result<LinkOutcome, LinkError<Rel::Id>> {
+        self.inner.link(a, b)
     }
 }
 

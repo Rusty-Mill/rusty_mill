@@ -68,6 +68,7 @@
 //! | 11 | `SERVER-001` v0.34.0 | + [`ScanValue::StrList`] (5) and [`ValueKind::StrList`] (4) — `ENT4-FR-001`, ADR-0041: a stored list-of-strings field, [`crate::generic::entity::Entity`]'s `aliases` the first (`FIELD_ALIASES = 3`, every capability flag `false`, read-only). Unlike `F64`, `StrList` describes a stored field's real type, so its `ValueKind` exists. **The first appended value variant that reaches an ungated response** — `GetById`/`Query`/`DescribeSchema` are protocol-1/8/1 requests a silent client can send — so rule 3 rewrites *content* for the first time: `downgrade_for_version` strips every `StrList` pair from `Response::Record`/`Rows` and every `StrList` descriptor from `Response::Schema` on a connection negotiated below 11, leaving exactly the three-field `Entity` of `FR-042`. No new `Request`/`ErrorCode`. ADR-0041 |
 //! | 12 | `SERVER-001` v0.35.0 | + [`Request::Join`] (19) and [`Request::DescribeRelations`] (20), [`Response::JoinedRows`] (15) and [`Response::Relations`] (16) — `JOIN-FR-001`/`002`, ADR-0044: an inner join over a *declared relation* of one table ([`JoinRelation`]: every symmetric relation, one named label, `parent`, or `children`), evaluated server-side as an index nested loop over the adapter's own relation methods and answered as [`JoinedRow`]s carrying both ids and both projected field lists; [`RelationDescriptor`] names what `ON` may say. `right_table`/`target_table` are carried from day one for ADR-0045 (more than one table per connection, gated) and are `None` here. Gated: `Malformed` below 12 (rule 3), sent only after negotiating ≥ 12 (rule 4); `JoinedRows`/`Relations` only ever answer the two gated requests, so no `downgrade_for_version` arm is needed — the `Query`/`Rows` precedent. No new `ErrorCode`. ADR-0044 |
 //! | 13 | `SERVER-001` v0.36.0 | + [`Request::Insert`] (21), [`ErrorCode::Duplicate`] (11), and [`ErrorCode::Storage`] (12) — `INS-FR-007`, ADR-0046: add one whole record to the connection's table at runtime, `id` minted by the client, `fields` in [`Response::Record`]'s own `(tag, value)` shape with every schema-described field present exactly once; answered `Ok`, or `Err { Duplicate }` when the id already has a record (nothing written), `Unsupported` from an adapter with no insert (`Dog`, `Order`, `Employee`), `Malformed`/`UnknownField` for a field list that doesn't match the schema, `Err { Storage }` when the record could not be made durable (nothing applied). Both new codes only ever answer `Insert`. Server-gated `Malformed` below 13 (rule 3, the session/`Join` precedent — a write, not a read); `Duplicate` only ever answers `Insert`, so no `downgrade_for_version` arm. Refused `Unauthorized` for a `ReadOnly` token (the third write beside `UpdateField`/`Transaction`); `SessionOpen` inside a session; never journaled, never part of a `Transaction`. ADR-0046 |
+//! | 14 | `SERVER-001` v0.37.0 | + [`Request::Link`] (22) — `LNK-FR-010`, ADR-0047: add one edge to a symmetric relation of the connection's table at runtime, under a label (`Entity`: any valid label, created at first use — open labels; `Employee`: its one fixed label). Answered `Ok` whether the edge is new or already present (the consumer's insert-or-ignore); `RecordNotFound` for a missing endpoint, `Malformed` for a self-loop, an invalid label, or a label a fixed-label domain does not have, `Storage` when the edge could not be made durable, `Unsupported` from a domain with no symmetric relation or no link (`Dog`, `Reminder`, `Order`). Server-gated `Malformed` below 14 (rule 3), `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session; never journaled or staged. No new response, no new `ErrorCode`. ADR-0047 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -102,7 +103,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -695,6 +696,28 @@ pub enum Request {
         id: RecordId,
         fields: Vec<(FieldRef, ScanValue)>,
     },
+    /// Protocol 14 (`LNK-FR-010`, ADR-0047,
+    /// `docs/design/SERVER-LINK-DESIGN.md`): add one edge between two
+    /// records of this table under a symmetric relation label — the
+    /// first request that changes the *graph* at runtime. Both ids must
+    /// have a record (`RecordNotFound` names the first that does not,
+    /// `left` before `right`); `left == right` is `Malformed`; `relation`
+    /// must be a valid label (1–64 bytes of `[A-Za-z0-9_-]`, not leading
+    /// `-`) and, on a fixed-label domain, one the domain has —
+    /// `Malformed` otherwise. On an open-label domain (`Entity`) a label
+    /// with no edges yet is created by this request and then listed by
+    /// [`Request::ListRelationKinds`]/[`Request::DescribeRelations`].
+    /// Answered [`Response::Ok`] whether the edge is new or was already
+    /// present — insert-or-ignore, so a retry is safe. Edges are
+    /// symmetric: `Neighbors` sees it from both ends. Gated server-side:
+    /// `Malformed` below 14; `Unauthorized` for a `ReadOnly` token;
+    /// `SessionOpen` while a session is open (never staged, never
+    /// journaled).
+    Link {
+        left: RecordId,
+        right: RecordId,
+        relation: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -809,6 +832,7 @@ mod tests {
             "Record(StrList)" | "Rows(StrList)" | "Schema(StrList)" => 11,
             "Join" | "DescribeRelations" | "JoinedRows" | "Relations" => 12,
             "Insert" | "Err(Duplicate)" | "Err(Storage)" => 13,
+            "Link" => 14,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1113,6 +1137,24 @@ mod tests {
             "DescribeRelations",
             &Request::DescribeRelations,
             &[0x14, 0x00, 0x00, 0x00],
+        );
+        // Protocol 14 (`LNK-FR-010`, ADR-0047): `Link` at 22.
+        assert_golden(
+            "Link",
+            &Request::Link {
+                left: id,
+                right: Uuid::from_u128(2),
+                relation: "relates_to".into(),
+            },
+            &bytes(&[
+                &[0x16, 0x00, 0x00, 0x00], // Link
+                &ID1,
+                &[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // right: uuid len
+                &[0x00; 15],
+                &[0x02],
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // relation len
+                b"relates_to",
+            ]),
         );
         // Protocol 13 (`INS-FR-007`, ADR-0046): `Insert` at 21 — the
         // `Response::Record` field shape on the request side.
@@ -1457,8 +1499,9 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 13 is the one that added
-    /// `Request::Insert` and `ErrorCode::{Duplicate, Storage}` (12 `Request::Join`/
+    /// module docs' table — version 14 is the one that added
+    /// `Request::Link` (13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
     /// `Request::Aggregate`/`Response::Groups`, 8 `Request::Query`/
@@ -1469,7 +1512,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 13);
+        assert_eq!(PROTOCOL_VERSION, 14);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

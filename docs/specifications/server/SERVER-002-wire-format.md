@@ -1,7 +1,8 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.2.0 (protocol version 13 — `SERVER-001` v0.36.0, `INS-FR-009`,
-  ADR-0046; 0.1.0 was protocol 12, `ECO-FR-004`, ADR-0043)
+- Version: 0.3.0 (protocol version 14 — `SERVER-001` v0.37.0, `LNK-FR-013`,
+  ADR-0047; 0.2.0 was protocol 13, ADR-0046; 0.1.0 protocol 12,
+  `ECO-FR-004`, ADR-0043)
 - Status: Accepted / Implemented / Verified
 - Owner: baileyrd
 - Depends on: `SERVER-001` (the protocol this document describes),
@@ -74,7 +75,7 @@ are no type tags, field names, alignment, or varints.
 |---|---|---|
 | `u8` | 1 byte | `01` |
 | `u16` | 2 bytes LE | `03 00` |
-| `u32` | 4 bytes LE | `0d 00 00 00` (13) |
+| `u32` | 4 bytes LE | `0e 00 00 00` (14) |
 | `u64`, `usize` | 8 bytes LE | `02 00 00 00 00 00 00 00` |
 | `i64` | 8 bytes LE, two's complement | `fb ff ff ff ff ff ff ff` (-5) |
 | `f64` | 8 bytes IEEE 754 binary64, LE | `00 00 00 00 00 00 04 40` (2.5) |
@@ -89,13 +90,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 13 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `0d 00 00 00` (13).
+- `Request::Hello { protocol_version: 14 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `0e 00 00 00` (14).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 13
+## 5. Types at protocol version 14
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -178,6 +179,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 19 | `Join` | `JoinSpec` (a newtype: the struct's fields directly) | 12 | `JoinedRows` |
 | 20 | `DescribeRelations` | — | 12 | `Relations` |
 | 21 | `Insert` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>` | 13 | `Ok` |
+| 22 | `Link` | `left: RecordId`, `right: RecordId`, `relation: String` | 14 | `Ok` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -344,6 +346,23 @@ Each item names the `SERVER-001` requirement that owns it.
    session is open — it is never staged. `Malformed` below 13. No
    relation is created: an inserted record has no neighbors, no
    parent, no children. (`FR-046`)
+11. **`Link`** (14) — add one edge between two records under a symmetric
+   relation label. Both ids must have a record (`RecordNotFound` names
+   the first missing one, `left` before `right`); `left == right` is
+   `Malformed`; `relation` is 1–64 bytes of `[A-Za-z0-9_-]` not starting
+   with `-` (`Malformed` otherwise). On an open-label domain (`Entity`)
+   a label the server has never seen is created by this request and
+   listed by `ListRelationKinds`/`DescribeRelations` from then on; on a
+   fixed-label domain (`Employee`) the label must be one it lists
+   (`Malformed`). `Ok` whether the edge is new or already present —
+   insert-or-ignore, so a retry is safe; `Storage` if the edge could not
+   be made durable; `Unsupported` from a domain with no symmetric
+   relation or no link (`Dog`, `Reminder`, `Order`). Edges are
+   symmetric: `Neighbors` sees the edge from both ends, and a `Join`
+   over the label yields both orientations. Refused `Unauthorized` for
+   a read-only token and `SessionOpen` while a session is open — never
+   staged. `Malformed` below 14. No direction, no metadata, no unlink.
+   (`FR-047`)
 
 ### 7.6 `BeginWith` flags
 
@@ -372,6 +391,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 11 | v0.34.0 | `ScanValue::StrList` (5), `ValueKind::StrList` (4) — stripped from `Record`/`Rows`/`Schema` for connections below 11 |
 | 12 | v0.35.0 | `Join` (19), `DescribeRelations` (20), `JoinedRows` (15), `Relations` (16), `JoinRelation`, `JoinSpec`, `JoinedRow`, `RelationDescriptor` |
 | 13 | v0.36.0 | `Insert` (21), `ErrorCode::Duplicate` (11), `ErrorCode::Storage` (12) |
+| 14 | v0.37.0 | `Link` (22) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -383,7 +403,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -413,10 +433,14 @@ byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
 client; it needs only `python3`. The live half —
 `tests/server_python_client.rs` — drives the reference client against a
-real server at 13 and at a hand-negotiated 10.
+real server at 14 and at a hand-negotiated 10.
 
 ## 10. Change history
 
+- 0.3.0 (`SERVER-001` v0.37.0, ADR-0047, `LNK-FR-013`): protocol version
+  14 — `Request::Link` (22); §5.6, §7 item 11, §8 row 14 and rule 3's
+  list; fixture at 52 vectors (`Request/Link`); the reference client
+  gains `Client.link` and declares 14.
 - 0.2.0 (`SERVER-001` v0.36.0, ADR-0046 accepted as option (d),
   `INS-FR-009`): protocol version 13 — `Request::Insert` (21),
   `ErrorCode::Duplicate` (11), and `ErrorCode::Storage` (12); §5.2,

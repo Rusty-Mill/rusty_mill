@@ -68,6 +68,17 @@ def main() -> int:
             print(f"insert_get={len(c.get(new))}")
         except UnsupportedError as e:
             print(f"insert=unsupported:{e}")
+
+        # Protocol 14 (LNK-FR-012): link the new entity to Ada under a
+        # brand-new label, then read it back from both ends.
+        try:
+            c.link(uuid.UUID(int=1), new, "mentored_by")
+            c.link(uuid.UUID(int=1), new, "mentored_by")  # insert-or-ignore
+            print("link=ok")
+            print(f"link_neighbors={len(c.neighbors(new, 'mentored_by'))}")
+            print(f"link_kinds={','.join(sorted(c.relation_kinds()))}")
+        except UnsupportedError as e:
+            print(f"link=unsupported:{e}")
     return 0
 
 

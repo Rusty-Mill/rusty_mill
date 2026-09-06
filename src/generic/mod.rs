@@ -182,3 +182,55 @@ impl<Id> From<DurabilityError> for InsertError<Id> {
         InsertError::Durability(e)
     }
 }
+
+/// What [`query::Link::link`] / [`query::MultiLink::link`] did
+/// (`LNK-FR-001`, ADR-0047): the edge is new, or it was already present
+/// and nothing was written — the consumer's insert-or-ignore, a normal
+/// outcome rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkOutcome {
+    Linked,
+    AlreadyLinked,
+}
+
+/// Error returned by [`query::Link::link`] / [`query::MultiLink::link`]
+/// (`LNK-FR-001`, ADR-0047). Every variant but `Durability` is refused
+/// before anything is written, at every layer.
+#[derive(Debug)]
+pub enum LinkError<Id> {
+    /// One endpoint has no record — the first missing one, `a` before `b`.
+    UnknownRecord(Id),
+    /// Both endpoints are the same record.
+    SelfLoop(Id),
+    /// The relation label is not a valid one — see
+    /// [`store::valid_relation_label`].
+    InvalidLabel(String),
+    /// The edge could not be made durable; see the inner error.
+    Durability(DurabilityError),
+}
+
+impl<Id: fmt::Debug> fmt::Display for LinkError<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinkError::UnknownRecord(id) => write!(f, "no record with id {id:?}"),
+            LinkError::SelfLoop(id) => write!(f, "a record cannot be linked to itself ({id:?})"),
+            LinkError::InvalidLabel(label) => write!(f, "invalid relation label {label:?}"),
+            LinkError::Durability(e) => write!(f, "link could not be made durable: {e}"),
+        }
+    }
+}
+
+impl<Id: fmt::Debug> std::error::Error for LinkError<Id> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LinkError::Durability(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl<Id> From<DurabilityError> for LinkError<Id> {
+    fn from(e: DurabilityError) -> Self {
+        LinkError::Durability(e)
+    }
+}

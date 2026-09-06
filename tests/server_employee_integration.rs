@@ -398,3 +398,36 @@ fn join_on_parent_children_and_collaborates_with_over_the_wire() {
         ]
     );
 }
+
+/// `LNK` acceptance criterion 3 (ADR-0047) on the fixed-label domain: a
+/// `collaborates_with` link over the wire is visible from both ends and
+/// joinable; any other label is `Malformed`; the repeat is `Ok`.
+#[test]
+fn link_collaborates_with_over_the_wire_and_refuse_any_other_label() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let (alex, bel) = (Uuid::from_u128(1), Uuid::from_u128(2));
+    assert!(!client.neighbors(alex).unwrap().contains(&bel));
+    client.link(alex, bel, "collaborates_with").unwrap();
+    client.link(bel, alex, "collaborates_with").unwrap();
+    assert!(client.neighbors(alex).unwrap().contains(&bel));
+    assert!(client.neighbors(bel).unwrap().contains(&alex));
+    match client.link(alex, bel, "reports_to") {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Malformed,
+            _,
+        )) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    assert_eq!(
+        client.list_relation_kinds().unwrap(),
+        vec!["collaborates_with"]
+    );
+    match client
+        .query("SELECT a.name, b.name FROM employee a JOIN employee b ON collaborates_with WHERE a.name = 'Alex'")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => assert_eq!(rows.len(), 1),
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}

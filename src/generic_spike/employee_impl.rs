@@ -620,4 +620,38 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// `LNK-FR-008` (ADR-0047): `Link` forwards through `Reversed` to the
+    /// `Symmetric` layer over the durable core, and the edge survives a
+    /// portable reopen.
+    #[test]
+    fn link_forwards_through_reversed_and_survives_portable_reopen() {
+        use crate::generic::query::{Link, Neighbors};
+        use crate::generic::LinkOutcome;
+        let dir = crate::bench_support::fresh_temp_dir("employee_link").unwrap();
+        let path = dir.join("salary.mmap");
+        {
+            let mut stack =
+                create_employee_production_stack(sample(), &sample_collaboration_edges(), &path)
+                    .unwrap();
+            assert_eq!(
+                Link::<Employee, CollaboratesWith>::link(
+                    &mut stack,
+                    Uuid::from_u128(1),
+                    Uuid::from_u128(2)
+                )
+                .unwrap(),
+                LinkOutcome::Linked
+            );
+            assert!(
+                Neighbors::<Employee, CollaboratesWith>::neighbors(&stack, Uuid::from_u128(1))
+                    .contains(&Uuid::from_u128(2))
+            );
+        }
+        let reopened = open_employee_production_stack_portable(&path).unwrap();
+        assert!(
+            Neighbors::<Employee, CollaboratesWith>::neighbors(&reopened, Uuid::from_u128(2))
+                .contains(&Uuid::from_u128(1))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

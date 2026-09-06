@@ -70,7 +70,19 @@ pub(crate) fn append<R>(log: &Path, record: &R) -> Result<(), DurabilityError>
 where
     R: Serialize + SchemaTag,
 {
-    let payload = crate::codec::encode(record)?;
+    append_item(log, R::SCHEMA_TAG, record)
+}
+
+/// [`append`] over any serializable item under an explicit `tag` —
+/// `LNK-FR-003` (ADR-0047): an edge log holds `(Id, Id)` pairs, which
+/// carry no `SchemaTag` of their own, tagged with the *record type's*
+/// tag exactly as the edge blob is. The record-facing [`append`] is this
+/// with `R::SCHEMA_TAG`.
+pub(crate) fn append_item<T>(log: &Path, tag: &str, item: &T) -> Result<(), DurabilityError>
+where
+    T: Serialize + ?Sized,
+{
+    let payload = crate::codec::encode(item)?;
     let len = u32::try_from(payload.len()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -79,7 +91,7 @@ where
     })?;
     let mut file = OpenOptions::new().append(true).create(true).open(log)?;
     let mut image = if file.metadata()?.len() == 0 {
-        encode_tagged_image(&MAGIC, LOG_VERSION, 0, R::SCHEMA_TAG, &[])
+        encode_tagged_image(&MAGIC, LOG_VERSION, 0, tag, &[])
     } else {
         Vec::new()
     };
@@ -105,6 +117,15 @@ pub(crate) fn read<R>(log: &Path) -> Result<Vec<R>, DurabilityError>
 where
     R: DeserializeOwned + SchemaTag,
 {
+    read_items(log, R::SCHEMA_TAG)
+}
+
+/// [`read`] over any deserializable item under an explicit `tag` — the
+/// edge log's reader (`LNK-FR-003`).
+pub(crate) fn read_items<T>(log: &Path, tag: &str) -> Result<Vec<T>, DurabilityError>
+where
+    T: DeserializeOwned,
+{
     let unreadable = |cause: String| DurabilityError::RecordBlobUnreadable {
         path: log.to_path_buf(),
         cause,
@@ -116,7 +137,7 @@ where
     };
     // The fingerprint the header claims is always zero for a log and is
     // deliberately ignored — every entry is framed and decoded on its own.
-    parse_tagged_header(&bytes, &MAGIC, LOG_VERSION, R::SCHEMA_TAG).map_err(unreadable)?;
+    parse_tagged_header(&bytes, &MAGIC, LOG_VERSION, tag).map_err(unreadable)?;
 
     let mut records = Vec::new();
     let mut pos = TAGGED_HEADER_LEN;
@@ -224,6 +245,25 @@ mod tests {
         let entry = crate::codec::encode(&item(1)).unwrap().len() as u64 + 4;
         assert_eq!(after_one, TAGGED_HEADER_LEN as u64 + entry);
         assert_eq!(after_two, after_one + entry);
+    }
+
+    /// `LNK-FR-003`: an item with no `SchemaTag` of its own, logged under
+    /// an explicit tag — the edge log's shape — round-trips, and is
+    /// refused by name under another tag.
+    #[test]
+    fn tagged_items_round_trip_and_a_foreign_tag_is_refused() {
+        let dir = fresh_temp_dir("insert_log_items").unwrap();
+        let log = log_path(&dir.join("store.mmap.edges"));
+        append_item(&log, "edges::Item", &(1u32, 2u32)).unwrap();
+        append_item(&log, "edges::Item", &(2u32, 3u32)).unwrap();
+        assert_eq!(
+            read_items::<(u32, u32)>(&log, "edges::Item").unwrap(),
+            vec![(1, 2), (2, 3)]
+        );
+        assert!(matches!(
+            read_items::<(u32, u32)>(&log, "edges::Other"),
+            Err(DurabilityError::RecordBlobUnreadable { .. })
+        ));
     }
 
     #[test]

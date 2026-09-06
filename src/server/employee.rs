@@ -16,9 +16,10 @@ use super::protocol::{
     ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
     ValueKind,
 };
-use super::{default_relation_descriptors, ConnectionStore};
+use super::{default_relation_descriptors, ConnectionStore, LinkOutcome};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
+use crate::generic::LinkError;
 use crate::generic_spike::employee_impl::{
     CollaboratesWith, Department, DepartmentField, Employee, EmployeeProductionStack, ReportsTo,
     SalaryCents,
@@ -249,6 +250,26 @@ impl ConnectionStore for EmployeeConnectionStore {
         vec!["collaborates_with".to_string()]
     }
 
+    /// `LNK-FR-009` (ADR-0047): the fixed-label case — exactly one
+    /// label, through the `Symmetric` layer's own `link`.
+    fn link_records(
+        &self,
+        left: RecordId,
+        right: RecordId,
+        relation: &str,
+    ) -> Result<LinkOutcome, ErrorCode> {
+        if relation != "collaborates_with" {
+            return Err(ErrorCode::Malformed);
+        }
+        match self.store.link::<Employee, CollaboratesWith>(left, right) {
+            Ok(crate::generic::LinkOutcome::Linked) => Ok(LinkOutcome::Linked),
+            Ok(crate::generic::LinkOutcome::AlreadyLinked) => Ok(LinkOutcome::AlreadyLinked),
+            Err(LinkError::UnknownRecord(_)) => Err(ErrorCode::RecordNotFound),
+            Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => Err(ErrorCode::Malformed),
+            Err(LinkError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
     /// `JOIN-FR-002` (ADR-0044): `reports_to` is self-referential — an
     /// employee's manager is an employee — so `parent`/`children` are
     /// joinable within this table. The conservative default omits them
@@ -471,5 +492,29 @@ mod tests {
         assert_eq!(schema.fields.len(), 3);
         assert!(schema.relations.parent_children);
         assert!(schema.relations.neighbors);
+    }
+    /// `LNK-FR-009` (ADR-0047): the fixed-label case — only
+    /// `collaborates_with`, through the `Symmetric` layer.
+    #[test]
+    fn link_records_accepts_only_collaborates_with() {
+        let adapter = sample_adapter();
+        assert_eq!(
+            adapter.link_records(Uuid::from_u128(1), Uuid::from_u128(3), "collaborates_with"),
+            Ok(LinkOutcome::Linked)
+        );
+        assert_eq!(
+            adapter.link_records(Uuid::from_u128(3), Uuid::from_u128(1), "collaborates_with"),
+            Ok(LinkOutcome::AlreadyLinked)
+        );
+        assert!(adapter
+            .neighbors(Uuid::from_u128(3))
+            .unwrap()
+            .contains(&Uuid::from_u128(1)));
+        assert_eq!(
+            adapter.link_records(Uuid::from_u128(1), Uuid::from_u128(2), "reports_to"),
+            Err(ErrorCode::Malformed),
+            "a fixed-label domain creates nothing"
+        );
+        assert_eq!(adapter.list_relation_kinds(), vec!["collaborates_with"]);
     }
 }

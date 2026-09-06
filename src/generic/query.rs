@@ -28,6 +28,30 @@ pub trait Insert<R: Record> {
     fn insert(&mut self, record: R) -> Result<(), super::InsertError<R::Id>>;
 }
 
+/// Add one edge to a single symmetric relation at runtime (`LNK-FR-001`/
+/// `002`, ADR-0047, `docs/design/SERVER-LINK-DESIGN.md`). Both ids must
+/// have a record; `a == b` is refused; an edge already present (either
+/// orientation) is [`super::LinkOutcome::AlreadyLinked`] with nothing
+/// written. On a durable layer, `Linked` means the edge is on disk (its
+/// edge log) before `neighbors` can see it. Forwarded by every layer
+/// above a `Symmetric`.
+pub trait Link<R: SymmetricRelation<Marker>, Marker> {
+    fn link(&mut self, a: R::Id, b: R::Id) -> Result<super::LinkOutcome, super::LinkError<R::Id>>;
+}
+
+/// [`Link`] for a store keying its relations by label at runtime
+/// (`MultiSymmetric`): the same rules within `relation`'s adjacency,
+/// plus label validation — and, on a layer that admits open labels, a
+/// label with no adjacency yet is created (`LNK-FR-005`).
+pub trait MultiLink<R: Record> {
+    fn link(
+        &mut self,
+        relation: &str,
+        a: R::Id,
+        b: R::Id,
+    ) -> Result<super::LinkOutcome, super::LinkError<R::Id>>;
+}
+
 /// Every id this store holds, unspecified order — the one primitive
 /// `SERVER-001`'s `Request::Query` needs and no existing query trait
 /// exposes (`SQL-FR-005`, ADR-0034, `docs/design/SERVER-SQL-SELECT-DESIGN.md`):

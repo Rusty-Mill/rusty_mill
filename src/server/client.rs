@@ -1510,6 +1510,50 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// Add one edge between two records under a symmetric relation label
+    /// (`LNK-FR-012`, ADR-0047, protocol 14). `Ok(())` whether the edge is
+    /// new or was already present — insert-or-ignore, so a retry is
+    /// safe. On an open-label domain (`Entity`) a label the server has
+    /// not seen is created by this call; on a fixed-label domain
+    /// (`Employee`) it must be one [`Self::relations`] lists, else the
+    /// server's `Malformed`. A missing endpoint is `Server(RecordNotFound,
+    /// _)`; a self-loop or an invalid label `Server(Malformed, _)`.
+    /// [`ClientError::Unsupported`]`("Link on this domain")` locally when
+    /// the schema reports `relations.neighbors: false`, and
+    /// `Unsupported("link")` below 14, both with no frame sent. After a
+    /// link under a label absent from the cached relation list, the list
+    /// is re-fetched so a following `JOIN … ON <label>` compiles.
+    pub fn link(
+        &mut self,
+        left: RecordId,
+        right: RecordId,
+        relation: &str,
+    ) -> Result<(), ClientError> {
+        if !self.schema.relations.neighbors {
+            return Err(ClientError::Unsupported("Link on this domain"));
+        }
+        if self.server_protocol_version() < 14 {
+            return Err(ClientError::Unsupported("link"));
+        }
+        match self.roundtrip(Request::Link {
+            left,
+            right,
+            relation: relation.to_string(),
+        })? {
+            Response::Ok => {}
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("Ok")),
+        }
+        if !self.relations.iter().any(|r| r.name == relation) {
+            self.relations = match self.roundtrip(Request::DescribeRelations)? {
+                Response::Relations { relations } => relations,
+                Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+                _ => return Err(ClientError::UnexpectedResponse("Relations")),
+            };
+        }
+        Ok(())
+    }
+
     /// The directed relation's "one hop up" — see [`ParentLookup`]'s own
     /// doc comment for the three-way not-found/no-parent/parent
     /// distinction this preserves. `Err(ClientError::Unsupported)`
