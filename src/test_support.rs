@@ -99,8 +99,9 @@ where
 /// test --features client --lib protocol::` rewrites the file from the
 /// pins, and a second, plain run verifies it — never implicit, so a
 /// stale file on `main` is impossible. `SERVER-002` names this file as a
-/// foreign implementation's conformance test.
-#[cfg(test)]
+/// foreign implementation's conformance test. Gated with the `server`
+/// module itself (the `client` feature), since only its tests use it.
+#[cfg(all(test, feature = "client"))]
 pub(crate) mod wire_fixture {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
