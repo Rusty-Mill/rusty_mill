@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-09-06 — Every reply carries `resultType`, so a `2026-07-28` client can call a tool again
+
+### Fixed
+- **A client speaking MCP `2026-07-28` rejected every reply as malformed, and no tool could be called at all.** That revision made `resultType` a required member of every result — `"complete"` for an ordinary reply, `"input_required"` for a multi-round-trip interim one — and only a peer negotiated at an *earlier* revision is allowed to read an absent member as complete. This server has answered `initialize` with whatever `protocolVersion` the client asked for since the handshake was made dynamic, so a `2026-07-28` client was told it had that revision and then failed validation on the first `tools/call`. The symptom in a Claude Code session was every `remind_me_*` call, `search` and `add` included, failing with *"malformed result ... missing required resultType"*.
+- **`McpServer::handle_request` now stamps `resultType: "complete"` on every reply that carries a `result` and does not already name one**, at the single point every reply passes through (`stamp_result_type`), rather than at the several hundred `json!` sites that build them. A JSON-RPC `error` reply has no `result` and is untouched; a future `input_required` reply keeps its own value. Stamped unconditionally rather than per negotiated version — the handler keeps no per-connection state, and a pre-`2026-07-28` peer ignores an unknown member, as every revision's forward-compatibility rule requires. The streamable-HTTP path in `remind_me_remote` deserializes the same JSON into `rmcp`'s result types, whose `result_type` is an `Option` that accepts the member, so it inherits the fix.
+
+### Provenance
+
+`cargo test -p remind_me_mcp --lib` 65/65 (one new: `every_result_carries_result_type_complete`, driving `initialize`, `ping`, `tools/list`, `resources/list`, `resources/read`, `prompts/list`, a `tools/call` that succeeds and one that returns `isError`, asserting `"complete"` on each, and that `no/such/method` still answers a bare JSON-RPC error; one adjusted: the caught-panic test's `ping` reply is now `{"resultType":"complete"}` rather than `{}`), `cargo test -p remind_me_remote` 67/67, `cargo clippy -p remind_me_mcp -p remind_me_remote --all-targets -- -D warnings` and `cargo fmt --all --check` clean on the pinned `1.97.0`. The required-member rule was read out of the `2026-07-28` specification's tools page (every `tools/call` and `tools/list` example carries `"resultType": "complete"`, including the `isError: true` one) and out of `rmcp` 3.0.1's own `model.rs` doc ("protocol version MUST include `resultType` in every result"), not inferred from the client's error text alone.
+
 ## 2026-08-16 — Three loose ends from the standards audit are closed
 
 ### Removed

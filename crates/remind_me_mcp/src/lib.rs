@@ -392,7 +392,23 @@ impl McpServer {
         self.webhook.status()
     }
 
+    /// Answer one JSON-RPC request, or `None` for a notification.
+    ///
+    /// Every successful reply is stamped with `resultType: "complete"`
+    /// before it leaves (see [`stamp_result_type`]) — a `2026-07-28`
+    /// client requires it on every result, and this server has echoed
+    /// back whatever `protocolVersion` a client asked for since the
+    /// handshake was made dynamic, so it has been *claiming* that
+    /// revision without meeting it. The one field is stamped here, at
+    /// the single point every reply passes through, rather than at the
+    /// several hundred `json!` sites that build them.
     pub fn handle_request(&self, request_json: &str) -> Option<Value> {
+        let mut response = self.dispatch_request(request_json)?;
+        stamp_result_type(&mut response);
+        Some(response)
+    }
+
+    fn dispatch_request(&self, request_json: &str) -> Option<Value> {
         let req: Value = serde_json::from_str(request_json).ok()?;
         let method = req.get("method")?.as_str()?;
         let id = req.get("id").cloned();
@@ -3115,6 +3131,34 @@ fn dispatch_line_catching_panics(
     }
 }
 
+/// Add `"resultType": "complete"` to a reply's `result` object when it
+/// carries none.
+///
+/// The `2026-07-28` MCP revision made `resultType` a required member of
+/// every result — `"complete"` for an ordinary reply, `"input_required"`
+/// for a multi-round-trip interim one — and a client at that revision
+/// rejects a result without it; only a server negotiated at an *earlier*
+/// revision gets the absent-means-complete reading. This server answers
+/// `initialize` with the client's own requested version, so a client that
+/// asks for `2026-07-28` is told it got it, and every subsequent reply
+/// then failed that client's validation: no tool could be called at all.
+///
+/// Stamped unconditionally rather than per negotiated version: the
+/// handler keeps no per-connection state (the streamable-HTTP transport
+/// in `remind_me_remote` is stateless by design), and a pre-`2026-07-28`
+/// client ignores a member it does not know, as every revision's
+/// forward-compatibility rule requires. A reply that already names its
+/// `resultType` — a future `input_required` — is left alone, as is a
+/// JSON-RPC `error` reply, which has no `result` to stamp.
+fn stamp_result_type(response: &mut Value) {
+    let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    result
+        .entry("resultType")
+        .or_insert_with(|| json!("complete"));
+}
+
 /// The JSON-RPC error reply for a request whose handler panicked.
 ///
 /// Echoes back whatever `id` the request carried (re-parsed independently
@@ -3212,7 +3256,7 @@ mod tests {
 
         let ping = json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" });
         let resp = server.handle_request(&ping.to_string()).unwrap();
-        assert_eq!(resp["result"], json!({}));
+        assert_eq!(resp["result"], json!({ "resultType": "complete" }));
     }
 
     #[test]
@@ -3230,6 +3274,52 @@ mod tests {
         let resp = server.handle_request(&req.to_string()).unwrap();
         assert_eq!(resp["result"]["protocolVersion"], "2026-07-28");
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
+    }
+
+    /// A `2026-07-28` client requires `resultType` on every result, and a
+    /// server that echoes that version in `initialize` has promised it.
+    /// Before this stamp every tool call was rejected by such a client as
+    /// malformed — the symptom that motivated it. Every method that answers
+    /// with a `result` carries the member; a JSON-RPC `error` does not.
+    #[test]
+    fn every_result_carries_result_type_complete() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let with_result = [
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": { "protocolVersion": "2026-07-28" } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" }),
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+                    "params": { "uri": "memory://stats" } }),
+            json!({ "jsonrpc": "2.0", "id": 6, "method": "prompts/list" }),
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": { "name": "remind_me_add",
+                                "arguments": { "content": "resultType is required" } } }),
+            // A tool execution error is still a result, not a JSON-RPC error.
+            json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                    "params": { "name": "remind_me_get",
+                                "arguments": { "memory_id": "mem_missing" } } }),
+        ];
+        for req in with_result {
+            let resp = server.handle_request(&req.to_string()).unwrap();
+            assert_eq!(
+                resp["result"]["resultType"], "complete",
+                "{} must answer with resultType: complete — got {resp}",
+                req["method"]
+            );
+        }
+        let error_req = json!({ "jsonrpc": "2.0", "id": 9, "method": "no/such/method" });
+        let resp = server.handle_request(&error_req.to_string()).unwrap();
+        assert!(resp.get("result").is_none(), "{resp}");
+        assert_eq!(resp["error"]["code"], -32601);
+
+        // A result that already names its type is left alone.
+        let mut interim = json!({ "jsonrpc": "2.0", "id": 10,
+                                  "result": { "resultType": "input_required" } });
+        stamp_result_type(&mut interim);
+        assert_eq!(interim["result"]["resultType"], "input_required");
     }
 
     fn call(server: &McpServer, name: &str, args: Value) -> Value {
