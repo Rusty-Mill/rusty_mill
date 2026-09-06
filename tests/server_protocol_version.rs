@@ -29,8 +29,8 @@ use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, JoinRelation, JoinSpec, Request, Response, ScanValue, Selection, ValueKind,
-    PROTOCOL_VERSION,
+    ErrorCode, JoinRelation, JoinSpec, RecordId, Request, Response, ScanValue, Selection,
+    ValueKind, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{dispatch, serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 12);
+    assert_eq!(dog.server_protocol_version(), 13);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -449,7 +449,7 @@ fn join_and_describe_relations_are_malformed_below_version_12() {
             }
         ),
         Response::Hello {
-            protocol_version: 12
+            protocol_version: PROTOCOL_VERSION
         }
     );
     match roundtrip(&mut reader, &mut writer, &Request::DescribeRelations) {
@@ -675,4 +675,106 @@ fn a_pre_hello_server_is_reconnected_to_without_a_hello_unless_hello_is_required
             "expected a server that dies under any first frame to be an error, got {other:?}"
         ),
     }
+}
+
+/// `INS-FR-007` (ADR-0046), compatibility rule 3: `Insert` is protocol
+/// 13 — a connection negotiated at 12 (and a silent, version-1 one) is
+/// answered `Malformed` with the connection left open and nothing
+/// inserted; at 13 it is served. Rule 4 from the client side: against a
+/// pre-hello server the Rust client refuses with no frame sent.
+#[test]
+fn insert_is_malformed_below_version_13() {
+    let addr = start_entity_server();
+    let insert = Request::Insert {
+        id: RecordId::from_u128(50),
+        fields: vec![
+            (0, ScanValue::Str("Grace Hopper".into())),
+            (1, ScanValue::Str("person".into())),
+            (2, ScanValue::I64(1)),
+            (3, ScanValue::StrList(vec![])),
+        ],
+    };
+    for hello in [Some(12u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &insert),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::GetById {
+                    id: RecordId::from_u128(50)
+                }
+            ),
+            Response::NotFound,
+            "nothing inserted"
+        );
+    }
+
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert_eq!(roundtrip(&mut reader, &mut writer, &insert), Response::Ok);
+    assert!(matches!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::GetById {
+                id: RecordId::from_u128(50)
+            }
+        ),
+        Response::Record { .. }
+    ));
+    assert!(matches!(
+        roundtrip(&mut reader, &mut writer, &insert),
+        Response::Err {
+            code: ErrorCode::Duplicate,
+            ..
+        }
+    ));
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.insert(
+            RecordId::from_u128(9),
+            &[
+                ("breed", ScanValue::Str("pug".into())),
+                ("age", ScanValue::U32(1))
+            ]
+        ),
+        Err(ClientError::Unsupported("insert"))
+    ));
 }

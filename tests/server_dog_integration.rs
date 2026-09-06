@@ -404,3 +404,27 @@ fn join_on_littermate_of_works_with_the_default_relation_list() {
         other => panic!("expected Joined, got {other:?}"),
     }
 }
+
+/// `INS-FR-006` (ADR-0046): `Dog`'s adapter keeps the trait's default —
+/// its bespoke `ProductionStore` has no insert — so a well-formed
+/// `Insert` is `Unsupported`, server-side, with the connection intact.
+#[test]
+fn insert_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    match client.insert(
+        Uuid::from_u128(9),
+        &[
+            ("breed", ScanValue::Str("pug".into())),
+            ("age", ScanValue::U32(1)),
+        ],
+    ) {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert!(client.get(Uuid::from_u128(9)).unwrap().is_none());
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}

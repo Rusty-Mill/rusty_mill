@@ -32,12 +32,13 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::ConnectionStore;
+use super::{ConnectionStore, InsertOutcome};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::reminder::{
     status_from_u32, status_to_u32, DueAtField, Reminder, ReminderProductionStack, StatusField,
 };
+use crate::generic::InsertError;
 use std::path::Path;
 
 pub const FIELD_TITLE: FieldRef = 0;
@@ -122,6 +123,45 @@ impl ReminderConnectionStore {
             }
         }
         Ok(())
+    }
+
+    /// `INS-FR-006` (ADR-0046): the whole field list against this
+    /// domain's schema, before any write — every one of the three tags
+    /// exactly once with a value of its kind, `status` additionally a
+    /// known discriminant (the same `status_from_u32` rule
+    /// `update_field` applies). `Malformed` for a missing, repeated, or
+    /// wrong-kind field; `UnknownField` for a tag this domain doesn't
+    /// have.
+    fn reminder_from_fields(
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<Reminder, ErrorCode> {
+        let mut title = None;
+        let mut due_at_unix_ms = None;
+        let mut status = None;
+        for (tag, value) in fields {
+            match (tag, value) {
+                (FIELD_TITLE, ScanValue::Str(v)) if title.is_none() => title = Some(v),
+                (FIELD_DUE_AT, ScanValue::I64(v)) if due_at_unix_ms.is_none() => {
+                    due_at_unix_ms = Some(v)
+                }
+                (FIELD_STATUS, ScanValue::U32(raw)) if status.is_none() => {
+                    status = Some(status_from_u32(raw).ok_or(ErrorCode::Malformed)?)
+                }
+                (FIELD_TITLE | FIELD_DUE_AT | FIELD_STATUS, _) => return Err(ErrorCode::Malformed),
+                _ => return Err(ErrorCode::UnknownField),
+            }
+        }
+        let (Some(title), Some(due_at_unix_ms), Some(status)) = (title, due_at_unix_ms, status)
+        else {
+            return Err(ErrorCode::Malformed);
+        };
+        Ok(Reminder {
+            id,
+            title,
+            due_at_unix_ms,
+            status,
+        })
     }
 
     /// `ISO-FR-002`/`ISO-FR-006` — see `DogConnectionStore::check_read_set`
@@ -209,6 +249,22 @@ impl ConnectionStore for ReminderConnectionStore {
             (FIELD_STATUS, _) => Err(ErrorCode::Malformed),
             (FIELD_TITLE | FIELD_DUE_AT, _) => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
+        }
+    }
+
+    /// `INS-FR-006` (ADR-0046): validate, then one write under the
+    /// store's own lock. A duplicate is the normal outcome, not an
+    /// error; a durability failure is `Storage` (see the trait's docs).
+    fn insert_record(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<InsertOutcome, ErrorCode> {
+        let reminder = Self::reminder_from_fields(id, fields)?;
+        match self.store.insert(reminder) {
+            Ok(()) => Ok(InsertOutcome::Inserted),
+            Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
+            Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -475,5 +531,80 @@ mod tests {
             adapter.neighbors(Uuid::from_u128(1)),
             Err(ErrorCode::Unsupported)
         );
+    }
+    /// `INS-FR-006` (ADR-0046): the whole field list is validated before
+    /// any write — a complete, well-typed list inserts; the id is then a
+    /// duplicate; a missing, repeated, wrong-kind, unknown, or bad-
+    /// discriminant field is refused with nothing inserted.
+    #[test]
+    fn insert_record_validates_every_field_then_writes_once() {
+        let adapter = sample_adapter();
+        let full = |status: u32| {
+            vec![
+                (FIELD_TITLE, ScanValue::Str("Water plants".into())),
+                (FIELD_DUE_AT, ScanValue::I64(3_000)),
+                (FIELD_STATUS, ScanValue::U32(status)),
+            ]
+        };
+        let id = Uuid::from_u128(3);
+        assert_eq!(
+            adapter.insert_record(id, full(0)),
+            Ok(InsertOutcome::Inserted)
+        );
+        assert_eq!(adapter.get(id).unwrap(), full(0));
+        assert_eq!(
+            adapter.filter_eq(FIELD_DUE_AT, &ScanValue::I64(3_000)),
+            Ok(vec![id])
+        );
+        assert_eq!(
+            adapter.insert_record(id, full(1)),
+            Ok(InsertOutcome::Duplicate)
+        );
+        assert_eq!(
+            adapter.get(id).unwrap(),
+            full(0),
+            "the duplicate wrote nothing"
+        );
+
+        let refused: Vec<(Vec<(FieldRef, ScanValue)>, ErrorCode)> = vec![
+            (full(9), ErrorCode::Malformed),
+            (full(0)[..2].to_vec(), ErrorCode::Malformed),
+            (
+                {
+                    let mut f = full(0);
+                    f.push((FIELD_STATUS, ScanValue::U32(0)));
+                    f
+                },
+                ErrorCode::Malformed,
+            ),
+            (
+                vec![
+                    (FIELD_TITLE, ScanValue::I64(1)),
+                    (FIELD_DUE_AT, ScanValue::I64(3_000)),
+                    (FIELD_STATUS, ScanValue::U32(0)),
+                ],
+                ErrorCode::Malformed,
+            ),
+            (
+                {
+                    let mut f = full(0);
+                    f.push((99, ScanValue::U32(0)));
+                    f
+                },
+                ErrorCode::UnknownField,
+            ),
+            (vec![], ErrorCode::Malformed),
+        ];
+        for (fields, code) in refused {
+            assert_eq!(
+                adapter.insert_record(Uuid::from_u128(4), fields.clone()),
+                Err(code),
+                "{fields:?}"
+            );
+            assert!(
+                adapter.get(Uuid::from_u128(4)).is_none(),
+                "nothing inserted"
+            );
+        }
     }
 }

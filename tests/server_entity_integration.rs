@@ -948,7 +948,7 @@ fn id_pairs(rows: &[JoinedRowNamed]) -> Vec<(u128, u128)> {
 fn join_over_a_declared_relation_returns_both_endpoints_in_one_round_trip() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
-    assert_eq!(client.server_protocol_version(), 12);
+    assert!(client.server_protocol_version() >= 12);
 
     let mut names: Vec<&str> = client.relations().iter().map(|r| r.name.as_str()).collect();
     names.sort();
@@ -1109,7 +1109,7 @@ fn join_refusals_are_client_side_and_the_raw_server_rejections_use_existing_code
             }
         ),
         Response::Hello {
-            protocol_version: 12
+            protocol_version: PROTOCOL_VERSION
         }
     );
     let spec = |relation: JoinRelation, right_table: Option<String>| {
@@ -1147,4 +1147,78 @@ fn join_refusals_are_client_side_and_the_raw_server_rejections_use_existing_code
         Response::JoinedRows { rows } => assert_eq!(rows.len(), 2),
         other => panic!("expected JoinedRows, got {other:?}"),
     }
+}
+
+/// `INS` acceptance criterion 4 (ADR-0046) on `Entity`: an insert whose
+/// id is the derived `entity_id` of its label, `aliases` riding as a
+/// `StrList`, is then resolvable by label and alias through `filter_eq`,
+/// readable by the derived id in one `GetById`, joinable (as a row with
+/// no partner — it has no edges), and refused on repeat.
+#[test]
+fn insert_an_entity_by_derived_id_with_aliases_then_resolve_it_by_name() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let id = entity_id("Grace Hopper");
+    client
+        .insert(
+            id,
+            &[
+                ("label", ScanValue::Str("Grace Hopper".into())),
+                ("kind", ScanValue::Str("person".into())),
+                ("mention_count", ScanValue::I64(1)),
+                ("aliases", ScanValue::StrList(vec!["Amazing Grace".into()])),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .filter_eq("label", ScanValue::Str("amazing   grace".into()))
+            .unwrap(),
+        vec![id]
+    );
+    assert_eq!(
+        client.get(entity_id("GRACE hopper")).unwrap().unwrap()[3],
+        (
+            "aliases".to_string(),
+            ScanValue::StrList(vec!["Amazing Grace".into()])
+        )
+    );
+    assert_eq!(
+        client
+            .filter_eq("kind", ScanValue::Str("person".into()))
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(client.neighbors(id).unwrap().is_empty());
+    match client.query("SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to WHERE a.mention_count = 1").unwrap() {
+        QueryResult::Joined(rows) => assert!(rows.iter().all(|r| r.left_id != id), "no edges, no pairs"),
+        other => panic!("expected Joined, got {other:?}"),
+    }
+    match client.insert(
+        id,
+        &[
+            ("label", ScanValue::Str("Grace Hopper".into())),
+            ("kind", ScanValue::Str("person".into())),
+            ("mention_count", ScanValue::I64(0)),
+            ("aliases", ScanValue::StrList(vec![])),
+        ],
+    ) {
+        Err(ClientError::Server(ErrorCode::Duplicate, _)) => {}
+        other => panic!("expected Duplicate, got {other:?}"),
+    }
+    // `aliases` must be a list — the one kind rule `Entity` adds.
+    match client.insert(
+        Uuid::from_u128(99),
+        &[
+            ("label", ScanValue::Str("x".into())),
+            ("kind", ScanValue::Str("y".into())),
+            ("mention_count", ScanValue::I64(0)),
+            ("aliases", ScanValue::Str("z".into())),
+        ],
+    ) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    assert!(client.get(Uuid::from_u128(99)).unwrap().is_none());
 }

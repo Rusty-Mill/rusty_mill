@@ -14,6 +14,20 @@ pub trait GetById<R: Record> {
     fn get(&self, id: R::Id) -> Option<R>;
 }
 
+/// Add one record to the store at runtime (`INS-FR-001`, ADR-0046,
+/// `docs/design/SERVER-INSERT-DESIGN.md`) — the first mutation of the
+/// record *set* this library has ever had; every earlier write changed
+/// one field of a record that already existed. `Err(InsertError::
+/// Duplicate)` if `record.id()` already has a record, with nothing
+/// written at any layer; on the durable core, `Ok` means the record is
+/// on disk. Every composition layer forwards this, updating its own
+/// derived state (an index bucket, a name key, a parent's children list,
+/// a slot of its own) only after the inner insert succeeded — so no
+/// layer can hold a record the store beneath it refused.
+pub trait Insert<R: Record> {
+    fn insert(&mut self, record: R) -> Result<(), super::InsertError<R::Id>>;
+}
+
 /// Every id this store holds, unspecified order — the one primitive
 /// `SERVER-001`'s `Request::Query` needs and no existing query trait
 /// exposes (`SQL-FR-005`, ADR-0034, `docs/design/SERVER-SQL-SELECT-DESIGN.md`):

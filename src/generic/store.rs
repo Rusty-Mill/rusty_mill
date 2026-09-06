@@ -17,10 +17,10 @@
 
 use super::edge_blob::{self, EdgeBlob};
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Neighbors, Parent, ScanField, UpdateField,
 };
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::NotFound;
+use super::{InsertError, NotFound};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -45,6 +45,20 @@ impl<R: Record + Clone> BaseStore<R> {
 impl<R: Record + Clone> GetById<R> for BaseStore<R> {
     fn get(&self, id: R::Id) -> Option<R> {
         self.records.get(&id).cloned()
+    }
+}
+
+/// `INS-FR-005`: the in-memory root of a composed stack accepts a record
+/// it was not built with — a duplicate id is refused with nothing
+/// written, the same rule the durable core applies.
+impl<R: Record + Clone> Insert<R> for BaseStore<R> {
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let id = record.id();
+        if self.records.contains_key(&id) {
+            return Err(InsertError::Duplicate(id));
+        }
+        self.records.insert(id, record);
+        Ok(())
     }
 }
 
@@ -93,6 +107,22 @@ where
             index,
             _marker: PhantomData,
         }
+    }
+}
+
+// `INS-FR-005`: the index bucket gains the id only after the inner store
+// accepted the record; the value is taken before the record is moved.
+impl<S, R, Marker> Insert<R> for Indexed<S, R, Marker>
+where
+    R: IndexedField<Marker>,
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let id = record.id();
+        let value = record.indexed_value().clone();
+        self.inner.insert(record)?;
+        self.index.entry(value).or_default().push(id);
+        Ok(())
     }
 }
 
@@ -173,6 +203,23 @@ where
             cache,
             _marker: PhantomData,
         }
+    }
+}
+
+// `INS-FR-005`: a new cache position for the record, after the inner
+// store accepted it.
+impl<S, R, Marker> Insert<R> for Scanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let id = record.id();
+        let value = record.scannable_value();
+        self.inner.insert(record)?;
+        self.position_index.insert(id, self.cache.len());
+        self.cache.push(value);
+        Ok(())
     }
 }
 
@@ -543,6 +590,19 @@ where
     }
 }
 
+// `INS-FR-005`: a record inserted at runtime has no edges — `neighbors`
+// answers `[]` for it — and the edge blob is untouched; relation
+// insertion is the next round in this line (ADR-0046's Non-goals).
+impl<S, R, Marker> Insert<R> for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker>,
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        self.inner.insert(record)
+    }
+}
+
 // Forwarding impl: `Symmetric<S, ..>` re-exposing `GetById`.
 impl<S, R, Marker> GetById<R> for Symmetric<S, R, Marker>
 where
@@ -759,6 +819,17 @@ impl<S, R: Record> super::query::MultiNeighbors<R> for MultiSymmetric<S, R> {
 }
 
 // Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `GetById`.
+// `INS-FR-005`: same as `Symmetric` — no edges under any label for a
+// record inserted at runtime; no edge blob touched.
+impl<S, R: Record> Insert<R> for MultiSymmetric<S, R>
+where
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        self.inner.insert(record)
+    }
+}
+
 impl<S, R: Record> GetById<R> for MultiSymmetric<S, R>
 where
     S: GetById<R>,
@@ -902,6 +973,27 @@ impl<S, R: super::query::NameIndexed> super::query::FindByName<R> for NameIndex<
             .get(&normalize(name))
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+// `INS-FR-005`: the record's keys are taken before it is moved into the
+// inner store, and added to the index — normalized exactly as at build
+// (`ENT3-FR-003`) — only after the inner insert succeeded.
+impl<S, R: super::query::NameIndexed> Insert<R> for NameIndex<S, R>
+where
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let id = record.id();
+        let keys = record.index_keys();
+        self.inner.insert(record)?;
+        for key in keys {
+            let bucket = self.index.entry(normalize(&key)).or_default();
+            if !bucket.contains(&id) {
+                bucket.push(id);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1068,6 +1160,26 @@ where
             children_of,
             _marker: PhantomData,
         }
+    }
+}
+
+// `INS-FR-005`: a child inserted at runtime is indexed under its parent
+// (when it has one — the same `if let` `new` uses), after the inner
+// store accepted it.
+impl<S, P, C, Marker> Insert<C> for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    S: Insert<C>,
+{
+    fn insert(&mut self, record: C) -> Result<(), InsertError<C::Id>> {
+        let id = record.id();
+        let parent_id = record.parent_id();
+        self.inner.insert(record)?;
+        if let Some(parent_id) = parent_id {
+            self.children_of.entry(parent_id).or_default().push(id);
+        }
+        Ok(())
     }
 }
 
@@ -1270,6 +1382,37 @@ mod tests {
         (1..=4)
             .map(|id| Neighbors::<Node, Linked>::neighbors(layer, id))
             .collect()
+    }
+
+    /// `INS-FR-005` (ADR-0046): the in-memory root refuses a duplicate
+    /// and accepts a new id; `Symmetric` forwards and answers no
+    /// neighbors for the newcomer; its edge blob is untouched.
+    #[test]
+    fn insert_forwards_through_symmetric_with_no_edges_and_refuses_a_duplicate() {
+        use super::super::query::Insert;
+        use super::super::InsertError;
+        let (dir, edges_path) = scratch("symmetric_insert");
+        let mut layer = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        let before = std::fs::read(&edges_path).unwrap();
+
+        Insert::<Node>::insert(&mut layer, Node { id: 5 }).unwrap();
+        assert_eq!(GetById::<Node>::get(&layer, 5), Some(Node { id: 5 }));
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&layer, 5),
+            Vec::<u32>::new()
+        );
+        assert_eq!(all_neighbors(&layer), all_neighbors(&layer), "unchanged");
+        assert_eq!(std::fs::read(&edges_path).unwrap(), before);
+
+        match Insert::<Node>::insert(&mut layer, Node { id: 5 }) {
+            Err(InsertError::Duplicate(5)) => {}
+            other => panic!("expected Duplicate(5), got {other:?}"),
+        }
+        match Insert::<Node>::insert(&mut layer, Node { id: 1 }) {
+            Err(InsertError::Duplicate(1)) => {}
+            other => panic!("expected Duplicate(1), got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

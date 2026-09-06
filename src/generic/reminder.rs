@@ -227,4 +227,75 @@ mod tests {
         let got = GetById::<Reminder>::get(&reopened, Uuid::from_u128(1)).unwrap();
         assert_eq!(got.status, ReminderStatus::Done);
     }
+
+    /// `INS` acceptance criterion 1 (ADR-0046): an inserted reminder is
+    /// visible to every read immediately, updatable, refused on repeat
+    /// with nothing changed, and — after a reopen from the files alone —
+    /// folded into the blob with the log gone; a second reopen writes
+    /// nothing.
+    #[test]
+    fn insert_is_immediately_visible_durable_and_folded_at_reopen() {
+        use crate::generic::query::{AllIds, Insert, ScanField};
+        let dir = fresh_temp_dir("generic_reminder_insert").unwrap();
+        let path = dir.join("reminders.mmap");
+        let log = crate::generic::insert_log::log_path(&path);
+        let blob = crate::generic::record_blob::blob_path(&path);
+        let new = Reminder {
+            id: Uuid::from_u128(3),
+            title: "Water plants".into(),
+            due_at_unix_ms: 2_000,
+            status: ReminderStatus::Pending,
+        };
+        {
+            let mut store = create_reminder_production_stack(sample_reminders(), &path).unwrap();
+            assert!(!log.exists(), "a fresh store has no insert log");
+            Insert::<Reminder>::insert(&mut store, new.clone()).unwrap();
+            assert!(log.exists(), "the insert is logged");
+
+            assert_eq!(
+                GetById::<Reminder>::get(&store, Uuid::from_u128(3)),
+                Some(new.clone())
+            );
+            let mut due = FilterEq::<Reminder, DueAtField>::filter_eq(&store, &2_000);
+            due.sort();
+            assert_eq!(due, vec![Uuid::from_u128(2), Uuid::from_u128(3)]);
+            assert_eq!(ScanField::<Reminder, StatusField>::scan(&store).len(), 3);
+            assert_eq!(AllIds::<Reminder>::all_ids(&store).len(), 3);
+            UpdateField::<Reminder, StatusField>::update(
+                &mut store,
+                Uuid::from_u128(3),
+                status_to_u32(ReminderStatus::Done),
+            )
+            .unwrap();
+
+            match Insert::<Reminder>::insert(&mut store, new.clone()) {
+                Err(crate::generic::InsertError::Duplicate(id)) => {
+                    assert_eq!(id, Uuid::from_u128(3))
+                }
+                other => panic!("expected Duplicate, got {other:?}"),
+            }
+            assert_eq!(AllIds::<Reminder>::all_ids(&store).len(), 3);
+        }
+
+        let records = ReminderProductionStack::read_portable_records(&path).unwrap();
+        assert_eq!(records.len(), 3, "blob records then the logged one");
+        assert_eq!(records[2].id, Uuid::from_u128(3));
+
+        let reopened = ReminderProductionStack::open_portable(&path).unwrap();
+        let got = GetById::<Reminder>::get(&reopened, Uuid::from_u128(3)).unwrap();
+        assert_eq!(got.title, "Water plants");
+        assert_eq!(got.status, ReminderStatus::Done, "the slot survived too");
+        assert!(!log.exists(), "the fold removed the log");
+        let blob_bytes = std::fs::read(&blob).unwrap();
+        drop(reopened);
+
+        let again = ReminderProductionStack::open_portable(&path).unwrap();
+        assert_eq!(AllIds::<Reminder>::all_ids(&again).len(), 3);
+        assert_eq!(
+            std::fs::read(&blob).unwrap(),
+            blob_bytes,
+            "a reopen with nothing inserted rewrites nothing"
+        );
+        assert!(!log.exists());
+    }
 }

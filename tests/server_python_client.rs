@@ -109,18 +109,18 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_12_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_13_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
-    // shape, one write, and a protocol-12 join.
-    let v12 = drive(addr, PROTOCOL_VERSION);
+    // shape, one write, a protocol-12 join, and a protocol-13 insert.
+    let v13 = drive(addr, PROTOCOL_VERSION);
     let get = |k: &str| {
-        v12.get(k)
+        v13.get(k)
             .map(String::as_str)
-            .unwrap_or_else(|| panic!("no {k}=: {v12:?}"))
+            .unwrap_or_else(|| panic!("no {k}=: {v13:?}"))
     };
-    assert_eq!(get("negotiated"), "12");
+    assert_eq!(get("negotiated"), PROTOCOL_VERSION.to_string());
     assert_eq!(get("schema_fields"), "label,kind,mention_count,aliases");
     assert_eq!(get("relations"), "mentioned_with,neighbors,relates_to");
     assert_eq!(get("get_fields"), "4");
@@ -146,6 +146,11 @@ fn the_python_reference_client_speaks_the_protocol_at_12_and_at_10() {
         "1 relates to 2 and 3, is mentioned with 5"
     );
     assert_eq!(get("join_rows"), "8", "relates_to, both orientations");
+    // `INS-FR-008` (ADR-0046): the Python client inserts, is refused on
+    // the repeat with the one new code, and reads its own record back.
+    assert_eq!(get("insert"), "ok");
+    assert_eq!(get("insert_again"), "Duplicate");
+    assert_eq!(get("insert_get"), "4");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -166,6 +171,11 @@ fn the_python_reference_client_speaks_the_protocol_at_12_and_at_10() {
         get("join_rows")
     );
     assert_eq!(get("update"), "true");
+    assert!(
+        get("insert").starts_with("unsupported"),
+        "rule 4: no Insert below 13 — {}",
+        get("insert")
+    );
 
     // The Python client's write is real: the Rust client sees 42.
     let mut rust = SchemaDrivenClient::connect(addr).unwrap();
@@ -173,4 +183,12 @@ fn the_python_reference_client_speaks_the_protocol_at_12_and_at_10() {
     assert!(ada
         .iter()
         .any(|(name, v)| name == "mention_count" && *v == ScanValue::I64(42)));
+    // And so is its insert: the Rust client reads Grace, alias intact.
+    let grace = rust.get(Uuid::from_u128(77)).unwrap().unwrap();
+    assert!(grace
+        .iter()
+        .any(|(name, v)| name == "label" && *v == ScanValue::Str("Grace Hopper".into())));
+    assert!(grace.iter().any(
+        |(name, v)| name == "aliases" && *v == ScanValue::StrList(vec!["Amazing Grace".into()])
+    ));
 }

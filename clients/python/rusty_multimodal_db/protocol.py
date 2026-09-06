@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 12
+PROTOCOL_VERSION = 13
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -68,6 +68,8 @@ class ErrorCode(IntEnum):
     SessionFull = 8
     Journal = 9
     Conflict = 10
+    Duplicate = 11
+    Storage = 12
 
 
 # ---- ScanValue (enum family) ----
@@ -299,7 +301,7 @@ class RelationDescriptor:
     _spec: ClassVar[list] = [("name", "str"), ("kind", JoinRelation), ("target_table", ("opt", "str"))]
 
 
-# ---- Request (enum family, indices 0..20) ----
+# ---- Request (enum family, indices 0..21) ----
 
 
 def _variant(index, spec):
@@ -447,10 +449,20 @@ class DescribeRelations:
     pass
 
 
+@_variant(21, [("id", "uuid"), ("fields", FIELDS)])
+class Insert:
+    id: uuid.UUID
+    fields: Tuple[Tuple[int, Any], ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "fields", tuple(tuple(f) for f in self.fields))
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
+    Insert,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -460,6 +472,7 @@ REQUEST_INTRODUCED_AT = {
     NeighborsReq: 1, DescribeSchema: 1, Authenticate: 1, Transaction: 1, Hello: 2,
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
+    Insert: 13,
 }
 
 

@@ -539,6 +539,18 @@ fn session_state_errors_leave_the_connection_open() {
         ),
         ErrorCode::SessionOpen,
     );
+    // `INS-FR-007` (ADR-0046): an insert is never staged — the
+    // `Transaction`-inside-a-session rule, refused before the adapter.
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::Insert {
+                id: Uuid::from_u128(9),
+                fields: vec![],
+            },
+        ),
+        ErrorCode::SessionOpen,
+    );
     assert_eq!(
         stage(&mut c, Uuid::from_u128(1), 30),
         Response::Staged { index: 0 }

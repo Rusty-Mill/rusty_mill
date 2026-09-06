@@ -84,11 +84,13 @@
 //! territory (`ADR-0013`), not this layer's.
 
 use super::mmap_field::MmapFieldValue;
-use super::query::{AllIds, Children, FilterEq, GetById, Neighbors, ScanField, UpdateField};
+use super::query::{
+    AllIds, Children, FilterEq, GetById, Insert, Neighbors, ScanField, UpdateField,
+};
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::NotFound;
+use super::{InsertError, NotFound};
 use crate::durability::DurabilityError;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -233,6 +235,32 @@ where
             file,
             _marker: PhantomData,
         })
+    }
+}
+
+// `INS-FR-005`: the inner store first (it owns the duplicate check and
+// the record's content), then one committed slot of this layer's own,
+// through the same `O_APPEND` path `open` appends missing slots with. A
+// slot-append failure after the inner insert succeeded leaves a record
+// with no slot in this file — exactly what the next `open` reconciles
+// by appending one — so the record is never lost, only its value here
+// reseeded from the record itself.
+impl<S, R, Marker> Insert<R> for MmapScanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let id = record.id();
+        let value = record.scannable_value();
+        self.inner.insert(record)?;
+        let positions = self.file.append_committed_slots([(id, value)])?;
+        if let Some(&position) = positions.first() {
+            self.position_index.insert(id, position);
+        }
+        Ok(())
     }
 }
 

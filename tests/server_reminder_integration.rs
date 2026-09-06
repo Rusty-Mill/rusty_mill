@@ -7,7 +7,7 @@
 
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::reminder::{
-    create_reminder_production_stack, Reminder, ReminderStatus,
+    create_reminder_production_stack, Reminder, ReminderProductionStack, ReminderStatus,
 };
 use rusty_multimodal_db::server::client::{
     ClientError, QueryResult, SchemaDrivenClient, SessionOptions,
@@ -56,10 +56,17 @@ fn sample_reminders() -> Vec<Reminder> {
 }
 
 fn start_server() -> SocketAddr {
-    let dir = unique_dir("reminder_integration");
+    start_server_at(unique_dir("reminder_integration"))
+}
+
+fn start_server_at(dir: std::path::PathBuf) -> SocketAddr {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("reminders.mmap");
-    let stack = create_reminder_production_stack(sample_reminders(), &path).unwrap();
+    let stack = if path.exists() {
+        ReminderProductionStack::open_portable(&path).unwrap()
+    } else {
+        create_reminder_production_stack(sample_reminders(), &path).unwrap()
+    };
     let connection_store = Arc::new(ReminderConnectionStore::new(GenericProductionStore::new(
         stack,
     )));
@@ -357,4 +364,168 @@ fn a_domain_with_no_relation_lists_nothing_and_refuses_every_join() {
         );
     }
     assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+/// `INS` acceptance criterion 4 (ADR-0046) over a real socket: `insert`
+/// then `get` returns the fields sent; the repeat is `Duplicate` with the
+/// record unchanged; every malformed field list is refused with nothing
+/// inserted; a bad `status` discriminant is `Malformed`; an unknown name
+/// is refused client-side with no frame; inside a session the server
+/// answers `SessionOpen` and the session still commits; and a server
+/// restarted on the same directory serves the inserted record.
+#[test]
+fn insert_over_the_wire_is_validated_durable_and_served_after_a_restart() {
+    let dir = unique_dir("reminder_insert");
+    let addr = start_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let id = Uuid::from_u128(4);
+    let fields = [
+        ("title", ScanValue::Str("Water plants".into())),
+        ("due_at_unix_ms", ScanValue::I64(3_000)),
+        ("status", ScanValue::U32(0)),
+    ];
+    client.insert(id, &fields).unwrap();
+    let got = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        got,
+        fields
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        client
+            .filter_eq("due_at_unix_ms", ScanValue::I64(3_000))
+            .unwrap(),
+        vec![id]
+    );
+
+    match client.insert(
+        id,
+        &[
+            ("title", ScanValue::Str("x".into())),
+            ("due_at_unix_ms", ScanValue::I64(0)),
+            ("status", ScanValue::U32(1)),
+        ],
+    ) {
+        Err(ClientError::Server(ErrorCode::Duplicate, _)) => {}
+        other => panic!("expected Duplicate, got {other:?}"),
+    }
+    assert_eq!(
+        client.get(id).unwrap().unwrap()[0].1,
+        ScanValue::Str("Water plants".into())
+    );
+
+    let other = Uuid::from_u128(5);
+    for (fields, code) in [
+        (
+            vec![
+                ("title", ScanValue::Str("x".into())),
+                ("due_at_unix_ms", ScanValue::I64(0)),
+                ("status", ScanValue::U32(9)),
+            ],
+            ErrorCode::Malformed,
+        ),
+        (
+            vec![
+                ("title", ScanValue::Str("x".into())),
+                ("status", ScanValue::U32(0)),
+            ],
+            ErrorCode::Malformed,
+        ),
+        (
+            vec![
+                ("title", ScanValue::Str("x".into())),
+                ("title", ScanValue::Str("y".into())),
+                ("due_at_unix_ms", ScanValue::I64(0)),
+                ("status", ScanValue::U32(0)),
+            ],
+            ErrorCode::Malformed,
+        ),
+        (
+            vec![
+                ("title", ScanValue::U32(1)),
+                ("due_at_unix_ms", ScanValue::I64(0)),
+                ("status", ScanValue::U32(0)),
+            ],
+            ErrorCode::Malformed,
+        ),
+    ] {
+        match client.insert(other, &fields) {
+            Err(ClientError::Server(got, _)) if got == code => {}
+            other => panic!("expected {code:?} for {fields:?}, got {other:?}"),
+        }
+        assert!(client.get(other).unwrap().is_none(), "nothing inserted");
+    }
+    assert!(matches!(
+        client.insert(other, &[("colour", ScanValue::Str("x".into()))]),
+        Err(ClientError::UnknownField(_))
+    ));
+
+    // Inside a session: refused, and the session is unaffected.
+    let mut session = client.begin().unwrap();
+    session
+        .update(Uuid::from_u128(1), "status", ScanValue::U32(1))
+        .unwrap();
+    session.commit().unwrap();
+    let mut raw = TcpStream::connect(addr).unwrap();
+    let hello = |raw: &mut TcpStream| {
+        write_message(
+            raw,
+            &Request::Hello {
+                protocol_version: rusty_multimodal_db::server::protocol::PROTOCOL_VERSION,
+            },
+        )
+        .unwrap();
+        let _: Response = read_message(raw).unwrap();
+    };
+    hello(&mut raw);
+    write_message(&mut raw, &Request::Begin).unwrap();
+    assert_eq!(read_message::<_, Response>(&mut raw).unwrap(), Response::Ok);
+    write_message(
+        &mut raw,
+        &Request::Insert {
+            id: other,
+            fields: vec![],
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        read_message::<_, Response>(&mut raw).unwrap(),
+        Response::Err {
+            code: ErrorCode::SessionOpen,
+            ..
+        }
+    ));
+    write_message(
+        &mut raw,
+        &Request::UpdateField {
+            id: Uuid::from_u128(2),
+            field: FIELD_STATUS,
+            value: ScanValue::U32(1),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        read_message::<_, Response>(&mut raw).unwrap(),
+        Response::Staged { index: 0 }
+    );
+    write_message(&mut raw, &Request::Commit).unwrap();
+    assert_eq!(read_message::<_, Response>(&mut raw).unwrap(), Response::Ok);
+    drop(raw);
+    drop(client);
+
+    // A new server process on the same directory: the fold at open
+    // carries the insert.
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let got = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        got[0],
+        ("title".to_string(), ScanValue::Str("Water plants".into()))
+    );
+    assert_eq!(got[2], ("status".to_string(), ScanValue::U32(0)));
+    assert_eq!(client.get(other).unwrap(), None);
+    let all = rows(client.query("SELECT title FROM reminder").unwrap());
+    assert_eq!(all.len(), 4);
 }

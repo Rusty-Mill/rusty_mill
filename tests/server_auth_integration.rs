@@ -303,6 +303,19 @@ fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
         Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
         other => panic!("expected Unauthorized for a ReadOnly write, got {other:?}"),
     }
+    // `INS-FR-007` (ADR-0046): `Insert` is the third write under the
+    // same gate — refused before the adapter (which, for `Dog`, would
+    // have said `Unsupported`) is ever reached.
+    match client.insert(
+        Uuid::from_u128(9),
+        &[
+            ("breed", ScanValue::Str("pug".into())),
+            ("age", ScanValue::U32(1)),
+        ],
+    ) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a ReadOnly insert, got {other:?}"),
+    }
 
     client.authenticate("write-token").unwrap();
     assert!(client
