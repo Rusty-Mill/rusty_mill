@@ -153,6 +153,10 @@ pub mod entity;
 pub mod framing;
 #[cfg(feature = "server")]
 pub mod journal;
+/// `Memory`'s adapter — `server`-gated alone (`MEM-FR-006`, ADR-0048),
+/// the `Reminder`/`Entity` precedent: real, deployable capability.
+#[cfg(feature = "server")]
+pub mod memory;
 #[cfg(all(feature = "server", feature = "research"))]
 pub mod order;
 mod pem;

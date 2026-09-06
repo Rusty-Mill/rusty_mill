@@ -169,6 +169,14 @@ impl CheckpointFlush for crate::generic::reminder::ReminderProductionStack {
     }
 }
 
+/// `MEM-FR-006` — front-door like `Reminder` (`ADR-0048`):
+/// `MemoryProductionStack` is `GenericMmapStore` directly.
+impl CheckpointFlush for crate::generic::memory::MemoryProductionStack {
+    fn checkpoint_flush(&self) -> Result<(), DurabilityError> {
+        crate::generic::store::Flush::flush(self)
+    }
+}
+
 /// `ENT-FR-006` — not `research`-gated, matching `Reminder`'s own
 /// front-door status (`ADR-0037`): `EntityProductionStack` is
 /// `NameIndex<MultiSymmetric<GenericMmapStore<..>, ..>, ..>` (ADR-0039,
