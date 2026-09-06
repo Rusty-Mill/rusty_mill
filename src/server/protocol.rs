@@ -69,6 +69,7 @@
 //! | 12 | `SERVER-001` v0.35.0 | + [`Request::Join`] (19) and [`Request::DescribeRelations`] (20), [`Response::JoinedRows`] (15) and [`Response::Relations`] (16) — `JOIN-FR-001`/`002`, ADR-0044: an inner join over a *declared relation* of one table ([`JoinRelation`]: every symmetric relation, one named label, `parent`, or `children`), evaluated server-side as an index nested loop over the adapter's own relation methods and answered as [`JoinedRow`]s carrying both ids and both projected field lists; [`RelationDescriptor`] names what `ON` may say. `right_table`/`target_table` are carried from day one for ADR-0045 (more than one table per connection, gated) and are `None` here. Gated: `Malformed` below 12 (rule 3), sent only after negotiating ≥ 12 (rule 4); `JoinedRows`/`Relations` only ever answer the two gated requests, so no `downgrade_for_version` arm is needed — the `Query`/`Rows` precedent. No new `ErrorCode`. ADR-0044 |
 //! | 13 | `SERVER-001` v0.36.0 | + [`Request::Insert`] (21), [`ErrorCode::Duplicate`] (11), and [`ErrorCode::Storage`] (12) — `INS-FR-007`, ADR-0046: add one whole record to the connection's table at runtime, `id` minted by the client, `fields` in [`Response::Record`]'s own `(tag, value)` shape with every schema-described field present exactly once; answered `Ok`, or `Err { Duplicate }` when the id already has a record (nothing written), `Unsupported` from an adapter with no insert (`Dog`, `Order`, `Employee`), `Malformed`/`UnknownField` for a field list that doesn't match the schema, `Err { Storage }` when the record could not be made durable (nothing applied). Both new codes only ever answer `Insert`. Server-gated `Malformed` below 13 (rule 3, the session/`Join` precedent — a write, not a read); `Duplicate` only ever answers `Insert`, so no `downgrade_for_version` arm. Refused `Unauthorized` for a `ReadOnly` token (the third write beside `UpdateField`/`Transaction`); `SessionOpen` inside a session; never journaled, never part of a `Transaction`. ADR-0046 |
 //! | 14 | `SERVER-001` v0.37.0 | + [`Request::Link`] (22) — `LNK-FR-010`, ADR-0047: add one edge to a symmetric relation of the connection's table at runtime, under a label (`Entity`: any valid label, created at first use — open labels; `Employee`: its one fixed label). Answered `Ok` whether the edge is new or already present (the consumer's insert-or-ignore); `RecordNotFound` for a missing endpoint, `Malformed` for a self-loop, an invalid label, or a label a fixed-label domain does not have, `Storage` when the edge could not be made durable, `Unsupported` from a domain with no symmetric relation or no link (`Dog`, `Reminder`, `Order`). Server-gated `Malformed` below 14 (rule 3), `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session; never journaled or staged. No new response, no new `ErrorCode`. ADR-0047 |
+//! | 15 | `SERVER-001` v0.39.0 | + [`Request::Replace`] (23) — `REP-FR-006`, ADR-0049: replace one record of the connection's table whole, [`Request::Insert`]'s exact body over an id that already has a record (the consumer's `update_memory`/`entity_upsert` write path). Same whole-list validation as `Insert` (`Malformed`/`UnknownField`, the domain's rules), nothing written on refusal; answered `Ok`, or [`Response::NotFound`] when the id has no record — `UpdateField`'s own shape, no new `ErrorCode`, no new `Response`. Relation edges survive; the scannable field's slot is rewritten in place. `Unsupported` from a domain with no replace (`Dog`, `Order`, `Employee`). Server-gated `Malformed` below 15 (rule 3), `Unauthorized` for `ReadOnly` (the fifth write), `SessionOpen` inside a session; never journaled or staged. ADR-0049 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -103,7 +104,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -718,6 +719,27 @@ pub enum Request {
         right: RecordId,
         relation: String,
     },
+    /// Protocol 15 (`REP-FR-006`, ADR-0049,
+    /// `docs/design/SERVER-REPLACE-DESIGN.md`): replace one record of
+    /// this table **whole** — [`Request::Insert`]'s exact shape over an
+    /// id that already has a record, the consumer's `update_memory`/
+    /// `entity_upsert` write path. `fields` must name every field the
+    /// schema describes exactly once with a value of its `ValueKind`
+    /// (`Malformed` otherwise, `UnknownField` for a tag the schema
+    /// doesn't describe), and the domain's own rules apply as at insert;
+    /// nothing is written on any refusal. Answered [`Response::Ok`], or
+    /// [`Response::NotFound`] when `id` has no record — `UpdateField`'s
+    /// own not-found shape, since both write to an existing record.
+    /// Relation edges are not fields: a replaced record keeps every
+    /// neighbor, parent, and child it had. `Unsupported` from an adapter
+    /// that does not implement replacement. Gated server-side:
+    /// `Malformed` below 15; `Unauthorized` for a `ReadOnly` token;
+    /// `SessionOpen` while a session is open (never staged, never
+    /// journaled).
+    Replace {
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -833,6 +855,7 @@ mod tests {
             "Join" | "DescribeRelations" | "JoinedRows" | "Relations" => 12,
             "Insert" | "Err(Duplicate)" | "Err(Storage)" => 13,
             "Link" => 14,
+            "Replace" => 15,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1154,6 +1177,24 @@ mod tests {
                 &[0x02],
                 &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // relation len
                 b"relates_to",
+            ]),
+        );
+        // Protocol 15 (`REP-FR-006`, ADR-0049): `Replace` at 23 — `Insert`'s
+        // exact body shape.
+        assert_golden(
+            "Replace",
+            &Request::Replace {
+                id,
+                fields: vec![(0, ScanValue::Str("labrador".into()))],
+            },
+            &bytes(&[
+                &[0x17, 0x00, 0x00, 0x00], // Replace
+                &ID1,
+                &LEN1,                                             // one field
+                &[0x00, 0x00],                                     // field tag
+                &[0x03, 0x00, 0x00, 0x00],                         // ScanValue::Str
+                &[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // len
+                b"labrador",
             ]),
         );
         // Protocol 13 (`INS-FR-007`, ADR-0046): `Insert` at 21 — the
@@ -1499,8 +1540,8 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 14 is the one that added
-    /// `Request::Link` (13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// module docs' table — version 15 is the one that added
+    /// `Request::Replace` (14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1512,7 +1553,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 14);
+        assert_eq!(PROTOCOL_VERSION, 15);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

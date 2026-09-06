@@ -446,3 +446,27 @@ fn link_is_unsupported_on_the_dog_domain() {
     }
     assert_eq!(client.neighbors(Uuid::from_u128(1)).unwrap(), before);
 }
+
+/// `REP-FR-005` (ADR-0049): `Dog`'s adapter keeps the trait's default —
+/// the bespoke store has no replace — so a well-formed `Replace` is
+/// `Unsupported`, server-side, with the record intact.
+#[test]
+fn replace_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let before = client.get(Uuid::from_u128(1)).unwrap();
+    match client.replace(
+        Uuid::from_u128(1),
+        &[
+            ("breed", ScanValue::Str("pug".into())),
+            ("age", ScanValue::U32(1)),
+        ],
+    ) {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert_eq!(client.get(Uuid::from_u128(1)).unwrap(), before);
+}

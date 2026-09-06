@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_14_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_15_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -156,6 +156,12 @@ fn the_python_reference_client_speaks_the_protocol_at_14_and_at_10() {
     assert_eq!(get("link"), "ok");
     assert_eq!(get("link_neighbors"), "1");
     assert_eq!(get("link_kinds"), "mentioned_with,mentored_by,relates_to");
+    // `REP-FR-007` (ADR-0049): a whole-record replace from Python — the
+    // new alias resolves, the edge survives, an unknown id is `False`.
+    assert_eq!(get("replace"), "ok");
+    assert_eq!(get("replace_by_alias"), "1");
+    assert_eq!(get("replace_neighbors"), "1");
+    assert_eq!(get("replace_unknown"), "notfound");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -182,6 +188,11 @@ fn the_python_reference_client_speaks_the_protocol_at_14_and_at_10() {
         get("insert")
     );
     assert!(
+        get("replace").starts_with("unsupported"),
+        "{}",
+        get("replace")
+    );
+    assert!(
         get("link").starts_with("unsupported"),
         "rule 4: no Link below 14 — {}",
         get("link")
@@ -199,12 +210,13 @@ fn the_python_reference_client_speaks_the_protocol_at_14_and_at_10() {
             .unwrap(),
         vec![Uuid::from_u128(77)]
     );
-    // And so is its insert: the Rust client reads Grace, alias intact.
+    // And so are its insert and its replace: the Rust client reads Grace
+    // with the alias the Python replace gave her (`REP-FR-007`).
     let grace = rust.get(Uuid::from_u128(77)).unwrap().unwrap();
     assert!(grace
         .iter()
         .any(|(name, v)| name == "label" && *v == ScanValue::Str("Grace Hopper".into())));
     assert!(grace.iter().any(
-        |(name, v)| name == "aliases" && *v == ScanValue::StrList(vec!["Amazing Grace".into()])
+        |(name, v)| name == "aliases" && *v == ScanValue::StrList(vec!["Grandma COBOL".into()])
     ));
 }

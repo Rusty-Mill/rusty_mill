@@ -187,6 +187,42 @@ impl<Id> From<DurabilityError> for InsertError<Id> {
     }
 }
 
+/// Error returned by [`query::Replace::replace`] (`REP-FR-001`, ADR-0049):
+/// either `id` has no record — nothing was written, at any layer — or
+/// the innermost durable store could not make the new version durable
+/// (its insert log append failed).
+#[derive(Debug)]
+pub enum ReplaceError<Id> {
+    /// `id` has no record. Nothing was written.
+    NotFound(Id),
+    /// The new version could not be made durable; see the inner error.
+    Durability(DurabilityError),
+}
+
+impl<Id: fmt::Debug> fmt::Display for ReplaceError<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplaceError::NotFound(id) => write!(f, "no record with id {id:?} to replace"),
+            ReplaceError::Durability(e) => write!(f, "replace could not be made durable: {e}"),
+        }
+    }
+}
+
+impl<Id: fmt::Debug> std::error::Error for ReplaceError<Id> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReplaceError::NotFound(_) => None,
+            ReplaceError::Durability(e) => Some(e),
+        }
+    }
+}
+
+impl<Id> From<DurabilityError> for ReplaceError<Id> {
+    fn from(e: DurabilityError) -> Self {
+        ReplaceError::Durability(e)
+    }
+}
+
 /// What [`query::Link::link`] / [`query::MultiLink::link`] did
 /// (`LNK-FR-001`, ADR-0047): the edge is new, or it was already present
 /// and nothing was written — the consumer's insert-or-ignore, a normal

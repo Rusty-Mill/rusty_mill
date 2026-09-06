@@ -269,3 +269,133 @@ fn every_relation_request_is_unsupported() {
     ));
     assert!(client.relations().is_empty());
 }
+
+/// `REP` acceptance criterion 2 (ADR-0049) on `Memory` over a socket —
+/// the consumer's `update_memory`: `replace` with every field rewrites
+/// `content`, `category`, `tags`, `metadata_json`, `sensitive`, and the
+/// counter at once; every read sees the new version (`get`, `filter_eq`
+/// on the new and the old category, `WHERE sensitive`); an unknown id
+/// is `Ok(false)` with nothing created; a malformed list and a negative
+/// counter are `Malformed` with nothing written; `upsert` replaces an
+/// existing record and creates a missing one (`SessionOpen` inside a
+/// session is `tests/server_transaction_integration.rs`'s); and a server restarted on the same directory serves
+/// the replaced version.
+#[test]
+fn replace_a_memory_over_the_wire_every_read_sees_it_and_a_restart_serves_it() {
+    let dir = unique_dir("memory_replace");
+    let addr = start_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let id = Uuid::from_u128(1);
+    let before = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        before[1],
+        ("category".to_string(), ScanValue::Str("preference".into()))
+    );
+    let edited: Vec<(&str, ScanValue)> = vec![
+        ("content", ScanValue::Str("memory 1, revised".into())),
+        ("category", ScanValue::Str("decision".into())),
+        ("tags", ScanValue::StrList(vec!["revised".into()])),
+        ("source", ScanValue::Str("manual".into())),
+        ("metadata_json", ScanValue::Str(r#"{"edited":true}"#.into())),
+        ("created_at_unix_ms", ScanValue::I64(1_000)),
+        ("updated_at_unix_ms", ScanValue::I64(2_000)),
+        ("memory_type", ScanValue::Str("decision".into())),
+        ("status", ScanValue::Str("active".into())),
+        ("sensitive", ScanValue::Bool(true)),
+        ("access_count", ScanValue::I64(4)),
+    ];
+    assert!(client.replace(id, &edited).unwrap());
+    let got = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        got[0],
+        (
+            "content".to_string(),
+            ScanValue::Str("memory 1, revised".into())
+        )
+    );
+    assert_eq!(got[9], ("sensitive".to_string(), ScanValue::Bool(true)));
+    assert_eq!(got[10], ("access_count".to_string(), ScanValue::I64(4)));
+    assert_eq!(
+        client
+            .filter_eq("category", ScanValue::Str("decision".into()))
+            .unwrap(),
+        vec![id]
+    );
+    assert!(!client
+        .filter_eq("category", ScanValue::Str("preference".into()))
+        .unwrap()
+        .contains(&id));
+    let sensitive = rows(
+        client
+            .query("SELECT content FROM memory WHERE sensitive = true")
+            .unwrap(),
+    );
+    assert_eq!(sensitive.len(), 2, "memory 1 joined memory 3");
+    assert_eq!(
+        rows(client.query("SELECT content FROM memory").unwrap()).len(),
+        4,
+        "no new record"
+    );
+
+    // An unknown id: `Ok(false)`, nothing created.
+    assert!(!client.replace(Uuid::from_u128(99), &edited).unwrap());
+    assert!(client.get(Uuid::from_u128(99)).unwrap().is_none());
+    // Refusals write nothing.
+    let mut negative = edited.clone();
+    negative[10] = ("access_count", ScanValue::I64(-1));
+    match client.replace(id, &negative) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    match client.replace(id, &edited[..10]) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    assert!(matches!(
+        client.replace(id, &[("no_such_field", ScanValue::I64(0))]),
+        Err(ClientError::UnknownField(_))
+    ));
+    assert_eq!(
+        client.get(id).unwrap().unwrap(),
+        got,
+        "nothing written on refusal"
+    );
+
+    // `upsert`: an existing id is replaced (`false`), a new one created (`true`).
+    let mut again = edited.clone();
+    again[10] = ("access_count", ScanValue::I64(5));
+    assert!(!client.upsert(id, &again).unwrap());
+    assert_eq!(
+        client.get(id).unwrap().unwrap()[10],
+        ("access_count".to_string(), ScanValue::I64(5))
+    );
+    assert!(client.upsert(Uuid::from_u128(99), &edited).unwrap());
+    assert!(client.get(Uuid::from_u128(99)).unwrap().is_some());
+
+    drop(client);
+
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let got = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        got[0],
+        (
+            "content".to_string(),
+            ScanValue::Str("memory 1, revised".into())
+        )
+    );
+    assert_eq!(
+        got[2],
+        (
+            "tags".to_string(),
+            ScanValue::StrList(vec!["revised".into()])
+        )
+    );
+    assert_eq!(got[10], ("access_count".to_string(), ScanValue::I64(5)));
+    let mut decisions = client
+        .filter_eq("category", ScanValue::Str("decision".into()))
+        .unwrap();
+    decisions.sort();
+    assert_eq!(decisions, vec![id, Uuid::from_u128(99)], "both survived");
+    assert!(client.get(Uuid::from_u128(99)).unwrap().is_some());
+}

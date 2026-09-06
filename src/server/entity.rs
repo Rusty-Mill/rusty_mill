@@ -51,12 +51,12 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome, LinkOutcome};
+use super::{ConnectionStore, InsertOutcome, LinkOutcome, ReplaceOutcome};
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::store::valid_relation_label;
-use crate::generic::{InsertError, LinkError};
+use crate::generic::{InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_LABEL: FieldRef = 0;
@@ -294,6 +294,23 @@ impl ConnectionStore for EntityConnectionStore {
             Ok(()) => Ok(InsertOutcome::Inserted),
             Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
             Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,
+    /// then one whole-record write under the store's own lock — the
+    /// name index follows a changed `label`/`aliases`, every relation
+    /// edge survives. An unknown id is the normal outcome, not an error.
+    fn replace_record(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<ReplaceOutcome, ErrorCode> {
+        let entity = Self::entity_from_fields(id, fields)?;
+        match self.store.replace(entity) {
+            Ok(()) => Ok(ReplaceOutcome::Replaced),
+            Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -795,5 +812,44 @@ mod tests {
             .list_relation_kinds()
             .iter()
             .any(|k| k.contains(' ')));
+    }
+
+    /// `REP-FR-005` (ADR-0049): a replaced entity's new label and aliases
+    /// resolve through `filter_eq` on `label`, the old alias no longer
+    /// does, and its neighbors are untouched; an unknown id is `NotFound`.
+    #[test]
+    fn replace_record_moves_the_name_index_and_keeps_neighbors() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(1);
+        let neighbors_before = adapter.neighbors(id).unwrap();
+        assert!(!neighbors_before.is_empty());
+        let edited = vec![
+            (FIELD_LABEL, ScanValue::Str("Ada King".into())),
+            (FIELD_KIND, ScanValue::Str("person".into())),
+            (FIELD_MENTION_COUNT, ScanValue::I64(99)),
+            (
+                FIELD_ALIASES,
+                ScanValue::StrList(vec!["Enchantress of Number".into()]),
+            ),
+        ];
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced)
+        );
+        assert_eq!(adapter.get(id).unwrap(), edited);
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("enchantress of number".into())),
+            Ok(vec![id])
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("ada lovelace".into())),
+            Ok(vec![]),
+            "the old label no longer resolves"
+        );
+        assert_eq!(adapter.neighbors(id), Ok(neighbors_before));
+        assert_eq!(
+            adapter.replace_record(Uuid::from_u128(4242), edited),
+            Ok(ReplaceOutcome::NotFound)
+        );
     }
 }

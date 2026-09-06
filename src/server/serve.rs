@@ -58,6 +58,17 @@ pub enum LinkOutcome {
     AlreadyLinked,
 }
 
+/// What [`ConnectionStore::replace_record`] did (`REP-FR-005`, ADR-0049):
+/// the record is now the new version, or its id had no record and
+/// nothing was written — the normal-outcome pair `dispatch` maps to
+/// [`Response::Ok`] / [`Response::NotFound`], kept apart from the
+/// `ErrorCode` refusals exactly as [`InsertOutcome`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceOutcome {
+    Replaced,
+    NotFound,
+}
+
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
     /// outcome, not an error, matching [`crate::store::DogStore::get`]'s
@@ -185,6 +196,23 @@ pub trait ConnectionStore: Send + Sync {
         _right: RecordId,
         _relation: &str,
     ) -> Result<LinkOutcome, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// `REP-FR-005` (ADR-0049, protocol 15): replace the record at `id`
+    /// whole. An implementor validates `fields` exactly as
+    /// [`Self::insert_record`] does — the whole list before any write,
+    /// the domain's own rules included — and answers
+    /// [`ReplaceOutcome::NotFound`] when `id` has no record, with nothing
+    /// written. The default answers `Unsupported`: `Dog`'s bespoke store,
+    /// and `Order`/`Employee` as reference material; `Memory`, `Reminder`,
+    /// and `Entity` implement it. A durability failure is
+    /// [`ErrorCode::Storage`], as for an insert.
+    fn replace_record(
+        &self,
+        _id: RecordId,
+        _fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<ReplaceOutcome, ErrorCode> {
         Err(ErrorCode::Unsupported)
     }
 
@@ -1694,6 +1722,13 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(LinkOutcome::Linked | LinkOutcome::AlreadyLinked) => Response::Ok,
             Err(code) => err_response(code),
         },
+        // `REP-FR-005`/`006` (ADR-0049): `Insert`'s validation, `UpdateField`'s
+        // not-found shape. Gated in `handle_connection` like `Insert`.
+        Request::Replace { id, fields } => match store.replace_record(id, fields) {
+            Ok(ReplaceOutcome::Replaced) => Response::Ok,
+            Ok(ReplaceOutcome::NotFound) => Response::NotFound,
+            Err(code) => err_response(code),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -2078,6 +2113,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     | Request::Commit
                     | Request::Insert { .. }
                     | Request::Link { .. }
+                    | Request::Replace { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2243,6 +2279,9 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             // `LNK-FR-010` (ADR-0047): the same two gates, at 14.
             Request::Link { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::Link { .. } if negotiated < 14 => err_response(ErrorCode::Malformed),
+            // `REP-FR-006` (ADR-0049): the same two gates, at 15.
+            Request::Replace { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Replace { .. } if negotiated < 15 => err_response(ErrorCode::Malformed),
             // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
             // protocol-12 requests are unknown to a connection negotiated
             // below 12 — the session precedent, not `Query`'s client-only

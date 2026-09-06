@@ -563,6 +563,17 @@ fn session_state_errors_leave_the_connection_open() {
         ),
         ErrorCode::SessionOpen,
     );
+    // `REP-FR-006` (ADR-0049): a replace is never staged either.
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::Replace {
+                id: Uuid::from_u128(1),
+                fields: vec![],
+            },
+        ),
+        ErrorCode::SessionOpen,
+    );
     assert_eq!(
         stage(&mut c, Uuid::from_u128(1), 30),
         Response::Staged { index: 0 }

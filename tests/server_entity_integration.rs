@@ -1376,3 +1376,84 @@ fn link_over_the_wire_creates_labels_every_read_sees_and_a_restart_serves() {
     );
     assert!(client.neighbors(ada).unwrap().contains(&grace));
 }
+
+/// `REP` acceptance criterion 2 (ADR-0049) on `Entity` — the consumer's
+/// `entity_upsert`: `upsert` on a known id replaces the record whole,
+/// the new alias resolves by name and the old label no longer does, and
+/// every edge under every label survives — `neighbors`, `JOIN … ON
+/// relates_to`, and `traverse` unchanged; a second `upsert` on a fresh
+/// id creates it. A restart serves the replaced version with its edges.
+#[test]
+fn upsert_an_entity_replaces_it_whole_and_keeps_every_edge() {
+    let dir = unique_dir("entity_replace");
+    let addr = start_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let ada = Uuid::from_u128(1);
+    let neighbors_before = client.neighbors(ada).unwrap();
+    let joined_before = client
+        .query("SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to")
+        .unwrap();
+    let edited: Vec<(&str, ScanValue)> = vec![
+        ("label", ScanValue::Str("Ada King".into())),
+        ("kind", ScanValue::Str("person".into())),
+        ("mention_count", ScanValue::I64(50)),
+        (
+            "aliases",
+            ScanValue::StrList(vec!["Enchantress of Number".into()]),
+        ),
+    ];
+    assert!(
+        !client.upsert(ada, &edited).unwrap(),
+        "replaced, not created"
+    );
+    assert_eq!(
+        client.get(ada).unwrap().unwrap()[0],
+        ("label".to_string(), ScanValue::Str("Ada King".into()))
+    );
+    assert_eq!(
+        client
+            .filter_eq("label", ScanValue::Str("enchantress of number".into()))
+            .unwrap(),
+        vec![ada]
+    );
+    assert!(client
+        .filter_eq("label", ScanValue::Str("Ada Lovelace".into()))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        client.neighbors(ada).unwrap(),
+        neighbors_before,
+        "edges are not fields"
+    );
+    let joined_after = client
+        .query("SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to")
+        .unwrap();
+    match (&joined_before, &joined_after) {
+        (QueryResult::Joined(b), QueryResult::Joined(a)) => assert_eq!(b.len(), a.len()),
+        other => panic!("expected joined rows, got {other:?}"),
+    }
+    let grace = entity_id("Grace Hopper");
+    assert!(client
+        .upsert(
+            grace,
+            &[
+                ("label", ScanValue::Str("Grace Hopper".into())),
+                ("kind", ScanValue::Str("person".into())),
+                ("mention_count", ScanValue::I64(0)),
+                ("aliases", ScanValue::StrList(vec![])),
+            ],
+        )
+        .unwrap());
+    drop(client);
+
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(
+        client
+            .filter_eq("label", ScanValue::Str("Ada King".into()))
+            .unwrap(),
+        vec![ada]
+    );
+    assert_eq!(client.neighbors(ada).unwrap(), neighbors_before);
+    assert!(client.get(grace).unwrap().is_some());
+}

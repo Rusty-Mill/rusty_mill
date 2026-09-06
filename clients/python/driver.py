@@ -79,6 +79,18 @@ def main() -> int:
             print(f"link_kinds={','.join(sorted(c.relation_kinds()))}")
         except UnsupportedError as e:
             print(f"link=unsupported:{e}")
+
+        # Protocol 15 (REP-FR-007): replace the new entity whole — a new
+        # alias resolves, the edge from Ada survives; an unknown id is
+        # False.
+        try:
+            replaced = c.replace(new, [("label", "Grace Hopper"), ("kind", "person"), ("mention_count", 2), ("aliases", ["Grandma COBOL"])])
+            print(f"replace={'ok' if replaced else 'notfound'}")
+            print(f"replace_by_alias={len(c.filter_eq('label', 'grandma cobol'))}")
+            print(f"replace_neighbors={len(c.neighbors(new, 'mentored_by'))}")
+            print(f"replace_unknown={'ok' if c.replace(uuid.UUID(int=4242), [('label', 'x'), ('kind', 'x'), ('mention_count', 0), ('aliases', [])]) else 'notfound'}")
+        except UnsupportedError as e:
+            print(f"replace=unsupported:{e}")
     return 0
 
 

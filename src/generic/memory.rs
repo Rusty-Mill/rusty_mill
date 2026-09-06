@@ -32,11 +32,12 @@
 //!   store never parses it. This is the honest way to hold "schema-less
 //!   content" in a fixed-schema record — it is a field the caller owns.
 //! - `content`, `source`, `memory_type`, `status`, the two timestamps,
-//!   and `sensitive` are read-only over the wire after insert. The
-//!   consumer's `update_memory` edits `content`/`category`/`tags`/
-//!   `metadata`/`sensitive` in place — a *whole-record replacement*
-//!   this library does not have yet (`UpdateField` moves one `Copy`
-//!   value). Named as the next round, not hidden.
+//!   and `sensitive` cannot be changed one at a time (`UpdateField`
+//!   moves the one scannable value) — they change *whole*, with every
+//!   other field, through [`crate::generic::query::Replace`]
+//!   (`ADR-0049`): the consumer's `update_memory` edits `content`/
+//!   `category`/`tags`/`metadata`/`sensitive` in place, and that is a
+//!   whole-record replacement on the wire (`Request::Replace`).
 //!
 //! # Identity
 //!
@@ -250,6 +251,54 @@ mod tests {
         assert_eq!(
             FilterEq::<Memory, CategoryField>::filter_eq(&reopened, &"decision".into()),
             vec![Uuid::from_u128(4)]
+        );
+    }
+
+    /// `REP` acceptance criterion 1 (ADR-0049) on the simplest front-door
+    /// stack: a whole-record replace changes `content`, `tags`, the
+    /// indexed `category` (the old bucket loses the id, the new gains
+    /// it), and the scannable `access_count` (the slot, in place), and
+    /// all of it survives a reopen from the files alone.
+    #[test]
+    fn replace_changes_every_field_and_survives_portable_reopen() {
+        use crate::generic::query::Replace;
+        let dir = fresh_temp_dir("generic_memory_replace").unwrap();
+        let path = dir.join("memories.mmap");
+        let mut edited = memory(1, "decision", true);
+        edited.content = "memory 1, revised".into();
+        edited.tags = vec!["revised".into()];
+        edited.access_count = 12;
+        {
+            let mut store = create_memory_production_stack(sample(), &path).unwrap();
+            Replace::<Memory>::replace(&mut store, edited.clone()).unwrap();
+            assert_eq!(
+                GetById::<Memory>::get(&store, edited.id),
+                Some(edited.clone())
+            );
+            assert_eq!(
+                FilterEq::<Memory, CategoryField>::filter_eq(&store, &"general".into()),
+                vec![Uuid::from_u128(3)]
+            );
+            assert_eq!(
+                FilterEq::<Memory, CategoryField>::filter_eq(&store, &"decision".into()),
+                vec![Uuid::from_u128(1)]
+            );
+            let mut counts = ScanField::<Memory, AccessCountField>::scan(&store);
+            counts.sort_unstable();
+            assert_eq!(counts, vec![0, 0, 12]);
+            assert_eq!(AllIds::<Memory>::all_ids(&store).len(), 3, "no new record");
+            match Replace::<Memory>::replace(&mut store, memory(9, "general", false)) {
+                Err(crate::generic::ReplaceError::NotFound(id)) => {
+                    assert_eq!(id, Uuid::from_u128(9))
+                }
+                other => panic!("expected NotFound, got {other:?}"),
+            }
+        }
+        let reopened = open_memory_production_stack_portable(&path).unwrap();
+        assert_eq!(GetById::<Memory>::get(&reopened, edited.id), Some(edited));
+        assert_eq!(
+            FilterEq::<Memory, CategoryField>::filter_eq(&reopened, &"general".into()),
+            vec![Uuid::from_u128(3)]
         );
     }
 }

@@ -79,6 +79,8 @@ pub enum RequestKind {
     Insert,
     /// Protocol 14, ADR-0047.
     Link,
+    /// Protocol 15, ADR-0049.
+    Replace,
 }
 
 impl RequestKind {
@@ -107,6 +109,7 @@ impl RequestKind {
             Request::DescribeRelations => RequestKind::DescribeRelations,
             Request::Insert { .. } => RequestKind::Insert,
             Request::Link { .. } => RequestKind::Link,
+            Request::Replace { .. } => RequestKind::Replace,
         }
     }
 }

@@ -85,12 +85,12 @@
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Link, Neighbors, ScanField, UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Link, Neighbors, Replace, ScanField, UpdateField,
 };
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{InsertError, LinkError, LinkOutcome, NotFound};
+use super::{InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -260,6 +260,29 @@ where
         if let Some(&position) = positions.first() {
             self.position_index.insert(id, position);
         }
+        Ok(())
+    }
+}
+
+// `REP-FR-004`: this layer's own slot is rewritten in place with the new
+// record's value after the inner store accepted it — the `UpdateField`
+// path, driven by the record instead of a caller's value.
+impl<S, R, Marker> Replace<R> for MmapScanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+    S: Replace<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        let value = record.scannable_value();
+        self.inner.replace(record)?;
+        let position = *self
+            .position_index
+            .get(&id)
+            .ok_or(ReplaceError::NotFound(id))?;
+        self.file.write_value(position, value);
         Ok(())
     }
 }

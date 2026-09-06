@@ -266,6 +266,8 @@ Python vector suite (unchanged, proving criterion 4), `cargo doc
 
 - **Whole-record replacement** — the consumer's `update_memory`; the
   next round (a `Request::Replace` over the insert log's format).
+  *Resolved by `ADR-0049` / `SERVER-001` v0.39.0: `Request::Replace` at
+  protocol 15; every `Memory` field is now replaceable whole.*
 - **A float `ValueKind`** for the scoring triple — a wire design of its
   own; until then the consumer keeps scoring in its own layer.
 - **Null** — three nullable columns are omitted for want of it; an

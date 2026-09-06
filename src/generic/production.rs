@@ -30,12 +30,12 @@
 //! real implementation strategy (take the lock, delegate).
 
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, ScanField,
-    UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, Replace,
+    ScanField, UpdateField,
 };
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
-use super::{InsertError, LinkError, LinkOutcome, NotFound};
+use super::{InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
 
@@ -258,6 +258,28 @@ impl<S> GenericProductionStore<S> {
         S: Insert<R>,
     {
         self.inner.write().expect(LOCK_POISONED).insert(record)
+    }
+
+    /// Replace one record whole at runtime (`REP-FR-004`, ADR-0049) under
+    /// the write lock — see [`Replace`] and
+    /// [`super::mmap_store::GenericMmapStore::replace`] for what `Ok`
+    /// guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplaceError::NotFound`] if the id has no record,
+    /// [`ReplaceError::Durability`] if the durable core could not
+    /// persist the new version.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn replace<R>(&self, record: R) -> Result<(), ReplaceError<R::Id>>
+    where
+        R: Record,
+        S: Replace<R>,
+    {
+        self.inner.write().expect(LOCK_POISONED).replace(record)
     }
 
     /// Add one edge to a single symmetric relation at runtime
