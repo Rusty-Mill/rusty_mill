@@ -100,6 +100,10 @@ pub(crate) mod edge_blob;
 /// module's own doc comment for the full account.
 pub mod entity;
 pub(crate) mod insert_log;
+/// `Memory` — this library's third front-door domain (`MEM-FR-001`,
+/// ADR-0048): the consumer's own `memories` table, bounded to the eleven
+/// fields a memory is. See the module's own doc comment.
+pub mod memory;
 pub mod mmap_field;
 pub mod mmap_scanned;
 pub mod mmap_store;

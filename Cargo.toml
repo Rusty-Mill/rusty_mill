@@ -125,6 +125,10 @@ required-features = ["server"]
 name = "server_entity_integration"
 required-features = ["server"]
 
+[[test]]
+name = "server_memory_integration"
+required-features = ["server"]
+
 # `ECO-FR-003` (ADR-0043): proves the client-only feature set builds and
 # works with no server compiled — framing + protocol round trips and the
 # client library's own refusals, connecting to nothing.
@@ -219,6 +223,13 @@ required-features = ["server"]
 # alone is sufficient, since `Entity` is front-door, not `research`-gated.
 [[bin]]
 name = "entity_server"
+required-features = ["server"]
+
+# A minimal, real server binary for the `Memory` domain — mirrors
+# `reminder_server`'s own shape exactly (MEM-FR-007, ADR-0048); `server`
+# alone is sufficient, since `Memory` is front-door, not `research`-gated.
+[[bin]]
+name = "memory_server"
 required-features = ["server"]
 
 [dependencies]

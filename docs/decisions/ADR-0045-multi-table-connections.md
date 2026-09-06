@@ -75,6 +75,10 @@ implementation gated on a second table someone needs:
 over the fixture's `Vec<Customer>` would suffice for the reference
 domain), or (ii) a front-door second table is designed (a `Memory`
 domain is the obvious candidate and a domain round of its own).
+**Gate (ii) met, 2026-09-06**: `ADR-0048` designs and implements
+`Memory` as a front-door second table (`SERVER-001` v0.38.0 /
+FR-048). The implementation unit this ADR gates can now be
+scheduled; its first cross-table link is `memory_entities`.
 
 ## Consequences
 
