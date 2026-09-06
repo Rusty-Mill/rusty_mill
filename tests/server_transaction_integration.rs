@@ -551,6 +551,18 @@ fn session_state_errors_leave_the_connection_open() {
         ),
         ErrorCode::SessionOpen,
     );
+    // `LNK-FR-010` (ADR-0047): a link is never staged either.
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::Link {
+                left: Uuid::from_u128(1),
+                right: Uuid::from_u128(2),
+                relation: "littermate_of".into(),
+            },
+        ),
+        ErrorCode::SessionOpen,
+    );
     assert_eq!(
         stage(&mut c, Uuid::from_u128(1), 30),
         Response::Staged { index: 0 }

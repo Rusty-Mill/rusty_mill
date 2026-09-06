@@ -77,6 +77,8 @@ pub enum RequestKind {
     DescribeRelations,
     /// Protocol 13, ADR-0046.
     Insert,
+    /// Protocol 14, ADR-0047.
+    Link,
 }
 
 impl RequestKind {
@@ -104,6 +106,7 @@ impl RequestKind {
             Request::Join(_) => RequestKind::Join,
             Request::DescribeRelations => RequestKind::DescribeRelations,
             Request::Insert { .. } => RequestKind::Insert,
+            Request::Link { .. } => RequestKind::Link,
         }
     }
 }

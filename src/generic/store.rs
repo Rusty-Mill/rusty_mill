@@ -16,17 +16,21 @@
 //! in. Every wrapper below forwards it, same as every other capability.
 
 use super::edge_blob::{self, EdgeBlob};
+use super::insert_log;
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Neighbors, Parent, ScanField, UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, ScanField,
+    UpdateField,
 };
+use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{InsertError, NotFound};
+use super::{InsertError, LinkError, LinkOutcome, NotFound};
+use crate::durability::record_blob::{EncodedRecordBlob, Fnv1a64};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Owns the records — the base of every composed stack. The generic
 /// analogue of `CanonicalStore`'s `HashMap<Uuid, DogRecord>`.
@@ -448,6 +452,11 @@ where
 {
     inner: S,
     adjacency: HashMap<R::Id, Vec<R::Id>>,
+    /// Where this layer's edge blob lives — `Some` from `create`/`open`/
+    /// `open_portable`, `None` from `new` (`LNK-FR-002`, ADR-0047): a
+    /// runtime [`Link`] is logged beside the blob when there is one, and
+    /// stays in memory when there is not.
+    edges_path: Option<PathBuf>,
     _marker: PhantomData<Marker>,
 }
 
@@ -464,9 +473,43 @@ where
         Self {
             inner,
             adjacency,
+            edges_path: None,
             _marker: PhantomData,
         }
     }
+
+    fn with_path(mut self, edges_path: &Path) -> Self {
+        self.edges_path = Some(edges_path.to_path_buf());
+        self
+    }
+
+    fn has_edge(&self, a: R::Id, b: R::Id) -> bool {
+        self.adjacency.get(&a).is_some_and(|v| v.contains(&b))
+    }
+}
+
+/// `LNK-FR-004`: `edges` followed by every logged pair not already
+/// present in either orientation, in log order — the same skip that
+/// makes a fold idempotent for records. Shared by both relation layers.
+fn merge_edge_lists<Id: Copy + Eq + std::hash::Hash>(
+    mut edges: Vec<(Id, Id)>,
+    logged: Vec<(Id, Id)>,
+) -> Vec<(Id, Id)> {
+    if logged.is_empty() {
+        return edges;
+    }
+    let mut seen: std::collections::HashSet<(Id, Id)> = std::collections::HashSet::new();
+    for &(a, b) in &edges {
+        seen.insert((a, b));
+        seen.insert((b, a));
+    }
+    for (a, b) in logged {
+        if seen.insert((a, b)) {
+            seen.insert((b, a));
+            edges.push((a, b));
+        }
+    }
+    edges
 }
 
 /// The edge list [`Symmetric::read_portable_edges`] returns: the pairs
@@ -518,10 +561,12 @@ where
         edges: &[(R::Id, R::Id)],
         edges_path: &Path,
     ) -> Result<Self, DurabilityError> {
+        // `LNK-FR-004`: a fresh layer starts with no edge log.
+        insert_log::clear(&insert_log::log_path(edges_path))?;
         EdgeBlob::new(edges, R::SCHEMA_TAG)
             .encode()?
             .write(edges_path)?;
-        Ok(Self::new(inner, edges))
+        Ok(Self::new(inner, edges).with_path(edges_path))
     }
 
     /// [`Self::new`] over the caller's `edges`, keeping the blob at
@@ -543,16 +588,61 @@ where
         edges: &[(R::Id, R::Id)],
         edges_path: &Path,
     ) -> Result<Self, DurabilityError> {
-        let blob = EdgeBlob::new(edges, R::SCHEMA_TAG);
+        // `LNK-FR-004`: fold the edge log in first, so the rewrite below
+        // covers every runtime link and the log can then be cleared.
+        let log = insert_log::log_path(edges_path);
+        let edges = merge_edge_lists(edges.to_vec(), insert_log::read_items(&log, R::SCHEMA_TAG)?);
+        let blob = EdgeBlob::new(&edges, R::SCHEMA_TAG);
         if !blob.is_current_at(edges_path) {
             blob.encode()?.write(edges_path)?;
         }
-        Ok(Self::new(inner, edges))
+        insert_log::clear(&log)?;
+        Ok(Self::new(inner, &edges).with_path(edges_path))
+    }
+
+    /// Add one edge at runtime — `LNK-FR-002` (ADR-0047): both ids must
+    /// have a record in the store beneath, `a != b`, and an edge already
+    /// present in either orientation is [`LinkOutcome::AlreadyLinked`]
+    /// with nothing written. Otherwise the pair is appended to the edge
+    /// log at `<edges_path>.inserts` and `sync_data`ed *before* the
+    /// adjacency gains both directions, so `Linked` means durable; the
+    /// next [`Self::open`] folds the log into the blob. A layer built
+    /// with [`Self::new`] has no path and links in memory only.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::UnknownRecord`] (the first missing endpoint, `a`
+    /// before `b`), [`LinkError::SelfLoop`], or
+    /// [`LinkError::Durability`] if the log append fails.
+    pub fn link(&mut self, a: R::Id, b: R::Id) -> Result<LinkOutcome, LinkError<R::Id>>
+    where
+        S: GetById<R>,
+    {
+        if self.inner.get(a).is_none() {
+            return Err(LinkError::UnknownRecord(a));
+        }
+        if self.inner.get(b).is_none() {
+            return Err(LinkError::UnknownRecord(b));
+        }
+        if a == b {
+            return Err(LinkError::SelfLoop(a));
+        }
+        if self.has_edge(a, b) {
+            return Ok(LinkOutcome::AlreadyLinked);
+        }
+        if let Some(path) = &self.edges_path {
+            insert_log::append_item(&insert_log::log_path(path), R::SCHEMA_TAG, &(a, b))?;
+        }
+        self.adjacency.entry(a).or_default().push(b);
+        self.adjacency.entry(b).or_default().push(a);
+        Ok(LinkOutcome::Linked)
     }
 
     /// The edge list persisted at `edges_path`, in the order it was
-    /// written (`SYMPORT-FR-002`). Reads only the blob; never writes,
-    /// never touches the inner store.
+    /// written (`SYMPORT-FR-002`), followed by every runtime-linked pair
+    /// its edge log holds that the blob does not (`LNK-FR-004`). Reads
+    /// only the blob and the log; never writes, never touches the inner
+    /// store.
     ///
     /// # Errors
     ///
@@ -563,7 +653,9 @@ where
     /// (`SCHTAG-FR-003`), doesn't decode, or doesn't match its own header
     /// fingerprint (`SYMPORT-FR-005`).
     pub fn read_portable_edges(edges_path: &Path) -> Result<PortableEdges<R>, DurabilityError> {
-        edge_blob::read(edges_path, R::SCHEMA_TAG)
+        let persisted = edge_blob::read(edges_path, R::SCHEMA_TAG)?;
+        let logged = insert_log::read_items(&insert_log::log_path(edges_path), R::SCHEMA_TAG)?;
+        Ok(merge_edge_lists(persisted, logged))
     }
 
     /// Rebuild the layer from its blob alone — exactly
@@ -577,7 +669,23 @@ where
     ///
     /// Everything [`Self::read_portable_edges`] can return.
     pub fn open_portable(inner: S, edges_path: &Path) -> Result<Self, DurabilityError> {
-        Ok(Self::new(inner, &Self::read_portable_edges(edges_path)?))
+        // Through `open`, since `LNK-FR-004`: a non-empty edge log is
+        // folded into the blob and cleared; with no log, `open`'s
+        // currency check passes and nothing is written, as before.
+        Self::open(inner, &Self::read_portable_edges(edges_path)?, edges_path)
+    }
+}
+
+// `LNK-FR-002`: the inherent [`Symmetric::link`], reached through the
+// trait every layer above forwards.
+impl<S, R, Marker> Link<R, Marker> for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker> + SchemaTag,
+    R::Id: Serialize + DeserializeOwned,
+    S: GetById<R>,
+{
+    fn link(&mut self, a: R::Id, b: R::Id) -> Result<LinkOutcome, LinkError<R::Id>> {
+        Symmetric::link(self, a, b)
     }
 }
 
@@ -685,9 +793,82 @@ where
 /// (`STORAGE-016`'s own `EdgeBlob` mechanism, reused directly — one blob
 /// per label, at `<path>.<label>.edges`), the same real portability
 /// `Symmetric` already has, generalized to more than one label.
+/// Whether `label` may name a relation — `LNK-FR-001`/`005` (ADR-0047).
+/// A label becomes part of a file name (`<path>.<label>.edges`), so it
+/// is 1 to 64 bytes of ASCII letters, digits, `_`, or `-`, not starting
+/// with `-`: no path separators, no `..`, no whitespace, nothing that
+/// could steer a file name. Checked at the server boundary *and* at the
+/// layer, so no caller can bypass it. The consumer's own labels keep
+/// case and may contain spaces (`ADR-0042` F3); a bridge maps those
+/// (`works with` → `works_with`) — stated in the design's Non-goals.
+pub fn valid_relation_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0] != b'-'
+        && bytes
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+}
+
+/// The label manifest — `<path>.relations`, `LNK-FR-006` (ADR-0047): the
+/// labels a [`MultiSymmetric`] has ever had an edge blob for, so a
+/// portable reopen discovers a label created at runtime without the
+/// caller naming it. A tagged blob (`GENLABL\0`, version 1, the record
+/// type's tag, the body fingerprinted) of `Vec<String>` in first-seen
+/// order; a missing file is the empty set, so every directory written
+/// before this round reopens exactly as before.
+mod label_manifest {
+    use super::*;
+
+    const MAGIC: [u8; 8] = *b"GENLABL\0";
+    const VERSION: u32 = 1;
+
+    pub(super) fn path(base: &Path) -> PathBuf {
+        let mut name = base.as_os_str().to_owned();
+        name.push(".relations");
+        PathBuf::from(name)
+    }
+
+    pub(super) fn read(base: &Path, tag: &str) -> Result<Vec<String>, DurabilityError> {
+        let manifest = path(base);
+        let unreadable = |cause: String| DurabilityError::RecordBlobUnreadable {
+            path: manifest.clone(),
+            cause,
+        };
+        let bytes = match std::fs::read(&manifest) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let claimed = parse_tagged_header(&bytes, &MAGIC, VERSION, tag).map_err(unreadable)?;
+        let body = &bytes[TAGGED_HEADER_LEN..];
+        let mut hash = Fnv1a64::new();
+        hash.update(body);
+        if hash.finish() != claimed {
+            return Err(unreadable("fingerprint mismatch".to_owned()));
+        }
+        crate::codec::decode(body).map_err(|e| unreadable(format!("body does not decode: {e}")))
+    }
+
+    pub(super) fn write(base: &Path, tag: &str, labels: &[String]) -> Result<(), DurabilityError> {
+        let body = crate::codec::encode(labels)?;
+        let mut hash = Fnv1a64::new();
+        hash.update(&body);
+        EncodedRecordBlob {
+            image: encode_tagged_image(&MAGIC, VERSION, hash.finish(), tag, &body),
+        }
+        .write(&path(base))
+    }
+}
+
 pub struct MultiSymmetric<S, R: Record> {
     inner: S,
     adjacency: HashMap<String, HashMap<R::Id, Vec<R::Id>>>,
+    /// The base path its blobs, logs, and manifest hang off — `Some`
+    /// from `create`/`open`/`open_portable`, `None` from `new`
+    /// (`LNK-FR-005`).
+    base_path: Option<PathBuf>,
 }
 
 /// A named list of relations, each a label paired with its own edge
@@ -696,6 +877,10 @@ pub struct MultiSymmetric<S, R: Record> {
 /// signatures under clippy's `type_complexity` threshold; carries no
 /// behavior of its own.
 type LabeledRelations<R> = [(String, Vec<(<R as Record>::Id, <R as Record>::Id)>)];
+
+/// The owned form of [`LabeledRelations`] — what the manifest union
+/// (`LNK-FR-006`) builds before handing it to [`MultiSymmetric::new`].
+type OwnedLabeledRelations<R> = Vec<(String, Vec<(<R as Record>::Id, <R as Record>::Id)>)>;
 
 /// The suffix pattern `<path>.<label>.edges` uses — parallels
 /// [`super::edge_blob::edges_path`]'s own single-relation `<path>.edges`
@@ -723,7 +908,31 @@ impl<S, R: Record> MultiSymmetric<S, R> {
             }
             adjacency.insert(label.clone(), map);
         }
-        Self { inner, adjacency }
+        Self {
+            inner,
+            adjacency,
+            base_path: None,
+        }
+    }
+
+    fn with_path(mut self, base: &Path) -> Self {
+        self.base_path = Some(base.to_path_buf());
+        self
+    }
+
+    /// `LNK-FR-006`/`007`: `relations` plus every manifest label it does
+    /// not name (with an empty edge list), in caller-then-manifest order.
+    fn with_manifest_labels(
+        relations: &LabeledRelations<R>,
+        manifest: Vec<String>,
+    ) -> OwnedLabeledRelations<R> {
+        let mut all: OwnedLabeledRelations<R> = relations.to_vec();
+        for label in manifest {
+            if !all.iter().any(|(l, _)| *l == label) {
+                all.push((label, Vec::new()));
+            }
+        }
+        all
     }
 }
 
@@ -746,11 +955,15 @@ where
         path: &Path,
     ) -> Result<Self, DurabilityError> {
         for (label, edges) in relations {
+            let blob_path = labeled_edges_path(path, label);
+            insert_log::clear(&insert_log::log_path(&blob_path))?;
             EdgeBlob::new(edges, R::SCHEMA_TAG)
                 .encode()?
-                .write(&labeled_edges_path(path, label))?;
+                .write(&blob_path)?;
         }
-        Ok(Self::new(inner, relations))
+        let labels: Vec<String> = relations.iter().map(|(l, _)| l.clone()).collect();
+        label_manifest::write(path, R::SCHEMA_TAG, &labels)?;
+        Ok(Self::new(inner, relations).with_path(path))
     }
 
     /// [`Self::new`] over `relations`, rewriting only the labels whose
@@ -765,37 +978,134 @@ where
         relations: &LabeledRelations<R>,
         path: &Path,
     ) -> Result<Self, DurabilityError> {
-        for (label, edges) in relations {
-            let blob = EdgeBlob::new(edges, R::SCHEMA_TAG);
+        // `LNK-FR-006`/`007`: the caller's labels plus the manifest's,
+        // each folding its own edge log before the stale check.
+        let manifest = label_manifest::read(path, R::SCHEMA_TAG)?;
+        let mut all = Self::with_manifest_labels(relations, manifest.clone());
+        for (label, edges) in &mut all {
             let blob_path = labeled_edges_path(path, label);
+            let log = insert_log::log_path(&blob_path);
+            *edges = merge_edge_lists(
+                std::mem::take(edges),
+                insert_log::read_items(&log, R::SCHEMA_TAG)?,
+            );
+            let blob = EdgeBlob::new(edges, R::SCHEMA_TAG);
             if !blob.is_current_at(&blob_path) {
                 blob.encode()?.write(&blob_path)?;
             }
+            insert_log::clear(&log)?;
         }
-        Ok(Self::new(inner, relations))
+        let labels: Vec<String> = all.iter().map(|(l, _)| l.clone()).collect();
+        if labels != manifest {
+            label_manifest::write(path, R::SCHEMA_TAG, &labels)?;
+        }
+        Ok(Self::new(inner, &all).with_path(path))
     }
 
-    /// Rebuild every named relation from its own blob alone —
-    /// [`Self::new`] over each `(label, Self::read_portable_edges(label))`
-    /// pair. Unlike `Symmetric::open_portable`, `labels` must still be
-    /// named by the caller: an open-ended, self-discovering label set
-    /// would need a manifest file this primitive does not have (a real,
-    /// named limitation, not an oversight — every real caller of this
-    /// method knows its own domain's fixed relation set at compile time,
-    /// e.g. `crate::generic::entity`'s own `RELATION_LABELS`). Never
-    /// writes.
+    /// Add one edge under `relation` at runtime — `LNK-FR-005` (ADR-0047):
+    /// the label is validated ([`valid_relation_label`]), then
+    /// [`Symmetric::link`]'s rules apply within that label's adjacency.
+    /// A label with no adjacency yet is **created** — when the layer has
+    /// a base path, an empty edge blob for it and the rewritten manifest
+    /// land *before* the edge is logged, so every manifest label has a
+    /// blob and a crash between the steps leaves an empty relation, not
+    /// a dangling one. `relation_kinds` reports the new label at once.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::InvalidLabel`], [`LinkError::UnknownRecord`],
+    /// [`LinkError::SelfLoop`], or [`LinkError::Durability`].
+    pub fn link(
+        &mut self,
+        relation: &str,
+        a: R::Id,
+        b: R::Id,
+    ) -> Result<LinkOutcome, LinkError<R::Id>>
+    where
+        S: GetById<R>,
+    {
+        if !valid_relation_label(relation) {
+            return Err(LinkError::InvalidLabel(relation.to_string()));
+        }
+        if self.inner.get(a).is_none() {
+            return Err(LinkError::UnknownRecord(a));
+        }
+        if self.inner.get(b).is_none() {
+            return Err(LinkError::UnknownRecord(b));
+        }
+        if a == b {
+            return Err(LinkError::SelfLoop(a));
+        }
+        if !self.adjacency.contains_key(relation) {
+            if let Some(base) = &self.base_path {
+                let empty: [(R::Id, R::Id); 0] = [];
+                EdgeBlob::new(&empty, R::SCHEMA_TAG)
+                    .encode()?
+                    .write(&labeled_edges_path(base, relation))?;
+                let mut labels = label_manifest::read(base, R::SCHEMA_TAG)?;
+                if !labels.iter().any(|l| l == relation) {
+                    labels.push(relation.to_string());
+                    label_manifest::write(base, R::SCHEMA_TAG, &labels)?;
+                }
+            }
+            self.adjacency.insert(relation.to_string(), HashMap::new());
+        }
+        let adjacency = self
+            .adjacency
+            .get_mut(relation)
+            .expect("inserted just above when absent");
+        if adjacency.get(&a).is_some_and(|v| v.contains(&b)) {
+            return Ok(LinkOutcome::AlreadyLinked);
+        }
+        if let Some(base) = &self.base_path {
+            let log = insert_log::log_path(&labeled_edges_path(base, relation));
+            insert_log::append_item(&log, R::SCHEMA_TAG, &(a, b))?;
+        }
+        adjacency.entry(a).or_default().push(b);
+        adjacency.entry(b).or_default().push(a);
+        Ok(LinkOutcome::Linked)
+    }
+
+    /// Rebuild every relation from its own blob alone — the caller's
+    /// `labels` plus, since `LNK-FR-006` (ADR-0047), every label the
+    /// manifest at `<path>.relations` names (a label created at runtime
+    /// by [`Self::link`]). Before that round an open-ended label set had
+    /// no manifest and the caller had to name every label; the caller's
+    /// list is still honored, so `crate::generic::entity`'s compile-time
+    /// `RELATION_LABELS` keeps working unchanged.
     ///
     /// # Errors
     ///
     /// Returns [`DurabilityError::RecordBlobUnreadable`], naming
     /// whichever labeled blob is missing or invalid.
     pub fn open_portable(inner: S, path: &Path, labels: &[&str]) -> Result<Self, DurabilityError> {
-        let mut relations = Vec::with_capacity(labels.len());
-        for &label in labels {
-            let edges = edge_blob::read::<R::Id>(&labeled_edges_path(path, label), R::SCHEMA_TAG)?;
-            relations.push((label.to_string(), edges));
+        let named: OwnedLabeledRelations<R> =
+            labels.iter().map(|l| (l.to_string(), Vec::new())).collect();
+        let manifest = label_manifest::read(path, R::SCHEMA_TAG)?;
+        let mut relations = Self::with_manifest_labels(&named, manifest);
+        for (label, edges) in &mut relations {
+            *edges = edge_blob::read::<R::Id>(&labeled_edges_path(path, label), R::SCHEMA_TAG)?;
         }
-        Ok(Self::new(inner, &relations))
+        // Through `open`: any label's edge log is folded and cleared; with
+        // no log nothing is written, as before (`LNK-FR-007`).
+        Self::open(inner, &relations, path)
+    }
+}
+
+// `LNK-FR-005`: the inherent [`MultiSymmetric::link`], through the trait.
+impl<S, R> MultiLink<R> for MultiSymmetric<S, R>
+where
+    R: Record + SchemaTag,
+    R::Id: Serialize + DeserializeOwned,
+    S: GetById<R>,
+{
+    fn link(
+        &mut self,
+        relation: &str,
+        a: R::Id,
+        b: R::Id,
+    ) -> Result<LinkOutcome, LinkError<R::Id>> {
+        MultiSymmetric::link(self, relation, a, b)
     }
 }
 
@@ -1099,6 +1409,33 @@ where
     }
 }
 
+// `LNK-FR-008`: `NameIndex` forwards both link shapes — the name index
+// is over records, and an edge changes no name.
+impl<S, R, R2, RelMarker> Link<R2, RelMarker> for NameIndex<S, R>
+where
+    R: super::query::NameIndexed,
+    R2: SymmetricRelation<RelMarker>,
+    S: Link<R2, RelMarker>,
+{
+    fn link(&mut self, a: R2::Id, b: R2::Id) -> Result<LinkOutcome, LinkError<R2::Id>> {
+        self.inner.link(a, b)
+    }
+}
+
+impl<S, R: super::query::NameIndexed> MultiLink<R> for NameIndex<S, R>
+where
+    S: MultiLink<R>,
+{
+    fn link(
+        &mut self,
+        relation: &str,
+        a: R::Id,
+        b: R::Id,
+    ) -> Result<LinkOutcome, LinkError<R::Id>> {
+        self.inner.link(relation, a, b)
+    }
+}
+
 /// `Parent` (the cheap direction of a directed relation) needs no new
 /// store state at all — a blanket impl over anything that already
 /// provides `GetById<C>`, per the design doc §2.
@@ -1294,6 +1631,21 @@ where
     }
 }
 
+// `LNK-FR-008`: `Reversed` forwards `Link` for the symmetric relation
+// beneath it (`Employee`'s `collaborates_with`); its own `ChildOf`
+// relation is a record field, never linked.
+impl<S, P, C, Marker, R, RelMarker> Link<R, RelMarker> for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    R: SymmetricRelation<RelMarker>,
+    S: Link<R, RelMarker>,
+{
+    fn link(&mut self, a: R::Id, b: R::Id) -> Result<LinkOutcome, LinkError<R::Id>> {
+        self.inner.link(a, b)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,6 +1763,232 @@ mod tests {
         match Insert::<Node>::insert(&mut layer, Node { id: 1 }) {
             Err(InsertError::Duplicate(1)) => {}
             other => panic!("expected Duplicate(1), got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `LNK-FR-001`: the label charset, checked at the layer as well as at
+    /// the boundary.
+    #[test]
+    fn valid_relation_label_accepts_a_safe_charset_only() {
+        for ok in ["relates_to", "works-with", "A1", "_x", &"a".repeat(64)] {
+            assert!(valid_relation_label(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "-leading",
+            "has space",
+            "../up",
+            "a/b",
+            "tab\there",
+            "ünïcode",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_relation_label(bad), "{bad:?}");
+        }
+    }
+
+    /// `LNK` acceptance criterion 1 (ADR-0047) on a `Symmetric` over a
+    /// blob: a link is visible both ways at once; the repeat is
+    /// `AlreadyLinked` with the log unchanged; a self-loop and an unknown
+    /// id are refused with nothing written; after a portable reopen the
+    /// edge is in the blob, the log gone; a second reopen writes nothing.
+    #[test]
+    fn link_is_immediately_visible_durable_and_folded_at_reopen() {
+        let (dir, edges_path) = scratch("symmetric_link");
+        let log = insert_log::log_path(&edges_path);
+        {
+            let mut layer = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+            assert!(!log.exists());
+            assert_eq!(
+                Link::<Node, Linked>::link(&mut layer, 1, 4).unwrap(),
+                LinkOutcome::Linked
+            );
+            assert!(log.exists(), "the link is logged");
+            assert_eq!(
+                Neighbors::<Node, Linked>::neighbors(&layer, 1),
+                vec![2, 3, 4]
+            );
+            assert_eq!(Neighbors::<Node, Linked>::neighbors(&layer, 4), vec![1]);
+            let log_len = std::fs::metadata(&log).unwrap().len();
+            assert_eq!(
+                Link::<Node, Linked>::link(&mut layer, 4, 1).unwrap(),
+                LinkOutcome::AlreadyLinked,
+                "either orientation"
+            );
+            assert_eq!(
+                std::fs::metadata(&log).unwrap().len(),
+                log_len,
+                "nothing written"
+            );
+            assert!(matches!(
+                Link::<Node, Linked>::link(&mut layer, 2, 2),
+                Err(LinkError::SelfLoop(2))
+            ));
+            assert!(matches!(
+                Link::<Node, Linked>::link(&mut layer, 1, 9),
+                Err(LinkError::UnknownRecord(9))
+            ));
+            assert!(matches!(
+                Link::<Node, Linked>::link(&mut layer, 9, 1),
+                Err(LinkError::UnknownRecord(9))
+            ));
+            assert_eq!(std::fs::metadata(&log).unwrap().len(), log_len);
+        }
+
+        assert_eq!(
+            Layer::read_portable_edges(&edges_path).unwrap(),
+            vec![(1, 2), (2, 3), (1, 3), (1, 4)],
+            "blob order, then the logged edge"
+        );
+        let reopened = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&reopened, 4), vec![1]);
+        assert!(!log.exists(), "the fold removed the log");
+        let blob_bytes = std::fs::read(&edges_path).unwrap();
+        drop(reopened);
+        let again = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&again, 1),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            std::fs::read(&edges_path).unwrap(),
+            blob_bytes,
+            "no rewrite"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `LNK-FR-002`: a layer built with `new` has no path — it links in
+    /// memory only and never touches a file.
+    #[test]
+    fn a_layer_built_with_new_links_in_memory_only() {
+        let mut layer = Layer::new(BaseStore::new(nodes()), &edges());
+        assert_eq!(
+            Link::<Node, Linked>::link(&mut layer, 1, 4).unwrap(),
+            LinkOutcome::Linked
+        );
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&layer, 4), vec![1]);
+    }
+
+    /// `LNK-FR-004`: a logged edge the blob already holds is skipped, so a
+    /// fold that crashed after the rewrite replays without a double edge.
+    #[test]
+    fn a_logged_edge_the_blob_already_holds_is_skipped() {
+        let (dir, edges_path) = scratch("symmetric_link_dup");
+        drop(Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap());
+        let log = insert_log::log_path(&edges_path);
+        insert_log::append_item(&log, Node::SCHEMA_TAG, &(3u32, 2u32)).unwrap();
+        insert_log::append_item(&log, Node::SCHEMA_TAG, &(4u32, 1u32)).unwrap();
+        let reopened = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&reopened, 2),
+            vec![1, 3]
+        );
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&reopened, 4), vec![1]);
+        assert!(!log.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    type Multi = MultiSymmetric<BaseStore<Node>, Node>;
+
+    /// `LNK` acceptance criterion 2 (ADR-0047) on `MultiSymmetric`: a link
+    /// under an existing label; a link under a **new** label creates it —
+    /// its blob and the manifest exist, `relation_kinds` lists it — and a
+    /// portable reopen naming only the original labels finds it; an
+    /// invalid label touches no file.
+    #[test]
+    fn multi_link_creates_labels_recorded_in_a_manifest_the_portable_reopen_reads() {
+        use super::super::query::MultiNeighbors;
+        let dir = fresh_temp_dir("multi_link_manifest").unwrap();
+        let base = dir.join("store.mmap");
+        let relations = vec![("knows".to_string(), edges())];
+        {
+            let mut layer = Multi::create(BaseStore::new(nodes()), &relations, &base).unwrap();
+            assert_eq!(
+                label_manifest::read(&base, Node::SCHEMA_TAG).unwrap(),
+                vec!["knows".to_string()]
+            );
+            assert_eq!(
+                MultiLink::<Node>::link(&mut layer, "knows", 1, 4).unwrap(),
+                LinkOutcome::Linked
+            );
+            assert_eq!(
+                MultiLink::<Node>::link(&mut layer, "mentors", 2, 4).unwrap(),
+                LinkOutcome::Linked,
+                "a new label"
+            );
+            assert!(
+                labeled_edges_path(&base, "mentors").is_file(),
+                "an (empty) blob"
+            );
+            assert_eq!(
+                label_manifest::read(&base, Node::SCHEMA_TAG).unwrap(),
+                vec!["knows".to_string(), "mentors".to_string()]
+            );
+            let mut kinds = layer.relation_kinds();
+            kinds.sort();
+            assert_eq!(kinds, vec!["knows", "mentors"]);
+            assert_eq!(layer.neighbors_by_relation("mentors", 4), Some(vec![2]));
+            assert_eq!(
+                MultiLink::<Node>::link(&mut layer, "mentors", 4, 2).unwrap(),
+                LinkOutcome::AlreadyLinked
+            );
+            for bad in ["", "../x", "has space", "-x"] {
+                assert!(
+                    matches!(
+                        MultiLink::<Node>::link(&mut layer, bad, 1, 2),
+                        Err(LinkError::InvalidLabel(_))
+                    ),
+                    "{bad:?}"
+                );
+                assert!(!labeled_edges_path(&base, bad).exists());
+            }
+            assert!(matches!(
+                MultiLink::<Node>::link(&mut layer, "knows", 1, 1),
+                Err(LinkError::SelfLoop(1))
+            ));
+            assert!(matches!(
+                MultiLink::<Node>::link(&mut layer, "knows", 1, 9),
+                Err(LinkError::UnknownRecord(9))
+            ));
+        }
+        let reopened = Multi::open_portable(BaseStore::new(nodes()), &base, &["knows"]).unwrap();
+        let mut kinds = reopened.relation_kinds();
+        kinds.sort();
+        assert_eq!(kinds, vec!["knows", "mentors"], "the manifest supplied it");
+        assert_eq!(reopened.neighbors_by_relation("mentors", 2), Some(vec![4]));
+        assert_eq!(reopened.neighbors_by_relation("knows", 4), Some(vec![1]));
+        assert!(!insert_log::log_path(&labeled_edges_path(&base, "mentors")).exists());
+        assert!(!insert_log::log_path(&labeled_edges_path(&base, "knows")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `LNK-FR-006`: a directory written before this round has no
+    /// manifest — it reopens as before, and `open` then writes one so the
+    /// caller's labels are durable from then on.
+    #[test]
+    fn a_directory_without_a_manifest_reopens_and_gains_one() {
+        use super::super::query::MultiNeighbors;
+        let dir = fresh_temp_dir("multi_link_no_manifest").unwrap();
+        let base = dir.join("store.mmap");
+        let relations = vec![("knows".to_string(), edges())];
+        drop(Multi::create(BaseStore::new(nodes()), &relations, &base).unwrap());
+        std::fs::remove_file(label_manifest::path(&base)).unwrap();
+        let reopened = Multi::open_portable(BaseStore::new(nodes()), &base, &["knows"]).unwrap();
+        assert_eq!(reopened.relation_kinds(), vec!["knows"]);
+        assert_eq!(
+            label_manifest::read(&base, Node::SCHEMA_TAG).unwrap(),
+            vec!["knows".to_string()]
+        );
+        // A foreign manifest is refused by name.
+        label_manifest::write(&base, "other::Type", &["x".to_string()]).unwrap();
+        match Multi::open_portable(BaseStore::new(nodes()), &base, &["knows"]) {
+            Err(DurabilityError::RecordBlobUnreadable { path, cause }) => {
+                assert!(path.ends_with("store.mmap.relations"), "{path:?}");
+                assert!(cause.contains("schema tag mismatch"), "{cause}");
+            }
+            other => panic!("expected RecordBlobUnreadable, got {:?}", other.map(|_| ())),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

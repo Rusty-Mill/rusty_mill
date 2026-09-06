@@ -227,6 +227,19 @@ class Client:
         tagged = tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
         _expect_ok(self._roundtrip(p.Insert(record_id, tagged)))
 
+    def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
+        """Add one edge under a symmetric relation label (LNK-FR-012,
+        protocol 14). Returns normally whether the edge is new or already
+        present. ``UnsupportedError`` on a domain without a symmetric
+        relation or below 14, with no frame sent."""
+        if not self.schema.relations.neighbors:
+            raise UnsupportedError("Link on this domain")
+        _expect_ok(self._roundtrip(p.Link(left, right, relation)))
+        if not any(r.name == relation for r in self.relations):
+            rel = _exchange(self._sock, p.DescribeRelations())
+            if isinstance(rel, p.Relations):
+                self.relations = list(rel.relations)
+
     def transaction(self, updates: Sequence[Tuple[uuid.UUID, str, Any]]) -> None:
         ops = []
         for record_id, field_name, value in updates:

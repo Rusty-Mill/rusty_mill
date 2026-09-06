@@ -190,11 +190,16 @@ fn update_status_with_discriminant_validation_and_unsupported_fields() {
 
 /// Acceptance criterion 5: `parent`/`children`/`neighbors` are all
 /// client-side `Unsupported`, unconditionally — `Reminder` has no
-/// relation of either kind.
+/// relation of either kind. `LNK-FR-012` (ADR-0047): and so is `link`.
 #[test]
 fn every_relation_request_is_unsupported() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    assert!(matches!(
+        client.link(Uuid::from_u128(1), Uuid::from_u128(2), "x"),
+        Err(ClientError::Unsupported("Link on this domain"))
+    ));
 
     assert!(matches!(
         client.parent(Uuid::from_u128(1)),

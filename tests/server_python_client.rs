@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_13_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_14_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -151,6 +151,11 @@ fn the_python_reference_client_speaks_the_protocol_at_13_and_at_10() {
     assert_eq!(get("insert"), "ok");
     assert_eq!(get("insert_again"), "Duplicate");
     assert_eq!(get("insert_get"), "4");
+    // `LNK-FR-012` (ADR-0047): a link under a new label from Python,
+    // idempotent on repeat, visible from the far end, and listed.
+    assert_eq!(get("link"), "ok");
+    assert_eq!(get("link_neighbors"), "1");
+    assert_eq!(get("link_kinds"), "mentioned_with,mentored_by,relates_to");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -176,6 +181,11 @@ fn the_python_reference_client_speaks_the_protocol_at_13_and_at_10() {
         "rule 4: no Insert below 13 — {}",
         get("insert")
     );
+    assert!(
+        get("link").starts_with("unsupported"),
+        "rule 4: no Link below 14 — {}",
+        get("link")
+    );
 
     // The Python client's write is real: the Rust client sees 42.
     let mut rust = SchemaDrivenClient::connect(addr).unwrap();
@@ -183,6 +193,12 @@ fn the_python_reference_client_speaks_the_protocol_at_13_and_at_10() {
     assert!(ada
         .iter()
         .any(|(name, v)| name == "mention_count" && *v == ScanValue::I64(42)));
+    // And its link: Ada now has Grace as a `mentored_by` neighbor.
+    assert_eq!(
+        rust.neighbors_by_relation(Uuid::from_u128(1), "mentored_by")
+            .unwrap(),
+        vec![Uuid::from_u128(77)]
+    );
     // And so is its insert: the Rust client reads Grace, alias intact.
     let grace = rust.get(Uuid::from_u128(77)).unwrap().unwrap();
     assert!(grace

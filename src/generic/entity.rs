@@ -580,7 +580,9 @@ mod tests {
             FindByName::<Entity>::find_by_name(&portable, "londinium"),
             vec![Uuid::from_u128(3)]
         );
-        // Exactly the four files the docs name — no fifth for the index.
+        // Exactly the five files the docs name — no sixth for the index.
+        // The fifth, `.relations`, is the label manifest `LNK-FR-006`
+        // (ADR-0047) added: it names the labels, not the names.
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -593,6 +595,7 @@ mod tests {
                 "entities.mmap.mentioned_with.edges",
                 "entities.mmap.records",
                 "entities.mmap.relates_to.edges",
+                "entities.mmap.relations",
             ]
         );
     }
@@ -665,5 +668,77 @@ mod tests {
             "existing edges intact"
         );
         assert!(!crate::generic::insert_log::log_path(&path).exists());
+    }
+    /// `LNK` acceptance criterion 2 (ADR-0047) through the real stack —
+    /// `NameIndex<MultiSymmetric<GenericMmapStore>>`: a link under an
+    /// existing label and under a new one, both visible to every neighbor
+    /// read at once, `relation_kinds` listing the new label, and all of it
+    /// surviving `open_entity_production_stack_portable` with
+    /// `RELATION_LABELS` unchanged.
+    #[test]
+    fn link_through_the_stack_creates_a_label_that_survives_portable_reopen() {
+        use crate::generic::query::{Insert, MultiLink};
+        use crate::generic::LinkOutcome;
+        let dir = fresh_temp_dir("generic_entity_link").unwrap();
+        let path = dir.join("entities.mmap");
+        let grace = Entity {
+            id: entity_id("Grace Hopper"),
+            label: "Grace Hopper".into(),
+            kind: "person".into(),
+            mention_count: 1,
+            aliases: vec![],
+        };
+        {
+            let mut stack = create_entity_production_stack(
+                sample_entities(),
+                &sample_relates_to(),
+                &sample_mentioned_with(),
+                &path,
+            )
+            .unwrap();
+            Insert::<Entity>::insert(&mut stack, grace.clone()).unwrap();
+            assert_eq!(
+                MultiLink::<Entity>::link(&mut stack, "relates_to", grace.id, Uuid::from_u128(1))
+                    .unwrap(),
+                LinkOutcome::Linked
+            );
+            assert_eq!(
+                MultiLink::<Entity>::link(&mut stack, "mentored_by", grace.id, Uuid::from_u128(2))
+                    .unwrap(),
+                LinkOutcome::Linked,
+                "a label RELATION_LABELS never named"
+            );
+            assert_eq!(
+                MultiNeighbors::<Entity>::neighbors_by_relation(
+                    &stack,
+                    "relates_to",
+                    Uuid::from_u128(1)
+                ),
+                Some(vec![Uuid::from_u128(2), grace.id])
+            );
+            let mut kinds = MultiNeighbors::<Entity>::relation_kinds(&stack);
+            kinds.sort();
+            assert_eq!(kinds, vec!["mentioned_with", "mentored_by", "relates_to"]);
+            assert_eq!(
+                MultiNeighbors::<Entity>::all_neighbors(&stack, grace.id).len(),
+                2
+            );
+        }
+        let reopened = open_entity_production_stack_portable(&path).unwrap();
+        assert_eq!(
+            MultiNeighbors::<Entity>::neighbors_by_relation(
+                &reopened,
+                "mentored_by",
+                Uuid::from_u128(2)
+            ),
+            Some(vec![grace.id])
+        );
+        assert_eq!(
+            MultiNeighbors::<Entity>::neighbors_by_relation(&reopened, "relates_to", grace.id),
+            Some(vec![Uuid::from_u128(1)])
+        );
+        let mut kinds = MultiNeighbors::<Entity>::relation_kinds(&reopened);
+        kinds.sort();
+        assert_eq!(kinds, vec!["mentioned_with", "mentored_by", "relates_to"]);
     }
 }

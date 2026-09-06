@@ -30,11 +30,12 @@
 //! real implementation strategy (take the lock, delegate).
 
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Neighbors, Parent, ScanField, UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, ScanField,
+    UpdateField,
 };
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
-use super::{InsertError, NotFound};
+use super::{InsertError, LinkError, LinkOutcome, NotFound};
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
 
@@ -257,6 +258,49 @@ impl<S> GenericProductionStore<S> {
         S: Insert<R>,
     {
         self.inner.write().expect(LOCK_POISONED).insert(record)
+    }
+
+    /// Add one edge to a single symmetric relation at runtime
+    /// (`LNK-FR-008`, ADR-0047) under the write lock — see [`Link`].
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError`], as the layer reports it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn link<R, Marker>(&self, a: R::Id, b: R::Id) -> Result<LinkOutcome, LinkError<R::Id>>
+    where
+        R: SymmetricRelation<Marker>,
+        S: Link<R, Marker>,
+    {
+        self.inner.write().expect(LOCK_POISONED).link(a, b)
+    }
+
+    /// Add one edge under a named relation at runtime (`LNK-FR-008`,
+    /// ADR-0047) under the write lock — see [`MultiLink`].
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError`], as the layer reports it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn link_by_relation<R: Record>(
+        &self,
+        relation: &str,
+        a: R::Id,
+        b: R::Id,
+    ) -> Result<LinkOutcome, LinkError<R::Id>>
+    where
+        S: MultiLink<R>,
+    {
+        self.inner
+            .write()
+            .expect(LOCK_POISONED)
+            .link(relation, a, b)
     }
 
     /// # Errors

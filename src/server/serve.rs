@@ -48,6 +48,16 @@ pub enum InsertOutcome {
     Duplicate,
 }
 
+/// What [`ConnectionStore::link_records`] did (`LNK-FR-009`, ADR-0047):
+/// the edge is new, or it was already present and nothing was written.
+/// Both are [`Response::Ok`] on the wire — insert-or-ignore, the
+/// consumer's own semantics — kept apart here for the adapters' tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkOutcome {
+    Linked,
+    AlreadyLinked,
+}
+
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
     /// outcome, not an error, matching [`crate::store::DogStore::get`]'s
@@ -156,6 +166,25 @@ pub trait ConnectionStore: Send + Sync {
         _id: RecordId,
         _fields: Vec<(FieldRef, ScanValue)>,
     ) -> Result<InsertOutcome, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// `LNK-FR-009` (ADR-0047, protocol 14): add one edge between two
+    /// records of this table under a symmetric relation label. An
+    /// implementor validates `relation` with
+    /// [`crate::generic::store::valid_relation_label`] (`Malformed`) and,
+    /// on a fixed-label domain, against its own labels (`Malformed`);
+    /// a missing endpoint is `RecordNotFound`, a self-loop `Malformed`, a
+    /// durability failure `Storage`. The default answers `Unsupported`:
+    /// `Dog`'s bespoke store, and `Reminder`/`Order`, which have no
+    /// symmetric relation. `Entity` (open labels) and `Employee` (its one
+    /// fixed label, `research`) implement it.
+    fn link_records(
+        &self,
+        _left: RecordId,
+        _right: RecordId,
+        _relation: &str,
+    ) -> Result<LinkOutcome, ErrorCode> {
         Err(ErrorCode::Unsupported)
     }
 
@@ -866,8 +895,9 @@ fn outcome_of(resp: &Response) -> access::Outcome {
 /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012. Deliberately coarse:
 /// `ReadOnly` is blocked only from [`Request::UpdateField`],
 /// [`Request::Transaction`] (`TXN-FR-004` extends `AUTH-FR-003`'s rule to
-/// the latter), and — since protocol 13 — [`Request::Insert`]
-/// (`INS-FR-007`); both classes can do everything else, including
+/// the latter), and — since protocol 13/14 — [`Request::Insert`]
+/// (`INS-FR-007`) and [`Request::Link`] (`LNK-FR-010`); both classes can
+/// do everything else, including
 /// `DescribeSchema` (`AUTH-FR-003`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenClass {
@@ -1654,6 +1684,16 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(InsertOutcome::Duplicate) => err_response(ErrorCode::Duplicate),
             Err(code) => err_response(code),
         },
+        // `LNK-FR-009`/`010` (ADR-0047): both outcomes are `Ok` —
+        // insert-or-ignore. Gated in `handle_connection` like `Insert`.
+        Request::Link {
+            left,
+            right,
+            relation,
+        } => match store.link_records(left, right, &relation) {
+            Ok(LinkOutcome::Linked | LinkOutcome::AlreadyLinked) => Response::Ok,
+            Err(code) => err_response(code),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -2037,6 +2077,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     | Request::Transaction { .. }
                     | Request::Commit
                     | Request::Insert { .. }
+                    | Request::Link { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2199,6 +2240,9 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             // gated server-side below 13 like the session requests.
             Request::Insert { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::Insert { .. } if negotiated < 13 => err_response(ErrorCode::Malformed),
+            // `LNK-FR-010` (ADR-0047): the same two gates, at 14.
+            Request::Link { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Link { .. } if negotiated < 14 => err_response(ErrorCode::Malformed),
             // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
             // protocol-12 requests are unknown to a connection negotiated
             // below 12 — the session precedent, not `Query`'s client-only
@@ -4303,6 +4347,100 @@ mod tests {
         );
         assert_eq!(
             dispatch(&FixtureStore, insert(2, fields)),
+            err_response(ErrorCode::Unsupported),
+            "the trait's default"
+        );
+    }
+    /// `LNK-FR-009`/`010` (ADR-0047): `dispatch` answers `Ok` for both
+    /// link outcomes, passes a refusal's code through, and the trait's
+    /// default is `Unsupported`.
+    #[test]
+    fn dispatch_answers_link_ok_for_both_outcomes_and_unsupported_by_default() {
+        struct LinkFixture;
+        impl ConnectionStore for LinkFixture {
+            fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
+                FixtureStore.get(id)
+            }
+            fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+                FixtureStore.scan_all()
+            }
+            fn filter_eq(&self, f: FieldRef, v: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.filter_eq(f, v)
+            }
+            fn scan_field(&self, f: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
+                FixtureStore.scan_field(f)
+            }
+            fn update_field(
+                &self,
+                id: RecordId,
+                f: FieldRef,
+                v: ScanValue,
+            ) -> Result<bool, ErrorCode> {
+                FixtureStore.update_field(id, f, v)
+            }
+            fn parent(&self, id: RecordId) -> Result<ParentLookup, ErrorCode> {
+                FixtureStore.parent(id)
+            }
+            fn children(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.children(id)
+            }
+            fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.neighbors(id)
+            }
+            fn neighbors_by_relation(
+                &self,
+                id: RecordId,
+                r: &str,
+            ) -> Result<Vec<RecordId>, ErrorCode> {
+                FixtureStore.neighbors_by_relation(id, r)
+            }
+            fn list_relation_kinds(&self) -> Vec<String> {
+                FixtureStore.list_relation_kinds()
+            }
+            fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {
+                FixtureStore.validate_op(op)
+            }
+            fn describe(&self) -> DomainSchema {
+                FixtureStore.describe()
+            }
+            fn apply_transaction(
+                &self,
+                u: &[TransactionOp],
+                r: &[(RecordId, FieldRef, ScanValue)],
+            ) -> Result<(), (usize, ErrorCode)> {
+                FixtureStore.apply_transaction(u, r)
+            }
+            fn link_records(
+                &self,
+                left: RecordId,
+                right: RecordId,
+                relation: &str,
+            ) -> Result<LinkOutcome, ErrorCode> {
+                match (left == right, relation) {
+                    (true, _) => Err(ErrorCode::Malformed),
+                    (false, "again") => Ok(LinkOutcome::AlreadyLinked),
+                    (false, "knows") => Ok(LinkOutcome::Linked),
+                    _ => Err(ErrorCode::RecordNotFound),
+                }
+            }
+        }
+        let link = |l: u128, r: u128, relation: &str| Request::Link {
+            left: RecordId::from_u128(l),
+            right: RecordId::from_u128(r),
+            relation: relation.into(),
+        };
+        assert_eq!(dispatch(&LinkFixture, link(1, 2, "knows")), Response::Ok);
+        assert_eq!(dispatch(&LinkFixture, link(1, 2, "again")), Response::Ok);
+        assert_eq!(
+            dispatch(&LinkFixture, link(1, 1, "knows")),
+            err_response(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            dispatch(&LinkFixture, link(1, 9, "x")),
+            err_response(ErrorCode::RecordNotFound)
+        );
+        assert_eq!(
+            dispatch(&FixtureStore, link(1, 2, "knows")),
             err_response(ErrorCode::Unsupported),
             "the trait's default"
         );

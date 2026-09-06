@@ -428,3 +428,21 @@ fn insert_is_unsupported_on_the_dog_domain() {
     assert!(client.get(Uuid::from_u128(9)).unwrap().is_none());
     assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
 }
+
+/// `LNK-FR-009` (ADR-0047): `Dog`'s adapter keeps the trait's default —
+/// the bespoke store has no link — so a well-formed `Link` is
+/// `Unsupported`, server-side, with the graph intact.
+#[test]
+fn link_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let before = client.neighbors(Uuid::from_u128(1)).unwrap();
+    match client.link(Uuid::from_u128(1), Uuid::from_u128(3), "littermate_of") {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert_eq!(client.neighbors(Uuid::from_u128(1)).unwrap(), before);
+}
