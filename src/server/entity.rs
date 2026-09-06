@@ -282,7 +282,7 @@ impl ConnectionStore for EntityConnectionStore {
     /// `INS-FR-006` (ADR-0046): validate, then one write under the
     /// store's own lock — through `NameIndex` (its keys added) and
     /// `MultiSymmetric` (no edges) down to the durable core. A duplicate
-    /// is the normal outcome; a durability failure is `Journal`.
+    /// is the normal outcome; a durability failure is `Storage`.
     fn insert_record(
         &self,
         id: RecordId,
@@ -292,7 +292,7 @@ impl ConnectionStore for EntityConnectionStore {
         match self.store.insert(entity) {
             Ok(()) => Ok(InsertOutcome::Inserted),
             Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
-            Err(InsertError::Durability(_)) => Err(ErrorCode::Journal),
+            Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 

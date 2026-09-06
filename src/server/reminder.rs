@@ -254,7 +254,7 @@ impl ConnectionStore for ReminderConnectionStore {
 
     /// `INS-FR-006` (ADR-0046): validate, then one write under the
     /// store's own lock. A duplicate is the normal outcome, not an
-    /// error; a durability failure is `Journal` (see the trait's docs).
+    /// error; a durability failure is `Storage` (see the trait's docs).
     fn insert_record(
         &self,
         id: RecordId,
@@ -264,7 +264,7 @@ impl ConnectionStore for ReminderConnectionStore {
         match self.store.insert(reminder) {
             Ok(()) => Ok(InsertOutcome::Inserted),
             Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
-            Err(InsertError::Durability(_)) => Err(ErrorCode::Journal),
+            Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 

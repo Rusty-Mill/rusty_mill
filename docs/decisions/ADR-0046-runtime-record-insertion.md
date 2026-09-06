@@ -1,7 +1,12 @@
 # ADR-0046: Runtime record insertion — `Insert<R>`, the insert log, `Request::Insert` at protocol 13
 
-- Status: **Proposed, implemented in the same cycle** (2026-09-06).
-  Under the owner's standing mandate for this line ("continue working
+- Status: **Accepted as option (d)** (promoted from Proposed on
+  2026-09-06 — the owner picked (d): accept as implemented and append a
+  dedicated `ErrorCode::Storage` for the durability-failure path in the
+  same version; (a), (b), and (c) declined. Recorded in "Acceptance and
+  implementation" below.) The original Status note follows unchanged:
+  proposed and implemented in the same cycle. Under the owner's standing
+  mandate for this line ("continue working
   to mature `multimodal_db` and ensure it can be used as a backend for
   `rusty_remind_me`"), this round proposes *and* lands the design —
   the `ADR-0011` precedent, taken deliberately rather than by default:
@@ -87,11 +92,14 @@ Adopt `docs/design/SERVER-INSERT-DESIGN.md` as proposed:
 6. **`SchemaDrivenClient::insert`** and the Python client's `Client.
    insert`, both refusing below 13 with no frame sent.
 
-One reuse a reader should see: an insert whose log or slot append
-fails is answered `ErrorCode::Journal` — its documented meaning
-("could not be made durable; nothing was applied") is exact, and a
-dedicated `Storage` code for a path no test reaches without fault
-injection was judged speculative. Option (d) below adds it.
+One reuse a reader should see, as proposed: an insert whose log or
+slot append fails was answered `ErrorCode::Journal` — its documented
+meaning ("could not be made durable; nothing was applied") is exact,
+and a dedicated `Storage` code for a path no test reaches without
+fault injection was judged speculative. **Option (d), accepted, adds
+it**: `ErrorCode::Storage` (12), appended at 13 beside `Duplicate`,
+so `Journal` keeps its one producer (a transaction batch) and a
+client's "retry the batch" handling of it never fires for an insert.
 
 ## Consequences
 
@@ -108,9 +116,10 @@ injection was judged speculative. Option (d) below adds it.
 - Cost, named: the insert log grows until the next reopen. A long-
   running process with many inserts pays a one-time fold at restart;
   runtime compaction is the named revisit trigger.
-- Cost, named: `ErrorCode::Journal` now has a second producer. If the
-  owner prefers a distinct code, it is a one-variant append at 13
-  *now* or a version bump *later*.
+- Resolved by (d): `ErrorCode::Journal` keeps its one producer. The
+  distinct code cost one variant, one vector, and one `SERVER-002`
+  row inside a version that had not shipped — the last moment it would
+  ever be that cheap.
 - Cost, named: a `ReadOnly` token's meaning widens to "cannot insert"
   — the only reading anyone could have intended, but a documented
   change to `TokenClass`'s contract.
@@ -146,3 +155,12 @@ injection was judged speculative. Option (d) below adds it.
   (v0.36.0) in the same PR, per the Status note above. See that
   requirement's entry and `docs/PROJECT-STATUS.md` for the file list
   and test counts.
+- 2026-09-06: **accepted as option (d)** — the owner's "d", on this
+  session's own recommendation (the reasoning: `Journal`'s one
+  producer is a transaction batch and a client's retry handling for it
+  would misfire on an insert; appending now costs one variant, later a
+  version). Folded into the same PR: `ErrorCode::Storage` (12), the
+  `Reminder`/`Entity` adapters routing `InsertError::Durability` to it,
+  the `Response/Err(Storage)` vector (51 pinned), `error_message`,
+  `SERVER-002` §5.2/§7/§8/§10, the Python client's `ErrorCode.Storage`.
+  Options (a), (b), (c) declined.

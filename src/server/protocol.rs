@@ -67,7 +67,7 @@
 //! | 10 | `SERVER-001` v0.31.0 | + [`Request::NeighborsByRelation`] (17), [`Request::ListRelationKinds`] (18), and [`Response::RelationKinds`] (14) — `ENT2-FR-004`/`005`, ADR-0039: a one-hop neighbor lookup filtered to one named relation label (`NeighborsByRelation`, answered by the existing [`Response::RecordList`] unchanged), and relation-label discovery (`ListRelationKinds`/`RelationKinds`) for a domain with more than one named `SymmetricRelation` — [`crate::generic::entity::Entity`], the first. No field added to any pre-existing `Request`/`Response` variant or to `DomainSchema`/`RelationCapabilities` — `bincode`'s positional struct encoding makes that unsafe (rule 1); both are brand-new, appended variants instead. No new `ErrorCode` — an unknown relation label reuses `Malformed`. Gated entirely client-side, the same posture `Query`/`Aggregate` already established: `dispatch` itself performs no version check (as it never has for `Query`/`Aggregate` either), relying on `SchemaDrivenClient` never sending either request below version 10. Not overlaid, not read-set-tracked. ADR-0039 |
 //! | 11 | `SERVER-001` v0.34.0 | + [`ScanValue::StrList`] (5) and [`ValueKind::StrList`] (4) — `ENT4-FR-001`, ADR-0041: a stored list-of-strings field, [`crate::generic::entity::Entity`]'s `aliases` the first (`FIELD_ALIASES = 3`, every capability flag `false`, read-only). Unlike `F64`, `StrList` describes a stored field's real type, so its `ValueKind` exists. **The first appended value variant that reaches an ungated response** — `GetById`/`Query`/`DescribeSchema` are protocol-1/8/1 requests a silent client can send — so rule 3 rewrites *content* for the first time: `downgrade_for_version` strips every `StrList` pair from `Response::Record`/`Rows` and every `StrList` descriptor from `Response::Schema` on a connection negotiated below 11, leaving exactly the three-field `Entity` of `FR-042`. No new `Request`/`ErrorCode`. ADR-0041 |
 //! | 12 | `SERVER-001` v0.35.0 | + [`Request::Join`] (19) and [`Request::DescribeRelations`] (20), [`Response::JoinedRows`] (15) and [`Response::Relations`] (16) — `JOIN-FR-001`/`002`, ADR-0044: an inner join over a *declared relation* of one table ([`JoinRelation`]: every symmetric relation, one named label, `parent`, or `children`), evaluated server-side as an index nested loop over the adapter's own relation methods and answered as [`JoinedRow`]s carrying both ids and both projected field lists; [`RelationDescriptor`] names what `ON` may say. `right_table`/`target_table` are carried from day one for ADR-0045 (more than one table per connection, gated) and are `None` here. Gated: `Malformed` below 12 (rule 3), sent only after negotiating ≥ 12 (rule 4); `JoinedRows`/`Relations` only ever answer the two gated requests, so no `downgrade_for_version` arm is needed — the `Query`/`Rows` precedent. No new `ErrorCode`. ADR-0044 |
-//! | 13 | `SERVER-001` v0.36.0 | + [`Request::Insert`] (21) and [`ErrorCode::Duplicate`] (11) — `INS-FR-007`, ADR-0046: add one whole record to the connection's table at runtime, `id` minted by the client, `fields` in [`Response::Record`]'s own `(tag, value)` shape with every schema-described field present exactly once; answered `Ok`, or `Err { Duplicate }` when the id already has a record (nothing written), `Unsupported` from an adapter with no insert (`Dog`, `Order`, `Employee`), `Malformed`/`UnknownField` for a field list that doesn't match the schema. Server-gated `Malformed` below 13 (rule 3, the session/`Join` precedent — a write, not a read); `Duplicate` only ever answers `Insert`, so no `downgrade_for_version` arm. Refused `Unauthorized` for a `ReadOnly` token (the third write beside `UpdateField`/`Transaction`); `SessionOpen` inside a session; never journaled, never part of a `Transaction`. ADR-0046 |
+//! | 13 | `SERVER-001` v0.36.0 | + [`Request::Insert`] (21), [`ErrorCode::Duplicate`] (11), and [`ErrorCode::Storage`] (12) — `INS-FR-007`, ADR-0046: add one whole record to the connection's table at runtime, `id` minted by the client, `fields` in [`Response::Record`]'s own `(tag, value)` shape with every schema-described field present exactly once; answered `Ok`, or `Err { Duplicate }` when the id already has a record (nothing written), `Unsupported` from an adapter with no insert (`Dog`, `Order`, `Employee`), `Malformed`/`UnknownField` for a field list that doesn't match the schema, `Err { Storage }` when the record could not be made durable (nothing applied). Both new codes only ever answer `Insert`. Server-gated `Malformed` below 13 (rule 3, the session/`Join` precedent — a write, not a read); `Duplicate` only ever answers `Insert`, so no `downgrade_for_version` arm. Refused `Unauthorized` for a `ReadOnly` token (the third write beside `UpdateField`/`Transaction`); `SessionOpen` inside a session; never journaled, never part of a `Transaction`. ADR-0046 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -473,6 +473,13 @@ pub enum ErrorCode {
     /// `Insert`, which a connection below 13 cannot send, so it needs no
     /// downgrade.
     Duplicate,
+    /// Protocol 13 (`INS-FR-007`, ADR-0046 option (d)). [`Request::Insert`]'s
+    /// record could not be made durable — the insert log or slot append
+    /// failed — and nothing was applied. Distinct from
+    /// [`ErrorCode::Journal`], whose producer is a transaction batch, so a
+    /// client's "retry the batch" handling of that code never fires for an
+    /// insert. Only ever answers an `Insert`, so it needs no downgrade.
+    Storage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -801,7 +808,7 @@ mod tests {
             "NeighborsByRelation" | "ListRelationKinds" | "RelationKinds" => 10,
             "Record(StrList)" | "Rows(StrList)" | "Schema(StrList)" => 11,
             "Join" | "DescribeRelations" | "JoinedRows" | "Relations" => 12,
-            "Insert" | "Err(Duplicate)" => 13,
+            "Insert" | "Err(Duplicate)" | "Err(Storage)" => 13,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1431,6 +1438,7 @@ mod tests {
             (ErrorCode::Conflict, 0x0a),
             // Protocol 13 (`INS-FR-007`): `Duplicate` at 11.
             (ErrorCode::Duplicate, 0x0b),
+            (ErrorCode::Storage, 0x0c),
         ] {
             assert_golden_eq(
                 &format!("Err({code:?})"),
@@ -1450,7 +1458,7 @@ mod tests {
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
     /// module docs' table — version 13 is the one that added
-    /// `Request::Insert` and `ErrorCode::Duplicate` (12 `Request::Join`/
+    /// `Request::Insert` and `ErrorCode::{Duplicate, Storage}` (12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
     /// `Request::Aggregate`/`Response::Groups`, 8 `Request::Query`/

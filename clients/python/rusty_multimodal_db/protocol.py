@@ -69,6 +69,7 @@ class ErrorCode(IntEnum):
     Journal = 9
     Conflict = 10
     Duplicate = 11
+    Storage = 12
 
 
 # ---- ScanValue (enum family) ----

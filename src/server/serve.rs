@@ -147,9 +147,10 @@ pub trait ConnectionStore: Send + Sync {
     /// bespoke `ProductionStore` has no insert, and `Order`/`Employee`
     /// are `research`-gated reference material; `Reminder` and `Entity`
     /// implement it. A durability failure — the insert log or slot
-    /// append failed, nothing applied — is `ErrorCode::Journal`, whose
-    /// documented meaning is exactly that (see the design's "Proposed
-    /// shape" for why no new code was added for it).
+    /// append failed, nothing applied — is [`ErrorCode::Storage`]
+    /// (ADR-0046 option (d)): its own code, so a client's handling of
+    /// `Journal` (a transaction batch that was not journaled) never
+    /// fires for an insert.
     fn insert_record(
         &self,
         _id: RecordId,
@@ -230,6 +231,7 @@ fn error_message(code: ErrorCode) -> &'static str {
             "this session's read set no longer matches current state; nothing was applied"
         }
         ErrorCode::Duplicate => "a record with this id already exists; nothing was written",
+        ErrorCode::Storage => "the record could not be made durable; nothing was written",
     }
 }
 

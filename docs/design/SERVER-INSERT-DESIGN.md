@@ -1,6 +1,8 @@
 # Server Runtime Record Insertion (Proposed)
 
-- Status: **Proposed** (2026-09-06). Implemented in the same delivery
+- Status: **Accepted** (2026-09-06, option (d): as implemented plus a
+  dedicated `ErrorCode::Storage` for the durability-failure path,
+  appended at 13 in the same PR). Implemented in the same delivery
   cycle under the owner's standing "continue maturing `multimodal_db`
   so it can back `rusty_remind_me`" mandate — the `ADR-0011` precedent
   (design and implementation in one cycle, reasoned through in the
@@ -226,13 +228,17 @@ with.
   21 — the shape of `Response::Record`, so a client can read a record
   and write one with the same code. Answered `Response::Ok`; a
   duplicate id is `Err { Duplicate }` with the new `ErrorCode::
-  Duplicate` at index 11; `Unsupported` from an adapter without insert;
+  Duplicate` at index 11; a record that could not be made durable is
+  `Err { Storage }` with the new `ErrorCode::Storage` at index 12
+  (option (d)); `Unsupported` from an adapter without insert;
   `Malformed`/`UnknownField` per `INS-FR-006`. `Malformed` on a
   connection negotiated below 13 (rule 3, the session/`Join`
   precedent). `Duplicate` only ever answers `Insert`, so no
   `downgrade_for_version` arm. Refused `Unauthorized` for a `ReadOnly`
   token — the third write beside `UpdateField`/`Transaction`.
   `SessionOpen` while a session is open. `audit::RequestKind::Insert`.
+  Neither new code needs a `downgrade_for_version` arm: both only ever
+  answer `Insert`.
 - `INS-FR-008` **Clients.** `SchemaDrivenClient::insert(&mut self, id,
   fields: &[(&str, ScanValue)]) -> Result<(), ClientError>` — names
   resolved through the discovered schema (`UnknownField` locally), the
@@ -240,8 +246,8 @@ with.
   Duplicate, _)`, `ClientError::Unsupported("insert")` below 13 with no
   frame sent. `clients/python`: `Client.insert(record_id, fields)`,
   `PROTOCOL_VERSION = 13`, `ErrorCode.Duplicate`.
-- `INS-FR-009` **Pins.** Two golden vectors (`Request/Insert`,
-  `Response/Err(Duplicate)`), `PROTOCOL_VERSION` 12 → 13, protocol
+- `INS-FR-009` **Pins.** Three golden vectors (`Request/Insert`,
+  `Response/Err(Duplicate)`, `Response/Err(Storage)`), `PROTOCOL_VERSION` 12 → 13, protocol
   table row 13, `SERVER-002` updated (§5.6, §5.7, §5.2 `ErrorCode`, §7,
   §8, §10), the three version pins moved.
 
@@ -355,12 +361,15 @@ of `INS-FR-006` and the discriminant check, then `store.insert`;
 `InsertError::Duplicate` → `Ok(Duplicate)`. `InsertError::Durability`
 — the log or slot append failed, nothing applied — has no exact code
 on the wire today: `Unsupported` and `Malformed` would both lie.
-**Proposed:** carry it as `ErrorCode::Journal`, whose documented
-meaning ("could not be made durable before applying; nothing was
-applied") is precisely this case and which already rides an `Err`
-shape; a dedicated `Storage` code for a path no test reaches without
-fault injection is speculative this round. Named in `ADR-0046` as the
-one reuse a reader might question, and in "Open questions" below.
+**As proposed**, it was to be carried as `ErrorCode::Journal`, whose
+documented meaning ("could not be made durable before applying;
+nothing was applied") is precisely this case. **As accepted (option
+(d))** it is its own code, `ErrorCode::Storage` (12), appended at 13
+alongside `Duplicate`: `Journal`'s one producer is a transaction batch,
+and a client whose handling of that code is "retry the batch" would
+give a caller the wrong advice on a failed insert. The cost was one
+variant, one vector, and one `SERVER-002` row while 13 was still
+unshipped — versus a whole version later.
 
 `EntityConnectionStore::insert_record`: the same shape over four
 fields, `aliases` accepted as a `StrList` (the first *write* of a
@@ -426,7 +435,7 @@ values coerced through `_to_scan_value` by the field's kind.
 - `InsertError::Duplicate` / `ErrorCode::Duplicate` — the id has a
   record; nothing written.
 - `InsertError::Durability(Io)` — the log or slot append failed; over
-  the wire `ErrorCode::Journal` (see "Proposed shape" for why).
+  the wire `ErrorCode::Storage` (12), its own code (option (d)).
 - `RecordBlobUnreadable { path: <path>.inserts, cause }` at
   `read_portable_records`/`open` — a foreign, wrong-version, or
   wrong-type log, refused by name, never silently ignored (the blob's
@@ -523,11 +532,9 @@ client.rs` (criterion 6), `tests/server_dog_integration.rs`
 
 ## Open questions
 
-- Whether `ErrorCode::Journal` is the right carrier for an insert's
-  durability failure (see "Proposed shape") or a dedicated `Storage`
-  code should be appended at 13 while the version is being bumped
-  anyway — the owner's call at acceptance; adding it later costs a
-  version.
+- **Resolved at acceptance (option (d))**: an insert's durability
+  failure has its own code, `ErrorCode::Storage`, appended at 13 while
+  the version was still unshipped.
 - Whether `Order`/`Employee` should expose `insert_record` now that
   their stacks support it — they are `research`-gated reference
   material, so the answer is "when a test needs it", not "for
@@ -538,6 +545,10 @@ client.rs` (criterion 6), `tests/server_dog_integration.rs`
 
 ## Change history
 
+- 2026-09-06: Accepted as option (d) — as implemented plus
+  `ErrorCode::Storage` (12) for the durability-failure path, folded
+  into the same PR. The "Proposed shape" and "Errors" sections above
+  record both the proposed reuse of `Journal` and the accepted code.
 - 2026-09-06: Initial proposal, implemented in the same cycle (see
   Status). The eleventh round in the `rusty_remind_me`-motivated line
   `ADR-0036` started; the first that changes what a running store can

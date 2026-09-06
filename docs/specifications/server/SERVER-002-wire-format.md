@@ -109,12 +109,12 @@ unmarked is version 1.
 
 ### 5.2 Fieldless enums (a `u32` index)
 
-| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | |
-| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | |
-| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | |
-| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) |
+| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | |
+| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | |
+| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | |
+| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) |
 
 ### 5.3 `ScanValue` — a field's value
 
@@ -339,7 +339,7 @@ Each item names the `SERVER-001` requirement that owns it.
    `StrList`). `Ok` when stored — durable before the reply; `Err {
    Duplicate }` when `id` already has a record, nothing written;
    `Unsupported` from a domain that does not accept inserts (`Dog`);
-   `Journal` if the record could not be made durable. Refused
+   `Storage` if the record could not be made durable. Refused
    `Unauthorized` for a read-only token and `SessionOpen` while a
    session is open — it is never staged. `Malformed` below 13. No
    relation is created: an inserted record has no neighbors, no
@@ -371,7 +371,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 10 | v0.31.0 | `NeighborsByRelation` (17), `ListRelationKinds` (18), `RelationKinds` (14) |
 | 11 | v0.34.0 | `ScanValue::StrList` (5), `ValueKind::StrList` (4) — stripped from `Record`/`Rows`/`Schema` for connections below 11 |
 | 12 | v0.35.0 | `Join` (19), `DescribeRelations` (20), `JoinedRows` (15), `Relations` (16), `JoinRelation`, `JoinSpec`, `JoinedRow`, `RelationDescriptor` |
-| 13 | v0.36.0 | `Insert` (21), `ErrorCode::Duplicate` (11) |
+| 13 | v0.36.0 | `Insert` (21), `ErrorCode::Duplicate` (11), `ErrorCode::Storage` (12) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -417,11 +417,12 @@ real server at 13 and at a hand-negotiated 10.
 
 ## 10. Change history
 
-- 0.2.0 (`SERVER-001` v0.36.0, ADR-0046, `INS-FR-009`): protocol version
-  13 — `Request::Insert` (21) and `ErrorCode::Duplicate` (11); §5.2,
-  §5.6, §7 item 10, §8 row 13 and rule 3's list; fixture at 50 vectors
-  (`Request/Insert`, `Response/Err(Duplicate)`); the reference client
-  gains `Client.insert` and declares 13.
+- 0.2.0 (`SERVER-001` v0.36.0, ADR-0046 accepted as option (d),
+  `INS-FR-009`): protocol version 13 — `Request::Insert` (21),
+  `ErrorCode::Duplicate` (11), and `ErrorCode::Storage` (12); §5.2,
+  §5.6, §7 item 10, §8 row 13 and rule 3's list; fixture at 51 vectors
+  (`Request/Insert`, `Response/Err(Duplicate)`, `Response/Err(Storage)`);
+  the reference client gains `Client.insert` and declares 13.
 - 0.1.0 (`SERVER-001` v0.35.1 patch entry, ADR-0043, `ECO-FR-004`–`006`):
   initial specification at protocol version 12, transcribed from
   `src/server/protocol.rs`, `src/server/framing.rs`, `src/codec.rs`, and
