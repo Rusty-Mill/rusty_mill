@@ -18,12 +18,12 @@
 use super::edge_blob::{self, EdgeBlob};
 use super::insert_log;
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, ScanField,
-    UpdateField,
+    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, Replace,
+    ScanField, UpdateField,
 };
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{InsertError, LinkError, LinkOutcome, NotFound};
+use super::{InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
 use crate::durability::record_blob::{EncodedRecordBlob, Fnv1a64};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
@@ -60,6 +60,20 @@ impl<R: Record + Clone> Insert<R> for BaseStore<R> {
         let id = record.id();
         if self.records.contains_key(&id) {
             return Err(InsertError::Duplicate(id));
+        }
+        self.records.insert(id, record);
+        Ok(())
+    }
+}
+
+/// `REP-FR-004`: the in-memory root swaps the record whole — an unknown
+/// id is refused with nothing written, the same rule the durable core
+/// applies.
+impl<R: Record + Clone> Replace<R> for BaseStore<R> {
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        if !self.records.contains_key(&id) {
+            return Err(ReplaceError::NotFound(id));
         }
         self.records.insert(id, record);
         Ok(())
@@ -126,6 +140,36 @@ where
         let value = record.indexed_value().clone();
         self.inner.insert(record)?;
         self.index.entry(value).or_default().push(id);
+        Ok(())
+    }
+}
+
+// `REP-FR-004`: the id moves from the old value's bucket to the new
+// one's only after the inner store accepted the record; the old value
+// is read from the inner store before the record is moved.
+impl<S, R, Marker> Replace<R> for Indexed<S, R, Marker>
+where
+    R: IndexedField<Marker>,
+    S: Replace<R> + GetById<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        let old_value = self
+            .inner
+            .get(id)
+            .map(|old| old.indexed_value().clone())
+            .ok_or(ReplaceError::NotFound(id))?;
+        let new_value = record.indexed_value().clone();
+        self.inner.replace(record)?;
+        if old_value != new_value {
+            if let Some(bucket) = self.index.get_mut(&old_value) {
+                bucket.retain(|other| *other != id);
+                if bucket.is_empty() {
+                    self.index.remove(&old_value);
+                }
+            }
+            self.index.entry(new_value).or_default().push(id);
+        }
         Ok(())
     }
 }
@@ -223,6 +267,26 @@ where
         self.inner.insert(record)?;
         self.position_index.insert(id, self.cache.len());
         self.cache.push(value);
+        Ok(())
+    }
+}
+
+// `REP-FR-004`: the cached value is rewritten in place after the inner
+// store accepted the record.
+impl<S, R, Marker> Replace<R> for Scanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    S: Replace<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        let value = record.scannable_value();
+        self.inner.replace(record)?;
+        let position = *self
+            .position_index
+            .get(&id)
+            .ok_or(ReplaceError::NotFound(id))?;
+        self.cache[position] = value;
         Ok(())
     }
 }
@@ -711,6 +775,18 @@ where
     }
 }
 
+// `REP-FR-004`: edges are not part of a record — a replaced record keeps
+// every neighbor it had; the edge blob is untouched.
+impl<S, R, Marker> Replace<R> for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker>,
+    S: Replace<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        self.inner.replace(record)
+    }
+}
+
 // Forwarding impl: `Symmetric<S, ..>` re-exposing `GetById`.
 impl<S, R, Marker> GetById<R> for Symmetric<S, R, Marker>
 where
@@ -1140,6 +1216,17 @@ where
     }
 }
 
+// `REP-FR-004`: same as `Symmetric` — every label's edges survive a
+// replace; no edge blob touched.
+impl<S, R: Record> Replace<R> for MultiSymmetric<S, R>
+where
+    S: Replace<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        self.inner.replace(record)
+    }
+}
+
 impl<S, R: Record> GetById<R> for MultiSymmetric<S, R>
 where
     S: GetById<R>,
@@ -1299,6 +1386,50 @@ where
         self.inner.insert(record)?;
         for key in keys {
             let bucket = self.index.entry(normalize(&key)).or_default();
+            if !bucket.contains(&id) {
+                bucket.push(id);
+            }
+        }
+        Ok(())
+    }
+}
+
+// `REP-FR-004`: the old record's keys (read from the inner store before
+// the move) leave the index and the new record's keys enter it —
+// normalized exactly as at build — only after the inner replace
+// succeeded. A key both versions share is untouched.
+impl<S, R: super::query::NameIndexed> Replace<R> for NameIndex<S, R>
+where
+    S: Replace<R> + GetById<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        let old_keys: Vec<String> = self
+            .inner
+            .get(id)
+            .map(|old| {
+                old.index_keys()
+                    .into_iter()
+                    .map(|k| normalize(&k))
+                    .collect()
+            })
+            .ok_or(ReplaceError::NotFound(id))?;
+        let new_keys: Vec<String> = record
+            .index_keys()
+            .into_iter()
+            .map(|k| normalize(&k))
+            .collect();
+        self.inner.replace(record)?;
+        for key in old_keys.iter().filter(|k| !new_keys.contains(k)) {
+            if let Some(bucket) = self.index.get_mut(key) {
+                bucket.retain(|other| *other != id);
+                if bucket.is_empty() {
+                    self.index.remove(key);
+                }
+            }
+        }
+        for key in new_keys {
+            let bucket = self.index.entry(key).or_default();
             if !bucket.contains(&id) {
                 bucket.push(id);
             }
@@ -1515,6 +1646,42 @@ where
         self.inner.insert(record)?;
         if let Some(parent_id) = parent_id {
             self.children_of.entry(parent_id).or_default().push(id);
+        }
+        Ok(())
+    }
+}
+
+// `REP-FR-004`: a child whose parent changed leaves the old parent's
+// list and joins the new one's, after the inner store accepted it; a
+// parent that did not change is untouched.
+impl<S, P, C, Marker> Replace<C> for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    S: Replace<C> + GetById<C>,
+{
+    fn replace(&mut self, record: C) -> Result<(), ReplaceError<C::Id>> {
+        let id = record.id();
+        let old_parent = self
+            .inner
+            .get(id)
+            .map(|old| old.parent_id())
+            .ok_or(ReplaceError::NotFound(id))?;
+        let new_parent = record.parent_id();
+        self.inner.replace(record)?;
+        if old_parent == new_parent {
+            return Ok(());
+        }
+        if let Some(old) = old_parent {
+            if let Some(children) = self.children_of.get_mut(&old) {
+                children.retain(|other| *other != id);
+                if children.is_empty() {
+                    self.children_of.remove(&old);
+                }
+            }
+        }
+        if let Some(new) = new_parent {
+            self.children_of.entry(new).or_default().push(id);
         }
         Ok(())
     }

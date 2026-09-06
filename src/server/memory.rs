@@ -5,9 +5,10 @@
 //! `server`-gated alone like `reminder`/`entity`. Eleven fields:
 //! `category` is equality-filterable, `access_count` scannable and
 //! updatable (non-negative — the one domain rule), everything else
-//! read-only over the wire after insert and reachable through `Query`/
-//! `Aggregate` like any field. `tags` is a `StrList`. No relation of
-//! either kind; every relation request is `Unsupported`.
+//! refused by `UpdateField` and changed only whole through
+//! `Request::Replace` (`REP-FR-005`, ADR-0049), reachable through
+//! `Query`/`Aggregate` like any field. `tags` is a `StrList`. No
+//! relation of either kind; every relation request is `Unsupported`.
 //!
 //! See `crate::generic::memory`'s own module docs for what the
 //! consumer's table holds that this record does not, and why.
@@ -17,11 +18,11 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome};
+use super::{ConnectionStore, InsertOutcome, ReplaceOutcome};
 use crate::generic::memory::{AccessCountField, CategoryField, Memory, MemoryProductionStack};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
-use crate::generic::InsertError;
+use crate::generic::{InsertError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_CONTENT: FieldRef = 0;
@@ -36,9 +37,9 @@ pub const FIELD_STATUS: FieldRef = 8;
 pub const FIELD_SENSITIVE: FieldRef = 9;
 pub const FIELD_ACCESS_COUNT: FieldRef = 10;
 
-/// Every field but `access_count`: read-only over the wire after insert
-/// (`MEM-FR-004`) — the whole-record replacement the consumer's
-/// `update_memory` needs is the next round, named in the module docs.
+/// Every field but `access_count`: refused by `UpdateField`
+/// (`MEM-FR-004`) — changed only whole, with every other field, through
+/// `replace_record` (`REP-FR-005`, ADR-0049).
 const READ_ONLY_FIELDS: [FieldRef; 10] = [
     FIELD_CONTENT,
     FIELD_CATEGORY,
@@ -340,6 +341,22 @@ impl ConnectionStore for MemoryConnectionStore {
             Ok(()) => Ok(InsertOutcome::Inserted),
             Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
             Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,
+    /// then one whole-record write under the store's own lock. An
+    /// unknown id is the normal outcome, not an error.
+    fn replace_record(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<ReplaceOutcome, ErrorCode> {
+        let memory = Self::memory_from_fields(id, fields)?;
+        match self.store.replace(memory) {
+            Ok(()) => Ok(ReplaceOutcome::Replaced),
+            Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -652,5 +669,54 @@ mod tests {
             Err(ErrorCode::Unsupported)
         );
         assert!(adapter.list_relation_kinds().is_empty());
+    }
+
+    /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,
+    /// then the whole record replaced — every read sees the new version
+    /// at once, the old category bucket no longer lists the id; an
+    /// unknown id is `NotFound` with nothing written; a malformed list
+    /// is refused before any write.
+    #[test]
+    fn replace_record_validates_like_insert_then_swaps_the_whole_record() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(1);
+        let mut edited = full_fields(1);
+        edited[0] = (FIELD_CONTENT, ScanValue::Str("memory 1, revised".into()));
+        edited[1] = (FIELD_CATEGORY, ScanValue::Str("decision".into()));
+        edited[10] = (FIELD_ACCESS_COUNT, ScanValue::I64(5));
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced)
+        );
+        assert_eq!(adapter.get(id).unwrap(), edited);
+        assert_eq!(
+            adapter.filter_eq(FIELD_CATEGORY, &ScanValue::Str("decision".into())),
+            Ok(vec![id])
+        );
+        assert!(!adapter
+            .filter_eq(FIELD_CATEGORY, &ScanValue::Str("general".into()))
+            .unwrap()
+            .contains(&id));
+        assert_eq!(
+            adapter.replace_record(Uuid::from_u128(9), full_fields(9)),
+            Ok(ReplaceOutcome::NotFound)
+        );
+        assert!(adapter.get(Uuid::from_u128(9)).is_none());
+        let mut negative = full_fields(1);
+        negative[10] = (FIELD_ACCESS_COUNT, ScanValue::I64(-1));
+        assert_eq!(
+            adapter.replace_record(id, negative),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            adapter.replace_record(id, full_fields(1)[..10].to_vec()),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            adapter.get(id).unwrap(),
+            edited,
+            "nothing written on refusal"
+        );
+        assert_eq!(adapter.scan_all().len(), 3, "no new record");
     }
 }

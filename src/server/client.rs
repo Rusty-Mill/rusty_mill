@@ -1510,6 +1510,65 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// Replace one record whole (`REP-FR-007`, ADR-0049, protocol 15):
+    /// [`Self::insert`]'s exact shape over an id that already has a
+    /// record — every field of the domain by schema name, resolved
+    /// through the discovered schema ([`ClientError::UnknownField`]
+    /// locally, no frame). `Ok(true)` when replaced, `Ok(false)` when
+    /// `id` has no record (nothing written) — [`Self::update`]'s own
+    /// shape. A missing, repeated, or wrong-kind field, or a domain rule,
+    /// is the server's `Malformed`; a domain with no replace (`Dog`) is
+    /// `Server(Unsupported, _)`. [`ClientError::Unsupported`]`("replace")`
+    /// below 15 with no frame sent (rule 4). Never inside a [`Session`] —
+    /// the server answers `SessionOpen`. Relation edges survive: a
+    /// replaced record keeps every neighbor it had.
+    pub fn replace(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<bool, ClientError> {
+        if self.server_protocol_version() < 15 {
+            return Err(ClientError::Unsupported("replace"));
+        }
+        let mut tagged = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            tagged.push((self.field(name)?.tag, value.clone()));
+        }
+        match self.roundtrip(Request::Replace { id, fields: tagged })? {
+            Response::Ok => Ok(true),
+            Response::NotFound => Ok(false),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Ok or NotFound")),
+        }
+    }
+
+    /// Insert-or-replace (`REP-FR-007`, ADR-0049): the consumer's
+    /// `entity_upsert` shape, built client-side from [`Self::insert`] and
+    /// [`Self::replace`] with no wire primitive of its own — an insert
+    /// first, and only on [`ErrorCode::Duplicate`] a replace. `Ok(true)`
+    /// when the record was created, `Ok(false)` when an existing one was
+    /// replaced. Two round trips at most and not atomic across them; the
+    /// second call's `NotFound` is unreachable (this library has no
+    /// runtime deletion) and reported as
+    /// [`ClientError::UnexpectedResponse`] if it ever occurs.
+    pub fn upsert(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<bool, ClientError> {
+        match self.insert(id, fields) {
+            Ok(()) => Ok(true),
+            Err(ClientError::Server(ErrorCode::Duplicate, _)) => {
+                if self.replace(id, fields)? {
+                    Ok(false)
+                } else {
+                    Err(ClientError::UnexpectedResponse("Ok after Duplicate"))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Add one edge between two records under a symmetric relation label
     /// (`LNK-FR-012`, ADR-0047, protocol 14). `Ok(())` whether the edge is
     /// new or was already present — insert-or-ignore, so a retry is

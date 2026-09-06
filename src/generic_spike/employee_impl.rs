@@ -654,4 +654,53 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `REP-FR-004` (ADR-0049): `Replace` forwards through `Reversed` —
+    /// a child whose `manager_id` changed leaves the old parent's
+    /// children and joins the new one's — and through `Symmetric` (its
+    /// edges intact) to the durable core; the new version survives a
+    /// portable reopen.
+    #[test]
+    fn replace_forwards_through_reversed_and_moves_the_child() {
+        use crate::generic::query::{Children, Neighbors, Parent, Replace};
+        let dir = crate::bench_support::fresh_temp_dir("employee_replace").unwrap();
+        let path = dir.join("salary.mmap");
+        let (one, two, three) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        {
+            let mut stack =
+                create_employee_production_stack(sample(), &sample_collaboration_edges(), &path)
+                    .unwrap();
+            let mut cas = GetById::<Employee>::get(&stack, three).unwrap();
+            cas.manager_id = Some(two);
+            cas.salary_cents += 1_000;
+            cas.name = "Cass".into();
+            Replace::<Employee>::replace(&mut stack, cas.clone()).unwrap();
+            assert_eq!(GetById::<Employee>::get(&stack, three), Some(cas));
+            assert_eq!(
+                Parent::<Employee, ReportsTo>::parent(&stack, three),
+                Ok(Some(two))
+            );
+            assert_eq!(
+                Children::<Employee, Employee, ReportsTo>::children(&stack, one),
+                vec![two]
+            );
+            assert_eq!(
+                Children::<Employee, Employee, ReportsTo>::children(&stack, two),
+                vec![three]
+            );
+            assert!(
+                Neighbors::<Employee, CollaboratesWith>::neighbors(&stack, three).contains(&two),
+                "the symmetric edge survives"
+            );
+        }
+        let reopened = open_employee_production_stack_portable(&path).unwrap();
+        let cas = GetById::<Employee>::get(&reopened, three).unwrap();
+        assert_eq!(cas.name, "Cass");
+        assert_eq!(cas.manager_id, Some(two));
+        assert_eq!(
+            Children::<Employee, Employee, ReportsTo>::children(&reopened, two),
+            vec![three]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

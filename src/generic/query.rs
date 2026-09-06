@@ -28,6 +28,21 @@ pub trait Insert<R: Record> {
     fn insert(&mut self, record: R) -> Result<(), super::InsertError<R::Id>>;
 }
 
+/// Replace one record whole at runtime (`REP-FR-001`, ADR-0049,
+/// `docs/design/SERVER-REPLACE-DESIGN.md`) — the counterpart of
+/// [`Insert`] for a record that already exists: every field of the
+/// record with `record.id()` becomes `record`'s, including the indexed
+/// and the scannable field. `Err(ReplaceError::NotFound)` if the id has
+/// no record, with nothing written at any layer; on the durable core,
+/// `Ok` means the new version is on disk. Every composition layer
+/// forwards this, moving its own derived state (an index bucket, a name
+/// key, a parent's children list, a cached or slotted value) from the
+/// old record's to the new one's only after the inner replace
+/// succeeded. Relation edges are not part of a record and are untouched.
+pub trait Replace<R: Record> {
+    fn replace(&mut self, record: R) -> Result<(), super::ReplaceError<R::Id>>;
+}
+
 /// Add one edge to a single symmetric relation at runtime (`LNK-FR-001`/
 /// `002`, ADR-0047, `docs/design/SERVER-LINK-DESIGN.md`). Both ids must
 /// have a record; `a == b` is refused; an edge already present (either

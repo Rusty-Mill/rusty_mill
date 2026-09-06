@@ -321,6 +321,17 @@ fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
         Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
         other => panic!("expected Unauthorized for a ReadOnly link, got {other:?}"),
     }
+    // `REP-FR-006` (ADR-0049): and the fifth write, `Replace`.
+    match client.replace(
+        Uuid::from_u128(1),
+        &[
+            ("breed", ScanValue::Str("pug".into())),
+            ("age", ScanValue::U32(1)),
+        ],
+    ) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a ReadOnly replace, got {other:?}"),
+    }
 
     client.authenticate("write-token").unwrap();
     assert!(client

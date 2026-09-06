@@ -32,13 +32,13 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome};
+use super::{ConnectionStore, InsertOutcome, ReplaceOutcome};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::reminder::{
     status_from_u32, status_to_u32, DueAtField, Reminder, ReminderProductionStack, StatusField,
 };
-use crate::generic::InsertError;
+use crate::generic::{InsertError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_TITLE: FieldRef = 0;
@@ -265,6 +265,22 @@ impl ConnectionStore for ReminderConnectionStore {
             Ok(()) => Ok(InsertOutcome::Inserted),
             Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
             Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,
+    /// then one whole-record write under the store's own lock. An
+    /// unknown id is the normal outcome, not an error.
+    fn replace_record(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    ) -> Result<ReplaceOutcome, ErrorCode> {
+        let reminder = Self::reminder_from_fields(id, fields)?;
+        match self.store.replace(reminder) {
+            Ok(()) => Ok(ReplaceOutcome::Replaced),
+            Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -606,5 +622,40 @@ mod tests {
                 "nothing inserted"
             );
         }
+    }
+
+    /// `REP-FR-005` (ADR-0049): a replaced reminder is read back whole;
+    /// an unknown id is `NotFound`; the domain's own `status` rule holds
+    /// at replace exactly as at insert.
+    #[test]
+    fn replace_record_swaps_the_whole_reminder_and_keeps_the_status_rule() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(1);
+        let mut edited = adapter.get(id).unwrap();
+        for (tag, value) in edited.iter_mut() {
+            if *tag == FIELD_TITLE {
+                *value = ScanValue::Str("retitled".into());
+            }
+        }
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced)
+        );
+        assert_eq!(adapter.get(id).unwrap(), edited);
+        assert_eq!(
+            adapter.replace_record(Uuid::from_u128(99), edited.clone()),
+            Ok(ReplaceOutcome::NotFound)
+        );
+        let mut bad_status = edited.clone();
+        for (tag, value) in bad_status.iter_mut() {
+            if *tag == FIELD_STATUS {
+                *value = ScanValue::U32(99);
+            }
+        }
+        assert_eq!(
+            adapter.replace_record(id, bad_status),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(adapter.get(id).unwrap(), edited, "nothing written");
     }
 }

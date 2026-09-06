@@ -417,12 +417,12 @@
 
 use super::insert_log;
 use super::mmap_field::MmapFieldValue;
-use super::query::{AllIds, FilterEq, GetById, Insert, ScanField, UpdateField};
+use super::query::{AllIds, FilterEq, GetById, Insert, Replace, ScanField, UpdateField};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{IndexedField, ScannableField, SchemaTag};
-use super::{InsertError, NotFound};
+use super::{InsertError, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -719,19 +719,29 @@ where
         })
     }
 
-    /// `INS-FR-004`: `records` followed by every `logged` record whose
-    /// id `records` does not already hold, in log order. The skip is
-    /// what makes a fold idempotent: a blob rewritten but not yet
-    /// cleared of its log replays without duplicates.
+    /// `INS-FR-004`/`REP-FR-003`: `records`, with every `logged` record
+    /// applied in log order — an id `records` does not hold is appended;
+    /// an id it does hold (a replacement, `REP-FR-002`, or a blob already
+    /// rewritten but not yet cleared of its log) has its record
+    /// **overwritten in place**, position kept. The log is the later
+    /// fact, so it wins; a replay of an entry the blob already carries
+    /// is a no-op, which is what keeps a fold idempotent.
     fn merge_log(mut records: Vec<R>, logged: Vec<R>) -> Vec<R> {
         if logged.is_empty() {
             return records;
         }
-        let mut seen: std::collections::HashSet<R::Id> =
-            records.iter().map(|record| record.id()).collect();
+        let mut position_of: HashMap<R::Id, usize> = records
+            .iter()
+            .enumerate()
+            .map(|(i, record)| (record.id(), i))
+            .collect();
         for record in logged {
-            if seen.insert(record.id()) {
-                records.push(record);
+            match position_of.get(&record.id()) {
+                Some(&i) => records[i] = record,
+                None => {
+                    position_of.insert(record.id(), records.len());
+                    records.push(record);
+                }
             }
         }
         records
@@ -775,6 +785,54 @@ where
             .or_default()
             .push(id);
         self.position_index.insert(id, position);
+        self.records.insert(id, record);
+        Ok(())
+    }
+
+    /// Replace one record whole at runtime (`REP-FR-002`, ADR-0049):
+    /// refuse an unknown id with nothing written; append the new version
+    /// to the insert log at `<path>.inserts` and `sync_data` it (the
+    /// fold in [`Self::open`] applies it over the blob's copy by id); write
+    /// the new scannable value into the record's existing slot in place;
+    /// move the id from its old index bucket to the new one; then swap
+    /// the record. `Ok` means the new version is durable.
+    ///
+    /// **The one window, named**: the log entry lands before the slot
+    /// write, so a crash between them leaves every field but the
+    /// scannable one replaced — the next `open` folds the log, keeps the
+    /// slot's value (a slot is authoritative for its field, exactly as
+    /// after an [`UpdateField`]), and never notices. A slot-first order
+    /// would leave the opposite partial state; neither is worse than an
+    /// `UpdateField` that landed and a `replace` that did not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplaceError::NotFound`] if `record.id()` has no record;
+    /// [`ReplaceError::Durability`] wrapping [`DurabilityError::Serde`]
+    /// if the record can't be serialized or [`DurabilityError::Io`] if
+    /// the log append fails.
+    pub fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        let old_value = match self.records.get(&id) {
+            Some(old) => old.indexed_value().clone(),
+            None => return Err(ReplaceError::NotFound(id)),
+        };
+        let position = *self
+            .position_index
+            .get(&id)
+            .ok_or(ReplaceError::NotFound(id))?;
+        insert_log::append(&insert_log::log_path(self.file.path()), &record)?;
+        self.file.write_value(position, record.scannable_value());
+        let new_value = record.indexed_value().clone();
+        if old_value != new_value {
+            if let Some(bucket) = self.index.get_mut(&old_value) {
+                bucket.retain(|other| *other != id);
+                if bucket.is_empty() {
+                    self.index.remove(&old_value);
+                }
+            }
+            self.index.entry(new_value).or_default().push(id);
+        }
         self.records.insert(id, record);
         Ok(())
     }
@@ -956,6 +1014,22 @@ where
     /// through the trait every composition layer forwards.
     fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
         GenericMmapStore::insert(self, record)
+    }
+}
+
+impl<R, IndexMarker, ScanMarker> Replace<R> for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned
+        + SchemaTag,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        GenericMmapStore::replace(self, record)
     }
 }
 
@@ -1656,6 +1730,104 @@ mod tests {
                 other => panic!("expected RecordBlobUnreadable, got {other:?}"),
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `REP-FR-002`/`REP-FR-003` (ADR-0049): a replace moves the id to
+    /// its new index bucket, rewrites the slot in place (no new slot),
+    /// swaps the record, and — through the log — survives a portable
+    /// reopen, after which the log is gone and a second reopen writes
+    /// nothing; an unknown id is refused with nothing written.
+    #[test]
+    fn replace_moves_the_index_rewrites_the_slot_and_survives_reopen() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_replace").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        {
+            let mut store = OrderCore::create(sample(), &path).unwrap();
+            let slots_before = store.all_ids().len();
+            let mut replaced = order(2);
+            replaced.amount_cents = 9_999;
+            replaced.status = OrderStatus::Shipped;
+            replaced.discount_cents = 5;
+            store.replace(replaced.clone()).unwrap();
+            assert!(log.exists(), "the new version is logged");
+            assert_eq!(store.get(replaced.id), Some(replaced.clone()));
+            assert_eq!(store.all_ids().len(), slots_before, "no new slot");
+            let mut shipped = store.filter_eq(&OrderStatus::Shipped);
+            shipped.sort();
+            assert_eq!(
+                shipped,
+                vec![uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)]
+            );
+            assert!(store.filter_eq(&OrderStatus::Pending).is_empty());
+            let mut amounts = store.scan();
+            amounts.sort_unstable();
+            assert_eq!(amounts, vec![2_500, 9_999]);
+
+            match store.replace(order(42)) {
+                Err(ReplaceError::NotFound(id)) => assert_eq!(id, uuid::Uuid::from_u128(42)),
+                other => panic!("expected NotFound, got {other:?}"),
+            }
+            assert_eq!(store.all_ids().len(), 2);
+        }
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        let got = reopened.get(uuid::Uuid::from_u128(2)).unwrap();
+        assert_eq!(got.discount_cents, 5, "a non-scannable field replaced");
+        assert_eq!(
+            got.status,
+            OrderStatus::Shipped,
+            "the indexed field replaced"
+        );
+        assert_eq!(got.amount_cents, 9_999, "the slot rewritten");
+        assert_eq!(
+            reopened.filter_eq(&OrderStatus::Shipped).len(),
+            2,
+            "the index rebuilt from the folded blob"
+        );
+        assert!(!log.exists(), "folded");
+        let blob_before = std::fs::read(blob_path(&path)).unwrap();
+        drop(reopened);
+        drop(OrderCore::open_portable(&path).unwrap());
+        assert_eq!(
+            std::fs::read(blob_path(&path)).unwrap(),
+            blob_before,
+            "a second reopen writes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `REP-FR-003`: the fold applies a logged record over the blob's
+    /// copy by id — the log is the later fact — and a replay of an entry
+    /// the blob already carries is a no-op, so an interrupted fold stays
+    /// idempotent; log order decides between two versions of one id.
+    #[test]
+    fn a_logged_replacement_wins_over_the_blob_in_the_fold() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_replace_fold").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        drop(OrderCore::create(sample(), &path).unwrap());
+        let mut v1 = order(1);
+        v1.discount_cents = 1;
+        let mut v2 = order(1);
+        v2.discount_cents = 2;
+        insert_log::append(&log, &v1).unwrap();
+        insert_log::append(&log, &order(3)).unwrap();
+        insert_log::append(&log, &v2).unwrap();
+
+        let records = OrderCore::read_portable_records(&path).unwrap();
+        let ids: Vec<u128> = records.iter().map(|o| o.id.as_u128()).collect();
+        assert_eq!(ids, vec![1, 2, 3], "position kept, newcomer appended");
+        assert_eq!(records[0].discount_cents, 2, "the later entry wins");
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert_eq!(
+            reopened
+                .get(uuid::Uuid::from_u128(1))
+                .unwrap()
+                .discount_cents,
+            2
+        );
+        assert!(!log.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

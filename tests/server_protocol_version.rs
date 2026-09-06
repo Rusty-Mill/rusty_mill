@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 14);
+    assert_eq!(dog.server_protocol_version(), 15);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -857,5 +857,87 @@ fn link_is_malformed_below_version_14() {
             "littermate_of"
         ),
         Err(ClientError::Unsupported("link"))
+    ));
+}
+
+/// `REP-FR-006` (ADR-0049), rule 3: `Replace` is protocol 15 — a
+/// connection negotiated at 14 (and a silent one) is answered
+/// `Malformed` with nothing replaced; at 15 it is served. Rule 4: the
+/// Rust client refuses below 15 with no frame.
+#[test]
+fn replace_is_malformed_below_version_15() {
+    let addr = start_entity_server();
+    let replace = Request::Replace {
+        id: RecordId::from_u128(1),
+        fields: vec![
+            (0, ScanValue::Str("Ada King".into())),
+            (1, ScanValue::Str("person".into())),
+            (2, ScanValue::I64(1)),
+            (3, ScanValue::StrList(vec![])),
+        ],
+    };
+    for hello in [Some(14u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &replace),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        match roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::GetById {
+                id: RecordId::from_u128(1),
+            },
+        ) {
+            Response::Record { fields, .. } => {
+                assert_eq!(
+                    fields[0],
+                    (0, ScanValue::Str("Ada Lovelace".into())),
+                    "nothing replaced"
+                )
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert_eq!(roundtrip(&mut reader, &mut writer, &replace), Response::Ok);
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.replace(RecordId::from_u128(1), &[("age", ScanValue::U32(1))]),
+        Err(ClientError::Unsupported("replace"))
     ));
 }

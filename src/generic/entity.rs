@@ -741,4 +741,74 @@ mod tests {
         kinds.sort();
         assert_eq!(kinds, vec!["mentioned_with", "mentored_by", "relates_to"]);
     }
+
+    /// `REP` acceptance criterion 1 (ADR-0049) on the richest front-door
+    /// stack, `NameIndex<MultiSymmetric<GenericMmapStore>>`: a replaced
+    /// label and alias set moves the name keys (the old alias no longer
+    /// resolves, the new one does), the indexed `kind` moves, every edge
+    /// under every label survives, and the whole of it survives
+    /// `open_entity_production_stack_portable`.
+    #[test]
+    fn replace_moves_name_keys_and_kind_and_keeps_every_edge_across_reopen() {
+        use crate::generic::query::Replace;
+        let dir = fresh_temp_dir("generic_entity_replace").unwrap();
+        let path = dir.join("entities.mmap");
+        let one = Uuid::from_u128(1);
+        let before = {
+            let stack = create_entity_production_stack(
+                sample_entities(),
+                &sample_relates_to(),
+                &sample_mentioned_with(),
+                &path,
+            )
+            .unwrap();
+            GetById::<Entity>::get(&stack, one).unwrap()
+        };
+        let edited = Entity {
+            id: one,
+            label: "Ada King".into(),
+            kind: "historical-person".into(),
+            mention_count: before.mention_count + 10,
+            aliases: vec!["Enchantress of Number".into()],
+        };
+        {
+            let mut stack = open_entity_production_stack_portable(&path).unwrap();
+            let neighbors_before = MultiNeighbors::<Entity>::all_neighbors(&stack, one);
+            assert!(!neighbors_before.is_empty(), "the sample links 1");
+            Replace::<Entity>::replace(&mut stack, edited.clone()).unwrap();
+            assert_eq!(GetById::<Entity>::get(&stack, one), Some(edited.clone()));
+            assert_eq!(
+                FindByName::<Entity>::find_by_name(&stack, "ada king"),
+                vec![one]
+            );
+            assert_eq!(
+                FindByName::<Entity>::find_by_name(&stack, "enchantress of number"),
+                vec![one]
+            );
+            for old_key in before.aliases.iter().chain(std::iter::once(&before.label)) {
+                assert!(
+                    !FindByName::<Entity>::find_by_name(&stack, old_key).contains(&one),
+                    "{old_key} still resolves to the replaced entity"
+                );
+            }
+            assert_eq!(
+                FilterEq::<Entity, KindField>::filter_eq(&stack, &"historical-person".to_string()),
+                vec![one]
+            );
+            assert!(!FilterEq::<Entity, KindField>::filter_eq(&stack, &before.kind).contains(&one));
+            assert_eq!(
+                MultiNeighbors::<Entity>::all_neighbors(&stack, one),
+                neighbors_before,
+                "edges are not fields"
+            );
+        }
+        let reopened = open_entity_production_stack_portable(&path).unwrap();
+        assert_eq!(GetById::<Entity>::get(&reopened, one), Some(edited));
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&reopened, "Enchantress of Number"),
+            vec![one]
+        );
+        assert!(FindByName::<Entity>::find_by_name(&reopened, &before.label).is_empty());
+        assert!(!MultiNeighbors::<Entity>::all_neighbors(&reopened, one).is_empty());
+    }
 }

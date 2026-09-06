@@ -1,9 +1,12 @@
 # ADR-0048: `Memory` domain — a bounded projection of the consumer's `memories` table
 
-- Status: **Proposed** (2026-09-06; implemented on the same branch,
-  the `ADR-0046`/`ADR-0047` cadence — the owner accepts or amends a
-  working, tested shape). See "Considered options" for what
-  acceptance chooses between.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-06 — the owner's "Accept as designed", option (a): the
+  eleven-field projection on `Reminder`'s stack, no wire change; (b)
+  the whole table, (c) `memory_associations` now, (d) replacement
+  first, and (e) decline all declined. Recorded in "Acceptance and
+  implementation" below.) Proposed and implemented on one branch, the
+  `ADR-0046`/`ADR-0047` cadence.
 - Date: 2026-09-06
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-MEMORY-DOMAIN-DESIGN.md` (the full
@@ -80,4 +83,7 @@ into and read is useful before it can be edited. **(e) Decline.**
   `tests/server_memory_integration.rs`, `CheckpointFlush` in
   `src/server/journal.rs`; one unit test under default features, four
   in the adapter, three over sockets; every acceptance criterion 1–4
-  holds. (This PR.)
+  holds. (PR #200.)
+- 2026-09-06: accepted as designed (option (a); (b)–(e) declined).
+  No change to the implementation. The replacement round
+  (`ADR-0049`) starts next, as this ADR named.

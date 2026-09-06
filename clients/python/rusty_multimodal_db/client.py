@@ -227,6 +227,24 @@ class Client:
         tagged = tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
         _expect_ok(self._roundtrip(p.Insert(record_id, tagged)))
 
+    def replace(self, record_id: uuid.UUID, fields: Sequence[Tuple[str, Any]]) -> bool:
+        """Replace one record whole (REP-FR-007, protocol 15): ``insert``'s
+        shape over an id that already has a record. ``True`` when replaced,
+        ``False`` when the id has no record (nothing written). Below 15,
+        ``UnsupportedError`` with no frame sent."""
+        need = p.REQUEST_INTRODUCED_AT[p.Replace]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(f"Replace needs protocol {need}, negotiated {self.server_protocol_version}")
+        tagged = tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
+        reply = self._roundtrip(p.Replace(record_id, tagged))
+        if isinstance(reply, p.Ok):
+            return True
+        if isinstance(reply, p.NotFound):
+            return False
+        if isinstance(reply, p.Err):
+            raise ServerError(reply.code, reply.message)
+        raise ProtocolError(type(reply).__name__)
+
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
         """Add one edge under a symmetric relation label (LNK-FR-012,
         protocol 14). Returns normally whether the edge is new or already
