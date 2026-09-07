@@ -36,7 +36,8 @@ use super::query::{
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 use super::{
-    CompactionReport, DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError,
+    CompactionReport, DeleteError, GuardedReplace, InsertError, LinkError, LinkOutcome, NotFound,
+    ReplaceError,
 };
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
@@ -282,6 +283,45 @@ impl<S> GenericProductionStore<S> {
         S: Replace<R>,
     {
         self.inner.write().expect(LOCK_POISONED).replace(record)
+    }
+
+    /// Replace one record whole **only if `guard` holds against the
+    /// stored version** (`GRD-FR-001`, ADR-0054) — the read of the
+    /// current record, the guard, and the write all happen under one
+    /// acquisition of the write lock, so no other writer can slip between
+    /// the comparison and the replacement: this is what makes a
+    /// last-writer-wins merge (`guard` = "the stored `updated_at` is older
+    /// than mine") atomic, where a client-side get-then-replace is not.
+    /// Nothing is written when the guard does not hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplaceError::NotFound`] if the id has no record (the
+    /// guard is never evaluated), [`ReplaceError::Durability`] if the
+    /// durable core could not persist the new version.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn replace_if<R, F>(
+        &self,
+        record: R,
+        guard: F,
+    ) -> Result<GuardedReplace, ReplaceError<R::Id>>
+    where
+        R: Record,
+        S: Replace<R> + GetById<R>,
+        F: FnOnce(&R) -> bool,
+    {
+        let mut inner = self.inner.write().expect(LOCK_POISONED);
+        let current = inner
+            .get(record.id())
+            .ok_or_else(|| ReplaceError::NotFound(record.id()))?;
+        if !guard(&current) {
+            return Ok(GuardedReplace::Refused);
+        }
+        inner.replace(record)?;
+        Ok(GuardedReplace::Replaced)
     }
 
     /// Remove one record at runtime (`DEL-FR-004`, ADR-0051) under the
@@ -640,5 +680,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `GRD-FR-001` (ADR-0054): the guard is evaluated against the stored
+    /// record under the write lock — a holding guard replaces, a failing
+    /// one writes nothing, an unknown id is `NotFound` with the guard
+    /// never called.
+    #[test]
+    fn replace_if_replaces_only_when_the_guard_holds_against_the_stored_record() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_production_replace_if").unwrap();
+        let path = dir.join("amount.mmap");
+        let stack = create_order_production_stack(sample(), &path).unwrap();
+        let store = GenericProductionStore::new(stack);
+        let id = uuid::Uuid::from_u128(1);
+        let newer = Order {
+            created_at_unix_ms: 5_000,
+            amount_cents: 7_000,
+            ..sample()[0].clone()
+        };
+
+        // Last-writer-wins: the stored version is older, so the guard holds.
+        assert!(matches!(
+            store.replace_if(newer.clone(), |stored| stored.created_at_unix_ms < 5_000),
+            Ok(GuardedReplace::Replaced)
+        ));
+        assert_eq!(store.get::<Order>(id).unwrap().amount_cents, 7_000);
+
+        // An older version loses: the guard fails and nothing is written.
+        let older = Order {
+            created_at_unix_ms: 3_000,
+            amount_cents: 1,
+            ..sample()[0].clone()
+        };
+        assert!(matches!(
+            store.replace_if(older, |stored| stored.created_at_unix_ms < 3_000),
+            Ok(GuardedReplace::Refused)
+        ));
+        assert_eq!(store.get::<Order>(id).unwrap().amount_cents, 7_000);
+
+        // An unknown id: `NotFound`, the guard never runs.
+        let unknown = Order {
+            id: uuid::Uuid::from_u128(99),
+            ..newer
+        };
+        match store.replace_if(unknown, |_| panic!("guard must not run for a missing id")) {
+            Err(ReplaceError::NotFound(missing)) => assert_eq!(missing, uuid::Uuid::from_u128(99)),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
     }
 }

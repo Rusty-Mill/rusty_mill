@@ -29,16 +29,19 @@
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
-    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
+    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, DeleteOutcome, InsertOutcome, ReplaceOutcome};
+use super::{
+    predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, ReplaceIfOutcome,
+    ReplaceOutcome,
+};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::reminder::{
     status_from_u32, status_to_u32, DueAtField, Reminder, ReminderProductionStack, StatusField,
 };
-use crate::generic::{DeleteError, InsertError, ReplaceError};
+use crate::generic::{DeleteError, GuardedReplace, InsertError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_TITLE: FieldRef = 0;
@@ -185,15 +188,21 @@ impl ReminderConnectionStore {
     }
 }
 
+impl ReminderConnectionStore {
+    /// The wire shape of one reminder, in tag order — `get` and a
+    /// `ReplaceIf` guard's evaluation both go through here.
+    fn fields_of(reminder: Reminder) -> Vec<(FieldRef, ScanValue)> {
+        vec![
+            (FIELD_TITLE, ScanValue::Str(reminder.title)),
+            (FIELD_DUE_AT, ScanValue::I64(reminder.due_at_unix_ms)),
+            (FIELD_STATUS, ScanValue::U32(status_to_u32(reminder.status))),
+        ]
+    }
+}
+
 impl ConnectionStore for ReminderConnectionStore {
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
-        self.store.get::<Reminder>(id).map(|reminder| {
-            vec![
-                (FIELD_TITLE, ScanValue::Str(reminder.title)),
-                (FIELD_DUE_AT, ScanValue::I64(reminder.due_at_unix_ms)),
-                (FIELD_STATUS, ScanValue::U32(status_to_u32(reminder.status))),
-            ]
-        })
+        self.store.get::<Reminder>(id).map(Self::fields_of)
     }
 
     /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,
@@ -280,6 +289,25 @@ impl ConnectionStore for ReminderConnectionStore {
         match self.store.replace(reminder) {
             Ok(()) => Ok(ReplaceOutcome::Replaced),
             Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `GRD-FR-003` (ADR-0054): `replace_record`'s validation, then the
+    /// read, the guard over this adapter's own wire shape of the stored
+    /// record, and the write under one acquisition of the store's lock.
+    fn replace_record_if(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+        guard: &Predicate,
+    ) -> Result<ReplaceIfOutcome, ErrorCode> {
+        let reminder = Self::reminder_from_fields(id, fields)?;
+        let holds = |stored: &Reminder| predicate_matches(&Self::fields_of(stored.clone()), guard);
+        match self.store.replace_if(reminder, holds) {
+            Ok(GuardedReplace::Replaced) => Ok(ReplaceIfOutcome::Replaced),
+            Ok(GuardedReplace::Refused) => Ok(ReplaceIfOutcome::GuardFailed),
+            Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
             Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }

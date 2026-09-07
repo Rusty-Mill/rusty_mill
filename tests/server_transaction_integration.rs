@@ -16,8 +16,9 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
-    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS,
+    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use rusty_multimodal_db::server::{serve, ConnectionStore, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
@@ -586,6 +587,22 @@ fn session_state_errors_leave_the_connection_open() {
     );
     // `CMP-FR-006` (ADR-0052): a compaction never runs inside a session.
     assert_err(roundtrip(&mut c, Request::Compact), ErrorCode::SessionOpen);
+    // `GRD-FR-005` (ADR-0054): a guarded replace is never staged either.
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::ReplaceIf {
+                id: Uuid::from_u128(1),
+                fields: vec![],
+                guard: Predicate {
+                    field: FIELD_AGE,
+                    op: CompareOp::Lt,
+                    value: ScanValue::U32(9),
+                },
+            },
+        ),
+        ErrorCode::SessionOpen,
+    );
     // `TBL-FR-006` (ADR-0050): a session's writes belong to one table —
     // `Use` inside one is refused, even for the table already selected.
     assert_err(

@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_18_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_19_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -162,6 +162,12 @@ fn the_python_reference_client_speaks_the_protocol_at_18_and_at_10() {
     assert_eq!(get("replace_by_alias"), "1");
     assert_eq!(get("replace_neighbors"), "1");
     assert_eq!(get("replace_unknown"), "notfound");
+    // `GRD-FR-006` (ADR-0054): a guarded replace from Python — holds,
+    // refused with the stored value intact, unknown id.
+    assert_eq!(get("replace_if_holds"), "replaced");
+    assert_eq!(get("replace_if_refused"), "refused");
+    assert_eq!(get("replace_if_stored"), "3");
+    assert_eq!(get("replace_if_unknown"), "notfound");
     // `TBL-FR-009` (ADR-0050): the table list and `Use` from Python.
     assert_eq!(get("tables"), "entity;entity");
     assert_eq!(get("use_self"), "entity");
@@ -172,9 +178,9 @@ fn the_python_reference_client_speaks_the_protocol_at_18_and_at_10() {
     assert_eq!(get("delete_get"), "-");
     // `CMP-FR-007` (ADR-0052): a compaction from Python — the live count
     // (five sample entities plus Grace), the throwaway's retired slot, the
-    // record log (an insert, a replace, an insert, a tombstone), and the
-    // edge logs a runtime link touched.
-    assert_eq!(get("compact"), "6;1;4;1");
+    // record log (an insert, a replace, a guarded replace, an insert, a
+    // tombstone), and the edge logs a runtime link touched.
+    assert_eq!(get("compact"), "6;1;5;1");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.

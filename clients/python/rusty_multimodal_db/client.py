@@ -293,6 +293,44 @@ class Client:
             raise ServerError(reply.code, reply.message)
         raise ProtocolError(type(reply).__name__)
 
+    def replace_if(
+        self,
+        record_id: uuid.UUID,
+        fields: Sequence[Tuple[str, Any]],
+        guard: Tuple[str, p.CompareOp, Any],
+    ) -> str:
+        """Replace one record whole only if ``guard`` holds against the
+        stored record (GRD-FR-006, protocol 19): ``replace``'s shape plus a
+        ``(field, op, value)`` guard, the comparison and the write under
+        the server's write lock. Returns ``"replaced"``, ``"refused"`` (the
+        guard did not hold; nothing written), or ``"notfound"`` (the id has
+        no record). Last-writer-wins is ``("updated_at_unix_ms",
+        CompareOp.Lt, mine)``. An ordering comparator on a non-numeric
+        field is ``UnsupportedError`` with no frame sent; below 19 likewise."""
+        need = p.REQUEST_INTRODUCED_AT[p.ReplaceIf]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(f"ReplaceIf needs protocol {need}, negotiated {self.server_protocol_version}")
+        tagged = tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
+        guard_name, op, value = guard
+        descriptor = self.field(guard_name)
+        if op in (p.CompareOp.Lt, p.CompareOp.Le, p.CompareOp.Gt, p.CompareOp.Ge) and descriptor.value_kind not in (
+            p.ValueKind.U32,
+            p.ValueKind.I64,
+        ):
+            raise UnsupportedError(f"ordering guard on {guard_name!r}, a {descriptor.value_kind.name} field")
+        predicate = p.Predicate(descriptor.tag, op, _to_scan_value(descriptor.value_kind, value))
+        try:
+            reply = self._roundtrip(p.ReplaceIf(record_id, tagged, predicate))
+        except ServerError as e:
+            if e.code == p.ErrorCode.GuardFailed:
+                return "refused"
+            raise
+        if isinstance(reply, p.Ok):
+            return "replaced"
+        if isinstance(reply, p.NotFound):
+            return "notfound"
+        raise ProtocolError(type(reply).__name__)
+
     def delete(self, record_id: uuid.UUID) -> bool:
         """Remove one record (DEL-FR-008, protocol 17): ``True`` when it is
         gone with every edge touching it, ``False`` when the id has no

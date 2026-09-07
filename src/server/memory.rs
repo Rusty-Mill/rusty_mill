@@ -20,17 +20,20 @@
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
-    ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
-    ValueKind,
+    ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
+    TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReplaceOutcome};
+use super::{
+    predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
+    ReplaceIfOutcome, ReplaceOutcome,
+};
 use crate::generic::memory::{
     AccessCountField, CategoryField, Memory, MemoryProductionStack, MEMORY_FOREIGN_TABLE,
     MEMORY_RELATION_LABELS,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
-use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
+use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_CONTENT: FieldRef = 0;
@@ -364,6 +367,25 @@ impl ConnectionStore for MemoryConnectionStore {
         match self.store.replace(memory) {
             Ok(()) => Ok(ReplaceOutcome::Replaced),
             Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `GRD-FR-003` (ADR-0054): `replace_record`'s validation, then the
+    /// read, the guard over this adapter's own wire shape of the stored
+    /// record, and the write under one acquisition of the store's lock.
+    fn replace_record_if(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+        guard: &Predicate,
+    ) -> Result<ReplaceIfOutcome, ErrorCode> {
+        let memory = Self::memory_from_fields(id, fields)?;
+        let holds = |stored: &Memory| predicate_matches(&Self::fields_of(stored.clone()), guard);
+        match self.store.replace_if(memory, holds) {
+            Ok(GuardedReplace::Replaced) => Ok(ReplaceIfOutcome::Replaced),
+            Ok(GuardedReplace::Refused) => Ok(ReplaceIfOutcome::GuardFailed),
+            Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
             Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
@@ -895,5 +917,52 @@ mod tests {
             adapter.neighbors_by_relation(one, "mentions"),
             Ok(vec![ada])
         );
+    }
+
+    /// `GRD-FR-003` (ADR-0054): the guard is evaluated over this adapter's
+    /// own wire shape of the stored record — `updated_at < mine` holds
+    /// for a newer version and replaces, fails for an older one with
+    /// nothing written; an unknown id is `NotFound`; `replace_record`'s
+    /// validation still runs first.
+    #[test]
+    fn replace_record_if_is_last_writer_wins_over_the_stored_updated_at() {
+        use crate::server::protocol::{CompareOp, Predicate};
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(1);
+        let stored_updated_at = 1_000;
+        let mut newer = full_fields(1);
+        newer[0] = (FIELD_CONTENT, ScanValue::Str("newer".into()));
+        newer[6] = (FIELD_UPDATED_AT, ScanValue::I64(5_000));
+        let guard = |mine: i64| Predicate {
+            field: FIELD_UPDATED_AT,
+            op: CompareOp::Lt,
+            value: ScanValue::I64(mine),
+        };
+        assert_eq!(
+            adapter.replace_record_if(id, newer.clone(), &guard(5_000)),
+            Ok(ReplaceIfOutcome::Replaced)
+        );
+        assert_eq!(adapter.get(id).unwrap(), newer);
+
+        let mut older = newer.clone();
+        older[0] = (FIELD_CONTENT, ScanValue::Str("older".into()));
+        older[6] = (FIELD_UPDATED_AT, ScanValue::I64(stored_updated_at));
+        assert_eq!(
+            adapter.replace_record_if(id, older, &guard(stored_updated_at)),
+            Ok(ReplaceIfOutcome::GuardFailed)
+        );
+        assert_eq!(adapter.get(id).unwrap(), newer, "nothing written");
+
+        assert_eq!(
+            adapter.replace_record_if(Uuid::from_u128(99), newer.clone(), &guard(9_000)),
+            Ok(ReplaceIfOutcome::NotFound)
+        );
+        let mut negative = newer.clone();
+        negative[10] = (FIELD_ACCESS_COUNT, ScanValue::I64(-1));
+        assert_eq!(
+            adapter.replace_record_if(id, negative, &guard(9_000)),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(adapter.get(id).unwrap(), newer);
     }
 }

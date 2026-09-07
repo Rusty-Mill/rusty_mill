@@ -79,6 +79,18 @@ pub enum DeleteOutcome {
     NotFound,
 }
 
+/// What [`ConnectionStore::replace_record_if`] did (`GRD-FR-003`,
+/// ADR-0054): the guard held and the record is the new version; the id
+/// had no record (the guard never evaluated); or the guard did not hold
+/// — nothing written in the latter two. `dispatch` maps them to
+/// [`Response::Ok`] / [`Response::NotFound`] / `Err { GuardFailed }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceIfOutcome {
+    Replaced,
+    NotFound,
+    GuardFailed,
+}
+
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
     /// outcome, not an error, matching [`crate::store::DogStore::get`]'s
@@ -236,6 +248,26 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `GRD-FR-003` (ADR-0054, protocol 19): replace the record at `id`
+    /// whole **only if `guard` holds against the stored record**, the
+    /// read, the comparison, and the write under one acquisition of the
+    /// store's write lock. `fields` is validated exactly as
+    /// [`Self::replace_record`]'s; `guard` has already been validated
+    /// against the schema by `dispatch` (`validate_predicate`), so an
+    /// implementor evaluates it with [`predicate_matches`] over its own
+    /// wire shape of the stored record. The default answers
+    /// `Unsupported`, as [`Self::replace_record`] does; `Memory`,
+    /// `Reminder`, and `Entity` implement it. A durability failure is
+    /// [`ErrorCode::Storage`].
+    fn replace_record_if(
+        &self,
+        _id: RecordId,
+        _fields: Vec<(FieldRef, ScanValue)>,
+        _guard: &Predicate,
+    ) -> Result<ReplaceIfOutcome, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
     /// and, within this table, every edge touching it. Answers
     /// [`DeleteOutcome::NotFound`] when `id` has no record, nothing
@@ -342,6 +374,9 @@ fn error_message(code: ErrorCode) -> &'static str {
         }
         ErrorCode::Duplicate => "a record with this id already exists; nothing was written",
         ErrorCode::Storage => "the record could not be made durable; nothing was written",
+        ErrorCode::GuardFailed => {
+            "the guard did not hold against the stored record; nothing was written"
+        }
     }
 }
 
@@ -431,14 +466,28 @@ fn validate_query(
         }
     }
     for predicate in filter {
-        let kind = kind_of(predicate.field).ok_or(ErrorCode::UnknownField)?;
-        if !value_matches_kind(kind, &predicate.value) {
-            return Err(ErrorCode::Malformed);
-        }
-        let orderable_kind = matches!(kind, protocol::ValueKind::U32 | protocol::ValueKind::I64);
-        if predicate.op.is_ordering() && !orderable_kind {
-            return Err(ErrorCode::Malformed);
-        }
+        validate_predicate(schema, predicate)?;
+    }
+    Ok(())
+}
+
+/// One predicate against a schema (`SQL-FR-007`; shared with
+/// `Request::ReplaceIf`'s guard, `GRD-FR-004`): `UnknownField` for a tag
+/// the schema lacks, `Malformed` for a value of another kind or an
+/// ordering comparator on a field that is not `U32`/`I64`.
+fn validate_predicate(schema: &DomainSchema, predicate: &Predicate) -> Result<(), ErrorCode> {
+    let kind = schema
+        .fields
+        .iter()
+        .find(|f| f.tag == predicate.field)
+        .map(|f| f.value_kind)
+        .ok_or(ErrorCode::UnknownField)?;
+    if !value_matches_kind(kind, &predicate.value) {
+        return Err(ErrorCode::Malformed);
+    }
+    let orderable_kind = matches!(kind, protocol::ValueKind::U32 | protocol::ValueKind::I64);
+    if predicate.op.is_ordering() && !orderable_kind {
+        return Err(ErrorCode::Malformed);
     }
     Ok(())
 }
@@ -480,7 +529,10 @@ fn evaluate_query(
     matched
 }
 
-fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate) -> bool {
+/// Whether `predicate` holds over one record's wire shape — a `Query`
+/// filter's per-row test, and (`GRD-FR-003`) the evaluation of a
+/// `ReplaceIf` guard against the stored record inside an adapter.
+pub fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate) -> bool {
     fields
         .iter()
         .find(|(field, _)| *field == predicate.field)
@@ -1821,6 +1873,20 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         },
         // `CMP-FR-006` (ADR-0052): the counts, straight from the stack.
         // Gated in `handle_connection` like `Insert`.
+        // `GRD-FR-004`/`005` (ADR-0054): the guard validated as a query
+        // predicate first (nothing evaluated on refusal), then one guarded
+        // write under the adapter's own lock. Gated like `Replace`.
+        Request::ReplaceIf { id, fields, guard } => {
+            if let Err(code) = validate_predicate(&store.describe(), &guard) {
+                return err_response(code);
+            }
+            match store.replace_record_if(id, fields, &guard) {
+                Ok(ReplaceIfOutcome::Replaced) => Response::Ok,
+                Ok(ReplaceIfOutcome::NotFound) => Response::NotFound,
+                Ok(ReplaceIfOutcome::GuardFailed) => err_response(ErrorCode::GuardFailed),
+                Err(code) => err_response(code),
+            }
+        }
         Request::Compact => match store.compact() {
             Ok(report) => Response::Compacted {
                 records: report.records as u64,
@@ -2222,6 +2288,7 @@ fn handle_connection(
                     | Request::Replace { .. }
                     | Request::Delete { .. }
                     | Request::Compact
+                    | Request::ReplaceIf { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2396,6 +2463,9 @@ fn handle_connection(
             // `CMP-FR-006` (ADR-0052): the same two gates, at 18.
             Request::Compact if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::Compact if negotiated < 18 => err_response(ErrorCode::Malformed),
+            // `GRD-FR-005` (ADR-0054): the same two gates, at 19.
+            Request::ReplaceIf { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::ReplaceIf { .. } if negotiated < 19 => err_response(ErrorCode::Malformed),
             // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
             // protocol-12 requests are unknown to a connection negotiated
             // below 12 — the session precedent, not `Query`'s client-only

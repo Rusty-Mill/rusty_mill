@@ -13,7 +13,7 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::client::{QueryResult, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue};
+use rusty_multimodal_db::server::protocol::{CompareOp, Request, Response, ScanValue};
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
@@ -449,6 +449,30 @@ fn link_is_unsupported_on_the_dog_domain() {
 
 /// `REP-FR-005` (ADR-0049): `Dog`'s adapter keeps the trait's default —
 /// the bespoke store has no replace — so a well-formed `Replace` is
+/// `GRD-FR-005` (ADR-0054): `ReplaceIf` on a domain with no replace is
+/// `Unsupported`, server-side, with the record intact.
+#[test]
+fn replace_if_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let before = client.get(Uuid::from_u128(1)).unwrap();
+    match client.replace_if(
+        Uuid::from_u128(1),
+        &[
+            ("breed", ScanValue::Str("pug".into())),
+            ("age", ScanValue::U32(1)),
+        ],
+        ("age", CompareOp::Lt, ScanValue::U32(9)),
+    ) {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert_eq!(client.get(Uuid::from_u128(1)).unwrap(), before);
+}
+
 /// `Unsupported`, server-side, with the record intact.
 #[test]
 fn replace_is_unsupported_on_the_dog_domain() {

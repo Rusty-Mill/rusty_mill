@@ -16,7 +16,7 @@ use rusty_multimodal_db::server::audit::{
 use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::protocol::{ErrorCode, Request, Response, ScanValue};
+use rusty_multimodal_db::server::protocol::{CompareOp, ErrorCode, Request, Response, ScanValue};
 use rusty_multimodal_db::server::{serve, RateLimit, ServeOptions, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
@@ -341,6 +341,18 @@ fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
     match client.compact() {
         Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
         other => panic!("expected Unauthorized for a ReadOnly compact, got {other:?}"),
+    }
+    // `GRD-FR-005` (ADR-0054): and the eighth write, `ReplaceIf`.
+    match client.replace_if(
+        Uuid::from_u128(1),
+        &[
+            ("breed", ScanValue::Str("pug".into())),
+            ("age", ScanValue::U32(1)),
+        ],
+        ("age", CompareOp::Lt, ScanValue::U32(9)),
+    ) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a ReadOnly replace_if, got {other:?}"),
     }
 
     client.authenticate("write-token").unwrap();

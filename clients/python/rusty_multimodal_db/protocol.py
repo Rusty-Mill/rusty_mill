@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 18
+PROTOCOL_VERSION = 19
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -70,6 +70,7 @@ class ErrorCode(IntEnum):
     Conflict = 10
     Duplicate = 11
     Storage = 12
+    GuardFailed = 13
 
 
 # ---- ScanValue (enum family) ----
@@ -494,11 +495,21 @@ class Compact:
     pass
 
 
+@_variant(28, [("id", "uuid"), ("fields", FIELDS), ("guard", Predicate)])
+class ReplaceIf:
+    id: uuid.UUID
+    fields: Tuple[Tuple[int, Any], ...]
+    guard: Predicate
+
+    def __post_init__(self):
+        object.__setattr__(self, "fields", tuple(tuple(f) for f in self.fields))
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
-    Insert, Link, Replace, Use, ListTables, Delete, Compact,
+    Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -509,6 +520,7 @@ REQUEST_INTRODUCED_AT = {
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
+    ReplaceIf: 19,
 }
 
 

@@ -11,10 +11,12 @@ use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
-use rusty_multimodal_db::server::client::{ClientError, QueryResult, SchemaDrivenClient};
+use rusty_multimodal_db::server::client::{
+    ClientError, GuardedReplace, QueryResult, SchemaDrivenClient,
+};
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
-use rusty_multimodal_db::server::protocol::{ErrorCode, ScanValue};
+use rusty_multimodal_db::server::protocol::{CompareOp, ErrorCode, ScanValue};
 use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -425,6 +427,136 @@ fn replace_a_memory_over_the_wire_every_read_sees_it_and_a_restart_serves_it() {
     decisions.sort();
     assert_eq!(decisions, vec![id, Uuid::from_u128(99)], "both survived");
     assert!(client.get(Uuid::from_u128(99)).unwrap().is_some());
+}
+
+/// `GRD-FR-005`/`006` (ADR-0054), over a real socket: a guarded replace
+/// is last-writer-wins on `updated_at_unix_ms` — a newer version
+/// replaces, an older one is refused with nothing written, an unknown id
+/// is `NotFound`; a guard of the wrong kind is the server's `Malformed`,
+/// an ordering guard on a `Str` field and an unknown guard field are
+/// refused locally; the winner survives a restart.
+#[test]
+fn a_guarded_replace_is_last_writer_wins_over_the_wire_and_survives_a_restart() {
+    let dir = unique_dir("memory_replace_if");
+    let addr = start_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let id = Uuid::from_u128(1);
+    let stored = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        stored[6],
+        ("updated_at_unix_ms".to_string(), ScanValue::I64(1_000))
+    );
+    let version = |content: &str, updated_at: i64| -> Vec<(&'static str, ScanValue)> {
+        vec![
+            ("content", ScanValue::Str(content.into())),
+            ("category", ScanValue::Str("preference".into())),
+            ("tags", ScanValue::StrList(vec!["sync".into()])),
+            ("source", ScanValue::Str("hub".into())),
+            ("metadata_json", ScanValue::Str("{}".into())),
+            ("created_at_unix_ms", ScanValue::I64(1_000)),
+            ("updated_at_unix_ms", ScanValue::I64(updated_at)),
+            ("memory_type", ScanValue::Str("unclassified".into())),
+            ("status", ScanValue::Str("active".into())),
+            ("sensitive", ScanValue::Bool(false)),
+            ("access_count", ScanValue::I64(0)),
+        ]
+    };
+    let lww = |mine: i64| ("updated_at_unix_ms", CompareOp::Lt, ScanValue::I64(mine));
+
+    // A newer version wins.
+    let newer = version("from node B, newer", 5_000);
+    assert_eq!(
+        client.replace_if(id, &newer, lww(5_000)).unwrap(),
+        GuardedReplace::Replaced
+    );
+    assert_eq!(
+        client.get(id).unwrap().unwrap()[0],
+        (
+            "content".to_string(),
+            ScanValue::Str("from node B, newer".into())
+        )
+    );
+    // An older version loses: refused, nothing written.
+    let older = version("from node A, stale", 3_000);
+    assert_eq!(
+        client.replace_if(id, &older, lww(3_000)).unwrap(),
+        GuardedReplace::Refused
+    );
+    assert_eq!(
+        client.get(id).unwrap().unwrap()[0],
+        (
+            "content".to_string(),
+            ScanValue::Str("from node B, newer".into())
+        )
+    );
+    // An equal timestamp loses too (strict `Lt`), a compare-and-swap holds.
+    assert_eq!(
+        client.replace_if(id, &newer, lww(5_000)).unwrap(),
+        GuardedReplace::Refused
+    );
+    assert_eq!(
+        client
+            .replace_if(
+                id,
+                &version("cas", 6_000),
+                ("updated_at_unix_ms", CompareOp::Eq, ScanValue::I64(5_000)),
+            )
+            .unwrap(),
+        GuardedReplace::Replaced
+    );
+    // An unknown id.
+    assert_eq!(
+        client
+            .replace_if(Uuid::from_u128(99), &newer, lww(9_000))
+            .unwrap(),
+        GuardedReplace::NotFound
+    );
+    assert!(client.get(Uuid::from_u128(99)).unwrap().is_none());
+    // Guard refusals: wrong kind (server), ordering on Str and unknown
+    // field (client, no frame). Nothing written by any of them.
+    let before = client.get(id).unwrap().unwrap();
+    match client.replace_if(
+        id,
+        &newer,
+        (
+            "updated_at_unix_ms",
+            CompareOp::Lt,
+            ScanValue::Str("x".into()),
+        ),
+    ) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    assert!(matches!(
+        client.replace_if(
+            id,
+            &newer,
+            ("content", CompareOp::Lt, ScanValue::Str("x".into()))
+        ),
+        Err(ClientError::Unsupported("ordering guard"))
+    ));
+    assert!(matches!(
+        client.replace_if(
+            id,
+            &newer,
+            ("no_such_field", CompareOp::Eq, ScanValue::I64(0))
+        ),
+        Err(ClientError::UnknownField(_))
+    ));
+    assert_eq!(client.get(id).unwrap().unwrap(), before);
+    drop(client);
+
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let got = client.get(id).unwrap().unwrap();
+    assert_eq!(
+        got[0],
+        ("content".to_string(), ScanValue::Str("cas".into()))
+    );
+    assert_eq!(
+        got[6],
+        ("updated_at_unix_ms".to_string(), ScanValue::I64(6_000))
+    );
 }
 
 fn sample_entities() -> Vec<Entity> {

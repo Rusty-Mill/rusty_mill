@@ -1,7 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.7.0 (protocol version 18 — `SERVER-001` v0.42.0, `CMP-FR-008`,
-  ADR-0052; 0.6.0 was protocol 17, ADR-0051; 0.5.0 protocol 16,
+- Version: 0.8.0 (protocol version 19 — `SERVER-001` v0.44.0, `GRD-FR-007`,
+  ADR-0054; 0.7.0 was protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
   ADR-0050; 0.4.0 protocol 15, ADR-0049; 0.3.0 protocol 14, ADR-0047;
   0.2.0 protocol 13, ADR-0046; 0.1.0 protocol 12, `ECO-FR-004`,
   ADR-0043)
@@ -92,13 +92,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 18 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `12 00 00 00` (18).
+- `Request::Hello { protocol_version: 19 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `13 00 00 00` (19).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 18
+## 5. Types at protocol version 19
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -117,7 +117,7 @@ unmarked is version 1.
 | `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | |
 | `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | |
 | `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | |
-| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) |
+| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) |
 
 ### 5.3 `ScanValue` — a field's value
 
@@ -187,6 +187,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 25 | `ListTables` | — | 16 | `Tables` |
 | 26 | `Delete` | `id: RecordId` | 17 | `Ok` or `NotFound` |
 | 27 | `Compact` | — | 18 | `Compacted` |
+| 28 | `ReplaceIf` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>`, `guard: Predicate` — `Replace`'s body, then one predicate | 19 | `Ok`, `NotFound`, or `Err { GuardFailed }` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -443,6 +444,23 @@ Each item names the `SERVER-001` requirement that owns it.
    `Unauthorized` for a read-only token and `SessionOpen` while a
    session is open. `Malformed` below 18. An operator's request: the
    server never compacts on its own. (`FR-052`)
+17. **`ReplaceIf`** (19) — `Replace` with a **guard**: the server reads
+   the stored record, evaluates `guard` against its fields exactly as a
+   `Query` predicate (`stored.field op value`), and replaces the record
+   whole only if it holds — the read, the comparison, and the write
+   under the table's write lock, so no other writer lands in between.
+   Last-writer-wins is `guard = { updated_at, Lt, mine }`; compare-and-
+   swap on a numeric field is `Eq`. `fields` is validated as `Replace`'s;
+   `guard` as a query predicate (`UnknownField` for an unknown tag,
+   `Malformed` for a value of another kind or an ordering comparator on
+   a field that is not `U32`/`I64`), nothing evaluated on refusal.
+   Answered `Ok` when replaced, `NotFound` when `id` has no record (the
+   guard never evaluated), `Err { GuardFailed }` when the guard did not
+   hold — nothing written in either refusal. `Unsupported` from a
+   domain with no replace (`Dog`, `Order`, `Employee`); `Storage` if the
+   new version could not be made durable. Refused `Unauthorized` for a
+   read-only token and `SessionOpen` while a session is open.
+   `Malformed` below 19. (`FR-054`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -487,6 +505,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 16 | v0.40.0 | `Use` (24), `ListTables` (25), `Tables` (17) |
 | 17 | v0.41.0 | `Delete` (26) |
 | 18 | v0.42.0 | `Compact` (27), `Compacted` (18) |
+| 19 | v0.44.0 | `ReplaceIf` (28), `GuardFailed` (13) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -498,7 +517,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -528,10 +547,16 @@ byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
 client; it needs only `python3`. The live half —
 `tests/server_python_client.rs` — drives the reference client against a
-real server at 18 and at a hand-negotiated 10.
+real server at 19 and at a hand-negotiated 10.
 
 ## 10. Change history
 
+- 0.8.0 (`SERVER-001` v0.44.0, ADR-0054, `GRD-FR-007`): protocol version
+  19 — `Request::ReplaceIf` (28), `ErrorCode::GuardFailed` (13); §4's
+  `Hello` example, §5's `ErrorCode` row, §5.6, §7 item 17, §8 row 19 and
+  rule 3's list; fixture at 61 vectors (`Request/ReplaceIf`,
+  `Response/Err(GuardFailed)`); the reference client gains
+  `Client.replace_if` and declares 19.
 - 0.7.0 (`SERVER-001` v0.42.0, ADR-0052, `CMP-FR-008`): protocol version
   18 — `Request::Compact` (27), `Response::Compacted` (18); §4's `Hello`
   example, §5.6, §5.7, §7 item 16, §8 row 18 and rule 3's list; fixture

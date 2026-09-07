@@ -48,15 +48,18 @@
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
-    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
+    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReplaceOutcome};
+use super::{
+    predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
+    ReplaceIfOutcome, ReplaceOutcome,
+};
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::store::valid_relation_label;
-use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
+use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_LABEL: FieldRef = 0;
@@ -208,17 +211,23 @@ impl EntityConnectionStore {
     }
 }
 
+impl EntityConnectionStore {
+    /// The wire shape of one entity, in tag order — `get` and a
+    /// `ReplaceIf` guard's evaluation both go through here.
+    fn fields_of(entity: Entity) -> Vec<(FieldRef, ScanValue)> {
+        vec![
+            (FIELD_LABEL, ScanValue::Str(entity.label)),
+            (FIELD_KIND, ScanValue::Str(entity.kind)),
+            (FIELD_MENTION_COUNT, ScanValue::I64(entity.mention_count)),
+            // `ENT4-FR-002`: raw, stored order, un-normalized.
+            (FIELD_ALIASES, ScanValue::StrList(entity.aliases)),
+        ]
+    }
+}
+
 impl ConnectionStore for EntityConnectionStore {
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
-        self.store.get::<Entity>(id).map(|entity| {
-            vec![
-                (FIELD_LABEL, ScanValue::Str(entity.label)),
-                (FIELD_KIND, ScanValue::Str(entity.kind)),
-                (FIELD_MENTION_COUNT, ScanValue::I64(entity.mention_count)),
-                // `ENT4-FR-002`: raw, stored order, un-normalized.
-                (FIELD_ALIASES, ScanValue::StrList(entity.aliases)),
-            ]
-        })
+        self.store.get::<Entity>(id).map(Self::fields_of)
     }
 
     /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,
@@ -310,6 +319,25 @@ impl ConnectionStore for EntityConnectionStore {
         match self.store.replace(entity) {
             Ok(()) => Ok(ReplaceOutcome::Replaced),
             Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `GRD-FR-003` (ADR-0054): `replace_record`'s validation, then the
+    /// read, the guard over this adapter's own wire shape of the stored
+    /// record, and the write under one acquisition of the store's lock.
+    fn replace_record_if(
+        &self,
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+        guard: &Predicate,
+    ) -> Result<ReplaceIfOutcome, ErrorCode> {
+        let entity = Self::entity_from_fields(id, fields)?;
+        let holds = |stored: &Entity| predicate_matches(&Self::fields_of(stored.clone()), guard);
+        match self.store.replace_if(entity, holds) {
+            Ok(GuardedReplace::Replaced) => Ok(ReplaceIfOutcome::Replaced),
+            Ok(GuardedReplace::Refused) => Ok(ReplaceIfOutcome::GuardFailed),
+            Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
             Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
