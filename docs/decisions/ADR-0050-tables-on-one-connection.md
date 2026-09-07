@@ -1,8 +1,13 @@
 # ADR-0050: More than one table on one connection, built — `serve_tables`, `Use`/`ListTables` at protocol 16, `Memory → Entity` via a foreign `mentions` label
 
-- Status: **Proposed** (2026-09-07; implemented on the same branch,
-  the `ADR-0046`–`ADR-0049` cadence — the owner accepts or amends a
-  working, tested shape). Implements `ADR-0045`'s accepted direction.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): Part B as
+  accepted plus foreign labels on `MultiSymmetric`, `Memory → Entity`
+  the instance; (b) a new directed cross-table layer, (c) mirroring the
+  link on the entity side, (d) `Order → Customer` first, and (e)
+  decline all declined. Recorded in "Acceptance and implementation"
+  below.) Proposed and implemented on one branch, the `ADR-0046`–
+  `ADR-0049` cadence. Implements `ADR-0045`'s accepted direction.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-TABLES-DESIGN.md` (this round's design),
@@ -69,4 +74,7 @@ transaction across two stores. **(d) `Order → Customer` first.**
   memory.rs` +1 (rewritten), `server_memory_integration` +2 (one
   rewritten; the two-table suite with a restart), `server_protocol_
   version` +1, `server_transaction_integration`/`server_python_client`
-  extended; every acceptance criterion 1–5 holds. (This PR.)
+  extended; every acceptance criterion 1–5 holds. (PR #202.)
+- 2026-09-07: accepted as designed (option (a); (b)–(e) declined). No
+  change to the implementation. `ADR-0045`'s gate is closed. Next in
+  the line: runtime deletion, the last of `ADR-0036`'s three clauses.

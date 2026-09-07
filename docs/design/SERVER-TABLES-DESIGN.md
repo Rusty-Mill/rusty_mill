@@ -1,9 +1,11 @@
-# Server Tables Design — more than one table on one connection (Proposed)
+# Server Tables Design — more than one table on one connection (Accepted)
 
-- Status: **Proposed** (2026-09-07; implementation follows on the same
-  branch — the `ADR-0046`–`ADR-0049` cadence — so the owner accepts or
-  amends a working, tested shape). Options at acceptance: see
-  `ADR-0050`. This is the implementation unit `ADR-0045` gated; Part B
+- Status: **Accepted** (2026-09-07, `ADR-0050` option (a), as designed —
+  Part B as accepted plus foreign labels, `Memory → Entity` the
+  instance; a new directed layer, mirroring on the entity side,
+  `Order → Customer` first, and declining all declined). Implemented on
+  the same branch as `SERVER-001` v0.40.0 / FR-050, `SERVER-002`
+  v0.5.0, PR #202. This is the implementation unit `ADR-0045` gated; Part B
   of `docs/design/SERVER-SQL-JOIN-DESIGN.md` is the accepted direction
   it builds, restated here where this round adds to it.
 - Date: 2026-09-07
@@ -251,6 +253,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #202. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.40.0 / FR-050, landed as
+  designed (PR #202).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The fifteenth round in the `rusty_remind_me`-motivated line;
   the unit `ADR-0045` gated.
