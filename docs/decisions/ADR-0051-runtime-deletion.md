@@ -1,8 +1,12 @@
 # ADR-0051: Runtime deletion — tombstones in the insert and edge logs, `Request::Delete` at protocol 17, the cross-table cascade
 
-- Status: **Proposed** (2026-09-07; implemented on the same branch,
-  the `ADR-0046`–`ADR-0050` cadence — the owner accepts or amends a
-  working, tested shape). See "Considered options".
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): tombstones
+  in the ordered logs, the slot retired, edges cascading, one request;
+  (b) a separate deletes log, (c) soft delete as a folded flag, (d)
+  rewriting the blob per delete, and (e) decline all declined. Recorded
+  in "Acceptance and implementation" below.) Proposed and implemented
+  on one branch, the `ADR-0046`–`ADR-0050` cadence.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-DELETE-DESIGN.md` (the full design),
@@ -82,4 +86,7 @@ per delete. **(e) Decline.**
   two-table delete suite with a restart), `server_protocol_version` +1,
   `server_dog_integration` +1, `server_auth_integration`/`server_
   transaction_integration`/`server_python_client` extended; every
-  acceptance criterion 1–4 holds. (This PR.)
+  acceptance criterion 1–4 holds. (PR #204.)
+- 2026-09-07: accepted as designed (option (a); (b)–(e) declined). No
+  change to the implementation. `ADR-0036`'s last clause is closed;
+  compaction is the strongest remaining case.
