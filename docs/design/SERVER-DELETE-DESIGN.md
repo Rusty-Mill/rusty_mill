@@ -1,9 +1,10 @@
-# Server Runtime Deletion Design (Proposed)
+# Server Runtime Deletion Design (Accepted)
 
-- Status: **Proposed** (2026-09-07; implementation follows on the same
-  branch — the `ADR-0046`–`ADR-0050` cadence — so the owner accepts or
-  amends a working, tested shape). Options at acceptance: see
-  `ADR-0051`.
+- Status: **Accepted** (2026-09-07, `ADR-0051` option (a), as designed —
+  tombstones in the ordered logs, the slot retired, edges cascading, one
+  request; a separate deletes log, a soft-delete flag, a per-delete blob
+  rewrite, and declining all declined). Implemented on the same branch
+  as `SERVER-001` v0.41.0 / FR-051, `SERVER-002` v0.6.0, PR #204.
 - Date: 2026-09-07
 - Related: `ADR-0036` (whose "no runtime deletion" was the last of its
   three fixed-shape clauses still standing after `ADR-0046`/`ADR-0049`),
@@ -257,6 +258,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #204. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.41.0 / FR-051, landed as
+  designed (PR #204).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The sixteenth round in the `rusty_remind_me`-motivated line;
   the last of `ADR-0036`'s three clauses.
