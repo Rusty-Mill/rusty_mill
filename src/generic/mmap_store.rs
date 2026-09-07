@@ -416,13 +416,14 @@
 //! fails now.
 
 use super::insert_log;
+use super::insert_log::LogEntry;
 use super::mmap_field::MmapFieldValue;
-use super::query::{AllIds, FilterEq, GetById, Insert, Replace, ScanField, UpdateField};
+use super::query::{AllIds, Delete, FilterEq, GetById, Insert, Replace, ScanField, UpdateField};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{IndexedField, ScannableField, SchemaTag};
-use super::{InsertError, NotFound, ReplaceError};
+use super::{DeleteError, InsertError, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -541,7 +542,7 @@ where
         + Serialize
         + DeserializeOwned
         + SchemaTag,
-    R::Id: MmapFieldValue,
+    R::Id: MmapFieldValue + Serialize + DeserializeOwned,
     R::ScanValue: MmapFieldValue,
 {
     /// Build fresh: create a new `HEADER_LEN + slot_width() * records.len()`-byte
@@ -641,7 +642,7 @@ where
         // from the blob) covers every runtime insert since the last
         // fold, and the log can then be cleared.
         let log = insert_log::log_path(path);
-        let records = Self::merge_log(records, insert_log::read(&log)?);
+        let records = Self::merge_log(records, insert_log::read_entries(&log, R::SCHEMA_TAG)?);
         let companion = blob_path(path);
         let stale_blob = {
             let blob = GenericRecordBlob::new(&records);
@@ -726,7 +727,7 @@ where
     /// **overwritten in place**, position kept. The log is the later
     /// fact, so it wins; a replay of an entry the blob already carries
     /// is a no-op, which is what keeps a fold idempotent.
-    fn merge_log(mut records: Vec<R>, logged: Vec<R>) -> Vec<R> {
+    fn merge_log(mut records: Vec<R>, logged: Vec<LogEntry<R, R::Id>>) -> Vec<R> {
         if logged.is_empty() {
             return records;
         }
@@ -735,12 +736,27 @@ where
             .enumerate()
             .map(|(i, record)| (record.id(), i))
             .collect();
-        for record in logged {
-            match position_of.get(&record.id()) {
-                Some(&i) => records[i] = record,
-                None => {
-                    position_of.insert(record.id(), records.len());
-                    records.push(record);
+        for entry in logged {
+            match entry {
+                LogEntry::Item(record) => match position_of.get(&record.id()) {
+                    Some(&i) => records[i] = record,
+                    None => {
+                        position_of.insert(record.id(), records.len());
+                        records.push(record);
+                    }
+                },
+                // `DEL-FR-004`: a tombstone removes the record it names;
+                // a tombstone for an id nothing holds (a replayed fold)
+                // is a no-op. Positions after it shift down by one.
+                LogEntry::Tombstone(id) => {
+                    if let Some(i) = position_of.remove(&id) {
+                        records.remove(i);
+                        for position in position_of.values_mut() {
+                            if *position > i {
+                                *position -= 1;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -837,6 +853,42 @@ where
         Ok(())
     }
 
+    /// Remove one record at runtime (`DEL-FR-002`, ADR-0051): refuse an
+    /// unknown id with nothing written; append a tombstone to the insert
+    /// log at `<path>.inserts` and `sync_data` it (the fold in
+    /// [`Self::open`] removes the record from the blob); clear the slot's
+    /// marker so the next open skips it and the fast scan path stands
+    /// down; drop the id from the index bucket, the position index, and
+    /// the record map. `Ok` means the deletion is durable. The slot's
+    /// bytes stay in the file (no compaction); a later insert of the same
+    /// id appends a fresh slot and a later log entry, both of which win.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeleteError::NotFound`] if `id` has no record;
+    /// [`DeleteError::Durability`] if the tombstone can't be written.
+    pub fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        let Some(record) = self.records.get(&id) else {
+            return Err(DeleteError::NotFound(id));
+        };
+        let indexed = record.indexed_value().clone();
+        let position = *self
+            .position_index
+            .get(&id)
+            .ok_or(DeleteError::NotFound(id))?;
+        insert_log::append_tombstone(&insert_log::log_path(self.file.path()), R::SCHEMA_TAG, &id)?;
+        self.file.clear_marker(position);
+        if let Some(bucket) = self.index.get_mut(&indexed) {
+            bucket.retain(|other| *other != id);
+            if bucket.is_empty() {
+                self.index.remove(&indexed);
+            }
+        }
+        self.position_index.remove(&id);
+        self.records.remove(&id);
+        Ok(())
+    }
+
     /// The record set persisted in the companion blob at `<path>.records`,
     /// in the order it was written, followed by every record the insert
     /// log at `<path>.inserts` holds that the blob does not, in log order
@@ -857,7 +909,7 @@ where
     /// fingerprint (`STORAGE-015-FR-005`).
     pub fn read_portable_records(path: &Path) -> Result<Vec<R>, DurabilityError> {
         let persisted = record_blob::read(&blob_path(path))?;
-        let logged = insert_log::read(&insert_log::log_path(path))?;
+        let logged = insert_log::read_entries(&insert_log::log_path(path), R::SCHEMA_TAG)?;
         Ok(Self::merge_log(persisted, logged))
     }
 
@@ -1007,7 +1059,7 @@ where
         + Serialize
         + DeserializeOwned
         + SchemaTag,
-    R::Id: MmapFieldValue,
+    R::Id: MmapFieldValue + Serialize + DeserializeOwned,
     R::ScanValue: MmapFieldValue,
 {
     /// `INS-FR-002` — the inherent [`GenericMmapStore::insert`], reached
@@ -1025,11 +1077,27 @@ where
         + Serialize
         + DeserializeOwned
         + SchemaTag,
-    R::Id: MmapFieldValue,
+    R::Id: MmapFieldValue + Serialize + DeserializeOwned,
     R::ScanValue: MmapFieldValue,
 {
     fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
         GenericMmapStore::replace(self, record)
+    }
+}
+
+impl<R, IndexMarker, ScanMarker> Delete<R> for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned
+        + SchemaTag,
+    R::Id: MmapFieldValue + Serialize + DeserializeOwned,
+    R::ScanValue: MmapFieldValue,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        GenericMmapStore::delete(self, id)
     }
 }
 
@@ -1828,6 +1896,91 @@ mod tests {
             2
         );
         assert!(!log.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `DEL-FR-002`/`DEL-FR-004` (ADR-0051): a delete removes the record
+    /// from every read, retires its slot (the fast scan path stands down,
+    /// the fallback reads only live slots), refuses a repeat, survives a
+    /// portable reopen with the log folded and gone, and the id can be
+    /// inserted again afterwards — the later log entry winning.
+    #[test]
+    fn delete_retires_the_slot_survives_reopen_and_allows_reinsert() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_delete").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        let two = uuid::Uuid::from_u128(2);
+        {
+            let mut store = OrderCore::create(sample(), &path).unwrap();
+            assert!(store.is_gapless());
+            store.delete(two).unwrap();
+            assert!(log.exists(), "the tombstone is logged");
+            assert!(store.get(two).is_none());
+            assert_eq!(store.all_ids(), vec![uuid::Uuid::from_u128(1)]);
+            assert!(store.filter_eq(&OrderStatus::Pending).is_empty());
+            assert!(!store.is_gapless(), "the retired slot is a gap");
+            assert_eq!(store.scan(), vec![2_500], "only the live slot is read");
+            match store.delete(two) {
+                Err(DeleteError::NotFound(id)) => assert_eq!(id, two),
+                other => panic!("expected NotFound, got {other:?}"),
+            }
+        }
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert!(reopened.get(two).is_none());
+        assert_eq!(reopened.all_ids().len(), 1);
+        assert!(!log.exists(), "folded");
+        assert_eq!(
+            OrderCore::read_portable_records(&path)
+                .unwrap()
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![uuid::Uuid::from_u128(1)]
+        );
+        drop(reopened);
+        {
+            let mut store = OrderCore::open_portable(&path).unwrap();
+            let mut again = order(2);
+            again.amount_cents = 77;
+            store.insert(again.clone()).unwrap();
+            assert_eq!(store.get(two), Some(again));
+            let mut amounts = store.scan();
+            amounts.sort_unstable();
+            assert_eq!(amounts, vec![77, 2_500]);
+        }
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert_eq!(
+            reopened.get(two).unwrap().amount_cents,
+            77,
+            "the re-insert survives"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `DEL-FR-004`: the fold applies a tombstone over the blob's copy
+    /// and a later item over the tombstone, in log order; a tombstone
+    /// for an id nothing holds is a no-op.
+    #[test]
+    fn the_fold_applies_tombstones_in_log_order() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_delete_fold").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        drop(OrderCore::create(sample(), &path).unwrap());
+        let tag = <Order as SchemaTag>::SCHEMA_TAG;
+        insert_log::append_tombstone(&log, tag, &uuid::Uuid::from_u128(1)).unwrap();
+        insert_log::append_tombstone(&log, tag, &uuid::Uuid::from_u128(99)).unwrap();
+        insert_log::append(&log, &order(3)).unwrap();
+        insert_log::append_tombstone(&log, tag, &uuid::Uuid::from_u128(3)).unwrap();
+        insert_log::append(&log, &order(3)).unwrap();
+        let ids: Vec<u128> = OrderCore::read_portable_records(&path)
+            .unwrap()
+            .iter()
+            .map(|o| o.id.as_u128())
+            .collect();
+        assert_eq!(ids, vec![2, 3]);
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert_eq!(reopened.all_ids().len(), 2);
+        assert!(reopened.get(uuid::Uuid::from_u128(1)).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

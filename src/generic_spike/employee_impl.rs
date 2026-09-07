@@ -703,4 +703,39 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `DEL-FR-004` (ADR-0051): `Delete` forwards through `Reversed` — a
+    /// deleted child leaves its manager's children list — and through
+    /// `Symmetric` — its collaboration edge goes from the other end —
+    /// and both survive a portable reopen.
+    #[test]
+    fn delete_forwards_through_reversed_and_symmetric() {
+        use crate::generic::query::{Children, Delete, Neighbors};
+        let dir = crate::bench_support::fresh_temp_dir("employee_delete").unwrap();
+        let path = dir.join("salary.mmap");
+        let (one, two, three) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        {
+            let mut stack =
+                create_employee_production_stack(sample(), &sample_collaboration_edges(), &path)
+                    .unwrap();
+            Delete::<Employee>::delete(&mut stack, three).unwrap();
+            assert!(GetById::<Employee>::get(&stack, three).is_none());
+            assert_eq!(
+                Children::<Employee, Employee, ReportsTo>::children(&stack, one),
+                vec![two]
+            );
+            assert!(
+                Neighbors::<Employee, CollaboratesWith>::neighbors(&stack, two).is_empty(),
+                "the edge to the deleted employee is gone from the other end"
+            );
+        }
+        let reopened = open_employee_production_stack_portable(&path).unwrap();
+        assert!(GetById::<Employee>::get(&reopened, three).is_none());
+        assert_eq!(
+            Children::<Employee, Employee, ReportsTo>::children(&reopened, one),
+            vec![two]
+        );
+        assert!(Neighbors::<Employee, CollaboratesWith>::neighbors(&reopened, two).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

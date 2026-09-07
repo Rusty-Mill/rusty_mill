@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 16);
+    assert_eq!(dog.server_protocol_version(), 17);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -1041,5 +1041,79 @@ fn use_and_list_tables_are_malformed_below_version_16() {
     assert!(matches!(
         old.use_table("dog"),
         Err(ClientError::Unsupported("use_table"))
+    ));
+}
+
+/// `DEL-FR-006` (ADR-0051), rule 3: `Delete` is protocol 17 — a
+/// connection negotiated at 16 (and a silent one) is answered
+/// `Malformed` with nothing deleted; at 17 it is served. Rule 4: the
+/// Rust client refuses below 17 with no frame.
+#[test]
+fn delete_is_malformed_below_version_17() {
+    let addr = start_entity_server();
+    let delete = Request::Delete {
+        id: RecordId::from_u128(1),
+    };
+    for hello in [Some(16u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &delete),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        assert!(matches!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::GetById {
+                    id: RecordId::from_u128(1)
+                }
+            ),
+            Response::Record { .. }
+        ));
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert_eq!(roundtrip(&mut reader, &mut writer, &delete), Response::Ok);
+    assert_eq!(
+        roundtrip(&mut reader, &mut writer, &delete),
+        Response::NotFound
+    );
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.delete(RecordId::from_u128(1)),
+        Err(ClientError::Unsupported("delete"))
     ));
 }

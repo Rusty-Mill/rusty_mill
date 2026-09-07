@@ -85,12 +85,13 @@
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Link, Neighbors, Replace, ScanField, UpdateField,
+    AllIds, Children, Delete, FilterEq, GetById, Insert, Link, Neighbors, Replace, ScanField,
+    UpdateField,
 };
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
+use super::{DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -259,6 +260,24 @@ where
         let positions = self.file.append_committed_slots([(id, value)])?;
         if let Some(&position) = positions.first() {
             self.position_index.insert(id, position);
+        }
+        Ok(())
+    }
+}
+
+// `DEL-FR-004`: this layer's own slot is retired (its marker cleared)
+// after the inner delete succeeded; the next open reconciles it away.
+impl<S, R, Marker> Delete<R> for MmapScanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+    S: Delete<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        self.inner.delete(id)?;
+        if let Some(position) = self.position_index.remove(&id) {
+            self.file.clear_marker(position);
         }
         Ok(())
     }

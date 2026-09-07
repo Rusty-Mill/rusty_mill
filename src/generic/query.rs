@@ -43,6 +43,33 @@ pub trait Replace<R: Record> {
     fn replace(&mut self, record: R) -> Result<(), super::ReplaceError<R::Id>>;
 }
 
+/// Remove one record at runtime (`DEL-FR-001`, ADR-0051,
+/// `docs/design/SERVER-DELETE-DESIGN.md`) — the last of the three
+/// mutations of the record set (`Insert`, `Replace`, this). `Err(
+/// DeleteError::NotFound)` if `id` has no record, with nothing written
+/// at any layer; on the durable core, `Ok` means a tombstone is on
+/// disk and the record is gone from every read. Every composition layer
+/// forwards this, dropping its own derived state (an index bucket, a
+/// name key, a parent's children entry, a cached or slotted value)
+/// after the inner delete succeeded — and a relation layer drops
+/// **every edge touching the id** under every label it holds, logging
+/// an edge tombstone so the fold does the same. The id may be inserted
+/// again afterwards: the log is ordered, so a later insert wins.
+pub trait Delete<R: Record> {
+    fn delete(&mut self, id: R::Id) -> Result<(), super::DeleteError<R::Id>>;
+}
+
+/// Drop every edge touching `id` under `relation` without touching the
+/// record itself (`DEL-FR-005`, ADR-0051) — what a relation layer does
+/// for a **foreign** label when the far table's record was deleted
+/// (`crate::generic::memory`'s `mentions`, when an `Entity` goes): the
+/// id is another table's, so this store holds no record for it, only
+/// edges. `Ok(n)` is the number of edges dropped, `0` for an id with
+/// none; an unknown label is `Err(NotFound)` carrying the id.
+pub trait Detach<R: Record> {
+    fn detach(&mut self, relation: &str, id: R::Id) -> Result<usize, super::DeleteError<R::Id>>;
+}
+
 /// Add one edge to a single symmetric relation at runtime (`LNK-FR-001`/
 /// `002`, ADR-0047, `docs/design/SERVER-LINK-DESIGN.md`). Both ids must
 /// have a record; `a == b` is refused; an edge already present (either

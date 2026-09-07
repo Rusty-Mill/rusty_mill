@@ -293,6 +293,17 @@ class Client:
             raise ServerError(reply.code, reply.message)
         raise ProtocolError(type(reply).__name__)
 
+    def delete(self, record_id: uuid.UUID) -> bool:
+        """Remove one record (DEL-FR-008, protocol 17): ``True`` when it is
+        gone with every edge touching it, ``False`` when the id has no
+        record. Below 17, ``UnsupportedError`` with no frame sent."""
+        reply = self._roundtrip(p.Delete(record_id))
+        if isinstance(reply, p.Ok):
+            return True
+        if isinstance(reply, p.NotFound):
+            return False
+        raise ProtocolError(type(reply).__name__)
+
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
         """Add one edge under a symmetric relation label (LNK-FR-012,
         protocol 14). Returns normally whether the edge is new or already

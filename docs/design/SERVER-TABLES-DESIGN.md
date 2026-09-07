@@ -240,7 +240,9 @@ doc --all-features --no-deps` at the baseline.
 
 ## Open questions
 
-- **Runtime deletion** — a deleted entity would leave `mentions` edges
+- **Runtime deletion** — *resolved by `ADR-0051` / `SERVER-001`
+  v0.41.0, with the cascade below built as `DEL-FR-007`.* Before it: a
+  deleted entity would leave `mentions` edges
   pointing at nothing; the consumer's `DELETE FROM memory_entities
   WHERE entity_id = ?` (`entity.rs:622`) is the shape to mirror when
   deletion arrives.

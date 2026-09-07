@@ -51,12 +51,12 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome, LinkOutcome, ReplaceOutcome};
+use super::{ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReplaceOutcome};
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::store::valid_relation_label;
-use crate::generic::{InsertError, LinkError, ReplaceError};
+use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_LABEL: FieldRef = 0;
@@ -311,6 +311,17 @@ impl ConnectionStore for EntityConnectionStore {
             Ok(()) => Ok(ReplaceOutcome::Replaced),
             Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
             Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `DEL-FR-006` (ADR-0051): one whole-record delete under the store's
+    /// own lock — the record and, within this table, every edge touching
+    /// it. An unknown id is the normal outcome, not an error.
+    fn delete_record(&self, id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
+        match self.store.delete::<Entity>(id) {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
+            Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -855,5 +866,26 @@ mod tests {
             adapter.replace_record(Uuid::from_u128(4242), edited),
             Ok(ReplaceOutcome::NotFound)
         );
+    }
+
+    /// `DEL-FR-006` (ADR-0051): a deleted entity is gone from `get`, from
+    /// the name index, and from its neighbors' lists; a repeat is
+    /// `NotFound`.
+    #[test]
+    fn delete_record_removes_the_entity_its_names_and_its_edges() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(1);
+        let neighbors = adapter.neighbors(id).unwrap();
+        assert!(!neighbors.is_empty());
+        assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::Deleted));
+        assert!(adapter.get(id).is_none());
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("ada lovelace".into())),
+            Ok(vec![])
+        );
+        for neighbor in neighbors {
+            assert!(!adapter.neighbors(neighbor).unwrap().contains(&id));
+        }
+        assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::NotFound));
     }
 }

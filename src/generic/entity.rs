@@ -811,4 +811,61 @@ mod tests {
         assert!(FindByName::<Entity>::find_by_name(&reopened, &before.label).is_empty());
         assert!(!MultiNeighbors::<Entity>::all_neighbors(&reopened, one).is_empty());
     }
+
+    /// `DEL` acceptance criterion 1 (ADR-0051) on the richest front-door
+    /// stack: a deleted entity is gone from `get`, from `find_by_name`
+    /// under its label and every alias, from `filter_eq` on `kind`, and
+    /// from every neighbor's list under every label — and stays gone
+    /// across `open_entity_production_stack_portable`, with the entity's
+    /// own id insertable again.
+    #[test]
+    fn delete_through_the_stack_removes_names_edges_and_survives_reopen() {
+        use crate::generic::query::{AllIds, Delete, Insert};
+        let dir = fresh_temp_dir("generic_entity_delete").unwrap();
+        let path = dir.join("entities.mmap");
+        let one = Uuid::from_u128(1);
+        let before = {
+            let mut stack = create_entity_production_stack(
+                sample_entities(),
+                &sample_relates_to(),
+                &sample_mentioned_with(),
+                &path,
+            )
+            .unwrap();
+            let before = GetById::<Entity>::get(&stack, one).unwrap();
+            let neighbors = MultiNeighbors::<Entity>::all_neighbors(&stack, one);
+            assert!(!neighbors.is_empty());
+            Delete::<Entity>::delete(&mut stack, one).unwrap();
+            assert!(GetById::<Entity>::get(&stack, one).is_none());
+            assert!(FindByName::<Entity>::find_by_name(&stack, &before.label).is_empty());
+            for alias in &before.aliases {
+                assert!(FindByName::<Entity>::find_by_name(&stack, alias).is_empty());
+            }
+            assert!(!FilterEq::<Entity, KindField>::filter_eq(&stack, &before.kind).contains(&one));
+            for neighbor in neighbors {
+                assert!(
+                    !MultiNeighbors::<Entity>::all_neighbors(&stack, neighbor).contains(&one),
+                    "{neighbor} still lists the deleted entity"
+                );
+            }
+            assert!(MultiNeighbors::<Entity>::all_neighbors(&stack, one).is_empty());
+            assert_eq!(
+                AllIds::<Entity>::all_ids(&stack).len(),
+                sample_entities().len() - 1
+            );
+            before
+        };
+        let mut reopened = open_entity_production_stack_portable(&path).unwrap();
+        assert!(GetById::<Entity>::get(&reopened, one).is_none());
+        assert!(FindByName::<Entity>::find_by_name(&reopened, &before.label).is_empty());
+        for id in AllIds::<Entity>::all_ids(&reopened) {
+            assert!(!MultiNeighbors::<Entity>::all_neighbors(&reopened, id).contains(&one));
+        }
+        Insert::<Entity>::insert(&mut reopened, before.clone()).unwrap();
+        assert_eq!(GetById::<Entity>::get(&reopened, one), Some(before));
+        assert!(
+            MultiNeighbors::<Entity>::all_neighbors(&reopened, one).is_empty(),
+            "no edges came back"
+        );
+    }
 }

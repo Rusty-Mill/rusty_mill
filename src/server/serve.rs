@@ -69,6 +69,16 @@ pub enum ReplaceOutcome {
     NotFound,
 }
 
+/// What [`ConnectionStore::delete_record`] did (`DEL-FR-006`, ADR-0051):
+/// the record is gone, or its id had none and nothing was written — the
+/// normal-outcome pair `dispatch` maps to [`Response::Ok`] /
+/// [`Response::NotFound`], exactly as [`ReplaceOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    Deleted,
+    NotFound,
+}
+
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
     /// outcome, not an error, matching [`crate::store::DogStore::get`]'s
@@ -223,6 +233,29 @@ pub trait ConnectionStore: Send + Sync {
         _id: RecordId,
         _fields: Vec<(FieldRef, ScanValue)>,
     ) -> Result<ReplaceOutcome, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
+    /// and, within this table, every edge touching it. Answers
+    /// [`DeleteOutcome::NotFound`] when `id` has no record, nothing
+    /// written. The default answers `Unsupported`: `Dog`'s bespoke
+    /// store, and `Order`/`Employee` as reference material; `Memory`,
+    /// `Reminder`, and `Entity` implement it. A durability failure is
+    /// [`ErrorCode::Storage`].
+    fn delete_record(&self, _id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// `DEL-FR-005` (ADR-0051): drop every edge under `relation` that
+    /// touches `id`, where `id` is **another table's** record — the
+    /// relation's descriptor names that table as `target_table` — and
+    /// that table just deleted it. Returns the number of edges dropped;
+    /// `Malformed` for a relation this table does not have. The server
+    /// calls this on every other table after a `Delete` (`DEL-FR-007`).
+    /// The default answers `Unsupported`; `Memory` implements it for
+    /// `mentions`.
+    fn detach_record(&self, _relation: &str, _id: RecordId) -> Result<usize, ErrorCode> {
         Err(ErrorCode::Unsupported)
     }
 
@@ -1767,6 +1800,14 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(ReplaceOutcome::NotFound) => Response::NotFound,
             Err(code) => err_response(code),
         },
+        // `DEL-FR-006` (ADR-0051): `UpdateField`'s not-found shape. Gated in
+        // `handle_connection` like `Insert`; the cross-table cascade
+        // (`DEL-FR-007`) is `delete_across`'s, since it needs every table.
+        Request::Delete { id } => match store.delete_record(id) {
+            Ok(DeleteOutcome::Deleted) => Response::Ok,
+            Ok(DeleteOutcome::NotFound) => Response::NotFound,
+            Err(code) => err_response(code),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -2157,6 +2198,7 @@ fn handle_connection(
                     | Request::Insert { .. }
                     | Request::Link { .. }
                     | Request::Replace { .. }
+                    | Request::Delete { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2325,6 +2367,9 @@ fn handle_connection(
             // `REP-FR-006` (ADR-0049): the same two gates, at 15.
             Request::Replace { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::Replace { .. } if negotiated < 15 => err_response(ErrorCode::Malformed),
+            // `DEL-FR-006` (ADR-0051): the same two gates, at 17.
+            Request::Delete { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Delete { .. } if negotiated < 17 => err_response(ErrorCode::Malformed),
             // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
             // protocol-12 requests are unknown to a connection negotiated
             // below 12 — the session precedent, not `Query`'s client-only
@@ -2361,6 +2406,9 @@ fn handle_connection(
                 right,
                 relation,
             } => link_across(tables, store, left, right, relation),
+            // `DEL-FR-007` (ADR-0051): a delete here detaches the id from
+            // every other table's relation that targets this one.
+            Request::Delete { id } => delete_across(tables, store, id),
             other => dispatch(store, other),
         };
         let resp = downgrade_for_version(resp, negotiated);
@@ -2475,6 +2523,44 @@ fn join_across(
         },
         Err(code) => err_response(code),
     }
+}
+
+/// `DEL-FR-007` (ADR-0051): [`Request::Delete`] on a `serve_tables`
+/// server — the table's own `delete_record` (which drops the record's
+/// edges within that table), then, only on `Ok`, every *other* table's
+/// `detach_record` for each of its relations whose `target_table` is
+/// this one: the consumer's `DELETE FROM memory_entities WHERE
+/// entity_id = ?`. An adapter answering `Unsupported`/`Malformed` for
+/// the detach has nothing to drop and is skipped; a `Storage` failure
+/// there is reported in the delete's place, the record itself already
+/// gone (the one partial state, named in the design). A crash between
+/// the two steps leaves edges to a record no table holds, which every
+/// read already skips (`evaluate_join`'s `get` miss).
+fn delete_across(
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    store: &dyn ConnectionStore,
+    id: RecordId,
+) -> Response {
+    let resp = dispatch(store, Request::Delete { id });
+    if resp != Response::Ok {
+        return resp;
+    }
+    let this = store.table_name();
+    for (name, other) in tables {
+        if name == this {
+            continue;
+        }
+        for relation in other.describe_relations() {
+            if relation.target_table.as_deref() != Some(this) {
+                continue;
+            }
+            match other.detach_record(&relation.name, id) {
+                Ok(_) | Err(ErrorCode::Unsupported) | Err(ErrorCode::Malformed) => {}
+                Err(code) => return err_response(code),
+            }
+        }
+    }
+    Response::Ok
 }
 
 /// `TBL-FR-007` (ADR-0050): [`Request::Link`] under a relation whose

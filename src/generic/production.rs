@@ -30,12 +30,12 @@
 //! real implementation strategy (take the lock, delegate).
 
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, Replace,
-    ScanField, UpdateField,
+    AllIds, Children, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink, Neighbors,
+    Parent, Replace, ScanField, UpdateField,
 };
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
-use super::{InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
+use super::{DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
 
@@ -280,6 +280,48 @@ impl<S> GenericProductionStore<S> {
         S: Replace<R>,
     {
         self.inner.write().expect(LOCK_POISONED).replace(record)
+    }
+
+    /// Remove one record at runtime (`DEL-FR-004`, ADR-0051) under the
+    /// write lock — see [`Delete`] and
+    /// [`super::mmap_store::GenericMmapStore::delete`] for what `Ok`
+    /// guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeleteError::NotFound`] if the id has no record,
+    /// [`DeleteError::Durability`] if the tombstone could not be written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn delete<R>(&self, id: R::Id) -> Result<(), DeleteError<R::Id>>
+    where
+        R: Record,
+        S: Delete<R>,
+    {
+        self.inner.write().expect(LOCK_POISONED).delete(id)
+    }
+
+    /// Drop every edge touching `id` under `relation` (`DEL-FR-005`,
+    /// ADR-0051) under the write lock — see [`Detach`].
+    ///
+    /// # Errors
+    ///
+    /// [`DeleteError`], as the layer reports it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn detach<R>(&self, relation: &str, id: R::Id) -> Result<usize, DeleteError<R::Id>>
+    where
+        R: Record,
+        S: Detach<R>,
+    {
+        self.inner
+            .write()
+            .expect(LOCK_POISONED)
+            .detach(relation, id)
     }
 
     /// Add one edge to a single symmetric relation at runtime

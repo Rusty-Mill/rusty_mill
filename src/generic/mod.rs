@@ -223,6 +223,44 @@ impl<Id> From<DurabilityError> for ReplaceError<Id> {
     }
 }
 
+/// Error returned by [`query::Delete::delete`] and
+/// [`query::Detach::detach`] (`DEL-FR-001`, ADR-0051): either the id (or,
+/// for `detach`, the label) is unknown — nothing was written, at any
+/// layer — or the innermost durable store could not make the tombstone
+/// durable.
+#[derive(Debug)]
+pub enum DeleteError<Id> {
+    /// `id` has no record (or, for `detach`, the label does not exist).
+    /// Nothing was written.
+    NotFound(Id),
+    /// The tombstone could not be made durable; see the inner error.
+    Durability(DurabilityError),
+}
+
+impl<Id: fmt::Debug> fmt::Display for DeleteError<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeleteError::NotFound(id) => write!(f, "no record with id {id:?} to delete"),
+            DeleteError::Durability(e) => write!(f, "delete could not be made durable: {e}"),
+        }
+    }
+}
+
+impl<Id: fmt::Debug> std::error::Error for DeleteError<Id> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DeleteError::NotFound(_) => None,
+            DeleteError::Durability(e) => Some(e),
+        }
+    }
+}
+
+impl<Id> From<DurabilityError> for DeleteError<Id> {
+    fn from(e: DurabilityError) -> Self {
+        DeleteError::Durability(e)
+    }
+}
+
 /// What [`query::Link::link`] / [`query::MultiLink::link`] did
 /// (`LNK-FR-001`, ADR-0047): the edge is new, or it was already present
 /// and nothing was written — the consumer's insert-or-ignore, a normal

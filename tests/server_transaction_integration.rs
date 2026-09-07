@@ -574,6 +574,16 @@ fn session_state_errors_leave_the_connection_open() {
         ),
         ErrorCode::SessionOpen,
     );
+    // `DEL-FR-006` (ADR-0051): a delete is never staged either.
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::Delete {
+                id: Uuid::from_u128(1),
+            },
+        ),
+        ErrorCode::SessionOpen,
+    );
     // `TBL-FR-006` (ADR-0050): a session's writes belong to one table —
     // `Use` inside one is refused, even for the table already selected.
     assert_err(
