@@ -1,9 +1,10 @@
-# Server Compaction Design (Proposed)
+# Server Compaction Design (Accepted)
 
-- Status: **Proposed** (2026-09-07; implementation follows on the same
-  branch — the `ADR-0046`–`ADR-0051` cadence — so the owner accepts or
-  amends a working, tested shape). Options at acceptance: see
-  `ADR-0052`.
+- Status: **Accepted** (2026-09-07, `ADR-0052` option (a), as designed —
+  an explicit request doing the reopen fold in place plus a gapless
+  slot rewrite, under the write lock; automatic, reopen-only, online,
+  and declining all declined). Implemented on the same branch as
+  `SERVER-001` v0.42.0 / FR-052, `SERVER-002` v0.7.0, PR #206.
 - Date: 2026-09-07
 - Related: `ADR-0046`/`docs/design/SERVER-INSERT-DESIGN.md` (which first
   named "runtime compaction" as a revisit trigger: a log noticeably
@@ -220,6 +221,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #206. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.42.0 / FR-052, landed as
+  designed (PR #206).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The seventeenth round in the `rusty_remind_me`-motivated
   line; the operational gap five rounds named.
