@@ -13,6 +13,8 @@
 //! every operation goes through the existing, already-validated
 //! [`ConnectionStore`] adapter around a real store type
 //! ([`dog::DogConnectionStore`] wraps [`crate::production::ProductionStore`];
+//! `reminder::ReminderConnectionStore`, `entity::EntityConnectionStore`,
+//! `memory::MemoryConnectionStore`, and the `research`-gated
 //! [`order::OrderConnectionStore`]/[`employee::EmployeeConnectionStore`] wrap
 //! [`crate::generic::production::GenericProductionStore`]). Concurrency
 //! across client connections adds no new lock: it collapses onto whatever
@@ -21,8 +23,11 @@
 //!
 //! # What this does not provide
 //!
-//! No query language beyond fixed field-tag addressing — an explicit
-//! non-goal of the accepted design(s). **Do not expose a server built
+//! No query language of its own — the server addresses fields by tag and
+//! evaluates fixed request shapes; the SQL `SELECT`/`GROUP BY`/`JOIN`
+//! subset `client::SchemaDrivenClient` accepts is parsed and compiled
+//! *client-side* to those shapes (ADR-0034/0035/0044), an explicit
+//! non-goal of the accepted design(s) kept. **Do not expose a server built
 //! from this module beyond a trusted, localhost/development network
 //! unless both `ServeOptions` and `TlsConfig` (below) are configured** —
 //! see ADR-0010's Consequences; ADR-0012 closed the authentication/
@@ -32,7 +37,14 @@
 //! anything; a `ServeOptions`-only server still puts tokens and every
 //! record value in plaintext on the wire). ADR-0010's third named gap,
 //! "no transaction semantics," is now partly closed too — see "Atomic
-//! transactions" below for exactly which slice.
+//! transactions" below for exactly which slice. What the layer *can*
+//! change at runtime has grown since the original design fixed a
+//! table's record set and graph at open: records can be inserted
+//! (ADR-0046), linked under open labels (ADR-0047), replaced whole
+//! (ADR-0049), and deleted with their edges (ADR-0051); a server can
+//! hold several tables on one listener (ADR-0050); and an operator can
+//! compact what those writes leave behind (ADR-0052). Each is one
+//! appended request, gated by the protocol version it arrived at.
 //!
 //! # Authentication/authorization (`ServeOptions`), ADR-0012
 //!
