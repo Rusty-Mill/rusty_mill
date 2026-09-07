@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 17);
+    assert_eq!(dog.server_protocol_version(), 18);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -1115,5 +1115,65 @@ fn delete_is_malformed_below_version_17() {
     assert!(matches!(
         old.delete(RecordId::from_u128(1)),
         Err(ClientError::Unsupported("delete"))
+    ));
+}
+
+/// `CMP-FR-006` (ADR-0052), rule 3: `Compact` is protocol 18 — a
+/// connection negotiated at 17 (and a silent one) is answered
+/// `Malformed`; at 18 it is served with a report. Rule 4: the Rust
+/// client refuses below 18 with no frame.
+#[test]
+fn compact_is_malformed_below_version_18() {
+    let addr = start_entity_server();
+    for hello in [Some(17u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &Request::Compact),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert!(matches!(
+        roundtrip(&mut reader, &mut writer, &Request::Compact),
+        Response::Compacted { .. }
+    ));
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.compact(),
+        Err(ClientError::Unsupported("compact"))
     ));
 }

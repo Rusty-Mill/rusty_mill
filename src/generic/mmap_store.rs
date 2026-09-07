@@ -418,12 +418,14 @@
 use super::insert_log;
 use super::insert_log::LogEntry;
 use super::mmap_field::MmapFieldValue;
-use super::query::{AllIds, Delete, FilterEq, GetById, Insert, Replace, ScanField, UpdateField};
+use super::query::{
+    AllIds, Compact, Delete, FilterEq, GetById, Insert, Replace, ScanField, UpdateField,
+};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{IndexedField, ScannableField, SchemaTag};
-use super::{DeleteError, InsertError, NotFound, ReplaceError};
+use super::{CompactionReport, DeleteError, InsertError, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -889,6 +891,64 @@ where
         Ok(())
     }
 
+    /// Compact in place (`CMP-FR-002`, ADR-0052): rewrite the companion
+    /// blob from the live record set — each record carrying its slot's
+    /// current scannable value, so the blob is self-consistent — then
+    /// rewrite the slot file gaplessly in the live records' position
+    /// order (retired slots gone), then remove the insert log. That
+    /// order is what makes a crash anywhere in it safe: a blob written
+    /// but a slot file not yet replaced reopens through the old slot
+    /// file and a fold of the still-present log (idempotent); a slot
+    /// file replaced but a log not yet removed folds the log once more
+    /// (idempotent). Nothing a reader sees changes; `is_gapless` is true
+    /// again afterwards, so the fast scan path returns.
+    ///
+    /// # Errors
+    ///
+    /// [`DurabilityError::Serde`] if the record set can't be serialized,
+    /// [`DurabilityError::Io`] if a file can't be written, renamed,
+    /// mapped, or removed.
+    pub fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        let path = self.file.path().to_path_buf();
+        let log = insert_log::log_path(&path);
+        let log_entries_folded = insert_log::read_entries::<R, R::Id>(&log, R::SCHEMA_TAG)?.len();
+        let mut ordered: Vec<(usize, R::Id)> = self
+            .position_index
+            .iter()
+            .map(|(id, position)| (*position, *id))
+            .collect();
+        ordered.sort_unstable_by_key(|(position, _)| *position);
+        let records: Vec<R> = ordered
+            .iter()
+            .map(|(position, id)| {
+                let mut record = self.records[id].clone();
+                record.set_scannable_value(self.file.read_value(*position));
+                record
+            })
+            .collect();
+        let slots_before = self.file.slot_count();
+        GenericRecordBlob::new(&records)
+            .encode()?
+            .write(&blob_path(&path))?;
+        self.file.rewrite(
+            records
+                .iter()
+                .map(|record| (record.id(), record.scannable_value())),
+        )?;
+        insert_log::clear(&log)?;
+        self.position_index = records
+            .iter()
+            .enumerate()
+            .map(|(position, record)| (record.id(), position))
+            .collect();
+        Ok(CompactionReport {
+            records: records.len(),
+            slots_reclaimed: slots_before - records.len(),
+            log_entries_folded,
+            edge_logs_folded: 0,
+        })
+    }
+
     /// The record set persisted in the companion blob at `<path>.records`,
     /// in the order it was written, followed by every record the insert
     /// log at `<path>.inserts` holds that the blob does not, in log order
@@ -1098,6 +1158,22 @@ where
 {
     fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
         GenericMmapStore::delete(self, id)
+    }
+}
+
+impl<R, IndexMarker, ScanMarker> Compact for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned
+        + SchemaTag,
+    R::Id: MmapFieldValue + Serialize + DeserializeOwned,
+    R::ScanValue: MmapFieldValue,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        GenericMmapStore::compact(self)
     }
 }
 
@@ -1981,6 +2057,78 @@ mod tests {
         let reopened = OrderCore::open_portable(&path).unwrap();
         assert_eq!(reopened.all_ids().len(), 2);
         assert!(reopened.get(uuid::Uuid::from_u128(1)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `CMP-FR-002` (ADR-0052): after an insert, an update, a replace,
+    /// and a delete, `compact` reports the live count, the one retired
+    /// slot, and every log entry; the log is gone, the fast scan path is
+    /// back, every read is unchanged, a portable reopen serves the same
+    /// data without writing, and a second compaction reclaims nothing.
+    #[test]
+    fn compact_reclaims_retired_slots_folds_the_log_and_changes_no_read() {
+        let dir = crate::bench_support::fresh_temp_dir("mmap_compact").unwrap();
+        let path = dir.join("orders.mmap");
+        let log = insert_log::log_path(&path);
+        let mut store = OrderCore::create(sample(), &path).unwrap();
+        store.insert(order(3)).unwrap();
+        store.update(uuid::Uuid::from_u128(1), 111).unwrap();
+        let mut replaced = order(3);
+        replaced.discount_cents = 9;
+        store.replace(replaced).unwrap();
+        store.delete(uuid::Uuid::from_u128(2)).unwrap();
+        assert!(!store.is_gapless());
+        let before_get: Vec<Option<Order>> = (1..=3)
+            .map(|n| store.get(uuid::Uuid::from_u128(n)))
+            .collect();
+        let mut before_scan = store.scan();
+        before_scan.sort_unstable();
+
+        let report = store.compact().unwrap();
+        assert_eq!(report.records, 2);
+        assert_eq!(report.slots_reclaimed, 1);
+        assert_eq!(report.log_entries_folded, 3, "insert, replace, tombstone");
+        assert_eq!(report.edge_logs_folded, 0);
+        assert!(!log.exists());
+        assert!(store.is_gapless(), "the fast scan path is back");
+        let after_get: Vec<Option<Order>> = (1..=3)
+            .map(|n| store.get(uuid::Uuid::from_u128(n)))
+            .collect();
+        assert_eq!(after_get, before_get);
+        let mut after_scan = store.scan();
+        after_scan.sort_unstable();
+        assert_eq!(after_scan, before_scan);
+        assert_eq!(after_scan, vec![1, 111]);
+        assert_eq!(
+            store.compact().unwrap(),
+            CompactionReport {
+                records: 2,
+                ..CompactionReport::default()
+            }
+        );
+
+        // Writes after a compaction land as before.
+        store.update(uuid::Uuid::from_u128(3), 5).unwrap();
+        store.insert(order(4)).unwrap();
+        drop(store);
+        let reopened = OrderCore::open_portable(&path).unwrap();
+        assert_eq!(
+            reopened.get(uuid::Uuid::from_u128(1)).unwrap().amount_cents,
+            111
+        );
+        assert_eq!(
+            reopened.get(uuid::Uuid::from_u128(3)).unwrap().amount_cents,
+            5
+        );
+        assert_eq!(
+            reopened
+                .get(uuid::Uuid::from_u128(3))
+                .unwrap()
+                .discount_cents,
+            9
+        );
+        assert!(reopened.get(uuid::Uuid::from_u128(2)).is_none());
+        assert_eq!(reopened.all_ids().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

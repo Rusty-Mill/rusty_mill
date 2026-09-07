@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_17_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_18_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -170,6 +170,11 @@ fn the_python_reference_client_speaks_the_protocol_at_17_and_at_10() {
     assert_eq!(get("delete"), "ok");
     assert_eq!(get("delete_again"), "notfound");
     assert_eq!(get("delete_get"), "-");
+    // `CMP-FR-007` (ADR-0052): a compaction from Python — the live count
+    // (five sample entities plus Grace), the throwaway's retired slot, the
+    // record log (an insert, a replace, an insert, a tombstone), and the
+    // edge logs a runtime link touched.
+    assert_eq!(get("compact"), "6;1;4;1");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -194,6 +199,11 @@ fn the_python_reference_client_speaks_the_protocol_at_17_and_at_10() {
         get("insert").starts_with("unsupported"),
         "rule 4: no Insert below 13 — {}",
         get("insert")
+    );
+    assert!(
+        get("compact").starts_with("unsupported"),
+        "{}",
+        get("compact")
     );
     assert!(
         get("delete").starts_with("unsupported"),

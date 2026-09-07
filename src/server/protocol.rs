@@ -72,6 +72,7 @@
 //! | 15 | `SERVER-001` v0.39.0 | + [`Request::Replace`] (23) — `REP-FR-006`, ADR-0049: replace one record of the connection's table whole, [`Request::Insert`]'s exact body over an id that already has a record (the consumer's `update_memory`/`entity_upsert` write path). Same whole-list validation as `Insert` (`Malformed`/`UnknownField`, the domain's rules), nothing written on refusal; answered `Ok`, or [`Response::NotFound`] when the id has no record — `UpdateField`'s own shape, no new `ErrorCode`, no new `Response`. Relation edges survive; the scannable field's slot is rewritten in place. `Unsupported` from a domain with no replace (`Dog`, `Order`, `Employee`). Server-gated `Malformed` below 15 (rule 3), `Unauthorized` for `ReadOnly` (the fifth write), `SessionOpen` inside a session; never journaled or staged. ADR-0049 |
 //! | 16 | `SERVER-001` v0.40.0 | + [`Request::Use`] (24), [`Request::ListTables`] (25), and [`Response::Tables`] (17) — `TBL-FR-002`/`003`, ADR-0045 (accepted direction) implemented by ADR-0050: more than one table on one connection. A server built with `serve_tables` registers several `ConnectionStore`s under names; `Use { table }` selects, per connection, which one every table-less request is served from (default: the primary, so a connection that never sends `Use` is a pre-16 connection byte for byte); `ListTables` reports the names. Cross-table `Join`: `JoinSpec::right_table: Some(name)` — carried since 12 for exactly this — now fetches right rows from that table, when the relation's `RelationDescriptor::target_table` names it (`Malformed` otherwise); and a `Link` under a relation whose descriptor names a `target_table` has its far endpoint checked against that table. `Use` inside a session is `SessionOpen`; an unknown name `Malformed`; both new requests `Malformed` below 16 (rule 3). No new `ErrorCode`. ADR-0050 |
 //! | 17 | `SERVER-001` v0.41.0 | + [`Request::Delete`] (26) — `DEL-FR-006`, ADR-0051: remove one record of the connection's table at runtime, the last of the three record-set writes. Answered `Ok` (durable before the reply — a tombstone in the insert log, folded at the next open) or [`Response::NotFound`]; no new `Response`, no new `ErrorCode`. Every edge touching the record goes with it — under every label of its own table, and on a `serve_tables` server under every other table's relation whose `target_table` is this one. The id may be inserted again. `Unsupported` from a domain with no delete (`Dog`, `Order`, `Employee`). Server-gated `Malformed` below 17 (rule 3), `Unauthorized` for `ReadOnly` (the sixth write), `SessionOpen` inside a session; never journaled or staged. ADR-0051 |
+//! | 18 | `SERVER-001` v0.42.0 | + [`Request::Compact`] (27) and [`Response::Compacted`] (18) — `CMP-FR-006`, ADR-0052: reclaim in place what runtime writes left behind — the insert and edge logs folded into their blobs, the slot files rewritten without the slots deletion retired, the logs removed — under the table's write lock; answered with the counts reclaimed. An operator's request. `Unsupported` from a domain with no compaction (`Dog`, `Order`, `Employee`); `Storage` if a file could not be rewritten. Server-gated `Malformed` below 18 (rule 3), `Unauthorized` for `ReadOnly` (the seventh write), `SessionOpen` inside a session; never journaled or staged. No new `ErrorCode`. ADR-0052 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -106,7 +107,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -777,6 +778,19 @@ pub enum Request {
     Delete {
         id: RecordId,
     },
+    /// Protocol 18 (`CMP-FR-006`, ADR-0052,
+    /// `docs/design/SERVER-COMPACT-DESIGN.md`): reclaim what runtime
+    /// writes left behind in this table's files — fold the insert and
+    /// edge logs into their blobs, rewrite the slot files without the
+    /// slots deletion retired, remove the logs — in place, under the
+    /// table's write lock (every other connection waits). An operator's
+    /// request, not a per-write cost. Answered [`Response::Compacted`]
+    /// with what was reclaimed; `Unsupported` from an adapter with no
+    /// compaction; `Storage` if a file could not be rewritten (the
+    /// files are left reopenable — see the design's crash order).
+    /// Gated server-side: `Malformed` below 18; `Unauthorized` for a
+    /// `ReadOnly` token; `SessionOpen` while a session is open.
+    Compact,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -868,6 +882,20 @@ pub enum Response {
         names: Vec<String>,
         primary: String,
     },
+    /// Protocol 18 (`CMP-FR-006`, ADR-0052). Answers [`Request::Compact`]:
+    /// what one compaction reclaimed, summed across every layer of the
+    /// table's stack. Only ever answers a gated request, so it needs no
+    /// `downgrade_for_version` arm.
+    Compacted {
+        /// Live records the rewritten blob and slot file hold.
+        records: u64,
+        /// Slots the old slot file held that the new one does not.
+        slots_reclaimed: u64,
+        /// Entries the insert log held, now folded.
+        log_entries_folded: u64,
+        /// Edge logs (one per relation label) that held entries, now folded.
+        edge_logs_folded: u64,
+    },
 }
 
 #[cfg(test)]
@@ -903,6 +931,7 @@ mod tests {
             "Replace" => 15,
             "Use" | "ListTables" | "Tables" => 16,
             "Delete" => 17,
+            "Compact" | "Compacted" => 18,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1226,6 +1255,8 @@ mod tests {
                 b"relates_to",
             ]),
         );
+        // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compact` at 27.
+        assert_golden("Compact", &Request::Compact, &[0x1b, 0x00, 0x00, 0x00]);
         // Protocol 17 (`DEL-FR-006`, ADR-0051): `Delete` at 26.
         assert_golden(
             "Delete",
@@ -1582,6 +1613,23 @@ mod tests {
                 &[0x00],                   // target_table: None
             ]),
         );
+        // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
+        assert_golden_eq(
+            "Compacted",
+            &Response::Compacted {
+                records: 3,
+                slots_reclaimed: 1,
+                log_entries_folded: 4,
+                edge_logs_folded: 2,
+            },
+            &bytes(&[
+                &[0x12, 0x00, 0x00, 0x00], // Compacted
+                &[0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                &[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                &[0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            ]),
+        );
         // Protocol 16 (`TBL-FR-003`, ADR-0050): `Tables` at 17.
         assert_golden_eq(
             "Tables",
@@ -1629,8 +1677,8 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 17 is the one that added
-    /// `Request::Delete` (16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// module docs' table — version 18 is the one that added
+    /// `Request::Compact`/`Response::Compacted` (17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1642,7 +1690,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 17);
+        assert_eq!(PROTOCOL_VERSION, 18);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

@@ -328,6 +328,34 @@ where
     /// mapped; [`DurabilityError::InvalidMagic`] or
     /// [`DurabilityError::SchemaVersionMismatch`] if the header doesn't
     /// check out (see [`Self::read_header`]).
+    /// `CMP-FR-002` (ADR-0052): replace this file's slots with `slots`,
+    /// gaplessly — the compaction step. A fresh image is written and
+    /// flushed at `<path>.compact`, this mapping is released, the new
+    /// file is renamed over the old (atomic on every platform this
+    /// crate builds for, once nothing maps the old file), and the result
+    /// is mapped in its place. A crash before the rename leaves the old
+    /// file intact plus a stray `.compact` the next `create`/`rewrite`
+    /// truncates; a crash after it leaves the new file whole.
+    pub(crate) fn rewrite<I>(&mut self, slots: I) -> Result<(), DurabilityError>
+    where
+        I: ExactSizeIterator<Item = (Id, V)>,
+    {
+        let mut temp = self.path.as_os_str().to_owned();
+        temp.push(".compact");
+        let temp = std::path::PathBuf::from(temp);
+        drop(Self::create(&temp, slots)?);
+        // Release the old mapping before the rename: a mapped file cannot
+        // be replaced on Windows, and the anonymous page is a placeholder
+        // the field type requires.
+        self.mmap = MmapMut::map_anon(1)?;
+        std::fs::rename(&temp, &self.path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        // SAFETY: see `create` — the same single-process exclusive-access
+        // assumption, over the file this call just put in place.
+        self.mmap = unsafe { MmapMut::map_mut(&file)? };
+        Ok(())
+    }
+
     pub(crate) fn open(path: &Path) -> Result<Self, DurabilityError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         // SAFETY: see `create` — same single-process exclusive-access

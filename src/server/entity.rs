@@ -325,6 +325,12 @@ impl ConnectionStore for EntityConnectionStore {
         }
     }
 
+    /// `CMP-FR-006` (ADR-0052): the stack compacted under the store's own
+    /// write lock; a file that could not be rewritten is `Storage`.
+    fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
+        self.store.compact().map_err(|_| ErrorCode::Storage)
+    }
+
     /// `LNK-FR-009` (ADR-0047): open labels — any valid label is
     /// accepted and created at first use by the `MultiSymmetric` layer
     /// beneath; `ListRelationKinds`/`DescribeRelations` list it at once.

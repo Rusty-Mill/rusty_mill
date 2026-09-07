@@ -738,4 +738,37 @@ mod tests {
         assert!(Neighbors::<Employee, CollaboratesWith>::neighbors(&reopened, two).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `CMP-FR-002`/`004` (ADR-0052) through `Reversed<Symmetric<MmapScanned<…>>>`:
+    /// after a delete, `compact` reclaims the retired slots of the core
+    /// and of the `MmapScanned` layer both, folds the collaboration
+    /// edge log, and a portable reopen agrees.
+    #[test]
+    fn compact_forwards_through_reversed_symmetric_and_mmap_scanned() {
+        use crate::generic::query::{Children, Compact, Delete, Neighbors};
+        let dir = crate::bench_support::fresh_temp_dir("employee_compact").unwrap();
+        let path = dir.join("salary.mmap");
+        let (one, two, three) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        let mut stack =
+            create_employee_production_stack(sample(), &sample_collaboration_edges(), &path)
+                .unwrap();
+        Delete::<Employee>::delete(&mut stack, three).unwrap();
+        let report = Compact::compact(&mut stack).unwrap();
+        assert_eq!(report.records, 2);
+        assert!(report.slots_reclaimed >= 1, "{report:?}");
+        assert_eq!(report.edge_logs_folded, 1);
+        assert_eq!(
+            Children::<Employee, Employee, ReportsTo>::children(&stack, one),
+            vec![two]
+        );
+        drop(stack);
+        let reopened = open_employee_production_stack_portable(&path).unwrap();
+        assert!(GetById::<Employee>::get(&reopened, three).is_none());
+        assert!(Neighbors::<Employee, CollaboratesWith>::neighbors(&reopened, two).is_empty());
+        assert_eq!(
+            GetById::<Employee>::get(&reopened, one).unwrap().name,
+            "Alex"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

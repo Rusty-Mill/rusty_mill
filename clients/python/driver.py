@@ -117,6 +117,14 @@ def main() -> int:
             print(f"delete_get={'-' if c.get(gone) is None else 'present'}")
         except UnsupportedError as e:
             print(f"delete=unsupported:{e}")
+
+        # Protocol 18 (CMP-FR-007): compact the entity table — the throwaway
+        # entity's slot and the runtime edge logs are what it reclaims.
+        try:
+            r = c.compact()
+            print(f"compact={r.records};{r.slots_reclaimed};{r.log_entries_folded};{r.edge_logs_folded}")
+        except UnsupportedError as e:
+            print(f"compact=unsupported:{e}")
     return 0
 
 

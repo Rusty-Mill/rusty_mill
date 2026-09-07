@@ -55,10 +55,10 @@ class WireVectors(unittest.TestCase):
                 self.assertLessEqual(version, p.PROTOCOL_VERSION)
 
     def test_handshake_frames_match_the_specification_examples(self):
-        # SERVER-002 §4's worked examples: Hello { 17 } and GetById(uuid 1).
+        # SERVER-002 §4's worked examples: Hello { 18 } and GetById(uuid 1).
         import uuid
 
-        self.assertEqual(p.encode_request(p.Hello(17)), bytes.fromhex("0a00000011000000"))
+        self.assertEqual(p.encode_request(p.Hello(18)), bytes.fromhex("0a00000012000000"))
         self.assertEqual(
             p.frame(p.encode_request(p.GetById(uuid.UUID(int=1)))),
             bytes.fromhex("1c000000" "00000000" "1000000000000000" + "00" * 15 + "01"),

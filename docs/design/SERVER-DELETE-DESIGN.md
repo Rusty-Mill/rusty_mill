@@ -247,7 +247,8 @@ doc --all-features --no-deps` at the baseline.
 - **Compaction** — now that records, edges, and tombstones all
   accumulate in logs and retired slots, the trigger is the same but the
   case is stronger; a `compact()` that rewrites the mmap file and blob
-  from the live set is the shape.
+  from the live set is the shape. *Resolved by `ADR-0052` / `SERVER-001`
+  v0.42.0, exactly that shape.*
 - **Unlinking one edge** — the remaining edge write.
 - **Entity merge** — the consumer's `merge_entities` repoints
   `memory_entities` then deletes the loser; here that is a `detach`,

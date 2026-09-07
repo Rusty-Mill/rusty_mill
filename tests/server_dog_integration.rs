@@ -487,3 +487,18 @@ fn delete_is_unsupported_on_the_dog_domain() {
     }
     assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
 }
+
+/// `CMP-FR-006` (ADR-0052): `Dog`'s adapter keeps the trait's default —
+/// the bespoke store has no compaction — so `Compact` is `Unsupported`.
+#[test]
+fn compact_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    match client.compact() {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}

@@ -85,13 +85,15 @@
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{
-    AllIds, Children, Delete, FilterEq, GetById, Insert, Link, Neighbors, Replace, ScanField,
-    UpdateField,
+    AllIds, Children, Compact, Delete, FilterEq, GetById, Insert, Link, Neighbors, Replace,
+    ScanField, UpdateField,
 };
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
+use super::{
+    CompactionReport, DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError,
+};
 use crate::durability::DurabilityError;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -262,6 +264,40 @@ where
             self.position_index.insert(id, position);
         }
         Ok(())
+    }
+}
+
+// `CMP-FR-002`: the inner store first, then this layer's own slot file
+// rewritten gaplessly in position order — no blob and no log of its own
+// (`MFMD-FR-001`: the record set is the inner store's), so only slots.
+impl<S, R, Marker> Compact for MmapScanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+    S: Compact,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        let mut report = self.inner.compact()?;
+        let mut ordered: Vec<(usize, R::Id)> = self
+            .position_index
+            .iter()
+            .map(|(id, position)| (*position, *id))
+            .collect();
+        ordered.sort_unstable_by_key(|(position, _)| *position);
+        let slots: Vec<(R::Id, R::ScanValue)> = ordered
+            .iter()
+            .map(|(position, id)| (*id, self.file.read_value(*position)))
+            .collect();
+        let before = self.file.slot_count();
+        self.file.rewrite(slots.iter().copied())?;
+        self.position_index = slots
+            .iter()
+            .enumerate()
+            .map(|(position, (id, _))| (*id, position))
+            .collect();
+        report.slots_reclaimed += before - slots.len();
+        Ok(report)
     }
 }
 

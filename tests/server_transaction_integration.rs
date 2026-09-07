@@ -584,6 +584,8 @@ fn session_state_errors_leave_the_connection_open() {
         ),
         ErrorCode::SessionOpen,
     );
+    // `CMP-FR-006` (ADR-0052): a compaction never runs inside a session.
+    assert_err(roundtrip(&mut c, Request::Compact), ErrorCode::SessionOpen);
     // `TBL-FR-006` (ADR-0050): a session's writes belong to one table —
     // `Use` inside one is refused, even for the table already selected.
     assert_err(

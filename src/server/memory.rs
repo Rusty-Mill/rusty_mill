@@ -379,6 +379,12 @@ impl ConnectionStore for MemoryConnectionStore {
         }
     }
 
+    /// `CMP-FR-006` (ADR-0052): the stack compacted under the store's own
+    /// write lock; a file that could not be rewritten is `Storage`.
+    fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
+        self.store.compact().map_err(|_| ErrorCode::Storage)
+    }
+
     /// `MEM-FR-005`: `Memory` has no `ChildOf` relation.
     fn parent(&self, _id: RecordId) -> Result<ParentLookup, ErrorCode> {
         Err(ErrorCode::Unsupported)
@@ -865,5 +871,29 @@ mod tests {
         assert!(adapter.get(two).is_some());
         assert_eq!(adapter.detach_record("mentions", ada), Ok(0));
         assert_eq!(adapter.detach_record("x", ada), Err(ErrorCode::Malformed));
+    }
+
+    /// `CMP-FR-006` (ADR-0052): the adapter compacts its stack and reports
+    /// it; every read afterwards is what it was.
+    #[test]
+    fn compact_reports_what_it_reclaimed_and_changes_no_read() {
+        let adapter = sample_adapter();
+        let (one, ada) = (Uuid::from_u128(1), Uuid::from_u128(0xada));
+        adapter.link_records(one, ada, "mentions").unwrap();
+        assert_eq!(
+            adapter.delete_record(Uuid::from_u128(3)),
+            Ok(DeleteOutcome::Deleted)
+        );
+        let before = adapter.scan_all();
+        let report = adapter.compact().unwrap();
+        assert_eq!(report.records, 2);
+        assert_eq!(report.slots_reclaimed, 1);
+        assert_eq!(report.log_entries_folded, 1);
+        assert_eq!(report.edge_logs_folded, 1);
+        assert_eq!(adapter.scan_all(), before);
+        assert_eq!(
+            adapter.neighbors_by_relation(one, "mentions"),
+            Ok(vec![ada])
+        );
     }
 }
