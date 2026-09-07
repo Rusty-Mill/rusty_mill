@@ -1,9 +1,11 @@
-# Server Ordered Page Design (Proposed)
+# Server Ordered Page Design (Accepted)
 
-- Status: **Proposed** (2026-09-07) — implemented on the same branch as
-  `SERVER-001` v0.45.0 / FR-055 and `SERVER-002` v0.9.0, the
-  `ADR-0046`–`ADR-0054` cadence, for the owner to accept as designed or
-  send back.
+- Status: **Accepted** (2026-09-07, `ADR-0055` option (a), as designed —
+  one ordered keyset page over an orderable field, evaluated by default
+  over the full scan, overridable; `ORDER BY`/`OFFSET` in `Query`, a
+  second scannable slot first, a server-side sequence, and declining
+  all declined). Implemented on the same branch as `SERVER-001` v0.45.0
+  / FR-055, `SERVER-002` v0.9.0, PR #214.
 - Date: 2026-09-07
 - Related: `ADR-0034`/`docs/design/SERVER-SQL-SELECT-DESIGN.md` (`Query`,
   `Response::Rows`, the full-scan posture and `SQL-FR-007`'s kind rules,
@@ -191,6 +193,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #214. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.45.0 / FR-055, `SERVER-002`
+  v0.9.0, landed as designed (PR #214).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The twentieth round in the `rusty_remind_me`-motivated line;
   the hub spike's second gap.

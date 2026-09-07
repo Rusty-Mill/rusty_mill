@@ -1,8 +1,13 @@
 # ADR-0055: One ordered keyset page — `Request::Page` over an orderable field, at protocol 20
 
-- Status: **Proposed** (2026-09-07). Proposed and implemented on one
-  branch, the `ADR-0046`–`ADR-0054` cadence; the owner's options are in
-  "Considered options" below.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): one ordered
+  keyset page over an orderable field, evaluated by default over the
+  full scan, overridable; (b) `ORDER BY`/`LIMIT`/`OFFSET` in `Query`,
+  (c) a second scannable slot first, (d) a server-side sequence, and
+  (e) decline declined. Recorded in "Acceptance and implementation"
+  below.) Proposed and implemented on one branch, the
+  `ADR-0046`–`ADR-0054` cadence.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-PAGE-DESIGN.md` (the full design),
@@ -55,3 +60,7 @@ optimization before the request exists. **(d) A server-side sequence**
   one vector (62 pinned); tests: `serve` +1, `server_memory_integration`
   +1, `server_dog_integration` +1, `server_protocol_version` +1,
   `server_python_client` extended; every acceptance criterion 1–3 holds.
+  (PR #214.)
+- 2026-09-07: accepted as designed (option (a); (b)–(e) declined). No
+  change to the implementation. Next in the line: `deleted_at`/`node_id`
+  in the `Memory` projection.
