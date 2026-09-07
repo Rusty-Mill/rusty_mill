@@ -1795,6 +1795,55 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// One ordered keyset page (`PAG-FR-005`, ADR-0055, protocol 20):
+    /// every record of the selected table sorted ascending by `order_by`
+    /// (a `U32`/`I64` field, by schema name) with the id as the
+    /// tie-break, strictly after `after` (`None` for the first page), at
+    /// most `limit` rows, each with every field named. The last row's
+    /// `(order_by value, id)` is the next call's `after`; a puller
+    /// wanting everything after time *t* starts at `(t,
+    /// RecordId::max())`. An unknown field is
+    /// [`ClientError::UnknownField`], a non-orderable one
+    /// [`ClientError::Unsupported`]`("page order")`, a zero `limit`
+    /// [`ClientError::Unsupported`]`("page limit")`, all with no frame;
+    /// [`ClientError::Unsupported`]`("page")` below 20 (rule 4). The
+    /// server's `Malformed` for a cursor value of the wrong kind.
+    pub fn page(
+        &mut self,
+        order_by: &str,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<QueryRow>, ClientError> {
+        if self.server_protocol_version() < 20 {
+            return Err(ClientError::Unsupported("page"));
+        }
+        let descriptor = self.field(order_by)?;
+        if !matches!(descriptor.value_kind, ValueKind::U32 | ValueKind::I64) {
+            return Err(ClientError::Unsupported("page order"));
+        }
+        if limit == 0 {
+            return Err(ClientError::Unsupported("page limit"));
+        }
+        match self.roundtrip(Request::Page {
+            order_by: descriptor.tag,
+            after,
+            limit: limit as u64,
+        })? {
+            Response::Rows { rows } => Ok(rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let named = fields
+                        .into_iter()
+                        .map(|(tag, value)| (self.field_name(tag), value))
+                        .collect();
+                    (id, named)
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Rows")),
+        }
+    }
+
     /// Compact the selected table's files in place (`CMP-FR-007`,
     /// ADR-0052, protocol 18) and report what was reclaimed. Every other
     /// connection waits while it runs — an operator's call, not a

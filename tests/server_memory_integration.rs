@@ -559,6 +559,86 @@ fn a_guarded_replace_is_last_writer_wins_over_the_wire_and_survives_a_restart() 
     );
 }
 
+/// `PAG-FR-004`/`005` (ADR-0055), over a real socket: pages by
+/// `updated_at_unix_ms` walk the table in `(value, id)` order — the last
+/// row's key as the next cursor, a cursor at the maximum id as "after
+/// time *t*", a tie broken by id; the client refuses a `Str` order and a
+/// zero limit locally.
+#[test]
+fn ordered_keyset_pages_by_updated_at_walk_the_table_over_the_wire() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let ids = |rows: &[(Uuid, Vec<(String, ScanValue)>)]| {
+        rows.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    };
+    let id = Uuid::from_u128;
+    // Four sample memories, updated_at 1000·n; a fifth ties with the fourth.
+    let mut fifth: Vec<(&str, ScanValue)> = client
+        .get(id(4))
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|(name, value)| (Box::leak(name.into_boxed_str()) as &str, value))
+        .collect();
+    fifth[0] = ("content", ScanValue::Str("a tie".into()));
+    client.insert(id(5), &fifth).unwrap();
+
+    let first = client.page("updated_at_unix_ms", None, 2).unwrap();
+    assert_eq!(ids(&first), vec![id(1), id(2)]);
+    assert_eq!(first[0].1.len(), 11, "every field of each record");
+    let (last_id, last_fields) = &first[1];
+    let cursor = (last_fields[6].1.clone(), *last_id);
+    assert_eq!(cursor, (ScanValue::I64(2_000), id(2)));
+    let second = client.page("updated_at_unix_ms", Some(cursor), 2).unwrap();
+    assert_eq!(ids(&second), vec![id(3), id(4)]);
+    let third = client
+        .page(
+            "updated_at_unix_ms",
+            Some((ScanValue::I64(4_000), id(4))),
+            2,
+        )
+        .unwrap();
+    assert_eq!(ids(&third), vec![id(5)], "the tie broken by id");
+    let after_third = client
+        .page(
+            "updated_at_unix_ms",
+            Some((ScanValue::I64(4_000), id(5))),
+            2,
+        )
+        .unwrap();
+    assert!(after_third.is_empty(), "the walk ends");
+    // "Everything updated after 3000": a cursor at the maximum id.
+    let since = client
+        .page(
+            "updated_at_unix_ms",
+            Some((ScanValue::I64(3_000), Uuid::from_u128(u128::MAX))),
+            100,
+        )
+        .unwrap();
+    assert_eq!(ids(&since), vec![id(4), id(5)]);
+
+    assert!(matches!(
+        client.page("content", None, 10),
+        Err(ClientError::Unsupported("page order"))
+    ));
+    assert!(matches!(
+        client.page("updated_at_unix_ms", None, 0),
+        Err(ClientError::Unsupported("page limit"))
+    ));
+    assert!(matches!(
+        client.page("no_such_field", None, 10),
+        Err(ClientError::UnknownField(_))
+    ));
+    match client.page(
+        "updated_at_unix_ms",
+        Some((ScanValue::Str("x".into()), id(1))),
+        10,
+    ) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed for a wrong-kind cursor, got {other:?}"),
+    }
+}
+
 fn sample_entities() -> Vec<Entity> {
     let entity = |n: u128, label: &str, kind: &str| Entity {
         id: Uuid::from_u128(n),

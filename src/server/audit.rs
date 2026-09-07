@@ -91,6 +91,8 @@ pub enum RequestKind {
     Compact,
     /// Protocol 19, ADR-0054.
     ReplaceIf,
+    /// Protocol 20, ADR-0055.
+    Page,
 }
 
 impl RequestKind {
@@ -125,6 +127,7 @@ impl RequestKind {
             Request::Delete { .. } => RequestKind::Delete,
             Request::Compact => RequestKind::Compact,
             Request::ReplaceIf { .. } => RequestKind::ReplaceIf,
+            Request::Page { .. } => RequestKind::Page,
         }
     }
 }

@@ -84,6 +84,10 @@ pub enum DeleteOutcome {
 /// had no record (the guard never evaluated); or the guard did not hold
 /// — nothing written in the latter two. `dispatch` maps them to
 /// [`Response::Ok`] / [`Response::NotFound`] / `Err { GuardFailed }`.
+/// One row of a [`Response::Rows`] page or query: a record's id and
+/// every field of it in tag order (`PAG-FR-002`).
+pub type PageRow = (RecordId, Vec<(FieldRef, ScanValue)>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplaceIfOutcome {
     Replaced,
@@ -266,6 +270,22 @@ pub trait ConnectionStore: Send + Sync {
         _guard: &Predicate,
     ) -> Result<ReplaceIfOutcome, ErrorCode> {
         Err(ErrorCode::Unsupported)
+    }
+
+    /// `PAG-FR-002` (ADR-0055, protocol 20): one ordered keyset page —
+    /// every record sorted ascending by `order_by` with the id as the
+    /// tie-break, strictly after `after`, at most `limit` rows. `dispatch`
+    /// has already validated `order_by` as an orderable field, `after`'s
+    /// kind, and `limit` (`validate_page`). The default is
+    /// [`page_rows`] over [`Self::scan_all`] — `Query`'s own full-scan
+    /// posture — and an adapter with a cheaper order may override it.
+    fn page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        Ok(page_rows(self.scan_all(), order_by, after, limit))
     }
 
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
@@ -527,6 +547,87 @@ fn evaluate_query(
         matched.truncate(limit);
     }
     matched
+}
+
+/// `PAG-FR-003` (ADR-0055): `Request::Page`'s validation, before any
+/// scan — `UnknownField` for an `order_by` the schema lacks, `Malformed`
+/// for a field that is not `U32`/`I64` (the one kind pair with an order,
+/// `CompareOp::is_ordering`'s rule), a cursor value of another kind, or
+/// a zero `limit`.
+fn validate_page(
+    schema: &DomainSchema,
+    order_by: FieldRef,
+    after: Option<&(ScanValue, RecordId)>,
+    limit: u64,
+) -> Result<(), ErrorCode> {
+    let kind = schema
+        .fields
+        .iter()
+        .find(|f| f.tag == order_by)
+        .map(|f| f.value_kind)
+        .ok_or(ErrorCode::UnknownField)?;
+    if !matches!(kind, protocol::ValueKind::U32 | protocol::ValueKind::I64) {
+        return Err(ErrorCode::Malformed);
+    }
+    if let Some((value, _)) = after {
+        if !value_matches_kind(kind, value) {
+            return Err(ErrorCode::Malformed);
+        }
+    }
+    if limit == 0 {
+        return Err(ErrorCode::Malformed);
+    }
+    Ok(())
+}
+
+/// The sort key one row contributes to a page: its `order_by` value as
+/// an `i128` (so `U32` and `I64` share one order) and its id. A row
+/// without the field, or with one of another kind, sorts first — a
+/// state `validate_page` has already ruled out for every adapter whose
+/// `scan_all` describes its own schema.
+fn page_key(
+    fields: &[(FieldRef, ScanValue)],
+    order_by: FieldRef,
+    id: RecordId,
+) -> (i128, RecordId) {
+    let value = fields
+        .iter()
+        .find(|(field, _)| *field == order_by)
+        .and_then(|(_, value)| match value {
+            ScanValue::U32(v) => Some(i128::from(*v)),
+            ScanValue::I64(v) => Some(i128::from(*v)),
+            _ => None,
+        })
+        .unwrap_or(i128::MIN);
+    (value, id)
+}
+
+/// `PAG-FR-002` (ADR-0055): one ordered keyset page over `rows` — sorted
+/// ascending by `(order_by value, id)`, every row whose key is strictly
+/// greater than `after`'s, the first `limit` of them. The one place the
+/// order is written, shared by every adapter's default
+/// [`ConnectionStore::page`].
+pub fn page_rows(
+    rows: Vec<PageRow>,
+    order_by: FieldRef,
+    after: Option<(ScanValue, RecordId)>,
+    limit: usize,
+) -> Vec<PageRow> {
+    let cursor = after.map(|(value, id)| page_key(&[(order_by, value)], order_by, id));
+    let mut keyed: Vec<_> = rows
+        .into_iter()
+        .map(|(id, fields)| (page_key(&fields, order_by, id), id, fields))
+        .filter(|(key, _, _)| match cursor {
+            None => true,
+            Some(cursor) => *key > cursor,
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    keyed
+        .into_iter()
+        .take(limit)
+        .map(|(_, id, fields)| (id, fields))
+        .collect()
 }
 
 /// Whether `predicate` holds over one record's wire shape — a `Query`
@@ -1887,6 +1988,19 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
                 Err(code) => err_response(code),
             }
         }
+        // `PAG-FR-003`/`004` (ADR-0055): validate, then one ordered page —
+        // `Query`'s own validate-then-scan shape and posture.
+        Request::Page {
+            order_by,
+            after,
+            limit,
+        } => match validate_page(&store.describe(), order_by, after.as_ref(), limit) {
+            Ok(()) => match store.page(order_by, after, limit as usize) {
+                Ok(rows) => Response::Rows { rows },
+                Err(code) => err_response(code),
+            },
+            Err(code) => err_response(code),
+        },
         Request::Compact => match store.compact() {
             Ok(report) => Response::Compacted {
                 records: report.records as u64,
@@ -2473,6 +2587,8 @@ fn handle_connection(
             Request::Join(_) | Request::DescribeRelations if negotiated < 12 => {
                 err_response(ErrorCode::Malformed)
             }
+            // `PAG-FR-004` (ADR-0055), rule 3: a read, gated like `Join`.
+            Request::Page { .. } if negotiated < 20 => err_response(ErrorCode::Malformed),
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes
@@ -4854,6 +4970,58 @@ mod tests {
             dispatch(&FixtureStore, link(1, 2, "knows")),
             err_response(ErrorCode::Unsupported),
             "the trait's default"
+        );
+    }
+
+    /// `PAG-FR-002` (ADR-0055): rows sort by `(order_by value, id)`, the
+    /// cursor is strict, `U32` and `I64` share one order, and `limit`
+    /// truncates after the sort.
+    #[test]
+    fn page_rows_orders_by_value_then_id_strictly_after_the_cursor() {
+        let id = RecordId::from_u128;
+        let rows = vec![
+            (id(3), vec![(0, ScanValue::I64(20))]),
+            (id(1), vec![(0, ScanValue::I64(10))]),
+            (id(2), vec![(0, ScanValue::I64(20))]),
+            (id(4), vec![(0, ScanValue::I64(-5))]),
+        ];
+        let ids = |rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>| {
+            rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(page_rows(rows.clone(), 0, None, 10)),
+            vec![id(4), id(1), id(2), id(3)]
+        );
+        assert_eq!(ids(page_rows(rows.clone(), 0, None, 2)), vec![id(4), id(1)]);
+        // Strictly after `(10, id 1)`: the two 20s, id-ordered.
+        assert_eq!(
+            ids(page_rows(
+                rows.clone(),
+                0,
+                Some((ScanValue::I64(10), id(1))),
+                10
+            )),
+            vec![id(2), id(3)]
+        );
+        // Strictly after `(20, id 2)`: only id 3 — the tie-break is the id.
+        assert_eq!(
+            ids(page_rows(
+                rows.clone(),
+                0,
+                Some((ScanValue::I64(20), id(2))),
+                10
+            )),
+            vec![id(3)]
+        );
+        // "Everything after 10": a cursor at the maximum id.
+        assert_eq!(
+            ids(page_rows(
+                rows,
+                0,
+                Some((ScanValue::I64(10), RecordId::from_u128(u128::MAX))),
+                10
+            )),
+            vec![id(2), id(3)]
         );
     }
 }

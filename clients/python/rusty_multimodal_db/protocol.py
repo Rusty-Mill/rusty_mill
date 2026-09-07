@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 19
+PROTOCOL_VERSION = 20
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -505,11 +505,18 @@ class ReplaceIf:
         object.__setattr__(self, "fields", tuple(tuple(f) for f in self.fields))
 
 
+@_variant(29, [("order_by", "u16"), ("after", ("opt", ("tuple", ScanValue, "uuid"))), ("limit", "u64")])
+class Page:
+    order_by: int
+    after: Optional[Tuple[Any, uuid.UUID]]
+    limit: int
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
-    Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf,
+    Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -520,7 +527,7 @@ REQUEST_INTRODUCED_AT = {
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
-    ReplaceIf: 19,
+    ReplaceIf: 19, Page: 20,
 }
 
 
