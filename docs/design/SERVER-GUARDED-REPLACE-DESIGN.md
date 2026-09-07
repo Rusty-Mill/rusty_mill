@@ -1,9 +1,11 @@
-# Server Guarded Replace Design (Proposed)
+# Server Guarded Replace Design (Accepted)
 
-- Status: **Proposed** (2026-09-07) — implemented on the same branch as
-  `SERVER-001` v0.44.0 / FR-054 and `SERVER-002` v0.8.0, the
-  `ADR-0046`–`ADR-0053` cadence, for the owner to accept as designed or
-  send back.
+- Status: **Accepted** (2026-09-07, `ADR-0054` option (a), as designed —
+  a guarded replace with one query predicate over the stored record,
+  evaluated under the write lock; a dedicated `ReplaceIfNewer`, a
+  server-maintained version counter, client-side, and declining all
+  declined). Implemented on the same branch as `SERVER-001` v0.44.0 /
+  FR-054, `SERVER-002` v0.8.0, PR #212.
 - Date: 2026-09-07
 - Related: `ADR-0049`/`docs/design/SERVER-REPLACE-DESIGN.md` (the
   unconditional replace this round guards), `ADR-0034` (`Predicate`/
@@ -208,6 +210,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #212. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.44.0 / FR-054, `SERVER-002`
+  v0.8.0, landed as designed (PR #212).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The nineteenth round in the `rusty_remind_me`-motivated line;
   the hub spike's first gap.
