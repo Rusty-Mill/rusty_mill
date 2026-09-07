@@ -217,6 +217,18 @@ impl<Id: fmt::Debug> std::error::Error for ReplaceError<Id> {
     }
 }
 
+/// What a guarded replacement did (`GRD-FR-001`, ADR-0054): the record
+/// is now the new version, or the guard did not hold against the stored
+/// record and nothing was written. A missing id is
+/// [`ReplaceError::NotFound`], as for an unguarded replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedReplace {
+    /// The guard held; the record is the new version.
+    Replaced,
+    /// The guard did not hold; nothing was written.
+    Refused,
+}
+
 impl<Id> From<DurabilityError> for ReplaceError<Id> {
     fn from(e: DurabilityError) -> Self {
         ReplaceError::Durability(e)

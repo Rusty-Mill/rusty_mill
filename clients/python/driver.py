@@ -92,6 +92,19 @@ def main() -> int:
         except UnsupportedError as e:
             print(f"replace=unsupported:{e}")
 
+        # Protocol 19 (GRD-FR-006): a guarded replace — mention_count is 2
+        # after the replace above, so a guard of "stored < 5" holds and one
+        # of "stored < 1" is refused with nothing written; an unknown id is
+        # notfound.
+        try:
+            fields = [("label", "Grace Hopper"), ("kind", "person"), ("mention_count", 3), ("aliases", ["Grandma COBOL"])]
+            print(f"replace_if_holds={c.replace_if(new, fields, ('mention_count', CompareOp.Lt, 5))}")
+            print(f"replace_if_refused={c.replace_if(new, fields, ('mention_count', CompareOp.Lt, 1))}")
+            print(f"replace_if_stored={dict(c.get(new))['mention_count']}")
+            print(f"replace_if_unknown={c.replace_if(uuid.UUID(int=4242), fields, ('mention_count', CompareOp.Lt, 5))}")
+        except UnsupportedError as e:
+            print(f"replace_if=unsupported:{e}")
+
         # Protocol 16 (TBL-FR-009): a one-table server lists itself; Use of
         # its own name is Ok, of another Malformed.
         try:

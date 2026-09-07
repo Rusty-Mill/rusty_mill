@@ -25,6 +25,7 @@ with Client.connect("127.0.0.1", 7878) as c:
     c.join("mentions", ["content"], ["label"])  # crosses tables when the relation's target_table says so
     c.delete(uuid.UUID(int=1))         # protocol 17: True when gone (with every edge touching it), False if unknown
     c.compact()                        # protocol 18: fold the logs, drop retired slots; returns the counts reclaimed
+    c.replace_if(uuid.UUID(int=1), [...], ("mention_count", CompareOp.Lt, 5))  # protocol 19: "replaced" / "refused" / "notfound"
 ```
 
 Verification, both in CI:

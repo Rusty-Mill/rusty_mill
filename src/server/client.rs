@@ -170,9 +170,9 @@
 
 use super::framing::{self, FrameError};
 use super::protocol::{
-    AggregateFn, AggregateSpec, DomainSchema, ErrorCode, FieldDescriptor, FieldRef, JoinSpec,
-    ParentLookup, Predicate, RecordId, RelationDescriptor, Request, Response, ScanValue, Selection,
-    ValueKind, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    AggregateFn, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldDescriptor, FieldRef,
+    JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor, Request, Response, ScanValue,
+    Selection, ValueKind, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
     SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
@@ -668,6 +668,20 @@ pub enum QueryResult {
     /// two records per row, so a third shape rather than a synthetic
     /// fold into [`QueryResult::Rows`].
     Joined(Vec<JoinedRowNamed>),
+}
+
+/// What [`SchemaDrivenClient::replace_if`] did (`GRD-FR-006`, ADR-0054):
+/// the three normal outcomes of a guarded replace, kept apart so a
+/// last-writer-wins merge can insert on `NotFound`, move on after
+/// `Refused`, and count `Replaced` — none of them is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedReplace {
+    /// The guard held; the record is the new version.
+    Replaced,
+    /// The guard did not hold against the stored record; nothing written.
+    Refused,
+    /// `id` has no record; nothing written, the guard never evaluated.
+    NotFound,
 }
 
 /// One [`QueryResult::Joined`] row: both records' ids, and the selected
@@ -1721,6 +1735,63 @@ impl SchemaDrivenClient {
             Response::NotFound => Ok(false),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Ok or NotFound")),
+        }
+    }
+
+    /// Replace one record whole **only if `guard` holds against the
+    /// stored record** (`GRD-FR-006`, ADR-0054, protocol 19):
+    /// [`Self::replace`]'s exact shape plus a guard `(field, op, value)`
+    /// resolved through the discovered schema — the comparison and the
+    /// write happen under the server's write lock, so this is the atomic
+    /// compare-and-replace a client-side get-then-`replace` is not. The
+    /// consumer's last-writer-wins merge is `("updated_at_unix_ms",
+    /// CompareOp::Lt, ScanValue::I64(mine))`; a compare-and-swap on a
+    /// version field is `CompareOp::Eq`. An ordering comparator on a
+    /// field that is not `U32`/`I64` is refused locally
+    /// ([`ClientError::Unsupported`]`("ordering guard")`, the `SQL-FR-010`
+    /// rule), an unknown field [`ClientError::UnknownField`], both with
+    /// no frame. [`ClientError::Unsupported`]`("replace_if")` below 19
+    /// (rule 4). Server refusals as for `replace`, plus the server's
+    /// `Malformed` for a guard value of the wrong kind.
+    pub fn replace_if(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+        guard: (&str, CompareOp, ScanValue),
+    ) -> Result<GuardedReplace, ClientError> {
+        if self.server_protocol_version() < 19 {
+            return Err(ClientError::Unsupported("replace_if"));
+        }
+        let mut tagged = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            tagged.push((self.field(name)?.tag, value.clone()));
+        }
+        let (guard_field, op, value) = guard;
+        let descriptor = self.field(guard_field)?;
+        let orderable = matches!(descriptor.value_kind, ValueKind::U32 | ValueKind::I64);
+        if op.is_ordering() && !orderable {
+            return Err(ClientError::Unsupported("ordering guard"));
+        }
+        let guard = Predicate {
+            field: descriptor.tag,
+            op,
+            value,
+        };
+        match self.roundtrip(Request::ReplaceIf {
+            id,
+            fields: tagged,
+            guard,
+        })? {
+            Response::Ok => Ok(GuardedReplace::Replaced),
+            Response::NotFound => Ok(GuardedReplace::NotFound),
+            Response::Err {
+                code: ErrorCode::GuardFailed,
+                ..
+            } => Ok(GuardedReplace::Refused),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse(
+                "Ok, NotFound, or GuardFailed",
+            )),
         }
     }
 

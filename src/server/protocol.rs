@@ -73,6 +73,7 @@
 //! | 16 | `SERVER-001` v0.40.0 | + [`Request::Use`] (24), [`Request::ListTables`] (25), and [`Response::Tables`] (17) — `TBL-FR-002`/`003`, ADR-0045 (accepted direction) implemented by ADR-0050: more than one table on one connection. A server built with `serve_tables` registers several `ConnectionStore`s under names; `Use { table }` selects, per connection, which one every table-less request is served from (default: the primary, so a connection that never sends `Use` is a pre-16 connection byte for byte); `ListTables` reports the names. Cross-table `Join`: `JoinSpec::right_table: Some(name)` — carried since 12 for exactly this — now fetches right rows from that table, when the relation's `RelationDescriptor::target_table` names it (`Malformed` otherwise); and a `Link` under a relation whose descriptor names a `target_table` has its far endpoint checked against that table. `Use` inside a session is `SessionOpen`; an unknown name `Malformed`; both new requests `Malformed` below 16 (rule 3). No new `ErrorCode`. ADR-0050 |
 //! | 17 | `SERVER-001` v0.41.0 | + [`Request::Delete`] (26) — `DEL-FR-006`, ADR-0051: remove one record of the connection's table at runtime, the last of the three record-set writes. Answered `Ok` (durable before the reply — a tombstone in the insert log, folded at the next open) or [`Response::NotFound`]; no new `Response`, no new `ErrorCode`. Every edge touching the record goes with it — under every label of its own table, and on a `serve_tables` server under every other table's relation whose `target_table` is this one. The id may be inserted again. `Unsupported` from a domain with no delete (`Dog`, `Order`, `Employee`). Server-gated `Malformed` below 17 (rule 3), `Unauthorized` for `ReadOnly` (the sixth write), `SessionOpen` inside a session; never journaled or staged. ADR-0051 |
 //! | 18 | `SERVER-001` v0.42.0 | + [`Request::Compact`] (27) and [`Response::Compacted`] (18) — `CMP-FR-006`, ADR-0052: reclaim in place what runtime writes left behind — the insert and edge logs folded into their blobs, the slot files rewritten without the slots deletion retired, the logs removed — under the table's write lock; answered with the counts reclaimed. An operator's request. `Unsupported` from a domain with no compaction (`Dog`, `Order`, `Employee`); `Storage` if a file could not be rewritten. Server-gated `Malformed` below 18 (rule 3), `Unauthorized` for `ReadOnly` (the seventh write), `SessionOpen` inside a session; never journaled or staged. No new `ErrorCode`. ADR-0052 |
+//! | 19 | `SERVER-001` v0.44.0 | + [`Request::ReplaceIf`] (28) and [`ErrorCode::GuardFailed`] (13) — `GRD-FR-005`, ADR-0054: [`Request::Replace`]'s exact body plus a `guard: Predicate` over the connection's table; the server reads the stored record, evaluates the guard against it, and replaces **only if it holds**, all under the table's write lock — the atomic compare-and-replace a last-writer-wins merge needs (`guard` = `updated_at < mine`). Answered `Ok` when replaced, `NotFound` when the id has no record (the guard never evaluated), `Err { GuardFailed }` when the guard did not hold (nothing written). The guard is validated as a `Query` predicate (`UnknownField`/`Malformed`, `SQL-FR-007`'s kind and comparator rules). `Unsupported` from a domain with no replace. Server-gated `Malformed` below 19 (rule 3), `Unauthorized` for `ReadOnly` (the eighth write), `SessionOpen` inside a session; never journaled or staged. `GuardFailed` only ever answers `ReplaceIf`, so no downgrade. ADR-0054 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -107,7 +108,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -485,6 +486,13 @@ pub enum ErrorCode {
     /// client's "retry the batch" handling of that code never fires for an
     /// insert. Only ever answers an `Insert`, so it needs no downgrade.
     Storage,
+    /// Protocol 19 (`GRD-FR-005`, ADR-0054). [`Request::ReplaceIf`]'s guard
+    /// did not hold against the stored record; nothing was written. The
+    /// normal outcome of a lost last-writer-wins race, kept as an
+    /// `ErrorCode` for [`ErrorCode::Duplicate`]'s reason: it is not `Ok`
+    /// and it is not `NotFound`. Only ever answers a `ReplaceIf`, which a
+    /// connection below 19 cannot send, so it needs no downgrade.
+    GuardFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -791,6 +799,30 @@ pub enum Request {
     /// Gated server-side: `Malformed` below 18; `Unauthorized` for a
     /// `ReadOnly` token; `SessionOpen` while a session is open.
     Compact,
+    /// Protocol 19 (`GRD-FR-005`, ADR-0054,
+    /// `docs/design/SERVER-GUARDED-REPLACE-DESIGN.md`): [`Request::Replace`]
+    /// with a **guard** — the stored record is read, `guard` is evaluated
+    /// against its fields exactly as a [`Request::Query`] predicate is,
+    /// and the record is replaced whole only if the guard holds, all
+    /// under the table's write lock so no other writer can land between
+    /// the comparison and the write. The consumer's last-writer-wins
+    /// merge is `guard = { updated_at, Lt, my_updated_at }`; a
+    /// compare-and-swap on a version field is `Eq`. `fields` is validated
+    /// exactly as `Replace`'s; `guard` as a query predicate
+    /// (`UnknownField` for a tag the schema lacks, `Malformed` for a
+    /// kind mismatch or an ordering comparator on a `Str`/`Bool`/list
+    /// field). Answered [`Response::Ok`] when replaced,
+    /// [`Response::NotFound`] when `id` has no record (the guard is never
+    /// evaluated), `Err { GuardFailed }` when the guard did not hold —
+    /// nothing written in either refusal. `Unsupported` from an adapter
+    /// without replacement. Gated server-side: `Malformed` below 19;
+    /// `Unauthorized` for a `ReadOnly` token; `SessionOpen` while a
+    /// session is open.
+    ReplaceIf {
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+        guard: Predicate,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -932,6 +964,7 @@ mod tests {
             "Use" | "ListTables" | "Tables" => 16,
             "Delete" => 17,
             "Compact" | "Compacted" => 18,
+            "ReplaceIf" | "Err(GuardFailed)" => 19,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1257,6 +1290,33 @@ mod tests {
         );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compact` at 27.
         assert_golden("Compact", &Request::Compact, &[0x1b, 0x00, 0x00, 0x00]);
+        // Protocol 19 (`GRD-FR-005`, ADR-0054): `ReplaceIf` at 28 —
+        // `Replace`'s body, then a `Predicate` (tag u16, op u32, value).
+        assert_golden(
+            "ReplaceIf",
+            &Request::ReplaceIf {
+                id,
+                fields: vec![(0, ScanValue::Str("labrador".into()))],
+                guard: Predicate {
+                    field: 1,
+                    op: CompareOp::Lt,
+                    value: ScanValue::I64(2_000),
+                },
+            },
+            &bytes(&[
+                &[0x1c, 0x00, 0x00, 0x00], // ReplaceIf
+                &ID1,
+                &LEN1,                                             // one field
+                &[0x00, 0x00],                                     // field tag
+                &[0x03, 0x00, 0x00, 0x00],                         // ScanValue::Str
+                &[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // len
+                b"labrador",
+                &[0x01, 0x00],                                     // guard field tag
+                &[0x02, 0x00, 0x00, 0x00],                         // CompareOp::Lt
+                &[0x01, 0x00, 0x00, 0x00],                         // ScanValue::I64
+                &[0xd0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 2000
+            ]),
+        );
         // Protocol 17 (`DEL-FR-006`, ADR-0051): `Delete` at 26.
         assert_golden(
             "Delete",
@@ -1659,6 +1719,8 @@ mod tests {
             // Protocol 13 (`INS-FR-007`): `Duplicate` at 11.
             (ErrorCode::Duplicate, 0x0b),
             (ErrorCode::Storage, 0x0c),
+            // Protocol 19 (`GRD-FR-005`): `GuardFailed` at 13.
+            (ErrorCode::GuardFailed, 0x0d),
         ] {
             assert_golden_eq(
                 &format!("Err({code:?})"),
@@ -1677,8 +1739,8 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 18 is the one that added
-    /// `Request::Compact`/`Response::Compacted` (17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// module docs' table — version 19 is the one that added
+    /// `Request::ReplaceIf` and `ErrorCode::GuardFailed` (18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1690,7 +1752,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 18);
+        assert_eq!(PROTOCOL_VERSION, 19);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like
