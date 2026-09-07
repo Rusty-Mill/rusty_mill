@@ -201,6 +201,28 @@ pub fn open_memory_production_stack_portable(
     )
 }
 
+/// Open the stack at `path` if its slot file exists, else create an
+/// **empty** one there — the shape a served process needs across
+/// restarts (`DDR-FR-001`, ADR-0053): the first start creates, every
+/// later start reopens from the files alone, and no caller-supplied
+/// record list is ever authoritative over what runtime writes left.
+/// The decision is on `path` itself (the slot file); a directory that
+/// has the slot file but lacks a companion is reported by the reopen,
+/// never silently recreated.
+///
+/// # Errors
+///
+/// Everything [`create_memory_production_stack`] or
+/// [`open_memory_production_stack_portable`] can return.
+pub fn open_or_create_memory_production_stack(
+    path: &Path,
+) -> Result<MemoryProductionStack, DurabilityError> {
+    if path.exists() {
+        return open_memory_production_stack_portable(path);
+    }
+    create_memory_production_stack(Vec::new(), &[], path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +476,45 @@ mod tests {
             MultiNeighbors::<Memory>::neighbors_by_relation(&reopened, "mentions", engine),
             Some(vec![three])
         );
+    }
+
+    /// `DDR-FR-001` (ADR-0053): the first call at a path creates an
+    /// empty stack; runtime writes on it survive a second call, which
+    /// reopens rather than recreates; a third call after a delete and a
+    /// compaction still reopens.
+    #[test]
+    fn open_or_create_creates_empty_then_reopens_with_runtime_writes() {
+        use crate::generic::query::{Compact, Delete, MultiNeighbors};
+        let dir = fresh_temp_dir("generic_memory_open_or_create").unwrap();
+        let path = dir.join("memories.mmap");
+
+        let mut store = open_or_create_memory_production_stack(&path).unwrap();
+        assert!(store.all_ids().is_empty(), "created empty");
+        store.insert(memory(1, "preference", false)).unwrap();
+        store.insert(memory(2, "fact", true)).unwrap();
+        store
+            .link("mentions", Uuid::from_u128(1), Uuid::from_u128(0xada))
+            .unwrap();
+        drop(store);
+
+        let mut store = open_or_create_memory_production_stack(&path).unwrap();
+        let mut ids = store.all_ids();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![Uuid::from_u128(1), Uuid::from_u128(2)],
+            "reopened, not recreated"
+        );
+        assert_eq!(
+            store.neighbors_by_relation("mentions", Uuid::from_u128(1)),
+            Some(vec![Uuid::from_u128(0xada)])
+        );
+        store.delete(Uuid::from_u128(2)).unwrap();
+        store.compact().unwrap();
+        drop(store);
+
+        let store = open_or_create_memory_production_stack(&path).unwrap();
+        assert_eq!(store.all_ids(), vec![Uuid::from_u128(1)]);
+        assert!(GetById::<Memory>::get(&store, Uuid::from_u128(2)).is_none());
     }
 }

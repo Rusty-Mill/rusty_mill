@@ -34,9 +34,30 @@
 //! localhost/development network unless both auth and TLS are configured
 //! — see ADR-0010's Consequences. Usage: `memory_server [host:port]`
 //! (defaults to `127.0.0.1:7881`).
+//!
+//! # Where the data lives — `SERVER_DATA_DIR` (ADR-0053)
+//!
+//! Unset, this binary seeds the sample dataset into a fresh per-process
+//! scratch directory on every start — a demonstration, nothing survives
+//! a restart. Set `SERVER_DATA_DIR=<dir>` and it becomes a durable
+//! backend (`DDR-FR-002`): the directory is created if missing;
+//! `<dir>/memories.mmap` and `<dir>/entities.mmap` are each **opened
+//! from their files alone** when present and created **empty** when
+//! not (`open_or_create_*_production_stack`) — no sample data, and no
+//! caller-supplied record list that could overrule what earlier runs
+//! inserted, replaced, linked, deleted, or compacted. A directory that
+//! holds a slot file but lacks a companion is a startup error, never a
+//! silent recreation. Combine with `SERVER_TXN_JOURNAL_PATH` for
+//! crash-atomic batches; the two are independent settings.
 
-use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
-use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memory};
+use rusty_multimodal_db::generic::entity::{
+    create_entity_production_stack, open_or_create_entity_production_stack, Entity,
+    EntityProductionStack,
+};
+use rusty_multimodal_db::generic::memory::{
+    create_memory_production_stack, open_or_create_memory_production_stack, Memory,
+    MemoryProductionStack,
+};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
@@ -46,7 +67,7 @@ use rusty_multimodal_db::server::{
     serve_tables, ConnectionStore, RateLimit, ServeOptions, TlsConfig, TokenClass,
 };
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -110,15 +131,16 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:7881".to_string());
 
-    let dir = std::env::temp_dir().join(format!("memory_server_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("creating a scratch directory for the mmap-backed store");
-    let path = dir.join("memories.mmap");
-
-    let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &path)
-        .expect("creating the sample MemoryProductionStack");
-    let entity_store =
-        create_entity_production_stack(sample_entities(), &[], &[], &dir.join("entities.mmap"))
-            .expect("creating the sample EntityProductionStack");
+    // `SERVER_DATA_DIR` (ADR-0053, `DDR-FR-002`): set, a durable
+    // directory opened from its files or created empty; unset, the
+    // sample dataset in a per-process scratch directory, as before.
+    let data = match std::env::var_os("SERVER_DATA_DIR") {
+        Some(dir) => DataLocation::Durable(PathBuf::from(dir)),
+        None => DataLocation::Scratch(
+            std::env::temp_dir().join(format!("memory_server_{}", std::process::id())),
+        ),
+    };
+    let (store, entity_store) = open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new(EntityConnectionStore::new(
         GenericProductionStore::new(entity_store),
     ));
@@ -191,7 +213,8 @@ fn main() {
         None => auth,
     };
     eprintln!(
-        "memory_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
             None => "NOT configured",
@@ -217,6 +240,54 @@ fn main() {
         0,
         options,
     );
+}
+
+/// Where this process keeps its two tables (`DDR-FR-002`).
+enum DataLocation {
+    /// `SERVER_DATA_DIR`: opened from the files when present, created
+    /// empty when not; survives restarts.
+    Durable(PathBuf),
+    /// No `SERVER_DATA_DIR`: the sample dataset, recreated every start.
+    Scratch(PathBuf),
+}
+
+impl DataLocation {
+    fn describe(&self) -> String {
+        match self {
+            Self::Durable(dir) => format!("durable at {}", dir.display()),
+            Self::Scratch(dir) => {
+                format!("sample data, scratch at {} (NOT durable)", dir.display())
+            }
+        }
+    }
+}
+
+/// `SERVER_DATA_DIR`'s decision table (`DDR-FR-002`): the directory is
+/// created if missing; durable tables open-or-create, scratch tables
+/// are seeded. Every failure names the directory.
+fn open_stores(
+    data: &DataLocation,
+) -> Result<(MemoryProductionStack, EntityProductionStack), String> {
+    let (dir, durable) = match data {
+        DataLocation::Durable(dir) => (dir, true),
+        DataLocation::Scratch(dir) => (dir, false),
+    };
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("creating the data directory {}: {e}", dir.display()))?;
+    let memories = dir.join("memories.mmap");
+    let entities = dir.join("entities.mmap");
+    if durable {
+        let store = open_or_create_memory_production_stack(&memories)
+            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", memories.display()))?;
+        let entity_store = open_or_create_entity_production_stack(&entities)
+            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?;
+        return Ok((store, entity_store));
+    }
+    let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &memories)
+        .map_err(|e| format!("creating the sample MemoryProductionStack: {e}"))?;
+    let entity_store = create_entity_production_stack(sample_entities(), &[], &[], &entities)
+        .map_err(|e| format!("creating the sample EntityProductionStack: {e}"))?;
+    Ok((store, entity_store))
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see
