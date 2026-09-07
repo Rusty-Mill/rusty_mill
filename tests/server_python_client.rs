@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_15_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_16_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -162,6 +162,10 @@ fn the_python_reference_client_speaks_the_protocol_at_15_and_at_10() {
     assert_eq!(get("replace_by_alias"), "1");
     assert_eq!(get("replace_neighbors"), "1");
     assert_eq!(get("replace_unknown"), "notfound");
+    // `TBL-FR-009` (ADR-0050): the table list and `Use` from Python.
+    assert_eq!(get("tables"), "entity;entity");
+    assert_eq!(get("use_self"), "entity");
+    assert_eq!(get("use_unknown"), "Malformed");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -186,6 +190,11 @@ fn the_python_reference_client_speaks_the_protocol_at_15_and_at_10() {
         get("insert").starts_with("unsupported"),
         "rule 4: no Insert below 13 — {}",
         get("insert")
+    );
+    assert!(
+        get("tables").starts_with("unsupported"),
+        "{}",
+        get("tables")
     );
     assert!(
         get("replace").starts_with("unsupported"),

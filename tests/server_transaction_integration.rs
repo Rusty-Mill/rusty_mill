@@ -574,6 +574,17 @@ fn session_state_errors_leave_the_connection_open() {
         ),
         ErrorCode::SessionOpen,
     );
+    // `TBL-FR-006` (ADR-0050): a session's writes belong to one table —
+    // `Use` inside one is refused, even for the table already selected.
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::Use {
+                table: "dog".into(),
+            },
+        ),
+        ErrorCode::SessionOpen,
+    );
     assert_eq!(
         stage(&mut c, Uuid::from_u128(1), 30),
         Response::Staged { index: 0 }

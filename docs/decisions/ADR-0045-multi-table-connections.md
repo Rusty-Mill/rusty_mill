@@ -79,6 +79,11 @@ domain is the obvious candidate and a domain round of its own).
 `Memory` as a front-door second table (`SERVER-001` v0.38.0 /
 FR-048). The implementation unit this ADR gates can now be
 scheduled; its first cross-table link is `memory_entities`.
+**Implemented, 2026-09-07**: `ADR-0050` / `SERVER-001` v0.40.0 /
+FR-050 builds this shape as accepted, at protocol 16, with `Memory →
+Entity` (a foreign `mentions` label) as the instance — see
+`docs/design/SERVER-TABLES-DESIGN.md` for the one addition (foreign
+labels) and the non-goals held.
 
 ## Consequences
 

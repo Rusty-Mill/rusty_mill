@@ -945,6 +945,17 @@ pub struct MultiSymmetric<S, R: Record> {
     /// from `create`/`open`/`open_portable`, `None` from `new`
     /// (`LNK-FR-005`).
     base_path: Option<PathBuf>,
+    /// `TBL-FR-007` (ADR-0050): labels whose far endpoint lives in
+    /// *another table* — `Memory`'s `mentions`, whose `b` is an `Entity`
+    /// id. [`Self::link`] checks only `a` against the inner store for
+    /// such a label; the far end is the server's to check, against the
+    /// table the relation's descriptor names. Storage is unchanged:
+    /// the edge is kept in both directions, so the foreign id's
+    /// neighbors under the label are this table's records that point
+    /// at it (the consumer's "memories for an entity"). A domain
+    /// constant, set by the domain's own constructors, never by a
+    /// runtime `link`, and not carried in the manifest.
+    foreign_labels: Vec<String>,
 }
 
 /// A named list of relations, each a label paired with its own edge
@@ -988,12 +999,26 @@ impl<S, R: Record> MultiSymmetric<S, R> {
             inner,
             adjacency,
             base_path: None,
+            foreign_labels: Vec::new(),
         }
     }
 
     fn with_path(mut self, base: &Path) -> Self {
         self.base_path = Some(base.to_path_buf());
         self
+    }
+
+    /// `TBL-FR-007` (ADR-0050): declare which labels are cross-table —
+    /// see the field's own doc comment. Chainable after any constructor.
+    pub fn with_foreign_labels(mut self, labels: &[&str]) -> Self {
+        self.foreign_labels = labels.iter().map(|l| l.to_string()).collect();
+        self
+    }
+
+    /// Whether `label`'s far endpoint lives in another table
+    /// (`TBL-FR-007`).
+    pub fn is_foreign(&self, label: &str) -> bool {
+        self.foreign_labels.iter().any(|l| l == label)
     }
 
     /// `LNK-FR-006`/`007`: `relations` plus every manifest label it does
@@ -1106,7 +1131,9 @@ where
         if self.inner.get(a).is_none() {
             return Err(LinkError::UnknownRecord(a));
         }
-        if self.inner.get(b).is_none() {
+        // `TBL-FR-007`: a foreign label's far end is another table's
+        // record — not this store's to check.
+        if !self.is_foreign(relation) && self.inner.get(b).is_none() {
             return Err(LinkError::UnknownRecord(b));
         }
         if a == b {
@@ -2336,5 +2363,46 @@ mod tests {
         assert_eq!(Neighbors::<Node, Linked>::neighbors(&healed, 1), vec![2, 3]);
         assert_eq!(std::fs::read(&edges_path).unwrap(), bytes);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `TBL-FR-007` (ADR-0050): a foreign label's far endpoint is not
+    /// this store's to check — `link` accepts an id the inner store has
+    /// never seen, stores the edge both ways so the foreign id's
+    /// neighbors are this table's records, and still checks the near
+    /// end; a label not declared foreign keeps every `LNK-FR-005` rule.
+    #[test]
+    fn a_foreign_label_skips_the_far_endpoint_check_and_nothing_else() {
+        use super::super::query::MultiNeighbors;
+        use super::super::LinkError;
+        let relations: Vec<(String, Vec<(u32, u32)>)> = vec![
+            ("mentions".to_string(), vec![]),
+            ("local".to_string(), vec![]),
+        ];
+        let mut layer = MultiSymmetric::new(BaseStore::new(nodes()), &relations)
+            .with_foreign_labels(&["mentions"]);
+        assert!(layer.is_foreign("mentions"));
+        assert!(!layer.is_foreign("local"));
+        assert_eq!(layer.link("mentions", 1, 999).unwrap(), LinkOutcome::Linked);
+        assert_eq!(
+            layer.link("mentions", 1, 999).unwrap(),
+            LinkOutcome::AlreadyLinked
+        );
+        assert_eq!(
+            MultiNeighbors::<Node>::neighbors_by_relation(&layer, "mentions", 1),
+            Some(vec![999])
+        );
+        assert_eq!(
+            MultiNeighbors::<Node>::neighbors_by_relation(&layer, "mentions", 999),
+            Some(vec![1]),
+            "the foreign id's neighbors are this table's records"
+        );
+        match layer.link("mentions", 999, 1) {
+            Err(LinkError::UnknownRecord(999)) => {}
+            other => panic!("the near end is still checked, got {other:?}"),
+        }
+        match layer.link("local", 1, 999) {
+            Err(LinkError::UnknownRecord(999)) => {}
+            other => panic!("a local label checks both ends, got {other:?}"),
+        }
     }
 }

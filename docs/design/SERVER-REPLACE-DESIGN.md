@@ -258,7 +258,7 @@ on the same three; `cargo fmt --check`; the Python vector suite;
 - **Compaction** of the insert and edge logs — unchanged; the trigger
   (`SERVER-INSERT-DESIGN.md`) is a log noticeably larger than its blob.
 - **`memory_entities`** — the `ADR-0045` implementation round, next in
-  the line.
+  the line. *Resolved by `ADR-0050` / `SERVER-001` v0.40.0.*
 
 ## Change history
 

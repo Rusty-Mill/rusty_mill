@@ -1,8 +1,9 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.4.0 (protocol version 15 — `SERVER-001` v0.39.0, `REP-FR-008`,
-  ADR-0049; 0.3.0 was protocol 14, ADR-0047; 0.2.0 protocol 13,
-  ADR-0046; 0.1.0 protocol 12, `ECO-FR-004`, ADR-0043)
+- Version: 0.5.0 (protocol version 16 — `SERVER-001` v0.40.0, `TBL-FR-010`,
+  ADR-0050; 0.4.0 was protocol 15, ADR-0049; 0.3.0 protocol 14,
+  ADR-0047; 0.2.0 protocol 13, ADR-0046; 0.1.0 protocol 12,
+  `ECO-FR-004`, ADR-0043)
 - Status: Accepted / Implemented / Verified
 - Owner: baileyrd
 - Depends on: `SERVER-001` (the protocol this document describes),
@@ -75,7 +76,7 @@ are no type tags, field names, alignment, or varints.
 |---|---|---|
 | `u8` | 1 byte | `01` |
 | `u16` | 2 bytes LE | `03 00` |
-| `u32` | 4 bytes LE | `0f 00 00 00` (15) |
+| `u32` | 4 bytes LE | `10 00 00 00` (16) |
 | `u64`, `usize` | 8 bytes LE | `02 00 00 00 00 00 00 00` |
 | `i64` | 8 bytes LE, two's complement | `fb ff ff ff ff ff ff ff` (-5) |
 | `f64` | 8 bytes IEEE 754 binary64, LE | `00 00 00 00 00 00 04 40` (2.5) |
@@ -90,13 +91,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 15 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `0f 00 00 00` (15).
+- `Request::Hello { protocol_version: 16 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `10 00 00 00` (16).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 15
+## 5. Types at protocol version 16
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -181,6 +182,8 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 21 | `Insert` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>` | 13 | `Ok` |
 | 22 | `Link` | `left: RecordId`, `right: RecordId`, `relation: String` | 14 | `Ok` |
 | 23 | `Replace` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>` — `Insert`'s exact body | 15 | `Ok` or `NotFound` |
+| 24 | `Use` | `table: String` | 16 | `Ok` |
+| 25 | `ListTables` | — | 16 | `Tables` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -206,6 +209,7 @@ server does not know closes the connection with no reply (§6.3).
 | 14 | `RelationKinds` | `kinds: Vec<String>` | 10 |
 | 15 | `JoinedRows` | `rows: Vec<JoinedRow>` | 12 |
 | 16 | `Relations` | `relations: Vec<RelationDescriptor>` | 12 |
+| 17 | `Tables` | `names: Vec<String>`, `primary: String` | 16 |
 
 ## 6. Connection lifecycle
 
@@ -280,6 +284,26 @@ session is open is `Err { SessionOpen }`. Closing the connection
 discards an open session. `Query`/`Aggregate`/`Join` are never affected
 by a session. The reference client does not implement sessions; a
 client that does needs nothing beyond this section.
+
+### 6.6 Tables (protocol 16+) — per-connection table selection
+
+A server may serve several **tables** (one adapter each, by name) on
+one listener. A connection starts on the server's **primary** table
+and every table-less request — everything but `Use`, `ListTables`,
+`Hello`, and `Authenticate` — is served from the table currently
+selected. `Use { table }` selects another (`Ok`; `Err { Malformed }` for
+a name the server lacks, the selection unchanged; `Err { SessionOpen }`
+while a session is open, since a session's writes belong to one
+table); `ListTables` answers `Tables { names, primary }`. `Use` is not a
+write — a read-only token may send it. A connection that never sends
+`Use` is byte-for-byte a pre-16 connection. `DescribeSchema` and
+`DescribeRelations` describe the selected table, so a client re-fetches
+both after a `Use`. A `RelationDescriptor` whose `target_table` is
+`Some(name)` describes a relation whose related rows are *that* table's:
+a `Join` over it must carry `right_table: Some(name)` (§7 item 9), and a
+`Link` under it has its far endpoint checked in that table (§7 item 11).
+One set of tokens, one TLS configuration, one set of logs serves every
+table.
 
 ## 7. Semantics per request
 
@@ -380,6 +404,25 @@ Each item names the `SERVER-001` requirement that owns it.
    staged. `Malformed` below 15. No partial update, no id change, no
    deletion. Insert-or-replace is a client composition — an `Insert`,
    then on `Duplicate` a `Replace` — not a request. (`FR-049`)
+13. **`Use`** (16) — select the table every following table-less
+   request is served from (§6.6). `Ok`; `Malformed` for an unknown
+   name, the selection unchanged; `SessionOpen` while a session is
+   open. `Malformed` below 16. (`FR-050`)
+14. **`ListTables`** (16) — `Tables { names, primary }`: every table's
+   name in the server's registration order, and the primary's. A
+   one-table server lists its one table. `Malformed` below 16.
+   (`FR-050`)
+
+Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
+relation's descriptor carries `target_table: Some(name)`: the right rows
+come from that table, `right`/`right_filter` are validated against
+*its* schema, and a `right_table` the descriptor does not name — or one
+the server did not register — is `Malformed`; a descriptor with a
+`target_table` and a `right_table: None` stays `Unsupported`. Item 11's
+`Link` under such a relation has `right` checked in the target table
+(`RecordNotFound` when absent; `Unsupported` when the server registered
+no such table). Neither needs a new version: no new shape crosses the
+wire. (`FR-050`)
 
 ### 7.6 `BeginWith` flags
 
@@ -410,6 +453,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 13 | v0.36.0 | `Insert` (21), `ErrorCode::Duplicate` (11), `ErrorCode::Storage` (12) |
 | 14 | v0.37.0 | `Link` (22) |
 | 15 | v0.39.0 | `Replace` (23) |
+| 16 | v0.40.0 | `Use` (24), `ListTables` (25), `Tables` (17) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -421,7 +465,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -451,10 +495,18 @@ byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
 client; it needs only `python3`. The live half —
 `tests/server_python_client.rs` — drives the reference client against a
-real server at 15 and at a hand-negotiated 10.
+real server at 16 and at a hand-negotiated 10.
 
 ## 10. Change history
 
+- 0.5.0 (`SERVER-001` v0.40.0, ADR-0050 implementing ADR-0045,
+  `TBL-FR-010`): protocol version 16 — `Request::Use` (24),
+  `Request::ListTables` (25), `Response::Tables` (17); §4's `Hello`
+  example, §5.6, §5.7, §6.6 (new), §7 items 13–14 and the cross-table
+  note on items 9 and 11, §8 row 16 and rule 3's list; fixture at 56
+  vectors (`Request/Use`, `Request/ListTables`, `Response/Tables`); the
+  reference client gains `Client.list_tables`/`use_table` and a
+  table-crossing `join`, and declares 16.
 - 0.4.0 (`SERVER-001` v0.39.0, ADR-0049, `REP-FR-008`): protocol version
   15 — `Request::Replace` (23); §4's `Hello` example, §5.6, §7 item 12,
   §8 row 15 and rule 3's list; fixture at 53 vectors (`Request/Replace`);

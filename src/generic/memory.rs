@@ -46,18 +46,21 @@
 //! `Uuid`; a bridge strips the prefix on the way in and restores it on
 //! the way out, losslessly. No derivation, no convention beyond that.
 //!
-//! # No relation of either kind — yet
+//! # One relation: `mentions`, foreign to the `entity` table
 //!
-//! `memory_entities` (memory → entity) and `memory_associations`
-//! (memory ↔ memory) are the consumer's edges. The first is a
-//! *cross-table* link, `ADR-0045`'s territory; the second could be a
-//! `MultiSymmetric` over this record exactly as `Entity` has, and is
-//! left for the round that also gives this table its second table.
-//! So `MemoryProductionStack = GenericMmapStore<Memory, CategoryField,
-//! AccessCountField>` — `Reminder`'s shape, the simplest this library
-//! supports.
+//! `memory_entities` (memory → entity) is the consumer's link table;
+//! since `ADR-0050` (`TBL-FR-008`) it is this stack's one relation,
+//! `MEMORY_RELATION_LABELS[0]`, a `MultiSymmetric` label whose far
+//! endpoint is an `Entity` id — another table's record, which the
+//! layer therefore never checks (`MultiSymmetric::with_foreign_labels`;
+//! the server checks it against the `MEMORY_FOREIGN_TABLE`). The edge
+//! is stored both ways, so an entity id's neighbors under `mentions`
+//! are the memories that mention it: the consumer's two lookups, from
+//! one edge set. `memory_associations` (memory ↔ memory) is not
+//! modeled yet; it would be a second, local label on this same layer.
 
 use super::mmap_store::GenericMmapStore;
+use super::store::MultiSymmetric;
 use super::traits::{IndexedField, Record, ScannableField, SchemaTag};
 use crate::durability::DurabilityError;
 use serde::{Deserialize, Serialize};
@@ -133,48 +136,66 @@ impl ScannableField<AccessCountField> for Memory {
 
 /// The durable production stack — `MEM-FR-005`: no relation of either
 /// kind, so `GenericMmapStore` directly.
-pub type MemoryProductionStack = GenericMmapStore<Memory, CategoryField, AccessCountField>;
+/// `TBL-FR-008` (ADR-0050): `Memory`'s one relation — the consumer's
+/// `memory_entities` link table, a memory *mentions* an entity. Its far
+/// endpoint is an `Entity` id, another table's record
+/// ([`MEMORY_FOREIGN_TABLE`]); the `MultiSymmetric` layer stores the
+/// edge in both directions, so an entity id's neighbors under this
+/// label are the memories that mention it.
+pub const MEMORY_RELATION_LABELS: [&str; 1] = ["mentions"];
 
-/// Build a fresh, durable production store for `Memory` at `path` —
-/// two files, `path` (the mmap file) and `<path>.records` (the record
-/// blob); an insert log appears beside them once something is inserted.
-///
-/// # Errors
-///
-/// Returns [`DurabilityError::Io`] under the same conditions
-/// [`GenericMmapStore::create`] does; [`DurabilityError::Serde`] if
-/// `memories` can't be serialized.
+/// The table [`MEMORY_RELATION_LABELS`]' far endpoints live in — what
+/// `MemoryConnectionStore::describe_relations` reports as
+/// `target_table`, and the name a server must register the `Entity`
+/// adapter under for a cross-table `Join`/`Link` to resolve.
+pub const MEMORY_FOREIGN_TABLE: &str = "entity";
+
+/// The durable production stack — since `ADR-0050` a `MultiSymmetric`
+/// over the core (the change `ADR-0048` said would happen once, in the
+/// round that gave this table its second table): one relation,
+/// `mentions`, foreign to `entity`.
+pub type MemoryProductionStack =
+    MultiSymmetric<GenericMmapStore<Memory, CategoryField, AccessCountField>, Memory>;
+
+fn labeled(mentions: &[(Uuid, Uuid)]) -> Vec<(String, Vec<(Uuid, Uuid)>)> {
+    vec![(MEMORY_RELATION_LABELS[0].to_string(), mentions.to_vec())]
+}
+
+/// Build a fresh durable store at `path` with `mentions` edges — each a
+/// `(memory id, entity id)` pair — writing the record files, the edge
+/// blob, and the label manifest.
 pub fn create_memory_production_stack(
     memories: Vec<Memory>,
+    mentions: &[(Uuid, Uuid)],
     path: &Path,
 ) -> Result<MemoryProductionStack, DurabilityError> {
-    GenericMmapStore::<Memory, CategoryField, AccessCountField>::create(memories, path)
+    let core = GenericMmapStore::<Memory, CategoryField, AccessCountField>::create(memories, path)?;
+    Ok(MultiSymmetric::create(core, &labeled(mentions), path)?
+        .with_foreign_labels(&MEMORY_RELATION_LABELS))
 }
 
-/// Reopen an existing durable production store for `Memory` at `path`
-/// from a caller-supplied record set — the insert log is folded in
-/// (`INS-FR-004`).
-///
-/// # Errors
-///
-/// Everything [`GenericMmapStore::open`] can return.
+/// Reopen an existing store at `path` from a caller-supplied record and
+/// edge set — the `open` analogue of [`create_memory_production_stack`].
 pub fn open_memory_production_stack(
     memories: Vec<Memory>,
+    mentions: &[(Uuid, Uuid)],
     path: &Path,
 ) -> Result<MemoryProductionStack, DurabilityError> {
-    GenericMmapStore::<Memory, CategoryField, AccessCountField>::open(memories, path)
+    let core = GenericMmapStore::<Memory, CategoryField, AccessCountField>::open(memories, path)?;
+    Ok(MultiSymmetric::open(core, &labeled(mentions), path)?
+        .with_foreign_labels(&MEMORY_RELATION_LABELS))
 }
 
-/// Reopen from the files alone — the blob, the insert log, and the
-/// mmap file — the way a server restarted on the same directory does.
-///
-/// # Errors
-///
-/// Everything [`GenericMmapStore::open_portable`] can return.
+/// Reopen from the files alone — records, insert log, edge blob, edge
+/// log, and manifest.
 pub fn open_memory_production_stack_portable(
     path: &Path,
 ) -> Result<MemoryProductionStack, DurabilityError> {
-    GenericMmapStore::<Memory, CategoryField, AccessCountField>::open_portable(path)
+    let core = GenericMmapStore::<Memory, CategoryField, AccessCountField>::open_portable(path)?;
+    Ok(
+        MultiSymmetric::open_portable(core, path, &MEMORY_RELATION_LABELS)?
+            .with_foreign_labels(&MEMORY_RELATION_LABELS),
+    )
 }
 
 #[cfg(test)]
@@ -216,7 +237,7 @@ mod tests {
         let dir = fresh_temp_dir("generic_memory").unwrap();
         let path = dir.join("memories.mmap");
         {
-            let mut store = create_memory_production_stack(sample(), &path).unwrap();
+            let mut store = create_memory_production_stack(sample(), &[], &path).unwrap();
             let got = GetById::<Memory>::get(&store, Uuid::from_u128(3)).unwrap();
             assert_eq!(got.content, "memory 3");
             assert!(got.sensitive);
@@ -269,7 +290,7 @@ mod tests {
         edited.tags = vec!["revised".into()];
         edited.access_count = 12;
         {
-            let mut store = create_memory_production_stack(sample(), &path).unwrap();
+            let mut store = create_memory_production_stack(sample(), &[], &path).unwrap();
             Replace::<Memory>::replace(&mut store, edited.clone()).unwrap();
             assert_eq!(
                 GetById::<Memory>::get(&store, edited.id),
@@ -299,6 +320,82 @@ mod tests {
         assert_eq!(
             FilterEq::<Memory, CategoryField>::filter_eq(&reopened, &"general".into()),
             vec![Uuid::from_u128(3)]
+        );
+    }
+
+    /// `TBL-FR-008` (ADR-0050): the stack's one relation, `mentions`,
+    /// with entity ids the store never holds — seeded at `create`, added
+    /// at runtime through `MultiLink`, listed by `relation_kinds`, read
+    /// from both ends, and surviving a portable reopen and a caller-list
+    /// reopen alike.
+    #[test]
+    fn mentions_edges_to_foreign_entity_ids_survive_every_reopen() {
+        use crate::generic::query::{MultiLink, MultiNeighbors};
+        use crate::generic::LinkOutcome;
+        let dir = fresh_temp_dir("generic_memory_mentions").unwrap();
+        let path = dir.join("memories.mmap");
+        let (ada, engine) = (Uuid::from_u128(0xada), Uuid::from_u128(0xe1e));
+        {
+            let mut store =
+                create_memory_production_stack(sample(), &[(Uuid::from_u128(1), ada)], &path)
+                    .unwrap();
+            assert!(store.is_foreign("mentions"));
+            assert_eq!(
+                MultiNeighbors::<Memory>::relation_kinds(&store),
+                vec!["mentions".to_string()]
+            );
+            assert_eq!(
+                MultiNeighbors::<Memory>::neighbors_by_relation(
+                    &store,
+                    "mentions",
+                    Uuid::from_u128(1)
+                ),
+                Some(vec![ada])
+            );
+            assert_eq!(
+                MultiLink::<Memory>::link(&mut store, "mentions", Uuid::from_u128(2), engine)
+                    .unwrap(),
+                LinkOutcome::Linked
+            );
+            assert_eq!(
+                MultiNeighbors::<Memory>::neighbors_by_relation(&store, "mentions", engine),
+                Some(vec![Uuid::from_u128(2)]),
+                "an entity id's neighbors are the memories that mention it"
+            );
+        }
+        let reopened = open_memory_production_stack_portable(&path).unwrap();
+        assert!(reopened.is_foreign("mentions"));
+        assert_eq!(
+            MultiNeighbors::<Memory>::neighbors_by_relation(
+                &reopened,
+                "mentions",
+                Uuid::from_u128(2)
+            ),
+            Some(vec![engine])
+        );
+        drop(reopened);
+        // A caller-list reopen: the caller's list *is* the dataset (the
+        // `Symmetric::open` precedent) — the seeded edge stays, the
+        // runtime one, already folded into the blob, is not in the list
+        // and is rewritten away. A restart that wants every runtime edge
+        // reopens portably, as the servers do.
+        let reopened =
+            open_memory_production_stack(sample(), &[(Uuid::from_u128(1), ada)], &path).unwrap();
+        assert_eq!(
+            MultiNeighbors::<Memory>::neighbors_by_relation(
+                &reopened,
+                "mentions",
+                Uuid::from_u128(1)
+            ),
+            Some(vec![ada])
+        );
+        assert_eq!(
+            MultiNeighbors::<Memory>::neighbors_by_relation(
+                &reopened,
+                "mentions",
+                Uuid::from_u128(2)
+            ),
+            Some(vec![])
         );
     }
 }

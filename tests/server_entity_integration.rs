@@ -1389,7 +1389,8 @@ fn upsert_an_entity_replaces_it_whole_and_keeps_every_edge() {
     let addr = start_server_at(dir.clone());
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
     let ada = Uuid::from_u128(1);
-    let neighbors_before = client.neighbors(ada).unwrap();
+    let mut neighbors_before = client.neighbors(ada).unwrap();
+    neighbors_before.sort();
     let joined_before = client
         .query("SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to")
         .unwrap();
@@ -1420,11 +1421,9 @@ fn upsert_an_entity_replaces_it_whole_and_keeps_every_edge() {
         .filter_eq("label", ScanValue::Str("Ada Lovelace".into()))
         .unwrap()
         .is_empty());
-    assert_eq!(
-        client.neighbors(ada).unwrap(),
-        neighbors_before,
-        "edges are not fields"
-    );
+    let mut neighbors_now = client.neighbors(ada).unwrap();
+    neighbors_now.sort();
+    assert_eq!(neighbors_now, neighbors_before, "edges are not fields");
     let joined_after = client
         .query("SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to")
         .unwrap();
@@ -1454,6 +1453,8 @@ fn upsert_an_entity_replaces_it_whole_and_keeps_every_edge() {
             .unwrap(),
         vec![ada]
     );
-    assert_eq!(client.neighbors(ada).unwrap(), neighbors_before);
+    let mut neighbors_after = client.neighbors(ada).unwrap();
+    neighbors_after.sort();
+    assert_eq!(neighbors_after, neighbors_before);
     assert!(client.get(grace).unwrap().is_some());
 }

@@ -301,6 +301,10 @@ impl ConnectionStore for EmployeeConnectionStore {
         .map_err(|(_, code)| code)
     }
 
+    fn table_name(&self) -> &str {
+        "employee"
+    }
+
     fn describe(&self) -> DomainSchema {
         DomainSchema {
             fields: vec![

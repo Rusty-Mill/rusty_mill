@@ -318,6 +318,10 @@ impl ConnectionStore for ReminderConnectionStore {
         .map_err(|(_, code)| code)
     }
 
+    fn table_name(&self) -> &str {
+        "reminder"
+    }
+
     fn describe(&self) -> DomainSchema {
         DomainSchema {
             fields: vec![

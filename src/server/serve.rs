@@ -155,6 +155,16 @@ pub trait ConnectionStore: Send + Sync {
         default_relation_descriptors(&self.describe(), self.list_relation_kinds())
     }
 
+    /// `TBL-FR-001` (ADR-0045/ADR-0050): the name [`serve`] registers this
+    /// adapter under, what [`Request::Use`] selects it by, and what a
+    /// `RelationDescriptor::target_table` on *another* table's relation
+    /// must equal to reach it. Every shipped adapter overrides this with
+    /// its domain's name (`"dog"`, `"entity"`, `"memory"`, …); the
+    /// default exists so a bespoke adapter compiles unchanged.
+    fn table_name(&self) -> &str {
+        "table"
+    }
+
     /// `INS-FR-006` (ADR-0046, protocol 13): add one whole record to
     /// this table at runtime. `fields` is [`Response::Record`]'s own
     /// shape; an implementor validates it against its own schema
@@ -513,17 +523,28 @@ pub fn default_relation_descriptors(
 fn validate_join(
     schema: &DomainSchema,
     relations: &[RelationDescriptor],
+    right_schema: Option<&DomainSchema>,
     spec: &JoinSpec,
 ) -> Result<(), ErrorCode> {
-    if spec.right_table.is_some() {
-        return Err(ErrorCode::Malformed);
-    }
     validate_query(schema, &spec.left, &spec.left_filter)?;
-    validate_query(schema, &spec.right, &spec.right_filter)?;
-    match relations.iter().find(|r| r.kind == spec.relation) {
-        None => Err(ErrorCode::Malformed),
-        Some(r) if r.target_table.is_some() => Err(ErrorCode::Unsupported),
-        Some(_) => Ok(()),
+    let relation = relations
+        .iter()
+        .find(|r| r.kind == spec.relation)
+        .ok_or(ErrorCode::Malformed)?;
+    match (&spec.right_table, &relation.target_table) {
+        // Within one table: the right rows are this table's.
+        (None, None) => validate_query(schema, &spec.right, &spec.right_filter),
+        // The relation's rows live elsewhere and the caller did not say
+        // where — `Unsupported`, as since `JOIN-FR-003`.
+        (None, Some(_)) => Err(ErrorCode::Unsupported),
+        // `TBL-FR-004` (ADR-0050): a cross-table join must name exactly
+        // the table the descriptor names, and that table must be one
+        // this server registered (`right_schema` is `Some`).
+        (Some(named), Some(target)) if named == target => {
+            let right = right_schema.ok_or(ErrorCode::Malformed)?;
+            validate_query(right, &spec.right, &spec.right_filter)
+        }
+        (Some(_), _) => Err(ErrorCode::Malformed),
     }
 }
 
@@ -538,7 +559,11 @@ fn validate_join(
 /// unreachable through `dispatch` (`validate_join` refused any relation
 /// the adapter does not list) and fall back to "no related rows" rather
 /// than panicking — the `compare` precedent.
-fn evaluate_join<S: ConnectionStore + ?Sized>(store: &S, spec: &JoinSpec) -> Vec<JoinedRow> {
+fn evaluate_join<L: ConnectionStore + ?Sized, R: ConnectionStore + ?Sized>(
+    store: &L,
+    right_store: &R,
+    spec: &JoinSpec,
+) -> Vec<JoinedRow> {
     let mut out = Vec::new();
     let limit = spec.limit.unwrap_or(usize::MAX);
     if limit == 0 {
@@ -564,7 +589,9 @@ fn evaluate_join<S: ConnectionStore + ?Sized>(store: &S, spec: &JoinSpec) -> Vec
             JoinRelation::Children => store.children(left_id).unwrap_or_default(),
         };
         for right_id in right_ids {
-            let Some(right_fields) = store.get(right_id) else {
+            // `TBL-FR-004`: the right rows come from `right_store` — the
+            // same adapter within one table, another table's across.
+            let Some(right_fields) = right_store.get(right_id) else {
                 continue;
             };
             if !spec
@@ -915,7 +942,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Groups { .. }
         | Response::RelationKinds { .. }
         | Response::JoinedRows { .. }
-        | Response::Relations { .. } => access::Outcome::Ok,
+        | Response::Relations { .. }
+        | Response::Tables { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1692,13 +1720,23 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // Gated server-side in `handle_connection` (`Malformed` below 12)
         // — unlike `Query`/`Aggregate`, per the accepted design text.
         Request::Join(spec) => {
-            match validate_join(&store.describe(), &store.describe_relations(), &spec) {
+            match validate_join(&store.describe(), &store.describe_relations(), None, &spec) {
                 Ok(()) => Response::JoinedRows {
-                    rows: evaluate_join(store, &spec),
+                    rows: evaluate_join(store, store, &spec),
                 },
                 Err(code) => err_response(code),
             }
         }
+        // `TBL-FR-002`/`003` (ADR-0050): `dispatch` knows exactly one
+        // table, so `Use` succeeds only for that table's own name and
+        // `ListTables` lists it alone; `handle_connection` answers both
+        // itself for a `serve_tables` server before ever reaching here.
+        Request::Use { table } if table == store.table_name() => Response::Ok,
+        Request::Use { .. } => err_response(ErrorCode::Malformed),
+        Request::ListTables => Response::Tables {
+            names: vec![store.table_name().to_string()],
+            primary: store.table_name().to_string(),
+        },
         Request::DescribeRelations => Response::Relations {
             relations: store.describe_relations(),
         },
@@ -1889,9 +1927,10 @@ impl Drop for DisconnectAudit<'_> {
     }
 }
 
-fn handle_connection<S: ConnectionStore + ?Sized>(
+fn handle_connection(
     stream: TcpStream,
-    store: &S,
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    primary: usize,
     options: &ServeOptions,
 ) {
     // `SRV-FR-004` (ADR-0032): `tls` was `serve`'s own second parameter;
@@ -1991,6 +2030,9 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     // state would appear. A silent client is version 1.
     let mut first_frame = true;
     let mut negotiated: u32 = 1;
+    // `TBL-FR-002` (ADR-0050): which of `tables` this connection's
+    // table-less requests are served from — the primary until a `Use`.
+    let mut table: usize = primary;
     // `SESS-FR-002`: the staged writes of an open session, if any.
     let mut session: Option<Vec<TransactionOp>> = None;
     // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
@@ -2010,6 +2052,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     let peer_ip = peer.map(|addr| addr.ip());
 
     loop {
+        let store: &dyn ConnectionStore = tables[table].1.as_ref();
         let req: Request = match framing::read_message(&mut reader) {
             Ok(req) => req,
             Err(_) => return, // client disconnected, or a framing/decode error — end the connection
@@ -2289,6 +2332,35 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             Request::Join(_) | Request::DescribeRelations if negotiated < 12 => {
                 err_response(ErrorCode::Malformed)
             }
+            // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
+            // gated like the session requests (rule 3); `Use` inside a
+            // session is `SessionOpen`, since a session's staged writes
+            // belong to one table; an unknown name is `Malformed`.
+            Request::Use { .. } | Request::ListTables if negotiated < 16 => {
+                err_response(ErrorCode::Malformed)
+            }
+            Request::Use { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Use { table: name } => match tables.iter().position(|(n, _)| *n == name) {
+                Some(i) => {
+                    table = i;
+                    Response::Ok
+                }
+                None => err_response(ErrorCode::Malformed),
+            },
+            Request::ListTables => Response::Tables {
+                names: tables.iter().map(|(n, _)| n.clone()).collect(),
+                primary: tables[primary].0.clone(),
+            },
+            // `TBL-FR-004` (ADR-0050): a cross-table join — the right rows
+            // from the named table's adapter, the relation the left's.
+            Request::Join(spec) if spec.right_table.is_some() => join_across(tables, store, &spec),
+            // `TBL-FR-007` (ADR-0050): a link under a relation whose rows
+            // live in another table has its far endpoint checked there.
+            Request::Link {
+                left,
+                right,
+                relation,
+            } => link_across(tables, store, left, right, relation),
             other => dispatch(store, other),
         };
         let resp = downgrade_for_version(resp, negotiated);
@@ -2332,16 +2404,114 @@ pub fn serve<S: ConnectionStore + 'static>(
     store: Arc<S>,
     options: ServeOptions,
 ) {
+    let name = store.table_name().to_string();
+    serve_tables(listener, vec![(name, store)], 0, options);
+}
+
+/// `TBL-FR-001` (ADR-0045, implemented by ADR-0050): [`serve`] for more
+/// than one table. Every adapter in `tables` is served on this one
+/// listener under its name; a connection starts on `tables[primary]`
+/// and moves with [`Request::Use`]. [`serve`] is exactly this with one
+/// table named by `ConnectionStore::table_name`, so a one-table server
+/// is unchanged. One `options` — tokens, TLS, logs, rate limit — is
+/// shared by every table; per-table authorization is a named non-goal.
+///
+/// # Panics
+///
+/// Panics if `tables` is empty or `primary` is out of range — a
+/// misconfiguration at startup, not a runtime condition.
+pub fn serve_tables(
+    listener: TcpListener,
+    tables: Vec<(String, Arc<dyn ConnectionStore>)>,
+    primary: usize,
+    options: ServeOptions,
+) {
+    assert!(
+        primary < tables.len(),
+        "serve_tables: primary {primary} is not one of the {} tables",
+        tables.len()
+    );
+    let tables = Arc::new(tables);
     let options = Arc::new(options);
     for incoming in listener.incoming() {
         let stream = match incoming {
             Ok(s) => s,
             Err(_) => continue, // one bad accept doesn't take down the server
         };
-        let store = Arc::clone(&store);
+        let tables = Arc::clone(&tables);
         let options = Arc::clone(&options);
-        thread::spawn(move || handle_connection(stream, store.as_ref(), options.as_ref()));
+        thread::spawn(move || handle_connection(stream, &tables, primary, options.as_ref()));
     }
+}
+
+/// `TBL-FR-004` (ADR-0050): [`Request::Join`] with `right_table: Some`
+/// — validated with the right table's own schema, evaluated with the
+/// left adapter's relation and the right adapter's `get`. A right table
+/// this server did not register, or one the relation's descriptor does
+/// not name, is `Malformed` (`validate_join`).
+fn join_across(
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    left: &dyn ConnectionStore,
+    spec: &JoinSpec,
+) -> Response {
+    let right = spec
+        .right_table
+        .as_deref()
+        .and_then(|name| tables.iter().find(|(n, _)| n == name))
+        .map(|(_, store)| store.as_ref());
+    let right_schema = right.map(|r| r.describe());
+    match validate_join(
+        &left.describe(),
+        &left.describe_relations(),
+        right_schema.as_ref(),
+        spec,
+    ) {
+        Ok(()) => Response::JoinedRows {
+            rows: evaluate_join(
+                left,
+                right.expect("validate_join accepted, so the right table resolved"),
+                spec,
+            ),
+        },
+        Err(code) => err_response(code),
+    }
+}
+
+/// `TBL-FR-007` (ADR-0050): [`Request::Link`] under a relation whose
+/// descriptor names a `target_table` — the far endpoint must exist in
+/// *that* table (`RecordNotFound` otherwise; `Unsupported` when the
+/// server registered no such table), which the left adapter cannot
+/// check itself. A relation with no `target_table` goes straight to
+/// `dispatch`, exactly as before this round.
+fn link_across(
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    store: &dyn ConnectionStore,
+    left: RecordId,
+    right: RecordId,
+    relation: String,
+) -> Response {
+    let foreign = store
+        .describe_relations()
+        .into_iter()
+        .find(|r| r.name == relation)
+        .and_then(|r| r.target_table);
+    if let Some(target) = foreign {
+        match tables.iter().find(|(n, _)| *n == target) {
+            None => return err_response(ErrorCode::Unsupported),
+            Some((_, other)) if other.get(right).is_none() => {
+                return err_response(ErrorCode::RecordNotFound)
+            }
+            Some(_) => {}
+        }
+    }
+    dispatch(
+        store,
+        Request::Link {
+            left,
+            right,
+            relation,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -4155,14 +4325,14 @@ mod tests {
         let mut other_table = join_spec(JoinRelation::Parent);
         other_table.right_table = Some("customer".into());
         assert_eq!(
-            validate_join(&schema, &relations, &other_table),
+            validate_join(&schema, &relations, None, &other_table),
             Err(ErrorCode::Malformed),
             "right_table is ADR-0045's, Malformed until then"
         );
         let mut bad_left = join_spec(JoinRelation::Parent);
         bad_left.left = Selection::Fields(vec![99]);
         assert_eq!(
-            validate_join(&schema, &relations, &bad_left),
+            validate_join(&schema, &relations, None, &bad_left),
             Err(ErrorCode::UnknownField)
         );
         let mut bad_right_filter = join_spec(JoinRelation::Parent);
@@ -4172,7 +4342,7 @@ mod tests {
             value: ScanValue::Str("x".into()),
         }];
         assert_eq!(
-            validate_join(&schema, &relations, &bad_right_filter),
+            validate_join(&schema, &relations, None, &bad_right_filter),
             Err(ErrorCode::Malformed)
         );
         // `FixtureStore` lists no relation at all: any join is Malformed.
@@ -4180,6 +4350,7 @@ mod tests {
             validate_join(
                 &FixtureStore.describe(),
                 &FixtureStore.describe_relations(),
+                None,
                 &join_spec(JoinRelation::Parent)
             ),
             Err(ErrorCode::Malformed)
@@ -4188,6 +4359,7 @@ mod tests {
             validate_join(
                 &schema,
                 &relations,
+                None,
                 &join_spec(JoinRelation::Neighbors(Some("zzz".into())))
             ),
             Err(ErrorCode::Malformed)
@@ -4199,11 +4371,16 @@ mod tests {
             target_table: Some("customer".into()),
         }];
         assert_eq!(
-            validate_join(&schema, &cross, &join_spec(JoinRelation::Parent)),
+            validate_join(&schema, &cross, None, &join_spec(JoinRelation::Parent)),
             Err(ErrorCode::Unsupported)
         );
         assert_eq!(
-            validate_join(&schema, &relations, &join_spec(JoinRelation::Children)),
+            validate_join(
+                &schema,
+                &relations,
+                None,
+                &join_spec(JoinRelation::Children)
+            ),
             Ok(())
         );
     }
@@ -4217,6 +4394,7 @@ mod tests {
         assert_eq!(
             pairs(&evaluate_join(
                 &store,
+                &store,
                 &join_spec(JoinRelation::Neighbors(None))
             )),
             vec![(1, 2), (2, 1), (2, 3), (3, 2)]
@@ -4224,17 +4402,26 @@ mod tests {
         assert_eq!(
             pairs(&evaluate_join(
                 &store,
+                &store,
                 &join_spec(JoinRelation::Neighbors(Some("r".into())))
             )),
             vec![(1, 2), (2, 1)]
         );
         assert_eq!(
-            pairs(&evaluate_join(&store, &join_spec(JoinRelation::Parent))),
+            pairs(&evaluate_join(
+                &store,
+                &store,
+                &join_spec(JoinRelation::Parent)
+            )),
             vec![(2, 1), (3, 1)],
             "1 has no parent: no row for it"
         );
         assert_eq!(
-            pairs(&evaluate_join(&store, &join_spec(JoinRelation::Children))),
+            pairs(&evaluate_join(
+                &store,
+                &store,
+                &join_spec(JoinRelation::Children)
+            )),
             vec![(1, 2), (1, 3)]
         );
         let mut filtered = join_spec(JoinRelation::Children);
@@ -4244,7 +4431,7 @@ mod tests {
             value: ScanValue::U32(2),
         }];
         filtered.left = Selection::Fields(vec![]);
-        let rows = evaluate_join(&store, &filtered);
+        let rows = evaluate_join(&store, &store, &filtered);
         assert_eq!(pairs(&rows), vec![(1, 3)]);
         assert!(rows[0].left.is_empty(), "left projection applied");
         assert_eq!(rows[0].right, vec![(FIELD_A, ScanValue::U32(3))]);
@@ -4255,14 +4442,17 @@ mod tests {
             value: ScanValue::U32(2),
         }];
         assert_eq!(
-            pairs(&evaluate_join(&store, &left_filtered)),
+            pairs(&evaluate_join(&store, &store, &left_filtered)),
             vec![(2, 1), (2, 3)]
         );
         let mut limited = join_spec(JoinRelation::Neighbors(None));
         limited.limit = Some(1);
-        assert_eq!(pairs(&evaluate_join(&store, &limited)), vec![(1, 2)]);
+        assert_eq!(
+            pairs(&evaluate_join(&store, &store, &limited)),
+            vec![(1, 2)]
+        );
         limited.limit = Some(0);
-        assert!(evaluate_join(&store, &limited).is_empty());
+        assert!(evaluate_join(&store, &store, &limited).is_empty());
     }
 
     /// `JOIN-FR-001`/`002`: `dispatch` routes both protocol-12 requests to
