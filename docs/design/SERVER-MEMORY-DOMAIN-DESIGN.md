@@ -28,20 +28,21 @@ The `rusty_remind_me` line so far gave this crate a `Reminder` table
 two rounds immediately before this one — the ability to create records
 and edges in a running store (`ADR-0046`, `ADR-0047`). What it has not
 given the consumer is the table the consumer is *about*: `memories`,
-the thirty-column table every one of its tools reads or writes. Every
+the twenty-eight-column table every one of its tools reads or writes. Every
 preceding round either scoped it out explicitly (`ADR-0036`) or named
 it as the next thing (`ADR-0045` gate (ii), `ADR-0046`'s and
 `ADR-0047`'s open questions).
 
 This round designs and builds that table as this crate's sixth domain
 and third front-door one — as a **bounded projection**, not the whole
-thirty columns. The consumer's source at `29602f1` was read again for
+twenty-eight columns. The consumer's source at `29602f1` was read again for
 this document: `schema_tables.sql:56-64` (the table), `db/queries.rs:
 98-140` (`add_memory` — what a memory *is* at creation), `db/queries.rs`
 `list_filters` (which columns every list filters on: `category`,
 `source`, `tags`, `sensitive`), and the `access_count` bump on every
-retrieval. The eleven fields below are the ones those paths touch;
-the nineteen omitted are named, each with its reason, in "Non-goals".
+retrieval. The eleven fields below (twelve with `id`) are the ones those paths
+touch; the sixteen omitted are named, each with its reason, in
+"Non-goals" (see the 2026-09-07 erratum in the change history).
 
 Scope of this round, exactly: the `Memory` record and its durable
 stack (`MEM-FR-001`–`005`), a `ConnectionStore` adapter and journal
@@ -162,7 +163,7 @@ later round owns.
   no wire change — proposed.** Buildable entirely from what the
   library already has; the omitted columns each have a stated reason
   and, where a later round owns them, a name.
-- **(b) The whole thirty-column table.** Needs a float `ValueKind`, a
+- **(b) The whole twenty-eight-column table.** Needs a float `ValueKind`, a
   null story, a directed edge, and soft deletion — four wire-level
   designs — before a single memory can be stored. The projection
   delivers the consumer's `add`/`get`/`list` paths now and leaves each
@@ -272,6 +273,12 @@ Python vector suite (unchanged, proving criterion 4), `cargo doc
   own; until then the consumer keeps scoring in its own layer.
 - **Null** — three nullable columns are omitted for want of it; an
   `Option`-carrying `ScanValue` is a protocol bump.
+- **Capture provenance and last access** — `capture_id`,
+  `source_capture_id` (which capture a memory came from; nullable
+  ids into a table this crate does not serve), and `accessed_at` (the
+  nullable timestamp beside the carried `access_count`). Omitted for
+  want of null, like the SPO triple; named here by the 2026-09-07
+  erratum, having been left out of the original count.
 - **`memory_entities`** — cross-table, the `ADR-0045` implementation
   round, for which this domain is now the second table. *Resolved by
   `ADR-0050` / `SERVER-001` v0.40.0: `Memory::mentions`, a foreign
@@ -281,6 +288,14 @@ Python vector suite (unchanged, proving criterion 4), `cargo doc
   `Request::Delete` at protocol 17; `deleted_at` stays the caller's.*
 
 ## Change history
+
+- 2026-09-07: Erratum. The consumer's `memories` table at `29602f1`
+  and at `593f793` has twenty-eight columns, not thirty; the projection
+  carries twelve of them (`id` and the eleven wire fields), and
+  sixteen are omitted, not nineteen. Three omitted columns
+  (`capture_id`, `source_capture_id`, `accessed_at`) were never named
+  in "Non-goals" and are now. Found by an integration spike against
+  the consumer; no change to the design or the record.
 
 - 2026-09-06: Accepted as designed (option (a)), after PR #200. No
   content change.

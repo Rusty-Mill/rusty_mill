@@ -9,15 +9,17 @@
 //!
 //! # Shape — a bounded projection of `memories`, not the whole table
 //!
-//! `rusty_remind_me`'s `memories` has thirty columns (`schema_tables.sql:
-//! 56-64`). This record carries the eleven a memory *is* — what the
+//! `rusty_remind_me`'s `memories` has twenty-eight columns
+//! (`schema_tables.sql:55-64`). This record carries `id` and the eleven
+//! fields a memory *is* — what the
 //! consumer's `add_memory` writes and its `list`/`get` read back — and
 //! names what it leaves out (the module docs of `ADR-0048` and the
 //! design's Non-goals): the retrieval-scoring triple (`decay_rate`,
 //! `vitality`, `base_weight` — `f64`, which no stored `ValueKind`
 //! carries), the sync bookkeeping (`node_id`, `client`), the SPO triple
 //! and `superseded_by` (nullable, and the wire has no null), the
-//! document chunking pair, `remind_at` (the `Reminder` domain's job),
+//! document chunking pair, the capture provenance ids and `accessed_at`
+//! (nullable), `remind_at` (the `Reminder` domain's job),
 //! and `deleted_at` (a soft-delete stamp; a record here is deleted
 //! outright through `Delete`, `ADR-0051`).
 //!
