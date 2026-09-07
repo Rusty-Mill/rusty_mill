@@ -259,6 +259,16 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `CMP-FR-006` (ADR-0052, protocol 18): compact this table's files in
+    /// place under its write lock and report what was reclaimed. The
+    /// default answers `Unsupported`: `Dog`'s bespoke store, and
+    /// `Order`/`Employee` as reference material; `Memory`, `Reminder`,
+    /// and `Entity` implement it. A file that could not be rewritten is
+    /// [`ErrorCode::Storage`] — the files are left reopenable.
+    fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// This domain's schema, for a client that doesn't know it at compile
     /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
     /// knows its own field/relation shape unconditionally, no store access
@@ -976,7 +986,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::RelationKinds { .. }
         | Response::JoinedRows { .. }
         | Response::Relations { .. }
-        | Response::Tables { .. } => access::Outcome::Ok,
+        | Response::Tables { .. }
+        | Response::Compacted { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1808,6 +1819,17 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(DeleteOutcome::NotFound) => Response::NotFound,
             Err(code) => err_response(code),
         },
+        // `CMP-FR-006` (ADR-0052): the counts, straight from the stack.
+        // Gated in `handle_connection` like `Insert`.
+        Request::Compact => match store.compact() {
+            Ok(report) => Response::Compacted {
+                records: report.records as u64,
+                slots_reclaimed: report.slots_reclaimed as u64,
+                log_entries_folded: report.log_entries_folded as u64,
+                edge_logs_folded: report.edge_logs_folded as u64,
+            },
+            Err(code) => err_response(code),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -2199,6 +2221,7 @@ fn handle_connection(
                     | Request::Link { .. }
                     | Request::Replace { .. }
                     | Request::Delete { .. }
+                    | Request::Compact
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2370,6 +2393,9 @@ fn handle_connection(
             // `DEL-FR-006` (ADR-0051): the same two gates, at 17.
             Request::Delete { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::Delete { .. } if negotiated < 17 => err_response(ErrorCode::Malformed),
+            // `CMP-FR-006` (ADR-0052): the same two gates, at 18.
+            Request::Compact if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Compact if negotiated < 18 => err_response(ErrorCode::Malformed),
             // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
             // protocol-12 requests are unknown to a connection negotiated
             // below 12 — the session precedent, not `Query`'s client-only

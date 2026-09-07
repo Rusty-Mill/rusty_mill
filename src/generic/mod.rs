@@ -261,6 +261,32 @@ impl<Id> From<DurabilityError> for DeleteError<Id> {
     }
 }
 
+/// What one [`query::Compact::compact`] reclaimed (`CMP-FR-001`,
+/// ADR-0052), summed across every layer of a stack.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionReport {
+    /// Live records the rewritten blob and slot file hold.
+    pub records: usize,
+    /// Slots the old slot file held that the new one does not — the
+    /// retired slots of deleted records, plus any a crash never
+    /// committed.
+    pub slots_reclaimed: usize,
+    /// Entries the insert log held (items and tombstones), now folded.
+    pub log_entries_folded: usize,
+    /// Edge logs (one per relation label) that held entries, now folded.
+    pub edge_logs_folded: usize,
+}
+
+impl CompactionReport {
+    /// Add a layer's numbers to a stack's total.
+    pub fn absorb(&mut self, other: CompactionReport) {
+        self.records += other.records;
+        self.slots_reclaimed += other.slots_reclaimed;
+        self.log_entries_folded += other.log_entries_folded;
+        self.edge_logs_folded += other.edge_logs_folded;
+    }
+}
+
 /// What [`query::Link::link`] / [`query::MultiLink::link`] did
 /// (`LNK-FR-001`, ADR-0047): the edge is new, or it was already present
 /// and nothing was written — the consumer's insert-or-ignore, a normal

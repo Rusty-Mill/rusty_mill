@@ -337,6 +337,11 @@ fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
         Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
         other => panic!("expected Unauthorized for a ReadOnly delete, got {other:?}"),
     }
+    // `CMP-FR-006` (ADR-0052): and the seventh write, `Compact`.
+    match client.compact() {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a ReadOnly compact, got {other:?}"),
+    }
 
     client.authenticate("write-token").unwrap();
     assert!(client

@@ -19,12 +19,14 @@ use super::edge_blob::{self, EdgeBlob};
 use super::insert_log;
 use super::insert_log::LogEntry;
 use super::query::{
-    AllIds, Children, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink, Neighbors,
-    Parent, Replace, ScanField, UpdateField,
+    AllIds, Children, Compact, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink,
+    Neighbors, Parent, Replace, ScanField, UpdateField,
 };
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
+use super::{
+    CompactionReport, DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError,
+};
 use crate::durability::record_blob::{EncodedRecordBlob, Fnv1a64};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
@@ -78,6 +80,13 @@ impl<R: Record + Clone> Replace<R> for BaseStore<R> {
         }
         self.records.insert(id, record);
         Ok(())
+    }
+}
+
+/// `CMP-FR-003`: nothing on disk — nothing to reclaim.
+impl<R: Record + Clone> Compact for BaseStore<R> {
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        Ok(CompactionReport::default())
     }
 }
 
@@ -153,6 +162,16 @@ where
         self.inner.insert(record)?;
         self.index.entry(value).or_default().push(id);
         Ok(())
+    }
+}
+
+// `CMP-FR-003`: forwarded — this layer keeps nothing on disk.
+impl<S: Compact, R, Marker> Compact for Indexed<S, R, Marker>
+where
+    R: IndexedField<Marker>,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        self.inner.compact()
     }
 }
 
@@ -304,6 +323,16 @@ where
         self.position_index.insert(id, self.cache.len());
         self.cache.push(value);
         Ok(())
+    }
+}
+
+// `CMP-FR-003`: forwarded — the cache is memory only.
+impl<S: Compact, R, Marker> Compact for Scanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        self.inner.compact()
     }
 }
 
@@ -875,6 +904,67 @@ where
     }
 }
 
+/// `CMP-FR-004`: one relation's edges as a deterministic list — each
+/// undirected edge once, `(smaller, larger)`, sorted — the shape a
+/// rewritten edge blob holds. Neighbor order after the next reopen is
+/// this order, not the original insertion order (named in the design).
+fn sorted_edges<Id: Copy + Ord + std::hash::Hash>(
+    adjacency: &HashMap<Id, Vec<Id>>,
+) -> Vec<(Id, Id)> {
+    let mut edges: Vec<(Id, Id)> = adjacency
+        .iter()
+        .flat_map(|(a, neighbors)| {
+            neighbors
+                .iter()
+                .filter(move |b| a <= *b)
+                .map(move |b| (*a, *b))
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    edges
+}
+
+/// `CMP-FR-004`: rewrite one edge blob from its adjacency when its log
+/// holds anything or the blob is stale, then remove the log. `true` when
+/// a log with entries was folded.
+fn compact_edge_blob<Id>(
+    adjacency: &HashMap<Id, Vec<Id>>,
+    blob_path: &Path,
+    tag: &'static str,
+) -> Result<bool, DurabilityError>
+where
+    Id: Copy + Ord + std::hash::Hash + Serialize + DeserializeOwned,
+{
+    let log = insert_log::log_path(blob_path);
+    let logged = !insert_log::read_entries::<(Id, Id), Id>(&log, tag)?.is_empty();
+    let edges = sorted_edges(adjacency);
+    let blob = EdgeBlob::new(&edges, tag);
+    if logged || !blob.is_current_at(blob_path) {
+        blob.encode()?.write(blob_path)?;
+    }
+    insert_log::clear(&log)?;
+    Ok(logged)
+}
+
+// `CMP-FR-004`: the inner store first, then this layer's own edge blob.
+impl<S, R, Marker> Compact for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker> + SchemaTag,
+    R::Id: Ord + Serialize + DeserializeOwned,
+    S: Compact,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        let mut report = self.inner.compact()?;
+        if let Some(edges_path) = &self.edges_path {
+            if compact_edge_blob(&self.adjacency, edges_path, R::SCHEMA_TAG)? {
+                report.edge_logs_folded += 1;
+            }
+        }
+        Ok(report)
+    }
+}
+
 // `DEL-FR-004`: a deleted record takes every edge touching it — the
 // tombstone is logged beside the edge blob (when the layer has a path)
 // before the adjacency changes, after the inner delete succeeded.
@@ -1365,6 +1455,26 @@ where
     }
 }
 
+// `CMP-FR-004`: the inner store first, then every label's edge blob.
+impl<S, R> Compact for MultiSymmetric<S, R>
+where
+    R: Record + SchemaTag,
+    R::Id: Ord + Serialize + DeserializeOwned,
+    S: Compact,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        let mut report = self.inner.compact()?;
+        if let Some(base) = &self.base_path {
+            for (label, adjacency) in &self.adjacency {
+                if compact_edge_blob(adjacency, &labeled_edges_path(base, label), R::SCHEMA_TAG)? {
+                    report.edge_logs_folded += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
 // `DEL-FR-004`: every label's edges touching the id go, each label
 // logging its own tombstone first, after the inner delete succeeded.
 impl<S, R> Delete<R> for MultiSymmetric<S, R>
@@ -1593,6 +1703,13 @@ where
             }
         }
         Ok(())
+    }
+}
+
+// `CMP-FR-003`: forwarded — the name index is memory only.
+impl<S: Compact, R: super::query::NameIndexed> Compact for NameIndex<S, R> {
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        self.inner.compact()
     }
 }
 
@@ -1890,6 +2007,17 @@ where
             self.children_of.entry(parent_id).or_default().push(id);
         }
         Ok(())
+    }
+}
+
+// `CMP-FR-003`: forwarded — the children index is memory only.
+impl<S: Compact, P, C, Marker> Compact for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        self.inner.compact()
     }
 }
 
@@ -2711,5 +2839,30 @@ mod tests {
             other => panic!("expected NotFound, got {other:?}"),
         }
         assert!(GetById::<Node>::get(&layer, 1).is_some());
+    }
+
+    /// `CMP-FR-004` (ADR-0052): `Symmetric` folds its edge log into the
+    /// blob on compaction — a runtime link and a delete's tombstone both
+    /// — reports the fold, leaves the adjacency unchanged, and a portable
+    /// reopen reads the compacted blob alone.
+    #[test]
+    fn compact_folds_the_edge_log_and_a_portable_reopen_agrees() {
+        use super::super::query::{Compact, Delete, Link};
+        let (dir, edges_path) = scratch("symmetric_compact");
+        let log = insert_log::log_path(&edges_path);
+        let mut layer = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        Link::<Node, Linked>::link(&mut layer, 3, 4).unwrap();
+        Delete::<Node>::delete(&mut layer, 2).unwrap();
+        assert!(log.exists());
+        let before = all_neighbors(&layer);
+        let report = Compact::compact(&mut layer).unwrap();
+        assert_eq!(report.edge_logs_folded, 1);
+        assert!(!log.exists());
+        assert_eq!(all_neighbors(&layer), before);
+        assert_eq!(Compact::compact(&mut layer).unwrap().edge_logs_folded, 0);
+        let mut edges = Layer::read_portable_edges(&edges_path).unwrap();
+        edges.sort();
+        assert_eq!(edges, vec![(1, 3), (3, 4)]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

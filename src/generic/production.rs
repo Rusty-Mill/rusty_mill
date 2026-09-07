@@ -30,12 +30,14 @@
 //! real implementation strategy (take the lock, delegate).
 
 use super::query::{
-    AllIds, Children, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink, Neighbors,
-    Parent, Replace, ScanField, UpdateField,
+    AllIds, Children, Compact, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink,
+    Neighbors, Parent, Replace, ScanField, UpdateField,
 };
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
-use super::{DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
+use super::{
+    CompactionReport, DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError,
+};
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
 
@@ -322,6 +324,24 @@ impl<S> GenericProductionStore<S> {
             .write()
             .expect(LOCK_POISONED)
             .detach(relation, id)
+    }
+
+    /// Compact every layer of the stack (`CMP-FR-005`, ADR-0052) under
+    /// the write lock — every reader and writer waits for the duration;
+    /// see [`Compact`] and [`super::mmap_store::GenericMmapStore::compact`].
+    ///
+    /// # Errors
+    ///
+    /// [`DurabilityError`], as the layers report it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn compact(&self) -> Result<CompactionReport, DurabilityError>
+    where
+        S: Compact,
+    {
+        self.inner.write().expect(LOCK_POISONED).compact()
     }
 
     /// Add one edge to a single symmetric relation at runtime

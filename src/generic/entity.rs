@@ -868,4 +868,67 @@ mod tests {
             "no edges came back"
         );
     }
+
+    /// `CMP-FR-004`/`005` (ADR-0052) through the richest front-door stack:
+    /// after an insert, a link under a new label, and a delete, one
+    /// `compact` folds the record log and every label's edge log, the
+    /// counts say so, every read is unchanged, and
+    /// `open_entity_production_stack_portable` serves the compacted files.
+    #[test]
+    fn compact_through_the_stack_folds_every_log_and_keeps_every_read() {
+        use crate::generic::query::{AllIds, Compact, Delete, Insert, MultiLink};
+        let dir = fresh_temp_dir("generic_entity_compact").unwrap();
+        let path = dir.join("entities.mmap");
+        let grace = Entity {
+            id: entity_id("Grace Hopper"),
+            label: "Grace Hopper".into(),
+            kind: "person".into(),
+            mention_count: 1,
+            aliases: vec![],
+        };
+        let mut stack = create_entity_production_stack(
+            sample_entities(),
+            &sample_relates_to(),
+            &sample_mentioned_with(),
+            &path,
+        )
+        .unwrap();
+        Insert::<Entity>::insert(&mut stack, grace.clone()).unwrap();
+        MultiLink::<Entity>::link(&mut stack, "mentored_by", Uuid::from_u128(1), grace.id).unwrap();
+        Delete::<Entity>::delete(&mut stack, Uuid::from_u128(3)).unwrap();
+        let ids_before = {
+            let mut ids = AllIds::<Entity>::all_ids(&stack);
+            ids.sort();
+            ids
+        };
+        let neighbors_before: Vec<Vec<Uuid>> = ids_before
+            .iter()
+            .map(|id| {
+                let mut n = MultiNeighbors::<Entity>::all_neighbors(&stack, *id);
+                n.sort();
+                n
+            })
+            .collect();
+        let report = Compact::compact(&mut stack).unwrap();
+        assert_eq!(report.records, ids_before.len());
+        assert_eq!(report.slots_reclaimed, 1);
+        assert!(report.log_entries_folded >= 2, "{report:?}");
+        assert!(report.edge_logs_folded >= 1, "{report:?}");
+        assert!(!crate::generic::insert_log::log_path(&path).exists());
+        let mut ids_after = AllIds::<Entity>::all_ids(&stack);
+        ids_after.sort();
+        assert_eq!(ids_after, ids_before);
+        drop(stack);
+        let reopened = open_entity_production_stack_portable(&path).unwrap();
+        for (id, expected) in ids_before.iter().zip(neighbors_before) {
+            let mut n = MultiNeighbors::<Entity>::all_neighbors(&reopened, *id);
+            n.sort();
+            assert_eq!(n, expected, "{id}");
+        }
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&reopened, "grace hopper"),
+            vec![grace.id]
+        );
+        assert!(GetById::<Entity>::get(&reopened, Uuid::from_u128(3)).is_none());
+    }
 }

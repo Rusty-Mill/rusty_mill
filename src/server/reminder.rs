@@ -295,6 +295,12 @@ impl ConnectionStore for ReminderConnectionStore {
         }
     }
 
+    /// `CMP-FR-006` (ADR-0052): the stack compacted under the store's own
+    /// write lock; a file that could not be rewritten is `Storage`.
+    fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
+        self.store.compact().map_err(|_| ErrorCode::Storage)
+    }
+
     /// `RMD-FR-005`: `Reminder` has no relation of either kind.
     fn parent(&self, _id: RecordId) -> Result<ParentLookup, ErrorCode> {
         Err(ErrorCode::Unsupported)

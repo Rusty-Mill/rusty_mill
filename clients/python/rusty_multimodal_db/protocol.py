@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 17
+PROTOCOL_VERSION = 18
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -489,11 +489,16 @@ class Delete:
     id: uuid.UUID
 
 
+@_variant(27, [])
+class Compact:
+    pass
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
-    Insert, Link, Replace, Use, ListTables, Delete,
+    Insert, Link, Replace, Use, ListTables, Delete, Compact,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -503,7 +508,7 @@ REQUEST_INTRODUCED_AT = {
     NeighborsReq: 1, DescribeSchema: 1, Authenticate: 1, Transaction: 1, Hello: 2,
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
-    Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17,
+    Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
 }
 
 
@@ -634,9 +639,17 @@ class Tables:
         object.__setattr__(self, "names", tuple(self.names))
 
 
+@_variant(18, [("records", "u64"), ("slots_reclaimed", "u64"), ("log_entries_folded", "u64"), ("edge_logs_folded", "u64")])
+class Compacted:
+    records: int
+    slots_reclaimed: int
+    log_entries_folded: int
+    edge_logs_folded: int
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
-    HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables,
+    HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted,
 ]
 
 

@@ -741,3 +741,69 @@ fn delete_a_memory_and_an_entity_across_tables_and_a_restart_serves_it() {
     assert!(client.get(ada).unwrap().is_none());
     assert!(client.get(engine).unwrap().is_some());
 }
+
+/// `CMP` acceptance criterion 2 (ADR-0052) on the two-table server: after
+/// inserts, links, and deletes, `compact` on each table reports what it
+/// reclaimed, every read before and after agrees, a second `compact`
+/// reclaims nothing, and a restart on the compacted files serves the
+/// same data.
+#[test]
+fn compact_each_table_over_the_wire_and_a_restart_serves_the_same_data() {
+    let dir = unique_dir("memory_compact");
+    let addr = start_two_table_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let (m1, m3) = (Uuid::from_u128(1), Uuid::from_u128(3));
+    let (ada, london) = (Uuid::from_u128(0xada), Uuid::from_u128(0x10d));
+    client.link(m3, london, "mentions").unwrap();
+    assert!(client.delete(m1).unwrap());
+    let joined = |client: &mut SchemaDrivenClient| match client
+        .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => {
+            let mut pairs: Vec<(Uuid, Uuid)> =
+                rows.iter().map(|r| (r.left_id, r.right_id)).collect();
+            pairs.sort();
+            pairs
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    let before = joined(&mut client);
+    let contents_before = rows(client.query("SELECT content FROM memory").unwrap()).len();
+
+    let report = client.compact().unwrap();
+    assert_eq!(report.records, 3);
+    assert_eq!(report.slots_reclaimed, 1);
+    assert_eq!(report.log_entries_folded, 1, "the tombstone");
+    assert_eq!(report.edge_logs_folded, 1, "the runtime link");
+    assert_eq!(joined(&mut client), before);
+    assert_eq!(
+        rows(client.query("SELECT content FROM memory").unwrap()).len(),
+        contents_before
+    );
+    let again = client.compact().unwrap();
+    assert_eq!(again.records, 3);
+    assert_eq!(
+        again.slots_reclaimed + again.log_entries_folded + again.edge_logs_folded,
+        0
+    );
+
+    client.use_table("entity").unwrap();
+    assert!(client.delete(ada).unwrap());
+    let entity_report = client.compact().unwrap();
+    assert_eq!(entity_report.records, 2);
+    assert_eq!(entity_report.slots_reclaimed, 1);
+    client.use_table("memory").unwrap();
+    let after_cascade = joined(&mut client);
+    assert!(after_cascade.iter().all(|(_, e)| *e != ada));
+    drop(client);
+
+    let addr = start_two_table_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(joined(&mut client), after_cascade);
+    assert!(client.get(m1).unwrap().is_none());
+    assert_eq!(
+        client.neighbors_by_relation(m3, "mentions").unwrap(),
+        vec![london]
+    );
+}

@@ -87,6 +87,8 @@ pub enum RequestKind {
     ListTables,
     /// Protocol 17, ADR-0051.
     Delete,
+    /// Protocol 18, ADR-0052.
+    Compact,
 }
 
 impl RequestKind {
@@ -119,6 +121,7 @@ impl RequestKind {
             Request::Use { .. } => RequestKind::Use,
             Request::ListTables => RequestKind::ListTables,
             Request::Delete { .. } => RequestKind::Delete,
+            Request::Compact => RequestKind::Compact,
         }
     }
 }

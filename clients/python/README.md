@@ -2,7 +2,7 @@
 
 A standard-library-only Python 3 client for `rusty_multimodal_db`'s
 server/query layer, written against `SERVER-002` (the wire specification)
-at protocol version 17. It exists to prove that specification is
+at protocol version 18. It exists to prove that specification is
 sufficient (`ECO-FR-007`–`009`, ADR-0043); it is not a packaged product.
 
 ```python
@@ -24,6 +24,7 @@ with Client.connect("127.0.0.1", 7878) as c:
     c.use_table("entity")              # every following request is served from that table
     c.join("mentions", ["content"], ["label"])  # crosses tables when the relation's target_table says so
     c.delete(uuid.UUID(int=1))         # protocol 17: True when gone (with every edge touching it), False if unknown
+    c.compact()                        # protocol 18: fold the logs, drop retired slots; returns the counts reclaimed
 ```
 
 Verification, both in CI:
@@ -33,7 +34,7 @@ Verification, both in CI:
   byte-for-byte;
 - live: `tests/server_python_client.rs` (under `cargo test
   --all-features`) starts a real `Entity` server and runs `driver.py`
-  against it, at protocol 17 and at a hand-negotiated 10.
+  against it, at protocol 18 and at a hand-negotiated 10.
 
 The client is version-pinned: when the wire grows, the fixture and
 `SERVER-002` grow in the same change; this client is updated when someone

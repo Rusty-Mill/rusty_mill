@@ -304,6 +304,16 @@ class Client:
             return False
         raise ProtocolError(type(reply).__name__)
 
+    def compact(self) -> p.Compacted:
+        """Compact the selected table's files in place (CMP-FR-007,
+        protocol 18) and return what was reclaimed. Every other connection
+        waits while it runs. Below 18, ``UnsupportedError`` with no frame
+        sent."""
+        reply = self._roundtrip(p.Compact())
+        if isinstance(reply, p.Compacted):
+            return reply
+        raise ProtocolError(type(reply).__name__)
+
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
         """Add one edge under a symmetric relation label (LNK-FR-012,
         protocol 14). Returns normally whether the edge is new or already

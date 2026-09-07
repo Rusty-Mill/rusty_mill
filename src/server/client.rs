@@ -177,6 +177,7 @@ use super::protocol::{
 };
 use super::sql;
 use super::{pem, TlsConfigError};
+use crate::generic::CompactionReport;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
@@ -1720,6 +1721,34 @@ impl SchemaDrivenClient {
             Response::NotFound => Ok(false),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Ok or NotFound")),
+        }
+    }
+
+    /// Compact the selected table's files in place (`CMP-FR-007`,
+    /// ADR-0052, protocol 18) and report what was reclaimed. Every other
+    /// connection waits while it runs — an operator's call, not a
+    /// per-write one. A domain with no compaction (`Dog`) is
+    /// `Server(Unsupported, _)`. [`ClientError::Unsupported`]`("compact")`
+    /// below 18 with no frame sent (rule 4). Never inside a [`Session`] —
+    /// the server answers `SessionOpen`.
+    pub fn compact(&mut self) -> Result<CompactionReport, ClientError> {
+        if self.server_protocol_version() < 18 {
+            return Err(ClientError::Unsupported("compact"));
+        }
+        match self.roundtrip(Request::Compact)? {
+            Response::Compacted {
+                records,
+                slots_reclaimed,
+                log_entries_folded,
+                edge_logs_folded,
+            } => Ok(CompactionReport {
+                records: records as usize,
+                slots_reclaimed: slots_reclaimed as usize,
+                log_entries_folded: log_entries_folded as usize,
+                edge_logs_folded: edge_logs_folded as usize,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Compacted")),
         }
     }
 

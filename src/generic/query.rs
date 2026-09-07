@@ -70,6 +70,21 @@ pub trait Detach<R: Record> {
     fn detach(&mut self, relation: &str, id: R::Id) -> Result<usize, super::DeleteError<R::Id>>;
 }
 
+/// Reclaim what runtime writes left behind (`CMP-FR-001`, ADR-0052,
+/// `docs/design/SERVER-COMPACT-DESIGN.md`): fold the insert log into the
+/// record blob and the edge logs into their blobs, rewrite the slot
+/// files without the slots deletion retired, and remove the logs — the
+/// work a reopen does, done in place while the store stays open. Every
+/// layer forwards it and adds its own numbers to the
+/// [`super::CompactionReport`]; a purely in-memory layer contributes
+/// nothing. Reads and writes issued after it see exactly what they saw
+/// before; only the files change. The store's exclusive section holds
+/// for the duration (`GenericProductionStore::compact` takes the write
+/// lock), so it is an operator's request, not a per-write cost.
+pub trait Compact {
+    fn compact(&mut self) -> Result<super::CompactionReport, crate::durability::DurabilityError>;
+}
+
 /// Add one edge to a single symmetric relation at runtime (`LNK-FR-001`/
 /// `002`, ADR-0047, `docs/design/SERVER-LINK-DESIGN.md`). Both ids must
 /// have a record; `a == b` is refused; an edge already present (either
