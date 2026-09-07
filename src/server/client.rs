@@ -1703,6 +1703,26 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// Remove one record (`DEL-FR-008`, ADR-0051, protocol 17): `Ok(true)`
+    /// when it is gone — durable before the reply, every edge touching it
+    /// in its own table and in every other table's relation that targets
+    /// this one gone with it — `Ok(false)` when `id` has no record
+    /// ([`Self::update`]'s shape). A domain with no delete (`Dog`) is
+    /// `Server(Unsupported, _)`. [`ClientError::Unsupported`]`("delete")`
+    /// below 17 with no frame sent (rule 4). Never inside a [`Session`] —
+    /// the server answers `SessionOpen`. The id may be inserted again.
+    pub fn delete(&mut self, id: RecordId) -> Result<bool, ClientError> {
+        if self.server_protocol_version() < 17 {
+            return Err(ClientError::Unsupported("delete"));
+        }
+        match self.roundtrip(Request::Delete { id })? {
+            Response::Ok => Ok(true),
+            Response::NotFound => Ok(false),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Ok or NotFound")),
+        }
+    }
+
     /// Add one edge between two records under a symmetric relation label
     /// (`LNK-FR-012`, ADR-0047, protocol 14). `Ok(())` whether the edge is
     /// new or was already present — insert-or-ignore, so a retry is

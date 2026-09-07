@@ -633,3 +633,111 @@ fn two_tables_on_one_connection_join_across_use_and_link_and_survive_a_restart()
     client.use_table("entity").unwrap();
     assert!(client.get(london).unwrap().is_some());
 }
+
+/// `DEL` acceptance criteria 2–3 (ADR-0051) on the two-table server —
+/// the consumer's `delete_memory` and entity delete: deleting a memory
+/// removes it from every read and its `mentions` edge from the entity's
+/// side; a repeat is `Ok(false)`; deleting an **entity** (`Use entity`)
+/// detaches every memory's `mentions` edge to it on the memory table
+/// (`DEL-FR-007`), the memories themselves intact, and the cross-table
+/// join shrinks accordingly; the deleted ids can be inserted again; and
+/// a second server on the same directory serves the deletions.
+#[test]
+fn delete_a_memory_and_an_entity_across_tables_and_a_restart_serves_it() {
+    let dir = unique_dir("memory_delete");
+    let addr = start_two_table_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let (m1, m2) = (Uuid::from_u128(1), Uuid::from_u128(2));
+    let (ada, engine) = (Uuid::from_u128(0xada), Uuid::from_u128(0xe1e));
+    let joined = |client: &mut SchemaDrivenClient| match client
+        .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => {
+            let mut pairs: Vec<(Uuid, Uuid)> =
+                rows.iter().map(|r| (r.left_id, r.right_id)).collect();
+            pairs.sort();
+            pairs
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    assert_eq!(
+        joined(&mut client),
+        vec![(m1, ada), (m2, ada), (m2, engine)]
+    );
+
+    // Criterion 2: delete a memory.
+    assert!(client.delete(m1).unwrap());
+    assert!(client.get(m1).unwrap().is_none());
+    assert!(!client.delete(m1).unwrap(), "a repeat is NotFound");
+    assert_eq!(
+        rows(client.query("SELECT content FROM memory").unwrap()).len(),
+        3
+    );
+    assert_eq!(
+        client.neighbors_by_relation(ada, "mentions").unwrap(),
+        vec![m2]
+    );
+    assert_eq!(joined(&mut client), vec![(m2, ada), (m2, engine)]);
+
+    // Criterion 3: delete an entity from the entity table — the memory
+    // table's edges to it go (`DEL-FR-007`), the memory stays.
+    client.use_table("entity").unwrap();
+    assert!(client.delete(ada).unwrap());
+    assert!(client.get(ada).unwrap().is_none());
+    assert!(!client.delete(ada).unwrap());
+    client.use_table("memory").unwrap();
+    assert!(client.get(m2).unwrap().is_some(), "the memory is intact");
+    assert_eq!(
+        client.neighbors_by_relation(m2, "mentions").unwrap(),
+        vec![engine]
+    );
+    assert_eq!(
+        client.neighbors_by_relation(ada, "mentions").unwrap(),
+        Vec::<Uuid>::new()
+    );
+    assert_eq!(joined(&mut client), vec![(m2, engine)]);
+
+    // The deleted memory's id can be inserted again — a fresh record, no edges.
+    client
+        .insert(
+            m1,
+            &[
+                ("content", ScanValue::Str("memory 1, reborn".into())),
+                ("category", ScanValue::Str("general".into())),
+                ("tags", ScanValue::StrList(vec![])),
+                ("source", ScanValue::Str("manual".into())),
+                ("metadata_json", ScanValue::Str("{}".into())),
+                ("created_at_unix_ms", ScanValue::I64(9_000)),
+                ("updated_at_unix_ms", ScanValue::I64(9_000)),
+                ("memory_type", ScanValue::Str("unclassified".into())),
+                ("status", ScanValue::Str("active".into())),
+                ("sensitive", ScanValue::Bool(false)),
+                ("access_count", ScanValue::I64(0)),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        client.neighbors_by_relation(m1, "mentions").unwrap(),
+        Vec::<Uuid>::new()
+    );
+    drop(client);
+
+    let addr = start_two_table_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(
+        client.get(m1).unwrap().unwrap()[0],
+        (
+            "content".to_string(),
+            ScanValue::Str("memory 1, reborn".into())
+        )
+    );
+    assert_eq!(
+        client.neighbors_by_relation(ada, "mentions").unwrap(),
+        Vec::<Uuid>::new()
+    );
+    assert_eq!(joined(&mut client), vec![(m2, engine)]);
+    client.use_table("entity").unwrap();
+    assert!(client.get(ada).unwrap().is_none());
+    assert!(client.get(engine).unwrap().is_some());
+}

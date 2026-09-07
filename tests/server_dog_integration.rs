@@ -470,3 +470,20 @@ fn replace_is_unsupported_on_the_dog_domain() {
     }
     assert_eq!(client.get(Uuid::from_u128(1)).unwrap(), before);
 }
+
+/// `DEL-FR-006` (ADR-0051): `Dog`'s adapter keeps the trait's default —
+/// the bespoke store has no delete — so a `Delete` is `Unsupported`,
+/// server-side, with the record intact.
+#[test]
+fn delete_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    match client.delete(Uuid::from_u128(1)) {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}

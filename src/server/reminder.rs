@@ -32,13 +32,13 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome, ReplaceOutcome};
+use super::{ConnectionStore, DeleteOutcome, InsertOutcome, ReplaceOutcome};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::reminder::{
     status_from_u32, status_to_u32, DueAtField, Reminder, ReminderProductionStack, StatusField,
 };
-use crate::generic::{InsertError, ReplaceError};
+use crate::generic::{DeleteError, InsertError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_TITLE: FieldRef = 0;
@@ -281,6 +281,17 @@ impl ConnectionStore for ReminderConnectionStore {
             Ok(()) => Ok(ReplaceOutcome::Replaced),
             Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
             Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    /// `DEL-FR-006` (ADR-0051): one whole-record delete under the store's
+    /// own lock — the record and, within this table, every edge touching
+    /// it. An unknown id is the normal outcome, not an error.
+    fn delete_record(&self, id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
+        match self.store.delete::<Reminder>(id) {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
+            Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 
@@ -661,5 +672,18 @@ mod tests {
             Err(ErrorCode::Malformed)
         );
         assert_eq!(adapter.get(id).unwrap(), edited, "nothing written");
+    }
+
+    /// `DEL-FR-006` (ADR-0051): a deleted reminder is gone from `get` and
+    /// the scans; a repeat is `NotFound`.
+    #[test]
+    fn delete_record_removes_the_reminder_and_refuses_a_repeat() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128(1);
+        let before = adapter.scan_all().len();
+        assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::Deleted));
+        assert!(adapter.get(id).is_none());
+        assert_eq!(adapter.scan_all().len(), before - 1);
+        assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::NotFound));
     }
 }

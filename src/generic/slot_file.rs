@@ -183,6 +183,20 @@ where
     /// Whether slot `position`'s trailing marker byte reads back as
     /// `COMMITTED` — the one thing [`Self::committed_pairs`] trusts before
     /// treating a slot's id/value bytes as real data at all.
+    /// `DEL-FR-002` (ADR-0051): retire a slot — its marker byte is
+    /// cleared, so [`Self::committed_pairs`] skips it on the next open
+    /// exactly as a slot a crash never committed, and
+    /// [`Self::is_gapless`] stops taking the fast scan path. The slot's
+    /// bytes are otherwise left in place; the file never shrinks (no
+    /// compaction). Not synced here — the deletion's durability is its
+    /// log tombstone's; a marker that survives a crash describes a slot
+    /// whose id the folded record set no longer holds, which `open`
+    /// already ignores as stale.
+    pub(crate) fn clear_marker(&mut self, position: usize) {
+        let marker_offset = Self::slot_offset(position) + Id::BYTE_WIDTH + V::BYTE_WIDTH;
+        self.mmap[marker_offset] = 0;
+    }
+
     fn is_committed(mmap: &MmapMut, position: usize) -> bool {
         let marker_offset = Self::slot_offset(position) + Id::BYTE_WIDTH + V::BYTE_WIDTH;
         mmap[marker_offset] == COMMITTED

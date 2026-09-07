@@ -18,7 +18,8 @@
 //! carries), the sync bookkeeping (`node_id`, `client`), the SPO triple
 //! and `superseded_by` (nullable, and the wire has no null), the
 //! document chunking pair, `remind_at` (the `Reminder` domain's job),
-//! and `deleted_at` (no runtime deletion, still).
+//! and `deleted_at` (a soft-delete stamp; a record here is deleted
+//! outright through `Delete`, `ADR-0051`).
 //!
 //! - `category` is the equality-filterable `IndexedField` — the
 //!   consumer indexes it (`idx_memories_category`) and every list filters
@@ -396,6 +397,60 @@ mod tests {
                 Uuid::from_u128(2)
             ),
             Some(vec![])
+        );
+    }
+
+    /// `DEL-FR-004`/`005` (ADR-0051) on `Memory`'s stack: deleting a
+    /// memory drops its `mentions` edge (the entity's side no longer
+    /// lists it); detaching an entity id drops every memory's edge to it
+    /// with the memories intact; both survive a portable reopen.
+    #[test]
+    fn delete_and_detach_drop_mentions_edges_and_survive_reopen() {
+        use crate::generic::query::{AllIds, Delete, Detach, MultiNeighbors};
+        let dir = fresh_temp_dir("generic_memory_delete").unwrap();
+        let path = dir.join("memories.mmap");
+        let (ada, engine) = (Uuid::from_u128(0xada), Uuid::from_u128(0xe1e));
+        let (one, two, three) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        {
+            let mut store = create_memory_production_stack(
+                sample(),
+                &[(one, ada), (two, ada), (three, engine)],
+                &path,
+            )
+            .unwrap();
+            Delete::<Memory>::delete(&mut store, one).unwrap();
+            assert!(GetById::<Memory>::get(&store, one).is_none());
+            assert_eq!(
+                MultiNeighbors::<Memory>::neighbors_by_relation(&store, "mentions", ada),
+                Some(vec![two])
+            );
+            assert_eq!(
+                Detach::<Memory>::detach(&mut store, "mentions", ada).unwrap(),
+                1
+            );
+            assert_eq!(
+                MultiNeighbors::<Memory>::neighbors_by_relation(&store, "mentions", two),
+                Some(vec![])
+            );
+            assert!(
+                GetById::<Memory>::get(&store, two).is_some(),
+                "the memory stays"
+            );
+            assert_eq!(
+                MultiNeighbors::<Memory>::neighbors_by_relation(&store, "mentions", engine),
+                Some(vec![three])
+            );
+            assert_eq!(AllIds::<Memory>::all_ids(&store).len(), 2);
+        }
+        let reopened = open_memory_production_stack_portable(&path).unwrap();
+        assert!(GetById::<Memory>::get(&reopened, one).is_none());
+        assert_eq!(
+            MultiNeighbors::<Memory>::neighbors_by_relation(&reopened, "mentions", ada),
+            Some(vec![])
+        );
+        assert_eq!(
+            MultiNeighbors::<Memory>::neighbors_by_relation(&reopened, "mentions", engine),
+            Some(vec![three])
         );
     }
 }

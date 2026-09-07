@@ -277,6 +277,8 @@ Python vector suite (unchanged, proving criterion 4), `cargo doc
   `ADR-0050` / `SERVER-001` v0.40.0: `Memory::mentions`, a foreign
   label to `entity`, joined across at protocol 16.*
 - **Soft deletion** — `deleted_at`; or the first runtime deletion.
+  *Resolved by `ADR-0051` / `SERVER-001` v0.41.0: hard deletion through
+  `Request::Delete` at protocol 17; `deleted_at` stays the caller's.*
 
 ## Change history
 

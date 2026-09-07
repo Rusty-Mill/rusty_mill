@@ -17,13 +17,14 @@
 
 use super::edge_blob::{self, EdgeBlob};
 use super::insert_log;
+use super::insert_log::LogEntry;
 use super::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Link, MultiLink, Neighbors, Parent, Replace,
-    ScanField, UpdateField,
+    AllIds, Children, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink, Neighbors,
+    Parent, Replace, ScanField, UpdateField,
 };
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
-use super::{InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
+use super::{DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError};
 use crate::durability::record_blob::{EncodedRecordBlob, Fnv1a64};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
@@ -77,6 +78,17 @@ impl<R: Record + Clone> Replace<R> for BaseStore<R> {
         }
         self.records.insert(id, record);
         Ok(())
+    }
+}
+
+/// `DEL-FR-004`: the in-memory root drops the record — an unknown id is
+/// refused with nothing written.
+impl<R: Record + Clone> Delete<R> for BaseStore<R> {
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        self.records
+            .remove(&id)
+            .map(|_| ())
+            .ok_or(DeleteError::NotFound(id))
     }
 }
 
@@ -140,6 +152,30 @@ where
         let value = record.indexed_value().clone();
         self.inner.insert(record)?;
         self.index.entry(value).or_default().push(id);
+        Ok(())
+    }
+}
+
+// `DEL-FR-004`: the id leaves its bucket (read from the inner store
+// first) after the inner delete succeeded.
+impl<S, R, Marker> Delete<R> for Indexed<S, R, Marker>
+where
+    R: IndexedField<Marker>,
+    S: Delete<R> + GetById<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        let value = self
+            .inner
+            .get(id)
+            .map(|old| old.indexed_value().clone())
+            .ok_or(DeleteError::NotFound(id))?;
+        self.inner.delete(id)?;
+        if let Some(bucket) = self.index.get_mut(&value) {
+            bucket.retain(|other| *other != id);
+            if bucket.is_empty() {
+                self.index.remove(&value);
+            }
+        }
         Ok(())
     }
 }
@@ -267,6 +303,31 @@ where
         self.inner.insert(record)?;
         self.position_index.insert(id, self.cache.len());
         self.cache.push(value);
+        Ok(())
+    }
+}
+
+// `DEL-FR-004`: the cache slot is retired by moving the last value into
+// it (and repointing that value's owner), after the inner delete.
+impl<S, R, Marker> Delete<R> for Scanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    S: Delete<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        self.inner.delete(id)?;
+        let Some(position) = self.position_index.remove(&id) else {
+            return Ok(());
+        };
+        let last = self.cache.len() - 1;
+        if position != last {
+            self.cache.swap(position, last);
+            if let Some((moved, _)) = self.position_index.iter().find(|(_, p)| **p == last) {
+                let moved = *moved;
+                self.position_index.insert(moved, position);
+            }
+        }
+        self.cache.pop();
         Ok(())
     }
 }
@@ -557,7 +618,7 @@ where
 /// makes a fold idempotent for records. Shared by both relation layers.
 fn merge_edge_lists<Id: Copy + Eq + std::hash::Hash>(
     mut edges: Vec<(Id, Id)>,
-    logged: Vec<(Id, Id)>,
+    logged: Vec<LogEntry<(Id, Id), Id>>,
 ) -> Vec<(Id, Id)> {
     if logged.is_empty() {
         return edges;
@@ -567,13 +628,49 @@ fn merge_edge_lists<Id: Copy + Eq + std::hash::Hash>(
         seen.insert((a, b));
         seen.insert((b, a));
     }
-    for (a, b) in logged {
-        if seen.insert((a, b)) {
-            seen.insert((b, a));
-            edges.push((a, b));
+    for entry in logged {
+        match entry {
+            LogEntry::Item((a, b)) => {
+                if seen.insert((a, b)) {
+                    seen.insert((b, a));
+                    edges.push((a, b));
+                }
+            }
+            // `DEL-FR-004`: an edge tombstone names an id; every edge
+            // touching it goes, in either orientation.
+            LogEntry::Tombstone(id) => {
+                edges.retain(|&(a, b)| {
+                    let keep = a != id && b != id;
+                    if !keep {
+                        seen.remove(&(a, b));
+                        seen.remove(&(b, a));
+                    }
+                    keep
+                });
+            }
         }
     }
     edges
+}
+
+/// Drop every edge touching `id` from one adjacency map, both
+/// directions; the number of edges removed (`DEL-FR-004`).
+fn drop_edges_of<Id: Copy + Eq + std::hash::Hash>(
+    adjacency: &mut HashMap<Id, Vec<Id>>,
+    id: Id,
+) -> usize {
+    let Some(neighbors) = adjacency.remove(&id) else {
+        return 0;
+    };
+    for neighbor in &neighbors {
+        if let Some(back) = adjacency.get_mut(neighbor) {
+            back.retain(|other| *other != id);
+            if back.is_empty() {
+                adjacency.remove(neighbor);
+            }
+        }
+    }
+    neighbors.len()
 }
 
 /// The edge list [`Symmetric::read_portable_edges`] returns: the pairs
@@ -655,7 +752,10 @@ where
         // `LNK-FR-004`: fold the edge log in first, so the rewrite below
         // covers every runtime link and the log can then be cleared.
         let log = insert_log::log_path(edges_path);
-        let edges = merge_edge_lists(edges.to_vec(), insert_log::read_items(&log, R::SCHEMA_TAG)?);
+        let edges = merge_edge_lists(
+            edges.to_vec(),
+            insert_log::read_entries(&log, R::SCHEMA_TAG)?,
+        );
         let blob = EdgeBlob::new(&edges, R::SCHEMA_TAG);
         if !blob.is_current_at(edges_path) {
             blob.encode()?.write(edges_path)?;
@@ -718,7 +818,7 @@ where
     /// fingerprint (`SYMPORT-FR-005`).
     pub fn read_portable_edges(edges_path: &Path) -> Result<PortableEdges<R>, DurabilityError> {
         let persisted = edge_blob::read(edges_path, R::SCHEMA_TAG)?;
-        let logged = insert_log::read_items(&insert_log::log_path(edges_path), R::SCHEMA_TAG)?;
+        let logged = insert_log::read_entries(&insert_log::log_path(edges_path), R::SCHEMA_TAG)?;
         Ok(merge_edge_lists(persisted, logged))
     }
 
@@ -772,6 +872,28 @@ where
 {
     fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
         self.inner.insert(record)
+    }
+}
+
+// `DEL-FR-004`: a deleted record takes every edge touching it — the
+// tombstone is logged beside the edge blob (when the layer has a path)
+// before the adjacency changes, after the inner delete succeeded.
+impl<S, R, Marker> Delete<R> for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker> + SchemaTag,
+    R::Id: Serialize,
+    S: Delete<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        self.inner.delete(id)?;
+        if self.adjacency.contains_key(&id) {
+            if let Some(edges_path) = &self.edges_path {
+                let log = insert_log::log_path(edges_path);
+                insert_log::append_tombstone(&log, R::SCHEMA_TAG, &id)?;
+            }
+            drop_edges_of(&mut self.adjacency, id);
+        }
+        Ok(())
     }
 }
 
@@ -1088,7 +1210,7 @@ where
             let log = insert_log::log_path(&blob_path);
             *edges = merge_edge_lists(
                 std::mem::take(edges),
-                insert_log::read_items(&log, R::SCHEMA_TAG)?,
+                insert_log::read_entries(&log, R::SCHEMA_TAG)?,
             );
             let blob = EdgeBlob::new(edges, R::SCHEMA_TAG);
             if !blob.is_current_at(&blob_path) {
@@ -1240,6 +1362,59 @@ where
 {
     fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
         self.inner.insert(record)
+    }
+}
+
+// `DEL-FR-004`: every label's edges touching the id go, each label
+// logging its own tombstone first, after the inner delete succeeded.
+impl<S, R> Delete<R> for MultiSymmetric<S, R>
+where
+    R: Record + SchemaTag,
+    R::Id: Serialize,
+    S: Delete<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        self.inner.delete(id)?;
+        let labels: Vec<String> = self.adjacency.keys().cloned().collect();
+        for label in labels {
+            self.detach_under(&label, id)?;
+        }
+        Ok(())
+    }
+}
+
+impl<S, R: Record> MultiSymmetric<S, R> {
+    /// `DEL-FR-005`: every edge touching `id` under `label` goes —
+    /// tombstone logged first when the layer has a path; the count of
+    /// edges dropped, `0` when the id had none (nothing logged).
+    fn detach_under(&mut self, label: &str, id: R::Id) -> Result<usize, DeleteError<R::Id>>
+    where
+        R: SchemaTag,
+        R::Id: Serialize,
+    {
+        let Some(adjacency) = self.adjacency.get_mut(label) else {
+            return Err(DeleteError::NotFound(id));
+        };
+        if !adjacency.contains_key(&id) {
+            return Ok(0);
+        }
+        if let Some(base) = &self.base_path {
+            let log = insert_log::log_path(&labeled_edges_path(base, label));
+            insert_log::append_tombstone(&log, R::SCHEMA_TAG, &id)?;
+        }
+        Ok(drop_edges_of(adjacency, id))
+    }
+}
+
+// `DEL-FR-005`: the foreign-label case — an id this store holds no
+// record for, only edges (the far table deleted its record).
+impl<S, R> Detach<R> for MultiSymmetric<S, R>
+where
+    R: Record + SchemaTag,
+    R::Id: Serialize,
+{
+    fn detach(&mut self, relation: &str, id: R::Id) -> Result<usize, DeleteError<R::Id>> {
+        self.detach_under(relation, id)
     }
 }
 
@@ -1418,6 +1593,46 @@ where
             }
         }
         Ok(())
+    }
+}
+
+// `DEL-FR-004`: the record's keys (read first) leave the index after
+// the inner delete succeeded.
+impl<S, R: super::query::NameIndexed> Delete<R> for NameIndex<S, R>
+where
+    S: Delete<R> + GetById<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        let keys: Vec<String> = self
+            .inner
+            .get(id)
+            .map(|old| {
+                old.index_keys()
+                    .into_iter()
+                    .map(|k| normalize(&k))
+                    .collect()
+            })
+            .ok_or(DeleteError::NotFound(id))?;
+        self.inner.delete(id)?;
+        for key in keys {
+            if let Some(bucket) = self.index.get_mut(&key) {
+                bucket.retain(|other| *other != id);
+                if bucket.is_empty() {
+                    self.index.remove(&key);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// `DEL-FR-005`: forwarded — the relation layer beneath decides.
+impl<S, R: super::query::NameIndexed> Detach<R> for NameIndex<S, R>
+where
+    S: Detach<R>,
+{
+    fn detach(&mut self, relation: &str, id: R::Id) -> Result<usize, DeleteError<R::Id>> {
+        self.inner.detach(relation, id)
     }
 }
 
@@ -1673,6 +1888,36 @@ where
         self.inner.insert(record)?;
         if let Some(parent_id) = parent_id {
             self.children_of.entry(parent_id).or_default().push(id);
+        }
+        Ok(())
+    }
+}
+
+// `DEL-FR-004`: a deleted child leaves its parent's list; a deleted
+// record that *was* a parent loses its children list — its children
+// keep their parent field (a record field, not an edge), and `Parent`
+// on one of them then names an id with no record, which `parent`'s
+// own three-way outcome already distinguishes.
+impl<S, P, C, Marker> Delete<C> for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    S: Delete<C> + GetById<C>,
+{
+    fn delete(&mut self, id: C::Id) -> Result<(), DeleteError<C::Id>> {
+        let parent = self
+            .inner
+            .get(id)
+            .map(|old| old.parent_id())
+            .ok_or(DeleteError::NotFound(id))?;
+        self.inner.delete(id)?;
+        if let Some(parent) = parent {
+            if let Some(children) = self.children_of.get_mut(&parent) {
+                children.retain(|other| *other != id);
+                if children.is_empty() {
+                    self.children_of.remove(&parent);
+                }
+            }
         }
         Ok(())
     }
@@ -2404,5 +2649,67 @@ mod tests {
             Err(LinkError::UnknownRecord(999)) => {}
             other => panic!("a local label checks both ends, got {other:?}"),
         }
+    }
+
+    /// `DEL-FR-004` (ADR-0051): deleting a node through `Symmetric` drops
+    /// every edge touching it from both ends, logs a tombstone beside the
+    /// blob, and the fold on a portable reopen agrees; a delete of an
+    /// unknown id is refused with nothing written.
+    #[test]
+    fn delete_through_symmetric_drops_both_ends_and_survives_reopen() {
+        use super::super::query::Delete;
+        use super::super::DeleteError;
+        let (dir, edges_path) = scratch("symmetric_delete");
+        {
+            let mut layer = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+            Delete::<Node>::delete(&mut layer, 2).unwrap();
+            assert!(GetById::<Node>::get(&layer, 2).is_none());
+            assert_eq!(Neighbors::<Node, Linked>::neighbors(&layer, 1), vec![3]);
+            assert_eq!(Neighbors::<Node, Linked>::neighbors(&layer, 3), vec![1]);
+            assert!(Neighbors::<Node, Linked>::neighbors(&layer, 2).is_empty());
+            assert!(insert_log::log_path(&edges_path).exists());
+            match Delete::<Node>::delete(&mut layer, 2) {
+                Err(DeleteError::NotFound(2)) => {}
+                other => panic!("expected NotFound(2), got {other:?}"),
+            }
+        }
+        let edges = Layer::read_portable_edges(&edges_path).unwrap();
+        assert_eq!(edges, vec![(1, 3)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `DEL-FR-005` (ADR-0051): `detach` on a foreign label drops every
+    /// edge touching an id this store holds no record for, reports the
+    /// count, is a no-op at zero, and refuses a label the layer lacks;
+    /// the record set is untouched.
+    #[test]
+    fn detach_drops_a_foreign_ids_edges_and_nothing_else() {
+        use super::super::query::{Detach, MultiNeighbors};
+        use super::super::DeleteError;
+        let relations: Vec<(String, Vec<(u32, u32)>)> =
+            vec![("mentions".to_string(), vec![(1, 999), (2, 999), (3, 888)])];
+        let mut layer = MultiSymmetric::new(BaseStore::new(nodes()), &relations)
+            .with_foreign_labels(&["mentions"]);
+        assert_eq!(
+            Detach::<Node>::detach(&mut layer, "mentions", 999).unwrap(),
+            2
+        );
+        assert_eq!(
+            MultiNeighbors::<Node>::neighbors_by_relation(&layer, "mentions", 1),
+            Some(vec![])
+        );
+        assert_eq!(
+            MultiNeighbors::<Node>::neighbors_by_relation(&layer, "mentions", 3),
+            Some(vec![888])
+        );
+        assert_eq!(
+            Detach::<Node>::detach(&mut layer, "mentions", 999).unwrap(),
+            0
+        );
+        match Detach::<Node>::detach(&mut layer, "nope", 999) {
+            Err(DeleteError::NotFound(999)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert!(GetById::<Node>::get(&layer, 1).is_some());
     }
 }

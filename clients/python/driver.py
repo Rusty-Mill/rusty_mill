@@ -106,6 +106,17 @@ def main() -> int:
                 print(f"use_unknown={e.code.name}")
         except UnsupportedError as e:
             print(f"tables=unsupported:{e}")
+
+        # Protocol 17 (DEL-FR-008): insert a throwaway entity, delete it,
+        # and see the repeat answered False.
+        try:
+            gone = uuid.UUID(int=78)
+            c.insert(gone, [("label", "Throwaway"), ("kind", "test"), ("mention_count", 0), ("aliases", [])])
+            print(f"delete={'ok' if c.delete(gone) else 'notfound'}")
+            print(f"delete_again={'ok' if c.delete(gone) else 'notfound'}")
+            print(f"delete_get={'-' if c.get(gone) is None else 'present'}")
+        except UnsupportedError as e:
+            print(f"delete=unsupported:{e}")
     return 0
 
 

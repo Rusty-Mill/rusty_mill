@@ -26,8 +26,8 @@ fn framing_and_protocol_round_trip_with_no_server_compiled() {
     .unwrap();
     assert_eq!(
         buf,
-        vec![0x08, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00],
-        "SERVER-002 §4's worked example: Hello {{ 16 }} is 12 bytes on the wire"
+        vec![0x08, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00],
+        "SERVER-002 §4's worked example: Hello {{ 17 }} is 12 bytes on the wire"
     );
     let back: Request = read_message(&mut &buf[..]).unwrap();
     assert!(matches!(

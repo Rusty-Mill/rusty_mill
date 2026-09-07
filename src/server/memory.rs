@@ -23,14 +23,14 @@ use super::protocol::{
     ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
     ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome, LinkOutcome, ReplaceOutcome};
+use super::{ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReplaceOutcome};
 use crate::generic::memory::{
     AccessCountField, CategoryField, Memory, MemoryProductionStack, MEMORY_FOREIGN_TABLE,
     MEMORY_RELATION_LABELS,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
-use crate::generic::{InsertError, LinkError, ReplaceError};
+use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_CONTENT: FieldRef = 0;
@@ -368,6 +368,17 @@ impl ConnectionStore for MemoryConnectionStore {
         }
     }
 
+    /// `DEL-FR-006` (ADR-0051): one whole-record delete under the store's
+    /// own lock — the record and, within this table, every edge touching
+    /// it. An unknown id is the normal outcome, not an error.
+    fn delete_record(&self, id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
+        match self.store.delete::<Memory>(id) {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
+            Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
     /// `MEM-FR-005`: `Memory` has no `ChildOf` relation.
     fn parent(&self, _id: RecordId) -> Result<ParentLookup, ErrorCode> {
         Err(ErrorCode::Unsupported)
@@ -440,6 +451,21 @@ impl ConnectionStore for MemoryConnectionStore {
 
     fn table_name(&self) -> &str {
         "memory"
+    }
+
+    /// `DEL-FR-005` (ADR-0051): the `entity` table deleted `id` — every
+    /// `mentions` edge to it goes (the consumer's `DELETE FROM
+    /// memory_entities WHERE entity_id = ?`). A label this domain lacks
+    /// is `Malformed`.
+    fn detach_record(&self, relation: &str, id: RecordId) -> Result<usize, ErrorCode> {
+        if !MEMORY_RELATION_LABELS.contains(&relation) {
+            return Err(ErrorCode::Malformed);
+        }
+        match self.store.detach::<Memory>(relation, id) {
+            Ok(n) => Ok(n),
+            Err(DeleteError::NotFound(_)) => Err(ErrorCode::Malformed),
+            Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
+        }
     }
 
     /// `STV-FR-002`: `validate_batch` on this one operation.
@@ -806,5 +832,38 @@ mod tests {
             "nothing written on refusal"
         );
         assert_eq!(adapter.scan_all().len(), 3, "no new record");
+    }
+
+    /// `DEL-FR-006`/`005` (ADR-0051): a deleted memory is gone from every
+    /// read and its `mentions` edge with it; a repeat is `NotFound`;
+    /// `detach_record` for an entity id drops every memory's edge to it
+    /// and refuses a label the domain lacks.
+    #[test]
+    fn delete_record_and_detach_record_drop_the_memory_and_its_edges() {
+        let adapter = sample_adapter();
+        let (one, two, ada) = (
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            Uuid::from_u128(0xada),
+        );
+        adapter.link_records(one, ada, "mentions").unwrap();
+        adapter.link_records(two, ada, "mentions").unwrap();
+        assert_eq!(adapter.delete_record(one), Ok(DeleteOutcome::Deleted));
+        assert!(adapter.get(one).is_none());
+        assert_eq!(adapter.scan_all().len(), 2);
+        assert!(!adapter
+            .filter_eq(FIELD_CATEGORY, &ScanValue::Str("general".into()))
+            .unwrap()
+            .contains(&one));
+        assert_eq!(
+            adapter.neighbors_by_relation(ada, "mentions"),
+            Ok(vec![two])
+        );
+        assert_eq!(adapter.delete_record(one), Ok(DeleteOutcome::NotFound));
+        assert_eq!(adapter.detach_record("mentions", ada), Ok(1));
+        assert_eq!(adapter.neighbors_by_relation(two, "mentions"), Ok(vec![]));
+        assert!(adapter.get(two).is_some());
+        assert_eq!(adapter.detach_record("mentions", ada), Ok(0));
+        assert_eq!(adapter.detach_record("x", ada), Err(ErrorCode::Malformed));
     }
 }

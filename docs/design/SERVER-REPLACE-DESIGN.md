@@ -252,7 +252,8 @@ on the same three; `cargo fmt --check`; the Python vector suite;
 
 - **Runtime deletion** — the last of `ADR-0036`'s three clauses ("no
   runtime deletion") still standing; a tombstone in the insert log is
-  the obvious shape now that the log carries versions.
+  the obvious shape now that the log carries versions. *Resolved by
+  `ADR-0051` / `SERVER-001` v0.41.0, exactly that shape.*
 - **A server-side `Upsert`** — option (d); revisit if the second round
   trip ever shows in a measurement.
 - **Compaction** of the insert and edge logs — unchanged; the trigger

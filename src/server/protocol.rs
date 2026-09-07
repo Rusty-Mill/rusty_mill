@@ -71,6 +71,7 @@
 //! | 14 | `SERVER-001` v0.37.0 | + [`Request::Link`] (22) — `LNK-FR-010`, ADR-0047: add one edge to a symmetric relation of the connection's table at runtime, under a label (`Entity`: any valid label, created at first use — open labels; `Employee`: its one fixed label). Answered `Ok` whether the edge is new or already present (the consumer's insert-or-ignore); `RecordNotFound` for a missing endpoint, `Malformed` for a self-loop, an invalid label, or a label a fixed-label domain does not have, `Storage` when the edge could not be made durable, `Unsupported` from a domain with no symmetric relation or no link (`Dog`, `Reminder`, `Order`). Server-gated `Malformed` below 14 (rule 3), `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session; never journaled or staged. No new response, no new `ErrorCode`. ADR-0047 |
 //! | 15 | `SERVER-001` v0.39.0 | + [`Request::Replace`] (23) — `REP-FR-006`, ADR-0049: replace one record of the connection's table whole, [`Request::Insert`]'s exact body over an id that already has a record (the consumer's `update_memory`/`entity_upsert` write path). Same whole-list validation as `Insert` (`Malformed`/`UnknownField`, the domain's rules), nothing written on refusal; answered `Ok`, or [`Response::NotFound`] when the id has no record — `UpdateField`'s own shape, no new `ErrorCode`, no new `Response`. Relation edges survive; the scannable field's slot is rewritten in place. `Unsupported` from a domain with no replace (`Dog`, `Order`, `Employee`). Server-gated `Malformed` below 15 (rule 3), `Unauthorized` for `ReadOnly` (the fifth write), `SessionOpen` inside a session; never journaled or staged. ADR-0049 |
 //! | 16 | `SERVER-001` v0.40.0 | + [`Request::Use`] (24), [`Request::ListTables`] (25), and [`Response::Tables`] (17) — `TBL-FR-002`/`003`, ADR-0045 (accepted direction) implemented by ADR-0050: more than one table on one connection. A server built with `serve_tables` registers several `ConnectionStore`s under names; `Use { table }` selects, per connection, which one every table-less request is served from (default: the primary, so a connection that never sends `Use` is a pre-16 connection byte for byte); `ListTables` reports the names. Cross-table `Join`: `JoinSpec::right_table: Some(name)` — carried since 12 for exactly this — now fetches right rows from that table, when the relation's `RelationDescriptor::target_table` names it (`Malformed` otherwise); and a `Link` under a relation whose descriptor names a `target_table` has its far endpoint checked against that table. `Use` inside a session is `SessionOpen`; an unknown name `Malformed`; both new requests `Malformed` below 16 (rule 3). No new `ErrorCode`. ADR-0050 |
+//! | 17 | `SERVER-001` v0.41.0 | + [`Request::Delete`] (26) — `DEL-FR-006`, ADR-0051: remove one record of the connection's table at runtime, the last of the three record-set writes. Answered `Ok` (durable before the reply — a tombstone in the insert log, folded at the next open) or [`Response::NotFound`]; no new `Response`, no new `ErrorCode`. Every edge touching the record goes with it — under every label of its own table, and on a `serve_tables` server under every other table's relation whose `target_table` is this one. The id may be inserted again. `Unsupported` from a domain with no delete (`Dog`, `Order`, `Employee`). Server-gated `Malformed` below 17 (rule 3), `Unauthorized` for `ReadOnly` (the sixth write), `SessionOpen` inside a session; never journaled or staged. ADR-0051 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -105,7 +106,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -758,6 +759,24 @@ pub enum Request {
     /// Protocol 16 (`TBL-FR-003`, ADR-0050): the server's table names and
     /// which is primary — [`Response::Tables`]. `Malformed` below 16.
     ListTables,
+    /// Protocol 17 (`DEL-FR-006`, ADR-0051,
+    /// `docs/design/SERVER-DELETE-DESIGN.md`): remove one record of this
+    /// table — the last of the three record-set writes, the consumer's
+    /// `delete_memory` and entity-delete paths. Answered [`Response::Ok`]
+    /// when the record is gone (durable before the reply), or
+    /// [`Response::NotFound`] when `id` has no record — `UpdateField`'s
+    /// and `Replace`'s shape; no new `ErrorCode`. Every edge touching the
+    /// record goes with it, under every label of its own table, and —
+    /// on a `serve_tables` server — under every other table's relation
+    /// whose `target_table` is this one (the consumer's `DELETE FROM
+    /// memory_entities WHERE entity_id = ?`). The id may be inserted
+    /// again afterwards. `Unsupported` from an adapter with no delete.
+    /// Gated server-side: `Malformed` below 17; `Unauthorized` for a
+    /// `ReadOnly` token; `SessionOpen` while a session is open (never
+    /// staged, never journaled).
+    Delete {
+        id: RecordId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -883,6 +902,7 @@ mod tests {
             "Link" => 14,
             "Replace" => 15,
             "Use" | "ListTables" | "Tables" => 16,
+            "Delete" => 17,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1205,6 +1225,12 @@ mod tests {
                 &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // relation len
                 b"relates_to",
             ]),
+        );
+        // Protocol 17 (`DEL-FR-006`, ADR-0051): `Delete` at 26.
+        assert_golden(
+            "Delete",
+            &Request::Delete { id },
+            &bytes(&[&[0x1a, 0x00, 0x00, 0x00], &ID1]),
         );
         // Protocol 16 (`TBL-FR-002`/`003`, ADR-0050): `Use` at 24 and
         // `ListTables` at 25.
@@ -1603,8 +1629,8 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 16 is the one that added
-    /// `Request::Use`/`ListTables` and `Response::Tables` (15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// module docs' table — version 17 is the one that added
+    /// `Request::Delete` (16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1616,7 +1642,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 16);
+        assert_eq!(PROTOCOL_VERSION, 17);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like
