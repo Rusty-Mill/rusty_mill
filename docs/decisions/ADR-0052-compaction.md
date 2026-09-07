@@ -1,8 +1,13 @@
 # ADR-0052: Compaction — the reopen fold in place, retired slots reclaimed, `Request::Compact` at protocol 18
 
-- Status: **Proposed** (2026-09-07; implemented on the same branch,
-  the `ADR-0046`–`ADR-0051` cadence — the owner accepts or amends a
-  working, tested shape). See "Considered options".
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): an
+  explicit request doing the reopen fold in place plus a gapless slot
+  rewrite, under the write lock; (b) automatic past a threshold, (c)
+  reopen-only with retired slots dropped, (d) online with a shadow
+  file, and (e) decline all declined. Recorded in "Acceptance and
+  implementation" below.) Proposed and implemented on one branch, the
+  `ADR-0046`–`ADR-0051` cadence.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-COMPACT-DESIGN.md` (the full design),
@@ -69,4 +74,8 @@ millisecond pause. **(e) Decline.**
   `server/memory` +1, `server_memory_integration` +1, `server_protocol_
   version` +1, `server_dog_integration` +1, `server_auth_integration`/
   `server_transaction_integration`/`server_python_client` extended;
-  every acceptance criterion 1–3 holds. (This PR.)
+  every acceptance criterion 1–3 holds. (PR #206.)
+- 2026-09-07: accepted as designed (option (a); (b)–(e) declined). No
+  change to the implementation. The line's functional and operational
+  scope for the consumer is closed; a compaction policy is the
+  caller's.
