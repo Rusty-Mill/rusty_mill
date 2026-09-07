@@ -298,6 +298,24 @@ pub fn open_entity_production_stack_portable(
     )?))
 }
 
+/// Open the stack at `path` if its slot file exists, else create an
+/// **empty** one there — the served process's shape across restarts
+/// (`DDR-FR-001`, ADR-0053), the `Entity` twin of
+/// `crate::generic::memory::open_or_create_memory_production_stack`.
+///
+/// # Errors
+///
+/// Everything [`create_entity_production_stack`] or
+/// [`open_entity_production_stack_portable`] can return.
+pub fn open_or_create_entity_production_stack(
+    path: &Path,
+) -> Result<EntityProductionStack, DurabilityError> {
+    if path.exists() {
+        return open_entity_production_stack_portable(path);
+    }
+    create_entity_production_stack(Vec::new(), &[], &[], path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,5 +948,37 @@ mod tests {
             vec![grace.id]
         );
         assert!(GetById::<Entity>::get(&reopened, Uuid::from_u128(3)).is_none());
+    }
+
+    /// `DDR-FR-001` (ADR-0053): the first call at a path creates an
+    /// empty stack; an insert and a link on it survive a second call,
+    /// which reopens rather than recreates, the name index included.
+    #[test]
+    fn open_or_create_creates_empty_then_reopens_with_runtime_writes() {
+        use crate::generic::query::{AllIds, Insert, MultiLink};
+        let dir = fresh_temp_dir("generic_entity_open_or_create").unwrap();
+        let path = dir.join("entities.mmap");
+
+        let mut store = open_or_create_entity_production_stack(&path).unwrap();
+        assert!(store.all_ids().is_empty(), "created empty");
+        for entity in sample_entities() {
+            store.insert(entity).unwrap();
+        }
+        store
+            .link(RELATION_LABELS[0], Uuid::from_u128(1), Uuid::from_u128(2))
+            .unwrap();
+        drop(store);
+
+        let store = open_or_create_entity_production_stack(&path).unwrap();
+        assert_eq!(
+            store.all_ids().len(),
+            sample_entities().len(),
+            "reopened, not recreated"
+        );
+        assert_eq!(
+            store.neighbors_by_relation(RELATION_LABELS[0], Uuid::from_u128(1)),
+            Some(vec![Uuid::from_u128(2)])
+        );
+        assert_eq!(store.find_by_name("ada lovelace"), vec![Uuid::from_u128(1)]);
     }
 }
