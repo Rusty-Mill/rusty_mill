@@ -86,17 +86,20 @@ justified each pick.
 ### The `server` feature: a network server/query layer
 
 `server::serve` puts a thin, real TCP listener in front of
-`ProductionStore`/`GenericProductionStore` — a `Request`/`Response` wire
-protocol over length-prefixed `bincode` framing, thread-per-connection,
-reusing whichever `RwLock` the wrapped store already manages (no new lock
-at this layer). Off by default, distinct from `research` (this is new,
-additive capability, not a benchmarked alternative):
+`ProductionStore`/`GenericProductionStore` — a versioned
+`Request`/`Response` wire protocol (currently version 18) over
+length-prefixed `bincode` framing, thread-per-connection, reusing whichever
+`RwLock` the wrapped store already manages (no new lock at this layer).
+Off by default, distinct from `research` (this is new, additive
+capability, not a benchmarked alternative):
 
 ```sh
 cargo build --features server
-cargo test --features server               # Dog domain only
-cargo test --features server,research       # + Order/Customer and Employee, the second and third validation domains
-cargo run --features server --bin dog_server   # a minimal local server, Dog domain
+cargo test --features server                # Dog, Reminder, Entity, Memory — the front-door domains
+cargo test --features server,research       # + Order/Customer and Employee, the reference domains
+cargo run --features server --bin dog_server      # a minimal local server, Dog domain
+cargo run --features server --bin entity_server   # Entity: a labeled graph with open relation labels
+cargo run --features server --bin memory_server   # Memory and Entity, two tables on one listener
 ```
 
 The client half stands alone behind the `client` feature (`server`
@@ -115,54 +118,54 @@ python3 -m unittest discover -s clients/python/tests -v   # Python client vs. th
 cargo test --features server --test server_python_client  # Python client vs. a live Entity server
 ```
 
-A client that doesn't know a domain at compile time can send
+A client that doesn't know a domain at compile time sends
 `Request::DescribeSchema` first — the `Response::Schema` it gets back
 names every field, its wire type, and which operations it supports (see
-`ADR-0011`), so it can drive `GetById`/`FilterEq`/`ScanField`/
-`UpdateField`/`Parent`/`Children`/`Neighbors` from discovered field tags
-instead of hardcoded ones. `server::client::SchemaDrivenClient` is a
-real, reusable client built exactly this way — addresses every field by
-name, never a domain's own `FIELD_*` constant, and checks capabilities
-client-side before sending.
+`ADR-0011`) — and `DescribeRelations` for what a `JOIN` may name.
+`server::client::SchemaDrivenClient` is a real, reusable client built
+exactly this way — addresses every field by name, never a domain's own
+`FIELD_*` constant, and checks capabilities client-side before sending.
+It also parses a bounded, read-only SQL subset (`SELECT … WHERE`,
+`GROUP BY` with `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, and `JOIN … ON
+<relation>`, within a table or across two) and compiles it to the wire
+primitives client-side — the server has no query language of its own.
 
-Three domain adapters validate the protocol: `Dog` (`Neighbors` only),
-`Order`/`Customer` (`Parent`/`Children` only), and `Employee` — the third,
-purpose-built to combine both relation kinds on one self-referential
-record type (`reports_to`/`ChildOf`, `collaborates_with`/
-`SymmetricRelation`), the first domain where every relation-kind request
-is a real operation, none `Unsupported`.
+**What the wire can do today** (`SERVER-001`, every item its own accepted
+ADR): read a record, filter on an indexed field, scan and update a
+scannable field, walk a directed or symmetric relation one hop;
+per-connection transaction sessions with read-your-writes, stage-time
+validation, and snapshot isolation; an opt-in crash-atomic redo journal
+with group commit; a protocol version negotiated by an optional first
+`Hello` frame, append-only with four compatibility rules; and — since the
+`rusty_remind_me` line of rounds (ADR-0036 through ADR-0052) — runtime
+**insertion**, **linking** under open relation labels, **whole-record
+replacement**, **deletion** with cascading edge cleanup, **more than one
+table on one connection** (`Use`, `ListTables`, cross-table `JOIN`), and
+an operator's **compaction** request. Every runtime write is append-only
+to a log beside the file and folded at the next open or compaction.
 
-**No transaction semantics beyond a single batch, no query language
-beyond fixed field-tag addressing** — see `src/server`'s own module docs
-and `docs/decisions/ADR-0010-server-query-layer-proposal.md` (Accepted)
-before using it. **Authentication/authorization is now implemented** —
-`docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted — `server::serve`
-takes an `AuthConfig` naming which token(s), if any, a server instance
-accepts and the `ReadOnly`/`ReadWrite` class each grants;
-`AuthConfig::default()` (no tokens configured) reproduces today's
-unauthenticated behavior exactly, so this is purely opt-in. **Native
-transport encryption is now implemented too** — `docs/design/SERVER-TLS-DESIGN.md`,
-ADR-0014, Accepted — `server::serve` also takes a `TlsConfig`, native TLS
-via `rusty_tls` (this owner's own ecosystem-wide `rustls` wrapper,
-`Rusty-Mill/rusty_mill` — not a direct `rustls` dependency); `tls: None`
-reproduces today's plaintext behavior exactly, so this is purely opt-in
-too. **Do not expose a server built from this module beyond a trusted,
-localhost/development network unless both `AuthConfig` and `TlsConfig`
-are configured together** — either alone still leaves the other half of
-the original gap open (a `TlsConfig`-only server still lets anyone who
-can connect do anything; an `AuthConfig`-only server still puts tokens
-and every record value in plaintext on the wire).
-**Atomic multi-operation transactions are now implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
-Accepted — `Request::Transaction { updates }` batches several
-`UpdateField`-shaped writes into one all-or-nothing operation, backed by
-a critical-section primitive on `ProductionStore`/`GenericProductionStore`
-themselves rather than a new lock. Delivers atomicity/isolation with
-respect to concurrent access, explicitly **not** crash-atomicity across a
-batch or a multi-round-trip interactive session — see that document for
-the full account before assuming more than it delivers.
+Six domain adapters validate the protocol. Three are front-door, built as
+a real backend for the owner's `rusty_remind_me` memory service:
+`Reminder` (a fixed-schema record), `Entity` (a labeled graph with
+name lookup, aliases, and relation labels created at runtime), and
+`Memory` (the consumer's `memories` table, with a `mentions` relation
+whose far end lives in the `entity` table). Three are reference material:
+`Dog` (`Neighbors` only), `Order`/`Customer` (`Parent`/`Children` only),
+and `Employee` (both relation kinds on one self-referential record).
+
+**Security.** Authentication/authorization (`ADR-0012`), native TLS via
+`rusty_tls` (`ADR-0014`), mutual TLS with class-from-certificate, rate
+limiting and lockout, and audit and access logs are all implemented and
+all opt-in through one `ServeOptions` value (`ADR-0032`);
+`ServeOptions::default()` reproduces the original unauthenticated,
+plaintext behavior exactly. **Do not expose a server built from this
+module beyond a trusted, localhost/development network unless both
+authentication and TLS are configured together** — either alone leaves
+the other half of the gap open. See `src/server`'s own module docs and
+`docs/decisions/ADR-0010-server-query-layer-proposal.md` before using it.
 
 ```sh
-cargo bench --features server,research --bench server   # real-socket round-trip latency + thread-per-connection throughput sweep, all three domains
+cargo bench --features server,research --bench server   # real-socket round-trip latency + thread-per-connection throughput sweep
 ```
 
 ## Running the suite
@@ -206,6 +209,14 @@ at the right file:
   ecosystem-wide `rustls` wrapper) on the server/query layer, now
   **Accepted and implemented** (`TlsConfig`, `server` feature, `SERVER-001`
   v0.9.0).
+- **`docs/design/SERVER-*-DESIGN.md`**, the rest — one design per server
+  round after that, each Accepted and implemented: protocol versioning,
+  sessions, the journal, SQL `SELECT`/`GROUP BY`/`JOIN`, the `Reminder`,
+  `Entity`, and `Memory` domains, runtime insertion/linking/replacement/
+  deletion, tables on one connection, compaction, and the wire
+  specification with its Python client. `docs/specifications/server/
+  SERVER-001-query-layer.md` is the one place every round's requirement
+  lives, in order.
 - **`docs/decisions/`** — one ADR per accepted architectural decision, in
   order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
@@ -228,11 +239,26 @@ at the right file:
   - `ADR-0015` — benchmarking `ProductionStore` against real external
     databases (SQLite, Postgres, DuckDB) on the same three fixed access
     patterns already used in-repo (now Accepted and implemented)
+  - `ADR-0016`–`ADR-0035` — the server hardened round by round:
+    portable record and edge blobs, schema tags, multi-field mmap
+    durability, the pinned `bincode` codec, protocol versioning
+    (`Hello`), mutual TLS, transaction sessions, the redo journal and its
+    group commit, read-your-writes, class-from-certificate, audit and
+    access logs, rate limiting, stage-time validation, snapshot
+    isolation, `ServeOptions`, and the SQL `SELECT`/`GROUP BY` subset
+  - `ADR-0036`–`ADR-0052` — the `rusty_remind_me` line: the `Reminder`,
+    `Entity`, and `Memory` domains; aliases and name lookup; the wire
+    specification and Python client (`ADR-0043`); relation `JOIN`
+    (`ADR-0044`) and tables on one connection (`ADR-0045`/`ADR-0050`);
+    runtime insertion (`ADR-0046`), linking (`ADR-0047`), replacement
+    (`ADR-0049`), deletion (`ADR-0051`), and compaction (`ADR-0052`) —
+    every one proposed and implemented in one cycle, then accepted
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
-- **`docs/FUTURE-GROWTH.md`** — unplanned, unscheduled directions this
-  project could grow in (a server/query layer, SQLite/DuckDB-style
+- **`docs/FUTURE-GROWTH.md`** — what was once unplanned growth (a
+  server/query layer, now built — the document records what of it
+  happened) and what remains genuinely out of scope (SQLite/DuckDB-style
   parity) and what each would actually require.
 - **`docs/traceability/TRACEABILITY.md`** — the requirement → decision →
   implementation → verification mapping tying the above together.

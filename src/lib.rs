@@ -61,8 +61,12 @@
 //! framing, thread-per-connection, reusing whichever `RwLock` the wrapped
 //! store already manages (no new lock at this layer). Off by default
 //! behind its own `server` feature (distinct from `research` — this is new
-//! capability, not a benchmarked alternative), and validated against three
-//! domains: `Dog` ([`server::dog::DogConnectionStore`], `Neighbors` only),
+//! capability, not a benchmarked alternative), and validated against six
+//! domains. Three are front-door — `Reminder`, `Entity`, and `Memory`
+//! ([`server::reminder`], [`server::entity`], [`server::memory`]), built
+//! since ADR-0036 as a real backend for the owner's `rusty_remind_me`
+//! memory service. Three are reference material: `Dog`
+//! ([`server::dog::DogConnectionStore`], `Neighbors` only),
 //! `Order`/`Customer` ([`server::order::OrderConnectionStore`],
 //! `Parent`/`Children` only), and `Employee`
 //! ([`server::employee::EmployeeConnectionStore`], both — the first
@@ -92,7 +96,14 @@
 //! ecosystem-wide `rustls` wrapper, not a direct `rustls` dependency —
 //! this crate's first git dependency) before any framed traffic, also
 //! purely opt-in — a server started with no `TlsConfig` behaves exactly
-//! as before. **No query language beyond fixed field-tag addressing, and
+//! as before. Since then the wire has gained a negotiated protocol version
+//! (18 today), transaction sessions, a redo journal, a client-side SQL
+//! `SELECT`/`GROUP BY`/`JOIN` subset compiled to the same primitives, and
+//! — the `rusty_remind_me` line, ADR-0036 through ADR-0052 — runtime
+//! insertion, linking, replacement, deletion, more than one table on one
+//! connection, and compaction; `SERVER-001`'s change history is the
+//! ordered account. **The server itself still has no query language
+//! beyond field-tag addressing (the SQL lives in the client), and
 //! `TlsConfig`/`ServeOptions` must both be configured together before
 //! exposing a server beyond a trusted network** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`

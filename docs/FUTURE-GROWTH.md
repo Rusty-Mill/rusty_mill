@@ -12,7 +12,9 @@ Every current boundary in this project is a deliberate scope line from a specifi
 * The generic schema layer (`crate::generic`) was validated against a toy domain (`Order`/`Customer`) and a real one (requirements traceability). Nothing schema-specific is baked into the storage engine itself.
 * Staying off crates.io is a current decision (a `Cargo.toml`/publishing choice), not a technical constraint.
 
-## Path to a server / query layer
+## Path to a server / query layer — since built
+
+**Status (2026-09):** this path was taken. The `server` feature (`ADR-0010`, `SERVER-001`) is the binary described below, and every "genuinely new" item was built in its own round: authentication/authorization (`ADR-0012`), transport encryption (`ADR-0014`, mutual TLS `ADR-0023`), transaction sessions (`ADR-0024`, journal `ADR-0025`/`0026`, read-your-writes `ADR-0027`, snapshot isolation `ADR-0033`), a versioned protocol (`ADR-0022`), a client-side SQL subset (`ADR-0034`/`0035`/`0044`), and — for the owner's `rusty_remind_me` service — runtime insertion, linking, replacement, deletion, tables on one connection, and compaction (`ADR-0046`–`ADR-0052`). The original accounting is kept below as written, because it was right about the shape: the engine did not change to accommodate any of it.
 
 The storage engine's public API (`get`/`scan`/`filter`/`update`/relationship traversal) is already a clean boundary a network layer could sit on top of without changing the engine itself.
 
@@ -35,14 +37,14 @@ This is a different tier of project, not a natural extension of the current one 
 The big three:
 
 1. SQL. A parser, a query planner, a cost-based optimizer, and an execution engine. Every query today is a hand-written Rust method call against a specific schema's traits — there's no declarative language layer at all.
-2. Transactions. Individual writes are crash-safe and torn-write-safe today, but "do these N operations atomically, or roll all of them back" doesn't exist as a concept. This needs a real transaction manager — likely its own MVCC or log-based design.
-3. Arbitrary joins. Relationships in this engine are hand-declared, purpose-built traversal primitives (`littermate_of`, `belongs_to`) — built in advance, specific to a schema. SQL lets you join any two tables on any predicate at query time; nothing like that exists here, and every relationship currently has to be designed and built ahead of time.
+2. Transactions. *Partly built since this was written:* a batch of field updates applies all-or-nothing (`ADR-0013`), a per-connection session stages writes and commits them as one batch with read-your-writes and snapshot isolation (`ADR-0024`/`0027`/`0033`), and an opt-in redo journal makes a batch crash-atomic (`ADR-0025`). Still absent: a general transaction manager — MVCC, multi-table atomicity, and transactions over inserts, links, replacements, and deletes (each of those is a single durable operation, never staged).
+3. Arbitrary joins. *Partly built since this was written:* a `JOIN … ON <relation>` over a declared relation, within a table or across two tables on one connection (`ADR-0044`/`ADR-0050`), evaluated as an index nested loop. Still absent: a join on an arbitrary predicate at query time — every relation is still declared ahead of time, and relation labels created at runtime (`ADR-0047`) are labels on a declared relation kind, not new predicates.
 
 Smaller, but still real:
 
 * Dynamic/runtime schema (`ALTER TABLE`-style changes). Schema here is a compile-time Rust concept.
-* A query optimizer for aggregation (`GROUP BY`, `AVG`, multi-table joins) — DuckDB's core identity is vectorized execution over exactly this; nothing comparable exists here.
-* Client ecosystem — drivers for other languages, a CLI, general tooling. This is Rust-only and embedded today.
+* A query optimizer for aggregation (`GROUP BY`, `AVG`, multi-table joins) — DuckDB's core identity is vectorized execution over exactly this. A bounded `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` exists (`ADR-0035`) as a full scan then a bucket, with no optimizer of any kind.
+* Client ecosystem — drivers for other languages, a CLI, general tooling. A byte-level wire specification and a stdlib-only Python client exist (`ADR-0043`); everything else on this list does not.
 * Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison.
 
 What's already solid and wouldn't need to be redone: the storage engine itself, real measured durability, real measured concurrency (single- and multi-process), and a working generic schema layer proven against more than one domain. SQL, transactions, and arbitrary joins would be built on top of that foundation, not require rebuilding it — but each is a serious, standalone effort, not a small extension of this project.

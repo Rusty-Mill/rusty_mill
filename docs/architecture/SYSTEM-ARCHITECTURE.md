@@ -26,6 +26,18 @@ small, write-heavy, high-thread-count deployment); otherwise, use
 
 ## Context
 
+> **Written for the first pass; kept as written.** The paragraph below
+> describes the benchmark harness this repository began as. Since then
+> the crate gained durable, concurrency-safe stores (`ProductionStore`,
+> `GenericProductionStore` — "Start here" above), and behind the `server`
+> feature a real network server/query layer with a versioned wire
+> protocol, six domain adapters, sessions, a redo journal, runtime
+> insertion/linking/replacement/deletion, several tables on one
+> connection, and compaction (`ADR-0010` through `ADR-0052`). For how
+> *that* fits together, `src/server/mod.rs`'s module docs and
+> `docs/specifications/server/SERVER-001-query-layer.md` are the current
+> account; this document remains the benchmark's.
+
 This crate has one runtime shape: a benchmark process (`cargo bench`) that,
 per iteration, builds a dataset once, constructs each of the three backend
 implementations from it, and drives the same workload functions against
