@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 19);
+    assert_eq!(dog.server_protocol_version(), 20);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -1033,6 +1033,107 @@ fn replace_if_is_malformed_below_version_19() {
             ("age", CompareOp::Lt, ScanValue::U32(9))
         ),
         Err(ClientError::Unsupported("replace_if"))
+    ));
+}
+
+/// `PAG-FR-004` (ADR-0055), rule 3: `Page` is protocol 20 — a connection
+/// negotiated at 19 (and a silent one) is answered `Malformed` with the
+/// connection left open; at 20 it is served, and its validation refuses
+/// a `Str` order, an unknown field, and a zero limit. Rule 4: the Rust
+/// client refuses below 20 with no frame.
+#[test]
+fn page_is_malformed_below_version_20() {
+    let addr = start_entity_server();
+    let page = Request::Page {
+        order_by: 2,
+        after: None,
+        limit: 10,
+    };
+    for hello in [Some(19u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &page),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            Response::Schema(_)
+        ));
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    match roundtrip(&mut reader, &mut writer, &page) {
+        Response::Rows { rows } => assert_eq!(rows.len(), 1, "one entity"),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+    for (req, code) in [
+        (
+            Request::Page {
+                order_by: 0,
+                after: None,
+                limit: 10,
+            },
+            ErrorCode::Malformed,
+        ),
+        (
+            Request::Page {
+                order_by: 99,
+                after: None,
+                limit: 10,
+            },
+            ErrorCode::UnknownField,
+        ),
+        (
+            Request::Page {
+                order_by: 2,
+                after: None,
+                limit: 0,
+            },
+            ErrorCode::Malformed,
+        ),
+    ] {
+        match roundtrip(&mut reader, &mut writer, &req) {
+            Response::Err { code: got, .. } => assert_eq!(got, code, "{req:?}"),
+            other => panic!("expected Err({code:?}), got {other:?}"),
+        }
+    }
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.page("age", None, 10),
+        Err(ClientError::Unsupported("page"))
     ));
 }
 

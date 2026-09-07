@@ -105,6 +105,18 @@ def main() -> int:
         except UnsupportedError as e:
             print(f"replace_if=unsupported:{e}")
 
+        # Protocol 20 (PAG-FR-005): ordered keyset pages by mention_count —
+        # two pages of three walk every entity in (mention_count, id) order.
+        try:
+            first = c.page("mention_count", None, 3)
+            rest = c.page("mention_count", (dict(first[-1][1])["mention_count"], first[-1][0]), 100)
+            counts = [dict(f)["mention_count"] for _, f in first + rest]
+            print(f"page_total={len(first) + len(rest)}")
+            print(f"page_sorted={'yes' if counts == sorted(counts) else 'no'}")
+            print(f"page_disjoint={'yes' if not {r for r, _ in first} & {r for r, _ in rest} else 'no'}")
+        except UnsupportedError as e:
+            print(f"page=unsupported:{e}")
+
         # Protocol 16 (TBL-FR-009): a one-table server lists itself; Use of
         # its own name is Ok, of another Malformed.
         try:

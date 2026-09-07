@@ -526,3 +526,47 @@ fn compact_is_unsupported_on_the_dog_domain() {
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }
+
+/// `PAG-FR-002` (ADR-0055): the trait's default `page` serves a domain
+/// that overrides nothing — `Dog` by `age`, every record in `(age, id)`
+/// order across two pages, disjoint and complete.
+#[test]
+fn page_by_age_walks_the_dog_domain_through_the_default() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let all = match client.query("SELECT age FROM dog").unwrap() {
+        QueryResult::Rows(rows) => rows.len(),
+        other => panic!("expected Rows, got {other:?}"),
+    };
+    assert!(all >= 2);
+    let first = client.page("age", None, 1).unwrap();
+    assert_eq!(first.len(), 1);
+    let (last_id, fields) = &first[0];
+    let age = fields
+        .iter()
+        .find(|(name, _)| name == "age")
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    let rest = client
+        .page("age", Some((age.clone(), *last_id)), 100)
+        .unwrap();
+    assert_eq!(1 + rest.len(), all, "disjoint and complete");
+    let mut keys: Vec<(u32, Uuid)> = first
+        .iter()
+        .chain(rest.iter())
+        .map(|(id, fields)| {
+            let age = fields
+                .iter()
+                .find(|(name, _)| name == "age")
+                .map(|(_, v)| match v {
+                    ScanValue::U32(a) => *a,
+                    other => panic!("age is U32, got {other:?}"),
+                })
+                .unwrap();
+            (age, *id)
+        })
+        .collect();
+    let sorted = keys.clone();
+    keys.sort();
+    assert_eq!(sorted, keys, "served in (age, id) order");
+}

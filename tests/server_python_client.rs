@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_19_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_20_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -168,6 +168,11 @@ fn the_python_reference_client_speaks_the_protocol_at_19_and_at_10() {
     assert_eq!(get("replace_if_refused"), "refused");
     assert_eq!(get("replace_if_stored"), "3");
     assert_eq!(get("replace_if_unknown"), "notfound");
+    // `PAG-FR-005` (ADR-0055): two ordered pages from Python walk every
+    // entity, sorted, disjoint.
+    assert_eq!(get("page_total"), "6");
+    assert_eq!(get("page_sorted"), "yes");
+    assert_eq!(get("page_disjoint"), "yes");
     // `TBL-FR-009` (ADR-0050): the table list and `Use` from Python.
     assert_eq!(get("tables"), "entity;entity");
     assert_eq!(get("use_self"), "entity");

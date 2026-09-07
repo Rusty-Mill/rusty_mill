@@ -331,6 +331,36 @@ class Client:
             return "notfound"
         raise ProtocolError(type(reply).__name__)
 
+    def page(
+        self,
+        order_by: str,
+        after: Optional[Tuple[Any, uuid.UUID]] = None,
+        limit: int = 100,
+    ) -> List[Tuple[uuid.UUID, List[Tuple[str, Any]]]]:
+        """One ordered keyset page (PAG-FR-005, protocol 20): every record
+        sorted ascending by ``order_by`` (a U32/I64 field) with the id as
+        the tie-break, strictly after ``after`` (``(value, id)``; ``None``
+        for the first page), at most ``limit`` rows, each ``(id, [(name,
+        value), ...])``. The last row's ``(value, id)`` is the next call's
+        ``after``. A non-numeric ``order_by`` or a zero ``limit`` is
+        ``UnsupportedError`` with no frame sent; below 20 likewise."""
+        need = p.REQUEST_INTRODUCED_AT[p.Page]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(f"Page needs protocol {need}, negotiated {self.server_protocol_version}")
+        descriptor = self.field(order_by)
+        if descriptor.value_kind not in (p.ValueKind.U32, p.ValueKind.I64):
+            raise UnsupportedError(f"page order on {order_by!r}, a {descriptor.value_kind.name} field")
+        if limit <= 0:
+            raise UnsupportedError("page limit must be at least 1")
+        cursor = None
+        if after is not None:
+            value, record_id = after
+            cursor = (_to_scan_value(descriptor.value_kind, value), record_id)
+        reply = self._roundtrip(p.Page(descriptor.tag, cursor, limit))
+        if isinstance(reply, p.Rows):
+            return [(rid, self._named(fields)) for rid, fields in reply.rows]
+        raise ProtocolError(type(reply).__name__)
+
     def delete(self, record_id: uuid.UUID) -> bool:
         """Remove one record (DEL-FR-008, protocol 17): ``True`` when it is
         gone with every edge touching it, ``False`` when the id has no
