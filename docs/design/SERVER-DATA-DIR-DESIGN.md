@@ -1,8 +1,10 @@
-# Server Durable Data Directory Design (Proposed)
+# Server Durable Data Directory Design (Accepted)
 
-- Status: **Proposed** (2026-09-07) — implemented on the same branch as
-  `SERVER-001` v0.43.0 / FR-053, the `ADR-0046`–`ADR-0052` cadence, for
-  the owner to accept as designed or send back. No wire change.
+- Status: **Accepted** (2026-09-07, `ADR-0053` option (a), as designed —
+  one environment variable selecting a durable directory, open-or-create
+  per table, empty on first start; a positional argument, durable by
+  default, seeding, and declining all declined). Implemented on the same
+  branch as `SERVER-001` v0.43.0 / FR-053, PR #210. No wire change.
 - Date: 2026-09-07
 - Related: `ADR-0048`/`docs/design/SERVER-MEMORY-DOMAIN-DESIGN.md`
   (`memory_server`, which this round makes restartable), `ADR-0046`
@@ -179,6 +181,10 @@ binary-level harness is an open question below.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #210. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.43.0 / FR-053, landed as
+  designed (PR #210).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The eighteenth round in the `rusty_remind_me`-motivated
   line; found by an integration spike's first restart.

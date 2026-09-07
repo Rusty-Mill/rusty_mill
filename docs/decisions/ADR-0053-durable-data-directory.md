@@ -1,8 +1,13 @@
 # ADR-0053: A durable data directory for `memory_server` — `SERVER_DATA_DIR`, open-or-create per table
 
-- Status: **Proposed** (2026-09-07). Proposed and implemented on one
-  branch, the `ADR-0046`–`ADR-0052` cadence; the owner's options are
-  in "Considered options" below.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): one
+  environment variable selecting a durable directory, open-or-create
+  per table, empty on first start; (b) a positional argument, (c)
+  durable by default at a fixed path, (d) seeding the samples into the
+  durable directory, and (e) decline declined. Recorded in "Acceptance
+  and implementation" below.) Proposed and implemented on one branch,
+  the `ADR-0046`–`ADR-0052` cadence.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-DATA-DIR-DESIGN.md` (the full design),
@@ -60,3 +65,7 @@ Decline.**
   `src/generic/entity.rs`, `src/bin/memory_server.rs`; tests: `memory`
   +1, `entity` +1; criterion 2 run by hand over a real socket (write,
   kill, restart, read back) and recorded in `docs/PROJECT-STATUS.md`.
+  (PR #210.)
+- 2026-09-07: accepted as designed (option (a); (b)–(e) declined). No
+  change to the implementation. The other binaries and a binary-level
+  test harness stay open questions.
