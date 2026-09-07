@@ -25,8 +25,10 @@ Since `ADR-0046`/`ADR-0047` a running store can gain records and
 edges, so a `memories` table would no longer be a fixture nobody can
 add to. Reading the consumer's source again (`schema_tables.sql`,
 `add_memory`, `list_filters`, the `access_count` bump) shows that
-eleven of its thirty columns are what a memory *is* at creation and
-what every list reads back; the other nineteen are scoring floats,
+eleven of its twenty-eight columns (twelve with `id`; the count
+corrected 2026-09-07, see the design's change history) are what a
+memory *is* at creation and what every list reads back; the other
+sixteen are scoring floats,
 nullable columns, sync bookkeeping, chunking, soft deletion, and two
 edge tables — each blocked by a wire-level gap this crate has not
 designed (float, null, directed edge, deletion) or owned by a named
