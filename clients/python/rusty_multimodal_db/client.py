@@ -76,6 +76,11 @@ class Client:
         self.relations = relations
         self._by_name: Dict[str, p.FieldDescriptor] = {f.name: f for f in schema.fields}
         self._by_tag: Dict[int, p.FieldDescriptor] = {f.tag: f for f in schema.fields}
+        # TBL-FR-009 (protocol 16): the table selected with ``use_table``
+        # (None = the server's primary), and other tables' schemas, cached
+        # once each for a cross-table join.
+        self.table: Optional[str] = None
+        self._table_schemas: Dict[str, p.DomainSchema] = {}
 
     # ---- connection lifecycle ----
 
@@ -227,6 +232,49 @@ class Client:
         tagged = tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
         _expect_ok(self._roundtrip(p.Insert(record_id, tagged)))
 
+    def list_tables(self) -> Tuple[List[str], str]:
+        """The server's table names and its primary (TBL-FR-009, protocol
+        16). ``UnsupportedError`` below 16 with no frame sent."""
+        reply = self._roundtrip(p.ListTables())
+        if isinstance(reply, p.Tables):
+            return list(reply.names), reply.primary
+        raise ProtocolError(type(reply).__name__)
+
+    def use_table(self, table: str) -> None:
+        """Select the table every following request is served from
+        (TBL-FR-009, protocol 16); the schema and relations are re-fetched.
+        An unknown name is ``ServerError`` with ``ErrorCode.Malformed``."""
+        _expect_ok(self._roundtrip(p.Use(table)))
+        schema_reply = self._roundtrip(p.DescribeSchema())
+        if not isinstance(schema_reply, p.Schema):
+            raise ProtocolError(type(schema_reply).__name__)
+        rel = self._roundtrip(p.DescribeRelations())
+        if not isinstance(rel, p.Relations):
+            raise ProtocolError(type(rel).__name__)
+        self.schema = schema_reply.schema
+        self.relations = list(rel.relations)
+        self._by_name = {f.name: f for f in self.schema.fields}
+        self._by_tag = {f.tag: f for f in self.schema.fields}
+        self._table_schemas[table] = self.schema
+        self.table = table
+
+    def _schema_of(self, table: str) -> p.DomainSchema:
+        """Another table's schema for a cross-table join: switch, describe,
+        switch back; cached for the connection's life."""
+        cached = self._table_schemas.get(table)
+        if cached is not None:
+            return cached
+        back_to = self.table if self.table is not None else self.list_tables()[1]
+        _expect_ok(self._roundtrip(p.Use(table)))
+        try:
+            reply = self._roundtrip(p.DescribeSchema())
+        finally:
+            _expect_ok(self._roundtrip(p.Use(back_to)))
+        if not isinstance(reply, p.Schema):
+            raise ProtocolError(type(reply).__name__)
+        self._table_schemas[table] = reply.schema
+        return reply.schema
+
     def replace(self, record_id: uuid.UUID, fields: Sequence[Tuple[str, Any]]) -> bool:
         """Replace one record whole (REP-FR-007, protocol 15): ``insert``'s
         shape over an id that already has a record. ``True`` when replaced,
@@ -362,21 +410,47 @@ class Client:
         descriptor = next((r for r in self.relations if r.name == relation), None)
         if descriptor is None:
             raise UnsupportedError(f"ON {relation}: not a relation this domain lists")
-        if descriptor.target_table is not None:
-            raise UnsupportedError(f"ON {relation}: its rows live in another table")
+        right_table = descriptor.target_table
+        if right_table is None:
+            right_schema = self.schema
+        else:
+            # TBL-FR-009 (protocol 16): a cross-table join — the right
+            # side compiles against the target table's own schema.
+            need = p.REQUEST_INTRODUCED_AT[p.Use]
+            if self.server_protocol_version < need:
+                raise UnsupportedError(f"ON {relation}: its rows live in table {right_table}, which needs protocol {need}")
+            right_schema = self._schema_of(right_table)
+        by_name = {f.name: f for f in right_schema.fields}
+        by_tag = {f.tag: f for f in right_schema.fields}
+
+        def right_field(name: str) -> p.FieldDescriptor:
+            try:
+                return by_name[name]
+            except KeyError:
+                raise UnknownFieldError(name) from None
+
+        right_selection = p.SelectAll() if right_select is None else p.SelectFields(
+            tuple(right_field(n).tag for n in right_select)
+        )
+        right_predicates = tuple(
+            p.Predicate(right_field(n).tag, op, _to_scan_value(right_field(n).value_kind, v))
+            for n, op, v in right_where
+        )
         spec = p.JoinSpec(
             descriptor.kind,
-            None,
+            right_table,
             self._selection(left_select),
-            self._selection(right_select),
+            right_selection,
             tuple(self._predicates(left_where)),
-            tuple(self._predicates(right_where)),
+            right_predicates,
             limit,
         )
         reply = self._roundtrip(p.Join(spec))
         if isinstance(reply, p.JoinedRows):
+            def named_right(fields):
+                return [((by_tag[t].name if t in by_tag else str(t)), p.scan_value_py(v)) for t, v in fields]
             return [
-                (r.left_id, self._named(r.left), r.right_id, self._named(r.right)) for r in reply.rows
+                (r.left_id, self._named(r.left), r.right_id, named_right(r.right)) for r in reply.rows
             ]
         raise ProtocolError(type(reply).__name__)
 

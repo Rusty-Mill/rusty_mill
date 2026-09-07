@@ -81,6 +81,10 @@ pub enum RequestKind {
     Link,
     /// Protocol 15, ADR-0049.
     Replace,
+    /// Protocol 16, ADR-0050.
+    Use,
+    /// Protocol 16, ADR-0050.
+    ListTables,
 }
 
 impl RequestKind {
@@ -110,6 +114,8 @@ impl RequestKind {
             Request::Insert { .. } => RequestKind::Insert,
             Request::Link { .. } => RequestKind::Link,
             Request::Replace { .. } => RequestKind::Replace,
+            Request::Use { .. } => RequestKind::Use,
+            Request::ListTables => RequestKind::ListTables,
         }
     }
 }

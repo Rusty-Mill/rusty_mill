@@ -35,12 +35,16 @@
 //! — see ADR-0010's Consequences. Usage: `memory_server [host:port]`
 //! (defaults to `127.0.0.1:7881`).
 
+use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
 use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memory};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
+use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
-use rusty_multimodal_db::server::{serve, RateLimit, ServeOptions, TlsConfig, TokenClass};
+use rusty_multimodal_db::server::{
+    serve_tables, ConnectionStore, RateLimit, ServeOptions, TlsConfig, TokenClass,
+};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
@@ -76,6 +80,31 @@ fn sample_memories() -> Vec<Memory> {
     ]
 }
 
+/// `TBL-FR-001` (ADR-0050): the second table — three entities the sample
+/// memories mention, served beside `memory` on the same listener.
+fn sample_entities() -> Vec<Entity> {
+    let entity = |n: u128, label: &str, kind: &str| Entity {
+        id: Uuid::from_u128(n),
+        label: label.into(),
+        kind: kind.into(),
+        mention_count: 0,
+        aliases: vec![],
+    };
+    vec![
+        entity(0xada, "Ada Lovelace", "person"),
+        entity(0x46, "ADR-0046", "decision"),
+        entity(0x47, "ADR-0047", "decision"),
+    ]
+}
+
+/// Which sample memory mentions which sample entity — `(memory, entity)`.
+fn sample_mentions() -> Vec<(Uuid, Uuid)> {
+    vec![
+        (Uuid::from_u128(2), Uuid::from_u128(0x46)),
+        (Uuid::from_u128(3), Uuid::from_u128(0x47)),
+    ]
+}
+
 fn main() {
     let addr = std::env::args()
         .nth(1)
@@ -85,8 +114,14 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("creating a scratch directory for the mmap-backed store");
     let path = dir.join("memories.mmap");
 
-    let store = create_memory_production_stack(sample_memories(), &path)
+    let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &path)
         .expect("creating the sample MemoryProductionStack");
+    let entity_store =
+        create_entity_production_stack(sample_entities(), &[], &[], &dir.join("entities.mmap"))
+            .expect("creating the sample EntityProductionStack");
+    let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new(EntityConnectionStore::new(
+        GenericProductionStore::new(entity_store),
+    ));
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
     // write, replayed on the next start. Set it the same way every start:
@@ -169,7 +204,19 @@ fn main() {
         if access_logged { "configured" } else { "NOT configured" },
     );
 
-    serve(listener, connection_store, options);
+    // `TBL-FR-001` (ADR-0050): two tables on one listener, `memory`
+    // primary — `Use entity` reaches the other; `JOIN entity e ON
+    // mentions` crosses between them.
+    let memory_connection_store: Arc<dyn ConnectionStore> = connection_store;
+    serve_tables(
+        listener,
+        vec![
+            ("memory".to_string(), memory_connection_store),
+            ("entity".to_string(), entity_connection_store),
+        ],
+        0,
+        options,
+    );
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see

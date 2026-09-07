@@ -91,6 +91,21 @@ def main() -> int:
             print(f"replace_unknown={'ok' if c.replace(uuid.UUID(int=4242), [('label', 'x'), ('kind', 'x'), ('mention_count', 0), ('aliases', [])]) else 'notfound'}")
         except UnsupportedError as e:
             print(f"replace=unsupported:{e}")
+
+        # Protocol 16 (TBL-FR-009): a one-table server lists itself; Use of
+        # its own name is Ok, of another Malformed.
+        try:
+            names, primary = c.list_tables()
+            print(f"tables={','.join(names)};{primary}")
+            c.use_table(primary)
+            print(f"use_self={c.table}")
+            try:
+                c.use_table("customer")
+                print("use_unknown=ok")
+            except ServerError as e:
+                print(f"use_unknown={e.code.name}")
+        except UnsupportedError as e:
+            print(f"tables=unsupported:{e}")
     return 0
 
 

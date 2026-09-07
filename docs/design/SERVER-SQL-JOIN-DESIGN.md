@@ -668,6 +668,10 @@ other => dispatch_in(&tables, table, other),   // today's `dispatch(store, other
 
 ## Change history
 
+- 2026-09-07: Part B implemented as `SERVER-001` v0.40.0 / FR-050 by
+  `ADR-0050` / `docs/design/SERVER-TABLES-DESIGN.md` — as accepted,
+  with the `Memory → Entity` instance in place of `TBL-FR-005`'s
+  research one, and foreign labels added for the cross-table edge.
 - 2026-09-05: Initial proposal, the owner's ordered pick "2" (arbitrary
   joins / real SQL JOIN) — the last of the four-item ordered queue.
   Reframed from "arbitrary joins" to "relation joins first, tables

@@ -276,6 +276,10 @@ where
         .map_err(|(_, code)| code)
     }
 
+    fn table_name(&self) -> &str {
+        "dog"
+    }
+
     fn describe(&self) -> DomainSchema {
         DomainSchema {
             fields: vec![

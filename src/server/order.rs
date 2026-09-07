@@ -277,6 +277,10 @@ impl ConnectionStore for OrderConnectionStore {
         .map_err(|(_, code)| code)
     }
 
+    fn table_name(&self) -> &str {
+        "order"
+    }
+
     fn describe(&self) -> DomainSchema {
         let read_only = |value_kind: ValueKind, name: &str, tag: FieldRef| FieldDescriptor {
             tag,

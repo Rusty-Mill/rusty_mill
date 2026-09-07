@@ -4,14 +4,18 @@
 //! the consumer's `add`/`get`/`list` shapes over the requests that
 //! already exist. `required-features = ["server"]` only, no `research`.
 
+use rusty_multimodal_db::generic::entity::{
+    create_entity_production_stack, open_entity_production_stack_portable, Entity,
+};
 use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::server::client::{ClientError, QueryResult, SchemaDrivenClient};
+use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::protocol::{ErrorCode, ScanValue};
-use rusty_multimodal_db::server::{serve, ServeOptions};
+use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::thread;
@@ -64,7 +68,7 @@ fn start_server_at(dir: std::path::PathBuf) -> SocketAddr {
     let stack = if path.exists() {
         open_memory_production_stack_portable(&path).unwrap()
     } else {
-        create_memory_production_stack(sample_memories(), &path).unwrap()
+        create_memory_production_stack(sample_memories(), &[], &path).unwrap()
     };
     let connection_store = Arc::new(MemoryConnectionStore::new(GenericProductionStore::new(
         stack,
@@ -249,25 +253,48 @@ fn insert_a_memory_bump_its_access_count_and_a_restart_serves_it() {
     assert_eq!(got[10], ("access_count".to_string(), ScanValue::I64(1)));
 }
 
-/// `MEM-FR-005`: no relation of either kind — every relation request and
-/// `link` are refused client-side, and the schema says so.
+/// `TBL-FR-008` (ADR-0050) on a one-table `Memory` server: the one
+/// relation, `mentions`, is listed with its rows in `entity`; a same-
+/// table `JOIN memory b ON mentions` is refused client-side; `parent`
+/// is `Unsupported`; a one-table server lists its one table and `Use`
+/// of any other name is `Malformed`.
 #[test]
-fn every_relation_request_is_unsupported() {
+fn a_one_table_memory_server_lists_mentions_as_foreign_and_itself_as_the_only_table() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
-    assert!(matches!(
-        client.neighbors(Uuid::from_u128(1)),
-        Err(ClientError::Unsupported(_))
-    ));
+    assert_eq!(client.relations().len(), 1);
+    assert_eq!(client.relations()[0].name, "mentions");
+    assert_eq!(
+        client.relations()[0].target_table.as_deref(),
+        Some("entity")
+    );
     assert!(matches!(
         client.parent(Uuid::from_u128(1)),
         Err(ClientError::Unsupported(_))
     ));
+    assert_eq!(
+        client.neighbors(Uuid::from_u128(1)).unwrap(),
+        Vec::<Uuid>::new()
+    );
     assert!(matches!(
-        client.link(Uuid::from_u128(1), Uuid::from_u128(2), "x"),
-        Err(ClientError::Unsupported(_))
+        client.query("SELECT a.content, b.content FROM memory a JOIN memory b ON mentions"),
+        Err(ClientError::Sql(_))
     ));
-    assert!(client.relations().is_empty());
+    assert_eq!(
+        client.list_tables().unwrap(),
+        (vec!["memory".to_string()], "memory".to_string())
+    );
+    assert!(client.use_table("memory").is_ok());
+    match client.use_table("entity") {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    // A link to an entity on a server with no entity table: the server
+    // cannot check the far end, so it is `Unsupported` (`TBL-FR-007`).
+    match client.link(Uuid::from_u128(1), Uuid::from_u128(0xada), "mentions") {
+        Err(ClientError::Server(ErrorCode::Unsupported, _)) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
 }
 
 /// `REP` acceptance criterion 2 (ADR-0049) on `Memory` over a socket —
@@ -398,4 +425,211 @@ fn replace_a_memory_over_the_wire_every_read_sees_it_and_a_restart_serves_it() {
     decisions.sort();
     assert_eq!(decisions, vec![id, Uuid::from_u128(99)], "both survived");
     assert!(client.get(Uuid::from_u128(99)).unwrap().is_some());
+}
+
+fn sample_entities() -> Vec<Entity> {
+    let entity = |n: u128, label: &str, kind: &str| Entity {
+        id: Uuid::from_u128(n),
+        label: label.into(),
+        kind: kind.into(),
+        mention_count: 0,
+        aliases: vec![],
+    };
+    vec![
+        entity(0xada, "Ada Lovelace", "person"),
+        entity(0xe1e, "Analytical Engine", "artifact"),
+        entity(0x10d, "London", "place"),
+    ]
+}
+
+/// `TBL-FR-001` (ADR-0050): one listener, two tables — `memory` (primary)
+/// with its `mentions` edges seeded, and `entity`. Reopened from the
+/// files alone when the directory already holds a store.
+fn start_two_table_server_at(dir: std::path::PathBuf) -> SocketAddr {
+    std::fs::create_dir_all(&dir).unwrap();
+    let memories = dir.join("memories.mmap");
+    let entities = dir.join("entities.mmap");
+    let memory_stack = if memories.exists() {
+        open_memory_production_stack_portable(&memories).unwrap()
+    } else {
+        create_memory_production_stack(
+            sample_memories(),
+            &[
+                (Uuid::from_u128(1), Uuid::from_u128(0xada)),
+                (Uuid::from_u128(2), Uuid::from_u128(0xe1e)),
+                (Uuid::from_u128(2), Uuid::from_u128(0xada)),
+            ],
+            &memories,
+        )
+        .unwrap()
+    };
+    let entity_stack = if entities.exists() {
+        open_entity_production_stack_portable(&entities).unwrap()
+    } else {
+        create_entity_production_stack(sample_entities(), &[], &[], &entities).unwrap()
+    };
+    let memory: Arc<dyn ConnectionStore> = Arc::new(MemoryConnectionStore::new(
+        GenericProductionStore::new(memory_stack),
+    ));
+    let entity: Arc<dyn ConnectionStore> = Arc::new(EntityConnectionStore::new(
+        GenericProductionStore::new(entity_stack),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        serve_tables(
+            listener,
+            vec![
+                ("memory".to_string(), memory),
+                ("entity".to_string(), entity),
+            ],
+            0,
+            ServeOptions::default(),
+        )
+    });
+    addr
+}
+
+/// `TBL` acceptance criteria 1–3 (ADR-0050) over a socket — the
+/// consumer's `memory_entities` path end to end: `ListTables`; the
+/// cross-table `SELECT m.content, e.label FROM memory m JOIN entity e ON
+/// mentions` in one round trip, with a right-side `WHERE` on the entity
+/// table's own field; `mentions` read from both ends; `use_table`
+/// switching every table-less request (the schema, `get`, a `Query`)
+/// and back; a runtime `link` to an entity checked against the entity
+/// table (`RecordNotFound` for an unknown one, `Malformed` for a label
+/// the domain lacks); an unknown table `Malformed`; and a second server
+/// on the same directory serving the edge and the join.
+#[test]
+fn two_tables_on_one_connection_join_across_use_and_link_and_survive_a_restart() {
+    let dir = unique_dir("memory_two_tables");
+    let addr = start_two_table_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let (m1, m2, m3) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+    let (ada, engine, london) = (
+        Uuid::from_u128(0xada),
+        Uuid::from_u128(0xe1e),
+        Uuid::from_u128(0x10d),
+    );
+    assert_eq!(
+        client.list_tables().unwrap(),
+        (
+            vec!["memory".to_string(), "entity".to_string()],
+            "memory".to_string()
+        )
+    );
+    assert_eq!(client.table(), None, "on the primary until a Use");
+
+    // Criterion 3: the cross-table join, one round trip, both sides named.
+    let joined = match client
+        .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => rows,
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    assert_eq!(joined.len(), 3);
+    let mut pairs: Vec<(Uuid, Uuid)> = joined.iter().map(|r| (r.left_id, r.right_id)).collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![(m1, ada), (m2, ada), (m2, engine)]);
+    let ada_row = joined.iter().find(|r| r.right_id == ada).unwrap();
+    assert!(ada_row
+        .fields
+        .iter()
+        .any(|(name, v)| name == "e.label" && *v == ScanValue::Str("Ada Lovelace".into())));
+    assert!(ada_row.fields.iter().any(|(name, _)| name == "m.content"));
+    // A right-side WHERE resolves against the entity table's schema.
+    let people = match client
+        .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions WHERE e.kind = 'artifact'")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => rows,
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].right_id, engine);
+    // Wrong table for the relation, or the FROM table itself: refused client-side.
+    assert!(matches!(
+        client.query("SELECT m.content, x.content FROM memory m JOIN memory x ON mentions"),
+        Err(ClientError::Sql(_))
+    ));
+
+    // Both ends of `mentions`: the entities a memory mentions, and the
+    // memories that mention an entity (the consumer's two lookups).
+    assert_eq!(
+        client.neighbors_by_relation(m1, "mentions").unwrap(),
+        vec![ada]
+    );
+    let mut about_ada = client.neighbors_by_relation(ada, "mentions").unwrap();
+    about_ada.sort();
+    assert_eq!(about_ada, vec![m1, m2]);
+
+    // Criterion 2: `Use` switches every table-less request, and back.
+    client.use_table("entity").unwrap();
+    assert_eq!(client.table(), Some("entity"));
+    let names: Vec<&str> = client
+        .schema()
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["label", "kind", "mention_count", "aliases"]);
+    assert_eq!(
+        client.get(london).unwrap().unwrap()[0],
+        ("label".to_string(), ScanValue::Str("London".into()))
+    );
+    assert!(
+        client.get(m1).unwrap().is_none(),
+        "a memory id is not an entity"
+    );
+    let places = rows(
+        client
+            .query("SELECT label FROM entity WHERE kind = 'place'")
+            .unwrap(),
+    );
+    assert_eq!(places.len(), 1);
+    client.use_table("memory").unwrap();
+    assert_eq!(client.table(), Some("memory"));
+    assert_eq!(client.schema().fields.len(), 11);
+    match client.use_table("customer") {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    assert_eq!(client.table(), Some("memory"), "unchanged on refusal");
+
+    // `TBL-FR-007`: a runtime link, its far end checked in the entity table.
+    client.link(m3, london, "mentions").unwrap();
+    client.link(m3, london, "mentions").unwrap();
+    match client.link(m3, Uuid::from_u128(0xbad), "mentions") {
+        Err(ClientError::Server(ErrorCode::RecordNotFound, _)) => {}
+        other => panic!("expected RecordNotFound, got {other:?}"),
+    }
+    match client.link(m3, london, "relates_to") {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    match client.link(Uuid::from_u128(0xbad), london, "mentions") {
+        Err(ClientError::Server(ErrorCode::RecordNotFound, _)) => {}
+        other => panic!("expected RecordNotFound, got {other:?}"),
+    }
+    assert_eq!(
+        client.neighbors_by_relation(london, "mentions").unwrap(),
+        vec![m3]
+    );
+    drop(client);
+
+    // A second server on the same directory serves the edge and the join.
+    let addr = start_two_table_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let joined = match client
+        .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions WHERE e.kind = 'place'")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => rows,
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    assert_eq!(joined.len(), 1);
+    assert_eq!((joined[0].left_id, joined[0].right_id), (m3, london));
+    client.use_table("entity").unwrap();
+    assert!(client.get(london).unwrap().is_some());
 }

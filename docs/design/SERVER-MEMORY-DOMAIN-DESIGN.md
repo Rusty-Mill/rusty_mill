@@ -273,7 +273,9 @@ Python vector suite (unchanged, proving criterion 4), `cargo doc
 - **Null** — three nullable columns are omitted for want of it; an
   `Option`-carrying `ScanValue` is a protocol bump.
 - **`memory_entities`** — cross-table, the `ADR-0045` implementation
-  round, for which this domain is now the second table.
+  round, for which this domain is now the second table. *Resolved by
+  `ADR-0050` / `SERVER-001` v0.40.0: `Memory::mentions`, a foreign
+  label to `entity`, joined across at protocol 16.*
 - **Soft deletion** — `deleted_at`; or the first runtime deletion.
 
 ## Change history

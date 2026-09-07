@@ -7,22 +7,30 @@
 //! updatable (non-negative — the one domain rule), everything else
 //! refused by `UpdateField` and changed only whole through
 //! `Request::Replace` (`REP-FR-005`, ADR-0049), reachable through
-//! `Query`/`Aggregate` like any field. `tags` is a `StrList`. No
-//! relation of either kind; every relation request is `Unsupported`.
+//! `Query`/`Aggregate` like any field. `tags` is a `StrList`. One
+//! relation since `ADR-0050` (`TBL-FR-008`): `mentions`, whose rows are
+//! the `entity` table's — `describe_relations` says so, a same-table
+//! `Join` over it is `Unsupported`, and a `Link` under it has its far
+//! end checked by the server against that table (`TBL-FR-007`); no
+//! `ChildOf` relation.
 //!
 //! See `crate::generic::memory`'s own module docs for what the
 //! consumer's table holds that this record does not, and why.
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
-    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
+    ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
+    ValueKind,
 };
-use super::{ConnectionStore, InsertOutcome, ReplaceOutcome};
-use crate::generic::memory::{AccessCountField, CategoryField, Memory, MemoryProductionStack};
+use super::{ConnectionStore, InsertOutcome, LinkOutcome, ReplaceOutcome};
+use crate::generic::memory::{
+    AccessCountField, CategoryField, Memory, MemoryProductionStack, MEMORY_FOREIGN_TABLE,
+    MEMORY_RELATION_LABELS,
+};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
-use crate::generic::{InsertError, ReplaceError};
+use crate::generic::{InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
 pub const FIELD_CONTENT: FieldRef = 0;
@@ -360,7 +368,7 @@ impl ConnectionStore for MemoryConnectionStore {
         }
     }
 
-    /// `MEM-FR-005`: `Memory` has no relation of either kind — yet.
+    /// `MEM-FR-005`: `Memory` has no `ChildOf` relation.
     fn parent(&self, _id: RecordId) -> Result<ParentLookup, ErrorCode> {
         Err(ErrorCode::Unsupported)
     }
@@ -369,20 +377,69 @@ impl ConnectionStore for MemoryConnectionStore {
         Err(ErrorCode::Unsupported)
     }
 
-    fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
-        Err(ErrorCode::Unsupported)
+    /// `TBL-FR-008` (ADR-0050): the entity ids a memory mentions — or,
+    /// given an entity id, the memories that mention it, since the edge
+    /// is stored in both directions. Every id on the far side is an
+    /// `Entity` (another table's record); none is a `Memory`.
+    fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+        Ok(self.store.all_neighbors::<Memory>(id))
     }
 
     fn neighbors_by_relation(
         &self,
-        _id: RecordId,
-        _relation: &str,
+        id: RecordId,
+        relation: &str,
     ) -> Result<Vec<RecordId>, ErrorCode> {
-        Err(ErrorCode::Unsupported)
+        match self.store.neighbors_by_relation::<Memory>(relation, id) {
+            Some(records) => Ok(records),
+            None => Err(ErrorCode::Malformed),
+        }
     }
 
     fn list_relation_kinds(&self) -> Vec<String> {
-        Vec::new()
+        self.store.relation_kinds::<Memory>()
+    }
+
+    /// `TBL-FR-008`: the one relation, `mentions`, with its rows in the
+    /// `entity` table — so a same-table `Join` over it is `Unsupported`
+    /// and a cross-table one needs `right_table: Some("entity")`. The
+    /// unfiltered `neighbors` is deliberately *not* listed: its far side
+    /// is never this table's rows.
+    fn describe_relations(&self) -> Vec<RelationDescriptor> {
+        MEMORY_RELATION_LABELS
+            .iter()
+            .map(|label| RelationDescriptor {
+                name: label.to_string(),
+                kind: JoinRelation::Neighbors(Some(label.to_string())),
+                target_table: Some(MEMORY_FOREIGN_TABLE.to_string()),
+            })
+            .collect()
+    }
+
+    /// `TBL-FR-008`: a fixed label set — `mentions` only; any other label
+    /// is `Malformed`. `left` must be a memory (`RecordNotFound`); `right`
+    /// is an entity id this adapter cannot see — the server checks it
+    /// against the `entity` table before this is called (`TBL-FR-007`).
+    fn link_records(
+        &self,
+        left: RecordId,
+        right: RecordId,
+        relation: &str,
+    ) -> Result<LinkOutcome, ErrorCode> {
+        if !MEMORY_RELATION_LABELS.contains(&relation) {
+            return Err(ErrorCode::Malformed);
+        }
+        match self.store.link_by_relation::<Memory>(relation, left, right) {
+            Ok(crate::generic::LinkOutcome::Linked) => Ok(LinkOutcome::Linked),
+            Ok(crate::generic::LinkOutcome::AlreadyLinked) => Ok(LinkOutcome::AlreadyLinked),
+            Err(LinkError::UnknownRecord(_)) => Err(ErrorCode::RecordNotFound),
+            Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => Err(ErrorCode::Malformed),
+            Err(LinkError::Durability(_)) => Err(ErrorCode::Storage),
+        }
+    }
+
+    fn table_name(&self) -> &str {
+        "memory"
     }
 
     /// `STV-FR-002`: `validate_batch` on this one operation.
@@ -439,7 +496,7 @@ impl ConnectionStore for MemoryConnectionStore {
             ],
             relations: RelationCapabilities {
                 parent_children: false,
-                neighbors: false,
+                neighbors: true,
             },
         }
     }
@@ -509,6 +566,7 @@ mod tests {
                 memory(2, "preference", false),
                 memory(3, "general", true),
             ],
+            &[],
             &path,
         )
         .unwrap();
@@ -549,7 +607,7 @@ mod tests {
                 update: false
             }
         );
-        assert!(!schema.relations.neighbors && !schema.relations.parent_children);
+        assert!(schema.relations.neighbors && !schema.relations.parent_children);
         assert!(adapter.get(Uuid::from_u128(99)).is_none());
     }
 
@@ -650,25 +708,55 @@ mod tests {
     }
 
     #[test]
-    fn every_relation_request_is_unsupported() {
+    fn mentions_is_the_one_relation_foreign_to_entity_and_links_without_seeing_the_far_end() {
         let adapter = sample_adapter();
+        let (one, ada) = (Uuid::from_u128(1), Uuid::from_u128(0xada));
+        assert_eq!(adapter.parent(one), Err(ErrorCode::Unsupported));
+        assert_eq!(adapter.children(one), Err(ErrorCode::Unsupported));
+        assert!(adapter.describe().relations.neighbors);
+        assert_eq!(adapter.table_name(), "memory");
         assert_eq!(
-            adapter.parent(Uuid::from_u128(1)),
-            Err(ErrorCode::Unsupported)
+            adapter.describe_relations(),
+            vec![RelationDescriptor {
+                name: "mentions".into(),
+                kind: JoinRelation::Neighbors(Some("mentions".into())),
+                target_table: Some("entity".into()),
+            }]
+        );
+        assert_eq!(adapter.list_relation_kinds(), vec!["mentions".to_string()]);
+        assert_eq!(adapter.neighbors(one), Ok(vec![]));
+        // The far end is an entity this adapter never sees (`TBL-FR-007`).
+        assert_eq!(
+            adapter.link_records(one, ada, "mentions"),
+            Ok(LinkOutcome::Linked)
         );
         assert_eq!(
-            adapter.children(Uuid::from_u128(1)),
-            Err(ErrorCode::Unsupported)
+            adapter.link_records(one, ada, "mentions"),
+            Ok(LinkOutcome::AlreadyLinked)
         );
         assert_eq!(
-            adapter.neighbors(Uuid::from_u128(1)),
-            Err(ErrorCode::Unsupported)
+            adapter.neighbors_by_relation(one, "mentions"),
+            Ok(vec![ada])
         );
         assert_eq!(
-            adapter.link_records(Uuid::from_u128(1), Uuid::from_u128(2), "x"),
-            Err(ErrorCode::Unsupported)
+            adapter.neighbors(ada),
+            Ok(vec![one]),
+            "read from the entity's side"
         );
-        assert!(adapter.list_relation_kinds().is_empty());
+        assert_eq!(
+            adapter.link_records(one, ada, "x"),
+            Err(ErrorCode::Malformed),
+            "a fixed label set"
+        );
+        assert_eq!(
+            adapter.link_records(Uuid::from_u128(77), ada, "mentions"),
+            Err(ErrorCode::RecordNotFound),
+            "the near end must be a memory"
+        );
+        assert_eq!(
+            adapter.neighbors_by_relation(one, "x"),
+            Err(ErrorCode::Malformed)
+        );
     }
 
     /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,

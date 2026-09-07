@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 15);
+    assert_eq!(dog.server_protocol_version(), 16);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -939,5 +939,107 @@ fn replace_is_malformed_below_version_15() {
     assert!(matches!(
         old.replace(RecordId::from_u128(1), &[("age", ScanValue::U32(1))]),
         Err(ClientError::Unsupported("replace"))
+    ));
+}
+
+/// `TBL-FR-002`/`003` (ADR-0050), rule 3: `Use` and `ListTables` are
+/// protocol 16 — a connection negotiated at 15 (and a silent one) is
+/// answered `Malformed`; at 16 a one-table server lists its one table,
+/// accepts its own name, and refuses any other. Rule 4: the Rust client
+/// refuses both below 16 with no frame.
+#[test]
+fn use_and_list_tables_are_malformed_below_version_16() {
+    let addr = start_entity_server();
+    for hello in [Some(15u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        for req in [
+            Request::Use {
+                table: "entity".into(),
+            },
+            Request::ListTables,
+        ] {
+            assert!(
+                matches!(
+                    roundtrip(&mut reader, &mut writer, &req),
+                    Response::Err {
+                        code: ErrorCode::Malformed,
+                        ..
+                    }
+                ),
+                "{hello:?} {req:?}"
+            );
+        }
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            Response::Schema(_)
+        ));
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert_eq!(
+        roundtrip(&mut reader, &mut writer, &Request::ListTables),
+        Response::Tables {
+            names: vec!["entity".into()],
+            primary: "entity".into(),
+        }
+    );
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Use {
+                table: "entity".into()
+            }
+        ),
+        Response::Ok
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Use {
+                table: "memory".into()
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.list_tables(),
+        Err(ClientError::Unsupported("list_tables"))
+    ));
+    assert!(matches!(
+        old.use_table("dog"),
+        Err(ClientError::Unsupported("use_table"))
     ));
 }

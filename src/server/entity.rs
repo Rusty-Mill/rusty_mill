@@ -372,6 +372,10 @@ impl ConnectionStore for EntityConnectionStore {
         .map_err(|(_, code)| code)
     }
 
+    fn table_name(&self) -> &str {
+        "entity"
+    }
+
     fn describe(&self) -> DomainSchema {
         DomainSchema {
             fields: vec![

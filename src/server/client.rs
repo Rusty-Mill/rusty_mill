@@ -732,6 +732,13 @@ pub struct SchemaDrivenClient {
     /// negotiated version is ≥ 12, empty otherwise.
     relations: Vec<RelationDescriptor>,
     server_protocol_version: u32,
+    /// `TBL-FR-009` (ADR-0050): the table this connection selected with
+    /// [`Self::use_table`] — `None` until then (the server's primary,
+    /// whose name the client does not need to know).
+    current_table: Option<String>,
+    /// `TBL-FR-009`: other tables' schemas, fetched once each for a
+    /// cross-table `JOIN` (see [`Self::schema_of`]).
+    table_schemas: HashMap<String, DomainSchema>,
 }
 
 impl SchemaDrivenClient {
@@ -832,6 +839,8 @@ impl SchemaDrivenClient {
             schema,
             relations,
             server_protocol_version,
+            current_table: None,
+            table_schemas: HashMap::new(),
         })
     }
 
@@ -1015,7 +1024,16 @@ impl SchemaDrivenClient {
     }
 
     fn field(&self, name: &str) -> Result<&FieldDescriptor, ClientError> {
-        self.schema
+        Self::field_in(&self.schema, name)
+    }
+
+    /// [`Self::field`] against an arbitrary schema — another table's,
+    /// for the right side of a cross-table `JOIN` (`TBL-FR-009`).
+    fn field_in<'s>(
+        schema: &'s DomainSchema,
+        name: &str,
+    ) -> Result<&'s FieldDescriptor, ClientError> {
+        schema
             .fields
             .iter()
             .find(|f| f.name == name)
@@ -1184,27 +1202,45 @@ impl SchemaDrivenClient {
         let join = parsed
             .join
             .expect("query() routes only JOIN-bearing queries here");
-        if !join.table.eq_ignore_ascii_case(&parsed.table) {
-            return Err(ClientError::Sql(format!(
-                "JOIN {}: a join may only name the FROM table ({}) — one table per connection",
-                join.table, parsed.table
-            )));
-        }
-        let relation = match self.relations.iter().find(|r| r.name == join.relation) {
-            Some(r) if r.target_table.is_some() => {
-                return Err(ClientError::Sql(format!(
-                    "ON {}: this relation's rows live in another table ({}), not joinable here",
-                    join.relation,
-                    r.target_table.as_deref().unwrap_or_default()
-                )))
-            }
-            Some(r) => r.kind.clone(),
+        // `TBL-FR-009` (ADR-0050): a `JOIN` naming another table is a
+        // cross-table join — the relation's descriptor must name exactly
+        // that table, and the right side compiles against *its* schema.
+        let cross_table = !join.table.eq_ignore_ascii_case(&parsed.table);
+        let descriptor = match self.relations.iter().find(|r| r.name == join.relation) {
+            Some(r) => r.clone(),
             None => {
                 return Err(ClientError::Sql(format!(
                     "ON {}: not a relation this domain lists (see SchemaDrivenClient::relations)",
                     join.relation
                 )))
             }
+        };
+        let relation = descriptor.kind.clone();
+        let right_table = match (&descriptor.target_table, cross_table) {
+            (None, false) => None,
+            (None, true) => {
+                return Err(ClientError::Sql(format!(
+                    "JOIN {}: ON {} joins rows of the FROM table ({}), not another table",
+                    join.table, join.relation, parsed.table
+                )))
+            }
+            (Some(target), false) => {
+                return Err(ClientError::Sql(format!(
+                    "ON {}: this relation's rows live in another table ({target}) — JOIN {target} to reach them",
+                    join.relation
+                )))
+            }
+            (Some(target), true) if *target == join.table => Some(target.clone()),
+            (Some(target), true) => {
+                return Err(ClientError::Sql(format!(
+                    "JOIN {}: ON {} joins rows of the {target} table, not {}",
+                    join.table, join.relation, join.table
+                )))
+            }
+        };
+        let right_schema = match &right_table {
+            Some(table) => self.schema_of(table)?,
+            None => self.schema.clone(),
         };
 
         let left_alias = parsed.alias.clone().unwrap_or_else(|| parsed.table.clone());
@@ -1223,7 +1259,7 @@ impl SchemaDrivenClient {
                     for f in &self.schema.fields {
                         plan.push((Side::Left, f.tag, format!("{left_alias}.{}", f.name)));
                     }
-                    for f in &self.schema.fields {
+                    for f in &right_schema.fields {
                         plan.push((Side::Right, f.tag, format!("{right_alias}.{}", f.name)));
                     }
                     (Selection::All, Selection::All, plan)
@@ -1236,12 +1272,13 @@ impl SchemaDrivenClient {
                         let sql::ParsedColumnItem::Qualified { qualifier, name } = item else {
                             unreachable!("the parser requires qualified, non-aggregate columns in a JOIN query")
                         };
-                        let tag = self.field(&name)?.tag;
                         let label = format!("{qualifier}.{name}");
                         if is_left(&qualifier) {
+                            let tag = self.field(&name)?.tag;
                             left_tags.push(tag);
                             plan.push((Side::Left, tag, label));
                         } else {
+                            let tag = Self::field_in(&right_schema, &name)?.tag;
                             right_tags.push(tag);
                             plan.push((Side::Right, tag, label));
                         }
@@ -1259,11 +1296,11 @@ impl SchemaDrivenClient {
             .into_iter()
             .partition(|c| c.qualifier.as_deref().is_some_and(is_left));
         let left_filter = self.resolve_filter(&left_conditions)?;
-        let right_filter = self.resolve_filter(&right_conditions)?;
+        let right_filter = Self::resolve_filter_in(&right_schema, &right_conditions)?;
 
         match self.roundtrip(Request::Join(JoinSpec {
             relation,
-            right_table: None,
+            right_table,
             left,
             right,
             left_filter,
@@ -1416,9 +1453,18 @@ impl SchemaDrivenClient {
         &self,
         conditions: &[sql::ParsedCondition],
     ) -> Result<Vec<Predicate>, ClientError> {
+        Self::resolve_filter_in(&self.schema, conditions)
+    }
+
+    /// [`Self::resolve_filter`] against an arbitrary schema
+    /// (`TBL-FR-009`).
+    fn resolve_filter_in(
+        schema: &DomainSchema,
+        conditions: &[sql::ParsedCondition],
+    ) -> Result<Vec<Predicate>, ClientError> {
         let mut filter = Vec::with_capacity(conditions.len());
         for condition in conditions {
-            let field = self.field(&condition.name)?;
+            let field = Self::field_in(schema, &condition.name)?;
             let tag = field.tag;
             let kind = field.value_kind;
             if condition.op.is_ordering() && !matches!(kind, ValueKind::U32 | ValueKind::I64) {
@@ -1508,6 +1554,94 @@ impl SchemaDrivenClient {
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Ok")),
         }
+    }
+
+    /// The server's table names and its primary (`TBL-FR-009`, ADR-0050,
+    /// protocol 16). [`ClientError::Unsupported`]`("list_tables")` below
+    /// 16 with no frame sent; a one-table server lists its one table.
+    pub fn list_tables(&mut self) -> Result<(Vec<String>, String), ClientError> {
+        if self.server_protocol_version < 16 {
+            return Err(ClientError::Unsupported("list_tables"));
+        }
+        match self.roundtrip(Request::ListTables)? {
+            Response::Tables { names, primary } => Ok((names, primary)),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Tables")),
+        }
+    }
+
+    /// Select which of the server's tables every following request is
+    /// served from (`TBL-FR-009`, ADR-0050, protocol 16). On `Ok` the
+    /// schema and relation list are re-fetched, so [`Self::schema`],
+    /// [`Self::relations`], and every name-resolving method describe the
+    /// new table. An unknown name is `Server(Malformed, _)` with the
+    /// table unchanged; inside a [`Session`] the server answers
+    /// `SessionOpen`. [`ClientError::Unsupported`]`("use_table")` below
+    /// 16 with no frame sent.
+    pub fn use_table(&mut self, table: &str) -> Result<(), ClientError> {
+        if self.server_protocol_version < 16 {
+            return Err(ClientError::Unsupported("use_table"));
+        }
+        self.select_table(table)?;
+        self.schema = match self.roundtrip(Request::DescribeSchema)? {
+            Response::Schema(schema) => schema,
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("Schema")),
+        };
+        self.relations = match self.roundtrip(Request::DescribeRelations)? {
+            Response::Relations { relations } => relations,
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("Relations")),
+        };
+        self.table_schemas
+            .insert(table.to_string(), self.schema.clone());
+        self.current_table = Some(table.to_string());
+        Ok(())
+    }
+
+    /// The table selected with [`Self::use_table`], or `None` while the
+    /// connection is on the server's primary (`TBL-FR-009`).
+    pub fn table(&self) -> Option<&str> {
+        self.current_table.as_deref()
+    }
+
+    /// One `Use` frame, nothing else — the connection's table changes,
+    /// the cached schema does not.
+    fn select_table(&mut self, table: &str) -> Result<(), ClientError> {
+        match self.roundtrip(Request::Use {
+            table: table.to_string(),
+        })? {
+            Response::Ok => Ok(()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Ok")),
+        }
+    }
+
+    /// Another table's schema, for the right side of a cross-table
+    /// `JOIN` (`TBL-FR-009`): fetched once by switching to it, describing
+    /// it, and switching back (to the selected table, or to the primary
+    /// by name), then cached for the connection's life.
+    fn schema_of(&mut self, table: &str) -> Result<DomainSchema, ClientError> {
+        if let Some(schema) = self.table_schemas.get(table) {
+            return Ok(schema.clone());
+        }
+        if self.server_protocol_version < 16 {
+            return Err(ClientError::Unsupported("cross-table join"));
+        }
+        let back_to = match &self.current_table {
+            Some(current) => current.clone(),
+            None => self.list_tables()?.1,
+        };
+        self.select_table(table)?;
+        let described = self.roundtrip(Request::DescribeSchema);
+        self.select_table(&back_to)?;
+        let schema = match described? {
+            Response::Schema(schema) => schema,
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("Schema")),
+        };
+        self.table_schemas.insert(table.to_string(), schema.clone());
+        Ok(schema)
     }
 
     /// Replace one record whole (`REP-FR-007`, ADR-0049, protocol 15):
