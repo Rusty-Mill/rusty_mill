@@ -1,0 +1,102 @@
+//! IPC dispatch abstraction — stable plugin-facing interface.
+
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::capability::Capability;
+use crate::error::IpcError;
+
+/// A boxed, `'static`, `Send` future returned by an async IPC handler.
+pub type IpcFuture = Pin<Box<dyn Future<Output = Result<serde_json::Value, IpcError>> + Send>>;
+
+/// Dispatches an IPC command to a loaded plugin's handler.
+///
+/// The caller's capability check is performed by the kernel context before
+/// delegating here; implementations only resolve the target and invoke the
+/// handler.
+pub trait IpcDispatcher: Send + Sync {
+    /// Dispatch `command_id` on plugin `target_plugin_id` with `args`.
+    ///
+    /// # Errors
+    /// - [`IpcError::PluginNotFound`] if the target plugin is not loaded.
+    /// - [`IpcError::CommandNotFound`] if the target does not register that command.
+    /// - [`IpcError::PluginCrashedDuringCall`] on panic or execution error.
+    fn dispatch(
+        &self,
+        target_plugin_id: &str,
+        command_id: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, IpcError>;
+
+    /// Try to dispatch `command_id` asynchronously.
+    ///
+    /// Returns `Some(future)` when the target plugin has an async handler for
+    /// this command; returns `None` when it is sync-only — the caller should
+    /// then fall back to [`dispatch`](IpcDispatcher::dispatch).
+    fn dispatch_async(
+        &self,
+        target_plugin_id: &str,
+        command_id: &str,
+        args: serde_json::Value,
+    ) -> Option<IpcFuture> {
+        let _ = (target_plugin_id, command_id, args);
+        None
+    }
+
+    /// Capabilities the caller must hold to invoke `command_id` on
+    /// `target_plugin_id`, in addition to the unconditional
+    /// [`Capability::IpcCall`] check the kernel context performs first.
+    ///
+    /// The default returns an empty list — most IPC commands need nothing
+    /// beyond `IpcCall`. Override this for commands that perform high-impact
+    /// side effects (process spawn, external network, …) so callers must
+    /// hold the matching kernel capability rather than laundering the
+    /// effect through `IpcCall` alone. See issue #77.
+    ///
+    /// [`KernelPluginContext::ipc_call`] consults
+    /// [`Self::required_caller_caps_for_args`] (which defaults to this
+    /// method) **before** dispatch, so handlers themselves don't need
+    /// to re-check.
+    fn required_caller_caps(&self, target_plugin_id: &str, command_id: &str) -> Vec<Capability> {
+        let _ = (target_plugin_id, command_id);
+        Vec::new()
+    }
+
+    /// Args-aware extension of [`Self::required_caller_caps`]
+    /// (ADR 0022 Phase 2). Lets dispatchers tighten the caller-cap
+    /// requirement based on what the call is asking for — e.g.
+    /// `com.nexus.ai::stream_chat` requires `ai.tools.write` only
+    /// when `tools=auto` advertises mutating tools.
+    ///
+    /// The default delegates to the args-less form so existing
+    /// implementations and dispatch tables keep their shape;
+    /// implementors that want args-aware policies override this
+    /// directly and may ignore the static fallback.
+    fn required_caller_caps_for_args(
+        &self,
+        target_plugin_id: &str,
+        command_id: &str,
+        args: &serde_json::Value,
+    ) -> Vec<Capability> {
+        let _ = args;
+        self.required_caller_caps(target_plugin_id, command_id)
+    }
+
+    /// P1-02 — `true` if `command_id` on `target_plugin_id` is marked
+    /// "in-tree only" in the cap matrix (i.e. only callable by a
+    /// context whose `trust_level == Core`). Distinct from the
+    /// capability gate: a community plugin that holds every cap
+    /// listed in [`Self::required_caller_caps`] for this handler is
+    /// still rejected if this returns `true`.
+    ///
+    /// Useful for handlers that expose host secrets / mutate
+    /// trust-establishing state and must never be reachable from a
+    /// sandboxed plugin no matter what caps it accumulates
+    /// (`com.nexus.ai::resolve_credentials` is the seed caller).
+    ///
+    /// Default `false` — the historical contract is "cap-gated only".
+    fn is_handler_internal_only(&self, target_plugin_id: &str, command_id: &str) -> bool {
+        let _ = (target_plugin_id, command_id);
+        false
+    }
+}
