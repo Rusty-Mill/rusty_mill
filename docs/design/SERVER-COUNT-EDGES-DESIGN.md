@@ -1,9 +1,10 @@
-# Server Edge Count Design (Proposed)
+# Server Edge Count Design (Accepted)
 
-- Status: **Proposed** (2026-09-07) — implemented on the same branch as
-  `SERVER-001` v0.47.0 / FR-057 and `SERVER-002` v0.10.0, the
-  `ADR-0046`–`ADR-0055` cadence, for the owner to accept as designed or
-  send back.
+- Status: **Accepted** (2026-09-07, `ADR-0057` option (a), as designed —
+  one request per label answered from the adjacency; counts on the
+  descriptor, an aggregate over edges, and declining all declined).
+  Implemented on the same branch as `SERVER-001` v0.47.0 / FR-057,
+  `SERVER-002` v0.10.0, PR #218.
 - Date: 2026-09-07
 - Related: `ADR-0039` (`MultiNeighbors`, `NeighborsByRelation`, the
   unknown-label rule reused), `ADR-0047` (runtime links, kept under
@@ -140,6 +141,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #218. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.47.0 / FR-057, `SERVER-002`
+  v0.10.0, landed as designed (PR #218).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The twenty-second round in the `rusty_remind_me`-motivated
   line; the hub spike's fifth gap.
