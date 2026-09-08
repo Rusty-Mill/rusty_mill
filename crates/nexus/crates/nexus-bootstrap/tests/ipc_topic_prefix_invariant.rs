@@ -86,7 +86,7 @@ const KERNEL_SHARED_TOPICS: &[&str] = &[
 #[test]
 fn every_publish_call_emits_in_namespace() {
     let workspace = workspace_root();
-    let crates_dir = workspace.join("crates");
+    let crates_dir = workspace.join("crates/nexus/crates");
 
     let mut violations: Vec<String> = Vec::new();
     let mut dynamic: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -194,7 +194,7 @@ fn every_publish_call_emits_in_namespace() {
 /// above.
 #[test]
 fn owners_table_matches_plugin_id_constants() {
-    let crates_dir = workspace_root().join("crates");
+    let crates_dir = workspace_root().join("crates/nexus/crates");
     // Crates that have centralized `PLUGIN_ID` to `nexus_types::plugin_ids`
     // no longer carry the literal in their own src tree — accept the
     // canonical registry as proof instead.

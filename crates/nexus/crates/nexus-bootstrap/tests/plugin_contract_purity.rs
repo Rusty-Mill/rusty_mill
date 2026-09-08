@@ -70,7 +70,7 @@ const PLUGIN_PURITY_CRATES: &[&str] = &[];
 #[test]
 fn contract_crate_does_not_depend_on_impl_crates() {
     let manifest_path = workspace_root()
-        .join("crates")
+        .join("crates/nexus/crates")
         .join(CONTRACT_CRATE)
         .join("Cargo.toml");
     let text = std::fs::read_to_string(&manifest_path)
@@ -92,7 +92,7 @@ fn contract_crate_does_not_depend_on_impl_crates() {
 #[test]
 fn contract_crate_source_does_not_reexport_impl_crates() {
     let src_root = workspace_root()
-        .join("crates")
+        .join("crates/nexus/crates")
         .join(CONTRACT_CRATE)
         .join("src");
 
@@ -121,7 +121,7 @@ fn community_plugin_crates_do_not_depend_on_impl_crates() {
 
     for crate_name in PLUGIN_PURITY_CRATES {
         let manifest_path = workspace_root
-            .join("crates")
+            .join("crates/nexus/crates")
             .join(crate_name)
             .join("Cargo.toml");
         let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
