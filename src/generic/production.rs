@@ -31,10 +31,12 @@
 
 use super::query::{
     AllIds, Children, Compact, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink,
-    Neighbors, Parent, Replace, ScanField, UpdateField,
+    Neighbors, PageBy, Parent, Replace, ScanField, UpdateField,
 };
 use super::store::Flush;
-use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
+use super::traits::{
+    ChildOf, IndexedField, OrderedField, Record, ScannableField, SymmetricRelation,
+};
 use super::{
     CompactionReport, DeleteError, GuardedReplace, InsertError, LinkError, LinkOutcome, NotFound,
     ReplaceError,
@@ -489,6 +491,24 @@ impl<S> GenericProductionStore<S> {
             .read()
             .expect(LOCK_POISONED)
             .neighbors_by_relation(relation, id)
+    }
+
+    /// One ordered keyset page over `R`'s `Marker` field (`ORD-FR-002`,
+    /// ADR-0059) — a range walk of the sorted index under the read lock;
+    /// the ids strictly after `after`, ascending, at most `limit`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn page_by<R, Marker>(&self, after: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id>
+    where
+        R: OrderedField<Marker>,
+        S: PageBy<R, Marker>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .page_by(after, limit)
     }
 
     /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one

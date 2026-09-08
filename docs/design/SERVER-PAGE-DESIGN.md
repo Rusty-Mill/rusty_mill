@@ -185,13 +185,11 @@ doc --all-features --no-deps` at the baseline.
 
 ## Open questions
 
-- **A cheaper `page` for `Memory`** — measured (v0.48.1, `RESULTS.md`):
-  after selecting by key, one page of 50 over 100K records costs
-  100 ms, all but ~20 ms of it one decode per record; SQLite's indexed
-  `ORDER BY … LIMIT` is 14 µs. A second scannable slot for
-  `updated_at_unix_ms` (`MmapScanned`, `Employee`'s precedent) removes
-  the decode; a sorted index removes the scan. Found wanting at about
-  100K rows; the owner's call which, and when.
+- **A cheaper `page` for `Memory`** — resolved by `ADR-0059`
+  (`SERVER-ORDERED-INDEX-DESIGN.md`, v0.49.0): measured at 100 ms per
+  page of 50 over 100K records after v0.48.1, a memory-only sorted
+  index over `updated_at_unix_ms` now answers the page in ~155 µs at
+  any size; the scan path stays for every other field.
 - **Descending order**, **`ORDER BY` in the SQL subset** — one appended
   field and one client-side round, if wanted.
 - **`deleted_at`/`node_id` in the projection**, **directed open-label
@@ -200,6 +198,9 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-08: `ADR-0059` answers the "a cheaper `page`" open question
+  with a memory-only sorted index (`SERVER-001` v0.49.0); this design
+  is unchanged — the index is an adapter override it always allowed.
 - 2026-09-08: `SERVER-001` v0.48.1 — the default `page` selects by key
   before materializing (`page_keys`/`page_ids`; `Memory`/`Entity`/
   `Relation` read the key off the record). 292 → 100 ms per page of

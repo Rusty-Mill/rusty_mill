@@ -20,10 +20,12 @@ use super::insert_log;
 use super::insert_log::LogEntry;
 use super::query::{
     AllIds, Children, Compact, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink,
-    Neighbors, Parent, Replace, ScanField, UpdateField,
+    Neighbors, PageBy, Parent, Replace, ScanField, UpdateField,
 };
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
-use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
+use super::traits::{
+    ChildOf, IndexedField, OrderedField, Record, ScannableField, SchemaTag, SymmetricRelation,
+};
 use super::{
     CompactionReport, DeleteError, InsertError, LinkError, LinkOutcome, NotFound, ReplaceError,
 };
@@ -31,7 +33,7 @@ use crate::durability::record_blob::{EncodedRecordBlob, Fnv1a64};
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -2223,6 +2225,302 @@ where
 {
     fn link(&mut self, a: R::Id, b: R::Id) -> Result<LinkOutcome, LinkError<R::Id>> {
         self.inner.link(a, b)
+    }
+}
+
+/// A memory-only sorted index over one [`OrderedField`] of `R`, on top
+/// of any store `S` — `ORD-FR-003` (ADR-0059). Holds every live
+/// record's `(key, id)` in a `BTreeSet`, built from the inner store's
+/// own records at wrap time (one read of each; writes nothing — like
+/// [`NameIndex`], the file format is untouched) and kept exact through
+/// every write that goes through it: an insert adds its pair, a replace
+/// swaps the old pair for the new, a delete removes it, and an
+/// `UpdateField` whose marker *is* this index's marker re-keys the
+/// record (any other field's update is forwarded untouched — the
+/// `TypeId` test is the one place the "is this marker that marker"
+/// question `traits.rs` explains coherence cannot ask is answered, at
+/// run time, for two `'static` unit markers). So a field that is both
+/// scannable and ordered must use one marker for both (`Relation`'s
+/// `UpdatedAtField`); two markers for one field would leave the index
+/// stale after an `update`. Compaction never moves an
+/// id, so the index survives it as is. Answers [`PageBy`]: a page costs
+/// the page, not the table. Every other trait is forwarded.
+pub struct Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+{
+    inner: S,
+    index: BTreeSet<(R::Key, R::Id)>,
+    _marker: PhantomData<Marker>,
+}
+
+impl<S, R, Marker> Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+    S: GetById<R> + AllIds<R>,
+{
+    /// Wrap `inner`, building the sorted index from its own records.
+    /// Reads every record once; writes nothing.
+    pub fn new(inner: S) -> Self {
+        let mut index = BTreeSet::new();
+        for id in inner.all_ids() {
+            if let Some(record) = inner.get(id) {
+                index.insert((record.order_key(), id));
+            }
+        }
+        Self {
+            inner,
+            index,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S, R, Marker> Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+{
+    /// Borrow the wrapped store.
+    pub fn inner(&self) -> &S {
+        &self.inner
+    }
+
+    /// How many `(key, id)` pairs the index holds — one per live record.
+    pub fn indexed_len(&self) -> usize {
+        self.index.len()
+    }
+}
+
+// `ORD-FR-002`: the page is a range walk from just past the cursor.
+impl<S, R, Marker> PageBy<R, Marker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+{
+    fn page_by(&self, after: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let page = |ids: &mut dyn Iterator<Item = &(R::Key, R::Id)>| {
+            ids.take(limit).map(|(_, id)| *id).collect::<Vec<_>>()
+        };
+        match after {
+            None => page(&mut self.index.iter()),
+            Some(cursor) => page(&mut self.index.range((Excluded(cursor), Unbounded))),
+        }
+    }
+}
+
+// `ORD-FR-003`: the pair enters the index only after the inner insert
+// succeeded.
+impl<S, R, Marker> Insert<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+    S: Insert<R>,
+{
+    fn insert(&mut self, record: R) -> Result<(), InsertError<R::Id>> {
+        let pair = (record.order_key(), record.id());
+        self.inner.insert(record)?;
+        self.index.insert(pair);
+        Ok(())
+    }
+}
+
+// The old pair (read from the inner store before the move) leaves and
+// the new one enters, only after the inner replace succeeded.
+impl<S, R, Marker> Replace<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+    S: Replace<R> + GetById<R>,
+{
+    fn replace(&mut self, record: R) -> Result<(), ReplaceError<R::Id>> {
+        let id = record.id();
+        let old = self
+            .inner
+            .get(id)
+            .map(|old| (old.order_key(), id))
+            .ok_or(ReplaceError::NotFound(id))?;
+        let new = (record.order_key(), id);
+        self.inner.replace(record)?;
+        self.index.remove(&old);
+        self.index.insert(new);
+        Ok(())
+    }
+}
+
+// The pair (read first) leaves the index after the inner delete
+// succeeded.
+impl<S, R, Marker> Delete<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+    S: Delete<R> + GetById<R>,
+{
+    fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
+        let old = self
+            .inner
+            .get(id)
+            .map(|old| (old.order_key(), id))
+            .ok_or(DeleteError::NotFound(id))?;
+        self.inner.delete(id)?;
+        self.index.remove(&old);
+        Ok(())
+    }
+}
+
+// An update of this index's own field re-keys the record; any other
+// field's update is forwarded untouched. Both markers are unit structs,
+// so the run-time test is exact and free.
+impl<S, R, Marker, ScanMarker> UpdateField<R, ScanMarker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker> + ScannableField<ScanMarker>,
+    R::Id: Ord,
+    Marker: 'static,
+    ScanMarker: 'static,
+    S: UpdateField<R, ScanMarker> + GetById<R>,
+{
+    fn update(&mut self, id: R::Id, value: R::ScanValue) -> Result<(), NotFound<R::Id>> {
+        let re_key = std::any::TypeId::of::<Marker>() == std::any::TypeId::of::<ScanMarker>();
+        let old = if re_key {
+            self.inner.get(id).map(|old| (old.order_key(), id))
+        } else {
+            None
+        };
+        self.inner.update(id, value)?;
+        if let Some(old) = old {
+            self.index.remove(&old);
+            if let Some(new) = self.inner.get(id) {
+                self.index.insert((new.order_key(), id));
+            }
+        }
+        Ok(())
+    }
+}
+
+// Forwarded — compaction reclaims slots, never renames an id.
+impl<S: Compact, R, Marker> Compact for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+{
+    fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        self.inner.compact()
+    }
+}
+
+impl<S, R, Marker> Detach<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: Detach<R>,
+{
+    fn detach(&mut self, relation: &str, id: R::Id) -> Result<usize, DeleteError<R::Id>> {
+        self.inner.detach(relation, id)
+    }
+}
+
+impl<S, R, Marker> GetById<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: GetById<R>,
+{
+    fn get(&self, id: R::Id) -> Option<R> {
+        self.inner.get(id)
+    }
+}
+
+impl<S, R, Marker> AllIds<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: AllIds<R>,
+{
+    fn all_ids(&self) -> Vec<R::Id> {
+        self.inner.all_ids()
+    }
+}
+
+impl<S, R, Marker> Flush for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
+impl<S, R, Marker, IndexMarker> FilterEq<R, IndexMarker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker> + IndexedField<IndexMarker>,
+    S: FilterEq<R, IndexMarker>,
+{
+    fn filter_eq(&self, value: &R::IndexValue) -> Vec<R::Id> {
+        self.inner.filter_eq(value)
+    }
+}
+
+impl<S, R, Marker, ScanMarker> ScanField<R, ScanMarker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker> + ScannableField<ScanMarker>,
+    S: ScanField<R, ScanMarker>,
+{
+    fn scan(&self) -> Vec<R::ScanValue> {
+        self.inner.scan()
+    }
+}
+
+impl<S, R, Marker> super::query::MultiNeighbors<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: super::query::MultiNeighbors<R>,
+{
+    fn neighbors_by_relation(&self, relation: &str, id: R::Id) -> Option<Vec<R::Id>> {
+        self.inner.neighbors_by_relation(relation, id)
+    }
+    fn all_neighbors(&self, id: R::Id) -> Vec<R::Id> {
+        self.inner.all_neighbors(id)
+    }
+    fn relation_kinds(&self) -> Vec<String> {
+        self.inner.relation_kinds()
+    }
+    fn edge_count(&self, relation: &str) -> Option<usize> {
+        self.inner.edge_count(relation)
+    }
+}
+
+impl<S, R, Marker, R2, RelMarker> Neighbors<R2, RelMarker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R2: SymmetricRelation<RelMarker>,
+    S: Neighbors<R2, RelMarker>,
+{
+    fn neighbors(&self, id: R2::Id) -> Vec<R2::Id> {
+        self.inner.neighbors(id)
+    }
+}
+
+impl<S, R, Marker, R2, RelMarker> Link<R2, RelMarker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R2: SymmetricRelation<RelMarker>,
+    S: Link<R2, RelMarker>,
+{
+    fn link(&mut self, a: R2::Id, b: R2::Id) -> Result<LinkOutcome, LinkError<R2::Id>> {
+        self.inner.link(a, b)
+    }
+}
+
+impl<S, R, Marker> MultiLink<R> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: MultiLink<R>,
+{
+    fn link(
+        &mut self,
+        relation: &str,
+        a: R::Id,
+        b: R::Id,
+    ) -> Result<LinkOutcome, LinkError<R::Id>> {
+        self.inner.link(relation, a, b)
     }
 }
 

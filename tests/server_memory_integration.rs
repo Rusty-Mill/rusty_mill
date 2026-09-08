@@ -597,6 +597,11 @@ fn ordered_keyset_pages_by_updated_at_walk_the_table_over_the_wire() {
 
     let first = client.page("updated_at_unix_ms", None, 2).unwrap();
     assert_eq!(ids(&first), vec![id(1), id(2)]);
+    // `ORD-FR-005` (ADR-0059): `updated_at_unix_ms` is answered from the
+    // sorted index; every other orderable field still takes the scan
+    // path, and the two agree.
+    let by_created = client.page("created_at_unix_ms", None, 2).unwrap();
+    assert_eq!(ids(&by_created), ids(&first));
     assert_eq!(first[0].1.len(), 13, "every field of each record");
     let (last_id, last_fields) = &first[1];
     let cursor = (last_fields[6].1.clone(), *last_id);
