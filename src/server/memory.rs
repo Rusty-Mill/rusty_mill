@@ -21,18 +21,18 @@ use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
-    TransactionOp, ValueKind,
+    TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    page_by_scan, page_key, predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome,
-    LinkOutcome, PageRow, ReplaceIfOutcome, ReplaceOutcome,
+    page_by_scan, page_key, predicate_matches, validate_predicate, ConnectionStore, DeleteOutcome,
+    InsertOutcome, LinkOutcome, PageRow, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::memory::{
     AccessCountField, CategoryField, Memory, MemoryProductionStack, UpdatedAtOrder,
     MEMORY_FOREIGN_TABLE, MEMORY_RELATION_LABELS,
 };
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{GetById, UpdateField};
+use crate::generic::query::{Delete, GetById, Insert, MultiLink, Replace, UpdateField};
 use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
 use std::path::Path;
 
@@ -299,6 +299,118 @@ impl MemoryConnectionStore {
     }
 }
 
+/// `WBT-FR-003` (ADR-0060): one parsed, pre-validated write of an atomic
+/// [`WriteOp`] batch — the field lists already decoded to a [`Memory`]
+/// and the guard/label already checked, so the exclusive section only
+/// reads endpoints and applies.
+enum PreparedWrite {
+    Insert(Memory),
+    Replace(Memory),
+    ReplaceIf(Memory, Predicate),
+    Delete(RecordId),
+    Link {
+        left: RecordId,
+        right: RecordId,
+        relation: String,
+    },
+}
+
+impl MemoryConnectionStore {
+    /// Parse and pre-validate one op with no lock held (`WBT-FR-003`):
+    /// the field list to a `Memory`, the `ReplaceIf` guard as a `Query`
+    /// predicate (`GRD-FR-004`), the `Link` label against this table's
+    /// relations. Any failure aborts the atomic batch before a write.
+    fn prepare_write(schema: &DomainSchema, op: &WriteOp) -> Result<PreparedWrite, ErrorCode> {
+        Ok(match op {
+            WriteOp::Insert { id, fields } => {
+                PreparedWrite::Insert(Self::memory_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::Replace { id, fields } => {
+                PreparedWrite::Replace(Self::memory_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::ReplaceIf { id, fields, guard } => {
+                validate_predicate(schema, guard)?;
+                PreparedWrite::ReplaceIf(
+                    Self::memory_from_fields(*id, fields.clone())?,
+                    guard.clone(),
+                )
+            }
+            WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            WriteOp::Link {
+                left,
+                right,
+                relation,
+            } => {
+                if !MEMORY_RELATION_LABELS.contains(&relation.as_str()) {
+                    return Err(ErrorCode::Malformed);
+                }
+                PreparedWrite::Link {
+                    left: *left,
+                    right: *right,
+                    relation: relation.clone(),
+                }
+            }
+        })
+    }
+
+    /// Apply one prepared write to the locked stack (`WBT-FR-003`).
+    /// Every soft outcome is a [`WriteResult`]; only a storage I/O error
+    /// (or a link to a missing own-table endpoint) is a hard `Err` — and
+    /// the batch's own-endpoint existence was checked before this ran.
+    fn apply_prepared(
+        inner: &mut MemoryProductionStack,
+        prepared: PreparedWrite,
+    ) -> Result<WriteResult, ErrorCode> {
+        Ok(match prepared {
+            PreparedWrite::Insert(memory) => match Insert::insert(inner, memory) {
+                Ok(()) => WriteResult::Inserted,
+                Err(InsertError::Duplicate(_)) => WriteResult::Duplicate,
+                Err(InsertError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::Replace(memory) => match Replace::replace(inner, memory) {
+                Ok(()) => WriteResult::Replaced,
+                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::ReplaceIf(memory, guard) => {
+                let id = memory.id;
+                match GetById::<Memory>::get(inner, id) {
+                    None => WriteResult::NotFound,
+                    Some(stored) => {
+                        if predicate_matches(&Self::fields_of(stored), &guard) {
+                            match Replace::replace(inner, memory) {
+                                Ok(()) => WriteResult::Replaced,
+                                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+                            }
+                        } else {
+                            WriteResult::GuardFailed
+                        }
+                    }
+                }
+            }
+            PreparedWrite::Delete(id) => match Delete::<Memory>::delete(inner, id) {
+                Ok(()) => WriteResult::Deleted,
+                Err(DeleteError::NotFound(_)) => WriteResult::NotFound,
+                Err(DeleteError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::Link {
+                left,
+                right,
+                relation,
+            } => match MultiLink::link(inner, &relation, left, right) {
+                Ok(crate::generic::LinkOutcome::Linked) => WriteResult::Linked,
+                Ok(crate::generic::LinkOutcome::AlreadyLinked) => WriteResult::AlreadyLinked,
+                Err(LinkError::UnknownRecord(_)) => return Err(ErrorCode::RecordNotFound),
+                Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => {
+                    return Err(ErrorCode::Malformed)
+                }
+                Err(LinkError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+        })
+    }
+}
+
 impl ConnectionStore for MemoryConnectionStore {
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Memory>(id).map(Self::fields_of)
@@ -507,6 +619,42 @@ impl ConnectionStore for MemoryConnectionStore {
 
     /// `CNT-FR-002` (ADR-0057): one read under the store's lock; an
     /// unknown label is `Malformed`, as for `neighbors_by_relation`.
+    /// `WBT-FR-002`/`003` (ADR-0060): pipelined is the trait default
+    /// (each op through its single-shot method); atomic parses and
+    /// pre-validates every op, then — under one exclusive section —
+    /// checks each `Link`'s own-table endpoint and applies every op, so
+    /// a precondition failure aborts with nothing applied and the batch
+    /// is isolated from other connections. Not crash-atomic: a storage
+    /// I/O error mid-apply is not rolled back (the named follow-on).
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
+        }
+        let schema = self.describe();
+        let mut prepared = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
+        }
+        self.store.with_exclusive(|inner| {
+            for (i, p) in prepared.iter().enumerate() {
+                if let PreparedWrite::Link { left, .. } = p {
+                    if GetById::<Memory>::get(inner, *left).is_none() {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+            }
+            let mut results = Vec::with_capacity(prepared.len());
+            for (i, p) in prepared.into_iter().enumerate() {
+                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
+            }
+            Ok(results)
+        })
+    }
+
     fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {
         match self.store.count_edges::<Memory>(relation) {
             Some(count) => Ok(count as u64),

@@ -58,7 +58,7 @@ class WireVectors(unittest.TestCase):
         # SERVER-002 §4's worked examples: Hello { 21 } and GetById(uuid 1).
         import uuid
 
-        self.assertEqual(p.encode_request(p.Hello(21)), bytes.fromhex("0a00000015000000"))
+        self.assertEqual(p.encode_request(p.Hello(22)), bytes.fromhex("0a00000016000000"))
         self.assertEqual(
             p.frame(p.encode_request(p.GetById(uuid.UUID(int=1)))),
             bytes.fromhex("1c000000" "00000000" "1000000000000000" + "00" * 15 + "01"),

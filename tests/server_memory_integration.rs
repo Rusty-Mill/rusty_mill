@@ -13,11 +13,11 @@ use rusty_multimodal_db::generic::memory::{
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::relation::open_or_create_relation_production_stack;
 use rusty_multimodal_db::server::client::{
-    ClientError, GuardedReplace, QueryResult, SchemaDrivenClient,
+    BatchOp, ClientError, GuardedReplace, QueryResult, SchemaDrivenClient,
 };
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
-use rusty_multimodal_db::server::protocol::{CompareOp, ErrorCode, ScanValue};
+use rusty_multimodal_db::server::protocol::{CompareOp, ErrorCode, ScanValue, WriteResult};
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions};
 use std::net::{SocketAddr, TcpListener};
@@ -1340,5 +1340,118 @@ fn the_relation_table_serves_directed_open_label_edges_over_the_wire() {
             .filter_eq("subject", ScanValue::Str("aaaaaaaaaaaa".into()))
             .unwrap(),
         vec![id(1)]
+    );
+}
+
+/// `WBT` acceptance (ADR-0060): a pipelined batch applies each op and
+/// records its own outcome; an atomic batch applies all under one lock on
+/// success; an atomic batch whose validation fails applies nothing and
+/// names the first failing op.
+#[test]
+fn write_batch_pipelined_applies_each_and_atomic_is_all_or_nothing() {
+    let dir = unique_dir("memory_write_batch");
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let id = Uuid::from_u128;
+    let full = |content: &str, stamp: i64| -> Vec<(&'static str, ScanValue)> {
+        vec![
+            ("content", ScanValue::Str(content.into())),
+            ("category", ScanValue::Str("general".into())),
+            ("tags", ScanValue::StrList(vec!["batch".into()])),
+            ("source", ScanValue::Str("test".into())),
+            ("metadata_json", ScanValue::Str("{}".into())),
+            ("created_at_unix_ms", ScanValue::I64(stamp)),
+            ("updated_at_unix_ms", ScanValue::I64(stamp)),
+            ("memory_type", ScanValue::Str("unclassified".into())),
+            ("status", ScanValue::Str("active".into())),
+            ("sensitive", ScanValue::Bool(false)),
+            ("access_count", ScanValue::I64(0)),
+            ("deleted_at_unix_ms", ScanValue::I64(0)),
+            ("node_id", ScanValue::Str(String::new())),
+        ]
+    };
+
+    // Pipelined: two inserts, a delete of an absent id (soft NotFound),
+    // and a mentions link from an inserted memory to a (foreign) entity.
+    let a = full("first", 1_000);
+    let b = full("second", 2_000);
+    let results = client
+        .write_batch(
+            &[
+                BatchOp::Insert {
+                    id: id(101),
+                    fields: &a,
+                },
+                BatchOp::Insert {
+                    id: id(102),
+                    fields: &b,
+                },
+                BatchOp::Delete { id: id(999) },
+                BatchOp::Link {
+                    left: id(101),
+                    right: id(0xe1),
+                    relation: "mentions",
+                },
+            ],
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        results,
+        vec![
+            WriteResult::Inserted,
+            WriteResult::Inserted,
+            WriteResult::NotFound,
+            WriteResult::Linked,
+        ]
+    );
+    assert!(client.get(id(101)).unwrap().is_some());
+
+    // Atomic success: two more inserts, applied under one lock.
+    let c = full("third", 3_000);
+    let d = full("fourth", 4_000);
+    let ok = client
+        .write_batch(
+            &[
+                BatchOp::Insert {
+                    id: id(103),
+                    fields: &c,
+                },
+                BatchOp::Insert {
+                    id: id(104),
+                    fields: &d,
+                },
+            ],
+            true,
+        )
+        .unwrap();
+    assert_eq!(ok, vec![WriteResult::Inserted, WriteResult::Inserted]);
+
+    // Atomic abort: a valid insert then a short (malformed) field list.
+    // The batch names the second op and applies nothing.
+    let e = full("fifth", 5_000);
+    let short = vec![("content", ScanValue::Str("incomplete".into()))];
+    match client.write_batch(
+        &[
+            BatchOp::Insert {
+                id: id(105),
+                fields: &e,
+            },
+            BatchOp::Insert {
+                id: id(106),
+                fields: &short,
+            },
+        ],
+        true,
+    ) {
+        Err(ClientError::TransactionFailed { index, code, .. }) => {
+            assert_eq!(index, 1);
+            assert_eq!(code, ErrorCode::Malformed);
+        }
+        other => panic!("expected TransactionFailed, got {other:?}"),
+    }
+    assert!(
+        client.get(id(105)).unwrap().is_none(),
+        "an atomic abort applies nothing, not even the valid op before the failure"
     );
 }

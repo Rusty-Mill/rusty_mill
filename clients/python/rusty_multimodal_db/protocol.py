@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 21
+PROTOCOL_VERSION = 22
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -317,6 +317,123 @@ def _variant(index, spec):
 FIELDS = ("vec", ("tuple", "u16", ScanValue))
 
 
+# ---- WriteOp / WriteResult (WBT-FR-001/002, ADR-0060, protocol 22) ----
+
+
+@dataclass(frozen=True)
+class WoInsert:
+    id: uuid.UUID
+    fields: Tuple[Tuple[int, Any], ...]
+    _index: ClassVar[int] = 0
+    _spec: ClassVar[list] = [("id", "uuid"), ("fields", FIELDS)]
+
+    def __post_init__(self):
+        object.__setattr__(self, "fields", tuple(tuple(f) for f in self.fields))
+
+
+@dataclass(frozen=True)
+class WoReplace:
+    id: uuid.UUID
+    fields: Tuple[Tuple[int, Any], ...]
+    _index: ClassVar[int] = 1
+    _spec: ClassVar[list] = [("id", "uuid"), ("fields", FIELDS)]
+
+    def __post_init__(self):
+        object.__setattr__(self, "fields", tuple(tuple(f) for f in self.fields))
+
+
+@dataclass(frozen=True)
+class WoReplaceIf:
+    id: uuid.UUID
+    fields: Tuple[Tuple[int, Any], ...]
+    guard: Predicate
+    _index: ClassVar[int] = 2
+    _spec: ClassVar[list] = [("id", "uuid"), ("fields", FIELDS), ("guard", Predicate)]
+
+    def __post_init__(self):
+        object.__setattr__(self, "fields", tuple(tuple(f) for f in self.fields))
+
+
+@dataclass(frozen=True)
+class WoDelete:
+    id: uuid.UUID
+    _index: ClassVar[int] = 3
+    _spec: ClassVar[list] = [("id", "uuid")]
+
+
+@dataclass(frozen=True)
+class WoLink:
+    left: uuid.UUID
+    right: uuid.UUID
+    relation: str
+    _index: ClassVar[int] = 4
+    _spec: ClassVar[list] = [("left", "uuid"), ("right", "uuid"), ("relation", "str")]
+
+
+WriteOp = [WoInsert, WoReplace, WoReplaceIf, WoDelete, WoLink]
+
+
+@dataclass(frozen=True)
+class WrInserted:
+    _index: ClassVar[int] = 0
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrDuplicate:
+    _index: ClassVar[int] = 1
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrReplaced:
+    _index: ClassVar[int] = 2
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrNotFound:
+    _index: ClassVar[int] = 3
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrGuardFailed:
+    _index: ClassVar[int] = 4
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrLinked:
+    _index: ClassVar[int] = 5
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrAlreadyLinked:
+    _index: ClassVar[int] = 6
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrDeleted:
+    _index: ClassVar[int] = 7
+    _spec: ClassVar[list] = []
+
+
+@dataclass(frozen=True)
+class WrFailed:
+    code: ErrorCode
+    _index: ClassVar[int] = 8
+    _spec: ClassVar[list] = [("code", ErrorCode)]
+
+
+WriteResult = [
+    WrInserted, WrDuplicate, WrReplaced, WrNotFound, WrGuardFailed, WrLinked, WrAlreadyLinked,
+    WrDeleted, WrFailed,
+]
+
+
 @_variant(0, [("id", "uuid")])
 class GetById:
     id: uuid.UUID
@@ -517,11 +634,21 @@ class CountEdges:
     relation: str
 
 
+@_variant(31, [("ops", ("vec", WriteOp)), ("atomic", "bool")])
+class WriteBatch:
+    ops: Tuple[Any, ...]
+    atomic: bool
+
+    def __post_init__(self):
+        object.__setattr__(self, "ops", tuple(self.ops))
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
+    WriteBatch,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -532,7 +659,7 @@ REQUEST_INTRODUCED_AT = {
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
-    ReplaceIf: 19, Page: 20, CountEdges: 21,
+    ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22,
 }
 
 
@@ -671,6 +798,14 @@ class Compacted:
     edge_logs_folded: int
 
 
+@_variant(20, [("results", ("vec", WriteResult))])
+class BatchResults:
+    results: Tuple[Any, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "results", tuple(self.results))
+
+
 @_variant(19, [("count", "u64")])
 class Count:
     count: int
@@ -679,6 +814,7 @@ class Count:
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
+    BatchResults,
 ]
 
 

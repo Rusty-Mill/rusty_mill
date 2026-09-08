@@ -1,7 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.10.0 (protocol version 21 — `SERVER-001` v0.47.0, `CNT-FR-005`,
-  ADR-0057; 0.9.0 was protocol 20, ADR-0055; 0.8.0 protocol 19, ADR-0054; 0.7.0 protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
+- Version: 0.11.0 (protocol version 22 — `SERVER-001` v0.50.0, `WBT-FR-005`,
+  ADR-0060; 0.10.0 was protocol 21, ADR-0057; 0.9.0 protocol 20, ADR-0055; 0.8.0 protocol 19, ADR-0054; 0.7.0 protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
   ADR-0050; 0.4.0 protocol 15, ADR-0049; 0.3.0 protocol 14, ADR-0047;
   0.2.0 protocol 13, ADR-0046; 0.1.0 protocol 12, `ECO-FR-004`,
   ADR-0043)
@@ -92,13 +92,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 21 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `15 00 00 00` (21).
+- `Request::Hello { protocol_version: 22 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `16 00 00 00` (22).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 21
+## 5. Types at protocol version 22
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -136,6 +136,33 @@ unmarked is version 1.
 |---|---|---|---|
 | `Selection` | `All` | `Fields(Vec<FieldRef>)` | |
 | `JoinRelation` | `Neighbors(Option<String>)` — every symmetric relation, or one named label | `Parent` | `Children` |
+
+### 5.4b `WriteOp` (since 22), `WriteResult` (since 22)
+
+`WriteOp` — one runtime write in a `WriteBatch`, each variant the body of
+its single-shot request:
+
+| Index | Variant | Payload |
+|---|---|---|
+| 0 | `Insert` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>` |
+| 1 | `Replace` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>` |
+| 2 | `ReplaceIf` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>`, `guard: Predicate` |
+| 3 | `Delete` | `id: RecordId` |
+| 4 | `Link` | `left: RecordId`, `right: RecordId`, `relation: String` |
+
+`WriteResult` — one op's outcome in a `BatchResults`:
+
+| Index | Variant | Payload |
+|---|---|---|
+| 0 | `Inserted` | — |
+| 1 | `Duplicate` | — |
+| 2 | `Replaced` | — |
+| 3 | `NotFound` | — |
+| 4 | `GuardFailed` | — |
+| 5 | `Linked` | — |
+| 6 | `AlreadyLinked` | — |
+| 7 | `Deleted` | — |
+| 8 | `Failed` | `code: ErrorCode` |
 
 ### 5.5 Structs (fields in order)
 
@@ -190,6 +217,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 28 | `ReplaceIf` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>`, `guard: Predicate` — `Replace`'s body, then one predicate | 19 | `Ok`, `NotFound`, or `Err { GuardFailed }` |
 | 29 | `Page` | `order_by: FieldRef`, `after: Option<(ScanValue, RecordId)>`, `limit: u64` | 20 | `Rows` |
 | 30 | `CountEdges` | `relation: String` | 21 | `Count` |
+| 31 | `WriteBatch` | `ops: Vec<WriteOp>`, `atomic: bool` | 22 | `BatchResults`, or `TransactionFailed` (atomic abort) |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -218,6 +246,7 @@ server does not know closes the connection with no reply (§6.3).
 | 17 | `Tables` | `names: Vec<String>`, `primary: String` | 16 |
 | 18 | `Compacted` | `records: u64`, `slots_reclaimed: u64`, `log_entries_folded: u64`, `edge_logs_folded: u64` | 18 |
 | 19 | `Count` | `count: u64` | 21 |
+| 20 | `BatchResults` | `results: Vec<WriteResult>` | 22 |
 
 ## 6. Connection lifecycle
 
@@ -484,6 +513,20 @@ Each item names the `SERVER-001` requirement that owns it.
    (`NeighborsByRelation`'s own rule); `Unsupported` from a domain with
    no labelled relations. A read, gated as `Query`. `Malformed` below
    21. (`FR-057`)
+20. **`WriteBatch`** (22) — a batch of runtime writes (`Insert`,
+   `Replace`, `ReplaceIf`, `Delete`, `Link`, as `WriteOp`) for the
+   selected table, applied in order under one write-lock acquisition,
+   answered `BatchResults` with one `WriteResult` per op in order.
+   `atomic: false` is pipelined — every op is applied and its outcome
+   recorded, each standing on its own. `atomic: true` is precondition-
+   and isolation-atomic — every op is validated first and the batch
+   aborts with `TransactionFailed` (naming the first failing op's index
+   and code) applying nothing, else all apply and the outcomes return;
+   it is not crash-atomic across the batch. A write: `Unauthorized` for
+   a read-only token, `SessionOpen` while a session is open, `Malformed`
+   below 22 or for a batch of more than `MAX_BATCH_OPS` (4096) ops. A
+   domain with no runtime write answers every op `Failed(Unsupported)`
+   (pipelined) or aborts `Unsupported` (atomic). (`FR-060`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -531,6 +574,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 19 | v0.44.0 | `ReplaceIf` (28), `GuardFailed` (13) |
 | 20 | v0.45.0 | `Page` (29) |
 | 21 | v0.47.0 | `CountEdges` (30), `Count` (19) |
+| 22 | v0.50.0 | `WriteBatch` (31), `BatchResults` (20) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -542,7 +586,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -572,9 +616,16 @@ byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
 client; it needs only `python3`. The live half —
 `tests/server_python_client.rs` — drives the reference client against a
-real server at 21 and at a hand-negotiated 10.
+real server at 22 and at a hand-negotiated 10.
 
 ## 10. Change history
+
+- 0.11.0 (`SERVER-001` v0.50.0, ADR-0060, `WBT-FR-005`): protocol version
+  22 — `Request::WriteBatch` (31), `Response::BatchResults` (20), the
+  `WriteOp` and `WriteResult` enums; §4's `Hello` example, §5 header,
+  §5.4b, §5.6, §5.7, §7 item 20, §8 row 22 and rule 3's list; fixture at
+  66 vectors (`Request/WriteBatch`, `Response/BatchResults`); the
+  reference Python client gains `write_batch`.
 
 - 0.10.0 (`SERVER-001` v0.47.0, ADR-0057, `CNT-FR-005`): protocol version
   21 — `Request::CountEdges` (30), `Response::Count` (19); §4's `Hello`

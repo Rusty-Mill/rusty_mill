@@ -95,6 +95,8 @@ pub enum RequestKind {
     Page,
     /// Protocol 21, ADR-0057.
     CountEdges,
+    /// Protocol 22, ADR-0060.
+    WriteBatch,
 }
 
 impl RequestKind {
@@ -131,6 +133,7 @@ impl RequestKind {
             Request::ReplaceIf { .. } => RequestKind::ReplaceIf,
             Request::Page { .. } => RequestKind::Page,
             Request::CountEdges { .. } => RequestKind::CountEdges,
+            Request::WriteBatch { .. } => RequestKind::WriteBatch,
         }
     }
 }

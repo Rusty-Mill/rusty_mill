@@ -372,6 +372,58 @@ class Client:
             return reply.count
         raise ProtocolError(type(reply).__name__)
 
+    def write_batch(self, ops: Sequence[Tuple], atomic: bool) -> List[str]:
+        """Apply a batch of runtime writes in one request (WBT-FR-004,
+        protocol 22). Each op is a tuple: ``("insert", id, fields)``,
+        ``("replace", id, fields)``, ``("replace_if", id, fields, guard)``,
+        ``("delete", id)``, or ``("link", left, right, relation)`` — field
+        names resolved to tags here. Returns one outcome string per op, in
+        order (``"inserted"``/``"duplicate"``/``"replaced"``/``"notfound"``/
+        ``"guardfailed"``/``"linked"``/``"alreadylinked"``/``"deleted"``, or
+        ``"failed:<CODE>"``). ``atomic=False`` is pipelined (each op stands
+        on its own); ``atomic=True`` is precondition- and isolation-atomic
+        (nothing applies unless every op validates), an abort raised as
+        ``ServerError`` naming the first failing op. ``UnsupportedError``
+        below 22 with no frame sent."""
+        need = p.REQUEST_INTRODUCED_AT[p.WriteBatch]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(f"WriteBatch needs protocol {need}, negotiated {self.server_protocol_version}")
+        wire = tuple(self._to_write_op(op) for op in ops)
+        reply = self._roundtrip(p.WriteBatch(wire, atomic))
+        if isinstance(reply, p.TransactionFailed):
+            raise ServerError(reply.code, f"operation {reply.index}: {reply.message}")
+        if isinstance(reply, p.BatchResults):
+            return [_write_result_str(r) for r in reply.results]
+        raise ProtocolError(type(reply).__name__)
+
+    def _to_write_op(self, op: Tuple):
+        kind = op[0]
+        if kind == "insert":
+            _, rid, fields = op
+            return p.WoInsert(rid, self._tag_fields(fields))
+        if kind == "replace":
+            _, rid, fields = op
+            return p.WoReplace(rid, self._tag_fields(fields))
+        if kind == "replace_if":
+            _, rid, fields, guard = op
+            name, gop, value = guard
+            d = self.field(name)
+            if gop in (p.CompareOp.Lt, p.CompareOp.Le, p.CompareOp.Gt, p.CompareOp.Ge) and d.value_kind not in (
+                p.ValueKind.U32,
+                p.ValueKind.I64,
+            ):
+                raise UnsupportedError(f"ordering guard on {name!r}, a {d.value_kind.name} field")
+            return p.WoReplaceIf(rid, self._tag_fields(fields), p.Predicate(d.tag, gop, _to_scan_value(d.value_kind, value)))
+        if kind == "delete":
+            return p.WoDelete(op[1])
+        if kind == "link":
+            _, left, right, relation = op
+            return p.WoLink(left, right, relation)
+        raise ValueError(f"unknown write-batch op kind {kind!r}")
+
+    def _tag_fields(self, fields: Sequence[Tuple[str, Any]]):
+        return tuple((self.field(n).tag, _to_scan_value(self.field(n).value_kind, v)) for n, v in fields)
+
     def delete(self, record_id: uuid.UUID) -> bool:
         """Remove one record (DEL-FR-008, protocol 17): ``True`` when it is
         gone with every edge touching it, ``False`` when the id has no
@@ -553,6 +605,23 @@ class Client:
                 (r.left_id, self._named(r.left), r.right_id, named_right(r.right)) for r in reply.rows
             ]
         raise ProtocolError(type(reply).__name__)
+
+
+def _write_result_str(r) -> str:
+    """One WriteResult variant to its outcome string (WBT-FR-004)."""
+    names = {
+        p.WrInserted: "inserted",
+        p.WrDuplicate: "duplicate",
+        p.WrReplaced: "replaced",
+        p.WrNotFound: "notfound",
+        p.WrGuardFailed: "guardfailed",
+        p.WrLinked: "linked",
+        p.WrAlreadyLinked: "alreadylinked",
+        p.WrDeleted: "deleted",
+    }
+    if isinstance(r, p.WrFailed):
+        return f"failed:{r.code.name}"
+    return names[type(r)]
 
 
 def _exchange(sock, req):

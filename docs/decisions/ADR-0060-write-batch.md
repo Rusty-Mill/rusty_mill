@@ -1,8 +1,9 @@
 # ADR-0060: Batch the runtime writes in one request
 
-- Status: **Proposed** (2026-09-08). Design only — the batch's atomicity
-  guarantee is a fork the owner picks, as `ADR-0056`'s layout change
-  was; implementation follows the pick.
+- Status: **Accepted as designed** (2026-09-08 — the owner picked option
+  (c): pipelined by default, atomic under a flag; (a) pipelined-only,
+  (b) atomic-only, (d) session, and (e) decline declined). Proposed and
+  then implemented on one branch once the pick was made.
 - Date: 2026-09-08
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-WRITE-BATCH-DESIGN.md` (the full design),
@@ -65,8 +66,14 @@ owner:
 
 ## Acceptance and implementation
 
-- 2026-09-08: proposed, design only. On the owner's pick the
-  implementation round follows on this branch — `WriteOp`/`WriteResult`
-  and the two wire variants, `ConnectionStore::write_batch`, both
-  clients, the pins and `SERVER-002` bump, and (for (b)/(c)) the journal
-  format v2 with idempotent redo.
+- 2026-09-08: proposed, design only.
+- 2026-09-08: the owner picked option (c). Implemented on the same branch
+  as `SERVER-001` v0.50.0 / FR-060 — `WriteOp`/`WriteResult` and the two
+  wire variants at protocol 22, `ConnectionStore::{apply_write_op,
+  write_batch}` (pipelined default) with the atomic single-`with_exclusive`
+  override on `Memory`/`Entity`/`Relation`, both clients, the pins and
+  `SERVER-002` v0.11.0. The atomic flag is precondition- and
+  isolation-atomic; crash-atomicity across the batch stays the named
+  storage follow-on (option (c)'s journal-format path was scoped to that
+  follow-on rather than built here, since the append logs fsync per op
+  and per-op durability already holds). (PR #229.)

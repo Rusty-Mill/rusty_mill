@@ -12,14 +12,14 @@
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
-    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    page_by_scan, page_key, predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome,
-    PageRow, ReplaceIfOutcome, ReplaceOutcome,
+    page_by_scan, page_key, predicate_matches, validate_predicate, ConnectionStore, DeleteOutcome,
+    InsertOutcome, PageRow, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{GetById, UpdateField};
+use crate::generic::query::{Delete, GetById, Insert, Replace, UpdateField};
 use crate::generic::relation::{Relation, RelationProductionStack, SubjectField, UpdatedAtField};
 use crate::generic::{DeleteError, GuardedReplace, InsertError, ReplaceError};
 use std::path::Path;
@@ -231,9 +231,104 @@ impl RelationConnectionStore {
     }
 }
 
+/// `WBT-FR-003` (ADR-0060): a parsed, pre-validated write of an atomic
+/// [`WriteOp`] batch on `Relation`. `Relation` is a record table with no
+/// edge layer, so `Link` is not representable here — an atomic batch
+/// carrying one aborts `Unsupported` in `prepare_write`.
+enum PreparedWrite {
+    Insert(Relation),
+    Replace(Relation),
+    ReplaceIf(Relation, Predicate),
+    Delete(RecordId),
+}
+
+impl RelationConnectionStore {
+    fn prepare_write(schema: &DomainSchema, op: &WriteOp) -> Result<PreparedWrite, ErrorCode> {
+        Ok(match op {
+            WriteOp::Insert { id, fields } => {
+                PreparedWrite::Insert(Self::relation_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::Replace { id, fields } => {
+                PreparedWrite::Replace(Self::relation_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::ReplaceIf { id, fields, guard } => {
+                validate_predicate(schema, guard)?;
+                PreparedWrite::ReplaceIf(
+                    Self::relation_from_fields(*id, fields.clone())?,
+                    guard.clone(),
+                )
+            }
+            WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            WriteOp::Link { .. } => return Err(ErrorCode::Unsupported),
+        })
+    }
+
+    fn apply_prepared(
+        inner: &mut RelationProductionStack,
+        prepared: PreparedWrite,
+    ) -> Result<WriteResult, ErrorCode> {
+        Ok(match prepared {
+            PreparedWrite::Insert(relation) => match Insert::insert(inner, relation) {
+                Ok(()) => WriteResult::Inserted,
+                Err(InsertError::Duplicate(_)) => WriteResult::Duplicate,
+                Err(InsertError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::Replace(relation) => match Replace::replace(inner, relation) {
+                Ok(()) => WriteResult::Replaced,
+                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::ReplaceIf(relation, guard) => {
+                let id = relation.id;
+                match GetById::<Relation>::get(inner, id) {
+                    None => WriteResult::NotFound,
+                    Some(stored) => {
+                        if predicate_matches(&Self::fields_of(stored), &guard) {
+                            match Replace::replace(inner, relation) {
+                                Ok(()) => WriteResult::Replaced,
+                                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+                            }
+                        } else {
+                            WriteResult::GuardFailed
+                        }
+                    }
+                }
+            }
+            PreparedWrite::Delete(id) => match Delete::<Relation>::delete(inner, id) {
+                Ok(()) => WriteResult::Deleted,
+                Err(DeleteError::NotFound(_)) => WriteResult::NotFound,
+                Err(DeleteError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+        })
+    }
+}
+
 impl ConnectionStore for RelationConnectionStore {
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Relation>(id).map(Self::fields_of)
+    }
+
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
+        }
+        let schema = self.describe();
+        let mut prepared = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
+        }
+        self.store.with_exclusive(|inner| {
+            let mut results = Vec::with_capacity(prepared.len());
+            for (i, p) in prepared.into_iter().enumerate() {
+                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
+            }
+            Ok(results)
+        })
     }
 
     /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,

@@ -30,7 +30,7 @@ use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{
     CompareOp, ErrorCode, JoinRelation, JoinSpec, Predicate, RecordId, Request, Response,
-    ScanValue, Selection, ValueKind, PROTOCOL_VERSION,
+    ScanValue, Selection, ValueKind, WriteOp, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{dispatch, serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 21);
+    assert_eq!(dog.server_protocol_version(), 22);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -1216,6 +1216,80 @@ fn count_edges_is_malformed_below_version_21() {
     assert!(matches!(
         old.count_edges("littermate_of"),
         Err(ClientError::Unsupported("count_edges"))
+    ));
+}
+
+/// `WBT-FR-003` (ADR-0060), rule 3: `WriteBatch` is protocol 22 — a
+/// connection negotiated at 21 (and a silent one) is answered `Malformed`
+/// with the connection left open; at 22 it is served (a `Delete` of an
+/// absent id is `BatchResults` carrying `NotFound`). Rule 4: the Rust
+/// client refuses below 22 with no frame.
+#[test]
+fn write_batch_is_malformed_below_version_22() {
+    let addr = start_entity_server();
+    let batch = Request::WriteBatch {
+        ops: vec![WriteOp::Delete {
+            id: RecordId::from_u128(99),
+        }],
+        atomic: false,
+    };
+    for hello in [Some(21u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &batch),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            Response::Schema(_)
+        ));
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    match roundtrip(&mut reader, &mut writer, &batch) {
+        Response::BatchResults { results } => assert_eq!(
+            results,
+            vec![rusty_multimodal_db::server::protocol::WriteResult::NotFound]
+        ),
+        other => panic!("expected BatchResults, got {other:?}"),
+    }
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.write_batch(&[], false),
+        Err(ClientError::Unsupported("write_batch"))
     ));
 }
 

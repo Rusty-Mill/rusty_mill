@@ -12,9 +12,9 @@
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
-    Request, Response, ScanValue, Selection, TransactionOp, MAX_STAGED_OPS, MAX_TRACKED_READS,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    Request, Response, ScanValue, Selection, TransactionOp, WriteOp, WriteResult, MAX_BATCH_OPS,
+    MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
 use std::cell::RefCell;
@@ -312,6 +312,75 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `WBT-FR-002` (ADR-0060, protocol 22): apply one [`WriteOp`] through
+    /// this adapter's single-shot write methods and map its outcome to a
+    /// [`WriteResult`]. The per-op step of the default pipelined
+    /// [`Self::write_batch`]; a domain with no runtime write answers
+    /// `Failed(Unsupported)` here, from the write methods' own defaults.
+    fn apply_write_op(&self, op: &WriteOp) -> WriteResult {
+        match op {
+            WriteOp::Insert { id, fields } => match self.insert_record(*id, fields.clone()) {
+                Ok(InsertOutcome::Inserted) => WriteResult::Inserted,
+                Ok(InsertOutcome::Duplicate) => WriteResult::Duplicate,
+                Err(code) => WriteResult::Failed(code),
+            },
+            WriteOp::Replace { id, fields } => match self.replace_record(*id, fields.clone()) {
+                Ok(ReplaceOutcome::Replaced) => WriteResult::Replaced,
+                Ok(ReplaceOutcome::NotFound) => WriteResult::NotFound,
+                Err(code) => WriteResult::Failed(code),
+            },
+            WriteOp::ReplaceIf { id, fields, guard } => {
+                match self.replace_record_if(*id, fields.clone(), guard) {
+                    Ok(ReplaceIfOutcome::Replaced) => WriteResult::Replaced,
+                    Ok(ReplaceIfOutcome::GuardFailed) => WriteResult::GuardFailed,
+                    Ok(ReplaceIfOutcome::NotFound) => WriteResult::NotFound,
+                    Err(code) => WriteResult::Failed(code),
+                }
+            }
+            WriteOp::Delete { id } => match self.delete_record(*id) {
+                Ok(DeleteOutcome::Deleted) => WriteResult::Deleted,
+                Ok(DeleteOutcome::NotFound) => WriteResult::NotFound,
+                Err(code) => WriteResult::Failed(code),
+            },
+            WriteOp::Link {
+                left,
+                right,
+                relation,
+            } => match self.link_records(*left, *right, relation) {
+                Ok(LinkOutcome::Linked) => WriteResult::Linked,
+                Ok(LinkOutcome::AlreadyLinked) => WriteResult::AlreadyLinked,
+                Err(code) => WriteResult::Failed(code),
+            },
+        }
+    }
+
+    /// `WBT-FR-002`/`WBT-FR-003` (ADR-0060, protocol 22): a batch of
+    /// runtime writes for this table. The default is **pipelined** —
+    /// each op applied through [`Self::apply_write_op`], its outcome
+    /// recorded, each standing on its own; `atomic` here can only abort
+    /// on the first hard `Failed(code)` (a domain with no runtime write
+    /// aborts at op 0 with `Unsupported`), because the default cannot
+    /// hold one lock across the batch. An adapter that supports runtime
+    /// writes overrides this to run the whole atomic batch under one
+    /// exclusive section (`Memory`/`Entity`/`Relation`).
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        let mut results = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            let result = self.apply_write_op(op);
+            if atomic {
+                if let WriteResult::Failed(code) = result {
+                    return Err((i, code));
+                }
+            }
+            results.push(result);
+        }
+        Ok(results)
+    }
+
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
     /// and, within this table, every edge touching it. Answers
     /// [`DeleteOutcome::NotFound`] when `id` has no record, nothing
@@ -519,7 +588,10 @@ fn validate_query(
 /// `Request::ReplaceIf`'s guard, `GRD-FR-004`): `UnknownField` for a tag
 /// the schema lacks, `Malformed` for a value of another kind or an
 /// ordering comparator on a field that is not `U32`/`I64`.
-fn validate_predicate(schema: &DomainSchema, predicate: &Predicate) -> Result<(), ErrorCode> {
+pub(crate) fn validate_predicate(
+    schema: &DomainSchema,
+    predicate: &Predicate,
+) -> Result<(), ErrorCode> {
     let kind = schema
         .fields
         .iter()
@@ -1216,7 +1288,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Relations { .. }
         | Response::Tables { .. }
         | Response::Compacted { .. }
-        | Response::Count { .. } => access::Outcome::Ok,
+        | Response::Count { .. }
+        | Response::BatchResults { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1994,6 +2067,19 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(count) => Response::Count { count },
             Err(code) => err_response(code),
         },
+        // `WBT-FR-002`/`003` (ADR-0060): the batch is applied by the
+        // adapter (pipelined or atomic per `atomic`); an atomic
+        // precondition abort is `TransactionFailed`, naming the first
+        // failing op. Gated in `handle_connection` (write, session, 22,
+        // `MAX_BATCH_OPS`).
+        Request::WriteBatch { ops, atomic } => match store.write_batch(&ops, atomic) {
+            Ok(results) => Response::BatchResults { results },
+            Err((index, code)) => Response::TransactionFailed {
+                index,
+                code,
+                message: error_message(code).to_string(),
+            },
+        },
         // `JOIN-FR-001`–`003` (ADR-0044): validate against the schema and
         // the adapter's own relation list, then the index nested loop.
         // Gated server-side in `handle_connection` (`Malformed` below 12)
@@ -2485,6 +2571,7 @@ fn handle_connection(
                     | Request::Delete { .. }
                     | Request::Compact
                     | Request::ReplaceIf { .. }
+                    | Request::WriteBatch { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2673,6 +2760,15 @@ fn handle_connection(
             Request::Page { .. } if negotiated < 20 => err_response(ErrorCode::Malformed),
             // `CNT-FR-003` (ADR-0057), rule 3: a read, gated like `Page`.
             Request::CountEdges { .. } if negotiated < 21 => err_response(ErrorCode::Malformed),
+            // `WBT-FR-003` (ADR-0060): a write, gated like the other
+            // runtime writes — `SessionOpen` inside a session, `Malformed`
+            // below 22, and `Malformed` for a batch over `MAX_BATCH_OPS`
+            // (nothing applied).
+            Request::WriteBatch { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::WriteBatch { .. } if negotiated < 22 => err_response(ErrorCode::Malformed),
+            Request::WriteBatch { ref ops, .. } if ops.len() > MAX_BATCH_OPS => {
+                err_response(ErrorCode::Malformed)
+            }
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes

@@ -76,6 +76,7 @@
 //! | 19 | `SERVER-001` v0.44.0 | + [`Request::ReplaceIf`] (28) and [`ErrorCode::GuardFailed`] (13) — `GRD-FR-005`, ADR-0054: [`Request::Replace`]'s exact body plus a `guard: Predicate` over the connection's table; the server reads the stored record, evaluates the guard against it, and replaces **only if it holds**, all under the table's write lock — the atomic compare-and-replace a last-writer-wins merge needs (`guard` = `updated_at < mine`). Answered `Ok` when replaced, `NotFound` when the id has no record (the guard never evaluated), `Err { GuardFailed }` when the guard did not hold (nothing written). The guard is validated as a `Query` predicate (`UnknownField`/`Malformed`, `SQL-FR-007`'s kind and comparator rules). `Unsupported` from a domain with no replace. Server-gated `Malformed` below 19 (rule 3), `Unauthorized` for `ReadOnly` (the eighth write), `SessionOpen` inside a session; never journaled or staged. `GuardFailed` only ever answers `ReplaceIf`, so no downgrade. ADR-0054 |
 //! | 20 | `SERVER-001` v0.45.0 | + [`Request::Page`] (29) — `PAG-FR-004`, ADR-0055: one ordered keyset page of the connection's table — every record sorted ascending by an orderable (`U32`/`I64`) field with the id as tie-break, starting strictly after an optional `(value, id)` cursor, at most `limit` rows — answered with the existing [`Response::Rows`] (every field of each record). The shape a sync puller needs (`updated_at`, then the last row's `(value, id)` as the next cursor) and the first request on this wire whose result has an order. Validated: `UnknownField` for an unknown `order_by`, `Malformed` for a non-orderable field, a cursor value of another kind, or a zero `limit`. A read, gated as `Query` (authentication only, never overlaid, never read-set-tracked); server-gated `Malformed` below 20 (rule 3). No new response, no new `ErrorCode`. ADR-0055 |
 //! | 21 | `SERVER-001` v0.47.0 | + [`Request::CountEdges`] (30) and [`Response::Count`] (19) — `CNT-FR-003`, ADR-0057: how many edges the connection's table holds under one relation label, each undirected edge counted once, a cross-table (foreign) label included — one read under the table's lock, in place of one `NeighborsByRelation` round trip per record. `Malformed` for a label the table has no relation under (`NeighborsByRelation`'s own rule); `Unsupported` from a domain with no labelled relations. A read, gated as `Query`; server-gated `Malformed` below 21 (rule 3). No new `ErrorCode`. ADR-0057 |
+//! | 22 | `SERVER-001` v0.50.0 | + [`Request::WriteBatch`] (31) and [`Response::BatchResults`] (20) — `WBT-FR-001`, ADR-0060: a batch of the five runtime writes (`Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link`, as [`WriteOp`]) for the connection's table, applied in order under one write-lock acquisition, answered one [`WriteResult`] per op. `atomic: false` pipelined (each op stands on its own); `atomic: true` precondition- and isolation-atomic — nothing applies unless every op validates, else all apply, an abort reported by [`Response::TransactionFailed`] (reused). Not crash-atomic across the batch (a storage batch marker is the named follow-on). A write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, server-gated `Malformed` below 22 or over `MAX_BATCH_OPS` ops. No new `ErrorCode`. ADR-0060 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -110,7 +111,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -144,6 +145,13 @@ pub const SESSION_SNAPSHOT_ISOLATION: u32 = 4;
 /// becomes one. Smaller than one `MAX_FRAME_BYTES` `Transaction` could
 /// carry, so a session never exceeds what a single request already may.
 pub const MAX_STAGED_OPS: usize = 4096;
+
+/// The most write operations one [`Request::WriteBatch`] may carry
+/// (`WBT-FR-001`, ADR-0060, protocol 22) — a bound on how long one
+/// connection holds the table's write lock for an atomic batch, the
+/// `MAX_STAGED_OPS` analogue for the pipelined/atomic batch. A batch
+/// over this is `Malformed`, applying nothing.
+pub const MAX_BATCH_OPS: usize = 4096;
 
 /// The most distinct `(id, field)` keys a snapshot-isolated session's own
 /// read set tracks (`ISO-FR-004`, ADR-0033): past the cap, a `GetById` for
@@ -197,6 +205,58 @@ pub struct TransactionOp {
     pub id: RecordId,
     pub field: FieldRef,
     pub value: ScanValue,
+}
+
+/// One runtime write within a [`Request::WriteBatch`] (`WBT-FR-001`,
+/// ADR-0060, protocol 22) — each variant carries the exact body of the
+/// single-shot request it names (`Insert`, `Replace`, `ReplaceIf`,
+/// `Delete`, `Link`), so a batch is those requests carried together, not
+/// a new operation kind.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WriteOp {
+    Insert {
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    },
+    Replace {
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+    },
+    ReplaceIf {
+        id: RecordId,
+        fields: Vec<(FieldRef, ScanValue)>,
+        guard: Predicate,
+    },
+    Delete {
+        id: RecordId,
+    },
+    Link {
+        left: RecordId,
+        right: RecordId,
+        relation: String,
+    },
+}
+
+/// The outcome of one [`WriteOp`] in a [`Response::BatchResults`]
+/// (`WBT-FR-002`, ADR-0060) — the flat union of every single-shot
+/// write's outcomes: `Inserted`/`Duplicate` (`Insert`),
+/// `Replaced`/`NotFound` (`Replace`), `Replaced`/`GuardFailed`/`NotFound`
+/// (`ReplaceIf`), `Linked`/`AlreadyLinked` (`Link`), `Deleted`/`NotFound`
+/// (`Delete`), and `Failed(code)` for a hard error on that op (a
+/// pipelined batch records it and goes on; an atomic batch aborts the
+/// whole batch with [`Response::TransactionFailed`] instead of ever
+/// producing a `Failed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteResult {
+    Inserted,
+    Duplicate,
+    Replaced,
+    NotFound,
+    GuardFailed,
+    Linked,
+    AlreadyLinked,
+    Deleted,
+    Failed(ErrorCode),
 }
 
 /// [`Request::Query`]'s column list — `All` is SQL's bare `*`, `Fields`
@@ -860,6 +920,28 @@ pub enum Request {
     CountEdges {
         relation: String,
     },
+    /// Protocol 22 (`WBT-FR-001`, ADR-0060,
+    /// `docs/design/SERVER-WRITE-BATCH-DESIGN.md`): a batch of runtime
+    /// writes for this table, applied in order under one acquisition of
+    /// the table's write lock, in place of a round trip per record.
+    /// `atomic` selects the guarantee: `false` **pipelined** — every op
+    /// is applied and its outcome recorded, each standing on its own,
+    /// answered [`Response::BatchResults`]; `true` **atomic** — every op
+    /// is precondition-validated first and the batch aborts with
+    /// [`Response::TransactionFailed`] (naming the first op's index and
+    /// code) if any validation fails, applying nothing, else all apply
+    /// under the one lock and the outcomes are returned. Atomic is
+    /// precondition- and isolation-atomic, not crash-atomic across the
+    /// batch (the append logs fsync per op; a storage batch marker is the
+    /// named follow-on). A write: `Unauthorized` for a `ReadOnly` token,
+    /// `SessionOpen` while a session is open, `Malformed` below 22 or
+    /// over `MAX_BATCH_OPS` ops. A domain that supports no runtime write
+    /// answers every op `Failed(Unsupported)` (pipelined) or aborts
+    /// `Unsupported` (atomic).
+    WriteBatch {
+        ops: Vec<WriteOp>,
+        atomic: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -971,6 +1053,14 @@ pub enum Response {
     Count {
         count: u64,
     },
+    /// Protocol 22 (`WBT-FR-002`, ADR-0060). Answers a
+    /// [`Request::WriteBatch`] that was not aborted: one [`WriteResult`]
+    /// per op, in the batch's order. A pipelined batch always answers
+    /// this; an atomic batch answers this on success and
+    /// [`Response::TransactionFailed`] on a precondition abort.
+    BatchResults {
+        results: Vec<WriteResult>,
+    },
 }
 
 #[cfg(test)]
@@ -1010,6 +1100,7 @@ mod tests {
             "ReplaceIf" | "Err(GuardFailed)" => 19,
             "Page" => 20,
             "CountEdges" | "Count" => 21,
+            "WriteBatch" | "BatchResults" => 22,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1345,6 +1436,24 @@ mod tests {
                 &[0x1e, 0x00, 0x00, 0x00],                         // CountEdges
                 &[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // len
                 b"mentions",
+            ]),
+        );
+        // Protocol 22 (`WBT-FR-001`, ADR-0060): `WriteBatch` at 31 — a
+        // one-op batch (`Delete` id 2) and the `atomic` bool.
+        assert_golden(
+            "WriteBatch",
+            &Request::WriteBatch {
+                ops: vec![WriteOp::Delete {
+                    id: Uuid::from_u128(2),
+                }],
+                atomic: true,
+            },
+            &bytes(&[
+                &[0x1f, 0x00, 0x00, 0x00], // WriteBatch
+                &LEN1,                     // ops: one
+                &[0x03, 0x00, 0x00, 0x00], // WriteOp::Delete
+                &ID2,                      // id 2
+                &[0x01],                   // atomic: true
             ]),
         );
         // Protocol 20 (`PAG-FR-004`, ADR-0055): `Page` at 29 — field tag,
@@ -1758,6 +1867,24 @@ mod tests {
                 &[0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
             ]),
         );
+        // Protocol 22 (`WBT-FR-002`, ADR-0060): `BatchResults` at 20 — two
+        // outcomes, `Inserted` (0) and `Failed(Unsupported)` (8 + code 1).
+        assert_golden_eq(
+            "BatchResults",
+            &Response::BatchResults {
+                results: vec![
+                    WriteResult::Inserted,
+                    WriteResult::Failed(ErrorCode::Unsupported),
+                ],
+            },
+            &bytes(&[
+                &[0x14, 0x00, 0x00, 0x00],                         // BatchResults
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // results: two
+                &[0x00, 0x00, 0x00, 0x00],                         // WriteResult::Inserted
+                &[0x08, 0x00, 0x00, 0x00],                         // WriteResult::Failed
+                &[0x01, 0x00, 0x00, 0x00],                         // ErrorCode::Unsupported
+            ]),
+        );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
         assert_golden_eq(
             "Compacted",
@@ -1825,7 +1952,7 @@ mod tests {
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
     /// module docs' table — version 21 is the one that added
-    /// `Request::CountEdges`/`Response::Count` (20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// `Request::WriteBatch`/`Response::BatchResults` (21 `Request::CountEdges`/`Response::Count`, 20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1837,7 +1964,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 21);
+        assert_eq!(PROTOCOL_VERSION, 22);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

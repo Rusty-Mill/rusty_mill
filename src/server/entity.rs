@@ -49,15 +49,15 @@
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
-    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    page_key, predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
-    ReplaceIfOutcome, ReplaceOutcome,
+    page_key, predicate_matches, validate_predicate, ConnectionStore, DeleteOutcome, InsertOutcome,
+    LinkOutcome, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{GetById, UpdateField};
+use crate::generic::query::{Delete, GetById, Insert, MultiLink, Replace, UpdateField};
 use crate::generic::store::valid_relation_label;
 use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
 use std::path::Path;
@@ -222,6 +222,108 @@ impl EntityConnectionStore {
             // `ENT4-FR-002`: raw, stored order, un-normalized.
             (FIELD_ALIASES, ScanValue::StrList(entity.aliases)),
         ]
+    }
+}
+
+/// `WBT-FR-003` (ADR-0060): a parsed, pre-validated write of an atomic
+/// [`WriteOp`] batch on `Entity`.
+enum PreparedWrite {
+    Insert(Entity),
+    Replace(Entity),
+    ReplaceIf(Entity, Predicate),
+    Delete(RecordId),
+    Link {
+        left: RecordId,
+        right: RecordId,
+        relation: String,
+    },
+}
+
+impl EntityConnectionStore {
+    fn prepare_write(schema: &DomainSchema, op: &WriteOp) -> Result<PreparedWrite, ErrorCode> {
+        Ok(match op {
+            WriteOp::Insert { id, fields } => {
+                PreparedWrite::Insert(Self::entity_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::Replace { id, fields } => {
+                PreparedWrite::Replace(Self::entity_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::ReplaceIf { id, fields, guard } => {
+                validate_predicate(schema, guard)?;
+                PreparedWrite::ReplaceIf(
+                    Self::entity_from_fields(*id, fields.clone())?,
+                    guard.clone(),
+                )
+            }
+            WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            WriteOp::Link {
+                left,
+                right,
+                relation,
+            } => {
+                if !valid_relation_label(relation) {
+                    return Err(ErrorCode::Malformed);
+                }
+                PreparedWrite::Link {
+                    left: *left,
+                    right: *right,
+                    relation: relation.clone(),
+                }
+            }
+        })
+    }
+
+    fn apply_prepared(
+        inner: &mut EntityProductionStack,
+        prepared: PreparedWrite,
+    ) -> Result<WriteResult, ErrorCode> {
+        Ok(match prepared {
+            PreparedWrite::Insert(entity) => match Insert::insert(inner, entity) {
+                Ok(()) => WriteResult::Inserted,
+                Err(InsertError::Duplicate(_)) => WriteResult::Duplicate,
+                Err(InsertError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::Replace(entity) => match Replace::replace(inner, entity) {
+                Ok(()) => WriteResult::Replaced,
+                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::ReplaceIf(entity, guard) => {
+                let id = entity.id;
+                match GetById::<Entity>::get(inner, id) {
+                    None => WriteResult::NotFound,
+                    Some(stored) => {
+                        if predicate_matches(&Self::fields_of(stored), &guard) {
+                            match Replace::replace(inner, entity) {
+                                Ok(()) => WriteResult::Replaced,
+                                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+                            }
+                        } else {
+                            WriteResult::GuardFailed
+                        }
+                    }
+                }
+            }
+            PreparedWrite::Delete(id) => match Delete::<Entity>::delete(inner, id) {
+                Ok(()) => WriteResult::Deleted,
+                Err(DeleteError::NotFound(_)) => WriteResult::NotFound,
+                Err(DeleteError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::Link {
+                left,
+                right,
+                relation,
+            } => match MultiLink::link(inner, &relation, left, right) {
+                Ok(crate::generic::LinkOutcome::Linked) => WriteResult::Linked,
+                Ok(crate::generic::LinkOutcome::AlreadyLinked) => WriteResult::AlreadyLinked,
+                Err(LinkError::UnknownRecord(_)) => return Err(ErrorCode::RecordNotFound),
+                Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => {
+                    return Err(ErrorCode::Malformed)
+                }
+                Err(LinkError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+        })
     }
 }
 
@@ -426,6 +528,35 @@ impl ConnectionStore for EntityConnectionStore {
 
     /// `CNT-FR-002` (ADR-0057): one read under the store's lock; an
     /// unknown label is `Malformed`, as for `neighbors_by_relation`.
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
+        }
+        let schema = self.describe();
+        let mut prepared = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
+        }
+        self.store.with_exclusive(|inner| {
+            for (i, p) in prepared.iter().enumerate() {
+                if let PreparedWrite::Link { left, .. } = p {
+                    if GetById::<Entity>::get(inner, *left).is_none() {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+            }
+            let mut results = Vec::with_capacity(prepared.len());
+            for (i, p) in prepared.into_iter().enumerate() {
+                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
+            }
+            Ok(results)
+        })
+    }
+
     fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {
         match self.store.count_edges::<Entity>(relation) {
             Some(count) => Ok(count as u64),
