@@ -1,7 +1,10 @@
-# Server Ordered Index Design (Proposed)
+# Server Ordered Index Design (Accepted)
 
-- Status: **Proposed** (2026-09-08). Implemented on the same branch as
-  `SERVER-001` v0.49.0 / FR-059, the `ADR-0046`–`ADR-0058` cadence.
+- Status: **Accepted** (2026-09-08, `ADR-0059` option (a), as designed —
+  a memory-only sorted index layer over one field, rebuilt at open,
+  exact through every write; a second scannable slot, a persisted
+  index, and declining all declined). Implemented on the same branch
+  as `SERVER-001` v0.49.0 / FR-059, PR #225.
 - Date: 2026-09-08
 - Related: `ADR-0055`/`docs/design/SERVER-PAGE-DESIGN.md` (`Page`, the
   order, the "a cheaper `page`" open question this closes), `ADR-0040`
@@ -169,6 +172,10 @@ table recorded.
 
 ## Change history
 
+- 2026-09-08: Accepted as designed (option (a)), after PR #225. No
+  content change.
+- 2026-09-08: Implemented as `SERVER-001` v0.49.0 / FR-059, landed as
+  designed (PR #225).
 - 2026-09-08: Initial proposal; implementation follows on the same
   branch. The twenty-fourth round in the `rusty_remind_me`-motivated
   line; the answer to `SERVER-PAGE-DESIGN.md`'s "a cheaper `page`",
