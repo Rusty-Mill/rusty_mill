@@ -288,6 +288,15 @@ pub trait ConnectionStore: Send + Sync {
         Ok(page_rows(self.scan_all(), order_by, after, limit))
     }
 
+    /// `CNT-FR-002` (ADR-0057, protocol 21): how many edges this table
+    /// holds under `relation`, each undirected edge once, a cross-table
+    /// label included. `Malformed` for a label the table has no relation
+    /// under — [`Self::neighbors_by_relation`]'s own rule. The default
+    /// answers `Unsupported`; `Memory` and `Entity` implement it.
+    fn count_edges(&self, _relation: &str) -> Result<u64, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
     /// and, within this table, every edge touching it. Answers
     /// [`DeleteOutcome::NotFound`] when `id` has no record, nothing
@@ -1140,7 +1149,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::JoinedRows { .. }
         | Response::Relations { .. }
         | Response::Tables { .. }
-        | Response::Compacted { .. } => access::Outcome::Ok,
+        | Response::Compacted { .. }
+        | Response::Count { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1912,6 +1922,12 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         Request::ListRelationKinds => Response::RelationKinds {
             kinds: store.list_relation_kinds(),
         },
+        // `CNT-FR-003` (ADR-0057): one read, `NeighborsByRelation`'s
+        // unknown-label rule. Gated in `handle_connection` like `Page`.
+        Request::CountEdges { relation } => match store.count_edges(&relation) {
+            Ok(count) => Response::Count { count },
+            Err(code) => err_response(code),
+        },
         // `JOIN-FR-001`–`003` (ADR-0044): validate against the schema and
         // the adapter's own relation list, then the index nested loop.
         // Gated server-side in `handle_connection` (`Malformed` below 12)
@@ -2589,6 +2605,8 @@ fn handle_connection(
             }
             // `PAG-FR-004` (ADR-0055), rule 3: a read, gated like `Join`.
             Request::Page { .. } if negotiated < 20 => err_response(ErrorCode::Malformed),
+            // `CNT-FR-003` (ADR-0057), rule 3: a read, gated like `Page`.
+            Request::CountEdges { .. } if negotiated < 21 => err_response(ErrorCode::Malformed),
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes

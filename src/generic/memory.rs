@@ -570,4 +570,39 @@ mod tests {
         }
         assert_eq!(std::fs::read(&blob).unwrap(), before, "nothing rewritten");
     }
+
+    /// `CNT-FR-001` (ADR-0057): the edge count under a foreign label is
+    /// each edge once — stored under both endpoints, halved — and follows
+    /// a runtime link and a delete; an unknown label is `None`.
+    #[test]
+    fn edge_count_counts_each_mentions_edge_once_and_tracks_links_and_deletes() {
+        use crate::generic::query::{Delete, MultiNeighbors};
+        let dir = fresh_temp_dir("generic_memory_edge_count").unwrap();
+        let path = dir.join("memories.mmap");
+        let mentions = [
+            (Uuid::from_u128(1), Uuid::from_u128(0xada)),
+            (Uuid::from_u128(2), Uuid::from_u128(0xada)),
+        ];
+        let mut store = create_memory_production_stack(
+            vec![memory(1, "fact", false), memory(2, "fact", false)],
+            &mentions,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(store.edge_count("mentions"), Some(2));
+        assert_eq!(store.edge_count("no_such_label"), None);
+        store
+            .link("mentions", Uuid::from_u128(2), Uuid::from_u128(0xe1e))
+            .unwrap();
+        assert_eq!(store.edge_count("mentions"), Some(3));
+        store.delete(Uuid::from_u128(2)).unwrap();
+        assert_eq!(
+            store.edge_count("mentions"),
+            Some(1),
+            "both of 2's edges gone"
+        );
+        drop(store);
+        let reopened = open_memory_production_stack_portable(&path).unwrap();
+        assert_eq!(reopened.edge_count("mentions"), Some(1));
+    }
 }

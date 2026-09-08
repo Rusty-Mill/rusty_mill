@@ -180,6 +180,12 @@ pub trait MultiNeighbors<R: Record> {
 
     /// Every relation label this store knows, unspecified order.
     fn relation_kinds(&self) -> Vec<String>;
+
+    /// How many edges `relation` holds — each undirected edge once,
+    /// a foreign-labelled edge (`TBL-FR-007`) included, since every edge
+    /// is kept in both directions (`CNT-FR-001`, ADR-0057). `None` for a
+    /// label this store has no relation under, as `neighbors_by_relation`.
+    fn edge_count(&self, relation: &str) -> Option<usize>;
 }
 
 /// A record that resolves under more than one string key — a primary

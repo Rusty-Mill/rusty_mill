@@ -117,6 +117,20 @@ def main() -> int:
         except UnsupportedError as e:
             print(f"page=unsupported:{e}")
 
+        # Protocol 21 (CNT-FR-004): the edge count under a label — the one
+        # runtime edge under mentored_by, the samples' relates_to, and an
+        # unknown label Malformed.
+        try:
+            print(f"count_edges={c.count_edges('mentored_by')}")
+            print(f"count_edges_relates_to={c.count_edges('relates_to')}")
+            try:
+                c.count_edges("no_such_label")
+                print("count_edges_unknown=ok")
+            except ServerError as e:
+                print(f"count_edges_unknown={e.code.name}")
+        except UnsupportedError as e:
+            print(f"count_edges=unsupported:{e}")
+
         # Protocol 16 (TBL-FR-009): a one-table server lists itself; Use of
         # its own name is Ok, of another Malformed.
         try:

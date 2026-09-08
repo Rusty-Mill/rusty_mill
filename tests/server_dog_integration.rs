@@ -570,3 +570,18 @@ fn page_by_age_walks_the_dog_domain_through_the_default() {
     keys.sort();
     assert_eq!(sorted, keys, "served in (age, id) order");
 }
+
+/// `CNT-FR-002` (ADR-0057): `CountEdges` on a domain with no labelled
+/// relations is `Unsupported`, server-side.
+#[test]
+fn count_edges_is_unsupported_on_the_dog_domain() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    match client.count_edges("littermate_of") {
+        Err(rusty_multimodal_db::server::client::ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Unsupported,
+            _,
+        )) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}

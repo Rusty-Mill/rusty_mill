@@ -491,6 +491,19 @@ impl<S> GenericProductionStore<S> {
             .neighbors_by_relation(relation, id)
     }
 
+    /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one
+    /// read under the lock, `None` for an unknown label.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn count_edges<R: Record>(&self, relation: &str) -> Option<usize>
+    where
+        S: super::query::MultiNeighbors<R>,
+    {
+        self.inner.read().expect(LOCK_POISONED).edge_count(relation)
+    }
+
     /// The union of every named relation's neighbors — what a plain,
     /// relation-unfiltered lookup answers.
     ///

@@ -1137,3 +1137,37 @@ fn sync_fields_carry_sentinels_and_serve_the_purge_set_over_the_wire() {
     assert_eq!(two[12].1, ScanValue::Str("laptop".into()));
     assert_eq!(client.get(id(1)).unwrap().unwrap()[11].1, ScanValue::I64(0));
 }
+
+/// `CNT-FR-002`–`004` (ADR-0057), over a real socket on the two-table
+/// server: `count_edges("mentions")` is one round trip and tracks a link
+/// and a cascading entity delete; an unknown label is `Malformed`; the
+/// entity table counts its own labels.
+#[test]
+fn count_edges_is_one_round_trip_and_tracks_links_and_deletes() {
+    let addr = start_two_table_server_at(unique_dir("memory_count_edges"));
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let before = client.count_edges("mentions").unwrap();
+    assert_eq!(before, 3, "the three sample mentions");
+    client
+        .link(Uuid::from_u128(1), Uuid::from_u128(0xe1e), "mentions")
+        .unwrap();
+    assert_eq!(client.count_edges("mentions").unwrap(), 4);
+    match client.count_edges("no_such_label") {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    // A cascading entity delete drops every mention of it.
+    client.use_table("entity").unwrap();
+    assert_eq!(
+        client.count_edges("relates_to").unwrap(),
+        0,
+        "no entity edges seeded"
+    );
+    assert!(client.delete(Uuid::from_u128(0xada)).unwrap());
+    client.use_table("memory").unwrap();
+    assert_eq!(
+        client.count_edges("mentions").unwrap(),
+        2,
+        "both mentions of 0xada gone"
+    );
+}

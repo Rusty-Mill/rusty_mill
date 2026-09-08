@@ -1441,6 +1441,15 @@ impl<S, R: Record> super::query::MultiNeighbors<R> for MultiSymmetric<S, R> {
     fn relation_kinds(&self) -> Vec<String> {
         self.adjacency.keys().cloned().collect()
     }
+
+    /// `CNT-FR-001`: the degree sum halved — every edge is stored under
+    /// both endpoints, foreign labels included, and self-loops are
+    /// refused at `link`, so the sum is exactly twice the edge count.
+    fn edge_count(&self, relation: &str) -> Option<usize> {
+        self.adjacency
+            .get(relation)
+            .map(|adj| adj.values().map(Vec::len).sum::<usize>() / 2)
+    }
 }
 
 // Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `GetById`.
@@ -1881,6 +1890,10 @@ where
 
     fn relation_kinds(&self) -> Vec<String> {
         self.inner.relation_kinds()
+    }
+
+    fn edge_count(&self, relation: &str) -> Option<usize> {
+        self.inner.edge_count(relation)
     }
 }
 
