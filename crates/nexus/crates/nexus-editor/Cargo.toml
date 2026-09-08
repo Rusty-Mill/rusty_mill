@@ -11,7 +11,7 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 serde_norway     = { workspace = true }
 uuid          = { workspace = true }
-thiserror     = { workspace = true }
+thiserror     = "2.0"
 chrono        = { workspace = true }
 comrak        = { workspace = true }
 sha2          = { workspace = true }

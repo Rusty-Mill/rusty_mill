@@ -8,7 +8,8 @@ use futures_util::StreamExt;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{
-    Column as _, Connection as _, Row as _, Sqlite, SqlitePool, TypeInfo as _, ValueRef as _,
+    AssertSqlSafe, Column as _, Connection as _, Row as _, Sqlite, SqlitePool, TypeInfo as _,
+    ValueRef as _,
 };
 
 use rusty_db_core::dialect::QuestionMarkDialect;
@@ -66,7 +67,7 @@ impl SqliteDriver {
             options = options.after_connect(move |conn, _meta| {
                 let sql = Arc::clone(&sql);
                 Box::pin(async move {
-                    sqlx::query(&sql).execute(conn).await?;
+                    sqlx::query(AssertSqlSafe(sql)).execute(conn).await?;
                     Ok(())
                 })
             });
@@ -75,7 +76,7 @@ impl SqliteDriver {
             options = options.before_acquire(move |conn, _meta| {
                 let sql = Arc::clone(&sql);
                 Box::pin(async move {
-                    sqlx::query(&sql).execute(conn).await?;
+                    sqlx::query(AssertSqlSafe(sql)).execute(conn).await?;
                     Ok(true)
                 })
             });
@@ -84,7 +85,7 @@ impl SqliteDriver {
             options = options.after_release(move |conn, _meta| {
                 let sql = Arc::clone(&sql);
                 Box::pin(async move {
-                    sqlx::query(&sql).execute(conn).await?;
+                    sqlx::query(AssertSqlSafe(sql)).execute(conn).await?;
                     Ok(true)
                 })
             });
@@ -655,13 +656,13 @@ macro_rules! bind_params {
 #[async_trait]
 impl Executor for SqliteConnection {
     async fn execute(&mut self, sql: &str, params: &[Value]) -> Result<u64> {
-        let query = bind_params!(sqlx::query(sql), params);
+        let query = bind_params!(sqlx::query(AssertSqlSafe(sql)), params);
         let result = query.execute(&mut *self.conn).await.map_err(to_core_err)?;
         Ok(result.rows_affected())
     }
 
     async fn fetch_all(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
-        let query = bind_params!(sqlx::query(sql), params);
+        let query = bind_params!(sqlx::query(AssertSqlSafe(sql)), params);
         let rows = query
             .fetch_all(&mut *self.conn)
             .await
@@ -670,7 +671,7 @@ impl Executor for SqliteConnection {
     }
 
     async fn fetch_optional(&mut self, sql: &str, params: &[Value]) -> Result<Option<Row>> {
-        let query = bind_params!(sqlx::query(sql), params);
+        let query = bind_params!(sqlx::query(AssertSqlSafe(sql)), params);
         let row = query
             .fetch_optional(&mut *self.conn)
             .await
@@ -691,7 +692,7 @@ impl Connection for SqliteConnection {
     ) -> rusty_db_core::BoxStream<'static, Result<Row>> {
         let SqliteConnection { mut conn } = *self;
         Box::pin(async_stream::try_stream! {
-            let query = bind_params!(sqlx::query(&sql), &params);
+            let query = bind_params!(sqlx::query(AssertSqlSafe(sql.as_str())), &params);
             let mut rows = query.fetch(&mut *conn);
             while let Some(row) = rows.next().await {
                 yield row_from_sqlite(&row.map_err(to_core_err)?)?;

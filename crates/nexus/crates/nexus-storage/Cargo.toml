@@ -14,7 +14,7 @@ nexus-database = { path = "../nexus-database" }
 nexus-formats = { path = "../nexus-formats" }
 # Phase 5.1 (RFC 0005) — hashline `edit` handler.
 nexus-hashline = { workspace = true }
-thiserror = { workspace = true }
+thiserror = "2.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 # C3 (#356) — OS-trash destination for deletes (XDG trash on Linux).
@@ -25,14 +25,14 @@ tracing = { workspace = true }
 rusqlite = { workspace = true }
 r2d2 = { workspace = true }
 r2d2_sqlite = { workspace = true }
-tantivy = { workspace = true }
+tantivy = { version = "0.26", default-features = false, features = ["mmap", "stopwords", "stemmer", "lz4-compression"] }
 # BL-078 — multi-file find/replace uses regex_lite for the regex
 # matcher and the whole-word boundary fallback. Same engine as the
 # editor's Find / Replace dialog and the cross-session terminal
 # search, so a query that works there works here.
 regex-lite = { workspace = true }
 comrak = { workspace = true }
-toml = { workspace = true }
+toml = "1.1"
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 rayon = { workspace = true }
@@ -40,7 +40,7 @@ libc = { workspace = true }
 fs4 = "1"
 petgraph = { workspace = true }
 chrono = { workspace = true }
-rand = { workspace = true }
+rand = "0.9"
 # BL-083: forge-to-forge import hashes.
 sha2 = { workspace = true }
 # BL-114: tree-sitter code-symbol index. One runtime crate + one

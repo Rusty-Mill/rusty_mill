@@ -10,9 +10,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(feature = "ts-export")]
+use schemars::JsonSchema;
+#[cfg(feature = "ts-export")]
+use ts_rs::TS;
+
 /// Cognitive class of a memory — mirrors the three in-memory stores plus an
 /// `Unclassified` bucket for raw, not-yet-categorised captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
     /// Time-ordered event: conversation turn, tool call, observation.
@@ -53,6 +59,7 @@ impl MemoryType {
 
 /// Lifecycle status of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
     /// Live and eligible for recall.
@@ -100,6 +107,7 @@ impl MemoryStatus {
 /// New memories created inside Nexus get a time-ordered UUID (v7) id and
 /// `created_at == updated_at == now`; ids are preserved verbatim on import.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
 pub struct Memory {
     /// Stable unique id (UUID v7 for new rows; preserved on import).
     pub id: Uuid,

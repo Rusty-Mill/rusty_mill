@@ -16,12 +16,20 @@ chrono = { workspace = true }
 rusqlite = { workspace = true }
 r2d2 = { workspace = true }
 r2d2_sqlite = { workspace = true }
-thiserror = { workspace = true }
+thiserror = "2.0"
 tracing = { workspace = true }
 reqwest = { workspace = true }
 nexus-plugins = { path = "../nexus-plugins" }
-ts-rs = { workspace = true, optional = true, features = ["serde-json-impl"] }
-schemars = { workspace = true, optional = true }
+# `chrono-impl`/`uuid-impl` are needed too: `Memory` (model.rs) carries
+# `DateTime<Utc>` and `Uuid` fields and is embedded in the `ts-export`
+# IPC types below (e.g. `ImportArgs::records: Vec<Memory>`), but this
+# crate's own `Memory`/`MemoryType`/`MemoryStatus` never actually derived
+# `TS`/`JsonSchema` before the nexus/rusty_mill merge -- a latent gap this
+# crate's own `scripts/check_ipc_drift.sh` never exercised (it isn't in
+# that script's per-crate build list), only surfaced once rusty_mill's own
+# CI's `--all-features` build actually compiled it.
+ts-rs = { workspace = true, optional = true, features = ["serde-json-impl", "chrono-impl", "uuid-impl"] }
+schemars = { workspace = true, optional = true, features = ["chrono04", "uuid1"] }
 
 [features]
 # Emit JSON Schema + TypeScript bindings for the IPC arg types (off by

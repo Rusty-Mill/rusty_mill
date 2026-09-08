@@ -7,6 +7,6 @@ publish.workspace = true
 description = "Hashline patch format for Nexus: content-hash-anchored edits with TAG hashing, an applier, and 3-way merge recovery (RFC 0005 Phase 5.1)"
 
 [dependencies]
-thiserror = { workspace = true }
+thiserror = "2.0"
 sha2 = { workspace = true }
 diffy = { workspace = true }

@@ -16,6 +16,18 @@ one crate at a time, the same way. All four waves are complete: every
 `baileyrd/rusty_*` repo that was in scope now lives under `crates/`, and
 the standalone repos carry an archive notice pointing here.
 
+A fifth merge, outside that `baileyrd/rusty_*` wave numbering, brought in
+`baileyrd/nexus` — a 42-crate microkernel note-taking/AI-agent workspace,
+not a `rusty_*`-prefixed leaf crate — under `crates/nexus/`, keeping the
+same `git subtree` process. Its own nested `[workspace]` and `Cargo.lock`
+were dropped the same way rusty_agent_gateway's and rusty_yirp's were; its
+42 crates join this workspace's member list directly rather than through
+their own path prefix, since nexus's crate names (`nexus-*`) don't
+collide with anything already here. `crates/nexus/shell` (nexus's own
+Tauri desktop shell, `shell/src-tauri`) is `exclude`d the same way as
+`rusty_key`'s `desktop/src-tauri` — it's a separate pnpm-driven Tauri
+workspace, not a `cargo test` target.
+
 ## Crates
 
 | Crate | Path | Purpose |
@@ -191,6 +203,48 @@ the standalone repos carry an archive notice pointing here.
 | [`agentgateway-proxy`](crates/rusty_agent_gateway/crates/agentgateway-proxy) | `crates/rusty_agent_gateway/crates/agentgateway-proxy` | HTTP reverse proxying for host backends |
 | [`agentgateway-tls`](crates/rusty_agent_gateway/crates/agentgateway-tls) | `crates/rusty_agent_gateway/crates/agentgateway-tls` | TLS termination, over `rusty_tls` |
 | [`agentgateway`](crates/rusty_agent_gateway/crates/agentgateway) | `crates/rusty_agent_gateway/crates/agentgateway` | `agentgateway`: the AI-native gateway binary for MCP, speaking agentgateway's config |
+| [`nexus-types`](crates/nexus/crates/nexus-types) | `crates/nexus/crates/nexus-types` | Nexus: shared plain-data types with no I/O, at the base of every other nexus crate |
+| [`nexus-plugin-api`](crates/nexus/crates/nexus-plugin-api) | `crates/nexus/crates/nexus-plugin-api` | Nexus: the versioned `CorePlugin`/capability/IPC ABI every plugin crate implements against |
+| [`nexus-hashline`](crates/nexus/crates/nexus-hashline) | `crates/nexus/crates/nexus-hashline` | Nexus: content-hash-anchored patch format for concurrent note edits (RFC 0005) |
+| [`nexus-kernel`](crates/nexus/crates/nexus-kernel) | `crates/nexus/crates/nexus-kernel` | Nexus: the microkernel — event bus, IPC dispatcher, capability system, plugin lifecycle |
+| [`nexus-kv`](crates/nexus/crates/nexus-kv) | `crates/nexus/crates/nexus-kv` | Nexus: the forge-scoped key/value store service plugin |
+| [`nexus-security`](crates/nexus/crates/nexus-security) | `crates/nexus/crates/nexus-security` | Nexus: capability grants, at-rest encryption, and the Linux Landlock/seccomp OS sandbox |
+| [`nexus-storage`](crates/nexus/crates/nexus-storage) | `crates/nexus/crates/nexus-storage` | Nexus: file-as-truth — SQLite index, Tantivy FTS, file watcher, knowledge graph |
+| [`nexus-plugins`](crates/nexus/crates/nexus-plugins) | `crates/nexus/crates/nexus-plugins` | Nexus: community plugin lifecycle — WASM (wasmtime) and JS-sandboxed plugin hosting |
+| [`nexus-ai`](crates/nexus/crates/nexus-ai) | `crates/nexus/crates/nexus-ai` | Nexus: AI provider integration — chat, embeddings, RAG |
+| [`nexus-ai-runtime`](crates/nexus/crates/nexus-ai-runtime) | `crates/nexus/crates/nexus-ai-runtime` | Nexus: local model runtime plumbing for `nexus-ai` |
+| [`nexus-mcp`](crates/nexus/crates/nexus-mcp) | `crates/nexus/crates/nexus-mcp` | Nexus: Host-side MCP client/server integration |
+| [`nexus-lsp`](crates/nexus/crates/nexus-lsp) | `crates/nexus/crates/nexus-lsp` | Nexus: Language Server Protocol integration |
+| [`nexus-dap`](crates/nexus/crates/nexus-dap) | `crates/nexus/crates/nexus-dap` | Nexus: Debug Adapter Protocol integration |
+| [`nexus-acp`](crates/nexus/crates/nexus-acp) | `crates/nexus/crates/nexus-acp` | Nexus: Agent Client Protocol integration |
+| [`nexus-remote`](crates/nexus/crates/nexus-remote) | `crates/nexus/crates/nexus-remote` | Nexus: remote/hosted forge connectivity |
+| [`nexus-cli`](crates/nexus/crates/nexus-cli) | `crates/nexus/crates/nexus-cli` | `nexus`: the CLI frontend, built on `nexus-bootstrap` |
+| [`nexus-tui`](crates/nexus/crates/nexus-tui) | `crates/nexus/crates/nexus-tui` | `nexus-tui`: the terminal UI frontend, built on `nexus-bootstrap` |
+| [`nexus-git`](crates/nexus/crates/nexus-git) | `crates/nexus/crates/nexus-git` | Nexus: Git integration (built on `git2`) |
+| [`nexus-formats`](crates/nexus/crates/nexus-formats) | `crates/nexus/crates/nexus-formats` | Nexus: import/export format converters (e.g. Notion `.zip` export) |
+| [`nexus-database`](crates/nexus/crates/nexus-database) | `crates/nexus/crates/nexus-database` | Nexus: user-facing embedded-database note views |
+| [`nexus-theme`](crates/nexus/crates/nexus-theme) | `crates/nexus/crates/nexus-theme` | Nexus: shell theming service |
+| [`nexus-bootstrap`](crates/nexus/crates/nexus-bootstrap) | `crates/nexus/crates/nexus-bootstrap` | Nexus: the orchestrator — assembles the kernel + every registered `CorePlugin` into a `Runtime` |
+| [`nexus-editor`](crates/nexus/crates/nexus-editor) | `crates/nexus/crates/nexus-editor` | Nexus: the note editor backend — CRDT snapshots, crash journal |
+| [`nexus-rush`](crates/nexus/crates/nexus-rush) | `crates/nexus/crates/nexus-rush` | Nexus: in-tree port of `rush` (RFC 0002) — the bundled shell for sandboxed sessions |
+| [`nexus-vt`](crates/nexus/crates/nexus-vt) | `crates/nexus/crates/nexus-vt` | Nexus: in-tree, GUI-free port of `rusty_term`'s core (RFC 0003) — the headless VT grid behind `nexus-terminal` |
+| [`nexus-terminal`](crates/nexus/crates/nexus-terminal) | `crates/nexus/crates/nexus-terminal` | Nexus: terminal/process-manager service plugin, built on `nexus-vt` + `portable-pty` |
+| [`nexus-agent`](crates/nexus/crates/nexus-agent) | `crates/nexus/crates/nexus-agent` | Nexus: the in-app agent — tool registry, planning, delegation |
+| [`nexus-skills`](crates/nexus/crates/nexus-skills) | `crates/nexus/crates/nexus-skills` | Nexus: agent skill loading |
+| [`nexus-templates`](crates/nexus/crates/nexus-templates) | `crates/nexus/crates/nexus-templates` | Nexus: note template service |
+| [`nexus-workflow`](crates/nexus/crates/nexus-workflow) | `crates/nexus/crates/nexus-workflow` | Nexus: multi-step workflow orchestration |
+| [`nexus-linkpreview`](crates/nexus/crates/nexus-linkpreview) | `crates/nexus/crates/nexus-linkpreview` | Nexus: URL link-preview fetching |
+| [`nexus-notifications`](crates/nexus/crates/nexus-notifications) | `crates/nexus/crates/nexus-notifications` | Nexus: notification inbox + SMTP email transport |
+| [`nexus-comments`](crates/nexus/crates/nexus-comments) | `crates/nexus/crates/nexus-comments` | Nexus: note comment threads |
+| [`nexus-panic-log`](crates/nexus/crates/nexus-panic-log) | `crates/nexus/crates/nexus-panic-log` | Nexus: structured panic capture and logging |
+| [`nexus-crdt`](crates/nexus/crates/nexus-crdt) | `crates/nexus/crates/nexus-crdt` | Nexus: CRDT primitives backing `nexus-editor`/`nexus-collab` |
+| [`nexus-fuzz`](crates/nexus/crates/nexus-fuzz) | `crates/nexus/crates/nexus-fuzz` | Nexus: fuzz targets for parser/format boundaries |
+| [`nexus-audio`](crates/nexus/crates/nexus-audio) | `crates/nexus/crates/nexus-audio` | Nexus: STT/TTS provider traits (local / provider-routed / platform backends) |
+| [`nexus-collab`](crates/nexus/crates/nexus-collab) | `crates/nexus/crates/nexus-collab` | Nexus: real-time collaboration over a WebSocket relay |
+| [`nexus-memory`](crates/nexus/crates/nexus-memory) | `crates/nexus/crates/nexus-memory` | Nexus: the `com.nexus.memory` service plugin — full `remind_me` schema/API parity |
+| [`nexus-memory-hub`](crates/nexus/crates/nexus-memory-hub) | `crates/nexus/crates/nexus-memory-hub` | Nexus: standalone `axum` HTTP sync server for `nexus-memory` — a deployable binary, not a bootstrap plugin |
+| [`nexus-context`](crates/nexus/crates/nexus-context) | `crates/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
+| [`nexus-protocol`](crates/nexus/crates/nexus-protocol) | `crates/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
@@ -1202,3 +1256,8 @@ eighth), and finally
 (nine behind a ninth) — one crate at a time, same process. Each of those
 eleven repos now carries an archive notice in its README pointing at its
 new home under `crates/`.
+
+A fifth merge, separate from that `baileyrd/rusty_*` wave numbering,
+brought in [`baileyrd/nexus`](https://github.com/baileyrd/nexus) — a
+42-crate microkernel note-taking/AI-agent workspace — under
+`crates/nexus/`, same `git subtree` process, full history preserved.

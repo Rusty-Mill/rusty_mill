@@ -13,5 +13,5 @@ nexus-plugins = { path = "../nexus-plugins" }
 nexus-types = { path = "../nexus-types" }
 
 [dev-dependencies]
-rand = { workspace = true }
+rand = "0.9"
 tempfile = { workspace = true }

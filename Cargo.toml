@@ -189,6 +189,48 @@ members = [
     "crates/rusty_agent_gateway/crates/agentgateway-tls",
     "crates/rusty_agent_gateway/crates/agentgateway-core",
     "crates/rusty_agent_gateway/crates/agentgateway",
+    "crates/nexus/crates/nexus-types",
+    "crates/nexus/crates/nexus-plugin-api",
+    "crates/nexus/crates/nexus-hashline",
+    "crates/nexus/crates/nexus-kernel",
+    "crates/nexus/crates/nexus-kv",
+    "crates/nexus/crates/nexus-security",
+    "crates/nexus/crates/nexus-storage",
+    "crates/nexus/crates/nexus-plugins",
+    "crates/nexus/crates/nexus-ai",
+    "crates/nexus/crates/nexus-ai-runtime",
+    "crates/nexus/crates/nexus-mcp",
+    "crates/nexus/crates/nexus-lsp",
+    "crates/nexus/crates/nexus-dap",
+    "crates/nexus/crates/nexus-acp",
+    "crates/nexus/crates/nexus-remote",
+    "crates/nexus/crates/nexus-cli",
+    "crates/nexus/crates/nexus-tui",
+    "crates/nexus/crates/nexus-git",
+    "crates/nexus/crates/nexus-formats",
+    "crates/nexus/crates/nexus-database",
+    "crates/nexus/crates/nexus-theme",
+    "crates/nexus/crates/nexus-bootstrap",
+    "crates/nexus/crates/nexus-editor",
+    "crates/nexus/crates/nexus-rush",
+    "crates/nexus/crates/nexus-vt",
+    "crates/nexus/crates/nexus-terminal",
+    "crates/nexus/crates/nexus-agent",
+    "crates/nexus/crates/nexus-skills",
+    "crates/nexus/crates/nexus-templates",
+    "crates/nexus/crates/nexus-workflow",
+    "crates/nexus/crates/nexus-linkpreview",
+    "crates/nexus/crates/nexus-notifications",
+    "crates/nexus/crates/nexus-comments",
+    "crates/nexus/crates/nexus-panic-log",
+    "crates/nexus/crates/nexus-crdt",
+    "crates/nexus/crates/nexus-fuzz",
+    "crates/nexus/crates/nexus-audio",
+    "crates/nexus/crates/nexus-collab",
+    "crates/nexus/crates/nexus-memory",
+    "crates/nexus/crates/nexus-memory-hub",
+    "crates/nexus/crates/nexus-context",
+    "crates/nexus/crates/nexus-protocol",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -209,6 +251,11 @@ exclude = [
     "crates/rustils/fuzz",
     "crates/rusty_croc/fuzz",
     "crates/rusty_key/desktop/src-tauri",
+    # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
+    # was excluded from nexus's own workspace too: it is built by `tauri
+    # build` from the pnpm side, carries its own dependency graph (tauri
+    # plugins, WebKitGTK), and is not a `cargo test` target.
+    "crates/nexus/shell",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/
@@ -295,15 +342,30 @@ rusty_json = { path = "crates/rusty_json" }
 rusty_std = { path = "crates/rusty_std" }
 thiserror = "1"
 futures-core = "0.3"
-futures-util = "0.3"
+# `sink` is nexus-collab's (WebSocket relay writes); `futures-util`'s
+# default set does not include it.
+futures-util = { version = "0.3", features = ["sink"] }
 async-stream = "0.3"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
+# Bumped 0.8 -> 0.9 by the nexus merge: sqlx-sqlite 0.8.x hard-pins
+# `libsqlite3-sys ^0.30.1`, which collides (Cargo's `links = "sqlite3"`
+# uniqueness rule) with the `libsqlite3-sys ^0.37` that nexus's `rusqlite`
+# 0.39 needs; sqlx-sqlite 0.9.0 widens its own range to
+# `>=0.30.1, <0.38.0`, which admits both. Feature names used across this
+# workspace (`runtime-tokio`, `tls-rustls`, `tls-rustls-ring`, `sqlite`,
+# `postgres`, `uuid`, `chrono`, `json`) are all unchanged in 0.9 (some are
+# now backwards-compat aliases for renamed internals, per sqlx's own
+# CHANGELOG). MSRV for 0.9 is 1.94.0; this workspace's toolchain is pinned
+# above that. Verified with `cargo check` on every direct sqlx consumer
+# (rp-core/rusty-db-sqlite/rusty-acp's postgres-store feature) plus the
+# nexus rusqlite consumers, not just `cargo metadata`.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 heck = "0.5"
 proc-macro-crate = "3"
-uuid = { version = "1", features = ["v4", "serde"] }
+# `v5`/`v7` are nexus's (deterministic note ids and time-ordered ids).
+uuid = { version = "1", features = ["v4", "serde", "v5", "v7"] }
 bigdecimal = "0.4"
 # `serde` is rusty_skillopt's requirement; rusty_db only needs the base crate.
 chrono = { version = "0.4", features = ["serde"] }
@@ -350,7 +412,13 @@ anyhow = "1.0"
 inventory-core = { path = "crates/rusty_inventrory/crates/inventory-core" }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
-rusqlite = "0.32.1"
+# nexus asks for "0.39" + `backup` (bundled sqlite3 links natively, so only
+# one rusqlite version may exist in the whole graph -- Cargo's `links`
+# uniqueness rule, stricter than ordinary duplicate-version tolerance);
+# widened to the higher version rather than kept literal like the other
+# six nexus collisions. `backup` is a no-op for inventory-core, whose own
+# feature list only asks for `bundled`.
+rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 
 # Hoisted from rusty_skillopt's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `license` ("MIT" vs. this root's
@@ -368,8 +436,12 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls-native-roots",
+    # nexus asks for the webpki-roots flavour and HTTP/2 for its AI
+    # provider calls; both unify into the same rustls graph regardless.
+    "rustls-tls",
+    "http2",
 ] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 rand = "0.8"
 
 # Hoisted from rusty_key's own former `[workspace.dependencies]`. Its
@@ -480,7 +552,9 @@ prometheus = { version = "0.13", default-features = false }
 wiremock = "0.6"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring", "native-certs"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# `std` is nexus's (TLS pinning in nexus-security); a no-op for the other
+# consumers, whose targets all have std anyway.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8"
 ring = "0.17"
 regex = "1"
@@ -523,7 +597,8 @@ agentgateway-proxy = { path = "crates/rusty_agent_gateway/crates/agentgateway-pr
 agentgateway-tls = { path = "crates/rusty_agent_gateway/crates/agentgateway-tls", version = "0.1.0" }
 # Another merged sibling, retiring agentgateway-tls' pinned git dependency.
 rusty_tls = { path = "crates/rusty_tls" }
-tokio-util = { version = "0.7", default-features = false }
+# `rt` is nexus-kernel's (CancellationToken-based cooperative IPC cancellation).
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 http-body = "1"
 cel = "0.14"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "transport"] }
@@ -551,6 +626,114 @@ windows-sys = { version = "0.59", features = [
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
 ] }
+
+# Hoisted from nexus's own former `[workspace.dependencies]` (it was its own
+# Cargo workspace of 42 crates before this merge). Its `[workspace.package]`
+# matched this root's on every field it set (version 0.1.0, edition 2021,
+# license "MIT OR Apache-2.0", publish = false), so -- like rusty_test and
+# unlike rusty_db -- its crates keep inheriting via `field.workspace = true`;
+# nexus-rush and nexus-vt already carried a literal `edition = "2024"`.
+#
+# Seven of its entries collided with this root's on something a member
+# cannot override by inheriting, and stay literal in the nexus crates that
+# use them instead of displacing the existing root entries: `thiserror`
+# ("2.0", the recurring "2"-vs-"1" split), `toml` ("1.1" vs. "0.8"),
+# `rand` ("0.9" vs.
+# "0.8"), `dirs` ("5" vs. "6.0"), `rmcp` ("1.3" with the server/client/
+# transport feature set vs. "3.1"), and `tantivy` (default-features = false
+# plus an explicit feature list vs. this root's default-features entry).
+# Everything else nexus asked for either already existed here as a
+# compatible superset (`tokio`, `serde`, `serde_json`, `chrono`, `axum`,
+# `clap`, `schemars`, `ratatui`, `crossterm`, `portable-pty`, ...) or was
+# widened above (`uuid` gained `v5`/`v7`, `reqwest` gained `rustls-tls`/
+# `http2`, `rustls` gained `std`, `tokio-util` gained `rt`,
+# `tracing-subscriber` gained `fmt`, `futures-util` gained `sink`).
+#
+# Its two `rustils` git pins (`platform`/`platform-linux` at rev 3772d60f,
+# used by nexus-rush's Linux job control) retire to this root's existing
+# path entries -- the ADR-0002 rule, and the same swap rusty_yirp's
+# sessionmgr-pty made.
+nexus-plugin-api = { path = "crates/nexus/crates/nexus-plugin-api" }
+nexus-hashline = { path = "crates/nexus/crates/nexus-hashline" }
+tracing-appender = "0.2"
+# Markdown parsing
+comrak = { version = "0.52", default-features = false, features = [] }
+# Tree-sitter -- code-symbol indexing. tree-sitter 0.26 expects language
+# crates emitting LANGUAGE_VERSION 13-15; the grammar versions below all
+# advertise a matching ABI. Bumping any grammar in isolation is safe;
+# bumping the runtime needs a matching grammar refresh.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
+# tree-sitter 0.25+ returns query matches as a StreamingIterator.
+streaming-iterator = "0.1"
+# File watching
+notify = "8"
+notify-debouncer-mini = "0.7"
+# WASM runtime for community plugins
+wasmtime = { version = "44", default-features = false, features = ["runtime", "std", "cranelift", "cache", "parallel-compilation"] }
+jsonschema = "0.46"
+semver = "1"
+regex-lite = "0.1"
+# Unicode width + grapheme segmentation -- the only deps of the headless VT
+# engine (`nexus-vt`, the in-tree port of rusty_term's core).
+unicode-width = "0.2"
+unicode-segmentation = "1"
+rayon = "1.11"
+sha2 = "0.11"
+# 3-way merge for hashline edits (nexus-hashline).
+diffy = "0.4"
+# Note: nexus's four `base64` consumers keep the external crate for now;
+# repo-inspector's Section 2 retired every *other* external `base64` use in
+# this workspace in favour of `rusty_base64`, so this is a known
+# sovereignty follow-up, not a policy exception granted here.
+base64 = "0.22"
+rustls-pki-types = "1"
+webpki-roots = "1"
+# Plugin manifest signing.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+# OS credential storage
+keyring = "3"
+# SQLite connection pooling, tracking the root `rusqlite` entry's 0.39 major.
+r2d2 = "0.8"
+r2d2_sqlite = "0.33"
+# YAML frontmatter (serde_norway is the maintained fork of archived
+# serde_yaml; serde_yml, the prior fork, is unsound + unmaintained,
+# RUSTSEC-2025-0068). Distinct from this root's `serde_yaml` entry above,
+# which rusty_skillopt/rusty_agent_gateway still use.
+serde_norway = "0.9"
+# OS process sandbox (Linux): Landlock LSM filesystem restrictions +
+# seccomp-bpf network-syscall blocking (nexus-security, Linux-only target
+# table).
+landlock = "0.4"
+seccompiler = "0.5"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+filetime = "0.2"
+trash = "5"
+tempfile = "3"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+csv = "1.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+clap_complete = "4.5"
+comfy-table = "7"
+ctrlc = "3.5"
+# REPL line editing for `nexus ai chat` and nexus-rush's interactive mode.
+rustyline = "18"
+petgraph = "0.7"
+# SMTP client (nexus-notifications email transport). `rustls-tls` keeps the
+# TLS stack aligned with reqwest's rustls + ring graph; no native-tls.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "ring", "webpki-roots", "pool", "hostname"] }
+# TypeScript type generation for nexus's IPC boundary (`ts-export` features).
+ts-rs = { version = "11", features = ["serde-compat"] }
+# WebSocket relay transport (nexus-collab): plain ws:// only, TLS deferred.
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+# Tauri desktop shell (`crates/nexus/shell/src-tauri`, excluded above).
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 
 # rustils' own `[workspace.lints]`, hoisted the same way -- only its eight
 # crates opt in via `[lints] workspace = true`; every other crate in this

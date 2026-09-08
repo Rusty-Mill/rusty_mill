@@ -10,7 +10,7 @@ description = "Operation-based CRDT layer for collaborative editing (BL-074, PRD
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 uuid        = { workspace = true }
-thiserror   = { workspace = true }
+thiserror   = "2.0"
 tracing     = { workspace = true }
 tokio       = { workspace = true, features = ["sync", "rt", "macros"] }
 # nexus-crdt wraps `nexus_editor::Operation` / `BlockId` / `BlockTree` —

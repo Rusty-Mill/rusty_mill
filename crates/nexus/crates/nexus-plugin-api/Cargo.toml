@@ -15,7 +15,7 @@ ts-export = ["dep:ts-rs", "dep:schemars"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
+thiserror = "2.0"
 uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
@@ -24,4 +24,4 @@ schemars = { workspace = true, optional = true, features = ["chrono04", "uuid1"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
-toml = { workspace = true }
+toml = "1.1"

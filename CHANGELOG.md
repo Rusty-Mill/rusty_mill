@@ -9,6 +9,13 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/nexus` — new workspace members: `baileyrd/nexus`, a 42-crate
+  microkernel note-taking/AI-agent workspace, merged via `git subtree`
+  with full history (separate from the `baileyrd/rusty_*` wave numbering).
+  Its own nested `[workspace]`/`Cargo.lock` and `.cargo/config.toml`
+  (target-dir override, redundant now that this root's own `target/`
+  covers it) were dropped; `crates/nexus/shell` (its Tauri desktop shell)
+  is `exclude`d the same way as `rusty_key`'s `desktop/src-tauri`.
 - `crates/rusty_rand` — new workspace member: OS-backed CSPRNG bytes
   (`fill`/`bytes`, `Result`-returning; cached `/dev/urandom` handle on
   Unix, hand-declared `BCryptGenRandom` FFI on Windows), no external
@@ -26,6 +33,38 @@ Removed / Fixed / Security, newest first.
 - `repo-inspector-report.md` gained a **Disposition** section recording
   what was done, or deliberately not, for every row of both sections.
 ### Changed
+- `sqlx` bumped `0.8` → `0.9`, workspace-wide: `sqlx-sqlite` 0.8.x pins
+  `libsqlite3-sys ^0.30.1`, which collided (Cargo's `links = "sqlite3"`
+  uniqueness rule) with the `libsqlite3-sys ^0.37` that nexus's
+  `rusqlite` 0.39 needs; `sqlx-sqlite` 0.9.0 widens its own range to
+  `>=0.30.1, <0.38.0`, admitting both. `rusty_acp`'s own `sqlx` pin
+  (`postgres-store` feature) and `rusty-db-postgres`/`rusty-db-mysql`/
+  `rusty-db-sqlite` bumped with it; each crate's dynamic-SQL call sites
+  (`sqlx::query(&format!(...))`-shaped) needed wrapping in
+  `sqlx::AssertSqlSafe` for sqlx 0.9's new `SqlSafeStr` injection-audit
+  bound — all of them build SQL from a config-supplied table name/prefix
+  (`rusty-db-*`'s generic `Executor` trait boundary, `rusty_acp`'s
+  `table_prefix`) or a caller-supplied connection-hook string, not from
+  request data, so the wrap is a straightforward assertion rather than a
+  behavior change.
+- `rusqlite` bumped `0.32.1` → `0.39` at the workspace root (the version
+  nexus's own manifest asked for) for the same `links` reason;
+  `inventory-core`, `rusty_sqlite`, and `rk-feed` (previously pinned to
+  `0.32.1`/`0.32` for their own reasons — an `sqlx-sqlite` unification and
+  a `libsqlite3-sys` stable-toolchain `cfg_select` issue, respectively,
+  both still satisfied at `0.39`) now share the one workspace version
+  Cargo's `links` uniqueness rule requires.
+- `nexus-memory`'s `Memory`/`MemoryType`/`MemoryStatus` (`model.rs`) now
+  derive `TS`/`JsonSchema` behind the `ts-export` feature, and its
+  `ts-rs`/`schemars` deps gained the `chrono`/`uuid` impl features they
+  need — a latent gap in nexus's own manifest (not exercised by nexus's
+  own `scripts/check_ipc_drift.sh`, which never built `nexus-memory`)
+  that only surfaced once this workspace's own CI compiled it with
+  `--all-features`.
+- `nexus-rush`'s job-spawn `platform::process::Command` literal gained an
+  explicit `detached: false` — a field added to this workspace's own
+  `rustils` fork after nexus's former pinned `rustils` git rev, now
+  exposed by retiring that pin to this root's path dependency (ADR-0002).
 - `rusty_base64`'s decoder now rejects misplaced or excess `=` padding
   (`Z=9v`, `Zm9v====`, `Zg==Zg==`) and a padded input that is not
   4-aligned, instead of stripping every `=` and guessing; `DecodeError`

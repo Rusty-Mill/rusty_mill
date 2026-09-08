@@ -7,11 +7,11 @@ publish.workspace   = true
 description = "Nexus file-format library: markdown, canvas, bases, config parsing (PRD 06)"
 
 [dependencies]
-thiserror  = { workspace = true }
+thiserror  = "2.0"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 serde_norway  = { workspace = true }
-toml       = { workspace = true }
+toml       = "1.1"
 comrak     = { workspace = true }
 sha2       = { workspace = true }
 regex-lite = { workspace = true }

@@ -11,7 +11,7 @@ nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugin-api = { path = "../nexus-plugin-api" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
+thiserror = "2.0"
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

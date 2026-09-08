@@ -102,7 +102,10 @@ pub fn init() {
         // itself never relies on SIGCHLD (it reaps via explicit waitpid/
         // wait_job calls throughout), so a no-op handler is behaviorally
         // inert here.
-        libc::signal(libc::SIGCHLD, ignore_job_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGCHLD,
+            ignore_job_signal as *const () as libc::sighandler_t,
+        );
     }
 
     if enable {
@@ -465,6 +468,15 @@ fn build_pcommand(
         stdout: stdout_sink.into_stdio(),
         stderr: stderr_sink.into_stdio(),
         group,
+        // `detached` was added to `platform::process::Command` in the
+        // rustils rev this crate merged onto (see the root Cargo.toml's
+        // `platform`/`platform-linux` entries) after nexus's own former
+        // pin. Rush's job control always wants the child attached to its
+        // own job's process group (`group` above already carries that
+        // policy via `GroupSpec`), never `setsid`-detached, so `false`
+        // here matches `Command::new`'s own default and this crate's
+        // pre-merge behavior exactly.
+        detached: false,
     })
 }
 

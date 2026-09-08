@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::{
     server::store::{
@@ -270,7 +270,7 @@ impl PostgresStore {
         ];
 
         for statement in statements {
-            sqlx::query(&statement)
+            sqlx::query(AssertSqlSafe(statement.as_str()))
                 .execute(&self.pool)
                 .await
                 .map_err(|err| pg_error("create schema", err))?;
@@ -291,7 +291,7 @@ impl PostgresStore {
             ),
         ];
         for statement in columns {
-            sqlx::query(&statement)
+            sqlx::query(AssertSqlSafe(statement.as_str()))
                 .execute(&self.pool)
                 .await
                 .map_err(|err| pg_error("add schema columns", err))?;
@@ -315,7 +315,7 @@ impl PostgresStore {
         // not even one event fits: everything before it goes and the newest
         // stays, which is the same rule the other backends keep — a log that
         // dropped what it was just given could not serve a live tail.
-        let deleted = sqlx::query(&format!(
+        let deleted = sqlx::query(AssertSqlSafe(format!(
             "WITH kept AS (
                  SELECT MIN(idx) AS first_kept FROM (
                      SELECT idx, SUM(bytes) OVER (ORDER BY idx DESC) AS running
@@ -332,7 +332,7 @@ impl PostgresStore {
              WHERE run_id = $1 AND idx < (SELECT first_kept FROM boundary)
              RETURNING bytes",
             events = events,
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(self.config.max_run_event_bytes as i64)
         .fetch_all(&mut **transaction)
@@ -345,10 +345,10 @@ impl PostgresStore {
 
         let freed: i64 =
             deleted.iter().map(|row| row.try_get::<i64, _>("bytes").unwrap_or(0)).sum();
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "UPDATE {} SET event_bytes = GREATEST(event_bytes - $2, 0) WHERE run_id = $1",
             self.table("runs")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(freed)
         .execute(&mut **transaction)
@@ -402,7 +402,7 @@ impl PostgresStore {
             - chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::zero());
 
         let runs = self.table("runs");
-        let deleted = sqlx::query(&format!(
+        let deleted = sqlx::query(AssertSqlSafe(format!(
             "WITH stale AS (
                  DELETE FROM {runs}
                  WHERE updated_at < $1
@@ -427,7 +427,7 @@ impl PostgresStore {
             leases = self.table("leases"),
             recovery = self.table("recovery"),
             signals = self.table("signals"),
-        ))
+        )))
         .bind(cutoff)
         .fetch_one(&self.pool)
         .await
@@ -438,7 +438,7 @@ impl PostgresStore {
         // conversation. It stays correct as the runs table is swept around it,
         // because only terminal runs are ever swept — a run that would protect
         // a session is never one of the rows this statement's sibling removed.
-        let collected = sqlx::query(&format!(
+        let collected = sqlx::query(AssertSqlSafe(format!(
             "WITH stale AS (
                  DELETE FROM {sessions}
                  WHERE updated_at < $1
@@ -460,7 +460,7 @@ impl PostgresStore {
             runs = runs,
             messages = self.table("session_messages"),
             state = self.table("session_state"),
-        ))
+        )))
         .bind(cutoff)
         .fetch_one(&self.pool)
         .await
@@ -523,11 +523,11 @@ impl Store for PostgresStore {
         // `next_event` is deliberately not touched: the run snapshot is
         // overwritten constantly, and resetting the counter would hand out an
         // index the log already used.
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (run_id, run, updated_at) VALUES ($1, $2, now())
              ON CONFLICT (run_id) DO UPDATE SET run = EXCLUDED.run, updated_at = now()",
             self.table("runs")
-        ))
+        )))
         .bind(*run.run_id.as_uuid())
         .bind(encode(run)?)
         .execute(&self.pool)
@@ -549,11 +549,14 @@ impl Store for PostgresStore {
     }
 
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>> {
-        let row = sqlx::query(&format!("SELECT run FROM {} WHERE run_id = $1", self.table("runs")))
-            .bind(*run_id.as_uuid())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|err| pg_error("read run", err))?;
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT run FROM {} WHERE run_id = $1",
+            self.table("runs")
+        )))
+        .bind(*run_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| pg_error("read run", err))?;
 
         match row {
             Some(row) => {
@@ -575,11 +578,11 @@ impl Store for PostgresStore {
         // concurrent append blocks here rather than computing the same one.
         // The running byte total rides on the same statement, so accounting
         // for the log costs nothing on the path that does not trim.
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "UPDATE {} SET next_event = next_event + 1, event_bytes = event_bytes + $2
              WHERE run_id = $1 RETURNING next_event - 1 AS idx, event_bytes",
             self.table("runs")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(size)
         .fetch_optional(&mut *transaction)
@@ -592,10 +595,10 @@ impl Store for PostgresStore {
         let index: i64 = row.try_get("idx").map_err(|err| pg_error("read event index", err))?;
         let held: i64 = row.try_get("event_bytes").map_err(|err| pg_error("read log size", err))?;
 
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (run_id, idx, event, bytes) VALUES ($1, $2, $3, $4)",
             self.table("events")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(index)
         .bind(encode(event)?)
@@ -616,10 +619,10 @@ impl Store for PostgresStore {
         // `MIN(idx)` is the answer directly: rows are deleted from the front,
         // and indices are absolute, so the lowest surviving one *is* where the
         // log now starts. Nothing to store and nothing that can disagree.
-        let row: Option<(Option<i64>,)> = sqlx::query_as(&format!(
+        let row: Option<(Option<i64>,)> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT MIN(idx) FROM {} WHERE run_id = $1",
             self.table("events")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -634,10 +637,10 @@ impl Store for PostgresStore {
     async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
         // Seeks on the primary key, so a reconnection costs the tail rather
         // than the whole run so far.
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT event FROM {} WHERE run_id = $1 AND idx >= $2 ORDER BY idx",
             self.table("events")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(from as i64)
         .fetch_all(&self.pool)
@@ -668,10 +671,10 @@ impl Store for PostgresStore {
                 } else {
                     // A resume payload can be arbitrarily large. Park it and
                     // send its id instead of failing the publish.
-                    let row = sqlx::query(&format!(
+                    let row = sqlx::query(AssertSqlSafe(format!(
                         "INSERT INTO {} (run_id, notification) VALUES ($1, $2) RETURNING id",
                         self.table("signals")
-                    ))
+                    )))
                     .bind(*run_id.as_uuid())
                     .bind(encoded)
                     .fetch_one(&self.pool)
@@ -737,10 +740,10 @@ impl Store for PostgresStore {
     }
 
     async fn get_session(&self, session_id: SessionId) -> StoreResult<Option<SessionRecord>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT state_url, prefix_history, base_url FROM {} WHERE session_id = $1",
             self.table("sessions")
-        ))
+        )))
         .bind(*session_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -779,11 +782,11 @@ impl Store for PostgresStore {
         // the retention window could be collected between the run picking it up
         // and the run appending its output, and the history would come back
         // empty with nothing raised.
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (session_id, state_url, prefix_history) VALUES ($1, $2, $3)
              ON CONFLICT (session_id) DO UPDATE SET updated_at = now()",
             self.table("sessions")
-        ))
+        )))
         .bind(*session.id.as_uuid())
         .bind(session.state.clone())
         .bind(encode(&session.history)?)
@@ -815,7 +818,7 @@ impl Store for PostgresStore {
         // One statement reserves the whole block of indices under the session's
         // row lock, so two replicas appending at once cannot interleave or land
         // on the same index — the invariant the trait requires.
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (session_id, base_url, next_message, updated_at)
              VALUES ($1, $2, $3, now())
              ON CONFLICT (session_id) DO UPDATE
@@ -825,7 +828,7 @@ impl Store for PostgresStore {
              RETURNING next_message - $3 AS first_index",
             self.table("sessions"),
             sessions = self.table("sessions"),
-        ))
+        )))
         .bind(*session_id.as_uuid())
         .bind(base_url)
         .bind(messages.len() as i64)
@@ -837,10 +840,10 @@ impl Store for PostgresStore {
             row.try_get("first_index").map_err(|err| pg_error("read message index", err))?;
 
         for (offset, message) in messages.iter().enumerate() {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "INSERT INTO {} (session_id, idx, message) VALUES ($1, $2, $3)",
                 self.table("session_messages")
-            ))
+            )))
             .bind(*session_id.as_uuid())
             .bind(first + offset as i64)
             .bind(encode(message)?)
@@ -856,10 +859,10 @@ impl Store for PostgresStore {
         &self,
         session_id: SessionId,
     ) -> StoreResult<Option<serde_json::Value>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT state FROM {} WHERE session_id = $1",
             self.table("session_state")
-        ))
+        )))
         .bind(*session_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -882,11 +885,11 @@ impl Store for PostgresStore {
         let mut transaction =
             self.pool.begin().await.map_err(|err| pg_error("begin transaction", err))?;
 
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (session_id, state) VALUES ($1, $2)
              ON CONFLICT (session_id) DO UPDATE SET state = EXCLUDED.state",
             self.table("session_state")
-        ))
+        )))
         .bind(*session_id.as_uuid())
         .bind(&state)
         .execute(&mut *transaction)
@@ -895,11 +898,11 @@ impl Store for PostgresStore {
 
         // ACP models state as a link rather than inline content, so the session
         // has to point at the document.
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (session_id, state_url, updated_at) VALUES ($1, $2, now())
              ON CONFLICT (session_id) DO UPDATE SET state_url = EXCLUDED.state_url, updated_at = now()",
             self.table("sessions")
-        ))
+        )))
         .bind(*session_id.as_uuid())
         .bind(state_url(base_url, session_id))
         .execute(&mut *transaction)
@@ -912,12 +915,12 @@ impl Store for PostgresStore {
     async fn renew_lease(&self, run_id: RunId, owner: &str, ttl: Duration) -> StoreResult<()> {
         // Unconditional: the executing replica is the only writer, so there is
         // no other claimant to lose a race with.
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (run_id, owner, expires_at) VALUES ($1, $2, now() + $3)
              ON CONFLICT (run_id) DO UPDATE
                SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at",
             self.table("leases")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(owner)
         .bind(pg_interval(ttl))
@@ -931,10 +934,10 @@ impl Store for PostgresStore {
         // Expiry is a column rather than something the database enforces, so
         // "has it lapsed" is part of the read. A lapsed row is left in place;
         // `sweep` removes it with the run.
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT owner FROM {} WHERE run_id = $1 AND expires_at > now()",
             self.table("leases")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -958,14 +961,14 @@ impl Store for PostgresStore {
         // lease or does nothing, in one statement. Exactly one replica can be
         // told it won, which is what stops two of them recovering the same
         // abandoned run.
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {leases} (run_id, owner, expires_at) VALUES ($1, $2, now() + $3)
              ON CONFLICT (run_id) DO UPDATE
                SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at
                WHERE {leases}.expires_at <= now()
              RETURNING run_id",
             leases = self.table("leases")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(owner)
         .bind(pg_interval(ttl))
@@ -983,11 +986,11 @@ impl Store for PostgresStore {
     ) -> StoreResult<()> {
         match record {
             Some(record) => {
-                sqlx::query(&format!(
+                sqlx::query(AssertSqlSafe(format!(
                     "INSERT INTO {} (run_id, record) VALUES ($1, $2)
                      ON CONFLICT (run_id) DO UPDATE SET record = EXCLUDED.record",
                     self.table("recovery")
-                ))
+                )))
                 .bind(*run_id.as_uuid())
                 .bind(encode(record)?)
                 .execute(&self.pool)
@@ -995,21 +998,24 @@ impl Store for PostgresStore {
                 .map_err(|err| pg_error("write recovery record", err))?;
             }
             None => {
-                sqlx::query(&format!("DELETE FROM {} WHERE run_id = $1", self.table("recovery")))
-                    .bind(*run_id.as_uuid())
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|err| pg_error("clear recovery record", err))?;
+                sqlx::query(AssertSqlSafe(format!(
+                    "DELETE FROM {} WHERE run_id = $1",
+                    self.table("recovery")
+                )))
+                .bind(*run_id.as_uuid())
+                .execute(&self.pool)
+                .await
+                .map_err(|err| pg_error("clear recovery record", err))?;
             }
         }
         Ok(())
     }
 
     async fn recovery_record(&self, run_id: RunId) -> StoreResult<Option<RecoveryRecord>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT record FROM {} WHERE run_id = $1",
             self.table("recovery")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -1026,11 +1032,14 @@ impl Store for PostgresStore {
     }
 
     async fn release_lease(&self, run_id: RunId) -> StoreResult<()> {
-        sqlx::query(&format!("DELETE FROM {} WHERE run_id = $1", self.table("leases")))
-            .bind(*run_id.as_uuid())
-            .execute(&self.pool)
-            .await
-            .map_err(|err| pg_error("release run lease", err))?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {} WHERE run_id = $1",
+            self.table("leases")
+        )))
+        .bind(*run_id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(|err| pg_error("release run lease", err))?;
         Ok(())
     }
 }
@@ -1065,10 +1074,10 @@ impl PostgresStore {
     /// `earliest_event(run_id) <= index`, which is a second round-trip on the
     /// hot path for something this query answers by itself.
     async fn event_at(&self, run_id: RunId, index: u64) -> Option<Notification> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT event FROM {} WHERE run_id = $1 AND idx = $2",
             self.table("events")
-        ))
+        )))
         .bind(*run_id.as_uuid())
         .bind(index as i64)
         .fetch_optional(&self.pool)
@@ -1094,10 +1103,10 @@ impl PostgresStore {
             Pointer::Inline { notification } => Some(*notification),
             Pointer::Event { index } => self.event_at(run_id, index).await,
             Pointer::Signal { id } => {
-                let row = sqlx::query(&format!(
+                let row = sqlx::query(AssertSqlSafe(format!(
                     "SELECT notification FROM {} WHERE id = $1",
                     self.table("signals")
-                ))
+                )))
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await;
@@ -1118,10 +1127,10 @@ impl PostgresStore {
     }
 
     async fn session_messages(&self, session_id: SessionId) -> StoreResult<Vec<Message>> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT message FROM {} WHERE session_id = $1 ORDER BY idx",
             self.table("session_messages")
-        ))
+        )))
         .bind(*session_id.as_uuid())
         .fetch_all(&self.pool)
         .await

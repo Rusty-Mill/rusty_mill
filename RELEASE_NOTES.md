@@ -13,6 +13,55 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Migrate nexus into the monorepo
+**2026-09-08** · branch [`claude/nexus-rusty-mill-migration-ic3fqa`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/nexus-rusty-mill-migration-ic3fqa)
+
+`baileyrd/nexus` — a 42-crate microkernel note-taking/AI-agent workspace —
+merged into `crates/nexus/` via `git subtree`, full history preserved. A
+fifth merge outside the `baileyrd/rusty_*` wave numbering (ADR-0001).
+
+- **Added:** all 42 of nexus's workspace crates join this root's member
+  list directly; `crates/nexus/shell` (its Tauri desktop shell) is
+  `exclude`d the same way as `rusty_key`'s `desktop/src-tauri`.
+- **Changed:** nexus's own nested `[workspace]`, `Cargo.lock`, and
+  `.cargo/config.toml` (a `target-dir` override that would have
+  fragmented this workspace's shared `target/` for anyone building from
+  inside `crates/nexus/`) were dropped on merge, the same treatment
+  rusty_agent_gateway's and rusty_yirp's own nested workspaces got.
+  nexus's `rustils` git pins (`platform`/`platform-linux`) retired to
+  this root's existing path dependencies (ADR-0002) — the same swap
+  rusty_yirp's `sessionmgr-pty` made.
+- **Changed:** `sqlx` bumped `0.8` → `0.9` workspace-wide to resolve a
+  hard `libsqlite3-sys` version collision between `sqlx-sqlite` (used by
+  `rusty_db`'s SQLite driver and `rusty_acp`'s optional Postgres store)
+  and the `rusqlite 0.39` nexus's storage layer needs — both crates
+  register `links = "sqlite3"`/pull `libsqlite3-sys`, and Cargo allows
+  only one version of a `links`-declaring crate in the whole graph.
+  `rusqlite` itself bumped `0.32.1` → `0.39` at the root for the same
+  reason; `inventory-core`, `rusty_sqlite`, and `rk-feed` (each
+  previously pinned lower for their own documented reasons, all still
+  satisfied at `0.39`) now share that one version too. sqlx 0.9's new
+  `SqlSafeStr` injection-audit bound needed `sqlx::AssertSqlSafe` wraps
+  at every dynamic-SQL call site in `rusty-db-postgres`/`-mysql`/
+  `-sqlite` and `rusty_acp`'s postgres store — all of them build SQL
+  from a config-supplied table prefix or a caller-supplied connection
+  hook, never request data, so each wrap is an audit assertion, not a
+  behavior change. This was surfaced to, and approved by, the user
+  before making the bump (a toolchain/dependency change, per the
+  working agreement) rather than picked unilaterally.
+- **Fixed:** two latent nexus-side gaps that its own CI never exercised,
+  only surfaced once this workspace's `--all-features` build compiled
+  them: `nexus-memory`'s `Memory`/`MemoryType`/`MemoryStatus` never
+  derived `TS`/`JsonSchema` despite being embedded in a `ts-export` IPC
+  type (`nexus-memory` isn't in nexus's own `check_ipc_drift.sh` build
+  list); `nexus-rush`'s job-spawn `Command` literal was missing a
+  `detached` field added to this workspace's `rustils` fork after
+  nexus's former pinned rev.
+- **Verified:** `cargo check --workspace --all-features` across all 230
+  workspace members (42 of them new from nexus), `cargo fmt --all -- --check`,
+  and `.github/scripts/check_workspace_deps.py` (ADR-0002 dependency-policy
+  check) all pass clean.
+
 ## Work through the repo-inspector report's duplication and sovereignty rows
 **2026-09-05** · branch [`claude/repo-inspector-report-wgoocq`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/repo-inspector-report-wgoocq)
 
