@@ -6,6 +6,11 @@
 //! REPL handlers from being pointed at a regular terminal session.
 //! The "eval streams real output" test spawns Python 3 if available;
 //! it skips with a printed note otherwise.
+//!
+//! Every test here is `#[cfg(unix)]` (relies on `cat` as a POSIX-only
+//! deterministic "kernel"), so the whole file is gated the same way —
+//! otherwise the shared helpers below are unused on a Windows build.
+#![cfg(unix)]
 
 use std::time::Duration;
 
