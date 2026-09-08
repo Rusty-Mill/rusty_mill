@@ -2,7 +2,10 @@
 name = "rusty_multimodal_db"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# The oldest compiler that builds the lockfile with every feature: `time` 0.3.55
+# declares 1.88.0, the ceiling of every dependency. Checked by CI's `msrv` job, so
+# a dependency bump that raises it fails there rather than on whoever builds next.
+rust-version = "1.88"
 description = "Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends"
 repository = "https://github.com/baileyrd/rusty_multimodal_db"
 license = "MIT"
