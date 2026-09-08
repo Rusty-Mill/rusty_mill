@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub git: GitSettings,
     /// Dream Cycle (BL-129) — scheduled entity-graph maintenance.
     pub dream_cycle: DreamCycleSettings,
+    /// Frontmatter property types (RFC 0009 properties panel).
+    pub properties: PropertiesSettings,
     /// Flat key/value bag mirrored by the shell's settings registry.
     /// Keys follow the `pluginId.fieldName` convention (e.g.
     /// `"nexus.editor.fontSize"`). Values can be any TOML scalar or
@@ -244,6 +246,20 @@ pub struct DreamCycleSettings {
     /// Passed through as `extract_entities`'s `max_entities` arg.
     /// Default `3`.
     pub extract_max_entities_per_note: u32,
+}
+
+/// RFC 0009 — declared frontmatter property types, layered over the
+/// types the index infers from existing values. Read by
+/// `com.nexus.storage::properties_schema`; the panel's per-key type
+/// picker writes here through `properties_set_override`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PropertiesSettings {
+    /// `key → type` where type is one of `text`, `number`, `date`,
+    /// `date_time`, `boolean`, `list`, `link`, `tags`. An override
+    /// always wins over the inferred type. Unknown type names are
+    /// ignored at read time rather than failing the whole config.
+    pub type_overrides: BTreeMap<String, String>,
 }
 
 impl Default for DreamCycleSettings {

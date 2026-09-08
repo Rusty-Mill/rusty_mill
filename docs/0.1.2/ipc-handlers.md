@@ -12,7 +12,7 @@
 
 | Plugin | Handlers |
 |--------|---------:|
-| `com.nexus.storage` | 86 |
+| `com.nexus.storage` | 91 |
 | `com.nexus.git` | 45 |
 | `com.nexus.terminal` | 36 |
 | `com.nexus.ai` | 31 |
@@ -36,7 +36,7 @@
 | `com.nexus.audio` | 3 |
 | `com.nexus.formats` | 4 |
 | `com.nexus.linkpreview` | 1 |
-| **Total** | **400** |
+| **Total** | **405** |
 
 `.v<N>` aliases (per ADR 0021) are not listed separately — the matrix applier auto-mirrors a row's classification onto every alias.
 
@@ -44,7 +44,7 @@
 
 ---
 
-## com.nexus.storage (86)
+## com.nexus.storage (91)
 
 ### Read
 
@@ -54,6 +54,7 @@
 | `read_file` | — | downstream `fs.read` if path resolves external |
 | `read_lines` | — | line-range read (1-based, inclusive) for large files; returns the slice + total lines + the file's hashline tag |
 | `read_frontmatter` | — | frontmatter extraction |
+| `properties_get` / `properties_schema` / `properties_list` | — | typed frontmatter: one note's rows, the inferred+declared key → type schema, and a paginated all-notes table (RFC 0009) |
 | `find_in_files` | — | ripgrep-style content search |
 | `ast_query` | — | tree-sitter structural code search (S-expression query with `@capture`s) over one language |
 | `search` | — | Tantivy FTS query |
@@ -83,6 +84,7 @@ All write handlers are classified `unrestricted` in the matrix — the downstrea
 | `note_create_unique` | — | Zettelkasten `{id}{sep}{title}.md` note (chrono-formatted id, `-N` on collision), written through `write_file` (RFC 0009) |
 | `note_merge` | — | append source into target, redirect inbound links, delete source to forge/system trash or permanently (RFC 0009) |
 | `note_create_from_title` | — | sanitised `{title}.md` with optional body; refuses to overwrite — backs extract-selection-to-note (RFC 0009) |
+| `properties_set` / `properties_set_override` | — | typed frontmatter key write (re-serialises the YAML block) / declare a key's type in `app.toml` (RFC 0009) |
 | `edit` | — | apply a hashline patch (content-hash-anchored edits), then write through `write_file` |
 | `create_file` / `create_dir` / `delete_file` / `delete_entry` / `rename_entry` | — | fs ops |
 | `toggle_task` | — | inline task checkbox toggle |

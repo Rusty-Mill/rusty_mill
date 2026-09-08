@@ -463,6 +463,33 @@ pub const HANDLER_NOTE_MERGE: u32 = 85;
 /// itself. Ported from `nexus_forge`'s note-composer plugin.
 pub const HANDLER_NOTE_CREATE_FROM_TITLE: u32 = 86;
 
+/// RFC 0009 — `properties_schema`. Args: `{}`. Returns
+/// [`crate::ipc::StoragePropertiesSchemaResult`]: key → type inferred
+/// from the index plus `[properties].type_overrides` from `app.toml`.
+pub const HANDLER_PROPERTIES_SCHEMA: u32 = 87;
+
+/// RFC 0009 — `properties_set_override`. Args:
+/// [`crate::ipc::StoragePropertiesSetOverrideArgs`]. Declares (or with
+/// `null` forgets) a key's type in `app.toml`.
+pub const HANDLER_PROPERTIES_SET_OVERRIDE: u32 = 88;
+
+/// RFC 0009 — `properties_get`. Args: shared `{ path }`. Returns
+/// [`crate::ipc::StoragePropertiesGetResult`]: the note's frontmatter
+/// as typed rows, read from disk.
+pub const HANDLER_PROPERTIES_GET: u32 = 89;
+
+/// RFC 0009 — `properties_set`. Args:
+/// [`crate::ipc::StoragePropertiesSetArgs`]. Sets or removes one typed
+/// frontmatter key by re-serialising the YAML mapping (comments in the
+/// block are not preserved), written through `write_file`.
+pub const HANDLER_PROPERTIES_SET: u32 = 90;
+
+/// RFC 0009 — `properties_list`. Args:
+/// [`crate::ipc::StoragePropertiesListArgs`]. Returns
+/// [`crate::ipc::StoragePropertiesListResult`]: a paginated table of
+/// every indexed note's properties with a stable column set.
+pub const HANDLER_PROPERTIES_LIST: u32 = 91;
+
 /// BL-129 thin slice — `entity_decay_relations`. Args:
 /// [`crate::ipc::EntityDecayRelationsArgs`]. Returns
 /// [`crate::ipc::EntityDecayRelationsResult`]. Walks `entities/*.md`,
@@ -566,6 +593,11 @@ pub const IPC_HANDLERS: &[(&str, u32)] = &[
     ("note_random", HANDLER_NOTE_RANDOM),
     ("note_merge", HANDLER_NOTE_MERGE),
     ("note_create_from_title", HANDLER_NOTE_CREATE_FROM_TITLE),
+    ("properties_schema", HANDLER_PROPERTIES_SCHEMA),
+    ("properties_set_override", HANDLER_PROPERTIES_SET_OVERRIDE),
+    ("properties_get", HANDLER_PROPERTIES_GET),
+    ("properties_set", HANDLER_PROPERTIES_SET),
+    ("properties_list", HANDLER_PROPERTIES_LIST),
     ("vector_stored_signature", HANDLER_VECTOR_STORED_SIGNATURE),
 ];
 
@@ -959,6 +991,13 @@ impl CorePlugin for StorageCorePlugin {
             HANDLER_NOTE_CREATE_FROM_TITLE => {
                 crate::handlers::notes::create_from_title(engine, args)
             }
+            HANDLER_PROPERTIES_SCHEMA => crate::handlers::properties::schema(engine, args),
+            HANDLER_PROPERTIES_SET_OVERRIDE => {
+                crate::handlers::properties::set_override(engine, args)
+            }
+            HANDLER_PROPERTIES_GET => crate::handlers::properties::get(engine, args),
+            HANDLER_PROPERTIES_SET => crate::handlers::properties::set(engine, args),
+            HANDLER_PROPERTIES_LIST => crate::handlers::properties::list(engine, args),
             _ => Err(exec_err(format!("unknown handler id {handler_id}"))),
         }
     }

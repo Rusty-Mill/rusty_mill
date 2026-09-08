@@ -1413,6 +1413,31 @@ unrestricted = "creates a titled note via write_file, never overwrites — downs
 
 [[handler]]
 plugin = "com.nexus.storage"
+command = "properties_schema"
+unrestricted = "read-only key → type map from the index + app.toml overrides (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
+command = "properties_set_override"
+unrestricted = "writes [properties].type_overrides in .forge/app.toml — same class as settings_write (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
+command = "properties_get"
+unrestricted = "read-only typed frontmatter of one note — same class as read_frontmatter (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
+command = "properties_set"
+unrestricted = "typed frontmatter edit via write_file — downstream fs.write gated, same class as write_frontmatter (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
+command = "properties_list"
+unrestricted = "read-only paginated properties table over the index (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
 command = "vector_stored_signature"
 unrestricted = "read-only lookup of a file's already-stored embedding content hash (C19 #372)"
 
