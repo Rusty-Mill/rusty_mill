@@ -43,6 +43,7 @@ mod search;
 mod search_scope;
 mod tasks;
 mod trash;
+pub mod unique_note;
 pub mod vectorstore;
 mod watcher;
 

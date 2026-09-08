@@ -50,7 +50,9 @@ use nexus_storage::ipc::{
     StorageEditResult, StorageFileExistsResult, StorageGraphNeighborsArgs, StorageHybridMatch,
     StorageHybridSearchArgs, StorageHybridSearchResult, StorageImportConflictStrategy,
     StorageImportForgeArgs, StorageListDirArgs, StorageListDirEntry, StorageListDirResult,
-    StorageNoteAppendArgs, StorageNoteAppendResult, StorageOk, StoragePathArgs,
+    StorageNoteAppendArgs, StorageNoteAppendResult, StorageNoteCreateUniqueArgs,
+    StorageNoteCreateUniqueResult, StorageNoteRandomArgs, StorageNoteRandomResult, StorageOk,
+    StoragePathArgs,
     StorageQuerySymbolArgs, StorageQuerySymbolResult, StorageQueryTagsArgs, StorageReadFileArgs,
     StorageReadFileResult, StorageReadFrontmatterArgs, StorageReadLinesArgs,
     StorageReadLinesResult, StorageRelpathArgs, StorageRenameEntryArgs, StorageRenameEntryResult,
@@ -261,6 +263,13 @@ fn emit_all_schemas_impl() {
 
     // ── com.nexus.storage::note_append (BL-043) ──────────────────────────
     write_schema::<StorageNoteAppendArgs>("com_nexus_storage__note_append", "args");
+    write_schema::<StorageNoteCreateUniqueArgs>("com_nexus_storage__note_create_unique", "args");
+    write_schema::<StorageNoteCreateUniqueResult>(
+        "com_nexus_storage__note_create_unique",
+        "result",
+    );
+    write_schema::<StorageNoteRandomArgs>("com_nexus_storage__note_random", "args");
+    write_schema::<StorageNoteRandomResult>("com_nexus_storage__note_random", "result");
     write_schema::<StorageNoteAppendResult>("com_nexus_storage__note_append", "result");
 
     // ── com.nexus.storage::list_dir ──────────────────────────────────────

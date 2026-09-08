@@ -40,6 +40,7 @@ libc = { workspace = true }
 fs4 = "1"
 petgraph = { workspace = true }
 chrono = { workspace = true }
+rand = { workspace = true }
 # BL-083: forge-to-forge import hashes.
 sha2 = { workspace = true }
 # BL-114: tree-sitter code-symbol index. One runtime crate + one

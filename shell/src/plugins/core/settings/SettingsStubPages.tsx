@@ -57,6 +57,12 @@ export const STUB_CORE_PLUGINS: ReadonlyArray<StubCorePluginEntry> = [
     render: (api) => <StubDailyNotesPage api={api} />,
   },
   {
+    id: 'cp-stub:unique-note',
+    label: 'Unique note',
+    category: 'files',
+    render: (api) => <StubUniqueNotePage api={api} />,
+  },
+  {
     id: 'cp-stub:file-recovery',
     label: 'File recovery',
     category: 'files',
@@ -280,6 +286,49 @@ export function StubDailyNotesPage(_: { api?: PluginAPI }) {
             defaultValue=""
             placeholder="Example: folder/note"
             label="Daily note template"
+          />
+        }
+      />
+    </div>
+  )
+}
+
+export function StubUniqueNotePage(_: { api?: PluginAPI }) {
+  // RFC 0009 — read by shell/src/plugins/nexus/uniqueNote via
+  // api.configuration; blanks fall back to the storage-engine defaults.
+  return (
+    <div className="settings-section">
+      <StubRow
+        title="Id format"
+        description="chrono strftime template for the timestamp id that prefixes each unique note."
+        control={
+          <WiredText
+            settingKey="nexus.settings.uniqueNote.idFormat"
+            defaultValue="%Y%m%d%H%M%S"
+            label="Unique note id format"
+          />
+        }
+      />
+      <StubRow
+        title="Separator"
+        description="Text placed between the id and the title."
+        control={
+          <WiredText
+            settingKey="nexus.settings.uniqueNote.separator"
+            defaultValue=" "
+            label="Unique note separator"
+          />
+        }
+      />
+      <StubRow
+        title="New file location"
+        description="New unique notes will be placed here."
+        control={
+          <WiredText
+            settingKey="nexus.settings.uniqueNote.fileLocation"
+            defaultValue=""
+            placeholder="Example: zettel"
+            label="Unique note location"
           />
         }
       />

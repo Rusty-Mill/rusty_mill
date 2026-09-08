@@ -455,6 +455,20 @@ export const DEFAULT_OFF_PLUGINS: PluginEntry[] = [
     load: () => import('./nexus/dailyNotes').then(m => m.dailyNotesPlugin),
   },
   {
+    id: 'nexus.uniqueNote', name: 'Unique Note',
+    version: '0.1.0', core: false, activationEvents: ['onStartup'],
+    dependsOn: ['com.nexus.storage'],
+    description: 'Zettelkasten-style notes named by a timestamp id plus title (RFC 0009).',
+    load: () => import('./nexus/uniqueNote').then(m => m.uniqueNotePlugin),
+  },
+  {
+    id: 'nexus.randomNote', name: 'Random Note',
+    version: '0.1.0', core: false, activationEvents: ['onStartup'],
+    dependsOn: ['com.nexus.storage', 'nexus.editor'],
+    description: 'Open a uniformly random note from the forge, skipping the active one (RFC 0009).',
+    load: () => import('./nexus/randomNote').then(m => m.randomNotePlugin),
+  },
+  {
     id: 'nexus.notionImport', name: 'Notion Import',
     version: '0.2.0', core: false, activationEvents: ['onStartup'],
     legacyPluginIds: ['nexus.notion'],

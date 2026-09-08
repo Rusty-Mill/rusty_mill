@@ -2501,3 +2501,83 @@ mod read_frontmatter_tests {
         assert!(out.status.is_none());
     }
 }
+
+// ── RFC 0009 — unique note / random note (ported from nexus_forge) ──────────
+
+/// Args for `com.nexus.storage::note_create_unique` (handler `83`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteCreateUniqueArgs {
+    /// Human title; sanitized into the filename suffix. May be empty.
+    pub title: String,
+    /// chrono `strftime` template for the id prefix. Default `%Y%m%d%H%M%S`.
+    #[serde(default)]
+    pub id_format: Option<String>,
+    /// Inserted between id and title. Default a single space.
+    #[serde(default)]
+    pub separator: Option<String>,
+    /// Forge-relative folder for the new note. Default: forge root.
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+/// Reply for `com.nexus.storage::note_create_unique`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteCreateUniqueResult {
+    /// Forge-relative path of the note that was created.
+    pub path: String,
+}
+
+/// Args for `com.nexus.storage::note_random` (handler `84`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteRandomArgs {
+    /// Forge-relative path to leave out of the draw (the caller's active note).
+    #[serde(default)]
+    pub exclude: Option<String>,
+    /// Restrict the draw to indexed markdown files under this path prefix.
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+/// Reply for `com.nexus.storage::note_random`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteRandomResult {
+    /// Forge-relative path of the chosen note, or `null` when the forge
+    /// has no eligible markdown note.
+    pub path: Option<String>,
+}
