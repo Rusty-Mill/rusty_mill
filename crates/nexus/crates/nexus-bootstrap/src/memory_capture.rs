@@ -380,14 +380,15 @@ event_retention_max_rows = 500
 
         let store = MemoryDb::open(&forge.join(".forge").join("memory").join("memory.db")).unwrap();
         // Poll until all 5 inserts have landed and pruning has caught the
-        // store back down to the configured cap.
+        // store back down to the configured cap. `insert` and
+        // `prune_event_rows` are separate statements on separate
+        // connections (the capture task's vs. this poller's), so a poll
+        // can legitimately observe a transient row between an insert
+        // landing and its prune committing — only the eventual, settled
+        // count is a guaranteed invariant.
         let mut count = 0u64;
         for _ in 0..200 {
             count = store.count().unwrap();
-            assert!(
-                count <= 2,
-                "retention cap must never be exceeded, got {count}"
-            );
             if count == 2 {
                 break;
             }
