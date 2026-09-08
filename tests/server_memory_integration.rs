@@ -11,12 +11,14 @@ use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::generic::relation::open_or_create_relation_production_stack;
 use rusty_multimodal_db::server::client::{
     ClientError, GuardedReplace, QueryResult, SchemaDrivenClient,
 };
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::protocol::{CompareOp, ErrorCode, ScanValue};
+use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -1169,5 +1171,169 @@ fn count_edges_is_one_round_trip_and_tracks_links_and_deletes() {
         client.count_edges("mentions").unwrap(),
         2,
         "both mentions of 0xada gone"
+    );
+}
+
+/// `REL-FR-005` (ADR-0058): the three-table server the binary runs —
+/// `relation` open-or-created beside the two-table helper's stores.
+fn start_three_table_server_at(dir: std::path::PathBuf) -> SocketAddr {
+    std::fs::create_dir_all(&dir).unwrap();
+    let memories = dir.join("memories.mmap");
+    let entities = dir.join("entities.mmap");
+    let memory_stack = if memories.exists() {
+        open_memory_production_stack_portable(&memories).unwrap()
+    } else {
+        create_memory_production_stack(sample_memories(), &[], &memories).unwrap()
+    };
+    let entity_stack = if entities.exists() {
+        open_entity_production_stack_portable(&entities).unwrap()
+    } else {
+        create_entity_production_stack(sample_entities(), &[], &[], &entities).unwrap()
+    };
+    let relation_stack =
+        open_or_create_relation_production_stack(&dir.join("relations.mmap")).unwrap();
+    let memory: Arc<dyn ConnectionStore> = Arc::new(MemoryConnectionStore::new(
+        GenericProductionStore::new(memory_stack),
+    ));
+    let entity: Arc<dyn ConnectionStore> = Arc::new(EntityConnectionStore::new(
+        GenericProductionStore::new(entity_stack),
+    ));
+    let relation: Arc<dyn ConnectionStore> = Arc::new(RelationConnectionStore::new(
+        GenericProductionStore::new(relation_stack),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        serve_tables(
+            listener,
+            vec![
+                ("memory".to_string(), memory),
+                ("entity".to_string(), entity),
+                ("relation".to_string(), relation),
+            ],
+            0,
+            ServeOptions::default(),
+        )
+    });
+    addr
+}
+
+/// `REL-FR-004`/`005` (ADR-0058), over a real socket: the `relation` table
+/// as the hub's `entity_relations` — insert two directed edges, out-edges
+/// by `FilterEq subject`, in-edges by `Query object`, one label by
+/// `Query`, `Page` by `updated_at_unix_ms`, a last-writer-wins
+/// `ReplaceIf`, a count by `Aggregate`, a delete; the empty endpoint
+/// refused; everything surviving a restart.
+#[test]
+fn the_relation_table_serves_directed_open_label_edges_over_the_wire() {
+    let dir = unique_dir("relation_table");
+    let addr = start_three_table_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let (names, primary) = client.list_tables().unwrap();
+    assert_eq!(names, vec!["memory", "entity", "relation"]);
+    assert_eq!(primary, "memory");
+    client.use_table("relation").unwrap();
+    assert_eq!(client.schema().fields.len(), 7);
+    let edge = |subject: &str, label: &str, object: &str, updated_at: i64| {
+        vec![
+            ("subject", ScanValue::Str(subject.into())),
+            ("relation", ScanValue::Str(label.into())),
+            ("object", ScanValue::Str(object.into())),
+            ("created_at_unix_ms", ScanValue::I64(1_000)),
+            ("updated_at_unix_ms", ScanValue::I64(updated_at)),
+            ("node_id", ScanValue::Str("laptop".into())),
+            ("deleted_at_unix_ms", ScanValue::I64(0)),
+        ]
+    };
+    let id = Uuid::from_u128;
+    client
+        .insert(
+            id(1),
+            &edge("aaaaaaaaaaaa", "works_with", "bbbbbbbbbbbb", 1_000),
+        )
+        .unwrap();
+    client
+        .insert(
+            id(2),
+            &edge("aaaaaaaaaaaa", "located_in", "cccccccccccc", 2_000),
+        )
+        .unwrap();
+    client
+        .insert(
+            id(3),
+            &edge("bbbbbbbbbbbb", "works_with", "aaaaaaaaaaaa", 3_000),
+        )
+        .unwrap();
+    match client.insert(id(4), &edge("", "works_with", "aaaaaaaaaaaa", 4_000)) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed for an empty subject, got {other:?}"),
+    }
+
+    // Out-edges of aaa through the index; in-edges of aaa through Query.
+    let mut out = client
+        .filter_eq("subject", ScanValue::Str("aaaaaaaaaaaa".into()))
+        .unwrap();
+    out.sort();
+    assert_eq!(out, vec![id(1), id(2)]);
+    let inbound = rows(
+        client
+            .query("SELECT relation FROM relation WHERE object = 'aaaaaaaaaaaa'")
+            .unwrap(),
+    );
+    assert_eq!(inbound.len(), 1);
+    assert_eq!(inbound[0].0, id(3));
+    let by_label = rows(
+        client
+            .query("SELECT subject FROM relation WHERE relation = 'works_with'")
+            .unwrap(),
+    );
+    assert_eq!(by_label.len(), 2);
+    // The pull: pages by updated_at.
+    let page = client.page("updated_at_unix_ms", None, 2).unwrap();
+    assert_eq!(
+        page.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![id(1), id(2)]
+    );
+    // The merge: last-writer-wins on updated_at.
+    assert_eq!(
+        client
+            .replace_if(
+                id(1),
+                &edge("aaaaaaaaaaaa", "works_with", "bbbbbbbbbbbb", 9_000),
+                ("updated_at_unix_ms", CompareOp::Lt, ScanValue::I64(9_000)),
+            )
+            .unwrap(),
+        GuardedReplace::Replaced
+    );
+    assert_eq!(
+        client
+            .replace_if(
+                id(1),
+                &edge("aaaaaaaaaaaa", "works_with", "bbbbbbbbbbbb", 500),
+                ("updated_at_unix_ms", CompareOp::Lt, ScanValue::I64(500)),
+            )
+            .unwrap(),
+        GuardedReplace::Refused
+    );
+    // The count.
+    let groups = match client.query("SELECT COUNT(*) FROM relation").unwrap() {
+        QueryResult::Groups(groups) => groups,
+        other => panic!("expected Groups, got {other:?}"),
+    };
+    assert_eq!(groups[0][0].1, ScanValue::I64(3));
+    assert!(client.delete(id(2)).unwrap());
+    drop(client);
+
+    let addr = start_three_table_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    client.use_table("relation").unwrap();
+    let one = client.get(id(1)).unwrap().unwrap();
+    assert_eq!(one[4].1, ScanValue::I64(9_000), "the winner survived");
+    assert!(client.get(id(2)).unwrap().is_none());
+    assert_eq!(
+        client
+            .filter_eq("subject", ScanValue::Str("aaaaaaaaaaaa".into()))
+            .unwrap(),
+        vec![id(1)]
     );
 }

@@ -41,7 +41,8 @@
 //! scratch directory on every start — a demonstration, nothing survives
 //! a restart. Set `SERVER_DATA_DIR=<dir>` and it becomes a durable
 //! backend (`DDR-FR-002`): the directory is created if missing;
-//! `<dir>/memories.mmap` and `<dir>/entities.mmap` are each **opened
+//! `<dir>/memories.mmap`, `<dir>/entities.mmap`, and `<dir>/relations.mmap`
+//! (`ADR-0058`, the third table) are each **opened
 //! from their files alone** when present and created **empty** when
 //! not (`open_or_create_*_production_stack`) — no sample data, and no
 //! caller-supplied record list that could overrule what earlier runs
@@ -59,10 +60,15 @@ use rusty_multimodal_db::generic::memory::{
     MemoryProductionStack,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::generic::relation::{
+    create_relation_production_stack, open_or_create_relation_production_stack, Relation,
+    RelationProductionStack,
+};
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
+use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{
     serve_tables, ConnectionStore, RateLimit, ServeOptions, TlsConfig, TokenClass,
 };
@@ -121,6 +127,25 @@ fn sample_entities() -> Vec<Entity> {
 }
 
 /// Which sample memory mentions which sample entity — `(memory, entity)`.
+/// `REL-FR-005` (ADR-0058): the third table — two directed edges between
+/// the sample entities, by the consumer's own id strings.
+fn sample_relations() -> Vec<Relation> {
+    let relation = |n: u128, subject: &str, label: &str, object: &str| Relation {
+        id: Uuid::from_u128(n),
+        subject: subject.into(),
+        relation: label.into(),
+        object: object.into(),
+        created_at_unix_ms: 1_000 * n as i64,
+        updated_at_unix_ms: 1_000 * n as i64,
+        node_id: String::new(),
+        deleted_at_unix_ms: 0,
+    };
+    vec![
+        relation(1, "ada", "authored", "adr-0046"),
+        relation(2, "adr-0047", "follows", "adr-0046"),
+    ]
+}
+
 fn sample_mentions() -> Vec<(Uuid, Uuid)> {
     vec![
         (Uuid::from_u128(2), Uuid::from_u128(0x46)),
@@ -142,7 +167,11 @@ fn main() {
             std::env::temp_dir().join(format!("memory_server_{}", std::process::id())),
         ),
     };
-    let (store, entity_store) = open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
+    let (store, entity_store, relation_store) =
+        open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
+    let relation_connection_store: Arc<dyn ConnectionStore> = Arc::new(
+        RelationConnectionStore::new(GenericProductionStore::new(relation_store)),
+    );
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new(EntityConnectionStore::new(
         GenericProductionStore::new(entity_store),
     ));
@@ -229,22 +258,23 @@ fn main() {
         if access_logged { "configured" } else { "NOT configured" },
     );
 
-    // `TBL-FR-001` (ADR-0050): two tables on one listener, `memory`
-    // primary — `Use entity` reaches the other; `JOIN entity e ON
-    // mentions` crosses between them.
+    // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary
+    // — `Use entity` reaches the second; `JOIN entity e ON mentions`
+    // crosses between them; `Use relation` (ADR-0058) reaches the third.
     let memory_connection_store: Arc<dyn ConnectionStore> = connection_store;
     serve_tables(
         listener,
         vec![
             ("memory".to_string(), memory_connection_store),
             ("entity".to_string(), entity_connection_store),
+            ("relation".to_string(), relation_connection_store),
         ],
         0,
         options,
     );
 }
 
-/// Where this process keeps its two tables (`DDR-FR-002`).
+/// Where this process keeps its three tables (`DDR-FR-002`).
 enum DataLocation {
     /// `SERVER_DATA_DIR`: opened from the files when present, created
     /// empty when not; survives restarts.
@@ -269,7 +299,14 @@ impl DataLocation {
 /// are seeded. Every failure names the directory.
 fn open_stores(
     data: &DataLocation,
-) -> Result<(MemoryProductionStack, EntityProductionStack), String> {
+) -> Result<
+    (
+        MemoryProductionStack,
+        EntityProductionStack,
+        RelationProductionStack,
+    ),
+    String,
+> {
     let (dir, durable) = match data {
         DataLocation::Durable(dir) => (dir, true),
         DataLocation::Scratch(dir) => (dir, false),
@@ -278,18 +315,23 @@ fn open_stores(
         .map_err(|e| format!("creating the data directory {}: {e}", dir.display()))?;
     let memories = dir.join("memories.mmap");
     let entities = dir.join("entities.mmap");
+    let relations = dir.join("relations.mmap");
     if durable {
         let store = open_or_create_memory_production_stack(&memories)
             .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", memories.display()))?;
         let entity_store = open_or_create_entity_production_stack(&entities)
             .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?;
-        return Ok((store, entity_store));
+        let relation_store = open_or_create_relation_production_stack(&relations)
+            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", relations.display()))?;
+        return Ok((store, entity_store, relation_store));
     }
     let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &memories)
         .map_err(|e| format!("creating the sample MemoryProductionStack: {e}"))?;
     let entity_store = create_entity_production_stack(sample_entities(), &[], &[], &entities)
         .map_err(|e| format!("creating the sample EntityProductionStack: {e}"))?;
-    Ok((store, entity_store))
+    let relation_store = create_relation_production_stack(sample_relations(), &relations)
+        .map_err(|e| format!("creating the sample RelationProductionStack: {e}"))?;
+    Ok((store, entity_store, relation_store))
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see
