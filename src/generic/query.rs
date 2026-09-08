@@ -244,3 +244,18 @@ where
 {
     fn children(&self, parent_id: P::Id) -> Vec<C::Id>;
 }
+
+/// One ordered keyset page over an [`OrderedField`] — `ORD-FR-002`
+/// (ADR-0059): the ids whose `(key, id)` is strictly greater than
+/// `after`'s, ascending, the first `limit`. The same order
+/// `crate::server::page_ids` writes for the wire, answered from a sorted
+/// index instead of a scan: cost is the page, not the table.
+/// [`super::store::Ordered`] implements it; every layer above forwards.
+///
+/// [`OrderedField`]: super::traits::OrderedField
+pub trait PageBy<R, Marker>
+where
+    R: super::traits::OrderedField<Marker>,
+{
+    fn page_by(&self, after: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id>;
+}

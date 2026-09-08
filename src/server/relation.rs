@@ -15,8 +15,8 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::{
-    page_key, predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, ReplaceIfOutcome,
-    ReplaceOutcome,
+    page_by_scan, page_key, predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome,
+    PageRow, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
@@ -244,6 +244,32 @@ impl ConnectionStore for RelationConnectionStore {
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect()
+    }
+
+    /// `ORD-FR-005` (ADR-0059): a page ordered by `updated_at_unix_ms`
+    /// is a range walk of the stack's sorted index; any other orderable
+    /// field takes the scan path. A cursor here is `I64` or absent
+    /// (`validate_page`).
+    fn page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if order_by != FIELD_UPDATED_AT {
+            return Ok(page_by_scan(self, order_by, after, limit));
+        }
+        let cursor = match after {
+            None => None,
+            Some((ScanValue::I64(stamp), id)) => Some((stamp, id)),
+            Some(_) => return Err(ErrorCode::Malformed),
+        };
+        Ok(self
+            .store
+            .page_by::<Relation, UpdatedAtField>(cursor, limit)
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect())
     }
 
     /// `PAG-FR-002` (ADR-0055): the sort key of every record read

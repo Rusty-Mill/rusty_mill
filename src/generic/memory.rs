@@ -63,8 +63,8 @@
 //! modeled yet; it would be a second, local label on this same layer.
 
 use super::mmap_store::GenericMmapStore;
-use super::store::MultiSymmetric;
-use super::traits::{IndexedField, Record, ScannableField, SchemaTag};
+use super::store::{MultiSymmetric, Ordered};
+use super::traits::{IndexedField, OrderedField, Record, ScannableField, SchemaTag};
 use crate::durability::DurabilityError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -173,8 +173,25 @@ pub const MEMORY_FOREIGN_TABLE: &str = "entity";
 /// over the core (the change `ADR-0048` said would happen once, in the
 /// round that gave this table its second table): one relation,
 /// `mentions`, foreign to `entity`.
-pub type MemoryProductionStack =
-    MultiSymmetric<GenericMmapStore<Memory, CategoryField, AccessCountField>, Memory>;
+/// `ORD-FR-004` (ADR-0059): the hub's sync walk orders by
+/// `updated_at_unix_ms`; this is the field [`MemoryProductionStack`]
+/// keeps a sorted index over.
+pub struct UpdatedAtOrder;
+impl OrderedField<UpdatedAtOrder> for Memory {
+    type Key = i64;
+    fn order_key(&self) -> i64 {
+        self.updated_at_unix_ms
+    }
+}
+
+/// The edge layer over the mmap core, under a sorted index on
+/// `updated_at_unix_ms` (`ORD-FR-004`, ADR-0059) — memory only, rebuilt
+/// from the records at every open; the files are `ADR-0056`'s.
+pub type MemoryProductionStack = Ordered<
+    MultiSymmetric<GenericMmapStore<Memory, CategoryField, AccessCountField>, Memory>,
+    Memory,
+    UpdatedAtOrder,
+>;
 
 fn labeled(mentions: &[(Uuid, Uuid)]) -> Vec<(String, Vec<(Uuid, Uuid)>)> {
     vec![(MEMORY_RELATION_LABELS[0].to_string(), mentions.to_vec())]
@@ -189,8 +206,10 @@ pub fn create_memory_production_stack(
     path: &Path,
 ) -> Result<MemoryProductionStack, DurabilityError> {
     let core = GenericMmapStore::<Memory, CategoryField, AccessCountField>::create(memories, path)?;
-    Ok(MultiSymmetric::create(core, &labeled(mentions), path)?
-        .with_foreign_labels(&MEMORY_RELATION_LABELS))
+    Ok(Ordered::new(
+        MultiSymmetric::create(core, &labeled(mentions), path)?
+            .with_foreign_labels(&MEMORY_RELATION_LABELS),
+    ))
 }
 
 /// Reopen an existing store at `path` from a caller-supplied record and
@@ -201,8 +220,10 @@ pub fn open_memory_production_stack(
     path: &Path,
 ) -> Result<MemoryProductionStack, DurabilityError> {
     let core = GenericMmapStore::<Memory, CategoryField, AccessCountField>::open(memories, path)?;
-    Ok(MultiSymmetric::open(core, &labeled(mentions), path)?
-        .with_foreign_labels(&MEMORY_RELATION_LABELS))
+    Ok(Ordered::new(
+        MultiSymmetric::open(core, &labeled(mentions), path)?
+            .with_foreign_labels(&MEMORY_RELATION_LABELS),
+    ))
 }
 
 /// Reopen from the files alone — records, insert log, edge blob, edge
@@ -211,10 +232,10 @@ pub fn open_memory_production_stack_portable(
     path: &Path,
 ) -> Result<MemoryProductionStack, DurabilityError> {
     let core = GenericMmapStore::<Memory, CategoryField, AccessCountField>::open_portable(path)?;
-    Ok(
+    Ok(Ordered::new(
         MultiSymmetric::open_portable(core, path, &MEMORY_RELATION_LABELS)?
             .with_foreign_labels(&MEMORY_RELATION_LABELS),
-    )
+    ))
 }
 
 /// Open the stack at `path` if its slot file exists, else create an
@@ -242,7 +263,9 @@ pub fn open_or_create_memory_production_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::query::{AllIds, FilterEq, GetById, Insert, ScanField, UpdateField};
+    use crate::generic::query::{
+        AllIds, FilterEq, GetById, Insert, MultiLink, ScanField, UpdateField,
+    };
     use crate::test_support::fresh_temp_dir;
 
     pub(crate) fn memory(n: u128, category: &str, sensitive: bool) -> Memory {
@@ -382,7 +405,7 @@ mod tests {
             let mut store =
                 create_memory_production_stack(sample(), &[(Uuid::from_u128(1), ada)], &path)
                     .unwrap();
-            assert!(store.is_foreign("mentions"));
+            assert!(store.inner().is_foreign("mentions"));
             assert_eq!(
                 MultiNeighbors::<Memory>::relation_kinds(&store),
                 vec!["mentions".to_string()]
@@ -407,7 +430,7 @@ mod tests {
             );
         }
         let reopened = open_memory_production_stack_portable(&path).unwrap();
-        assert!(reopened.is_foreign("mentions"));
+        assert!(reopened.inner().is_foreign("mentions"));
         assert_eq!(
             MultiNeighbors::<Memory>::neighbors_by_relation(
                 &reopened,
@@ -604,5 +627,62 @@ mod tests {
         drop(store);
         let reopened = open_memory_production_stack_portable(&path).unwrap();
         assert_eq!(reopened.edge_count("mentions"), Some(1));
+    }
+
+    /// `ORD-FR-002`–`004` (ADR-0059): the sorted index answers pages in
+    /// `(updated_at, id)` order from a strict cursor; an insert, a
+    /// replace, an `access_count` update (not the ordered field), and a
+    /// delete keep it exact; a portable reopen rebuilds it from the
+    /// records.
+    #[test]
+    fn page_by_updated_at_walks_the_sorted_index_and_tracks_every_write() {
+        use crate::generic::query::{Delete, PageBy, Replace};
+        let dir = fresh_temp_dir("memory_page_by").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128;
+        // updated_at is 1_000 * n, so ids 1..=5 are already in order;
+        // give 3 the same stamp as 2 to exercise the id tie-break.
+        let mut third = memory(3, "general", false);
+        third.updated_at_unix_ms = 2_000;
+        let seeded = vec![
+            memory(5, "general", false),
+            memory(2, "general", false),
+            third,
+            memory(1, "general", false),
+            memory(4, "general", false),
+        ];
+        let mut store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        assert_eq!(store.indexed_len(), 5);
+        assert_eq!(
+            store.page_by(None, 10),
+            vec![id(1), id(2), id(3), id(4), id(5)]
+        );
+        assert_eq!(store.page_by(None, 2), vec![id(1), id(2)]);
+        assert_eq!(store.page_by(Some((2_000, id(2))), 2), vec![id(3), id(4)]);
+        assert_eq!(store.page_by(Some((5_000, id(5))), 2), Vec::<Uuid>::new());
+
+        // Insert lands by its stamp; replace moves; a non-ordered
+        // update leaves the order alone; delete removes.
+        let mut sixth = memory(6, "general", false);
+        sixth.updated_at_unix_ms = 500;
+        store.insert(sixth).unwrap();
+        assert_eq!(store.page_by(None, 1), vec![id(6)]);
+        let mut moved = memory(1, "general", false);
+        moved.updated_at_unix_ms = 9_000;
+        store.replace(moved).unwrap();
+        assert_eq!(store.page_by(Some((5_000, id(5))), 2), vec![id(1)]);
+        store.update(id(6), 7).unwrap();
+        assert_eq!(store.page_by(None, 1), vec![id(6)]);
+        store.delete(id(6)).unwrap();
+        assert_eq!(store.page_by(None, 1), vec![id(2)]);
+        assert_eq!(store.indexed_len(), 5);
+        drop(store);
+
+        let reopened = open_memory_production_stack_portable(&path).unwrap();
+        assert_eq!(reopened.indexed_len(), 5);
+        assert_eq!(
+            reopened.page_by(None, 10),
+            vec![id(2), id(3), id(4), id(5), id(1)]
+        );
     }
 }

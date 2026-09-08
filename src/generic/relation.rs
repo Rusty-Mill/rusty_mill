@@ -32,7 +32,8 @@
 //!   directly, `Reminder`'s shape.
 
 use super::mmap_store::GenericMmapStore;
-use super::traits::{IndexedField, Record, ScannableField, SchemaTag};
+use super::store::Ordered;
+use super::traits::{IndexedField, OrderedField, Record, ScannableField, SchemaTag};
 use crate::durability::DurabilityError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -97,7 +98,21 @@ impl ScannableField<UpdatedAtField> for Relation {
 
 /// The durable production stack — `REL-FR-003`: no relation layer, just
 /// `GenericMmapStore` directly, `Reminder`'s shape.
-pub type RelationProductionStack = GenericMmapStore<Relation, SubjectField, UpdatedAtField>;
+/// `ORD-FR-004` (ADR-0059): the hub pages `entity_relations` by
+/// `updated_at_unix_ms` too — the same field as the scannable slot, so
+/// the same marker: [`Ordered`] re-keys on an `update` exactly when the
+/// scannable marker *is* the ordered one, and one field gets one marker.
+impl OrderedField<UpdatedAtField> for Relation {
+    type Key = i64;
+    fn order_key(&self) -> i64 {
+        self.updated_at_unix_ms
+    }
+}
+
+/// `Reminder`'s stack shape under a sorted index on `updated_at_unix_ms`
+/// (`ORD-FR-004`, ADR-0059) — memory only; the files are unchanged.
+pub type RelationProductionStack =
+    Ordered<GenericMmapStore<Relation, SubjectField, UpdatedAtField>, Relation, UpdatedAtField>;
 
 /// Build a fresh durable store at `path`.
 ///
@@ -108,7 +123,11 @@ pub fn create_relation_production_stack(
     relations: Vec<Relation>,
     path: &Path,
 ) -> Result<RelationProductionStack, DurabilityError> {
-    GenericMmapStore::<Relation, SubjectField, UpdatedAtField>::create(relations, path)
+    Ok(Ordered::new(GenericMmapStore::<
+        Relation,
+        SubjectField,
+        UpdatedAtField,
+    >::create(relations, path)?))
 }
 
 /// Reopen from the files alone — records and the insert log.
@@ -119,7 +138,11 @@ pub fn create_relation_production_stack(
 pub fn open_relation_production_stack_portable(
     path: &Path,
 ) -> Result<RelationProductionStack, DurabilityError> {
-    GenericMmapStore::<Relation, SubjectField, UpdatedAtField>::open_portable(path)
+    Ok(Ordered::new(GenericMmapStore::<
+        Relation,
+        SubjectField,
+        UpdatedAtField,
+    >::open_portable(path)?))
 }
 
 /// Open the stack at `path` if its slot file exists, else create an
@@ -141,7 +164,7 @@ pub fn open_or_create_relation_production_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::query::{AllIds, FilterEq, GetById, ScanField};
+    use crate::generic::query::{AllIds, Delete, FilterEq, GetById, Insert, ScanField};
     use crate::test_support::fresh_temp_dir;
 
     pub(crate) fn relation(n: u128, subject: &str, label: &str, object: &str) -> Relation {
@@ -198,5 +221,29 @@ mod tests {
         assert_eq!(again.all_ids().len(), 3, "reopened, not recreated");
         let fresh = open_or_create_relation_production_stack(&dir.join("other.mmap")).unwrap();
         assert!(fresh.all_ids().is_empty(), "created empty");
+    }
+
+    /// `ORD-FR-003`/`004` (ADR-0059): `updated_at_unix_ms` is both the
+    /// scannable slot and the ordered field, so an `update` through the
+    /// stack re-keys the index; the order survives the reopen.
+    #[test]
+    fn page_by_updated_at_re_keys_on_update_and_survives_reopen() {
+        use crate::generic::query::{PageBy, UpdateField};
+        let dir = fresh_temp_dir("relation_page_by").unwrap();
+        let path = dir.join("relations.mmap");
+        let id = Uuid::from_u128;
+        let seeded = vec![
+            relation(1, "a", "knows", "b"),
+            relation(2, "a", "knows", "c"),
+            relation(3, "b", "knows", "c"),
+        ];
+        let mut store = create_relation_production_stack(seeded, &path).unwrap();
+        assert_eq!(store.page_by(None, 10), vec![id(1), id(2), id(3)]);
+        store.update(id(1), 9_000).unwrap();
+        assert_eq!(store.page_by(None, 10), vec![id(2), id(3), id(1)]);
+        assert_eq!(store.page_by(Some((3_000, id(3))), 10), vec![id(1)]);
+        drop(store);
+        let reopened = open_relation_production_stack_portable(&path).unwrap();
+        assert_eq!(reopened.page_by(None, 10), vec![id(2), id(3), id(1)]);
     }
 }

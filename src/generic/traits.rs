@@ -143,3 +143,17 @@ pub trait ChildOf<Marker>: Record {
     type ParentId: Copy + Eq + Hash;
     fn parent_id(&self) -> Option<Self::ParentId>;
 }
+
+/// A record with one field an ordered page can walk — `ORD-FR-001`
+/// (ADR-0059). The key is whatever the domain orders by (`i64` for the
+/// consumer's timestamps), `Ord` so a sorted index can hold `(key, id)`
+/// pairs, `Copy` so it is read off the record without a move. Distinct
+/// from [`ScannableField`] on purpose: a scannable field is one the
+/// store keeps a durable, updatable slot for; an ordered field is one
+/// the store keeps a memory-only sorted index over, rebuilt from the
+/// records at open. A field may be both (`Relation`'s
+/// `updated_at_unix_ms`) or either.
+pub trait OrderedField<Marker>: Record {
+    type Key: Ord + Copy;
+    fn order_key(&self) -> Self::Key;
+}

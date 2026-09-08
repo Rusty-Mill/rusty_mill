@@ -71,3 +71,6 @@ optimization before the request exists. **(d) A server-side sequence**
   decision, the order, and the wire are unchanged. The remaining cost is
   the per-record decode; an index is the open question, now with a
   threshold (`RESULTS.md`).
+- 2026-09-08: `ADR-0059` — the index, memory-only over
+  `updated_at_unix_ms` on `Memory` and `Relation`, the override this
+  decision always allowed; ~155 µs per page at any size.

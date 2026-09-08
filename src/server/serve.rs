@@ -287,11 +287,7 @@ pub trait ConnectionStore: Send + Sync {
         after: Option<(ScanValue, RecordId)>,
         limit: usize,
     ) -> Result<Vec<PageRow>, ErrorCode> {
-        let winners = page_ids(self.page_keys(order_by), after, limit);
-        Ok(winners
-            .into_iter()
-            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
-            .collect())
+        Ok(page_by_scan(self, order_by, after, limit))
     }
 
     /// The `(id, sort key)` of every record for a [`Self::page`] ordered
@@ -666,6 +662,24 @@ pub fn page_ids(
     }
     keyed.sort_unstable();
     keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// The trait default of [`ConnectionStore::page`] as a free function, so
+/// an adapter that answers one field from a sorted index (`ORD-FR-005`,
+/// ADR-0059) can fall back to the scan for every other field:
+/// [`ConnectionStore::page_keys`] for every record, [`page_ids`] to pick
+/// the page, [`ConnectionStore::get`] for just those rows.
+pub fn page_by_scan<S: ConnectionStore + ?Sized>(
+    store: &S,
+    order_by: FieldRef,
+    after: Option<(ScanValue, RecordId)>,
+    limit: usize,
+) -> Vec<PageRow> {
+    let winners = page_ids(store.page_keys(order_by), after, limit);
+    winners
+        .into_iter()
+        .filter_map(|id| store.get(id).map(|fields| (id, fields)))
+        .collect()
 }
 
 /// `PAG-FR-002` (ADR-0055): one ordered keyset page over already
