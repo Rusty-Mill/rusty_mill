@@ -958,7 +958,7 @@ mod tests {
         // as a fatal protocol error and disconnects.
         let result = reply_result_for(
             "workspace/configuration",
-            serde_json::json!({
+            &serde_json::json!({
                 "items": [
                     { "scopeUri": "file:///a", "section": "rust-analyzer.cargo" },
                     { "scopeUri": "file:///a", "section": "rust-analyzer.checkOnSave" },
@@ -973,7 +973,7 @@ mod tests {
     fn workspace_configuration_handles_empty_items_array() {
         let result = reply_result_for(
             "workspace/configuration",
-            serde_json::json!({ "items": [] }),
+            &serde_json::json!({ "items": [] }),
         );
         assert_eq!(result, serde_json::json!([]));
     }
@@ -982,13 +982,13 @@ mod tests {
     fn workspace_configuration_handles_missing_items_field() {
         // Defensive — a malformed request gets back a zero-length
         // array rather than a server-killing protocol error.
-        let result = reply_result_for("workspace/configuration", serde_json::json!({}));
+        let result = reply_result_for("workspace/configuration", &serde_json::json!({}));
         assert_eq!(result, serde_json::json!([]));
     }
 
     #[test]
     fn workspace_workspace_folders_returns_null() {
-        let result = reply_result_for("workspace/workspaceFolders", serde_json::json!({}));
+        let result = reply_result_for("workspace/workspaceFolders", &serde_json::json!({}));
         assert_eq!(result, serde_json::Value::Null);
     }
 
@@ -996,7 +996,7 @@ mod tests {
     fn show_message_request_returns_null_canceled() {
         let result = reply_result_for(
             "window/showMessageRequest",
-            serde_json::json!({
+            &serde_json::json!({
                 "type": 1,
                 "message": "do you want to enable foo?",
                 "actions": [{ "title": "Yes" }, { "title": "No" }]
@@ -1009,7 +1009,7 @@ mod tests {
     fn show_document_returns_success_false() {
         let result = reply_result_for(
             "window/showDocument",
-            serde_json::json!({ "uri": "file:///x.rs", "external": false }),
+            &serde_json::json!({ "uri": "file:///x.rs", "external": false }),
         );
         assert_eq!(result, serde_json::json!({ "success": false }));
     }
@@ -1018,7 +1018,7 @@ mod tests {
     fn work_done_progress_create_returns_null() {
         let result = reply_result_for(
             "window/workDoneProgress/create",
-            serde_json::json!({ "token": "rustAnalyzer/Indexing" }),
+            &serde_json::json!({ "token": "rustAnalyzer/Indexing" }),
         );
         assert_eq!(result, serde_json::Value::Null);
     }
@@ -1027,7 +1027,7 @@ mod tests {
     fn register_and_unregister_capability_return_null() {
         let result = reply_result_for(
             "client/registerCapability",
-            serde_json::json!({
+            &serde_json::json!({
                 "registrations": [{
                     "id": "rust-analyzer-textDocument-completion",
                     "method": "textDocument/completion",
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(result, serde_json::Value::Null);
         let result = reply_result_for(
             "client/unregisterCapability",
-            serde_json::json!({ "unregisterations": [] }),
+            &serde_json::json!({ "unregisterations": [] }),
         );
         assert_eq!(result, serde_json::Value::Null);
     }
@@ -1046,7 +1046,7 @@ mod tests {
     fn workspace_apply_edit_reports_not_applied() {
         let result = reply_result_for(
             "workspace/applyEdit",
-            serde_json::json!({
+            &serde_json::json!({
                 "edit": { "changes": {} }
             }),
         );
@@ -1062,7 +1062,7 @@ mod tests {
             "workspace/semanticTokens/refresh",
             "workspace/foldingRange/refresh",
         ] {
-            let result = reply_result_for(method, serde_json::json!({}));
+            let result = reply_result_for(method, &serde_json::json!({}));
             assert_eq!(
                 result,
                 serde_json::Value::Null,

@@ -139,7 +139,11 @@ fn fsync_parent(target: &Path) -> io::Result<()> {
     dir.sync_all()
 }
 
+// Must keep the same fallible signature as the `#[cfg(unix)]` sibling
+// above — the call site is shared across platforms — even though this
+// stub itself never fails.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn fsync_parent(_target: &Path) -> io::Result<()> {
     Ok(())
 }
