@@ -155,7 +155,7 @@ hits for the feature in `crates/`, `shell/src/`, and `packages/`.
 | 2 | Random note | `nexus_forge/crates/forge-plugin-random-note` (68 LOC) | **gap** | Port as a command in `quickSwitcher` or `commandPalette` | XS |
 | 3 | Note composer: merge / split / extract-selection-to-note with backlink | `nexus_forge/crates/forge-plugin-note-composer` (198 LOC) + `AppState::delete_note` | **gap** (only a settings stub label in `SettingsStubPages.tsx:67`) | Port; extract-to-note should go through `nexus-hashline` so agent and human edits share one path | S–M |
 | 4 | Typed properties panel + bulk properties view (schema-typed frontmatter, virtualized table, proptest round-trip) | `nexus_forge/crates/forge-plugin-properties-{panel,view}` (1,122 LOC) + `src/features/` | `shell/src/plugins/nexus/fileProperties/index.tsx` (222 LOC, single file, untyped) | Port the Rust typed schema + tests into `nexus-storage`; rebuild the view as a shell plugin | M |
-| 5 | Buffer write-ahead log with `base_hash` chaining for crash recovery | `nexus_forge/crates/forge-buffer/src/wal.rs`, `docs/AUTOSAVE.md` | `nexus-editor` has no rope and no buffer WAL; `nexus-crdt` snapshots may already cover the crash case | **Assess first.** Port the design only if an unsaved-edits-after-crash test fails today | M |
+| 5 | Buffer write-ahead log with `base_hash` chaining for crash recovery | `nexus_forge/crates/forge-buffer/src/wal.rs`, `docs/AUTOSAVE.md` | `nexus-editor` has no rope and no buffer WAL; `nexus-crdt` snapshots may already cover the crash case | **Assessed 2026-09-08 — the test fails; see [Row 5 outcome](#row-5-outcome-crash-recovery).** Port the design in a follow-up | M |
 | 6 | Obsidian capability / UI reverse-engineering research | `Rustsidian/docs/Obsidian_Capabilities_Analysis.md`, `Obsidian_UI_Analysis.md`, `docs/obsidian_reverse_engineering/` | nothing equivalent in `docs/` | Copy into `docs/archive/research/` — zero code. **Check licensing/attribution before moving from a private to a public repo.** | XS |
 | 7 | CLI subcommand taxonomy | `rusty_nexus/crates/rusty_nexus_cli/src/main.rs` (21 subcommands) | `nexus-cli` covers most; #430 tracks `--format` gaps | Use as a checklist while working #430; port nothing | XS |
 | 8 | Brain-side syntax highlighting (`HighlightSpan` from Rust → CM6 decorations) | `nexus_forge/crates/forge-parser/src/highlights.rs` | `nexus` highlights in TS (`editor/cm/syntaxHighlight.ts`) | Do not port. Record as a design option; it adds an IPC round-trip per keystroke | — |
@@ -169,6 +169,59 @@ Rows 1–4 are the whole code deliverable: roughly 1.7k source lines of
 `nexus_forge`, all landing in existing crates and `shell/src/plugins/nexus/`.
 No new workspace member is needed, which matters because `nexus`'s main
 structural risk is crate count, not missing features.
+
+## Row 5 outcome: crash recovery
+
+`crates/nexus-bootstrap/tests/editor_crash_recovery.rs` (2026-09-08) asks the
+RFC's question through the real IPC path: a child process boots a runtime,
+`open`s a note, `apply_transaction`s an edit, and `abort()`s. The parent then
+reboots on the same forge and `open`s the note again.
+
+| Scenario | Result |
+|---|---|
+| Edit, `save`, crash, reopen | passes — saved content is durable (`atomic_write` fsyncs + renames) |
+| Edit, crash, reopen | **fails** — the reopened note is the pre-edit bytes |
+
+What the assessment established about `nexus` today:
+
+- **No autosave of note content.** The shell's only save is Ctrl+S; the
+  "autosave" in the tree is workspace *layout*. The `File recovery`
+  settings page is a stub with no reader.
+- **Nothing persists in-flight edits.** The editor session is in-memory.
+  BL-072 undo persistence runs only on a graceful `close`, and restores
+  only when the on-disk hash matches, i.e. only after a save. The CRDT
+  checkpoint (`.forge/.editor/crdt/`, every 32 ops) does contain the edits,
+  but its loader rejects it on the same hash mismatch and nothing reads
+  it for recovery.
+- **Maximum loss on a hard crash: everything since the last Ctrl+S.**
+- **Side finding:** dropping a `Runtime` in-process does not release the
+  `flock` forge lock, because the storage bridge threads keep the engine
+  alive. Only process death frees it. This is the mechanism behind #423's
+  "second launch boots into a LockHeld dead kernel" and is why the test
+  uses a child process rather than a dropped runtime.
+
+**Recommendation: port the design, adapted.** `nexus_forge` journaled
+`EditDelta`s against a Brain-owned rope; `nexus-editor` has the same shape
+in `apply_transaction` (serde-serialisable `Transaction`s against a
+session tree). The port is:
+
+1. Append each applied `Transaction` (and each `sync_content` snapshot) to
+   `.forge/.editor/journal/<sha-of-relpath>.log` as CRC-framed records
+   carrying a `base_hash` of the session markdown before the op, with a
+   batched fsync (forge default 20 ms).
+2. On `open`, if a journal exists and its first record's `base_hash`
+   matches the on-disk bytes, replay it into the session and report
+   "recovered N unsaved edits"; otherwise discard it (the file is newer
+   than the journal, file-as-truth wins).
+3. Truncate the journal on `save` and on `close`.
+4. Un-ignore `unsaved_edits_survive_a_hard_crash`; it is the acceptance
+   test.
+
+Caveat carried over from the shell: ops the transaction bridge cannot
+express stay in CodeMirror until `sync_content` at save time, so the
+journal bounds loss to "since the last bridge-expressible op", not to one
+keystroke. A shell-side blur/interval `sync_content` closes most of that
+gap cheaply and should ship with the journal.
 
 ## Mechanics
 
