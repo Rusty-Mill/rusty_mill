@@ -224,8 +224,7 @@ pub(crate) fn build_local_embedding_provider(
 /// config flag is set OR `NEXUS_TLS_PINNING=1` is in the environment.
 pub(crate) fn tls_pinning_effective(ai_cfg: Option<&AiConfig>) -> bool {
     let cfg_flag = ai_cfg.is_some_and(|c| c.tls_pinning_enabled);
-    let env_opt_in = std::env::var("NEXUS_TLS_PINNING")
-        .is_ok_and(|v| v == "1");
+    let env_opt_in = std::env::var("NEXUS_TLS_PINNING").is_ok_and(|v| v == "1");
     cfg_flag || env_opt_in
 }
 

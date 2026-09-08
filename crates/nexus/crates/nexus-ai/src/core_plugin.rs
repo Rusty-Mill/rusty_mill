@@ -1987,8 +1987,7 @@ mod bl102_tls_pinning_status_tests {
     fn no_config_and_no_flag_means_pinning_off_unless_env_set() {
         // Match build_client semantics: in the absence of the env
         // opt-in, an unconfigured AI surface reports unpinned.
-        let env_opt_in = std::env::var("NEXUS_TLS_PINNING")
-            .is_ok_and(|v| v == "1");
+        let env_opt_in = std::env::var("NEXUS_TLS_PINNING").is_ok_and(|v| v == "1");
         assert_eq!(tls_pinning_effective(None), env_opt_in);
 
         let cfg = AiConfig::default();

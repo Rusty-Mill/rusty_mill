@@ -47,7 +47,9 @@ pub(crate) async fn handle_suggest(
         .map_err(|e| exec_err(format!("suggest: invalid args: {e}")))?;
     let limit = parsed
         .line_count
-        .map_or(SUGGEST_DEFAULT_LINE_COUNT, |n| usize::try_from(n).unwrap_or(SUGGEST_DEFAULT_LINE_COUNT))
+        .map_or(SUGGEST_DEFAULT_LINE_COUNT, |n| {
+            usize::try_from(n).unwrap_or(SUGGEST_DEFAULT_LINE_COUNT)
+        })
         .max(1);
 
     // Read the tail of the line buffer under a brief server lock —

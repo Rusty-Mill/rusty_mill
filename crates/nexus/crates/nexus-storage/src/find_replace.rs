@@ -449,11 +449,15 @@ pub fn find_in_files(
     };
     let max_files = args
         .max_files
-        .map_or(DEFAULT_MAX_FILES, |n| usize::try_from(n).unwrap_or(usize::MAX))
+        .map_or(DEFAULT_MAX_FILES, |n| {
+            usize::try_from(n).unwrap_or(usize::MAX)
+        })
         .max(1);
     let max_results = args
         .max_results
-        .map_or(DEFAULT_MAX_RESULTS, |n| usize::try_from(n).unwrap_or(usize::MAX))
+        .map_or(DEFAULT_MAX_RESULTS, |n| {
+            usize::try_from(n).unwrap_or(usize::MAX)
+        })
         .max(1);
 
     let files = collect_text_files(forge_root)?;

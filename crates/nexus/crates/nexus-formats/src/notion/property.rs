@@ -144,7 +144,10 @@ fn count_columns(line: &str) -> usize {
 fn split_row(line: &str) -> Vec<String> {
     let trimmed = line.trim();
     let inner = &trimmed[1..trimmed.len() - 1];
-    inner.split('|').map(std::string::ToString::to_string).collect()
+    inner
+        .split('|')
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 #[cfg(test)]

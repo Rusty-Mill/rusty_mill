@@ -37,7 +37,10 @@ pub fn convert_notion_markdown<S: ::std::hash::BuildHasher>(
 
 /// Walk the body and replace `[Display](Encoded%20Path.md)` with `[[Title]]`
 /// when the encoded path resolves to a known page in the link index.
-fn rewrite_internal_links<S: ::std::hash::BuildHasher>(input: &str, rewrites: &HashMap<String, String, S>) -> String {
+fn rewrite_internal_links<S: ::std::hash::BuildHasher>(
+    input: &str,
+    rewrites: &HashMap<String, String, S>,
+) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     let bytes = input.as_bytes();

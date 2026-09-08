@@ -1026,7 +1026,11 @@ mod pending_bounded_tests {
             "sess-stale".into(),
             PendingEntry {
                 tx: tx_old,
-                inserted_at: std::time::Instant::now().checked_sub(std::time::Duration::from_secs(MAX_APPROVAL_TIMEOUT_SECS + 1)).unwrap(),
+                inserted_at: std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(
+                        MAX_APPROVAL_TIMEOUT_SECS + 1,
+                    ))
+                    .unwrap(),
             },
         );
         let (tx_new, _rx_new) = tokio::sync::oneshot::channel();

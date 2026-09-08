@@ -33,7 +33,9 @@ pub(crate) fn stash_push(h: &GitWorkerHandle, args: &Value) -> Result<Value, Plu
 }
 
 pub(crate) fn stash_list(h: &GitWorkerHandle) -> Result<Value, PluginError> {
-    let entries = h.with(super::super::engine::GitEngine::stash_list).map_err(map_err)?;
+    let entries = h
+        .with(super::super::engine::GitEngine::stash_list)
+        .map_err(map_err)?;
     let arr: Vec<GitStashEntry> = entries
         .into_iter()
         .map(|s| GitStashEntry {

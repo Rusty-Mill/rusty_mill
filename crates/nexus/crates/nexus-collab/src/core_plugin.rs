@@ -599,7 +599,8 @@ mod tests {
         let url = start["url"].as_str().expect("url present").to_string();
         assert!(url.starts_with("ws://"));
         assert!(url.contains("?token="));
-        let port = u16::try_from(start["port"].as_u64().expect("port present")).expect("port fits u16");
+        let port =
+            u16::try_from(start["port"].as_u64().expect("port present")).expect("port fits u16");
         assert!(port > 0, "OS picked a real port, got {port}");
 
         // started event was published.

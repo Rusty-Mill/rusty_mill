@@ -185,7 +185,8 @@ pub(crate) async fn handle_entity_recall(
     for (path, score) in ranked {
         let stem = std::path::Path::new(&path)
             .file_stem()
-            .and_then(|s| s.to_str()).map_or_else(|| path.clone(), str::to_string);
+            .and_then(|s| s.to_str())
+            .map_or_else(|| path.clone(), str::to_string);
         let resp: serde_json::Value = ctx
             .ipc_call(
                 "com.nexus.storage",

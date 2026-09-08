@@ -189,7 +189,11 @@ impl Compressor for KeepDecisionsCompressor {
                 if tc.approved && tc.error.is_empty() {
                     let _ = writeln!(out, "- round {}: {} ok", r.round, tc.name);
                 } else if !tc.error.is_empty() {
-                    let _ = writeln!(out, "- round {}: {} failed ({})", r.round, tc.name, tc.error);
+                    let _ = writeln!(
+                        out,
+                        "- round {}: {} failed ({})",
+                        r.round, tc.name, tc.error
+                    );
                 }
             }
         }

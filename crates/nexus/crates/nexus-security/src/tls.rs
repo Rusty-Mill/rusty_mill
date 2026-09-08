@@ -212,8 +212,7 @@ fn outbound_builder() -> reqwest::ClientBuilder {
 /// so chat + audio funnel through one pin policy.
 #[must_use]
 pub fn build_pinned_client(tls_pinning_enabled: bool) -> reqwest::Client {
-    let env_opt_in = std::env::var("NEXUS_TLS_PINNING")
-        .is_ok_and(|v| v == "1");
+    let env_opt_in = std::env::var("NEXUS_TLS_PINNING").is_ok_and(|v| v == "1");
     if !tls_pinning_enabled && !env_opt_in {
         return match outbound_builder().build() {
             Ok(c) => c,

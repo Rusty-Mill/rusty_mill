@@ -1121,7 +1121,9 @@ async fn execute_round<T: ToolDispatcher + ?Sized>(
                 // this id, so safer to reject than to guess.
                 let entry = entries.iter().find(|e| e.tool_use_id == p.id);
                 let (approve, reason) = entry
-                    .map_or((false, "no decision provided".to_string()), |e| (e.approve, e.reason.clone()));
+                    .map_or((false, "no decision provided".to_string()), |e| {
+                        (e.approve, e.reason.clone())
+                    });
                 let retry_safe = !non_idempotent.contains(p.name.as_str());
                 let record = dispatch_one(
                     dispatcher,

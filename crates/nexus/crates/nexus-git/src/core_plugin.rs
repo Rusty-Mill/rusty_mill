@@ -657,7 +657,8 @@ fn publish_git_activity(bus: &EventBus, kind: &str, head: &str, branch: Option<&
     use nexus_types::activity::{
         ActivityEntry, ActivityOrigin, ActivityOutcome, ActivitySurface, ACTIVITY_APPENDED_TOPIC,
     };
-    let mut entry = ActivityEntry::now(head.to_string(), ActivitySurface::Git, &ActivityOrigin::Git);
+    let mut entry =
+        ActivityEntry::now(head.to_string(), ActivitySurface::Git, &ActivityOrigin::Git);
     entry.outcome = ActivityOutcome::Ok;
     let head_short: String = head.chars().take(7).collect();
     entry.prompt = match branch {

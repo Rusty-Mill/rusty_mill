@@ -244,7 +244,9 @@ impl CorePlugin for SecurityCorePlugin {
             HANDLER_SET_SECRET => {
                 let typed: crate::ipc::SetSecretArgs = parse_args(args, "set_secret")?;
                 let key = format!("{}:{}", typed.plugin_id, typed.name);
-                self.vault.store(&key, &typed.value).map_err(|e| map_err(&e))?;
+                self.vault
+                    .store(&key, &typed.value)
+                    .map_err(|e| map_err(&e))?;
                 self.known_names.insert(key);
                 to_typed(&crate::ipc::SetSecretResult { ok: true }, "set_secret")
             }

@@ -2818,8 +2818,10 @@ mod tests {
                         match kind {
                             "memory_limit_exceeded" => {
                                 saw_breach = true;
-                                let limit_mb = payload.get("limit_mb").and_then(serde_json::Value::as_u64);
-                                let rss_bytes = payload.get("rss_bytes").and_then(serde_json::Value::as_u64);
+                                let limit_mb =
+                                    payload.get("limit_mb").and_then(serde_json::Value::as_u64);
+                                let rss_bytes =
+                                    payload.get("rss_bytes").and_then(serde_json::Value::as_u64);
                                 assert_eq!(limit_mb, Some(1));
                                 assert!(rss_bytes.is_some_and(|b| b > 0));
                             }

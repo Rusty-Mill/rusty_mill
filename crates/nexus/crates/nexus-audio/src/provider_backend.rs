@@ -94,7 +94,8 @@ async fn resolve_creds(cfg: &AudioConfig, ctx: &SharedCtx) -> Result<ResolvedCre
             ) {
                 if !api_key.is_empty() {
                     let base = base_url
-                        .filter(|s| !s.is_empty()).map_or_else(|| DEFAULT_BASE_URL.to_string(), str::to_string);
+                        .filter(|s| !s.is_empty())
+                        .map_or_else(|| DEFAULT_BASE_URL.to_string(), str::to_string);
                     return Ok(ResolvedCreds {
                         api_key: api_key.to_string(),
                         base_url: base,

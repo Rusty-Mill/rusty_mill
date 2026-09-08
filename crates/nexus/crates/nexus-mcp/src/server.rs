@@ -3819,7 +3819,12 @@ impl rmcp::ServerHandler for NexusMcpServer {
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             match &outcome {
                 Ok(_) => {
-                    nexus_kernel::audit::log_mcp_tool_call(&tool_name, duration_ms, "success", None);
+                    nexus_kernel::audit::log_mcp_tool_call(
+                        &tool_name,
+                        duration_ms,
+                        "success",
+                        None,
+                    );
                 }
                 Err(e) => nexus_kernel::audit::log_mcp_tool_call(
                     &tool_name,

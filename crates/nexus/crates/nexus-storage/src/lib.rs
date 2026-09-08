@@ -1661,9 +1661,9 @@ impl StorageEngine {
         let meta = trash::restore(self.forge.root(), trash_id)?;
         let abs = self.forge.root().join(&meta.original_path);
         for rel in trash::walk_restored_files(&abs, &meta.original_path) {
-            let ext_is_markdown = std::path::Path::new(&rel)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"));
+            let ext_is_markdown = std::path::Path::new(&rel).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+            });
             if ext_is_markdown {
                 if let Ok(bytes) = std::fs::read(self.forge.root().join(&rel)) {
                     // Full reindex; a parse failure must not abort the

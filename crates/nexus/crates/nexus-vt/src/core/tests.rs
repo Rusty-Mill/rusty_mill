@@ -2731,7 +2731,9 @@ fn iterm2_large_image_payload_is_not_truncated() {
     let img = jpeg::decode(&data).unwrap();
     let pixels: Vec<Option<u32>> = img
         .rgba
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| Some(((p[0] as u32) << 16) | ((p[1] as u32) << 8) | p[2] as u32))
         .collect();
     let mut gref = Grid::new(40, 30);

@@ -603,7 +603,10 @@ impl CorePlugin for McpHostPlugin {
                                 serde_json::Value::Object(t.input_schema.as_ref().clone());
                             McpToolEntry {
                                 name: t.name.to_string(),
-                                description: t.description.as_ref().map(std::string::ToString::to_string),
+                                description: t
+                                    .description
+                                    .as_ref()
+                                    .map(std::string::ToString::to_string),
                                 input_schema: Some(input_schema),
                             }
                         })

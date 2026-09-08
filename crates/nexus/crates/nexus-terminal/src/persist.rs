@@ -468,7 +468,8 @@ impl SqliteSessionStore {
         }
         sql.push_str(" ORDER BY ts_ms DESC, line_index ASC LIMIT ?");
         binds.push(Box::new(limit));
-        let bound: Vec<&dyn rusqlite::ToSql> = binds.iter().map(std::convert::AsRef::as_ref).collect();
+        let bound: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -503,7 +504,8 @@ impl SqliteSessionStore {
             binds.push(Box::new(ts));
         }
         sql.push_str(" ORDER BY ts_ms DESC, line_index ASC");
-        let bound: Vec<&dyn rusqlite::ToSql> = binds.iter().map(std::convert::AsRef::as_ref).collect();
+        let bound: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)

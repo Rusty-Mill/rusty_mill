@@ -337,9 +337,9 @@ fn process_events(
             // gets the count via ReconcileRequested.dropped_events.
             git_batch_mode = false;
             let dropped = std::mem::replace(&mut git_batch_dropped, 0);
-            let held_ms = git_batch_started_at
-                .take()
-                .map_or(0, |t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
+            let held_ms = git_batch_started_at.take().map_or(0, |t| {
+                u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+            });
             tracing::info!(
                 audit = true,
                 dropped_events = dropped,

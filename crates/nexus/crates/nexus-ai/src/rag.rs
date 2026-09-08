@@ -901,7 +901,9 @@ mod tests {
         let seen = dispatcher.seen.lock().unwrap();
         let vector_queries: Vec<_> = seen
             .iter()
-            .filter(|(target, command, _)| target == "com.nexus.storage" && command == "vector_query")
+            .filter(|(target, command, _)| {
+                target == "com.nexus.storage" && command == "vector_query"
+            })
             .collect();
         assert_eq!(vector_queries.len(), 1);
         assert_eq!(vector_queries[0].0, "com.nexus.storage");

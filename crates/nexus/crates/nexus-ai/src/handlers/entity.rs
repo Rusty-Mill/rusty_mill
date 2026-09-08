@@ -714,7 +714,8 @@ pub(crate) async fn handle_extract_entities(
                 serde_json::json!({ "id": &id }),
                 std::time::Duration::from_secs(5),
             )
-            .await.is_ok_and(|r| {
+            .await
+            .is_ok_and(|r| {
                 r.get("entity")
                     .and_then(serde_json::Value::as_object)
                     .is_some()

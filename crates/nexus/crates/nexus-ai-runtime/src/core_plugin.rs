@@ -634,7 +634,6 @@ async fn republish_loop(store: Store, ctx: Arc<KernelPluginContext>) {
         plugin_id = PLUGIN_ID,
         "ai-runtime republisher loop exited (bus subscription closed)"
     );
-
 }
 
 /// BL-134 Phase 2b-ii — pre-allocate a session id for the worker
