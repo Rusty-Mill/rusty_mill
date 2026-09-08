@@ -59,6 +59,9 @@ pub fn set_embedded(embedded: bool) {
 }
 
 /// Whether the shell is running embedded (job-control terminal hand-off off).
+// Only read by `job::init` (`#[cfg(unix)]`); the not(unix) build has no
+// reader so this is otherwise flagged dead_code there.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn embedded() -> bool {
     EMBEDDED.with(Cell::get)
 }
