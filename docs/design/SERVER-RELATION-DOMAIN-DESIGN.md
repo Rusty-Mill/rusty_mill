@@ -1,8 +1,9 @@
-# Server Relation Domain Design (Proposed)
+# Server Relation Domain Design (Accepted)
 
-- Status: **Proposed** (2026-09-07) — implemented on the same branch as
-  `SERVER-001` v0.48.0 / FR-058, the `ADR-0046`–`ADR-0057` cadence, for
-  the owner to accept as designed or send back. No wire change.
+- Status: **Accepted** (2026-09-07, `ADR-0058` option (a), as designed —
+  a record table; a directed edge layer with or without metadata, and
+  declining, all declined). Implemented on the same branch as
+  `SERVER-001` v0.48.0 / FR-058, PR #220. No wire change.
 - Date: 2026-09-07
 - Related: `ADR-0036`/`ADR-0048` (the front-door domain precedent:
   `Reminder`'s one-index/one-scan stack, `Memory`'s projection),
@@ -162,6 +163,10 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-07: Accepted as designed (option (a)), after PR #220. No
+  content change.
+- 2026-09-07: Implemented as `SERVER-001` v0.48.0 / FR-058, landed as
+  designed (PR #220).
 - 2026-09-07: Initial proposal; implementation follows on the same
   branch. The twenty-third round in the `rusty_remind_me`-motivated
   line; the hub spike's fourth and last gap.
