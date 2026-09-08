@@ -157,6 +157,7 @@ pub(crate) fn apply_transaction(
             .map_err(|e| exec_err(format!("apply_transaction: {e}")))?;
         auto_stamp_inbound_targets(&mut s.tree, &ops);
         s.revision = s.revision.saturating_add(1);
+        s.journal_now();
         let rev = s.revision;
         let response = if text_only {
             ApplyTransactionResponse::Slim { revision: rev }
@@ -313,6 +314,7 @@ pub(crate) fn undo(
             .undo(&mut s.tree)
             .map_err(|e| exec_err(format!("undo: {e}")))?;
         s.revision = s.revision.saturating_add(1);
+        s.journal_now();
         let rev = s.revision;
         let val = snapshot_to_value(&snapshot_of(s), "undo")?;
         let post_tree = s.tree.clone();
@@ -340,6 +342,7 @@ pub(crate) fn redo(
             .redo(&mut s.tree)
             .map_err(|e| exec_err(format!("redo: {e}")))?;
         s.revision = s.revision.saturating_add(1);
+        s.journal_now();
         let rev = s.revision;
         let val = snapshot_to_value(&snapshot_of(s), "redo")?;
         // Post-redo, `current` points at the just-replayed tx.

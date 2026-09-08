@@ -236,6 +236,7 @@ These appear in many places — a shared `PLUGIN_IDS` module would centralize th
 ~~| `crates/nexus-plugins/src/host_fns.rs` | 27 | `-1002` | `HOST_BUFFER_OVERFLOW` |~~ → already a `const HOST_BUFFER_OVERFLOW`.
 ~~| `crates/nexus-plugins/src/manifest.rs` | 1765 | `1024` | `MAX_REGISTRATIONS_PER_KIND` |~~ → already a `const MAX_REGISTRATIONS_PER_KIND`.
 | `crates/nexus-editor/src/block.rs` | 606 | `[0.3, 0.7]` | `DEFAULT_SPLIT_RATIOS` |
+| `crates/nexus-editor/src/journal.rs` | `record` | crash journal always on, written per mutation without `fsync` (survives process death, not power loss) | `[editor].crash_journal = { enabled, fsync }` in `app.toml` |
 ~~| `crates/nexus-dap/src/core_plugin.rs` | 61 | `6` | `HANDLER_TERMINATE` |~~ → already a `pub const HANDLER_TERMINATE: u32 = 6`.
 
 ---

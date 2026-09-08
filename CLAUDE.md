@@ -88,6 +88,7 @@ A "forge" is a user's directory of markdown files. Nexus stores its index alongs
 │   ├── kv.sqlite3        # KV store
 │   ├── procmgr.sqlite sessions.sqlite agent/transcripts.sqlite
 │   ├── .editor/crdt/     # CRDT snapshots
+│   ├── .editor/journal/  # crash journal for open notes (RFC 0009 row 5)
 │   ├── .kernel/audit.db  # audit log
 │   ├── plugins/          # community WASM plugins (forge-scoped)
 │   ├── logs/  temp/  .lock

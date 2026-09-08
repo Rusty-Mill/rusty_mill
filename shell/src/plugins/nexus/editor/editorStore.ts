@@ -116,6 +116,13 @@ interface EditorState {
    */
   seedRevision: (relpath: string, revision: number) => void
   /**
+   * RFC 0009 row 5 — seed for a session whose `open` restored unsaved
+   * edits from the crash journal: `sessionRevision` is the kernel's
+   * revision but `savedRevision` is pinned below it so `isDirty` reports
+   * true until the user saves.
+   */
+  seedRecoveredRevision: (relpath: string, revision: number) => void
+  /**
    * Snapshot the current `sessionRevision` for `relpath` into
    * `savedRevision`. Called after a successful save and after an
    * untitled → named transition establishes the session. Also seeds
@@ -300,6 +307,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       nextSession.set(relpath, revision)
       const nextSaved = new Map(s.savedRevision)
       nextSaved.set(relpath, revision)
+      return { sessionRevision: nextSession, savedRevision: nextSaved }
+    }),
+
+  seedRecoveredRevision: (relpath, revision) =>
+    set((s) => {
+      const nextSession = new Map(s.sessionRevision)
+      nextSession.set(relpath, revision)
+      const nextSaved = new Map(s.savedRevision)
+      nextSaved.set(relpath, -1)
       return { sessionRevision: nextSession, savedRevision: nextSaved }
     }),
 

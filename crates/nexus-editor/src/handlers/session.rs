@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use nexus_kernel::{EventBus, Ipc as _, KernelPluginContext};
 use nexus_plugins::PluginError;
+
+use crate::journal::EditJournal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,10 +32,11 @@ use super::shared::{
 fn finish_open(
     sessions: &SessionMap,
     observer: Option<&Arc<dyn OpObserver>>,
+    journal: &Arc<EditJournal>,
     relpath: &str,
     source: &str,
 ) -> Result<Value, PluginError> {
-    finish_open_with_undo(sessions, observer, relpath, source, None)
+    finish_open_with_undo(sessions, observer, journal, relpath, source, None)
 }
 
 /// Like [`finish_open`], but installs `restored_undo` (typically from
@@ -44,16 +47,32 @@ fn finish_open(
 fn finish_open_with_undo(
     sessions: &SessionMap,
     observer: Option<&Arc<dyn OpObserver>>,
+    journal: &Arc<EditJournal>,
     relpath: &str,
     source: &str,
     restored_undo: Option<UndoTree>,
 ) -> Result<Value, PluginError> {
+    // RFC 0009 row 5 — a journal whose base hash matches the bytes on
+    // disk carries edits that were applied but never saved before the
+    // process died. Start the session from it; the file on disk is
+    // untouched until the user saves.
+    let disk_hash = content_hash_hex(source.as_bytes());
+    let recovered = journal.recover(relpath, source.as_bytes());
+    if recovered.is_some() {
+        tracing::info!(
+            plugin = PLUGIN_ID,
+            relpath,
+            "edit journal: recovered unsaved edits from a previous session"
+        );
+    }
+    let effective = recovered.as_deref().unwrap_or(source);
+
     let parser = MarkdownParser::new(ParseOptions {
         file_path: relpath.to_string(),
         ..ParseOptions::default()
     });
     let tree = parser
-        .parse(source)
+        .parse(effective)
         .map_err(|e| exec_err(format!("open: parse '{relpath}': {e}")))?;
 
     // BL-074 hook: notify the observer *before* the session goes into
@@ -61,7 +80,7 @@ fn finish_open_with_undo(
     // mutate the session — it's a read-only signal carrying tree +
     // canonical source.
     if let Some(obs) = observer {
-        obs.on_session_opened(relpath, &tree, source.as_bytes());
+        obs.on_session_opened(relpath, &tree, effective.as_bytes());
     }
 
     let session = Session {
@@ -70,6 +89,9 @@ fn finish_open_with_undo(
         relpath: relpath.to_string(),
         revision: 0,
         is_synthetic: false,
+        journal: Some(Arc::clone(journal)),
+        disk_hash,
+        recovered: recovered.is_some(),
     };
     let entry = insert_session_entry(sessions, relpath.to_string(), session)?;
     let s = entry.lock().map_err(|_| sessions_poisoned())?;
@@ -107,6 +129,7 @@ pub(crate) fn open_sync(
     forge_root: &Path,
     sessions: &SessionMap,
     observer: Option<&Arc<dyn OpObserver>>,
+    journal: &Arc<EditJournal>,
     args: &Value,
 ) -> Result<Value, PluginError> {
     let relpath = relpath_arg(args, "open")?;
@@ -116,7 +139,7 @@ pub(crate) fn open_sync(
     let abs = resolve_within(forge_root, &relpath).map_err(|e| exec_err(format!("open: {e}")))?;
     let source = fs::read_to_string(&abs)
         .map_err(|e| exec_err(format!("open: read '{}': {e}", abs.display())))?;
-    finish_open(sessions, observer, &relpath, &source)
+    finish_open(sessions, observer, journal, &relpath, &source)
 }
 
 pub(crate) async fn open_async(
@@ -124,6 +147,7 @@ pub(crate) async fn open_async(
     sessions: Arc<SessionMap>,
     ctx: Option<Arc<KernelPluginContext>>,
     observer: Option<&Arc<dyn OpObserver>>,
+    journal: &Arc<EditJournal>,
     args: &Value,
 ) -> Result<Value, PluginError> {
     let relpath = relpath_arg(args, "open")?;
@@ -174,7 +198,14 @@ pub(crate) async fn open_async(
         None
     };
 
-    finish_open_with_undo(&sessions, observer, &relpath, &source, restored_undo)
+    finish_open_with_undo(
+        &sessions,
+        observer,
+        journal,
+        &relpath,
+        &source,
+        restored_undo,
+    )
 }
 
 pub(crate) fn close(
@@ -186,7 +217,10 @@ pub(crate) fn close(
     if let Some(obs) = observer {
         obs.on_session_closed(&relpath);
     }
-    remove_session_entry(sessions, &relpath)?;
+    if let Some(s) = remove_session_entry(sessions, &relpath)? {
+        // Close discards unsaved edits by contract; so does the journal.
+        s.clear_journal();
+    }
     Ok(serde_json::json!({}))
 }
 
@@ -208,7 +242,11 @@ pub(crate) async fn close_async(
     // Capture the session's tree + undo before removing it so the
     // persistence write happens against a consistent snapshot but the
     // session map is freed for re-open as soon as possible.
-    let captured = remove_session_entry(&sessions, &relpath)?.map(|s| (s.tree, s.undo));
+    let captured = remove_session_entry(&sessions, &relpath)?.map(|s| {
+        // Close discards unsaved edits by contract; so does the journal.
+        s.clear_journal();
+        (s.tree, s.undo)
+    });
 
     if let (Some(ctx), Some((tree, undo))) = (ctx.as_deref(), captured) {
         // Hash the canonical-markdown serialization — that's what
@@ -227,9 +265,11 @@ pub(crate) async fn close_async(
 /// The undo history is left untouched: `sync_content` is a background resync
 /// for read-only consumers (AI, MCP, outline), not a user-visible transaction.
 pub(crate) fn sync_content(
+    forge_root: &Path,
     sessions: &SessionMap,
     event_bus: Option<&Arc<EventBus>>,
     observer: Option<&Arc<dyn OpObserver>>,
+    journal: &Arc<EditJournal>,
     args: &Value,
 ) -> Result<Value, PluginError> {
     let relpath = relpath_arg(args, "sync_content")?;
@@ -261,12 +301,23 @@ pub(crate) fn sync_content(
     let entry = {
         let mut guard = sessions.lock().map_err(|_| sessions_poisoned())?;
         Arc::clone(guard.entry(relpath.clone()).or_insert_with(|| {
+            // A session created by sync_content (no prior `open`) still
+            // needs a journal base: hash whatever is on disk right now,
+            // or nothing for a not-yet-created file.
+            let disk_hash = resolve_within(forge_root, &relpath)
+                .ok()
+                .and_then(|abs| fs::read(abs).ok())
+                .map(|bytes| content_hash_hex(&bytes))
+                .unwrap_or_default();
             Arc::new(Mutex::new(Session {
                 tree: BlockTree::default(),
                 undo: UndoTree::new(),
                 relpath: relpath.clone(),
                 revision: 0,
                 is_synthetic: false,
+                journal: Some(Arc::clone(journal)),
+                disk_hash,
+                recovered: false,
             }))
         }))
     };
@@ -274,6 +325,7 @@ pub(crate) fn sync_content(
         let mut session = entry.lock().map_err(|_| sessions_poisoned())?;
         session.tree = tree;
         session.revision = session.revision.saturating_add(1);
+        session.journal_now();
         session.revision
     };
     publish_changed(event_bus, &relpath, revision, None);
@@ -322,18 +374,13 @@ const UNDO_STATE_VERSION: u32 = 1;
 /// (no traversal, no clashes with `/`-bearing relpaths) — the source
 /// path is recoverable from inside the file via the schema if needed.
 fn undo_state_path(relpath: &str) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    let mut hasher = Sha256::new();
-    hasher.update(relpath.as_bytes());
-    let digest = hasher.finalize();
     // 16 hex chars / 64 bits is enough for collision resistance over
-    // the few hundred files a forge actually edits in a session.
-    let mut hex = String::with_capacity(16);
-    for b in digest.iter().take(8) {
-        write!(&mut hex, "{b:02x}").expect("write to String");
-    }
-    format!(".forge/.editor/undo/{hex}.json")
+    // the few hundred files a forge actually edits in a session. Shared
+    // with the RFC 0009 crash journal so both sidecars key alike.
+    format!(
+        ".forge/.editor/undo/{}.json",
+        crate::journal::relpath_key(relpath)
+    )
 }
 
 /// SHA-256 hex of `bytes`. Used as the integrity tag on persisted

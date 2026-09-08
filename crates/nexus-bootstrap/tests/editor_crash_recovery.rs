@@ -22,13 +22,11 @@
 //! * [`saved_edits_survive_a_hard_crash`] is the control: it proves the
 //!   harness models a crash and pins the baseline that `save`d content
 //!   is durable.
-//! * [`unsaved_edits_survive_a_hard_crash`] is the RFC question. It is
-//!   `#[ignore]`d because it documents a known gap rather than a
-//!   regression: the editor session lives only in memory, undo state is
-//!   persisted only on a graceful `close` (BL-072), and no journal
-//!   exists, so an edit that was applied but not saved is lost. Run it
-//!   with `--ignored` to see the current answer; un-ignore it when an
-//!   edit journal lands and it becomes the acceptance test.
+//! * [`unsaved_edits_survive_a_hard_crash`] is the RFC question and the
+//!   acceptance test for the crash journal (`nexus-editor/src/journal.rs`):
+//!   an applied-but-unsaved edit comes back on the next `open`, flagged
+//!   `recovered_unsaved_edits`, and the file on disk stays untouched
+//!   until the user saves.
 
 use std::fs;
 use std::path::Path;
@@ -149,12 +147,25 @@ fn run_child_and_crash(root: &Path, save_first: bool) {
     );
 }
 
-async fn reopen_markdown(root: &Path) -> String {
+/// Reopen on a fresh runtime; returns `(markdown, recovered_unsaved_edits)`.
+async fn reopen(root: &Path) -> (String, bool) {
     let runtime = build_cli_runtime(root.to_path_buf()).expect("rebuild runtime after crash");
-    call(&runtime, "open", serde_json::json!({ "relpath": NOTE }))
-        .await
-        .expect("open after crash ok");
-    markdown(&runtime).await
+    let snap: EditorSnapshot = serde_json::from_value(
+        call(&runtime, "open", serde_json::json!({ "relpath": NOTE }))
+            .await
+            .expect("open after crash ok"),
+    )
+    .unwrap();
+    (markdown(&runtime).await, snap.recovered_unsaved_edits)
+}
+
+fn journal_dir_has_entries(root: &Path) -> bool {
+    fs::read_dir(root.join(nexus_editor::journal::JOURNAL_DIR_REL))
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -169,11 +180,16 @@ async fn saved_edits_survive_a_hard_crash() {
         fs::read_to_string(root.join(NOTE)).unwrap(),
         "Hello world\n"
     );
-    assert_eq!(reopen_markdown(&root).await, "Hello world\n");
+    assert!(
+        !journal_dir_has_entries(&root),
+        "save must clear the journal so nothing is replayed on reopen"
+    );
+    let (markdown, recovered) = reopen(&root).await;
+    assert_eq!(markdown, "Hello world\n");
+    assert!(!recovered);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "RFC 0009 row 5: documents the crash-recovery gap; un-ignore when an edit journal lands"]
 async fn unsaved_edits_survive_a_hard_crash() {
     let forge = scratch_forge();
     let root = forge.path().to_path_buf();
@@ -181,12 +197,47 @@ async fn unsaved_edits_survive_a_hard_crash() {
 
     run_child_and_crash(&root, false);
 
-    // The edit was applied in the kernel session but nothing flushed it:
-    // disk still holds the pre-edit bytes.
+    // The edit was applied in the kernel session but never saved: disk
+    // still holds the pre-edit bytes, and the journal holds the edit.
     assert_eq!(fs::read_to_string(root.join(NOTE)).unwrap(), "Hello\n");
+    assert!(
+        journal_dir_has_entries(&root),
+        "crash left a journal behind"
+    );
+
+    let (markdown, recovered) = reopen(&root).await;
     assert_eq!(
-        reopen_markdown(&root).await,
-        "Hello world\n",
+        markdown, "Hello world\n",
         "an applied-but-unsaved edit must be recoverable after a hard crash"
+    );
+    assert!(
+        recovered,
+        "open must flag the recovery so the tab opens dirty"
+    );
+    // File-as-truth: recovery lives in the session until the user saves.
+    assert_eq!(fs::read_to_string(root.join(NOTE)).unwrap(), "Hello\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn journal_is_ignored_when_the_file_changed_on_disk() {
+    let forge = scratch_forge();
+    let root = forge.path().to_path_buf();
+    write_note(&root, NOTE, "Hello\n");
+
+    run_child_and_crash(&root, false);
+    assert!(journal_dir_has_entries(&root));
+
+    // An external editor rewrote the note between crash and relaunch.
+    write_note(&root, NOTE, "Rewritten elsewhere\n");
+
+    let (markdown, recovered) = reopen(&root).await;
+    assert_eq!(
+        markdown, "Rewritten elsewhere\n",
+        "disk wins over a stale journal"
+    );
+    assert!(!recovered);
+    assert!(
+        !journal_dir_has_entries(&root),
+        "stale journal is discarded"
     );
 }

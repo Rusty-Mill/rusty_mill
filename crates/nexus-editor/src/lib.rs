@@ -13,6 +13,7 @@
 mod annotation;
 mod block;
 pub mod core_plugin;
+pub mod journal;
 pub mod database_view;
 mod error;
 // #202 / R19 — `excerpt_map` is the Step-1 primitive layer of an

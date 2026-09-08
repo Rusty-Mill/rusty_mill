@@ -410,6 +410,11 @@ pub struct EditorSnapshot {
     /// the `com.nexus.editor.changed.<relpath>` event) to detect stale
     /// local state and to dedupe the echoes of their own dispatches.
     pub revision: u64,
+    /// RFC 0009 row 5 — `true` when this `open` restored unsaved edits
+    /// from the crash journal instead of the bytes on disk. The session
+    /// is dirty from the moment it opens; stays `true` until `save`.
+    #[serde(default)]
+    pub recovered_unsaved_edits: bool,
 }
 
 // ── Plugin state ─────────────────────────────────────────────────────────────
@@ -428,6 +433,54 @@ pub(crate) struct Session {
     /// files behind their excerpts. (Read-write multibuffer with
     /// per-excerpt edit routing is BL-141 Phase 2.)
     pub(crate) is_synthetic: bool,
+    /// RFC 0009 row 5 — crash journal this session records into.
+    /// `None` for synthetic sessions and unit fixtures.
+    pub(crate) journal: Option<Arc<crate::journal::EditJournal>>,
+    /// SHA-256 hex of the bytes the session was opened from or last
+    /// saved to — the journal's `base_hash`.
+    pub(crate) disk_hash: String,
+    /// See [`EditorSnapshot::recovered_unsaved_edits`].
+    pub(crate) recovered: bool,
+}
+
+impl Session {
+    /// Snapshot the session's canonical markdown into the crash journal.
+    /// Called inside the session lock after every successful mutation.
+    /// Journal failures are logged, never surfaced: losing crash safety
+    /// must not fail the edit itself.
+    pub(crate) fn journal_now(&self) {
+        if self.is_synthetic {
+            return;
+        }
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let markdown = crate::markdown::MarkdownSerializer::serialize(&self.tree);
+        if let Err(err) = journal.record(&self.relpath, &self.disk_hash, &markdown) {
+            tracing::warn!(
+                plugin = PLUGIN_ID,
+                relpath = %self.relpath,
+                %err,
+                "edit journal: record failed; continuing without crash safety"
+            );
+        }
+    }
+
+    /// The session's content now matches `written` on disk: re-base the
+    /// journal on it and drop the pending record.
+    pub(crate) fn mark_saved(&mut self, written: &[u8]) {
+        self.disk_hash = crate::handlers::session::content_hash_hex(written);
+        self.recovered = false;
+        self.clear_journal();
+    }
+
+    /// Drop the journal record (save landed, or the session is closing
+    /// and discarding its edits).
+    pub(crate) fn clear_journal(&self) {
+        if let Some(journal) = &self.journal {
+            journal.clear(&self.relpath);
+        }
+    }
 }
 
 /// BL-126 follow-up: per-session lock. The outer map is acquired
@@ -530,6 +583,9 @@ pub(crate) fn remove_session_entry(
                 relpath: relpath.to_string(),
                 revision: 0,
                 is_synthetic: false,
+                journal: None,
+                disk_hash: String::new(),
+                recovered: false,
             };
             Ok(Some(std::mem::replace(&mut *guard, placeholder)))
         }
@@ -565,6 +621,8 @@ pub struct EditorCorePlugin {
     /// for unit tests and any runtime that hasn't opted into CRDT
     /// publishing.
     op_observer: Option<Arc<dyn OpObserver>>,
+    /// RFC 0009 row 5 — crash journal under `<forge>/.forge/.editor/journal/`.
+    journal: Arc<crate::journal::EditJournal>,
 }
 
 impl EditorCorePlugin {
@@ -574,6 +632,7 @@ impl EditorCorePlugin {
     #[must_use]
     pub fn new(forge_root: PathBuf) -> Self {
         Self {
+            journal: Arc::new(crate::journal::EditJournal::new(forge_root.clone())),
             forge_root,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             context: None,
@@ -588,6 +647,7 @@ impl EditorCorePlugin {
     #[must_use]
     pub fn with_event_bus(forge_root: PathBuf, event_bus: Arc<EventBus>) -> Self {
         Self {
+            journal: Arc::new(crate::journal::EditJournal::new(forge_root.clone())),
             forge_root,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             context: None,
@@ -628,6 +688,7 @@ impl CorePlugin for EditorCorePlugin {
                 &self.forge_root,
                 &self.sessions,
                 self.op_observer.as_ref(),
+                &self.journal,
                 args,
             ),
             // BL-072: persistent undo writes happen on the async path
@@ -660,9 +721,11 @@ impl CorePlugin for EditorCorePlugin {
             ),
             HANDLER_LIST_OPEN => crate::handlers::tree::list_open(&self.sessions),
             HANDLER_SYNC_CONTENT => crate::handlers::session::sync_content(
+                &self.forge_root,
                 &self.sessions,
                 self.event_bus.as_ref(),
                 self.op_observer.as_ref(),
+                &self.journal,
                 args,
             ),
             HANDLER_GET_MARKDOWN => crate::handlers::tree::get_markdown(&self.sessions, args),
@@ -720,6 +783,7 @@ impl CorePlugin for EditorCorePlugin {
         let event_bus = self.event_bus.clone();
         let observer = self.op_observer.clone();
         let args = args.clone();
+        let journal = Arc::clone(&self.journal);
 
         Some(Box::pin(async move {
             match handler_id {
@@ -729,6 +793,7 @@ impl CorePlugin for EditorCorePlugin {
                         sessions,
                         ctx,
                         observer.as_ref(),
+                        &journal,
                         &args,
                     )
                     .await
@@ -806,6 +871,7 @@ pub(crate) fn snapshot_of(s: &Session) -> EditorSnapshot {
         can_undo,
         can_redo,
         revision: s.revision,
+        recovered_unsaved_edits: s.recovered,
     }
 }
 

@@ -118,6 +118,7 @@ Full table in [`env-vars.md`](env-vars.md). Categories:
 | `.forge/.audio/models/` | Whisper / local-audio model cache (override via `[audio] local_model_dir`) | `nexus-audio/src/config.rs:138` |
 | `.forge/.editor/crdt/` | CRDT conflict snapshots | `nexus-crdt/src/state.rs:106` |
 | `.forge/.editor/undo/{sha}.json` | Per-file editor undo history | `nexus-editor/src/handlers/session.rs:336` |
+| `.forge/.editor/journal/{sha}.json` | Crash journal: an open note's unsaved content + the disk hash it was based on (RFC 0009 row 5); replayed on `open` when the hash still matches, deleted on `save` / `close` | `nexus-editor/src/journal.rs` |
 | `.forge/.kernel/audit.db` | Audit log SQLite | `nexus-bootstrap::audit_sqlite` |
 | `.forge/kv.sqlite3` | KV store | `nexus-bootstrap/src/lib.rs:204` |
 | `.forge/plugins/` | Community WASM/JS bundles | manual install |
