@@ -1,8 +1,10 @@
 # Server Write Batch Design (Proposed)
 
-- Status: **Proposed** (2026-09-08). The twenty-fifth round in the
-  `rusty_remind_me`-motivated line; design only, because the batch's
-  atomicity guarantee is a fork the owner picks (as `ADR-0056` was).
+- Status: **Accepted** (2026-09-08, `ADR-0060` option (c), implemented on
+  the same branch as `SERVER-001` v0.50.0 / FR-060, `SERVER-002` v0.11.0,
+  PR #229 — pipelined by default, atomic under a flag; crash-atomicity
+  across the batch left as the named storage follow-on). The
+  twenty-fifth round in the `rusty_remind_me`-motivated line.
 - Date: 2026-09-08
 - Related: `ADR-0013`/`SERVER-TRANSACTION-DESIGN.md` (the field-update
   batch this generalizes), `ADR-0024`/`SERVER-TRANSACTION-SESSION-DESIGN.md`
@@ -157,6 +159,8 @@ clean follow-on that adds a guarantee without taking one away.
 
 ## Change history
 
-- 2026-09-08: Initial proposal, design only. The owner picks the
-  atomicity fork ((a) pipelined recommended, (b) atomic, (c) both,
-  (d) session, (e) decline); implementation follows the pick.
+- 2026-09-08: Initial proposal, design only.
+- 2026-09-08: the owner picked option (c); implemented as `SERVER-001`
+  v0.50.0 / FR-060, `SERVER-002` v0.11.0 (PR #229). The atomic flag is
+  precondition- and isolation-atomic; crash-atomicity across the batch is
+  the named storage follow-on, not built this round.

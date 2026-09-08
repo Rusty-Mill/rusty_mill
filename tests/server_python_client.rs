@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_21_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_22_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read

@@ -172,8 +172,8 @@ use super::framing::{self, FrameError};
 use super::protocol::{
     AggregateFn, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldDescriptor, FieldRef,
     JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor, Request, Response, ScanValue,
-    Selection, ValueKind, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -641,6 +641,35 @@ impl Drop for Session<'_> {
 /// fields, named not tagged — named purely to keep that variant's own
 /// shape readable, not a type a caller needs to spell out.
 pub type QueryRow = (RecordId, Vec<(String, ScanValue)>);
+
+/// One write in a [`SchemaDrivenClient::write_batch`] call (`WBT-FR-004`,
+/// ADR-0060) — the name-keyed analogue of the wire [`WriteOp`]: field
+/// names (and a `ReplaceIf` guard by field name) that the client
+/// resolves to tags before sending. Borrows its field slices so a caller
+/// building a batch pays no owned allocation per op.
+pub enum BatchOp<'a> {
+    Insert {
+        id: RecordId,
+        fields: &'a [(&'a str, ScanValue)],
+    },
+    Replace {
+        id: RecordId,
+        fields: &'a [(&'a str, ScanValue)],
+    },
+    ReplaceIf {
+        id: RecordId,
+        fields: &'a [(&'a str, ScanValue)],
+        guard: (&'a str, CompareOp, ScanValue),
+    },
+    Delete {
+        id: RecordId,
+    },
+    Link {
+        left: RecordId,
+        right: RecordId,
+        relation: &'a str,
+    },
+}
 
 /// One [`QueryResult::Groups`] row: one group's `GROUP BY` key values and
 /// computed aggregate values, named and ordered exactly as the original
@@ -1861,6 +1890,100 @@ impl SchemaDrivenClient {
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Count")),
         }
+    }
+
+    /// A batch of runtime writes in one request (`WBT-FR-004`, ADR-0060,
+    /// protocol 22): the five single-shot writes carried together, field
+    /// names resolved to tags here, answered one [`WriteResult`] per op
+    /// in order. `atomic` selects the guarantee: `false` pipelined (each
+    /// op stands on its own), `true` atomic (nothing applies unless every
+    /// op passes precondition validation, and the batch is isolated under
+    /// one write lock — not crash-atomic across the batch). An atomic
+    /// precondition failure is [`ClientError::TransactionFailed`], naming
+    /// the first failing op. [`ClientError::Unsupported`]`("write_batch")`
+    /// below 22, [`ClientError::Unsupported`]`("write_batch size")` over
+    /// `MAX_BATCH_OPS` ops, both with no frame; an unknown field name is
+    /// [`ClientError::UnknownField`].
+    pub fn write_batch(
+        &mut self,
+        ops: &[BatchOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, ClientError> {
+        if self.server_protocol_version() < 22 {
+            return Err(ClientError::Unsupported("write_batch"));
+        }
+        if ops.len() > super::protocol::MAX_BATCH_OPS {
+            return Err(ClientError::Unsupported("write_batch size"));
+        }
+        let mut wire = Vec::with_capacity(ops.len());
+        for op in ops {
+            wire.push(self.to_wire_op(op)?);
+        }
+        match self.roundtrip(Request::WriteBatch { ops: wire, atomic })? {
+            Response::BatchResults { results } => Ok(results),
+            Response::TransactionFailed {
+                index,
+                code,
+                message,
+            } => Err(ClientError::TransactionFailed {
+                index,
+                code,
+                message,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("BatchResults")),
+        }
+    }
+
+    /// Resolve one [`BatchOp`]'s field names (and a `ReplaceIf` guard) to
+    /// tags, building the wire [`WriteOp`].
+    fn to_wire_op(&self, op: &BatchOp) -> Result<WriteOp, ClientError> {
+        let tagged = |this: &Self,
+                      fields: &[(&str, ScanValue)]|
+         -> Result<Vec<(FieldRef, ScanValue)>, ClientError> {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.push((this.field(name)?.tag, value.clone()));
+            }
+            Ok(out)
+        };
+        Ok(match op {
+            BatchOp::Insert { id, fields } => WriteOp::Insert {
+                id: *id,
+                fields: tagged(self, fields)?,
+            },
+            BatchOp::Replace { id, fields } => WriteOp::Replace {
+                id: *id,
+                fields: tagged(self, fields)?,
+            },
+            BatchOp::ReplaceIf { id, fields, guard } => {
+                let (guard_field, gop, gvalue) = guard;
+                let descriptor = self.field(guard_field)?;
+                let orderable = matches!(descriptor.value_kind, ValueKind::U32 | ValueKind::I64);
+                if gop.is_ordering() && !orderable {
+                    return Err(ClientError::Unsupported("ordering guard"));
+                }
+                WriteOp::ReplaceIf {
+                    id: *id,
+                    fields: tagged(self, fields)?,
+                    guard: Predicate {
+                        field: descriptor.tag,
+                        op: *gop,
+                        value: gvalue.clone(),
+                    },
+                }
+            }
+            BatchOp::Delete { id } => WriteOp::Delete { id: *id },
+            BatchOp::Link {
+                left,
+                right,
+                relation,
+            } => WriteOp::Link {
+                left: *left,
+                right: *right,
+                relation: (*relation).to_string(),
+            },
+        })
     }
 
     /// Compact the selected table's files in place (`CMP-FR-007`,
