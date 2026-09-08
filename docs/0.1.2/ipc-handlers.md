@@ -12,7 +12,7 @@
 
 | Plugin | Handlers |
 |--------|---------:|
-| `com.nexus.storage` | 82 |
+| `com.nexus.storage` | 84 |
 | `com.nexus.git` | 45 |
 | `com.nexus.terminal` | 36 |
 | `com.nexus.ai` | 31 |
@@ -36,7 +36,7 @@
 | `com.nexus.audio` | 3 |
 | `com.nexus.formats` | 4 |
 | `com.nexus.linkpreview` | 1 |
-| **Total** | **396** |
+| **Total** | **398** |
 
 `.v<N>` aliases (per ADR 0021) are not listed separately — the matrix applier auto-mirrors a row's classification onto every alias.
 
@@ -44,7 +44,7 @@
 
 ---
 
-## com.nexus.storage (82)
+## com.nexus.storage (84)
 
 ### Read
 
@@ -67,6 +67,7 @@
 | `entity_get` / `entity_search` / `entity_relations` / `entity_find_duplicates` | — | entity graph |
 | `list_draft_relations` | — | low-confidence entity relations (Dream Cycle inbox) |
 | `note_find_duplicates` | — | exact (`content_hash`) + near (embedding cosine similarity) note duplicate detection |
+| `note_random` | — | uniform random indexed markdown note, minus `exclude`, optionally under `prefix` (RFC 0009) |
 | `vector_query` / `vectorstore_count` / `vector_stored_signature` | — | RAG vector store reads — `vector_stored_signature` (C19 #372) is the unchanged-file skip-check lookup |
 | `config_read` / `settings_read` | — | forge config + settings |
 | `canvas_read` / `canvas_nodes` / `canvas_edges` | — | canvas parse |
@@ -79,6 +80,7 @@ All write handlers are classified `unrestricted` in the matrix — the downstrea
 | Command | Caps | Note |
 |---------|------|------|
 | `write_file` / `write_vault_file` / `write_default_gitignore` / `note_append` | — | text writes |
+| `note_create_unique` | — | Zettelkasten `{id}{sep}{title}.md` note (chrono-formatted id, `-N` on collision), written through `write_file` (RFC 0009) |
 | `edit` | — | apply a hashline patch (content-hash-anchored edits), then write through `write_file` |
 | `create_file` / `create_dir` / `delete_file` / `delete_entry` / `rename_entry` | — | fs ops |
 | `toggle_task` | — | inline task checkbox toggle |

@@ -1,5 +1,6 @@
 //! Note + frontmatter handlers: `note_append`, `read_frontmatter`,
-//! `write_frontmatter`, `note_find_duplicates`.
+//! `write_frontmatter`, `note_find_duplicates`, `note_create_unique`,
+//! `note_random`.
 
 use std::path::Path;
 
@@ -8,9 +9,11 @@ use serde_json::Value;
 
 use crate::ipc::{
     NoteExactDuplicateGroup, NoteFindDuplicatesArgs, NoteFindDuplicatesResult,
-    NoteNearDuplicatePair, StorageNoteAppendArgs, StorageOk, StorageReadFrontmatterArgs,
-    StorageWriteFrontmatterArgs,
+    NoteNearDuplicatePair, StorageNoteAppendArgs, StorageNoteCreateUniqueArgs,
+    StorageNoteCreateUniqueResult, StorageNoteRandomArgs, StorageNoteRandomResult, StorageOk,
+    StorageReadFrontmatterArgs, StorageWriteFrontmatterArgs,
 };
+use crate::unique_note::{UniqueNoteOptions, DEFAULT_ID_FORMAT, DEFAULT_SEPARATOR};
 use crate::{FileFilter, StorageEngine};
 
 use super::shared::{exec_err, parse_args, to_value};
@@ -177,4 +180,39 @@ pub(crate) fn find_duplicates(engine: &StorageEngine, args: &Value) -> Result<Va
         &NoteFindDuplicatesResult { exact, near },
         "note_find_duplicates",
     )
+}
+
+/// RFC 0009 — `note_create_unique`. Zettelkasten-style note whose filename
+/// is a chrono-formatted timestamp id plus the sanitized title. Naming
+/// options default engine-side so a caller that sends only `title` gets
+/// the canonical `%Y%m%d%H%M%S {title}.md` shape.
+pub(crate) fn create_unique(engine: &StorageEngine, args: &Value) -> Result<Value, PluginError> {
+    let StorageNoteCreateUniqueArgs {
+        title,
+        id_format,
+        separator,
+        folder,
+    } = parse_args(args, "note_create_unique")?;
+    let options = UniqueNoteOptions {
+        id_format: id_format
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_ID_FORMAT.to_string()),
+        separator: separator.unwrap_or_else(|| DEFAULT_SEPARATOR.to_string()),
+        folder: folder.filter(|s| !s.trim().is_empty()),
+    };
+    let path = engine
+        .create_unique_note(&options, &title)
+        .map_err(|e| exec_err(format!("note_create_unique: {e}")))?;
+    to_value(&StorageNoteCreateUniqueResult { path }, "note_create_unique")
+}
+
+/// RFC 0009 — `note_random`. Uniform draw over indexed markdown files,
+/// minus `exclude`, optionally under `prefix`. `path: null` when the
+/// forge has nothing eligible.
+pub(crate) fn random(engine: &StorageEngine, args: &Value) -> Result<Value, PluginError> {
+    let StorageNoteRandomArgs { exclude, prefix } = parse_args(args, "note_random")?;
+    let path = engine
+        .random_note_path(exclude.as_deref(), prefix.as_deref())
+        .map_err(|e| exec_err(format!("note_random: {e}")))?;
+    to_value(&StorageNoteRandomResult { path }, "note_random")
 }

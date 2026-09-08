@@ -434,6 +434,20 @@ pub const HANDLER_NOTE_FIND_DUPLICATES: u32 = 81;
 /// API on every reindex.
 pub const HANDLER_VECTOR_STORED_SIGNATURE: u32 = 82;
 
+/// RFC 0009 — `note_create_unique`. Args:
+/// [`crate::ipc::StorageNoteCreateUniqueArgs`]. Returns
+/// [`crate::ipc::StorageNoteCreateUniqueResult`]. Creates a
+/// Zettelkasten-style `{id}{sep}{title}.md` note (id = chrono-formatted
+/// local time) via `write_file`, appending `-2`, `-3`, … on collision.
+/// Ported from `nexus_forge`'s unique-note plugin.
+pub const HANDLER_NOTE_CREATE_UNIQUE: u32 = 83;
+
+/// RFC 0009 — `note_random`. Args: [`crate::ipc::StorageNoteRandomArgs`].
+/// Returns [`crate::ipc::StorageNoteRandomResult`]. Uniform random draw
+/// over indexed markdown files, excluding the caller's active note.
+/// Read-only. Ported from `nexus_forge`'s random-note plugin.
+pub const HANDLER_NOTE_RANDOM: u32 = 84;
+
 /// BL-129 thin slice — `entity_decay_relations`. Args:
 /// [`crate::ipc::EntityDecayRelationsArgs`]. Returns
 /// [`crate::ipc::EntityDecayRelationsResult`]. Walks `entities/*.md`,
@@ -533,6 +547,8 @@ pub const IPC_HANDLERS: &[(&str, u32)] = &[
     ("obsidian_base_query", HANDLER_OBSIDIAN_BASE_QUERY),
     ("hybrid_search", HANDLER_HYBRID_SEARCH),
     ("note_find_duplicates", HANDLER_NOTE_FIND_DUPLICATES),
+    ("note_create_unique", HANDLER_NOTE_CREATE_UNIQUE),
+    ("note_random", HANDLER_NOTE_RANDOM),
     ("vector_stored_signature", HANDLER_VECTOR_STORED_SIGNATURE),
 ];
 
@@ -920,6 +936,8 @@ impl CorePlugin for StorageCorePlugin {
                 crate::handlers::notes::write_frontmatter(engine, &self.forge_root, args)
             }
             HANDLER_NOTE_FIND_DUPLICATES => crate::handlers::notes::find_duplicates(engine, args),
+            HANDLER_NOTE_CREATE_UNIQUE => crate::handlers::notes::create_unique(engine, args),
+            HANDLER_NOTE_RANDOM => crate::handlers::notes::random(engine, args),
             _ => Err(exec_err(format!("unknown handler id {handler_id}"))),
         }
     }

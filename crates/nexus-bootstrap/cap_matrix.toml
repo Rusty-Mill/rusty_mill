@@ -1393,6 +1393,16 @@ unrestricted = "read-only duplicate detection over indexed notes (C23 #376)"
 
 [[handler]]
 plugin = "com.nexus.storage"
+command = "note_create_unique"
+unrestricted = "creates a timestamp-id note via write_file — downstream fs.write gated (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
+command = "note_random"
+unrestricted = "read-only random pick over indexed markdown paths (RFC 0009)"
+
+[[handler]]
+plugin = "com.nexus.storage"
 command = "vector_stored_signature"
 unrestricted = "read-only lookup of a file's already-stored embedding content hash (C19 #372)"
 
