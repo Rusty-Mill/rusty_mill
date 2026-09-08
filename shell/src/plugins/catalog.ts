@@ -562,6 +562,13 @@ export const DEFAULT_OFF_PLUGINS: PluginEntry[] = [
     load: () => import('./nexus/fileProperties').then(m => m.filePropertiesPlugin),
   },
   {
+    id: 'nexus.propertiesView', name: 'Properties View',
+    version: '0.1.0', core: false, activationEvents: ['onStartup'],
+    dependsOn: ['com.nexus.storage', 'nexus.workspace'],
+    description: 'Virtualized table of every note\'s frontmatter with a key/value filter (RFC 0009).',
+    load: () => import('./nexus/propertiesView').then(m => m.propertiesViewPlugin),
+  },
+  {
     id: 'community.mermaid', name: 'Mermaid',
     version: '0.1.0', core: false, activationEvents: ['onStartup'],
     description: 'Renders ```mermaid``` code blocks as inline diagrams in read-mode previews.',

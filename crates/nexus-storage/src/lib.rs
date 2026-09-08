@@ -44,6 +44,7 @@ mod search_scope;
 mod tasks;
 mod trash;
 pub mod note_composer;
+pub mod properties;
 pub mod unique_note;
 pub mod vectorstore;
 mod watcher;

@@ -14,6 +14,7 @@
 [plugins]           # PluginSettings
 [git]               # GitSettings — adds (P2-06) poll_interval_secs + auto_commit_tick_secs overrides
 [dream_cycle]       # DreamCycleSettings
+[properties]        # PropertiesSettings — RFC 0009: type_overrides = { due = "date", … } layered over index-inferred frontmatter types
 
 [settings]          # BTreeMap<String, toml::Value> — flat key→value bag
 # any plugin can stash typed values here

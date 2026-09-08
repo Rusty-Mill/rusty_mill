@@ -1,17 +1,41 @@
+// shell/src/plugins/nexus/fileProperties/index.tsx
+//
+// RFC 0009 — File Properties panel: the active note's frontmatter as a
+// typed, editable form (ported from nexus_forge's properties-panel),
+// above the file metadata rows this view always showed.
+//
+// Reads through `com.nexus.storage::properties_get` (effective type per
+// key: app.toml override → index-inferred → value shape), writes through
+// `properties_set`, and lets the user declare a key's type with a
+// per-row picker backed by `properties_set_override`. Writes re-serialise
+// the YAML block Brain-side, so comments inside it are not preserved —
+// the banner says so.
+
 import { createRoot, type Root } from 'react-dom/client'
-import { createElement, useEffect, useState } from 'react'
+import { createElement, useCallback, useEffect, useState } from 'react'
 import type { Plugin, PluginAPI } from '../../../types/plugin'
 import { ViewBase, workspace, type Leaf } from '../../../workspace'
 import { useEditorStore } from '../editor/editorStore'
 import { getKernel } from '../files/kernelClient'
+import {
+  decodeRow,
+  inputToValue,
+  labelForType,
+  PROPERTY_TYPES,
+  valueToInput,
+  type PropertyRow,
+  type PropertyType,
+} from './propertyEditors'
 
 const VIEW_TYPE = 'file-properties'
 const COMMAND_FOCUS = 'nexus.fileProperties.focus'
 const STORAGE_PLUGIN_ID = 'com.nexus.storage'
+const TOPIC_FILE_MODIFIED = 'com.nexus.storage.file_modified'
 
-interface FrontmatterReply {
-  status?: unknown
-  fields?: unknown
+/** Kernel `file_modified` events poke every mounted panel to refetch. */
+const _versionListeners = new Set<() => void>()
+function bumpExternalVersion(): void {
+  for (const l of _versionListeners) l()
 }
 
 interface FileRecord {
@@ -20,29 +44,6 @@ interface FileRecord {
   size_bytes?: unknown
   created_at?: unknown
   modified_at?: unknown
-}
-
-interface FileProps {
-  status: string | null
-  title: string | null
-  tags: string | null
-  fields: Record<string, string>
-}
-
-function decodeFrontmatter(raw: unknown): FileProps {
-  const out: FileProps = { status: null, title: null, tags: null, fields: {} }
-  if (!raw || typeof raw !== 'object') return out
-  const r = raw as FrontmatterReply
-  if (typeof r.status === 'string') out.status = r.status
-  if (r.fields && typeof r.fields === 'object') {
-    for (const [k, v] of Object.entries(r.fields as Record<string, unknown>)) {
-      if (typeof v !== 'string') continue
-      if (k === 'title') out.title = v
-      else if (k === 'tags') out.tags = v
-      else out.fields[k] = v
-    }
-  }
-  return out
 }
 
 function basename(relpath: string): string {
@@ -65,21 +66,135 @@ function formatTimestamp(secs: number): string {
   }
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+const cellLabel: React.CSSProperties = {
+  padding: '4px 8px',
+  color: 'var(--text-muted)',
+  verticalAlign: 'top',
+  width: '40%',
+}
+const cellValue: React.CSSProperties = {
+  padding: '4px 8px',
+  color: 'var(--text-normal)',
+  wordBreak: 'break-word',
+}
+const inputStyle: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  font: 'inherit',
+  padding: '2px 4px',
+  background: 'var(--background-primary)',
+  color: 'var(--text-normal)',
+  border: '1px solid var(--background-modifier-border)',
+  borderRadius: 3,
+}
+const selectStyle: React.CSSProperties = { ...inputStyle, width: 'auto', padding: '1px 2px' }
+
+function MetaRow({ label, value }: { label: string; value: string }) {
   return (
     <tr>
-      <td
-        style={{
-          padding: '4px 8px',
-          color: 'var(--text-muted)',
-          verticalAlign: 'top',
-          width: '40%',
-        }}
-      >
-        {label}
+      <td style={cellLabel}>{label}</td>
+      <td style={cellValue}>{value || <span style={{ color: 'var(--text-faint)' }}>—</span>}</td>
+    </tr>
+  )
+}
+
+interface PropertyRowProps {
+  row: PropertyRow
+  onValue: (key: string, value: unknown, type: PropertyType) => void
+  onType: (key: string, type: PropertyType) => void
+  onRemove: (key: string) => void
+}
+
+function PropertyEditorRow({ row, onValue, onType, onRemove }: PropertyRowProps) {
+  const [draft, setDraft] = useState(() => valueToInput(row.property_type, row.value))
+  useEffect(() => {
+    setDraft(valueToInput(row.property_type, row.value))
+  }, [row.property_type, row.value])
+
+  const commit = () => {
+    const next = inputToValue(row.property_type, draft)
+    if (next === null) return
+    if (valueToInput(row.property_type, next) === valueToInput(row.property_type, row.value)) return
+    onValue(row.key, next, row.property_type)
+  }
+
+  let editor: React.ReactNode
+  switch (row.property_type) {
+    case 'boolean':
+      editor = (
+        <input
+          type="checkbox"
+          aria-label={row.key}
+          checked={row.value === true}
+          onChange={(e) => onValue(row.key, e.target.checked, 'boolean')}
+        />
+      )
+      break
+    case 'number':
+    case 'date':
+    case 'date_time':
+      editor = (
+        <input
+          style={inputStyle}
+          aria-label={row.key}
+          type={row.property_type === 'number' ? 'number' : row.property_type === 'date' ? 'date' : 'datetime-local'}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+          }}
+        />
+      )
+      break
+    default:
+      editor = (
+        <input
+          style={inputStyle}
+          aria-label={row.key}
+          type="text"
+          value={draft}
+          placeholder={row.property_type === 'list' || row.property_type === 'tags' ? 'a, b, c' : ''}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+          }}
+        />
+      )
+  }
+
+  return (
+    <tr>
+      <td style={cellLabel} title={labelForType(row.property_type)}>
+        {row.key}
       </td>
-      <td style={{ padding: '4px 8px', color: 'var(--text-normal)', wordBreak: 'break-word' }}>
-        {value || <span style={{ color: 'var(--text-faint)' }}>—</span>}
+      <td style={cellValue}>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <div style={{ flex: 1 }}>{editor}</div>
+          <select
+            style={selectStyle}
+            aria-label={`Type of ${row.key}`}
+            title="Declared type (saved to app.toml)"
+            value={row.property_type}
+            onChange={(e) => onType(row.key, e.target.value as PropertyType)}
+          >
+            {PROPERTY_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {labelForType(t)}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label={`Remove ${row.key}`}
+            title="Remove property"
+            onClick={() => onRemove(row.key)}
+            style={{ ...selectStyle, cursor: 'pointer' }}
+          >
+            ×
+          </button>
+        </div>
       </td>
     </tr>
   )
@@ -87,15 +202,26 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function FilePropertiesView() {
   const activeRelpath = useEditorStore((s) => s.activeRelpath)
-  const [props, setProps] = useState<FileProps | null>(null)
+  const [rows, setRows] = useState<PropertyRow[]>([])
   const [meta, setMeta] = useState<FileRecord | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [newKey, setNewKey] = useState('')
+  const [newValue, setNewValue] = useState('')
+  const [version, setVersion] = useState(0)
+
+  useEffect(() => {
+    const l = () => setVersion((v) => v + 1)
+    _versionListeners.add(l)
+    return () => {
+      _versionListeners.delete(l)
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
     if (!activeRelpath) {
-      setProps(null)
+      setRows([])
       setMeta(null)
       setError(null)
       setLoading(false)
@@ -109,21 +235,23 @@ function FilePropertiesView() {
     setLoading(true)
     setError(null)
     Promise.all([
-      kernel.invoke<unknown>(STORAGE_PLUGIN_ID, 'read_frontmatter', { path: activeRelpath }),
+      kernel.invoke<{ rows?: unknown }>(STORAGE_PLUGIN_ID, 'properties_get', { path: activeRelpath }),
       kernel.invoke<unknown>(STORAGE_PLUGIN_ID, 'query_files', {
         prefix: activeRelpath,
         include_deleted: false,
       }),
     ])
-      .then(([rawFm, rawFiles]) => {
+      .then(([props, rawFiles]) => {
         if (cancelled) return
-        setProps(decodeFrontmatter(rawFm))
-        if (Array.isArray(rawFiles)) {
-          const match = (rawFiles as FileRecord[]).find((r) => r.path === activeRelpath) ?? null
-          setMeta(match)
-        } else {
-          setMeta(null)
-        }
+        const decoded = Array.isArray(props?.rows)
+          ? props.rows.map(decodeRow).filter((r): r is PropertyRow => r !== null)
+          : []
+        setRows(decoded)
+        setMeta(
+          Array.isArray(rawFiles)
+            ? ((rawFiles as FileRecord[]).find((r) => r.path === activeRelpath) ?? null)
+            : null,
+        )
         setLoading(false)
       })
       .catch((err: unknown) => {
@@ -134,45 +262,139 @@ function FilePropertiesView() {
     return () => {
       cancelled = true
     }
-  }, [activeRelpath])
+  }, [activeRelpath, version])
+
+  const refresh = useCallback(() => setVersion((v) => v + 1), [])
+
+  const write = useCallback(
+    async (command: string, args: Record<string, unknown>) => {
+      const kernel = getKernel()
+      if (!kernel) return
+      try {
+        await kernel.invoke<unknown>(STORAGE_PLUGIN_ID, command, args)
+        refresh()
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [refresh],
+  )
+
+  const onValue = useCallback(
+    (key: string, value: unknown, type: PropertyType) =>
+      void write('properties_set', { path: activeRelpath, key, value, property_type: type }),
+    [activeRelpath, write],
+  )
+  const onType = useCallback(
+    (key: string, type: PropertyType) => void write('properties_set_override', { key, property_type: type }),
+    [write],
+  )
+  const onRemove = useCallback(
+    (key: string) => void write('properties_set', { path: activeRelpath, key, value: null }),
+    [activeRelpath, write],
+  )
+  const onAdd = () => {
+    const key = newKey.trim()
+    if (!key || !activeRelpath) return
+    const value = newValue.trim() === '' ? '' : newValue.trim()
+    void write('properties_set', { path: activeRelpath, key, value })
+    setNewKey('')
+    setNewValue('')
+  }
 
   if (!activeRelpath) {
-    return (
-      <div style={{ padding: 16, fontSize: 12, color: 'var(--text-faint)' }}>
-        No active note.
-      </div>
-    )
+    return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-faint)' }}>No active note.</div>
   }
-  if (loading) {
+  if (loading && rows.length === 0 && !meta) {
     return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-faint)' }}>Loading…</div>
   }
-  if (error) {
-    return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-error)' }}>{error}</div>
-  }
-  const p = props ?? { status: null, title: null, tags: null, fields: {} }
+  const isMarkdown = activeRelpath.toLowerCase().endsWith('.md')
   const fileType = typeof meta?.file_type === 'string' ? meta.file_type : ''
   const size = typeof meta?.size_bytes === 'number' ? formatBytes(meta.size_bytes) : ''
   const created = typeof meta?.created_at === 'number' ? formatTimestamp(meta.created_at) : ''
-  const modified =
-    typeof meta?.modified_at === 'number' ? formatTimestamp(meta.modified_at) : ''
+  const modified = typeof meta?.modified_at === 'number' ? formatTimestamp(meta.modified_at) : ''
+
   return (
     <div style={{ padding: 8, fontSize: 12 }}>
+      {error && (
+        <div style={{ padding: '4px 8px', marginBottom: 6, color: 'var(--text-error)' }}>{error}</div>
+      )}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <tbody>
-          <Row label="name" value={basename(activeRelpath)} />
-          <Row label="path" value={activeRelpath} />
-          <Row label="type" value={fileType} />
-          <Row label="size" value={size} />
-          <Row label="created" value={created} />
-          <Row label="modified" value={modified} />
-          {p.title !== null && <Row label="title" value={p.title} />}
-          {p.tags !== null && <Row label="tags" value={p.tags} />}
-          {p.status !== null && <Row label="status" value={p.status} />}
-          {Object.entries(p.fields).map(([k, v]) => (
-            <Row key={k} label={k} value={v} />
-          ))}
+          <MetaRow label="name" value={basename(activeRelpath)} />
+          <MetaRow label="path" value={activeRelpath} />
+          <MetaRow label="type" value={fileType} />
+          <MetaRow label="size" value={size} />
+          <MetaRow label="created" value={created} />
+          <MetaRow label="modified" value={modified} />
         </tbody>
       </table>
+      {isMarkdown && (
+        <>
+          <div
+            role="note"
+            style={{
+              margin: '8px 0 4px',
+              padding: '4px 8px',
+              color: 'var(--text-muted)',
+              borderTop: '1px solid var(--background-modifier-border)',
+            }}
+          >
+            Properties — editing rewrites the frontmatter block (YAML comments are not preserved).
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={2} style={{ ...cellValue, color: 'var(--text-faint)' }}>
+                    No frontmatter properties.
+                  </td>
+                </tr>
+              )}
+              {rows.map((row) => (
+                <PropertyEditorRow
+                  key={row.key}
+                  row={row}
+                  onValue={onValue}
+                  onType={onType}
+                  onRemove={onRemove}
+                />
+              ))}
+              <tr>
+                <td style={cellLabel}>
+                  <input
+                    style={inputStyle}
+                    aria-label="New property key"
+                    placeholder="new key"
+                    value={newKey}
+                    onChange={(e) => setNewKey(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') onAdd()
+                    }}
+                  />
+                </td>
+                <td style={cellValue}>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <input
+                      style={inputStyle}
+                      aria-label="New property value"
+                      placeholder="value"
+                      value={newValue}
+                      onChange={(e) => setNewValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') onAdd()
+                      }}
+                    />
+                    <button type="button" onClick={onAdd} style={{ ...selectStyle, cursor: 'pointer' }}>
+                      Add
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </>
+      )}
     </div>
   )
 }
@@ -217,6 +439,11 @@ export const filePropertiesPlugin: Plugin = {
     api.commands.register(COMMAND_FOCUS, async () => {
       const leaf = await workspace.ensureLeafOfType(VIEW_TYPE, 'right')
       workspace.revealLeaf(leaf)
+    })
+    // External edits (watcher) to the active note refresh the panel.
+    void api.kernel.on(TOPIC_FILE_MODIFIED, (_topic: string, payload: unknown) => {
+      const path = payload && typeof payload === 'object' ? (payload as { path?: unknown }).path : undefined
+      if (typeof path !== 'string' || path === useEditorStore.getState().activeRelpath) bumpExternalVersion()
     })
   },
 }

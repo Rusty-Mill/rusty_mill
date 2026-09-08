@@ -2673,3 +2673,176 @@ pub struct StorageNoteCreateFromTitleResult {
     /// Forge-relative path of the note that was created.
     pub path: String,
 }
+
+// ── RFC 0009 — typed frontmatter properties (ported from nexus_forge) ───────
+
+/// Reply for `com.nexus.storage::properties_schema` (handler `87`).
+/// Values are property type names: `text`, `number`, `date`,
+/// `date_time`, `boolean`, `list`, `link`, `tags`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesSchemaResult {
+    /// Key → type inferred from indexed frontmatter values.
+    pub inferred: std::collections::BTreeMap<String, String>,
+    /// Key → type declared in `.forge/app.toml` `[properties].type_overrides`.
+    /// Overrides win over inferred types.
+    pub overrides: std::collections::BTreeMap<String, String>,
+}
+
+/// Args for `com.nexus.storage::properties_set_override` (handler `88`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesSetOverrideArgs {
+    /// Frontmatter key.
+    pub key: String,
+    /// Type name to declare, or `null` to drop the override.
+    #[serde(default)]
+    pub property_type: Option<String>,
+}
+
+/// One typed property in `properties_get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertyRow {
+    /// Frontmatter key.
+    pub key: String,
+    /// Effective type name (override, else inferred, else the value's shape).
+    pub property_type: String,
+    /// JSON projection of the YAML value.
+    #[cfg_attr(feature = "ts-export", ts(type = "unknown"))]
+    pub value: serde_json::Value,
+}
+
+/// Reply for `com.nexus.storage::properties_get` (handler `89`; args are
+/// the shared `{ path }`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesGetResult {
+    /// Frontmatter keys in document order.
+    pub rows: Vec<StoragePropertyRow>,
+}
+
+/// Args for `com.nexus.storage::properties_set` (handler `90`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesSetArgs {
+    /// Forge-relative markdown path.
+    pub path: String,
+    /// Frontmatter key.
+    pub key: String,
+    /// New value, or `null` to remove the key.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-export", ts(type = "unknown"))]
+    pub value: Option<serde_json::Value>,
+    /// Type to coerce the value to. Default: the effective schema type,
+    /// else the value's own shape.
+    #[serde(default)]
+    pub property_type: Option<String>,
+}
+
+/// Args for `com.nexus.storage::properties_list` (handler `91`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesListArgs {
+    /// Only notes carrying this key.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// With `key`: only notes whose rendered value equals this string.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Page size; omitted means every row.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Rows to skip.
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
+/// One note in `properties_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesListRow {
+    /// Forge-relative path.
+    pub path: String,
+    /// `title` property when present, else the filename stem.
+    pub title: String,
+    /// Sparse key → JSON value; keys absent from this note are omitted.
+    #[cfg_attr(feature = "ts-export", ts(type = "Record<string, unknown>"))]
+    pub properties: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Reply for `com.nexus.storage::properties_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePropertiesListResult {
+    /// Every known key (inferred ∪ overrides), sorted — stable across pages.
+    pub columns: Vec<String>,
+    /// The requested window.
+    pub rows: Vec<StoragePropertiesListRow>,
+    /// Notes matching the filter before pagination.
+    pub total: u32,
+}

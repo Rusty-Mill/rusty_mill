@@ -53,7 +53,9 @@ use nexus_storage::ipc::{
     StorageNoteAppendArgs, StorageNoteAppendResult, StorageNoteCreateFromTitleArgs,
     StorageNoteCreateFromTitleResult, StorageNoteCreateUniqueArgs, StorageNoteCreateUniqueResult,
     StorageNoteMergeArgs, StorageNoteMergeResult, StorageNoteRandomArgs, StorageNoteRandomResult,
-    StorageOk, StoragePathArgs,
+    StorageOk, StoragePathArgs, StoragePropertiesGetResult, StoragePropertiesListArgs,
+    StoragePropertiesListResult, StoragePropertiesListRow, StoragePropertiesSchemaResult,
+    StoragePropertiesSetArgs, StoragePropertiesSetOverrideArgs, StoragePropertyRow,
     StorageQuerySymbolArgs, StorageQuerySymbolResult, StorageQueryTagsArgs, StorageReadFileArgs,
     StorageReadFileResult, StorageReadFrontmatterArgs, StorageReadLinesArgs,
     StorageReadLinesResult, StorageRelpathArgs, StorageRenameEntryArgs, StorageRenameEntryResult,
@@ -281,6 +283,17 @@ fn emit_all_schemas_impl() {
         "com_nexus_storage__note_create_from_title",
         "result",
     );
+    write_schema::<StoragePropertiesSchemaResult>("com_nexus_storage__properties_schema", "result");
+    write_schema::<StoragePropertiesSetOverrideArgs>(
+        "com_nexus_storage__properties_set_override",
+        "args",
+    );
+    write_schema::<StoragePropertyRow>("com_nexus_storage__properties_get", "row");
+    write_schema::<StoragePropertiesGetResult>("com_nexus_storage__properties_get", "result");
+    write_schema::<StoragePropertiesSetArgs>("com_nexus_storage__properties_set", "args");
+    write_schema::<StoragePropertiesListArgs>("com_nexus_storage__properties_list", "args");
+    write_schema::<StoragePropertiesListRow>("com_nexus_storage__properties_list", "row");
+    write_schema::<StoragePropertiesListResult>("com_nexus_storage__properties_list", "result");
     write_schema::<StorageNoteAppendResult>("com_nexus_storage__note_append", "result");
 
     // ── com.nexus.storage::list_dir ──────────────────────────────────────
