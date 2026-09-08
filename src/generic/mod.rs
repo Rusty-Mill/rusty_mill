@@ -121,6 +121,7 @@ pub(crate) mod record_blob;
 /// gated (`RMD-FR-001`, ADR-0036): unlike `order_customer`, this is not
 /// reference material validating the design, but real, deployable
 /// capability. See this module's own doc comment for the full account.
+pub mod relation;
 pub mod reminder;
 pub(crate) mod slot_file;
 pub mod store;

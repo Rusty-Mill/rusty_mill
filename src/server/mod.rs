@@ -177,6 +177,8 @@ pub mod protocol;
 /// `research` (`RMD-FR-006`, ADR-0036): unlike `order`/`employee`,
 /// `Reminder` is real, deployable capability, not reference material.
 #[cfg(feature = "server")]
+pub mod relation;
+#[cfg(feature = "server")]
 pub mod reminder;
 mod sql;
 

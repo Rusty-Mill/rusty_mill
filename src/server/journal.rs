@@ -169,6 +169,14 @@ impl CheckpointFlush for crate::generic::reminder::ReminderProductionStack {
     }
 }
 
+/// `REL-FR-004` — front-door like `Reminder` (`ADR-0058`):
+/// `RelationProductionStack` is `GenericMmapStore` directly.
+impl CheckpointFlush for crate::generic::relation::RelationProductionStack {
+    fn checkpoint_flush(&self) -> Result<(), DurabilityError> {
+        crate::generic::store::Flush::flush(self)
+    }
+}
+
 /// `MEM-FR-006` — front-door like `Reminder` (`ADR-0048`):
 /// `MemoryProductionStack` is `GenericMmapStore` directly.
 impl CheckpointFlush for crate::generic::memory::MemoryProductionStack {
