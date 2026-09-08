@@ -109,7 +109,7 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
 }
 
 #[test]
-fn the_python_reference_client_speaks_the_protocol_at_20_and_at_10() {
+fn the_python_reference_client_speaks_the_protocol_at_21_and_at_10() {
     let addr = start_server();
 
     // This build's version: four fields, the StrList, one of each read
@@ -173,6 +173,10 @@ fn the_python_reference_client_speaks_the_protocol_at_20_and_at_10() {
     assert_eq!(get("page_total"), "6");
     assert_eq!(get("page_sorted"), "yes");
     assert_eq!(get("page_disjoint"), "yes");
+    // `CNT-FR-004` (ADR-0057): the edge count from Python — the one
+    // runtime `mentored_by` edge, an unknown label `Malformed`.
+    assert_eq!(get("count_edges"), "1");
+    assert_eq!(get("count_edges_unknown"), "Malformed");
     // `TBL-FR-009` (ADR-0050): the table list and `Use` from Python.
     assert_eq!(get("tables"), "entity;entity");
     assert_eq!(get("use_self"), "entity");

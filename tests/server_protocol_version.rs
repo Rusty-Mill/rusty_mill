@@ -283,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 20);
+    assert_eq!(dog.server_protocol_version(), 21);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -1134,6 +1134,88 @@ fn page_is_malformed_below_version_20() {
     assert!(matches!(
         old.page("age", None, 10),
         Err(ClientError::Unsupported("page"))
+    ));
+}
+
+/// `CNT-FR-003` (ADR-0057), rule 3: `CountEdges` is protocol 21 — a
+/// connection negotiated at 20 (and a silent one) is answered `Malformed`
+/// with the connection left open; at 21 it is served, and an unknown
+/// label is `Malformed`. Rule 4: the Rust client refuses below 21 with no
+/// frame.
+#[test]
+fn count_edges_is_malformed_below_version_21() {
+    let addr = start_entity_server();
+    let count = Request::CountEdges {
+        relation: "relates_to".into(),
+    };
+    for hello in [Some(20u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        assert!(
+            matches!(
+                roundtrip(&mut reader, &mut writer, &count),
+                Response::Err {
+                    code: ErrorCode::Malformed,
+                    ..
+                }
+            ),
+            "{hello:?}"
+        );
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            Response::Schema(_)
+        ));
+    }
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert_eq!(
+        roundtrip(&mut reader, &mut writer, &count),
+        Response::Count { count: 0 },
+        "one entity, no edges"
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::CountEdges {
+                relation: "no_such_label".into()
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(matches!(
+        old.count_edges("littermate_of"),
+        Err(ClientError::Unsupported("count_edges"))
     ));
 }
 

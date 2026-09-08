@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 20
+PROTOCOL_VERSION = 21
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -512,11 +512,16 @@ class Page:
     limit: int
 
 
+@_variant(30, [("relation", "str")])
+class CountEdges:
+    relation: str
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
-    Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page,
+    Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -527,7 +532,7 @@ REQUEST_INTRODUCED_AT = {
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
-    ReplaceIf: 19, Page: 20,
+    ReplaceIf: 19, Page: 20, CountEdges: 21,
 }
 
 
@@ -666,9 +671,14 @@ class Compacted:
     edge_logs_folded: int
 
 
+@_variant(19, [("count", "u64")])
+class Count:
+    count: int
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
-    HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted,
+    HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
 ]
 
 

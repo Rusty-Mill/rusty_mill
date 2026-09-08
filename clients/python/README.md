@@ -27,6 +27,7 @@ with Client.connect("127.0.0.1", 7878) as c:
     c.compact()                        # protocol 18: fold the logs, drop retired slots; returns the counts reclaimed
     c.replace_if(uuid.UUID(int=1), [...], ("mention_count", CompareOp.Lt, 5))  # protocol 19: "replaced" / "refused" / "notfound"
     c.page("mention_count", None, 100)  # protocol 20: one ordered keyset page; pass the last row's (value, id) as `after` for the next
+    c.count_edges("relates_to")        # protocol 21: how many edges the table holds under a label, one round trip
 ```
 
 Verification, both in CI:

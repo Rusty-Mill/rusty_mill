@@ -75,6 +75,7 @@
 //! | 18 | `SERVER-001` v0.42.0 | + [`Request::Compact`] (27) and [`Response::Compacted`] (18) — `CMP-FR-006`, ADR-0052: reclaim in place what runtime writes left behind — the insert and edge logs folded into their blobs, the slot files rewritten without the slots deletion retired, the logs removed — under the table's write lock; answered with the counts reclaimed. An operator's request. `Unsupported` from a domain with no compaction (`Dog`, `Order`, `Employee`); `Storage` if a file could not be rewritten. Server-gated `Malformed` below 18 (rule 3), `Unauthorized` for `ReadOnly` (the seventh write), `SessionOpen` inside a session; never journaled or staged. No new `ErrorCode`. ADR-0052 |
 //! | 19 | `SERVER-001` v0.44.0 | + [`Request::ReplaceIf`] (28) and [`ErrorCode::GuardFailed`] (13) — `GRD-FR-005`, ADR-0054: [`Request::Replace`]'s exact body plus a `guard: Predicate` over the connection's table; the server reads the stored record, evaluates the guard against it, and replaces **only if it holds**, all under the table's write lock — the atomic compare-and-replace a last-writer-wins merge needs (`guard` = `updated_at < mine`). Answered `Ok` when replaced, `NotFound` when the id has no record (the guard never evaluated), `Err { GuardFailed }` when the guard did not hold (nothing written). The guard is validated as a `Query` predicate (`UnknownField`/`Malformed`, `SQL-FR-007`'s kind and comparator rules). `Unsupported` from a domain with no replace. Server-gated `Malformed` below 19 (rule 3), `Unauthorized` for `ReadOnly` (the eighth write), `SessionOpen` inside a session; never journaled or staged. `GuardFailed` only ever answers `ReplaceIf`, so no downgrade. ADR-0054 |
 //! | 20 | `SERVER-001` v0.45.0 | + [`Request::Page`] (29) — `PAG-FR-004`, ADR-0055: one ordered keyset page of the connection's table — every record sorted ascending by an orderable (`U32`/`I64`) field with the id as tie-break, starting strictly after an optional `(value, id)` cursor, at most `limit` rows — answered with the existing [`Response::Rows`] (every field of each record). The shape a sync puller needs (`updated_at`, then the last row's `(value, id)` as the next cursor) and the first request on this wire whose result has an order. Validated: `UnknownField` for an unknown `order_by`, `Malformed` for a non-orderable field, a cursor value of another kind, or a zero `limit`. A read, gated as `Query` (authentication only, never overlaid, never read-set-tracked); server-gated `Malformed` below 20 (rule 3). No new response, no new `ErrorCode`. ADR-0055 |
+//! | 21 | `SERVER-001` v0.47.0 | + [`Request::CountEdges`] (30) and [`Response::Count`] (19) — `CNT-FR-003`, ADR-0057: how many edges the connection's table holds under one relation label, each undirected edge counted once, a cross-table (foreign) label included — one read under the table's lock, in place of one `NeighborsByRelation` round trip per record. `Malformed` for a label the table has no relation under (`NeighborsByRelation`'s own rule); `Unsupported` from a domain with no labelled relations. A read, gated as `Query`; server-gated `Malformed` below 21 (rule 3). No new `ErrorCode`. ADR-0057 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -109,7 +110,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -845,6 +846,20 @@ pub enum Request {
         after: Option<(ScanValue, RecordId)>,
         limit: u64,
     },
+    /// Protocol 21 (`CNT-FR-003`, ADR-0057,
+    /// `docs/design/SERVER-COUNT-EDGES-DESIGN.md`): how many edges this
+    /// table holds under `relation` — each undirected edge once, a
+    /// cross-table label (`Memory`'s `mentions`) included, since every
+    /// edge is kept under both endpoints. One read under the table's
+    /// lock: the hub's `count_tables("memory_entities")` in one round
+    /// trip instead of one `NeighborsByRelation` per record. Answered
+    /// [`Response::Count`]; `Malformed` for a label the table has no
+    /// relation under (`NeighborsByRelation`'s own rule); `Unsupported`
+    /// from a domain with no labelled relations. A read, gated as
+    /// `Query`; `Malformed` below 21 (rule 3).
+    CountEdges {
+        relation: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -950,6 +965,12 @@ pub enum Response {
         /// Edge logs (one per relation label) that held entries, now folded.
         edge_logs_folded: u64,
     },
+    /// Protocol 21 (`CNT-FR-003`, ADR-0057). Answers
+    /// [`Request::CountEdges`]: how many edges the table holds under the
+    /// named relation, each undirected edge once.
+    Count {
+        count: u64,
+    },
 }
 
 #[cfg(test)]
@@ -988,6 +1009,7 @@ mod tests {
             "Compact" | "Compacted" => 18,
             "ReplaceIf" | "Err(GuardFailed)" => 19,
             "Page" => 20,
+            "CountEdges" | "Count" => 21,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1313,6 +1335,18 @@ mod tests {
         );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compact` at 27.
         assert_golden("Compact", &Request::Compact, &[0x1b, 0x00, 0x00, 0x00]);
+        // Protocol 21 (`CNT-FR-003`, ADR-0057): `CountEdges` at 30.
+        assert_golden(
+            "CountEdges",
+            &Request::CountEdges {
+                relation: "mentions".into(),
+            },
+            &bytes(&[
+                &[0x1e, 0x00, 0x00, 0x00],                         // CountEdges
+                &[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // len
+                b"mentions",
+            ]),
+        );
         // Protocol 20 (`PAG-FR-004`, ADR-0055): `Page` at 29 — field tag,
         // `Some((I64 2000, id))`, limit.
         assert_golden(
@@ -1715,6 +1749,15 @@ mod tests {
                 &[0x00],                   // target_table: None
             ]),
         );
+        // Protocol 21 (`CNT-FR-003`, ADR-0057): `Count` at 19.
+        assert_golden_eq(
+            "Count",
+            &Response::Count { count: 7 },
+            &bytes(&[
+                &[0x13, 0x00, 0x00, 0x00], // Count
+                &[0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            ]),
+        );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
         assert_golden_eq(
             "Compacted",
@@ -1781,8 +1824,8 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 20 is the one that added
-    /// `Request::Page` (19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// module docs' table — version 21 is the one that added
+    /// `Request::CountEdges`/`Response::Count` (20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1794,7 +1837,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 20);
+        assert_eq!(PROTOCOL_VERSION, 21);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

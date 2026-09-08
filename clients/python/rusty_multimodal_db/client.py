@@ -361,6 +361,17 @@ class Client:
             return [(rid, self._named(fields)) for rid, fields in reply.rows]
         raise ProtocolError(type(reply).__name__)
 
+    def count_edges(self, relation: str) -> int:
+        """How many edges the selected table holds under ``relation``
+        (CNT-FR-004, protocol 21): each undirected edge once, a cross-table
+        label included, one round trip. An unknown label is ``ServerError``
+        with ``ErrorCode.Malformed``; below 21, ``UnsupportedError`` with no
+        frame sent."""
+        reply = self._roundtrip(p.CountEdges(relation))
+        if isinstance(reply, p.Count):
+            return reply.count
+        raise ProtocolError(type(reply).__name__)
+
     def delete(self, record_id: uuid.UUID) -> bool:
         """Remove one record (DEL-FR-008, protocol 17): ``True`` when it is
         gone with every edge touching it, ``False`` when the id has no

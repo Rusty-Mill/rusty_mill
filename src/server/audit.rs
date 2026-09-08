@@ -93,6 +93,8 @@ pub enum RequestKind {
     ReplaceIf,
     /// Protocol 20, ADR-0055.
     Page,
+    /// Protocol 21, ADR-0057.
+    CountEdges,
 }
 
 impl RequestKind {
@@ -128,6 +130,7 @@ impl RequestKind {
             Request::Compact => RequestKind::Compact,
             Request::ReplaceIf { .. } => RequestKind::ReplaceIf,
             Request::Page { .. } => RequestKind::Page,
+            Request::CountEdges { .. } => RequestKind::CountEdges,
         }
     }
 }

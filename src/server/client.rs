@@ -1844,6 +1844,25 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// How many edges the selected table holds under `relation`
+    /// (`CNT-FR-004`, ADR-0057, protocol 21) — each undirected edge once,
+    /// a cross-table label included; one round trip. A label the table
+    /// has no relation under is the server's `Malformed`; a domain with no
+    /// labelled relations `Server(Unsupported, _)`.
+    /// [`ClientError::Unsupported`]`("count_edges")` below 21 (rule 4).
+    pub fn count_edges(&mut self, relation: &str) -> Result<u64, ClientError> {
+        if self.server_protocol_version() < 21 {
+            return Err(ClientError::Unsupported("count_edges"));
+        }
+        match self.roundtrip(Request::CountEdges {
+            relation: relation.to_string(),
+        })? {
+            Response::Count { count } => Ok(count),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Count")),
+        }
+    }
+
     /// Compact the selected table's files in place (`CMP-FR-007`,
     /// ADR-0052, protocol 18) and report what was reclaimed. Every other
     /// connection waits while it runs — an operator's call, not a

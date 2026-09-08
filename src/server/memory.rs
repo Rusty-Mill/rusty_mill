@@ -455,6 +455,15 @@ impl ConnectionStore for MemoryConnectionStore {
         }
     }
 
+    /// `CNT-FR-002` (ADR-0057): one read under the store's lock; an
+    /// unknown label is `Malformed`, as for `neighbors_by_relation`.
+    fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {
+        match self.store.count_edges::<Memory>(relation) {
+            Some(count) => Ok(count as u64),
+            None => Err(ErrorCode::Malformed),
+        }
+    }
+
     fn list_relation_kinds(&self) -> Vec<String> {
         self.store.relation_kinds::<Memory>()
     }
