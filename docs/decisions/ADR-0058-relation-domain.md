@@ -1,8 +1,11 @@
 # ADR-0058: The `Relation` domain — the hub's directed, open-label edges as a record table
 
-- Status: **Proposed** (2026-09-07). Proposed and implemented on one
-  branch, the `ADR-0046`–`ADR-0057` cadence; the owner's options are in
-  "Considered options" below.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): a record
+  table; (b) a directed edge layer with metadata, (c) directed edges
+  without metadata, and (d) decline declined. Recorded in "Acceptance
+  and implementation" below.) Proposed and implemented on one branch,
+  the `ADR-0046`–`ADR-0057` cadence.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-RELATION-DOMAIN-DESIGN.md` (the full
@@ -58,3 +61,7 @@ carry the sync columns. **(d) Decline.**
   `src/server/journal.rs`, `src/bin/memory_server.rs`; tests:
   `generic/relation` +1, `server/relation` +2, `server_memory_integration`
   +1 (the three-table server); every acceptance criterion 1–3 holds.
+  (PR #220.)
+- 2026-09-07: accepted as designed (option (a); (b)–(d) declined). No
+  change to the implementation. Every one of the hub spike's five gaps
+  is closed.
