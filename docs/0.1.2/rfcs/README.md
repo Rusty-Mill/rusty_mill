@@ -18,6 +18,7 @@ is a snapshot of intent at its `Created` date, not a maintained spec.
 | [0006](0006-subagent-workspace-isolation.md) | Phase 5.3 — subagent workspace isolation | Draft — design | Isolate a delegated subagent's edits (git worktree) and merge the delta back. Deeper in Nexus than omp (storage is forge-root-bound); options A/B/C, recommends process-level isolation, with option-agnostic worktree primitives shipping first. |
 | [0007](0007-subagent-process-isolation.md) | Phase 5.3 Step 2 — process-level subagent isolation (build) | Draft — design | Build design for RFC 0006 Option A: run a delegated subagent as a headless child `nexus` process on a git-worktree forge root (forced child-process by the layering rule + irreversible per-thread sandbox), then merge the worktree branch back. Phased PR 1 (spawn primitive) → 2 (worktree harness) → 3 (OS-sandbox) → 4 (polish). |
 | [0008](0008-agent-session-tree.md) | Phase 5.4 — agent session tree | Implemented (PRs 1–6) | Turn flat single-pass sessions into a resumable tree (resume / branch / rewind / checkpoint). Insight: all are one `fork(parent, k, message)` primitive; build = a seedable loop + parent linkage. Immutable fork-nodes (delta-stored), non-destructive rewind. Shipped: PR 1 (resumable loop) → 2 (resume) → 3 (branch/rewind) → 4 (CLI surface) → 5 (checkpoints) → 6 (shell tree UI). |
+| [0009](0009-four-repo-consolidation.md) | Four-repo consolidation (`Rustsidian`, `nexus_forge`, `rusty_nexus`) | Draft — assessment | **Consolidate onto `nexus`; harvest, don't merge.** The siblings are earlier (or one later spike) attempts at the same product; port four small verified gaps from `nexus_forge` (unique note, random note, note composer, typed properties) into existing crates/shell plugins, copy Rustsidian's research docs, archive all three repos. |
 
 ## Assessment series (0002–0004)
 
@@ -33,7 +34,8 @@ shell + terminal stack.
 `rusty_omp` is examined separately in RFC 0005 (it is a docs-only blueprint for
 the omp agentic loop, not a repo to incorporate). Repos still unassessed at time
 of writing: `remind_me` (its engine already landed as `com.nexus.memory` — see
-[`../memory.md`](../memory.md)).
+[`../memory.md`](../memory.md)). The three product-level siblings (`Rustsidian`,
+`nexus_forge`, `rusty_nexus`) are assessed together in RFC 0009.
 
 ## Conventions
 
