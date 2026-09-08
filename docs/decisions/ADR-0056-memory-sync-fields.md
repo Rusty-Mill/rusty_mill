@@ -1,10 +1,10 @@
 # ADR-0056: `deleted_at` and `node_id` on `Memory` — sentinels for null, a schema-tag bump for the layout
 
-- Status: **Proposed, design only** (2026-09-07). Not implemented: it
-  changes `Memory`'s on-disk record layout after `ADR-0053` made
-  directories durable, and the working agreement asks before a schema
-  or data migration. The owner picks from "Considered options" below;
-  the implementation round follows the pick.
+- Status: **Accepted** (2026-09-07 — the owner's pick, option (a): N1
+  sentinels plus L1 a schema-tag bump with a distinct failure and no
+  upgrade; (b), (c), and (d) declined. Proposed design-only in PR #216,
+  since it changes `Memory`'s on-disk layout after `ADR-0053`;
+  implemented on the following branch as `SERVER-001` v0.46.0 / FR-056.)
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-MEMORY-SYNC-FIELDS-DESIGN.md` (the full
@@ -22,7 +22,7 @@ The projection has no null, and its record layout is unversioned: a
 mis-decodes rather than failing. Durable directories exist since
 today.
 
-## Decision (proposed)
+## Decision
 
 Add `deleted_at_unix_ms: i64` and `node_id: String` to `Memory` with
 documented sentinels — `0` is live, `""` is unattributed — as wire
@@ -36,7 +36,7 @@ upgrade (design option L2) is the named follow-up, triggered by the
 first directory that cannot be re-pushed. The server attaches no
 meaning to `deleted_at`; `Delete` stays the hard delete.
 
-## Consequences (if accepted)
+## Consequences
 
 - Positive: `compact_tombstones`, `stats.tombstones`, and
   `count_by_origin_node` become real on the spike adapter with `Query`,
@@ -64,4 +64,15 @@ projection stays as it is and tombstones remain the consumer's.
 
 ## Acceptance and implementation
 
-- 2026-09-07: proposed, design only. Awaiting the owner's option.
+- 2026-09-07: proposed, design only (PR #216).
+- 2026-09-07: the owner picked option (a).
+- 2026-09-07: implemented as `SERVER-001` v0.46.0 / FR-056 —
+  `src/generic/memory.rs` (two fields, `SCHEMA_TAG` `memory::Memory@2`),
+  `src/server/memory.rs` (tags 11/12, `fields_of`, `memory_from_fields`
+  with `deleted_at_unix_ms >= 0`, `describe`, `READ_ONLY_FIELDS`),
+  `src/bin/memory_server.rs` (sample data), every test spelling out a
+  `Memory`; tests: `generic/memory` +1 (a twelve-field-layout blob
+  refused distinctly, nothing rewritten or recreated),
+  `server_memory_integration` +1 (sentinels, the purge set, per-node
+  counts, a negative stamp refused, a restart); no wire, client, or
+  fixture change, `PROTOCOL_VERSION` stays 20.

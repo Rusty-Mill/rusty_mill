@@ -47,11 +47,15 @@ pub const FIELD_MEMORY_TYPE: FieldRef = 7;
 pub const FIELD_STATUS: FieldRef = 8;
 pub const FIELD_SENSITIVE: FieldRef = 9;
 pub const FIELD_ACCESS_COUNT: FieldRef = 10;
+/// `SYN-FR-001` (ADR-0056): the soft-delete stamp; `0` is live.
+pub const FIELD_DELETED_AT: FieldRef = 11;
+/// `SYN-FR-001` (ADR-0056): the writing node; `""` is unattributed.
+pub const FIELD_NODE_ID: FieldRef = 12;
 
 /// Every field but `access_count`: refused by `UpdateField`
 /// (`MEM-FR-004`) — changed only whole, with every other field, through
 /// `replace_record` (`REP-FR-005`, ADR-0049).
-const READ_ONLY_FIELDS: [FieldRef; 10] = [
+const READ_ONLY_FIELDS: [FieldRef; 12] = [
     FIELD_CONTENT,
     FIELD_CATEGORY,
     FIELD_TAGS,
@@ -62,6 +66,8 @@ const READ_ONLY_FIELDS: [FieldRef; 10] = [
     FIELD_MEMORY_TYPE,
     FIELD_STATUS,
     FIELD_SENSITIVE,
+    FIELD_DELETED_AT,
+    FIELD_NODE_ID,
 ];
 
 /// `MEM-FR-003`: `access_count` is a counter — a negative value is
@@ -148,7 +154,7 @@ impl MemoryConnectionStore {
     }
 
     /// `INS-FR-006` (ADR-0046): the whole field list against this
-    /// domain's schema, before any write — all eleven tags exactly once
+    /// domain's schema, before any write — all thirteen tags exactly once
     /// with a value of its kind, `tags` as a `StrList`, `access_count`
     /// non-negative. `Malformed` for a missing, repeated, or wrong-kind
     /// field; `UnknownField` for a tag this domain doesn't have.
@@ -167,6 +173,8 @@ impl MemoryConnectionStore {
         let mut status = None;
         let mut sensitive = None;
         let mut access_count = None;
+        let mut deleted_at = None;
+        let mut node_id = None;
         for (tag, value) in fields {
             match (tag, value) {
                 (FIELD_CONTENT, ScanValue::Str(v)) if content.is_none() => content = Some(v),
@@ -192,7 +200,11 @@ impl MemoryConnectionStore {
                 {
                     access_count = Some(v)
                 }
-                (tag, _) if tag <= FIELD_ACCESS_COUNT => return Err(ErrorCode::Malformed),
+                (FIELD_DELETED_AT, ScanValue::I64(v)) if deleted_at.is_none() && v >= 0 => {
+                    deleted_at = Some(v)
+                }
+                (FIELD_NODE_ID, ScanValue::Str(v)) if node_id.is_none() => node_id = Some(v),
+                (tag, _) if tag <= FIELD_NODE_ID => return Err(ErrorCode::Malformed),
                 _ => return Err(ErrorCode::UnknownField),
             }
         }
@@ -208,6 +220,8 @@ impl MemoryConnectionStore {
             Some(status),
             Some(sensitive),
             Some(access_count),
+            Some(deleted_at_unix_ms),
+            Some(node_id),
         ) = (
             content,
             category,
@@ -220,6 +234,8 @@ impl MemoryConnectionStore {
             status,
             sensitive,
             access_count,
+            deleted_at,
+            node_id,
         )
         else {
             return Err(ErrorCode::Malformed);
@@ -237,6 +253,8 @@ impl MemoryConnectionStore {
             status,
             sensitive,
             access_count,
+            deleted_at_unix_ms,
+            node_id,
         })
     }
 
@@ -275,6 +293,8 @@ impl MemoryConnectionStore {
             (FIELD_STATUS, ScanValue::Str(memory.status)),
             (FIELD_SENSITIVE, ScanValue::Bool(memory.sensitive)),
             (FIELD_ACCESS_COUNT, ScanValue::I64(memory.access_count)),
+            (FIELD_DELETED_AT, ScanValue::I64(memory.deleted_at_unix_ms)),
+            (FIELD_NODE_ID, ScanValue::Str(memory.node_id)),
         ]
     }
 }
@@ -300,7 +320,7 @@ impl ConnectionStore for MemoryConnectionStore {
                 Ok(self.store.filter_eq::<Memory, CategoryField>(category))
             }
             (FIELD_CATEGORY, _) => Err(ErrorCode::Malformed),
-            (field, _) if field <= FIELD_ACCESS_COUNT => Err(ErrorCode::Unsupported),
+            (field, _) if field <= FIELD_NODE_ID => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
         }
     }
@@ -547,6 +567,8 @@ impl ConnectionStore for MemoryConnectionStore {
                         update: true,
                     },
                 },
+                field(FIELD_DELETED_AT, "deleted_at_unix_ms", ValueKind::I64),
+                field(FIELD_NODE_ID, "node_id", ValueKind::Str),
             ],
             relations: RelationCapabilities {
                 parent_children: false,
@@ -608,6 +630,8 @@ mod tests {
             status: "active".into(),
             sensitive,
             access_count: 0,
+            deleted_at_unix_ms: 0,
+            node_id: String::new(),
         }
     }
 
@@ -635,14 +659,14 @@ mod tests {
     fn get_returns_every_field_in_tag_order_and_describe_matches() {
         let adapter = sample_adapter();
         let fields = adapter.get(Uuid::from_u128(3)).unwrap();
-        assert_eq!(fields.len(), 11);
+        assert_eq!(fields.len(), 13);
         assert_eq!(
             fields[2],
             (FIELD_TAGS, ScanValue::StrList(vec!["t".into()]))
         );
         assert_eq!(fields[9], (FIELD_SENSITIVE, ScanValue::Bool(true)));
         let schema = adapter.describe();
-        assert_eq!(schema.fields.len(), 11);
+        assert_eq!(schema.fields.len(), 13);
         for (i, f) in schema.fields.iter().enumerate() {
             assert_eq!(f.tag as usize, i, "tags are dense and in order");
             assert_eq!(fields[i].0, f.tag);
@@ -721,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_record_takes_all_eleven_fields_and_refuses_every_malformed_list() {
+    fn insert_record_takes_all_thirteen_fields_and_refuses_every_malformed_list() {
         let adapter = sample_adapter();
         let id = Uuid::from_u128(4);
         assert_eq!(
@@ -746,7 +770,7 @@ mod tests {
             Err(ErrorCode::Malformed)
         );
         assert_eq!(
-            adapter.insert_record(Uuid::from_u128(5), full_fields(5)[..10].to_vec()),
+            adapter.insert_record(Uuid::from_u128(5), full_fields(5)[..12].to_vec()),
             Err(ErrorCode::Malformed)
         );
         let mut extra = full_fields(5);
@@ -851,7 +875,7 @@ mod tests {
             Err(ErrorCode::Malformed)
         );
         assert_eq!(
-            adapter.replace_record(id, full_fields(1)[..10].to_vec()),
+            adapter.replace_record(id, full_fields(1)[..12].to_vec()),
             Err(ErrorCode::Malformed)
         );
         assert_eq!(

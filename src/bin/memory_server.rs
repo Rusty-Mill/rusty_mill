@@ -85,6 +85,8 @@ fn sample_memories() -> Vec<Memory> {
         status: "active".into(),
         sensitive: false,
         access_count: 0,
+        deleted_at_unix_ms: 0,
+        node_id: String::new(),
     };
     vec![
         memory(1, "Prefers merge commits over squash", "preference"),
