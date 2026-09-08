@@ -318,6 +318,7 @@ pub(crate) fn save_sync(
                 resolve_within(forge_root, &relpath).map_err(|e| exec_err(format!("save: {e}")))?;
             atomic_write(&abs, &markdown)
                 .map_err(|e| exec_err(format!("save: write '{}': {e}", abs.display())))?;
+            mark_session_saved(sessions, &relpath, markdown.as_bytes());
         }
         SavePlan::Splice { sources } => {
             for (source_relpath, splices) in sources {
@@ -336,6 +337,17 @@ pub(crate) fn save_sync(
         apply_reflow_after_save(sessions, &relpath)?;
     }
     Ok(serde_json::json!({}))
+}
+
+/// RFC 0009 row 5 — the bytes just written are the session's new
+/// journal base; the pending journal record is redundant and dropped.
+/// Best-effort: a missing session (closed mid-save) is not an error.
+fn mark_session_saved(sessions: &SessionMap, relpath: &str, written: &[u8]) {
+    if let Ok(entry) = acquire_session_entry(sessions, relpath, "save") {
+        if let Ok(mut s) = entry.lock() {
+            s.mark_saved(written);
+        }
+    }
 }
 
 pub(crate) async fn save_async(
@@ -362,6 +374,7 @@ pub(crate) async fn save_async(
                 )
                 .await
                 .map_err(|e| exec_err(format!("save: storage.write_file: {e}")))?;
+                mark_session_saved(&sessions, &relpath, markdown.as_bytes());
             }
             SavePlan::Splice { sources } => {
                 for (source_relpath, splices) in sources {
@@ -397,6 +410,7 @@ pub(crate) async fn save_async(
                     .map_err(|e| exec_err(format!("save: {e}")))?;
                 atomic_write(&abs, &markdown)
                     .map_err(|e| exec_err(format!("save: write '{}': {e}", abs.display())))?;
+                mark_session_saved(&sessions, &relpath, markdown.as_bytes());
             }
             SavePlan::Splice { sources } => {
                 for (source_relpath, splices) in sources {

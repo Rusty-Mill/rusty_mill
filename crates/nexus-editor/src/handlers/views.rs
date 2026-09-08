@@ -363,6 +363,9 @@ pub(crate) async fn open_excerpts(
         relpath: synthetic_relpath.clone(),
         revision: 0,
         is_synthetic: true,
+        journal: None,
+        disk_hash: String::new(),
+        recovered: false,
     };
 
     let entry = insert_session_entry(&sessions, synthetic_relpath, session)?;

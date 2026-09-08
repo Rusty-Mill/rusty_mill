@@ -89,6 +89,7 @@ pub(crate) fn stamp_block(
                 .rekey(block_id, new_id)
                 .map_err(|e| exec_err(format!("stamp_block: rekey: {e}")))?;
             s.revision = s.revision.saturating_add(1);
+            s.journal_now();
             (new_id, true, s.revision)
         }
     };

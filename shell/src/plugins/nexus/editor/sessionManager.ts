@@ -154,7 +154,14 @@ export class SessionManager {
     // call. Separate calls would race React 18 batching: the second updater
     // would see pre-batch state where sessionRevision is still empty, causing
     // markSavedRevision to return early and leave savedRevision unset.
-    useEditorStore.getState().seedRevision(relpath, snapshot.revision)
+    if (snapshot.recoveredUnsavedEdits) {
+      // RFC 0009 row 5 — the kernel replayed its crash journal: the tab
+      // holds edits that are not on disk, so it opens dirty.
+      useEditorStore.getState().seedRecoveredRevision(relpath, snapshot.revision)
+      clientLogger.info(`[sessionManager] recovered unsaved edits for '${relpath}' from the crash journal`)
+    } else {
+      useEditorStore.getState().seedRevision(relpath, snapshot.revision)
+    }
     const entry: Entry = {
       count: 1,
       snapshot,

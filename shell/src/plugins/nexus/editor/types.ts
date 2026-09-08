@@ -274,6 +274,13 @@ export interface EditorSnapshot {
    * editor transaction wiring plan.
    */
   revision: number
+  /**
+   * RFC 0009 row 5 — `true` when this `open` restored unsaved edits
+   * from the kernel's crash journal instead of the bytes on disk. The
+   * tab must present as dirty from the first paint so Ctrl+S is offered.
+   * Mirrors `EditorSnapshot.recovered_unsaved_edits` in `core_plugin.rs`.
+   */
+  recoveredUnsavedEdits?: boolean
 }
 
 // ── Changed-event payload (mirrors `publish_changed` in core_plugin.rs) ──────
