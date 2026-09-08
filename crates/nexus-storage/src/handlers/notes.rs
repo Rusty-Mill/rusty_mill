@@ -205,7 +205,10 @@ pub(crate) fn create_unique(engine: &StorageEngine, args: &Value) -> Result<Valu
     let path = engine
         .create_unique_note(&options, &title)
         .map_err(|e| exec_err(format!("note_create_unique: {e}")))?;
-    to_value(&StorageNoteCreateUniqueResult { path }, "note_create_unique")
+    to_value(
+        &StorageNoteCreateUniqueResult { path },
+        "note_create_unique",
+    )
 }
 
 /// RFC 0009 — `note_random`. Uniform draw over indexed markdown files,
@@ -261,7 +264,10 @@ pub(crate) fn create_from_title(
             content.as_deref().unwrap_or(""),
         )
         .map_err(|e| exec_err(format!("note_create_from_title: {e}")))?;
-    to_value(&StorageNoteCreateFromTitleResult { path }, "note_create_from_title")
+    to_value(
+        &StorageNoteCreateFromTitleResult { path },
+        "note_create_from_title",
+    )
 }
 
 /// Map the wire `destination` string shared by `trash_entry` and
