@@ -98,7 +98,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, PemError> {
     }
 
     let cleaned: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if cleaned.is_empty() || cleaned.len() % 4 != 0 {
+    if cleaned.is_empty() || !cleaned.len().is_multiple_of(4) {
         return Err(PemError::InvalidBase64);
     }
     let pad = cleaned.iter().rev().take_while(|&&b| b == b'=').count();

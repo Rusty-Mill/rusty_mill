@@ -276,16 +276,35 @@ pub trait ConnectionStore: Send + Sync {
     /// every record sorted ascending by `order_by` with the id as the
     /// tie-break, strictly after `after`, at most `limit` rows. `dispatch`
     /// has already validated `order_by` as an orderable field, `after`'s
-    /// kind, and `limit` (`validate_page`). The default is
-    /// [`page_rows`] over [`Self::scan_all`] — `Query`'s own full-scan
-    /// posture — and an adapter with a cheaper order may override it.
+    /// kind, and `limit` (`validate_page`). The default keeps `Query`'s
+    /// full-scan posture but touches only sort keys until the page is
+    /// chosen: [`Self::page_keys`] for every record, [`page_ids`] to pick
+    /// the page, then [`Self::get`] for just those rows. An adapter with
+    /// a cheaper order may override it.
     fn page(
         &self,
         order_by: FieldRef,
         after: Option<(ScanValue, RecordId)>,
         limit: usize,
     ) -> Result<Vec<PageRow>, ErrorCode> {
-        Ok(page_rows(self.scan_all(), order_by, after, limit))
+        let winners = page_ids(self.page_keys(order_by), after, limit);
+        Ok(winners
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect())
+    }
+
+    /// The `(id, sort key)` of every record for a [`Self::page`] ordered
+    /// by `order_by` — the key is [`page_key`]'s. The default derives it
+    /// from [`Self::scan_all`], materializing every field of every
+    /// record; an adapter that can read one numeric field off its own
+    /// record type overrides this to skip that work (the consumer's
+    /// three tables do).
+    fn page_keys(&self, order_by: FieldRef) -> Vec<(RecordId, i128)> {
+        self.scan_all()
+            .into_iter()
+            .map(|(id, fields)| (id, page_key(&fields, order_by, id).0))
+            .collect()
     }
 
     /// `CNT-FR-002` (ADR-0057, protocol 21): how many edges this table
@@ -594,7 +613,7 @@ fn validate_page(
 /// without the field, or with one of another kind, sorts first — a
 /// state `validate_page` has already ruled out for every adapter whose
 /// `scan_all` describes its own schema.
-fn page_key(
+pub fn page_key(
     fields: &[(FieldRef, ScanValue)],
     order_by: FieldRef,
     id: RecordId,
@@ -602,40 +621,73 @@ fn page_key(
     let value = fields
         .iter()
         .find(|(field, _)| *field == order_by)
-        .and_then(|(_, value)| match value {
-            ScanValue::U32(v) => Some(i128::from(*v)),
-            ScanValue::I64(v) => Some(i128::from(*v)),
-            _ => None,
-        })
+        .and_then(|(_, value)| page_key_value(value))
         .unwrap_or(i128::MIN);
     (value, id)
 }
 
-/// `PAG-FR-002` (ADR-0055): one ordered keyset page over `rows` — sorted
-/// ascending by `(order_by value, id)`, every row whose key is strictly
-/// greater than `after`'s, the first `limit` of them. The one place the
-/// order is written, shared by every adapter's default
-/// [`ConnectionStore::page`].
+/// One `order_by` value as [`page_key`]'s `i128`: `U32` and `I64` share
+/// the order, any other kind has none.
+pub fn page_key_value(value: &ScanValue) -> Option<i128> {
+    match value {
+        ScanValue::U32(v) => Some(i128::from(*v)),
+        ScanValue::I64(v) => Some(i128::from(*v)),
+        _ => None,
+    }
+}
+
+/// `PAG-FR-002` (ADR-0055): the ids of one ordered keyset page over
+/// `keys` — ascending by `(key, id)`, every entry strictly greater than
+/// `after`'s key, the first `limit` of them. The one place the order is
+/// written, shared by [`page_rows`] and every adapter's default
+/// [`ConnectionStore::page`]. Selects the page in one pass over the keys
+/// (`select_nth_unstable` then a sort of the page) rather than sorting
+/// every key, so the cost past the scan is linear in the table.
+pub fn page_ids(
+    keys: Vec<(RecordId, i128)>,
+    after: Option<(ScanValue, RecordId)>,
+    limit: usize,
+) -> Vec<RecordId> {
+    let cursor = after.map(|(value, id)| (page_key_value(&value).unwrap_or(i128::MIN), id));
+    let mut keyed: Vec<(i128, RecordId)> = keys
+        .into_iter()
+        .map(|(id, key)| (key, id))
+        .filter(|key| match cursor {
+            None => true,
+            Some(cursor) => *key > cursor,
+        })
+        .collect();
+    if limit == 0 {
+        return Vec::new();
+    }
+    if limit < keyed.len() {
+        keyed.select_nth_unstable(limit);
+        keyed.truncate(limit);
+    }
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// `PAG-FR-002` (ADR-0055): one ordered keyset page over already
+/// materialized `rows` — [`page_ids`] over their keys, then those rows
+/// in that order. For an adapter (or test) that holds every row already;
+/// the trait default pages by key first and materializes only the page.
 pub fn page_rows(
     rows: Vec<PageRow>,
     order_by: FieldRef,
     after: Option<(ScanValue, RecordId)>,
     limit: usize,
 ) -> Vec<PageRow> {
-    let cursor = after.map(|(value, id)| page_key(&[(order_by, value)], order_by, id));
-    let mut keyed: Vec<_> = rows
-        .into_iter()
-        .map(|(id, fields)| (page_key(&fields, order_by, id), id, fields))
-        .filter(|(key, _, _)| match cursor {
-            None => true,
-            Some(cursor) => *key > cursor,
-        })
+    let keys = rows
+        .iter()
+        .map(|(id, fields)| (*id, page_key(fields, order_by, *id).0))
         .collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
-    keyed
+    let winners = page_ids(keys, after, limit);
+    let mut by_id: std::collections::HashMap<RecordId, Vec<(FieldRef, ScanValue)>> =
+        rows.into_iter().collect();
+    winners
         .into_iter()
-        .take(limit)
-        .map(|(_, id, fields)| (id, fields))
+        .filter_map(|id| by_id.remove(&id).map(|fields| (id, fields)))
         .collect()
 }
 
@@ -5040,6 +5092,33 @@ mod tests {
                 10
             )),
             vec![id(2), id(3)]
+        );
+    }
+
+    /// `page_ids` is the order's one home: the same cases as above on
+    /// bare keys, plus the boundaries the selection path adds — a limit
+    /// of zero, a limit past the end, and a limit that leaves exactly one
+    /// key out (the `select_nth_unstable` pivot itself).
+    #[test]
+    fn page_ids_selects_the_same_page_as_a_full_sort_at_every_limit() {
+        let id = RecordId::from_u128;
+        let keys = vec![(id(3), 20), (id(1), 10), (id(2), 20), (id(4), -5)];
+        let sorted = vec![id(4), id(1), id(2), id(3)];
+        for limit in 0..=5 {
+            assert_eq!(
+                page_ids(keys.clone(), None, limit),
+                sorted[..limit.min(4)].to_vec(),
+                "limit {limit}"
+            );
+        }
+        assert_eq!(
+            page_ids(keys.clone(), Some((ScanValue::I64(10), id(1))), 1),
+            vec![id(2)]
+        );
+        assert_eq!(
+            page_ids(keys, Some((ScanValue::Str("x".into()), id(1))), 10),
+            sorted,
+            "a cursor of no orderable kind sorts before everything"
         );
     }
 }

@@ -52,7 +52,7 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::{
-    predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
+    page_key, predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
     ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
@@ -237,6 +237,26 @@ impl ConnectionStore for EntityConnectionStore {
             .all_ids::<Entity>()
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect()
+    }
+
+    /// `PAG-FR-002` (ADR-0055): the sort key of every record read
+    /// straight off [`Entity`], so a page materializes only its own rows.
+    /// A field this arm list does not name falls back to the wire shape
+    /// — the same key [`page_key`] derives for the trait default.
+    fn page_keys(&self, order_by: FieldRef) -> Vec<(RecordId, i128)> {
+        self.store
+            .all_ids::<Entity>()
+            .into_iter()
+            .filter_map(|id| {
+                let record = self.store.get::<Entity>(id)?;
+                let key = match order_by {
+                    FIELD_MENTION_COUNT => Some(i128::from(record.mention_count)),
+                    _ => None,
+                };
+                let key = key.unwrap_or_else(|| page_key(&Self::fields_of(record), order_by, id).0);
+                Some((id, key))
+            })
             .collect()
     }
 
