@@ -52,3 +52,21 @@ jobs:
         run: cargo test --features client
       - name: cargo doc
         run: cargo doc --all-features --no-deps
+
+  # `Cargo.toml`'s `rust-version` is only a promise if something builds at it.
+  # This job builds every target with every feature on exactly that compiler,
+  # so a dependency bump that raises the real floor fails here — with the
+  # floor named — instead of on the next person whose toolchain is older than
+  # `stable`. Keep the version below equal to `rust-version` in `Cargo.toml`.
+  # `--all-features` pulls DuckDB's amalgamation, so the first run costs the
+  # same ~20 minutes the `check` job's comment describes; the cache is keyed on
+  # the rustc version, so this job warms its own.
+  msrv:
+    name: msrv (rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check on the declared rust-version
+        run: cargo check --all-features --all-targets
