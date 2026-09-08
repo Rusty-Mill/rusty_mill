@@ -38,7 +38,7 @@ fn memory(n: u128, content: &str, category: &str, sensitive: bool) -> Memory {
         content: content.into(),
         category: category.into(),
         tags: vec!["sample".into(), format!("n{n}")],
-        source: if n % 2 == 0 {
+        source: if n.is_multiple_of(2) {
             "import".into()
         } else {
             "manual".into()

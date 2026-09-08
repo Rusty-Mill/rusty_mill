@@ -40,8 +40,9 @@ server-side sequence — each named.
 - Positive: a puller walks a table in pages that are disjoint and
   complete under concurrent writes; "everything after *t*" is a cursor.
 - Positive: additive; no adapter changed; a pre-20 client unaffected.
-- Named, not hidden: the default materializes and sorts every record
-  per page — `Query`'s cost, acceptable at target scale, overridable.
+- Named, not hidden: the default scans every record per page —
+  `Query`'s cost, acceptable at target scale, overridable. (Since
+  v0.48.1 it materializes only the page: keys first, then the winners.)
 - Named, not hidden: ascending and numeric only.
 
 ## Considered options
@@ -64,3 +65,9 @@ optimization before the request exists. **(d) A server-side sequence**
 - 2026-09-07: accepted as designed (option (a); (b)–(e) declined). No
   change to the implementation. Next in the line: `deleted_at`/`node_id`
   in the `Memory` projection.
+- 2026-09-08: `SERVER-001` v0.48.1 — measured for the first time (100K
+  `Memory` records: 292 ms per page of 50), the default was changed to
+  select the page by key and materialize only its rows (100 ms); the
+  decision, the order, and the wire are unchanged. The remaining cost is
+  the per-record decode; an index is the open question, now with a
+  threshold (`RESULTS.md`).

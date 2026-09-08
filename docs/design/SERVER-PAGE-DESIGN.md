@@ -29,7 +29,7 @@ wire one ordered keyset page: every record sorted by an orderable field
 with the id as the tie-break, strictly after a `(value, id)` cursor, at
 most `limit` rows.
 
-Scope, exactly: `page_rows`, the one place the order is written
+Scope, exactly: `page_ids` (v0.48.1; `page_rows` before), the one place the order is written
 (`PAG-FR-002`); `ConnectionStore::page` defaulting to it over `scan_all`
 (`PAG-FR-002`); validation before any scan (`PAG-FR-003`);
 `Request::Page` at protocol 20 answered by the existing `Response::Rows`,
@@ -76,11 +76,14 @@ and `SERVER-002` v0.9.0 (`PAG-FR-006`).
 - `PAG-FR-001` **Shape.** `Request::Page { order_by: FieldRef, after:
   Option<(ScanValue, RecordId)>, limit: u64 }` (29), answered
   `Response::Rows` with every field of each record in tag order.
-- `PAG-FR-002` **The order.** `page_rows(rows, order_by, after, limit)`:
-  key each row by `(value as i128, id)`, keep keys strictly greater
-  than the cursor's, sort ascending, take `limit`.
-  `ConnectionStore::page` defaults to `page_rows(self.scan_all(), …)`;
-  `PageRow` names the row type.
+- `PAG-FR-002` **The order.** `page_ids(keys, after, limit)`: key each
+  record by `(value as i128, id)`, keep keys strictly greater than the
+  cursor's, take the `limit` smallest in ascending order;
+  `page_rows(rows, …)` applies it to rows already held.
+  `ConnectionStore::page` defaults (v0.48.1) to `page_keys(order_by)` —
+  `(id, key)` per record, from `scan_all` unless the adapter reads the
+  field off its record — then `page_ids`, then `get` for the page's
+  ids only; `PageRow` names the row type.
 - `PAG-FR-003` **Validation**, in `dispatch` before any scan:
   `UnknownField` for an `order_by` the schema lacks; `Malformed` for a
   field that is not `U32`/`I64`, a cursor value of another kind, or a
@@ -120,7 +123,7 @@ and `SERVER-002` v0.9.0 (`PAG-FR-006`).
 ## Proposed shape
 
 `src/server/protocol.rs` (the variant, the constant, the table row, one
-vector), `src/server/serve.rs` (`PageRow`, `page_rows`, `validate_page`,
+vector), `src/server/serve.rs` (`PageRow`, `page_rows`, `page_ids`, `page_keys`, `validate_page`,
 the trait method with its default, one `dispatch` arm, one gate),
 `src/server/audit.rs`, `src/server/client.rs`, `clients/python/**`. No
 adapter change: every domain is served by the default.
@@ -182,9 +185,13 @@ doc --all-features --no-deps` at the baseline.
 
 ## Open questions
 
-- **A cheaper `page` for `Memory`** — a second scannable slot for
-  `updated_at_unix_ms` (`MmapScanned`, `Employee`'s precedent) once a
-  page time is measured and found wanting.
+- **A cheaper `page` for `Memory`** — measured (v0.48.1, `RESULTS.md`):
+  after selecting by key, one page of 50 over 100K records costs
+  100 ms, all but ~20 ms of it one decode per record; SQLite's indexed
+  `ORDER BY … LIMIT` is 14 µs. A second scannable slot for
+  `updated_at_unix_ms` (`MmapScanned`, `Employee`'s precedent) removes
+  the decode; a sorted index removes the scan. Found wanting at about
+  100K rows; the owner's call which, and when.
 - **Descending order**, **`ORDER BY` in the SQL subset** — one appended
   field and one client-side round, if wanted.
 - **`deleted_at`/`node_id` in the projection**, **directed open-label
@@ -193,6 +200,11 @@ doc --all-features --no-deps` at the baseline.
 
 ## Change history
 
+- 2026-09-08: `SERVER-001` v0.48.1 — the default `page` selects by key
+  before materializing (`page_keys`/`page_ids`; `Memory`/`Entity`/
+  `Relation` read the key off the record). 292 → 100 ms per page of
+  50 at 100K records; the order and every test unchanged. `PAG-FR-002`
+  reworded to say so; no requirement changed.
 - 2026-09-07: Accepted as designed (option (a)), after PR #214. No
   content change.
 - 2026-09-07: Implemented as `SERVER-001` v0.45.0 / FR-055, `SERVER-002`
