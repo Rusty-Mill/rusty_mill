@@ -103,9 +103,14 @@ fn workspace_root() -> PathBuf {
     }
 }
 
-/// `shell/src-tauri/src` relative to the workspace root.
+/// `crates/nexus/shell/src-tauri/src` relative to the workspace root
+/// (nexus's Tauri shell lives under nexus's own subtree post the
+/// rusty_mill monorepo merge).
 fn shell_src_dir() -> PathBuf {
-    workspace_root().join("shell").join("src-tauri").join("src")
+    workspace_root()
+        .join("crates/nexus/shell")
+        .join("src-tauri")
+        .join("src")
 }
 
 #[test]

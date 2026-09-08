@@ -437,7 +437,7 @@ mod or_critical_tests {
     /// Non-timeout errors propagate with anyhow context — same shape
     /// as `or_lifecycle_skip`'s non-timeout arm, just without the bus
     /// event. Confirms `or_critical` doesn't accidentally swallow
-    /// programming bugs (DuplicatePlugin) either.
+    /// programming bugs (`DuplicatePlugin`) either.
     #[test]
     fn non_timeout_errors_still_propagate_for_critical_plugins() {
         let result: Result<nexus_plugins::PluginInfo, PluginError> = Err(

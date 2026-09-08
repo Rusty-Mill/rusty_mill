@@ -1,7 +1,7 @@
 //! #188 / R5 — registration-coverage invariant for the bootstrap path.
 //!
 //! Every workspace member must either:
-//!   * have a corresponding `crates/nexus-bootstrap/src/plugins/<name>.rs`
+//!   * have a corresponding `nexus-bootstrap/src/plugins/<name>.rs`
 //!     registrar file (i.e. it's registered as a CorePlugin by
 //!     `register_all`), **or**
 //!   * appear on [`EXEMPT_CRATES`] with a documented reason.
@@ -94,6 +94,14 @@ fn every_workspace_member_is_registered_or_exempt() {
     let workspace_root = workspace_root();
 
     // Workspace members from the root Cargo.toml `[workspace] members`.
+    // The root workspace now spans the whole `rusty_mill` monorepo (post
+    // subtree-merge), so this scopes to nexus's own subsystem —
+    // `crates/nexus/crates/*` — the same set nexus's own `[workspace]`
+    // covered before the merge. Sibling rusty_mill crates (`providers`,
+    // `sessionmgr-*`, `agentgateway-*`, etc.) have no bootstrap registrar
+    // and were never meant to: this test only asserts nexus-internal
+    // coverage.
+    const NEXUS_CRATES_PREFIX: &str = "crates/nexus/crates/";
     let cargo_toml = workspace_root.join("Cargo.toml");
     let text = std::fs::read_to_string(&cargo_toml)
         .unwrap_or_else(|e| panic!("read {}: {e}", cargo_toml.display()));
@@ -106,9 +114,10 @@ fn every_workspace_member_is_registered_or_exempt() {
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
+                .filter(|p| p.starts_with(NEXUS_CRATES_PREFIX))
                 .map(|p| {
-                    // members look like "crates/nexus-foo"; strip the
-                    // prefix to get the crate name.
+                    // members look like "crates/nexus/crates/nexus-foo";
+                    // strip the prefix to get the crate name.
                     p.rsplit('/').next().unwrap_or(p).to_string()
                 })
                 .collect()
@@ -119,12 +128,16 @@ fn every_workspace_member_is_registered_or_exempt() {
         "[workspace] members section is empty — root Cargo.toml parse changed shape?"
     );
 
-    // Registrar files in `crates/nexus-bootstrap/src/plugins/*.rs`.
+    // Registrar files in this crate's `src/plugins/*.rs` (this test
+    // lives in `nexus-bootstrap`, so `CARGO_MANIFEST_DIR` already
+    // points at the crate root regardless of where it's mounted in
+    // the workspace tree — resilient to subtree merges/moves that
+    // change `workspace_root`-relative paths).
     // Each file `foo.rs` registers the crate `nexus-foo` (or
     // `nexus-ai-runtime` for `ai_runtime.rs` — the underscore/hyphen
     // distinction is handled below). `mod.rs` is the orchestrator,
     // not a per-plugin registrar.
-    let registrars_dir = workspace_root.join("crates/nexus-bootstrap/src/plugins");
+    let registrars_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/plugins");
     let mut registered: HashSet<String> = HashSet::new();
     for entry in std::fs::read_dir(&registrars_dir)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", registrars_dir.display()))
@@ -156,7 +169,7 @@ fn every_workspace_member_is_registered_or_exempt() {
     assert!(
         missing.is_empty(),
         "the following workspace members are neither registered by bootstrap nor on EXEMPT_CRATES:\n  {}\n\
-         Either add `crates/nexus-bootstrap/src/plugins/<crate>.rs` wired into `register_all`, or \
+         Either add `nexus-bootstrap/src/plugins/<crate>.rs` wired into `register_all`, or \
          add an EXEMPT_CRATES row with a documented reason.",
         missing.join("\n  "),
     );

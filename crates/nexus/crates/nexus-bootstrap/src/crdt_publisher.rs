@@ -168,7 +168,7 @@ impl CrdtPublisher {
     }
 
     /// BL-007 helper: relpaths with a live session. Stable order is
-    /// not guaranteed (HashMap iteration). Used by the pull-landing
+    /// not guaranteed (`HashMap` iteration). Used by the pull-landing
     /// subscriber and by tests.
     #[must_use]
     pub fn open_relpaths(&self) -> Vec<String> {
@@ -719,6 +719,10 @@ fn content_from_op(op: &Operation) -> Option<String> {
 /// event arrives, asks the publisher to reload every open relpath.
 /// Exits when the publisher's last strong [`Arc`] drops (so the
 /// [`Weak`] no longer upgrades).
+// `weak` is genuinely consumed: it's moved into a `'static` thread closure
+// by the sole caller (`start_pull_landing_subscriber`), so a reference
+// can't be substituted here.
+#[allow(clippy::needless_pass_by_value)]
 fn run_pull_landing_subscriber(weak: Weak<Inner>, mut sub: nexus_kernel::EventSubscription) {
     loop {
         // Drop ref each iteration so the Arc count reflects only
@@ -1452,7 +1456,14 @@ mod tests {
         match join_result {
             Ok(Ok(())) => {}
             Ok(Err(_)) => panic!("subscriber thread panicked"),
-            Err(_) => panic!("watchdog thread panicked"),
+            Err(e) => {
+                let msg = e
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| e.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("<unknown panic payload>");
+                panic!("watchdog thread panicked: {msg}");
+            }
         }
     }
 

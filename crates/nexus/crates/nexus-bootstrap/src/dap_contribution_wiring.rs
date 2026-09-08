@@ -295,7 +295,7 @@ mod tests {
             adapter_type: None,
             file_types: vec![],
             disabled: false,
-            env: Default::default(),
+            env: std::collections::HashMap::default(),
             metadata: Some(json!({
                 "plugin_id": "community.rust",
                 "display_name": "Rust (codelldb)",

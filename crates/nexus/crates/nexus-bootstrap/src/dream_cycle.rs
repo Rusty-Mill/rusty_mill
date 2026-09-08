@@ -289,7 +289,7 @@ fn select_extract_candidates(
             Some((path.to_string(), modified_at))
         })
         .collect();
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.1));
     candidates.truncate(max_notes as usize);
     candidates.into_iter().map(|(path, _)| path).collect()
 }
@@ -333,7 +333,7 @@ async fn run_cycle(
             Ok(files_val) => {
                 let now = Utc::now().timestamp();
                 let candidates = select_extract_candidates(
-                    files_val.as_array().map(Vec::as_slice).unwrap_or(&[]),
+                    files_val.as_array().map_or(&[][..], Vec::as_slice),
                     now,
                     cfg.extract_lookback_hours,
                     cfg.extract_max_notes_per_cycle,

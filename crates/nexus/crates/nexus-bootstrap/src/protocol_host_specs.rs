@@ -210,7 +210,7 @@ pub fn mcp_contribution_to_spec(
         env: adapter.env,
         url: adapter.url,
         auth_header: None,
-        headers: Default::default(),
+        headers: std::collections::BTreeMap::default(),
         auth: None,
         disabled: adapter.disabled,
     };
@@ -247,7 +247,7 @@ pub fn acp_contribution_to_spec(
     contribution: ContributedAdapter<AcpProtocolHostReg>,
 ) -> (AcpAdapterSpec, String) {
     let ContributedAdapter { plugin_id, adapter } = contribution;
-    let metadata = build_acp_contribution_metadata(&plugin_id, &adapter);
+    let metadata = Some(build_acp_contribution_metadata(&plugin_id, &adapter));
     let spec = AcpAdapterSpec {
         name: adapter.id,
         command: adapter.command,
@@ -267,7 +267,7 @@ pub fn acp_contribution_to_spec(
 fn build_acp_contribution_metadata(
     plugin_id: &str,
     adapter: &AcpProtocolHostReg,
-) -> Option<serde_json::Value> {
+) -> serde_json::Value {
     // ACP carries `plugin_id` unconditionally — the agent picker needs
     // it to render "shipped by <plugin>" tooltips, and the shell-side
     // unregister flow uses it for affordance gating.
@@ -282,7 +282,7 @@ fn build_acp_contribution_metadata(
             serde_json::Value::String(name.clone()),
         );
     }
-    Some(serde_json::Value::Object(obj))
+    serde_json::Value::Object(obj)
 }
 
 /// Convert every ACP contribution in `set`. Preserves order.

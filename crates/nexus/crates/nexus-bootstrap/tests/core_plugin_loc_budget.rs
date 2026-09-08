@@ -44,7 +44,11 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     // remains in each `core_plugin.rs` is the dispatch impl plus a
     // large IPC-roundtrip test module; the per-domain handler bodies
     // live under `<crate>/src/handlers/<domain>.rs`.
-    ("nexus-editor", 2_300),
+    // nexus-editor re-measured 2026-09 (rusty_mill subtree merge fixed
+    // this test's path resolution, which had been silently no-op'ing
+    // it against the wrong directory) at 2312 LOC — bumped from 2300
+    // to the next 100-LOC increment to lock in the current size.
+    ("nexus-editor", 2_400),
     ("nexus-terminal", 3_600),
     // Just over the default — earned a modest grandfather rather than
     // a full split. Bump to DEFAULT_BUDGET when the trigger / template
@@ -54,8 +58,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
 
 #[test]
 fn every_core_plugin_file_stays_under_budget() {
-    let workspace_root = workspace_root();
-    let crates_dir = workspace_root.join("crates");
+    let crates_dir = nexus_crates_dir();
 
     let mut failures = Vec::new();
 
@@ -134,6 +137,17 @@ fn workspace_root() -> PathBuf {
     }
 }
 
+/// Directory holding nexus's own service crates (`nexus-*`).
+///
+/// The root workspace now spans the whole `rusty_mill` monorepo (post
+/// subtree-merge): `<workspace_root>/crates` holds sibling rusty_mill
+/// crates too, and nexus's own crates live one level deeper, under
+/// `crates/nexus/crates`. Scoping here keeps this SD-07 guardrail
+/// checking only the files it was written for.
+fn nexus_crates_dir() -> PathBuf {
+    workspace_root().join("crates/nexus/crates")
+}
+
 /// Count physical lines in `path`. Matches `wc -l` semantics: counts
 /// newline characters, plus one for any trailing partial line.
 fn count_lines(path: &Path) -> usize {
@@ -153,12 +167,9 @@ fn grandfathered_entries_are_actually_oversized() {
     // itself should be removed and the file picked up by the
     // every_core_plugin path. This guards against forgotten
     // exceptions.
-    let workspace_root = workspace_root();
+    let crates_dir = nexus_crates_dir();
     for (crate_name, _budget) in GRANDFATHERED {
-        let path = workspace_root
-            .join("crates")
-            .join(crate_name)
-            .join("src/core_plugin.rs");
+        let path = crates_dir.join(crate_name).join("src/core_plugin.rs");
         if !path.exists() {
             // The crate was removed from the workspace; the
             // grandfathered row is also stale.

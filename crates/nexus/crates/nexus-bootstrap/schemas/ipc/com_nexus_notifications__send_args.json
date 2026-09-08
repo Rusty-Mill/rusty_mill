@@ -85,7 +85,7 @@
       ]
     },
     "Severity": {
-      "description": "Severity associated with a [`crate::Notification`] dispatch.\n\nWire form is snake_case (`debug` / `info` / `warn` / `error`). The\nordering matters — the router filters out events below a source's\n`min_severity`, so the `PartialOrd` derive must reflect the\ndeclaration order (`Debug < Info < Warn < Error`).",
+      "description": "Severity associated with a [`crate::Notification`] dispatch.\n\nWire form is `snake_case` (`debug` / `info` / `warn` / `error`). The\nordering matters — the router filters out events below a source's\n`min_severity`, so the `PartialOrd` derive must reflect the\ndeclaration order (`Debug < Info < Warn < Error`).",
       "oneOf": [
         {
           "description": "Verbose lifecycle traces. Filtered by every source by default.",

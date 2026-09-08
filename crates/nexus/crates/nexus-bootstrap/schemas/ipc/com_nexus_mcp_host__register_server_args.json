@@ -31,7 +31,7 @@
       "default": {}
     },
     "name": {
-      "description": "Stable server identifier (the BTreeMap key used by the host).",
+      "description": "Stable server identifier (the `BTreeMap` key used by the host).",
       "type": "string"
     },
     "plugin_id": {

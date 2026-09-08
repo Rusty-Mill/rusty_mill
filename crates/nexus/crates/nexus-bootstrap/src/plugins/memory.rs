@@ -1,6 +1,6 @@
 //! Memory plugin registration.
 //!
-//! Wires `nexus-memory`'s `com.nexus.memory` CorePlugin into the boot path.
+//! Wires `nexus-memory`'s `com.nexus.memory` `CorePlugin` into the boot path.
 //! The engine persists to `<forge>/.forge/memory/memory.db` and is exposed over
 //! kernel IPC so the agent loop, shell, and MCP clients reach it through the one
 //! `ipc_call` path. Registered right after storage — it owns its own SQLite

@@ -82,7 +82,7 @@ pub struct CollabConfig {
     /// failures. `None` ⇒ [`ReconnectConfig::default`]'s `2.0`.
     #[serde(default)]
     pub backoff_factor: Option<f32>,
-    /// P2-06 — handshake budget for the initial CollabClient connect.
+    /// P2-06 — handshake budget for the initial `CollabClient` connect.
     /// `None` ⇒ [`nexus_collab::DEFAULT_HANDSHAKE_TIMEOUT`] (10 s).
     #[serde(default)]
     pub handshake_timeout_secs: Option<u64>,
@@ -166,14 +166,14 @@ pub fn start_if_enabled(forge_root: &Path, bus: Arc<EventBus>) -> Option<JoinHan
         return None;
     };
     let reconnect_cfg = ReconnectConfig {
-        initial_delay: cfg
-            .initial_delay_ms
-            .map(Duration::from_millis)
-            .unwrap_or_else(|| ReconnectConfig::default().initial_delay),
-        max_delay: cfg
-            .max_delay_ms
-            .map(Duration::from_millis)
-            .unwrap_or_else(|| ReconnectConfig::default().max_delay),
+        initial_delay: cfg.initial_delay_ms.map_or_else(
+            || ReconnectConfig::default().initial_delay,
+            Duration::from_millis,
+        ),
+        max_delay: cfg.max_delay_ms.map_or_else(
+            || ReconnectConfig::default().max_delay,
+            Duration::from_millis,
+        ),
         backoff_factor: cfg
             .backoff_factor
             .unwrap_or_else(|| ReconnectConfig::default().backoff_factor),

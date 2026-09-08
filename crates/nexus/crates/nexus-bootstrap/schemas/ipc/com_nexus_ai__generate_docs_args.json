@@ -19,7 +19,7 @@
       ]
     },
     "style": {
-      "description": "Doc-comment style hint (`\"rustdoc\"` / `\"jsdoc\"` / `\"godoc\"` /\n`\"docstring\"`). When `None` the handler picks a default per\nthe symbol's language (rustdoc for Rust, JSDoc for TS/JS,\ngodoc for Go, Python docstrings for Python).",
+      "description": "Doc-comment style hint (`\"rustdoc\"` / `\"jsdoc\"` / `\"godoc\"` /\n`\"docstring\"`). When `None` the handler picks a default per\nthe symbol's language (rustdoc for Rust, `JSDoc` for TS/JS,\ngodoc for Go, Python docstrings for Python).",
       "type": [
         "string",
         "null"

@@ -250,6 +250,7 @@ pub fn build_tui_runtime(forge_root: PathBuf) -> Result<Runtime> {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn build(
     forge_root: &std::path::Path,
     invoker_id: &'static str,
@@ -525,7 +526,7 @@ fn build(
     // AI-first-class capture: feed every bus event into the native memory store
     // (loop-guarded + secret-redacted by nexus_memory::event_to_memory). Detached
     // like the collab relay; best-effort, never fatal to boot.
-    let _ = memory_capture::start_capture(forge_root, Arc::clone(&event_bus));
+    let _ = memory_capture::start_capture(forge_root, &event_bus);
 
     let context = KernelPluginContext::new(
         invoker_id,
@@ -656,8 +657,8 @@ pub fn all_caps() -> CapabilitySet {
 ///
 /// Pre-#73 this was `Capability::ALL`; the audit's amplifier-plugin
 /// finding is that an LLM-generated plan or an attacker-influenced
-/// prompt could exercise NetHttp / ProcessSpawn / FsReadExternal /
-/// FsWriteExternal directly from the agent's context. Restricting to
+/// prompt could exercise `NetHttp` / `ProcessSpawn` / `FsReadExternal` /
+/// `FsWriteExternal` directly from the agent's context. Restricting to
 /// the directly-used set prevents silent escalation if new
 /// direct-cap code is added. `FsRead` and `FsWrite` are confined to
 /// the forge root by the kernel's `confine_path` (`context_impl.rs`),
@@ -699,7 +700,7 @@ pub fn agent_capabilities() -> CapabilitySet {
 
 /// Capabilities granted to the `com.nexus.workflow` `KernelPluginContext`
 /// at runtime wiring time (issue #73). Scoped to `IpcCall` only —
-/// every step type in the workflow executor (ipc/ipc_call, ai_prompt,
+/// every step type in the workflow executor (`ipc/ipc_call`, `ai_prompt`,
 /// digest reads/writes, …) routes through `ctx.ipc_call(…)` rather
 /// than calling kernel surfaces directly.
 ///
@@ -756,7 +757,7 @@ pub fn ai_runtime_capabilities() -> CapabilitySet {
 
 /// Capabilities granted to the `com.nexus.workflow` `KernelPluginContext`
 /// at runtime wiring time (issue #73). Scoped to `IpcCall` + `AiChat`
-/// only — every step type (ipc_call / ai_prompt / digest reads / …)
+/// only — every step type (`ipc_call` / `ai_prompt` / digest reads / …)
 /// routes through `ctx.ipc_call(...)`, gated by the target plugin's
 /// own capability checks.
 #[must_use]

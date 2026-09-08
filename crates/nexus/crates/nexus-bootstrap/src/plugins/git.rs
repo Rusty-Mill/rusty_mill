@@ -1,7 +1,7 @@
 //! Git plugin registration.
 //!
 //! Wraps `GitWorker` behind IPC and publishes bus events
-//! (branch_changed, commit, dirty_changed) for any plugin or UI that
+//! (`branch_changed`, commit, `dirty_changed`) for any plugin or UI that
 //! subscribes to `com.nexus.git.*`.
 
 use std::sync::Arc;

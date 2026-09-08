@@ -107,7 +107,7 @@ fn load_config(forge_root: &Path) -> MemoryConfig {
 /// within a tokio runtime (the bootstrap `build` path is, same as collab's
 /// relay).
 #[must_use]
-pub fn start_capture(forge_root: &Path, bus: Arc<EventBus>) -> Option<JoinHandle<()>> {
+pub fn start_capture(forge_root: &Path, bus: &Arc<EventBus>) -> Option<JoinHandle<()>> {
     let cfg = load_config(forge_root);
     if !cfg.capture_enabled {
         tracing::debug!("memory capture: disabled via [memory].capture_enabled = false");
@@ -116,12 +116,9 @@ pub fn start_capture(forge_root: &Path, bus: Arc<EventBus>) -> Option<JoinHandle
     // Best-effort: capture only runs inside a tokio runtime (the CLI/TUI/shell
     // boot path). Synchronous callers without a runtime (some tests, `forge init`)
     // would otherwise panic inside `tokio::spawn` — skip cleanly instead.
-    let rt = match tokio::runtime::Handle::try_current() {
-        Ok(rt) => rt,
-        Err(_) => {
-            tracing::debug!("memory capture: no tokio runtime; capture disabled");
-            return None;
-        }
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!("memory capture: no tokio runtime; capture disabled");
+        return None;
     };
     let dir = forge_root.join(".forge").join("memory");
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -181,7 +178,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let forge = dir.path();
         let bus = Arc::new(EventBus::new(64));
-        let handle = start_capture(forge, Arc::clone(&bus)).expect("capture should start");
+        let handle = start_capture(forge, &bus).expect("capture should start");
 
         // Published FIFO: the memory-namespace event must be dropped (loop guard),
         // the terminal event must be captured. Publishing the dropped one first
@@ -296,7 +293,7 @@ event_retention_max_rows = 500
         )
         .unwrap();
         let bus = Arc::new(EventBus::new(8));
-        assert!(start_capture(dir.path(), bus).is_none());
+        assert!(start_capture(dir.path(), &bus).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -310,7 +307,7 @@ event_retention_max_rows = 500
         )
         .unwrap();
         let bus = Arc::new(EventBus::new(64));
-        let handle = start_capture(forge, Arc::clone(&bus)).expect("capture should start");
+        let handle = start_capture(forge, &bus).expect("capture should start");
 
         // Excluded plugin's event must never land; a non-excluded plugin's
         // event published right after it proves the pump kept running (a
@@ -367,7 +364,7 @@ event_retention_max_rows = 500
         )
         .unwrap();
         let bus = Arc::new(EventBus::new(64));
-        let handle = start_capture(forge, Arc::clone(&bus)).expect("capture should start");
+        let handle = start_capture(forge, &bus).expect("capture should start");
 
         for i in 0..5 {
             bus.publish_core(

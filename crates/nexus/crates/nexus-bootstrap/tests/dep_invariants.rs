@@ -88,7 +88,7 @@ fn ipc_consumers_do_not_direct_dep_on_forbidden_subsystems() {
     let mut violations = Vec::new();
     for (crate_name, forbidden_dep) in FORBIDDEN {
         let manifest = workspace_root
-            .join("crates")
+            .join("crates/nexus/crates")
             .join(crate_name)
             .join("Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| {
@@ -198,7 +198,7 @@ fn ipc_proxies_only_link_allowed_in_tree_crates() {
     let mut violations = Vec::new();
     for (crate_name, allowed) in IPC_PROXY_ALLOWLIST {
         let manifest = workspace_root
-            .join("crates")
+            .join("crates/nexus/crates")
             .join(crate_name)
             .join("Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| {
