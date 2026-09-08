@@ -101,6 +101,16 @@ pub struct Memory {
     /// The consumer's retrieval counter — the durably-mutable
     /// `ScannableField` (`MEM-FR-003`).
     pub access_count: i64,
+    /// The consumer's soft-delete stamp (`SYN-FR-001`, ADR-0056): Unix
+    /// milliseconds, or **`0` for a live record** — the documented
+    /// sentinel for the consumer's `NULL`, lossless because the epoch is
+    /// never a deletion time. Data, not a rule: the server hides nothing
+    /// and `Delete` stays the hard delete. Validated non-negative.
+    pub deleted_at_unix_ms: i64,
+    /// The consumer's writing node (`SYN-FR-001`): a node's name, or
+    /// **`""` for an unattributed record** — the sentinel for `NULL`,
+    /// lossless because a node has a name.
+    pub node_id: String,
 }
 
 impl Record for Memory {
@@ -111,9 +121,15 @@ impl Record for Memory {
 }
 
 // Part of the on-disk format (the blob and log headers) — see `Order`/
-// `Reminder`'s own impls for the same caveat.
+// `Reminder`'s own impls for the same caveat. `@2` since `ADR-0056`
+// (`SYN-FR-002`): the layout gained two fields, and a blob or log written
+// at the twelve-field layout must fail distinctly (`RecordBlobUnreadable`
+// on the schema tag) rather than mis-decode — `bincode` writes no field
+// markers. There is no upgrade; the remedy is a re-push from the
+// consumer, and the day a directory cannot be re-pushed is the trigger
+// for a layout version with an in-place upgrade (the design's option L2).
 impl SchemaTag for Memory {
-    const SCHEMA_TAG: &'static str = "memory::Memory";
+    const SCHEMA_TAG: &'static str = "memory::Memory@2";
 }
 
 /// `MEM-FR-002`: the equality-filterable field.
@@ -243,6 +259,8 @@ mod tests {
             status: "active".into(),
             sensitive,
             access_count: 0,
+            deleted_at_unix_ms: 0,
+            node_id: String::new(),
         }
     }
 
@@ -516,5 +534,40 @@ mod tests {
         let store = open_or_create_memory_production_stack(&path).unwrap();
         assert_eq!(store.all_ids(), vec![Uuid::from_u128(1)]);
         assert!(GetById::<Memory>::get(&store, Uuid::from_u128(2)).is_none());
+    }
+
+    /// `SYN-FR-002` (ADR-0056): a directory written at the twelve-field
+    /// layout — modelled by a blob carrying the pre-`@2` schema tag — is
+    /// refused distinctly on the portable reopen, naming the record blob;
+    /// nothing is rewritten and nothing is recreated.
+    #[test]
+    fn a_twelve_field_layout_directory_is_refused_distinctly_not_misread() {
+        use crate::durability::DurabilityError;
+        use crate::generic::record_blob::{blob_path, tag_hash, TAG_OFFSET};
+        let dir = fresh_temp_dir("generic_memory_old_layout").unwrap();
+        let path = dir.join("memories.mmap");
+        drop(create_memory_production_stack(vec![memory(1, "fact", false)], &[], &path).unwrap());
+        // Stamp the blob's header with the old tag, exactly as a
+        // pre-ADR-0056 build would have written it.
+        let blob = blob_path(&path);
+        let mut bytes = std::fs::read(&blob).unwrap();
+        bytes[TAG_OFFSET..TAG_OFFSET + 8]
+            .copy_from_slice(&tag_hash("memory::Memory").to_le_bytes());
+        std::fs::write(&blob, &bytes).unwrap();
+        let before = std::fs::read(&blob).unwrap();
+
+        match open_memory_production_stack_portable(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { path: named, .. }) => {
+                assert_eq!(named, blob, "the record blob is named");
+            }
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("a twelve-field blob must not open"),
+        }
+        match open_or_create_memory_production_stack(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { .. }) => {}
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("open_or_create must not recreate"),
+        }
+        assert_eq!(std::fs::read(&blob).unwrap(), before, "nothing rewritten");
     }
 }

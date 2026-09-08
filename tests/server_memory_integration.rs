@@ -48,6 +48,8 @@ fn memory(n: u128, content: &str, category: &str, sensitive: bool) -> Memory {
         status: "active".into(),
         sensitive,
         access_count: 0,
+        deleted_at_unix_ms: 0,
+        node_id: String::new(),
     }
 }
 
@@ -122,7 +124,9 @@ fn get_list_filters_and_group_by_category_match_the_consumers_shapes() {
             "memory_type",
             "status",
             "sensitive",
-            "access_count"
+            "access_count",
+            "deleted_at_unix_ms",
+            "node_id"
         ]
     );
     let fields = client.get(Uuid::from_u128(3)).unwrap().unwrap();
@@ -206,6 +210,8 @@ fn insert_a_memory_bump_its_access_count_and_a_restart_serves_it() {
                 ("status", ScanValue::Str("active".into())),
                 ("sensitive", ScanValue::Bool(false)),
                 ("access_count", ScanValue::I64(0)),
+                ("deleted_at_unix_ms", ScanValue::I64(0)),
+                ("node_id", ScanValue::Str(String::new())),
             ],
         )
         .unwrap();
@@ -332,6 +338,8 @@ fn replace_a_memory_over_the_wire_every_read_sees_it_and_a_restart_serves_it() {
         ("status", ScanValue::Str("active".into())),
         ("sensitive", ScanValue::Bool(true)),
         ("access_count", ScanValue::I64(4)),
+        ("deleted_at_unix_ms", ScanValue::I64(0)),
+        ("node_id", ScanValue::Str(String::new())),
     ];
     assert!(client.replace(id, &edited).unwrap());
     let got = client.get(id).unwrap().unwrap();
@@ -376,7 +384,7 @@ fn replace_a_memory_over_the_wire_every_read_sees_it_and_a_restart_serves_it() {
         Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
         other => panic!("expected Malformed, got {other:?}"),
     }
-    match client.replace(id, &edited[..10]) {
+    match client.replace(id, &edited[..12]) {
         Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
         other => panic!("expected Malformed, got {other:?}"),
     }
@@ -459,6 +467,8 @@ fn a_guarded_replace_is_last_writer_wins_over_the_wire_and_survives_a_restart() 
             ("status", ScanValue::Str("active".into())),
             ("sensitive", ScanValue::Bool(false)),
             ("access_count", ScanValue::I64(0)),
+            ("deleted_at_unix_ms", ScanValue::I64(0)),
+            ("node_id", ScanValue::Str("node-b".into())),
         ]
     };
     let lww = |mine: i64| ("updated_at_unix_ms", CompareOp::Lt, ScanValue::I64(mine));
@@ -585,7 +595,7 @@ fn ordered_keyset_pages_by_updated_at_walk_the_table_over_the_wire() {
 
     let first = client.page("updated_at_unix_ms", None, 2).unwrap();
     assert_eq!(ids(&first), vec![id(1), id(2)]);
-    assert_eq!(first[0].1.len(), 11, "every field of each record");
+    assert_eq!(first[0].1.len(), 13, "every field of each record");
     let (last_id, last_fields) = &first[1];
     let cursor = (last_fields[6].1.clone(), *last_id);
     assert_eq!(cursor, (ScanValue::I64(2_000), id(2)));
@@ -802,7 +812,7 @@ fn two_tables_on_one_connection_join_across_use_and_link_and_survive_a_restart()
     assert_eq!(places.len(), 1);
     client.use_table("memory").unwrap();
     assert_eq!(client.table(), Some("memory"));
-    assert_eq!(client.schema().fields.len(), 11);
+    assert_eq!(client.schema().fields.len(), 13);
     match client.use_table("customer") {
         Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
         other => panic!("expected Malformed, got {other:?}"),
@@ -926,6 +936,8 @@ fn delete_a_memory_and_an_entity_across_tables_and_a_restart_serves_it() {
                 ("status", ScanValue::Str("active".into())),
                 ("sensitive", ScanValue::Bool(false)),
                 ("access_count", ScanValue::I64(0)),
+                ("deleted_at_unix_ms", ScanValue::I64(0)),
+                ("node_id", ScanValue::Str(String::new())),
             ],
         )
         .unwrap();
@@ -1018,4 +1030,110 @@ fn compact_each_table_over_the_wire_and_a_restart_serves_the_same_data() {
         client.neighbors_by_relation(m3, "mentions").unwrap(),
         vec![london]
     );
+}
+
+/// `SYN-FR-001`/`003` (ADR-0056), over a real socket: the two sync fields
+/// with their sentinels — a live record inserts with `0`/`""`; a replace
+/// stamps a deletion and a node; `Page` by `deleted_at_unix_ms` lists the
+/// live rows first; `Query` finds the purge set; `GROUP BY node_id` counts
+/// per node with `""` its own group; a negative stamp is `Malformed`; both
+/// survive a restart.
+#[test]
+fn sync_fields_carry_sentinels_and_serve_the_purge_set_over_the_wire() {
+    let dir = unique_dir("memory_sync_fields");
+    let addr = start_server_at(dir.clone());
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let id = Uuid::from_u128;
+    let fields = client.get(id(1)).unwrap().unwrap();
+    assert_eq!(fields.len(), 13);
+    assert_eq!(
+        fields[11],
+        ("deleted_at_unix_ms".to_string(), ScanValue::I64(0))
+    );
+    assert_eq!(
+        fields[12],
+        ("node_id".to_string(), ScanValue::Str(String::new()))
+    );
+
+    // Tombstone memory 2 from node "laptop" at t=7000, attribute memory 3
+    // to "desktop", leave 1 and 4 live and unattributed.
+    let stamped = |mut fields: Vec<(String, ScanValue)>, deleted_at: i64, node: &str| {
+        fields[11].1 = ScanValue::I64(deleted_at);
+        fields[12].1 = ScanValue::Str(node.into());
+        fields
+            .into_iter()
+            .map(|(name, value)| (Box::leak(name.into_boxed_str()) as &str, value))
+            .collect::<Vec<(&str, ScanValue)>>()
+    };
+    let two = stamped(client.get(id(2)).unwrap().unwrap(), 7_000, "laptop");
+    assert!(client.replace(id(2), &two).unwrap());
+    let three = stamped(client.get(id(3)).unwrap().unwrap(), 0, "desktop");
+    assert!(client.replace(id(3), &three).unwrap());
+
+    // Live rows first: three zeros, then the tombstone.
+    let page = client.page("deleted_at_unix_ms", None, 10).unwrap();
+    let stamps: Vec<i64> = page
+        .iter()
+        .map(|(_, f)| match &f[11].1 {
+            ScanValue::I64(v) => *v,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(stamps, vec![0, 0, 0, 7_000]);
+    assert_eq!(page[3].0, id(2));
+    // The purge set before a cutoff.
+    let purge = rows(
+        client
+            .query(
+                "SELECT content FROM memory WHERE deleted_at_unix_ms > 0 AND deleted_at_unix_ms < 8000",
+            )
+            .unwrap(),
+    );
+    assert_eq!(purge.len(), 1);
+    assert_eq!(purge[0].0, id(2));
+    // Per-node counts, the empty node its own group.
+    let groups = match client
+        .query("SELECT node_id, COUNT(*) FROM memory GROUP BY node_id")
+        .unwrap()
+    {
+        QueryResult::Groups(groups) => groups,
+        other => panic!("expected Groups, got {other:?}"),
+    };
+    let mut counts: Vec<(String, i64)> = groups
+        .into_iter()
+        .map(|g| {
+            let node = match g.iter().find(|(name, _)| name == "node_id") {
+                Some((_, ScanValue::Str(s))) => s.clone(),
+                other => panic!("{other:?}"),
+            };
+            let n = match g.iter().find(|(name, _)| name.starts_with("COUNT")) {
+                Some((_, ScanValue::I64(n))) => *n,
+                other => panic!("{other:?}"),
+            };
+            (node, n)
+        })
+        .collect();
+    counts.sort();
+    assert_eq!(
+        counts,
+        vec![
+            (String::new(), 2),
+            ("desktop".to_string(), 1),
+            ("laptop".to_string(), 1)
+        ]
+    );
+    // A negative stamp is refused with nothing written.
+    let negative = stamped(client.get(id(1)).unwrap().unwrap(), -1, "");
+    match client.replace(id(1), &negative) {
+        Err(ClientError::Server(ErrorCode::Malformed, _)) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    drop(client);
+
+    let addr = start_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let two = client.get(id(2)).unwrap().unwrap();
+    assert_eq!(two[11].1, ScanValue::I64(7_000));
+    assert_eq!(two[12].1, ScanValue::Str("laptop".into()));
+    assert_eq!(client.get(id(1)).unwrap().unwrap()[11].1, ScanValue::I64(0));
 }

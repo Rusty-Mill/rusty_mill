@@ -1,11 +1,9 @@
-# Server Memory Sync Fields Design (Proposed — design only)
+# Server Memory Sync Fields Design (Accepted)
 
-- Status: **Proposed, design only** (2026-09-07). Unlike the
-  `ADR-0046`–`ADR-0055` rounds, this one is **not** implemented on the
-  same branch: it changes `Memory`'s on-disk record layout, and durable
-  directories exist since `ADR-0053`. The owner picks an option below
-  before any code lands (the working agreement's "ask before schema or
-  data migrations").
+- Status: **Accepted** (2026-09-07, `ADR-0056` option (a) — N1 sentinels
+  plus L1 a schema-tag bump with a distinct failure and no upgrade; the
+  owner's pick after a design-only proposal, PR #216). Implemented as
+  `SERVER-001` v0.46.0 / FR-056 on the branch that followed the pick.
 - Date: 2026-09-07
 - Related: `ADR-0048`/`docs/design/SERVER-MEMORY-DOMAIN-DESIGN.md` (the
   projection this widens, and its "Null" non-goal), `ADR-0053` (the
@@ -163,7 +161,7 @@ The consumer's spike adapter sends the two fields and stops returning
 
 ## Open questions
 
-- **Which option** — the owner's call; (N1)+(L1) recommended.
+- **Which option** — *resolved*: (a), N1 + L1.
 - **(L2)'s trigger** — the first durable directory that cannot be
   re-pushed.
 - **A `PurgeBefore` request** — when the client loop's round trips are
@@ -173,6 +171,9 @@ The consumer's spike adapter sends the two fields and stops returning
 
 ## Change history
 
+- 2026-09-07: Implemented as `SERVER-001` v0.46.0 / FR-056 (N1 + L1),
+  landed as designed.
+- 2026-09-07: Accepted — the owner picked option (a) after PR #216.
 - 2026-09-07: Initial proposal, design only; implementation waits for
   the owner's option. The twenty-first round in the
   `rusty_remind_me`-motivated line; the hub spike's third gap.
