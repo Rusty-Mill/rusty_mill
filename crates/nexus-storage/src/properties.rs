@@ -330,9 +330,8 @@ pub fn apply_typed_property(
     value: Option<&Json>,
     ty: PropertyType,
 ) -> Result<String, StorageError> {
-    let (block_end, body) = locate_block(content)
-        .map(|(end, body)| (end, body.to_string()))
-        .unwrap_or((0, String::new()));
+    let (block_end, body) =
+        locate_block(content).map_or((0, String::new()), |(end, body)| (end, body.to_string()));
     let mut mapping = parse_mapping(&body)?;
     let yaml_key = Yaml::String(key.to_string());
     match value {
