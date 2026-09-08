@@ -1,8 +1,12 @@
 # ADR-0057: A global edge count — `Request::CountEdges` answered from the adjacency, at protocol 21
 
-- Status: **Proposed** (2026-09-07). Proposed and implemented on one
-  branch, the `ADR-0046`–`ADR-0055` cadence; the owner's options are in
-  "Considered options" below.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-07 — the owner's "accept as designed", option (a): one request
+  per label answered from the adjacency; (b) counts on
+  `RelationDescriptor`, (c) an `Aggregate` over edges, and (d) decline
+  declined. Recorded in "Acceptance and implementation" below.)
+  Proposed and implemented on one branch, the `ADR-0046`–`ADR-0055`
+  cadence.
 - Date: 2026-09-07
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-COUNT-EDGES-DESIGN.md` (the full design),
@@ -53,4 +57,7 @@ domain for one count. **(d) Decline.**
   `clients/python/**`, two vectors (64 pinned); tests: `generic/memory`
   +1, `server_memory_integration` +1, `server_protocol_version` +1,
   `server_dog_integration` +1, `server_python_client` extended; every
-  acceptance criterion 1–3 holds.
+  acceptance criterion 1–3 holds. (PR #218.)
+- 2026-09-07: accepted as designed (option (a); (b)–(d) declined). No
+  change to the implementation. The last spike gap, directed open-label
+  edges, is next.
