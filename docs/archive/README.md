@@ -41,6 +41,9 @@ docs/archive/
 │   ├── README.md
 │   ├── specs/
 │   └── plans/
+├── research/
+│   └── rustsidian/                            ← RFC 0009 row 6 imports from the retired Rustsidian repo
+│       └── README.md                          (Obsidian capability/UI analyses, Rustsidian UI design + roadmap)
 │
 │   ── Top-level archived plans/audits ──
 ├── FORGE-UI-PLAN.md                           pre-shell-migration UI plan
