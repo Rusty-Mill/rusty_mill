@@ -1,8 +1,11 @@
 # ADR-0059: A memory-only sorted index behind `Page`
 
-- Status: **Proposed** (2026-09-08). Proposed and implemented on one
-  branch, the `ADR-0046`–`ADR-0058` cadence; the owner's "accept as
-  designed" promotes it.
+- Status: **Accepted as designed** (promoted from Proposed on
+  2026-09-08 — the owner's "accept as designed", option (a): a
+  memory-only sorted index layer; (b) a second scannable slot, (c) a
+  persisted index, and (d) decline declined. Recorded in "Acceptance
+  and implementation" below.) Proposed and implemented on one branch,
+  the `ADR-0046`–`ADR-0058` cadence.
 - Date: 2026-09-08
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ORDERED-INDEX-DESIGN.md` (the full
@@ -64,3 +67,8 @@ that rebuilds in 81 ms. **(d) Decline.**
   `src/server/{serve,memory,relation}.rs`; tests: `generic/memory` +1,
   `generic/relation` +1, `server_memory_integration` extended; every
   acceptance criterion 1–4 holds.
+  (PR #225.)
+- 2026-09-08: accepted as designed (option (a); (b)–(d) declined). No
+  change to the implementation. The page question is closed; what the
+  design leaves open is its own: descending order and a range on the
+  wire, a persisted index when the open-time rebuild is noticed.
