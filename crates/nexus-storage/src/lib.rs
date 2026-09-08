@@ -43,6 +43,7 @@ mod search;
 mod search_scope;
 mod tasks;
 mod trash;
+pub mod note_composer;
 pub mod unique_note;
 pub mod vectorstore;
 mod watcher;
@@ -1411,40 +1412,77 @@ impl StorageEngine {
         // each referencing file after the rename refreshes its rows,
         // but the query itself must see the pre-rename link graph.
         let sources: Vec<String> = if update_links {
-            let conn = self.pool.get().map_err(|e| {
-                StorageError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
-            })?;
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT sf.path FROM links l
-                 JOIN files sf ON sf.id = l.source_file_id
-                 JOIN files tf ON tf.id = l.target_file_id
-                 WHERE tf.path = ?1 AND sf.is_deleted = 0;",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![from], |r| r.get::<_, String>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
+            self.inbound_link_sources(from)?
         } else {
             Vec::new()
         };
 
         self.rename_entry(from, to)?;
 
+        self.rewrite_links_in(&sources, from, to)
+    }
+
+    /// Forge-relative paths of every live file whose links resolve to
+    /// `target` — the referencing set that a rename or merge must
+    /// rewrite. Read from the index's `links` table, so it must be
+    /// queried *before* the target moves or disappears.
+    fn inbound_link_sources(&self, target: &str) -> Result<Vec<String>, StorageError> {
+        let conn = self.pool.get().map_err(|e| {
+            StorageError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT sf.path FROM links l
+             JOIN files sf ON sf.id = l.source_file_id
+             JOIN files tf ON tf.id = l.target_file_id
+             WHERE tf.path = ?1 AND sf.is_deleted = 0;",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![target], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Rewrite links targeting `from` so they target `to` in each of
+    /// `sources`, skipping the two endpoints themselves. Returns
+    /// `(files_rewritten, links_updated)`.
+    fn rewrite_links_in(
+        &self,
+        sources: &[String],
+        from: &str,
+        to: &str,
+    ) -> Result<(usize, usize), StorageError> {
         let mut files_rewritten = 0usize;
         let mut links_updated = 0usize;
         for source in sources {
             if source == from || source == to {
                 continue; // self-links re-key with the file itself
             }
-            let abs = resolve_within(self.forge.root(), &source)?;
+            let abs = resolve_within(self.forge.root(), source)?;
             let Ok(text) = std::fs::read_to_string(&abs) else {
-                continue; // non-UTF-8 / vanished — skip, don't fail the rename
+                continue; // non-UTF-8 / vanished — skip, don't fail the caller
             };
             if let Some((rewritten, n)) = link_rewrite::rewrite_links(&text, from, to) {
-                self.write_file(&source, rewritten.as_bytes())?;
+                self.write_file(source, rewritten.as_bytes())?;
                 files_rewritten += 1;
                 links_updated += n;
             }
         }
         Ok((files_rewritten, links_updated))
+    }
+
+    /// RFC 0009 (note merge) — redirect every inbound link on `from` to
+    /// `to` while `from` still exists in the index. Same rewrite path as
+    /// [`rename_entry_with_links`](Self::rename_entry_with_links), minus
+    /// the rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] on index or write failure.
+    pub(crate) fn rewrite_inbound_links(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<(usize, usize), StorageError> {
+        let sources = self.inbound_link_sources(from)?;
+        self.rewrite_links_in(&sources, from, to)
     }
 
     /// Delete an entry within the forge. Handles both files and directories.
