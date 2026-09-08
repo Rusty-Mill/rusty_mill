@@ -911,7 +911,7 @@ targetField = "id"
         let expected = ["Tasks.bases", "Books.bases", "Contacts.bases"];
         for name in expected {
             let dir = fixtures.join(name);
-            assert!(dir.exists(), "committed fixture missing: {}", dir.display(),);
+            assert!(dir.exists(), "committed fixture missing: {}", dir.display());
             let base =
                 load_base(&dir).unwrap_or_else(|e| panic!("fixture '{name}' failed to load: {e}"));
             assert!(!base.records.is_empty(), "{name}: records empty");

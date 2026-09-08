@@ -489,7 +489,7 @@ mod tests {
             step: 0,
             exit_code: 1
         }
-        .is_success(),);
+        .is_success());
         assert!(!PreCommandOutcome::StepTimedOut { step: 0 }.is_success());
     }
 

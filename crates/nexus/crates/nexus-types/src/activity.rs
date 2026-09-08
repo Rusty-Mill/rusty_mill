@@ -403,8 +403,8 @@ mod tests {
 
     #[test]
     fn origin_kind_strips_detail() {
-        assert_eq!(ActivityOrigin::Plugin("anything".into()).kind(), "plugin",);
-        assert_eq!(ActivityOrigin::Terminal("tty-7".into()).kind(), "terminal",);
+        assert_eq!(ActivityOrigin::Plugin("anything".into()).kind(), "plugin");
+        assert_eq!(ActivityOrigin::Terminal("tty-7".into()).kind(), "terminal");
         assert_eq!(ActivityOrigin::Ai.kind(), "ai");
     }
 

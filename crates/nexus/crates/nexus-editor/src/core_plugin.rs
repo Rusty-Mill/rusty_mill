@@ -2031,7 +2031,7 @@ mod tests {
         assert_eq!(extract_wikilink_block_uuid(&with_display), Some(id));
 
         // Heading fragments aren't block refs.
-        assert_eq!(extract_wikilink_block_uuid("[[notes/foo#section]]"), None,);
+        assert_eq!(extract_wikilink_block_uuid("[[notes/foo#section]]"), None);
         // Path-only links have no fragment to stamp against.
         assert_eq!(extract_wikilink_block_uuid("[[notes/foo]]"), None);
         // Fragment present but not a uuid.

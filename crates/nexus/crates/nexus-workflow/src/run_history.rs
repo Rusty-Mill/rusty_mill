@@ -135,7 +135,7 @@ impl RunHistoryStore {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(poison) => {
-                tracing::warn!("workflow run_history: mutex poisoned; recovering",);
+                tracing::warn!("workflow run_history: mutex poisoned; recovering");
                 poison.into_inner()
             }
         };
