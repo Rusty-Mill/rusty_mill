@@ -2817,6 +2817,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn channel_initialize_advertises_protocols() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2833,6 +2834,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn mcp_tools_list_includes_terminal_tools() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2852,6 +2854,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn mcp_get_screen_returns_current_text() {
         let mut g = Grid::new(80, 24);
         let mut p = AnsiParser::new();
@@ -2870,6 +2873,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn mcp_get_dimensions_and_title() {
         let mut g = Grid::new(80, 24);
         g.title = "my window".into();
@@ -2888,6 +2892,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn lsp_initialize_negotiates() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2900,6 +2905,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn acp_initialize_negotiates() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2913,6 +2919,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn unknown_method_returns_jsonrpc_error() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2925,6 +2932,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn unknown_protocol_returns_error() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2936,6 +2944,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn malformed_json_is_dropped_no_reply() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(&mut g, "mcp", "{not valid json");
@@ -2943,6 +2952,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn notification_produces_no_reply() {
         // No `id` -> a JSON-RPC notification; the channel must not respond.
         let mut g = Grid::new(80, 24);
@@ -2955,6 +2965,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn channel_initialize_negotiates_version_down() {
         let mut g = Grid::new(80, 24);
         // A client claiming a far-future version is negotiated down to ours.
@@ -2969,6 +2980,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn channel_initialize_rejects_version_below_floor() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2984,6 +2996,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn channel_initialize_intersects_requested_protocols() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -2996,6 +3009,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn channel_describe_returns_versioned_schema() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -3015,6 +3029,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn mcp_resources_list_and_read() {
         let mut g = Grid::new(80, 24);
         let mut p = AnsiParser::new();
@@ -3048,6 +3063,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn mcp_resource_read_unknown_uri_errors() {
         let mut g = Grid::new(80, 24);
         let resp = channel_roundtrip(
@@ -3062,6 +3078,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn mcp_get_cursor_tool_reports_position() {
         let mut g = Grid::new(80, 24);
         let mut p = AnsiParser::new();
@@ -3079,6 +3096,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn subscribe_pushes_resource_updated_on_cwd_change() {
         let mut g = Grid::new(80, 24);
         let sub = channel_roundtrip(
@@ -3106,6 +3124,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn cwd_change_without_subscription_is_silent() {
         let mut g = Grid::new(80, 24);
         let mut p = AnsiParser::new();
@@ -3117,6 +3136,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn unsubscribe_stops_resource_updates() {
         let mut g = Grid::new(80, 24);
         let _ = channel_roundtrip(
@@ -3138,6 +3158,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn subscribe_to_high_churn_resource_errors() {
         let mut g = Grid::new(80, 24);
         // The screen changes on nearly every byte; it is polled, not pushed.
@@ -3153,6 +3174,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn resource_update_fires_only_on_real_change() {
         let mut g = Grid::new(80, 24);
         let _ = channel_roundtrip(
@@ -3177,6 +3199,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn render_set_status_overlays_bottom_row() {
         let mut g = Grid::new(10, 3);
         let ok = channel_roundtrip(
@@ -3211,6 +3234,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn render_status_survives_resize() {
         let mut g = Grid::new(10, 3);
         let _ = channel_roundtrip(
@@ -3234,6 +3258,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn render_set_status_requires_text() {
         let mut g = Grid::new(10, 3);
         let resp = channel_roundtrip(
@@ -3248,6 +3273,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn osc_133_d_pushes_typed_command_finished() {
         let mut g = Grid::new(20, 4);
         let _ = channel_roundtrip(
@@ -3280,6 +3306,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn osc_133_d_parses_nonzero_exit_code() {
         let mut g = Grid::new(20, 4);
         let mut p = AnsiParser::new();
@@ -3296,6 +3323,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn osc_133_d_without_code_notifies_with_empty_exit() {
         let mut g = Grid::new(20, 4);
         let _ = channel_roundtrip(
@@ -3327,6 +3355,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn osc_133_captures_command_output() {
         let mut g = Grid::new(20, 5);
         let _ = channel_roundtrip(
@@ -3357,6 +3386,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn osc_133_captures_multiline_output() {
         let mut g = Grid::new(20, 6);
         let mut p = AnsiParser::new();
@@ -3377,6 +3407,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn osc_133_d_without_c_captures_no_output() {
         let mut g = Grid::new(20, 5);
         let mut p = AnsiParser::new();
@@ -3394,6 +3425,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn resize_preserves_in_flight_command_capture() {
         let mut g = Grid::new(20, 5);
         let mut p = AnsiParser::new();
@@ -3412,6 +3444,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn resize_rewraps_captured_command_output() {
         let mut g = Grid::new(10, 5);
         let mut p = AnsiParser::new();
@@ -3432,6 +3465,7 @@ mod l13 {
     }
 
     #[test]
+    #[ignore = "l13/channel is a permanent RFC 0003 no-op stub in Nexus (see core/channel.rs); these upstream rusty_term tests assume a working in-band transport and are kept in-tree only for provenance"]
     fn resize_notifies_dimensions_subscriber() {
         let mut g = Grid::new(80, 24);
         // No subscriber: the driver gets nothing to send.
