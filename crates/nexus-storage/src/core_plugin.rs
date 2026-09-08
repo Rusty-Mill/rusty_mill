@@ -448,6 +448,21 @@ pub const HANDLER_NOTE_CREATE_UNIQUE: u32 = 83;
 /// Read-only. Ported from `nexus_forge`'s random-note plugin.
 pub const HANDLER_NOTE_RANDOM: u32 = 84;
 
+/// RFC 0009 — `note_merge`. Args: [`crate::ipc::StorageNoteMergeArgs`].
+/// Returns [`crate::ipc::StorageNoteMergeResult`]. Appends the source
+/// note to the target, redirects inbound links (the
+/// `rename_entry_with_links` machinery), and deletes the source to the
+/// requested destination. Ported from `nexus_forge`'s note-composer plugin.
+pub const HANDLER_NOTE_MERGE: u32 = 85;
+
+/// RFC 0009 — `note_create_from_title`. Args:
+/// [`crate::ipc::StorageNoteCreateFromTitleArgs`]. Returns
+/// [`crate::ipc::StorageNoteCreateFromTitleResult`]. Sanitised
+/// `{title}.md` with an optional body; refuses to overwrite. Backs
+/// "extract selection to new note" — the editor replaces the selection
+/// itself. Ported from `nexus_forge`'s note-composer plugin.
+pub const HANDLER_NOTE_CREATE_FROM_TITLE: u32 = 86;
+
 /// BL-129 thin slice — `entity_decay_relations`. Args:
 /// [`crate::ipc::EntityDecayRelationsArgs`]. Returns
 /// [`crate::ipc::EntityDecayRelationsResult`]. Walks `entities/*.md`,
@@ -549,6 +564,8 @@ pub const IPC_HANDLERS: &[(&str, u32)] = &[
     ("note_find_duplicates", HANDLER_NOTE_FIND_DUPLICATES),
     ("note_create_unique", HANDLER_NOTE_CREATE_UNIQUE),
     ("note_random", HANDLER_NOTE_RANDOM),
+    ("note_merge", HANDLER_NOTE_MERGE),
+    ("note_create_from_title", HANDLER_NOTE_CREATE_FROM_TITLE),
     ("vector_stored_signature", HANDLER_VECTOR_STORED_SIGNATURE),
 ];
 
@@ -938,6 +955,10 @@ impl CorePlugin for StorageCorePlugin {
             HANDLER_NOTE_FIND_DUPLICATES => crate::handlers::notes::find_duplicates(engine, args),
             HANDLER_NOTE_CREATE_UNIQUE => crate::handlers::notes::create_unique(engine, args),
             HANDLER_NOTE_RANDOM => crate::handlers::notes::random(engine, args),
+            HANDLER_NOTE_MERGE => crate::handlers::notes::merge(engine, args),
+            HANDLER_NOTE_CREATE_FROM_TITLE => {
+                crate::handlers::notes::create_from_title(engine, args)
+            }
             _ => Err(exec_err(format!("unknown handler id {handler_id}"))),
         }
     }

@@ -1,6 +1,6 @@
 //! Note + frontmatter handlers: `note_append`, `read_frontmatter`,
 //! `write_frontmatter`, `note_find_duplicates`, `note_create_unique`,
-//! `note_random`.
+//! `note_random`, `note_merge`, `note_create_from_title`.
 
 use std::path::Path;
 
@@ -9,11 +9,13 @@ use serde_json::Value;
 
 use crate::ipc::{
     NoteExactDuplicateGroup, NoteFindDuplicatesArgs, NoteFindDuplicatesResult,
-    NoteNearDuplicatePair, StorageNoteAppendArgs, StorageNoteCreateUniqueArgs,
-    StorageNoteCreateUniqueResult, StorageNoteRandomArgs, StorageNoteRandomResult, StorageOk,
-    StorageReadFrontmatterArgs, StorageWriteFrontmatterArgs,
+    NoteNearDuplicatePair, StorageNoteAppendArgs, StorageNoteCreateFromTitleArgs,
+    StorageNoteCreateFromTitleResult, StorageNoteCreateUniqueArgs, StorageNoteCreateUniqueResult,
+    StorageNoteMergeArgs, StorageNoteMergeResult, StorageNoteRandomArgs, StorageNoteRandomResult,
+    StorageOk, StorageReadFrontmatterArgs, StorageWriteFrontmatterArgs,
 };
 use crate::unique_note::{UniqueNoteOptions, DEFAULT_ID_FORMAT, DEFAULT_SEPARATOR};
+use crate::DeleteDestination;
 use crate::{FileFilter, StorageEngine};
 
 use super::shared::{exec_err, parse_args, to_value};
@@ -215,4 +217,63 @@ pub(crate) fn random(engine: &StorageEngine, args: &Value) -> Result<Value, Plug
         .random_note_path(exclude.as_deref(), prefix.as_deref())
         .map_err(|e| exec_err(format!("note_random: {e}")))?;
     to_value(&StorageNoteRandomResult { path }, "note_random")
+}
+
+/// RFC 0009 — `note_merge`. Append `source` into `target`, redirect
+/// inbound links, delete the source to `destination` (`forge` default).
+pub(crate) fn merge(engine: &StorageEngine, args: &Value) -> Result<Value, PluginError> {
+    let StorageNoteMergeArgs {
+        source,
+        target,
+        update_links,
+        destination,
+    } = parse_args(args, "note_merge")?;
+    let dest = parse_destination(destination.as_deref(), "note_merge")?;
+    let outcome = engine
+        .merge_notes(&source, &target, update_links, dest)
+        .map_err(|e| exec_err(format!("note_merge '{source}' -> '{target}': {e}")))?;
+    to_value(
+        &StorageNoteMergeResult {
+            target,
+            files_rewritten: outcome.files_rewritten,
+            links_updated: outcome.links_updated,
+            trash_id: outcome.trash_id,
+        },
+        "note_merge",
+    )
+}
+
+/// RFC 0009 — `note_create_from_title`. Sanitised `{title}.md` under
+/// `folder` with `content` as the body; refuses to overwrite.
+pub(crate) fn create_from_title(
+    engine: &StorageEngine,
+    args: &Value,
+) -> Result<Value, PluginError> {
+    let StorageNoteCreateFromTitleArgs {
+        title,
+        content,
+        folder,
+    } = parse_args(args, "note_create_from_title")?;
+    let path = engine
+        .create_note_from_title(
+            &title,
+            folder.as_deref().filter(|f| !f.trim().is_empty()),
+            content.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| exec_err(format!("note_create_from_title: {e}")))?;
+    to_value(&StorageNoteCreateFromTitleResult { path }, "note_create_from_title")
+}
+
+/// Map the wire `destination` string shared by `trash_entry` and
+/// `note_merge` onto [`DeleteDestination`]; `note_merge` additionally
+/// accepts `"permanent"`.
+fn parse_destination(raw: Option<&str>, handler: &str) -> Result<DeleteDestination, PluginError> {
+    match raw {
+        None | Some("forge") => Ok(DeleteDestination::ForgeTrash),
+        Some("system") => Ok(DeleteDestination::SystemTrash),
+        Some("permanent") => Ok(DeleteDestination::Permanent),
+        Some(other) => Err(exec_err(format!(
+            "{handler}: unknown destination '{other}' (expected 'forge', 'system', or 'permanent')"
+        ))),
+    }
 }

@@ -2581,3 +2581,95 @@ pub struct StorageNoteRandomResult {
     /// has no eligible markdown note.
     pub path: Option<String>,
 }
+
+// ── RFC 0009 — note composer (ported from nexus_forge) ──────────────────────
+
+/// Args for `com.nexus.storage::note_merge` (handler `85`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteMergeArgs {
+    /// Forge-relative path of the note that is absorbed and then deleted.
+    pub source: String,
+    /// Forge-relative path of the note that receives the source body.
+    pub target: String,
+    /// Rewrite inbound links on `source` to point at `target`. Default `true`.
+    #[serde(default = "default_true")]
+    pub update_links: bool,
+    /// Where the source goes: `"forge"` (default, `<forge>/.trash/`),
+    /// `"system"` (OS trash), or `"permanent"`.
+    #[serde(default)]
+    pub destination: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Reply for `com.nexus.storage::note_merge`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteMergeResult {
+    /// The merged note (same as the `target` arg).
+    pub target: String,
+    /// Referencing files whose links were redirected.
+    pub files_rewritten: usize,
+    /// Link occurrences redirected across those files.
+    pub links_updated: usize,
+    /// Forge-trash bucket id for the deleted source; `null` for
+    /// `system` / `permanent` destinations.
+    pub trash_id: Option<String>,
+}
+
+/// Args for `com.nexus.storage::note_create_from_title` (handler `86`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteCreateFromTitleArgs {
+    /// Human title; sanitised into the filename stem. Must not sanitise to empty.
+    pub title: String,
+    /// Initial body. Default empty. For "extract selection", the selection.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Forge-relative folder for the new note. Default: forge root.
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+/// Reply for `com.nexus.storage::note_create_from_title`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(
+        export,
+        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
+    )
+)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNoteCreateFromTitleResult {
+    /// Forge-relative path of the note that was created.
+    pub path: String,
+}

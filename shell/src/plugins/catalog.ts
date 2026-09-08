@@ -469,6 +469,13 @@ export const DEFAULT_OFF_PLUGINS: PluginEntry[] = [
     load: () => import('./nexus/randomNote').then(m => m.randomNotePlugin),
   },
   {
+    id: 'nexus.noteComposer', name: 'Note Composer',
+    version: '0.1.0', core: false, activationEvents: ['onStartup'],
+    dependsOn: ['com.nexus.storage', 'nexus.editor'],
+    description: 'Merge the current note into another, extract a selection to a new note, or create a note from a title (RFC 0009).',
+    load: () => import('./nexus/noteComposer').then(m => m.noteComposerPlugin),
+  },
+  {
     id: 'nexus.notionImport', name: 'Notion Import',
     version: '0.2.0', core: false, activationEvents: ['onStartup'],
     legacyPluginIds: ['nexus.notion'],
