@@ -339,8 +339,7 @@ fn process_events(
             let dropped = std::mem::replace(&mut git_batch_dropped, 0);
             let held_ms = git_batch_started_at
                 .take()
-                .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX))
-                .unwrap_or(0);
+                .map_or(0, |t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
             tracing::info!(
                 audit = true,
                 dropped_events = dropped,

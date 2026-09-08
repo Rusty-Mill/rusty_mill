@@ -665,7 +665,7 @@ pub fn build_rag_prompt_budgeted_with_scanner(
 
     let mut prompt = String::from(RAG_PROMPT_HEADER);
     for (i, (file_path, text)) in accepted.iter().enumerate() {
-        let _ = write!(prompt, "Source {}: [[{}]]\n{}\n\n", i + 1, file_path, text,);
+        let _ = write!(prompt, "Source {}: [[{}]]\n{}\n\n", i + 1, file_path, text);
     }
 
     if budget.utilization() >= NEAR_LIMIT_THRESHOLD {
@@ -894,13 +894,22 @@ mod tests {
         // Embedder saw the query exactly once.
         assert_eq!(embedder.seen.lock().unwrap().as_slice(), &["find me alpha"]);
         // Dispatcher saw a single vector_query against storage with our
-        // embedding + limit.
+        // embedding + limit. (retrieve() also does a best-effort
+        // .aiignore lookup for C28 (#381) exclusion filtering — that
+        // call is process-cache-gated and not what this test targets,
+        // so filter down to the vector_query call specifically.)
         let seen = dispatcher.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0, "com.nexus.storage");
-        assert_eq!(seen[0].1, "vector_query");
-        assert_eq!(seen[0].2["limit"], 4);
-        let emb = seen[0].2["embedding"].as_array().expect("embedding array");
+        let vector_queries: Vec<_> = seen
+            .iter()
+            .filter(|(target, command, _)| target == "com.nexus.storage" && command == "vector_query")
+            .collect();
+        assert_eq!(vector_queries.len(), 1);
+        assert_eq!(vector_queries[0].0, "com.nexus.storage");
+        assert_eq!(vector_queries[0].1, "vector_query");
+        assert_eq!(vector_queries[0].2["limit"], 4);
+        let emb = vector_queries[0].2["embedding"]
+            .as_array()
+            .expect("embedding array");
         assert_eq!(emb.len(), 3);
         let nums: Vec<f64> = emb.iter().map(|v| v.as_f64().unwrap()).collect();
         for (got, want) in nums.iter().zip([0.1f64, 0.2, 0.3]) {

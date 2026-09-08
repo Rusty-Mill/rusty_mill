@@ -87,8 +87,7 @@ fn now_unix_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Build the `<forge>/.forge/.editor/crdt/<sha>.json` storage path for
@@ -124,6 +123,7 @@ pub fn content_hash_hex(bytes: &[u8]) -> String {
 /// just for one hash. Implementation is the FIPS-180-4 reference; the
 /// only callers are `content_hash_hex` and `crdt_state_path`.
 #[allow(clippy::many_single_char_names)] // `a..h` mirror the FIPS-180-4 reference variable names.
+#[allow(clippy::too_many_lines)]
 fn sha256_bytes(input: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a_2f98,

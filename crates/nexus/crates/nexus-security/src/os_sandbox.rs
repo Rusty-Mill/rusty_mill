@@ -182,10 +182,10 @@ where
     A: IntoIterator,
     A::Item: AsRef<OsStr>,
 {
-    let argv = nexus_types::sandbox_argv(policy, cwd, program, args)
+    let out = nexus_types::sandbox_argv(policy, cwd, program, args)
         .map_err(|e| SandboxError::Encode(e.to_string()))?;
     let mut cmd = Command::new(helper);
-    cmd.args(argv);
+    cmd.args(out);
     Ok(cmd)
 }
 

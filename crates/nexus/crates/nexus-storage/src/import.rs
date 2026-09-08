@@ -227,7 +227,7 @@ pub fn apply_import(
         report.copied.push(relpath.clone());
     }
 
-    report.skipped_identical = plan.skips_identical.clone();
+    report.skipped_identical.clone_from(&plan.skips_identical);
 
     for conflict in &plan.conflicts {
         match options.on_conflict {
@@ -444,7 +444,9 @@ mod tests {
             "rename target must use `.imported.<n>` infix, got {}",
             renamed.1
         );
-        assert!(renamed.1.ends_with(".md"));
+        assert!(std::path::Path::new(&renamed.1)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md")));
         assert_eq!(read(dst.path(), &renamed.1), b"source");
     }
 

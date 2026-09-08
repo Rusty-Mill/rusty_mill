@@ -92,6 +92,7 @@ pub struct DispatchTarget {
 ///   the `__` separator between server and tool.
 /// - [`DispatchTargetError::InvalidInput`] if a built-in needed a
 ///   field for reshape that wasn't present.
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_target(name: &str, input: Value) -> Result<DispatchTarget, DispatchTargetError> {
     match name {
         "read_file" => Ok(DispatchTarget {

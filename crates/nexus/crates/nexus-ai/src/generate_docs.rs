@@ -36,7 +36,7 @@ use crate::provider::{ChatMessage, Role};
 const STORAGE_PLUGIN: &str = "com.nexus.storage";
 const STORAGE_IPC_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// `true` whenever the BL-114 index lacks the data the GitNexus
+/// `true` whenever the BL-114 index lacks the data the `GitNexus`
 /// equivalent would consume. v1 always reports `true` so agent
 /// prompts can downweight the result's confidence.
 pub(crate) const DEGRADED_REASON: &str =

@@ -267,6 +267,7 @@ impl Session {
     /// Returns [`TerminalError::PtyAlloc`] if the host refuses to allocate
     /// a pty, or [`TerminalError::Spawn`] if the shell binary cannot be
     /// launched (not on PATH, permission denied, …).
+    #[allow(clippy::too_many_lines)]
     pub fn spawn(config: SessionConfig) -> Result<Self, TerminalError> {
         // Bundled-shell opt-in (RFC 0002): a sandboxed session with no pinned
         // shell prefers the bundled nexus-rush. Resolution is best-effort — if
@@ -662,7 +663,7 @@ impl Session {
                 .kill()
                 .map_err(|e| TerminalError::Io(std::io::Error::other(e.to_string())))?;
             // Best-effort wait so the zombie is reaped before we return.
-            let code = child.wait().map(|s| s.exit_code()).unwrap_or(0);
+            let code = child.wait().map_or(0, |s| s.exit_code());
             self.state = ProcessState::Killed {
                 signal: Signal::Kill,
                 code,

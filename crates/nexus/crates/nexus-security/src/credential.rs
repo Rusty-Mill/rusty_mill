@@ -22,8 +22,7 @@ pub struct CredentialVault {
 /// Returns `true` only when `NEXUS_NO_KEYRING` is set to exactly `"1"`.
 fn env_requests_disabled() -> bool {
     std::env::var("NEXUS_NO_KEYRING")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+        .is_ok_and(|v| v == "1")
 }
 
 impl CredentialVault {

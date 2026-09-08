@@ -670,6 +670,10 @@ fn register_host_write_file(linker: &mut Linker<PluginData>) -> Result<(), Plugi
 /// target handler is internal-only, or `HOST_ERROR` on any other failure
 /// (target not found, command not found, dispatch error, dispatcher not
 /// injected).
+// Long but linear: one func_wrap registration with its inline validation
+// and error mapping, not a candidate for decomposition without splitting
+// the wasm host-fn ABI across files.
+#[allow(clippy::too_many_lines)]
 fn register_host_invoke_command(linker: &mut Linker<PluginData>) -> Result<(), PluginError> {
     linker
         .func_wrap(
@@ -1066,6 +1070,9 @@ fn register_host_notify(linker: &mut Linker<PluginData>) -> Result<(), PluginErr
 /// lacks `NetHttp`, `HOST_BUFFER_OVERFLOW` when the JSON response exceeds
 /// `out_cap`, or `HOST_ERROR` on any other failure (invalid request JSON,
 /// policy refusal, transport error, response-size cap exceeded).
+// Same shape as `register_host_invoke_command` above: one linear
+// func_wrap registration, not a candidate for decomposition.
+#[allow(clippy::too_many_lines)]
 fn register_host_http_request(linker: &mut Linker<PluginData>) -> Result<(), PluginError> {
     linker
         .func_wrap(

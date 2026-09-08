@@ -46,8 +46,7 @@ pub fn shared_pool_handle() -> Option<Handle> {
 /// of pulling `num_cpus`.
 fn default_worker_threads() -> usize {
     std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).max(2))
-        .unwrap_or(2)
+        .map_or(2, |n| (n.get() / 2).max(2))
 }
 
 /// Snapshot of pool dimensioning metrics. Inflight queue / running

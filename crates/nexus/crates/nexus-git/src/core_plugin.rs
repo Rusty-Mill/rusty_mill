@@ -89,13 +89,11 @@ fn read_git_settings(forge_root: &Path) -> GitTiming {
         poll_interval: cfg
             .git
             .poll_interval_secs
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_POLL_INTERVAL),
+            .map_or(DEFAULT_POLL_INTERVAL, Duration::from_secs),
         auto_commit_tick: cfg
             .git
             .auto_commit_tick_secs
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_AUTO_COMMIT_TICK),
+            .map_or(DEFAULT_AUTO_COMMIT_TICK, Duration::from_secs),
     }
 }
 
@@ -511,6 +509,7 @@ impl CorePlugin for GitCorePlugin {
 /// stable nexus-cli entry point — the SD-03 split moved the
 /// implementation but the surface stays at `core_plugin`.
 #[doc(hidden)]
+#[must_use]
 pub fn lfs_status_for_forge(forge_root: &Path) -> serde_json::Value {
     crate::handlers::status::lfs_status(forge_root)
 }
@@ -658,7 +657,7 @@ fn publish_git_activity(bus: &EventBus, kind: &str, head: &str, branch: Option<&
     use nexus_types::activity::{
         ActivityEntry, ActivityOrigin, ActivityOutcome, ActivitySurface, ACTIVITY_APPENDED_TOPIC,
     };
-    let mut entry = ActivityEntry::now(head.to_string(), ActivitySurface::Git, ActivityOrigin::Git);
+    let mut entry = ActivityEntry::now(head.to_string(), ActivitySurface::Git, &ActivityOrigin::Git);
     entry.outcome = ActivityOutcome::Ok;
     let head_short: String = head.chars().take(7).collect();
     entry.prompt = match branch {
@@ -743,7 +742,7 @@ fn run_auto_committer(
                             let mut entry = ActivityEntry::now(
                                 r.commit_hash.clone().unwrap_or_default(),
                                 ActivitySurface::Git,
-                                ActivityOrigin::Git,
+                                &ActivityOrigin::Git,
                             );
                             entry.outcome = ActivityOutcome::Ok;
                             let hash_short = r
@@ -952,7 +951,7 @@ mod tests {
     /// BL-052 follow-up — when the upstream tracking-branch SHA
     /// changes between polls (a fetch or push happened externally),
     /// the poller emits `com.nexus.git.remote_changed` and an
-    /// activity entry. Both prev and curr have the same head_oid so
+    /// activity entry. Both prev and curr have the same `head_oid` so
     /// this test isolates the new branch.
     #[test]
     fn publish_changes_emits_remote_changed_on_tracking_oid_advance() {
@@ -1017,8 +1016,8 @@ mod tests {
         assert!(saw_activity, "expected universal-activity entry");
     }
 
-    /// First observation never emits remote_changed — without a prior
-    /// tracking_oid the change is "the upstream existed all along",
+    /// First observation never emits `remote_changed` — without a prior
+    /// `tracking_oid` the change is "the upstream existed all along",
     /// which isn't a meaningful event.
     #[test]
     fn publish_changes_skips_remote_changed_on_first_observation() {

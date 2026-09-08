@@ -32,7 +32,7 @@ pub(crate) async fn publish_workflow_activity(
     let mut entry = ActivityEntry::now(
         workflow_name.to_string(),
         ActivitySurface::Workflow,
-        ActivityOrigin::Workflow(workflow_name.to_string()),
+        &ActivityOrigin::Workflow(workflow_name.to_string()),
     );
     if started {
         entry.outcome = ActivityOutcome::Ok;

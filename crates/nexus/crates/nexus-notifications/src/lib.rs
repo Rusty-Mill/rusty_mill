@@ -201,6 +201,11 @@ pub trait Transport: Send + Sync {
     /// Deliver a notification synchronously. Returns `Ok(())` on
     /// successful delivery; on failure returns the most specific
     /// [`SendError`] variant.
+    ///
+    /// # Errors
+    /// Returns [`SendError`] if delivery to the underlying channel /
+    /// transport fails (network error, auth failure, malformed
+    /// response, etc.).
     fn send(&self, notif: &Notification) -> Result<(), SendError>;
 }
 

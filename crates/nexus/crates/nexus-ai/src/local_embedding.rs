@@ -222,7 +222,7 @@ where
         if cache_max > 0 && cache.len() >= cache_max {
             cache.clear();
         }
-        for (slot, vec) in missing_idx.into_iter().zip(fetched.into_iter()) {
+        for (slot, vec) in missing_idx.into_iter().zip(fetched) {
             if cache_max > 0 {
                 cache.insert(keys[slot], vec.clone());
             }

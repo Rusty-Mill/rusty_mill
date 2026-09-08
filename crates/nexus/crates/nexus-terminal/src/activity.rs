@@ -19,7 +19,7 @@ pub(crate) fn build_activity_entry(
     let mut entry = ActivityEntry::now(
         session_id.clone(),
         ActivitySurface::Process,
-        ActivityOrigin::Terminal(session_id.clone()),
+        &ActivityOrigin::Terminal(session_id.clone()),
     );
 
     match event {

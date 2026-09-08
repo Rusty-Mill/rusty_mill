@@ -118,10 +118,7 @@ impl LocalWhisperStt {
     }
 
     fn load_ctx(&mut self) -> Result<&mut WhisperContext, AudioError> {
-        let needs_reload = match (&self.ctx, &self.loaded_size) {
-            (Some(_), Some(size)) if size == &self.cfg.local_model_size => false,
-            _ => true,
-        };
+        let needs_reload = !matches!((&self.ctx, &self.loaded_size), (Some(_), Some(size)) if size == &self.cfg.local_model_size);
         if needs_reload {
             let path = self.ensure_model()?;
             let params = WhisperContextParameters::default();
@@ -201,6 +198,9 @@ impl SttProvider for LocalWhisperStt {
 /// rates other than 16 kHz are rejected because we don't ship a
 /// resampler. Tell the user to re-record rather than silently giving
 /// them garbage transcripts.
+// Sample values are inherently bounded by the WAV bit depth / channel count,
+// so the f32 precision loss here never affects the decoded audio audibly.
+#[allow(clippy::cast_precision_loss)]
 fn decode_wav_to_mono16k(bytes: &[u8]) -> Result<Vec<f32>, AudioError> {
     let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes))
         .map_err(|e| AudioError::InvalidAudio(format!("wav decode header: {e}")))?;
@@ -409,6 +409,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn decodes_16khz_mono_wav() {
         let spec = hound::WavSpec {
             channels: 1,
@@ -421,7 +422,7 @@ mod tests {
             let mut w = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec).unwrap();
             for i in 0..1600 {
                 let v = ((i as f32) / 100.0).sin();
-                w.write_sample((v * i16::MAX as f32) as i16).unwrap();
+                w.write_sample((v * f32::from(i16::MAX)) as i16).unwrap();
             }
             w.finalize().unwrap();
         }
@@ -450,7 +451,7 @@ mod tests {
         assert_eq!(samples.len(), 800);
         // Both channels are constant, so the average is constant.
         // 1000 + (-500) = 500, /2 = 250; /max ~= 250 / 32768 ~ 0.00763
-        let expected = (1000.0_f32 + -500.0_f32) / 2.0 / 32768.0;
+        let expected = f32::midpoint(1000.0_f32, -500.0_f32) / 32768.0;
         assert!((samples[0] - expected).abs() < 1e-4);
     }
 }

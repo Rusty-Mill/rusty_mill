@@ -27,7 +27,7 @@ use tokio::sync::Semaphore;
 /// Default wall-clock ceiling for a single headless subagent run. Matches the
 /// `SESSION_RUN_TIMEOUT` the ai-runtime applies to an in-process session so an
 /// isolated subagent isn't killed sooner than its shared-forge sibling.
-pub const DEFAULT_SUBAGENT_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+pub const DEFAULT_SUBAGENT_TIMEOUT: Duration = Duration::from_hours(2);
 
 /// Env var overriding the `nexus` binary used to spawn isolated subagents
 /// (RFC 0007 PR 4). The binary location is *install*-specific, not forge-

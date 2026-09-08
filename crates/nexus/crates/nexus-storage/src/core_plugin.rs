@@ -32,7 +32,7 @@ use crate::{StorageConfig, StorageEngine};
 const GIT_COMMIT_TOPIC: &str = "com.nexus.git.commit";
 
 /// P2-06 — tick interval for the BL-114 git-commit subscriber thread.
-/// Override via a future StorageConfig field; today the const is the
+/// Override via a future `StorageConfig` field; today the const is the
 /// only source.
 pub const DEFAULT_GIT_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const GIT_COMMIT_POLL_INTERVAL: Duration = DEFAULT_GIT_COMMIT_POLL_INTERVAL;
@@ -1027,32 +1027,31 @@ nexus_plugins::define_dispatch_helpers!();
 /// caller today and accepts a single string value.
 #[must_use]
 pub fn apply_frontmatter_edit(content: &str, key: &str, value: Option<&str>) -> String {
+    use std::fmt::Write as _;
+
     // Locate the closing `---` of the existing frontmatter, if any.
-    let (open_len, fm_body_start, fm_close_start) = match locate_frontmatter(content) {
-        Some(triple) => triple,
-        None => {
-            // No frontmatter block.
-            let Some(v) = value else {
-                // Remove on a file that has no frontmatter — no-op.
-                return content.to_string();
-            };
-            let opener = if content.starts_with("---\r\n") || content.contains("\r\n") {
-                "---\r\n"
-            } else {
-                "---\n"
-            };
-            let closer = if opener.ends_with("\r\n") {
-                "---\r\n\r\n"
-            } else {
-                "---\n\n"
-            };
-            let line_end = if opener.ends_with("\r\n") {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            return format!("{opener}{key}: {v}{line_end}{closer}{content}");
-        }
+    let Some((open_len, fm_body_start, fm_close_start)) = locate_frontmatter(content) else {
+        // No frontmatter block.
+        let Some(v) = value else {
+            // Remove on a file that has no frontmatter — no-op.
+            return content.to_string();
+        };
+        let opener = if content.starts_with("---\r\n") || content.contains("\r\n") {
+            "---\r\n"
+        } else {
+            "---\n"
+        };
+        let closer = if opener.ends_with("\r\n") {
+            "---\r\n\r\n"
+        } else {
+            "---\n\n"
+        };
+        let line_end = if opener.ends_with("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        return format!("{opener}{key}: {v}{line_end}{closer}{content}");
     };
     let yaml_src = &content[open_len..fm_close_start];
     let line_end = if content[..open_len].ends_with("\r\n") {
@@ -1068,7 +1067,7 @@ pub fn apply_frontmatter_edit(content: &str, key: &str, value: Option<&str>) -> 
         if !found && trimmed.starts_with(&prefix) {
             found = true;
             if let Some(v) = value {
-                rebuilt.push_str(&format!("{key}: {v}{line_end}"));
+                let _ = write!(rebuilt, "{key}: {v}{line_end}");
             }
             // value == None ⇒ drop this line entirely.
             continue;
@@ -1082,7 +1081,7 @@ pub fn apply_frontmatter_edit(content: &str, key: &str, value: Option<&str>) -> 
             if !rebuilt.ends_with('\n') {
                 rebuilt.push_str(line_end);
             }
-            rebuilt.push_str(&format!("{key}: {v}{line_end}"));
+            let _ = write!(rebuilt, "{key}: {v}{line_end}");
         }
         // value == None ⇒ key absent, nothing to do.
     }
@@ -1182,6 +1181,10 @@ fn git_commit_loop(
     }
 }
 
+// Entry point for a spawned thread (see the `.spawn(move || ...)` call
+// site) — every parameter must be owned to cross the 'static thread
+// boundary, so taking them by value here is required, not needless.
+#[allow(clippy::needless_pass_by_value)]
 fn bridge_loop(
     watcher: Watcher,
     bus: Arc<EventBus>,
@@ -1364,7 +1367,7 @@ fn publish_file_activity(bus: &EventBus, kind: &str, path: &str, extra_path: Opt
         // many edits to the same file under one row if it wants to.
         path.to_string(),
         ActivitySurface::File,
-        ActivityOrigin::Storage,
+        &ActivityOrigin::Storage,
     );
     entry.outcome = ActivityOutcome::Ok;
     entry.prompt = match (kind, extra_path) {

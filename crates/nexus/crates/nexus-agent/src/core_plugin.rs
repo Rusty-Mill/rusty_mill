@@ -297,7 +297,7 @@ impl CorePlugin for AgentCorePlugin {
     fn dispatch(
         &mut self,
         handler_id: u32,
-        _args: &serde_json::Value,
+        args: &serde_json::Value,
     ) -> Result<serde_json::Value, PluginError> {
         // `list_archetypes` and `list_tools` are the two sync handlers
         // on this plugin — both read only from compile-time / in-memory
@@ -308,7 +308,7 @@ impl CorePlugin for AgentCorePlugin {
             return Ok(serde_json::json!(ARCHETYPE_NAMES));
         }
         if handler_id == HANDLER_LIST_TOOLS {
-            return handlers::list_tools::handle_list_tools(_args);
+            return handlers::list_tools::handle_list_tools(args);
         }
         Err(PluginError::HandlerIsAsyncOnly { handler_id })
     }

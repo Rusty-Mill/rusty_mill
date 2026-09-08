@@ -58,6 +58,7 @@ async fn start_relay(token: &str) -> SocketAddr {
     addr
 }
 
+#[allow(clippy::result_large_err)]
 async fn connect_client(
     addr: SocketAddr,
     bus: Arc<EventBus>,

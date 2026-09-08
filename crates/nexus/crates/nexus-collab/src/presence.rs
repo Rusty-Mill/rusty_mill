@@ -83,7 +83,7 @@ pub struct PresenceCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_id: Option<String>,
     /// Caret position as a character offset into the file
-    /// (CodeMirror `EditorSelection.main.head`). `None` when the
+    /// (`CodeMirror` `EditorSelection.main.head`). `None` when the
     /// publisher only knows the file (Phase 1.3 peers, idle focus).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,

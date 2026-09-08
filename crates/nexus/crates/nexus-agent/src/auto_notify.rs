@@ -163,7 +163,7 @@ pub fn spawn(ctx: Arc<KernelPluginContext>, threshold_secs: u64) {
                         tracing::debug!(%err, "auto_notify: notifications::send failed");
                     }
                 }
-                Err(nexus_kernel::RecvError::Lagged(_)) => continue,
+                Err(nexus_kernel::RecvError::Lagged(_)) => {}
                 Err(nexus_kernel::RecvError::Closed) => break,
             }
         }

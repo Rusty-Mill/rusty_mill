@@ -37,7 +37,7 @@ max_tool_calls_per_iteration: number,
 max_context_tokens: number, 
 /**
  * Provider-routing hint. v1 accepts the field for forward-
- * compat with BL-119's "provider-routing hints" DoD bullet but
+ * compat with BL-119's "provider-routing hints" `DoD` bullet but
  * the dispatch loop does not yet consult it — the AI plugin's
  * configured provider is still authoritative. A future BL
  * (Hermes Features 2–3) will let an agent pick a different

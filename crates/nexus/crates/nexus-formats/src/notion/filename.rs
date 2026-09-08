@@ -109,7 +109,7 @@ mod tests {
         let (name, uid) = strip_notion_uuid("Title not_hex_ZZZZZZZZZZZZZZZZZZZZZZZZZZZ.md");
         assert_eq!(
             name,
-            format!("Title not_hex_ZZZZZZZZZZZZZZZZZZZZZZZZZZZ.md")
+            "Title not_hex_ZZZZZZZZZZZZZZZZZZZZZZZZZZZ.md".to_string()
         );
         assert!(uid.is_none());
     }

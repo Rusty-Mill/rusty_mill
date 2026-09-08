@@ -40,7 +40,7 @@ pub enum SecurityError {
     CapabilityDenied(Capability),
 
     /// TLS pin mismatch (BL-102). The leaf certificate's
-    /// SubjectPublicKeyInfo SHA-256 hash did not match any pin
+    /// `SubjectPublicKeyInfo` SHA-256 hash did not match any pin
     /// configured for `host`. Connection is aborted before any
     /// request bytes are sent.
     #[error("TLS pin mismatch for {host}: expected one of {expected:?}, got {actual}")]

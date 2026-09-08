@@ -588,7 +588,7 @@ pub struct GitPushArgs {
 }
 
 /// BL-079 — one entry from `com.nexus.git::blame`. Wire-mirror of
-/// [`crate::types::BlameEntry`] with serde / ts-rs / JsonSchema
+/// [`crate::types::BlameEntry`] with serde / ts-rs / `JsonSchema`
 /// derivations the impl type doesn't carry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]

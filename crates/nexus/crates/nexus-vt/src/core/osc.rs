@@ -244,8 +244,7 @@ fn set_dynamic_colors(
     pen: &mut Pen,
 ) {
     let Some(text) = text else { return };
-    let mut role = start;
-    for spec in text.split(';') {
+    for (role, spec) in (start..).zip(text.split(';')) {
         if role > 12 {
             break;
         }
@@ -279,7 +278,6 @@ fn set_dynamic_colors(
                 _ => palette.cursor = rgb,
             }
         }
-        role += 1;
     }
     g.set_default_colors(palette.fg, palette.bg, palette.cursor);
 }

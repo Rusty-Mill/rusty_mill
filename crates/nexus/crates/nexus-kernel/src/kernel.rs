@@ -91,7 +91,7 @@ impl Kernel {
     /// # Errors
     /// Infallible today. The `Result` return is preserved for forward
     /// compatibility.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn start(&self) -> Result<()> {
         tracing::info!(
             forge_root = ?self.config.forge_root,
@@ -111,7 +111,7 @@ impl Kernel {
     /// # Errors
     /// Infallible today. The `Result` return is preserved for forward
     /// compatibility.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn shutdown(&self) -> Result<()> {
         let was_already_shutdown = self
             .shutdown_flag

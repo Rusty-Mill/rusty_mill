@@ -158,9 +158,8 @@ impl ProposedAction {
     #[must_use]
     pub fn capability_required(&self) -> Capability {
         match self {
-            Self::FsWrite { .. } => Capability::FsWrite,
+            Self::FsWrite { .. } | Self::FsDelete { .. } => Capability::FsWrite,
             Self::FsWriteExternal { .. } => Capability::FsWriteExternal,
-            Self::FsDelete { .. } => Capability::FsWrite,
             Self::IpcCall { .. } => Capability::IpcCall,
             Self::KvWrite { .. } => Capability::KvWrite,
             Self::ProcessSpawn { .. } => Capability::ProcessSpawn,
@@ -340,6 +339,9 @@ impl ProposalStore {
     /// Returns [`CapabilityError::Denied`] when the session's token
     /// does not grant the required capability (or is revoked). The
     /// proposal is stored as `Rejected` with a human-readable reason.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     pub fn submit(
         &self,
         session_id: Uuid,
@@ -381,6 +383,9 @@ impl ProposalStore {
     /// Returns a string describing why the commit was rejected:
     /// - proposal id is unknown
     /// - proposal is not in `Approved` state
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     pub fn commit(
         &self,
         proposal_id: ProposalId,
@@ -428,6 +433,9 @@ impl ProposalStore {
     /// Returns a string describing why the rollback was rejected:
     /// - snapshot id is unknown
     /// - snapshot is already rolled back
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     pub fn rollback(&self, snapshot_id: SnapshotId) -> Result<Snapshot, String> {
         let mut g = self.snapshots.lock().expect("snapshot store poisoned");
         let snap = g
@@ -441,6 +449,9 @@ impl ProposalStore {
     }
 
     /// Fetch a proposal by id.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn get_proposal(&self, id: ProposalId) -> Option<Proposal> {
         self.proposals
@@ -451,6 +462,9 @@ impl ProposalStore {
     }
 
     /// Fetch a snapshot by id.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn get_snapshot(&self, id: SnapshotId) -> Option<Snapshot> {
         self.snapshots
@@ -461,6 +475,9 @@ impl ProposalStore {
     }
 
     /// All proposals for a given session. Order is undefined.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn proposals_for_session(&self, session_id: Uuid) -> Vec<Proposal> {
         self.proposals
@@ -474,6 +491,9 @@ impl ProposalStore {
 
     /// All snapshots for a given session, sorted by `committed_at`
     /// ascending (oldest first — rollback replays in reverse).
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn snapshots_for_session(&self, session_id: Uuid) -> Vec<Snapshot> {
         let mut snaps: Vec<Snapshot> = self
@@ -490,6 +510,9 @@ impl ProposalStore {
 
     /// Count of live (non-terminal) proposals across all sessions.
     /// Used by the Supervisor's observability surface.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.proposals
@@ -655,11 +678,11 @@ mod tests {
         let snap1 = store.commit(pid1, vec![]).unwrap();
         let pid2 = store.submit(sid, fs_write_action(), &token).unwrap();
         let snap2 = store.commit(pid2, vec![]).unwrap();
-        let snaps = store.snapshots_for_session(sid);
-        assert_eq!(snaps.len(), 2);
-        assert!(snaps[0].committed_at <= snaps[1].committed_at);
-        assert!(snaps.iter().any(|s| s.id == snap1));
-        assert!(snaps.iter().any(|s| s.id == snap2));
+        let all_snaps = store.snapshots_for_session(sid);
+        assert_eq!(all_snaps.len(), 2);
+        assert!(all_snaps[0].committed_at <= all_snaps[1].committed_at);
+        assert!(all_snaps.iter().any(|s| s.id == snap1));
+        assert!(all_snaps.iter().any(|s| s.id == snap2));
     }
 
     #[test]

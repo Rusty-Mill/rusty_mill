@@ -98,6 +98,8 @@ pub fn parse_pointer(bytes: &[u8]) -> Option<LfsPointer> {
 /// `tracing::warn!` so operators see the degradation in logs.
 #[must_use]
 pub fn smudge(cwd: &Path, pointer_bytes: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+
     let mut child = Command::new("git")
         .args(["lfs", "smudge"])
         .current_dir(cwd)
@@ -106,7 +108,6 @@ pub fn smudge(cwd: &Path, pointer_bytes: &[u8]) -> Option<Vec<u8>> {
         .stderr(Stdio::piped())
         .spawn()
         .ok()?;
-    use std::io::Write;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(pointer_bytes).ok()?;
         // Drop closes the pipe so smudge can finish reading.

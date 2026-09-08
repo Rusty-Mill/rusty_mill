@@ -43,7 +43,7 @@ pub struct OpenAiProvider {
     cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
-/// The `usage` block of an OpenAI chat-completions response.
+/// The `usage` block of an `OpenAI` chat-completions response.
 #[derive(serde::Deserialize, Debug, Clone, Copy)]
 struct OpenAiUsage {
     #[serde(default)]
@@ -119,7 +119,7 @@ struct ChatRequest<'a> {
     stream_options: Option<StreamOptions>,
 }
 
-/// `stream_options` for an OpenAI streaming request.
+/// `stream_options` for an `OpenAI` streaming request.
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,

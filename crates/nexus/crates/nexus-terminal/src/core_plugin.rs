@@ -442,7 +442,7 @@ pub struct TerminalCorePlugin {
     pub(crate) context: Option<Arc<KernelPluginContext>>,
     /// BL-064 — pre-built suggestion engine. Holds the default rule
     /// set so every `suggest` dispatch reuses the same compiled
-    /// regex state. Wrapped in `Arc` so the dispatch_async future
+    /// regex state. Wrapped in `Arc` so the `dispatch_async` future
     /// can clone it without re-instantiating per-call.
     pub(crate) suggest_engine: Arc<crate::ai::AiSuggestionEngine>,
     /// BL-063 — session-store handle for cross-session search.
@@ -2593,7 +2593,7 @@ mod tests {
     }
 
     /// Without a `memory_limit_mb` on the saved command, the
-    /// pending_overrides map stays empty so the poller falls back to
+    /// `pending_overrides` map stays empty so the poller falls back to
     /// the bootstrap-wide default.
     #[test]
     fn run_saved_without_memory_limit_does_not_stage_override_unix() {
@@ -2818,8 +2818,8 @@ mod tests {
                         match kind {
                             "memory_limit_exceeded" => {
                                 saw_breach = true;
-                                let limit_mb = payload.get("limit_mb").and_then(|v| v.as_u64());
-                                let rss_bytes = payload.get("rss_bytes").and_then(|v| v.as_u64());
+                                let limit_mb = payload.get("limit_mb").and_then(serde_json::Value::as_u64);
+                                let rss_bytes = payload.get("rss_bytes").and_then(serde_json::Value::as_u64);
                                 assert_eq!(limit_mb, Some(1));
                                 assert!(rss_bytes.is_some_and(|b| b > 0));
                             }

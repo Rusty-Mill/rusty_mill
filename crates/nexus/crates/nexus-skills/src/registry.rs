@@ -258,8 +258,7 @@ fn any_skill_newer_than(root: &Path, cutoff_secs: u64) -> std::io::Result<bool> 
                 let mtime = meta
                     .modified()?
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_secs());
                 if mtime > cutoff_secs {
                     return Ok(true);
                 }

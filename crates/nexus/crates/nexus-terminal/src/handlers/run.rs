@@ -123,8 +123,7 @@ pub(crate) fn one_shot_flag(shell: &str) -> &'static str {
     let basename = std::path::Path::new(shell)
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s.strip_suffix(".exe").unwrap_or(s))
-        .unwrap_or(shell);
+        .map_or(shell, |s| s.strip_suffix(".exe").unwrap_or(s));
     match basename.to_ascii_lowercase().as_str() {
         "cmd" => "/C",
         "pwsh" | "powershell" => "-Command",

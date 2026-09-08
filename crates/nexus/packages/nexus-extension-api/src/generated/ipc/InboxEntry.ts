@@ -7,7 +7,7 @@ import type { Severity } from "./Severity";
  */
 export type InboxEntry = { 
 /**
- * Stable UUIDv4 generated at insert time.
+ * Stable `UUIDv4` generated at insert time.
  */
 id: string, 
 /**

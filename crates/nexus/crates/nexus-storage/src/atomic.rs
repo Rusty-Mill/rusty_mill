@@ -234,7 +234,7 @@ mod tests {
     /// Issue #84. Permanent error classes (here: write to a path
     /// whose parent doesn't exist) should bail immediately rather
     /// than waste ~2s of wall-clock on three retries that have no
-    /// chance of succeeding. The temp_dir argument is a non-existent
+    /// chance of succeeding. The `temp_dir` argument is a non-existent
     /// path so the temp-file open fails with `NotFound` — which is a
     /// permanent failure for retry purposes.
     #[test]
@@ -250,8 +250,7 @@ mod tests {
         // — well under 100ms.
         assert!(
             elapsed < Duration::from_millis(100),
-            "atomic_write retried on a permanent error (took {:?}, expected <100ms)",
-            elapsed
+            "atomic_write retried on a permanent error (took {elapsed:?}, expected <100ms)"
         );
         match err {
             StorageError::WriteFailed { .. } => {}

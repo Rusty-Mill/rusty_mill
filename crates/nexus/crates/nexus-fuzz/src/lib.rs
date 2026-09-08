@@ -37,7 +37,7 @@
 //!
 //! ## Crash protocol
 //!
-//! Per BL-103 DoD, any crash reproducer becomes a P1 bug, lands as a
+//! Per BL-103 `DoD`, any crash reproducer becomes a P1 bug, lands as a
 //! checked-in unit test in the relevant crate's normal test suite,
 //! and the underlying bug ships before the reproducer is added to
 //! the corpus tree.
@@ -56,10 +56,13 @@ use nexus_types::ForgePathValidator;
 /// interpreted as a path. The validator must terminate without
 /// panicking and never return a path outside the configured forge
 /// root.
+///
+/// # Panics
+/// Panics if `validate`/`validate_for_write` return a path outside
+/// `forge_root` — that's the BL-103 invariant this fuzz target checks.
 pub fn fuzz_path_validator(forge_root: &Path, data: &[u8]) {
-    let validator = match ForgePathValidator::new(forge_root) {
-        Ok(v) => v,
-        Err(_) => return,
+    let Ok(validator) = ForgePathValidator::new(forge_root) else {
+        return;
     };
     let canonical_root = validator.forge_root().to_path_buf();
 
@@ -97,6 +100,11 @@ pub fn fuzz_path_validator(forge_root: &Path, data: &[u8]) {
 /// — anything else (including substring spoofs like
 /// `"foobar.event"` claiming to be in `"foo"`'s namespace) must
 /// return `false`. The function must terminate without panic.
+///
+/// # Panics
+/// Panics if `type_id_in_namespace` returns `true` for a pair that
+/// isn't an exact match or a dotted-suffix extension — the BL-103
+/// invariant this fuzz target checks.
 pub fn fuzz_event_type_id(plugin_id: &str, type_id: &str) {
     let result = type_id_in_namespace(type_id, plugin_id);
     if result {
@@ -104,8 +112,7 @@ pub fn fuzz_event_type_id(plugin_id: &str, type_id: &str) {
         let exact = type_id == plugin_id;
         let suffix = type_id
             .strip_prefix(plugin_id)
-            .map(|rest| rest.starts_with('.'))
-            .unwrap_or(false);
+            .is_some_and(|rest| rest.starts_with('.'));
         assert!(
             exact || suffix,
             "BL-103 invariant violated: type_id_in_namespace returned \
@@ -122,6 +129,10 @@ pub fn fuzz_event_type_id(plugin_id: &str, type_id: &str) {
 /// 2. A parsed `Capability` must round-trip through `as_str` →
 ///    `from_str` to the same variant (catching a regression in
 ///    either direction of the bidirectional table).
+///
+/// # Panics
+/// Panics if a parsed `Capability` fails to round-trip through
+/// `as_str`/`from_str` to the same variant.
 pub fn fuzz_capability_set(data: &[u8]) {
     let s = String::from_utf8_lossy(data);
     let parsed = Capability::from_str(s.as_ref());

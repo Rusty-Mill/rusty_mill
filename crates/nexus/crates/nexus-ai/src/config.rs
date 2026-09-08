@@ -132,8 +132,7 @@ impl AiConfig {
     #[must_use]
     pub fn indexing_debounce(&self) -> std::time::Duration {
         self.indexing_debounce_secs
-            .map(std::time::Duration::from_secs)
-            .unwrap_or(crate::indexing_daemon::DEFAULT_DEBOUNCE)
+            .map_or(crate::indexing_daemon::DEFAULT_DEBOUNCE, std::time::Duration::from_secs)
     }
 }
 

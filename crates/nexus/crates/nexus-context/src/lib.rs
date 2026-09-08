@@ -13,7 +13,7 @@
 //! - Budget enforcement happen at the entry level (token estimates per
 //!   entry, hard stop when the budget is full)
 //! - The model adapter layer decide how to format each entry type for
-//!   a specific provider (OpenAI, Claude, etc.) without leaking those
+//!   a specific provider (`OpenAI`, Claude, etc.) without leaking those
 //!   formatting details into the memory or runtime layers
 //! - Replay-testing work without running a real model (the `Context`
 //!   is a pure value — no async, no I/O)
@@ -176,16 +176,16 @@ impl ContextEntry {
     #[must_use]
     pub fn estimated_tokens(&self) -> u32 {
         match self {
-            Self::System { content } => estimate_tokens(content),
-            Self::UserTurn { content, .. } => estimate_tokens(content),
-            Self::AssistantTurn { content } => estimate_tokens(content),
+            Self::System { content }
+            | Self::UserTurn { content, .. }
+            | Self::AssistantTurn { content }
+            | Self::MemoryInjection { content, .. } => estimate_tokens(content),
             Self::ToolCall { name, arguments } => {
                 estimate_tokens(name) + estimate_tokens(&arguments.to_string())
             }
             Self::ToolResult { call_id, content } => {
                 estimate_tokens(call_id) + estimate_tokens(content)
             }
-            Self::MemoryInjection { content, .. } => estimate_tokens(content),
         }
     }
 

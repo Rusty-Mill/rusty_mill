@@ -458,10 +458,10 @@ pub(crate) async fn refresh_excerpts(
             // slice-and-overwrite — the user sees the latest source
             // content at the original line numbers, same as step 3's
             // baseline behaviour.
-            let relocated = if !block.content.is_empty() {
-                super::save::relocate_excerpt_by_content(source, &block.content)
-            } else {
+            let relocated = if block.content.is_empty() {
                 None
+            } else {
+                super::save::relocate_excerpt_by_content(source, &block.content)
             };
             if let Some((new_start, new_end)) = relocated {
                 if let BlockType::Excerpt {

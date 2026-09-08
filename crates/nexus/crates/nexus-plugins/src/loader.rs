@@ -1960,18 +1960,16 @@ fn load_granted_high_risk_caps(
     };
     let json_bytes = if grants_crypto::looks_encrypted(&bytes) {
         let key = grants_crypto::GrantsKey::for_plugin(plugin_id);
-        match grants_crypto::decrypt_blob(&key, &bytes) {
-            Some(plain) => plain,
-            None => {
-                tracing::warn!(
-                    audit = true,
-                    plugin_id,
-                    path = %path.display(),
-                    "BL-101: granted_caps.json decryption failed (key rotated or file tampered); resetting HIGH-risk grants — user must re-consent",
-                );
-                return HashSet::new();
-            }
-        }
+        let Some(plain) = grants_crypto::decrypt_blob(&key, &bytes) else {
+            tracing::warn!(
+                audit = true,
+                plugin_id,
+                path = %path.display(),
+                "BL-101: granted_caps.json decryption failed (key rotated or file tampered); resetting HIGH-risk grants — user must re-consent",
+            );
+            return HashSet::new();
+        };
+        plain
     } else {
         bytes
     };
@@ -2042,7 +2040,7 @@ fn publish_capability_activity(
     let mut entry = ActivityEntry::now(
         format!("cap:{plugin_id}:{capability}"),
         ActivitySurface::Capability,
-        ActivityOrigin::Capability,
+        &ActivityOrigin::Capability,
     );
     entry.outcome = ActivityOutcome::Ok;
     entry.prompt = format!("{kind} {capability} for {plugin_id}");
@@ -2206,8 +2204,7 @@ fn load_disabled_subscriptions(plugin_dir: &Path) -> std::collections::HashSet<S
         Err(err) => {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_secs());
             let backup = plugin_dir.join(format!("{SUBSCRIPTIONS_FILE}.corrupt-{ts}"));
             let rename_result = std::fs::rename(&path, &backup);
             tracing::warn!(

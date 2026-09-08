@@ -687,7 +687,7 @@ mod tests {
     fn merge_contributed_rejects_invalid_specs() {
         let mut cfg = McpHostConfig::default();
         let skipped = cfg.merge_contributed(vec![
-            ("".into(), stdio_spec("x"), "p1".into()),
+            (String::new(), stdio_spec("x"), "p1".into()),
             ("empty-cmd".into(), stdio_spec(""), "p2".into()),
             (
                 "remote-no-url".into(),
@@ -723,7 +723,7 @@ mod tests {
         let skipped = cfg.merge_contributed(vec![
             ("taken".into(), stdio_spec("p1"), "plug1".into()),
             ("new1".into(), stdio_spec("ok"), "plug2".into()),
-            ("".into(), stdio_spec("oops"), "plug3".into()),
+            (String::new(), stdio_spec("oops"), "plug3".into()),
         ]);
         assert_eq!(skipped.len(), 2);
         assert_eq!(skipped[0].plugin_id, "plug1");
@@ -769,7 +769,7 @@ mod tests {
         let mut cfg = McpHostConfig::default();
         cfg.servers.insert("taken".into(), stdio_spec("x"));
         assert_eq!(
-            cfg.register_contributed("".into(), stdio_spec("ok"), "p".into())
+            cfg.register_contributed(String::new(), stdio_spec("ok"), "p".into())
                 .unwrap_err(),
             McpMergeSkipReason::InvalidName,
         );

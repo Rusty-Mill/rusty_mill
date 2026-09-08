@@ -68,7 +68,7 @@ pub struct CompactionEvent {
 }
 
 /// Estimate token count from character length. Approximates 4
-/// characters per token — the rule of thumb the OpenAI cookbook
+/// characters per token — the rule of thumb the `OpenAI` cookbook
 /// quotes for English prose. Over-estimates slightly for code +
 /// punctuation-heavy text, which is the safe side: the loop
 /// triggers compression a hair earlier than strictly necessary.
@@ -117,6 +117,8 @@ const COMPRESSION_SYSTEM_PROMPT: &str =
 #[async_trait]
 impl<D: ChatDriver + ?Sized> Compressor for LlmCompressor<'_, D> {
     async fn compress(&self, rounds: &[RoundRecord], goal: &str) -> Result<String, String> {
+        use std::fmt::Write as _;
+
         if rounds.is_empty() {
             return Ok(String::new());
         }
@@ -125,15 +127,16 @@ impl<D: ChatDriver + ?Sized> Compressor for LlmCompressor<'_, D> {
         user_msg.push_str(goal);
         user_msg.push_str("\n\nRounds to summarise:\n");
         for r in rounds {
-            user_msg.push_str(&format!(
-                "Round {}{}\n",
+            let _ = writeln!(
+                user_msg,
+                "Round {}{}",
                 r.round,
                 if r.text.is_empty() {
                     String::new()
                 } else {
                     format!(" — {}", r.text)
                 }
-            ));
+            );
             for tc in &r.tool_calls {
                 let verdict = if !tc.approved {
                     "denied"
@@ -142,9 +145,9 @@ impl<D: ChatDriver + ?Sized> Compressor for LlmCompressor<'_, D> {
                 } else {
                     "ok"
                 };
-                user_msg.push_str(&format!("  - {} {}\n", tc.name, verdict));
+                let _ = writeln!(user_msg, "  - {} {}", tc.name, verdict);
                 if !tc.error.is_empty() {
-                    user_msg.push_str(&format!("    error: {}\n", tc.error));
+                    let _ = writeln!(user_msg, "    error: {}", tc.error);
                 }
             }
         }
@@ -174,6 +177,8 @@ pub struct KeepDecisionsCompressor;
 #[async_trait]
 impl Compressor for KeepDecisionsCompressor {
     async fn compress(&self, rounds: &[RoundRecord], _goal: &str) -> Result<String, String> {
+        use std::fmt::Write as _;
+
         let mut out = String::new();
         if rounds.is_empty() {
             return Ok(out);
@@ -182,12 +187,9 @@ impl Compressor for KeepDecisionsCompressor {
         for r in rounds {
             for tc in &r.tool_calls {
                 if tc.approved && tc.error.is_empty() {
-                    out.push_str(&format!("- round {}: {} ok\n", r.round, tc.name));
+                    let _ = writeln!(out, "- round {}: {} ok", r.round, tc.name);
                 } else if !tc.error.is_empty() {
-                    out.push_str(&format!(
-                        "- round {}: {} failed ({})\n",
-                        r.round, tc.name, tc.error
-                    ));
+                    let _ = writeln!(out, "- round {}: {} failed ({})", r.round, tc.name, tc.error);
                 }
             }
         }
@@ -273,7 +275,7 @@ mod tests {
     async fn noop_compressor_records_count() {
         let rounds = vec![round(1, "x", true), round(2, "y", true)];
         let s = NoopCompressor.compress(&rounds, "g").await.unwrap();
-        assert!(s.contains("2"));
+        assert!(s.contains('2'));
         assert!(s.contains("elided"));
     }
 

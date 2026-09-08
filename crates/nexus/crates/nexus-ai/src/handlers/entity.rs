@@ -15,6 +15,7 @@ const ENRICH_ENTITY_MAX_RAG_HITS: usize = 4;
 const ENRICH_ENTITY_MAX_CHUNK_CHARS: usize = 400;
 const ENRICH_ENTITY_MAX_DESCRIPTION: usize = 480;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_enrich_entity(
     ctx: &KernelPluginContext,
     ai_cfg: Option<AiConfig>,
@@ -23,6 +24,7 @@ pub(crate) async fn handle_enrich_entity(
 ) -> Result<serde_json::Value, PluginError> {
     use crate::ipc::{EnrichEntityArgs, EnrichEntityResult};
     use crate::provider::{ChatMessage, Role};
+    use std::fmt::Write as _;
 
     let parsed: EnrichEntityArgs = serde_json::from_value(args.clone())
         .map_err(|e| exec_err(format!("enrich_entity: parse args: {e}")))?;
@@ -81,6 +83,9 @@ pub(crate) async fn handle_enrich_entity(
                 .filter_map(|v| {
                     let t = v.get("target").and_then(serde_json::Value::as_str)?;
                     let k = v.get("type").and_then(serde_json::Value::as_str)?;
+                    // Confidence is stored as JSON f64 but carried as f32;
+                    // exact-precision f64->f32 has no lossless `try_from`.
+                    #[allow(clippy::cast_possible_truncation)]
                     let c = v
                         .get("confidence")
                         .and_then(serde_json::Value::as_f64)
@@ -139,23 +144,24 @@ pub(crate) async fn handle_enrich_entity(
 
     let mut prompt = String::new();
     prompt.push_str("You are expanding a brief knowledge-graph entity description into a single self-contained paragraph (max 3 sentences, no preface, no bullet points).\n\n");
-    prompt.push_str(&format!("Entity: {entity_id}\n"));
-    prompt.push_str(&format!("Type: {entity_type}\n"));
+    let _ = writeln!(prompt, "Entity: {entity_id}");
+    let _ = writeln!(prompt, "Type: {entity_type}");
     if !aliases.is_empty() {
-        prompt.push_str(&format!("Aliases: {}\n", aliases.join(", ")));
+        let _ = writeln!(prompt, "Aliases: {}", aliases.join(", "));
     }
-    prompt.push_str(&format!(
-        "Existing description: {}\n",
+    let _ = writeln!(
+        prompt,
+        "Existing description: {}",
         if original_description.is_empty() {
             "(none)"
         } else {
             &original_description
         }
-    ));
+    );
     if !existing_relations.is_empty() {
         prompt.push_str("Existing relations:\n");
         for (target, kind, _) in &existing_relations {
-            prompt.push_str(&format!("- {kind} {target}\n"));
+            let _ = writeln!(prompt, "- {kind} {target}");
         }
     }
     if !rag_snippets.is_empty() {
@@ -242,6 +248,7 @@ const INFER_DEFAULT_MAX_PROPOSALS: u32 = 3;
 const INFER_NEIGHBOUR_FAN_OUT: usize = 6;
 const INFER_DRAFT_CONFIDENCE: f32 = 0.5;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_infer_entity_relations(
     ctx: &KernelPluginContext,
     ai_cfg: Option<AiConfig>,
@@ -250,6 +257,7 @@ pub(crate) async fn handle_infer_entity_relations(
 ) -> Result<serde_json::Value, PluginError> {
     use crate::ipc::{InferEntityRelationsArgs, InferEntityRelationsResult, InferredRelationRow};
     use crate::provider::{ChatMessage, Role};
+    use std::fmt::Write as _;
 
     let parsed: InferEntityRelationsArgs = serde_json::from_value(args.clone())
         .map_err(|e| exec_err(format!("infer_entity_relations: parse args: {e}")))?;
@@ -302,6 +310,9 @@ pub(crate) async fn handle_infer_entity_relations(
                 .filter_map(|v| {
                     let t = v.get("target").and_then(serde_json::Value::as_str)?;
                     let k = v.get("type").and_then(serde_json::Value::as_str)?;
+                    // Confidence is stored as JSON f64 but carried as f32;
+                    // exact-precision f64->f32 has no lossless `try_from`.
+                    #[allow(clippy::cast_possible_truncation)]
                     let c = v
                         .get("confidence")
                         .and_then(serde_json::Value::as_f64)
@@ -381,7 +392,7 @@ pub(crate) async fn handle_infer_entity_relations(
             .ipc_call(
                 "com.nexus.storage",
                 "entity_search",
-                serde_json::json!({ "query": "", "limit": (INFER_NEIGHBOUR_FAN_OUT + 1) as u32 }),
+                serde_json::json!({ "query": "", "limit": u32::try_from(INFER_NEIGHBOUR_FAN_OUT + 1).unwrap_or(u32::MAX) }),
                 std::time::Duration::from_secs(5),
             )
             .await
@@ -431,34 +442,37 @@ pub(crate) async fn handle_infer_entity_relations(
 
     let mut prompt = String::new();
     prompt.push_str("You propose new typed relations between knowledge-graph entities.\n\n");
-    prompt.push_str(&format!(
-        "Source entity:\n  id: {entity_id}\n  type: {entity_type}\n  description: {desc}\n",
+    let _ = writeln!(
+        prompt,
+        "Source entity:\n  id: {entity_id}\n  type: {entity_type}\n  description: {desc}",
         desc = if description.is_empty() {
             "(none)".to_string()
         } else {
             description.clone()
         },
-    ));
+    );
     if !existing_relations.is_empty() {
         prompt.push_str("  existing relations:\n");
         for (target, kind, _) in &existing_relations {
-            prompt.push_str(&format!("    - {kind} {target}\n"));
+            let _ = writeln!(prompt, "    - {kind} {target}");
         }
     }
     prompt.push_str("\nCandidate target entities:\n");
     for (id, etype, edesc) in &neighbours {
-        prompt.push_str(&format!(
-            "  - id: {id}\n    type: {etype}\n    description: {}\n",
+        let _ = writeln!(
+            prompt,
+            "  - id: {id}\n    type: {etype}\n    description: {}",
             if edesc.is_empty() {
                 "(none)".to_string()
             } else {
                 edesc.clone()
             },
-        ));
+        );
     }
-    prompt.push_str(&format!(
+    let _ = write!(
+        prompt,
         "\nReply with a JSON array of at most {max_proposals} new relation proposals. Each item: {{\"target\": <id>, \"type\": <relation kind>}}. Use only target ids from the candidate list. Skip relations that are already declared on the source. Do not include any text outside the JSON array."
-    ));
+    );
 
     let messages = [ChatMessage {
         role: Role::User,
@@ -573,6 +587,7 @@ struct ExtractReadFileReply {
     bytes: Option<Vec<u8>>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_extract_entities(
     ctx: &KernelPluginContext,
     ai_cfg: Option<AiConfig>,
@@ -580,6 +595,7 @@ pub(crate) async fn handle_extract_entities(
 ) -> Result<serde_json::Value, PluginError> {
     use crate::ipc::{ExtractEntitiesArgs, ExtractEntitiesResult, ExtractedEntityRow};
     use crate::provider::{ChatMessage, Role};
+    use std::fmt::Write as _;
 
     let parsed: ExtractEntitiesArgs = serde_json::from_value(args.clone())
         .map_err(|e| exec_err(format!("extract_entities: parse args: {e}")))?;
@@ -633,16 +649,15 @@ pub(crate) async fn handle_extract_entities(
          organizations, tools, products, or concepts) from a note. Skip generic or \
          passing mentions — only entities the note actually says something about.\n\n",
     );
-    prompt.push_str(&format!(
-        "Note path: {path}\nNote content:\n{truncated}\n\n"
-    ));
-    prompt.push_str(&format!(
+    let _ = write!(prompt, "Note path: {path}\nNote content:\n{truncated}\n\n");
+    let _ = write!(
+        prompt,
         "Reply with a JSON array of at most {max_entities} entities. Each item: \
          {{\"id\": <lowercase-hyphenated-slug, 2-4 words>, \"entity_type\": <one of: \
          person, project, organization, tool, concept>, \"description\": <one \
          sentence, grounded in the note>}}. Do not include any text outside the JSON \
          array."
-    ));
+    );
 
     let messages = [ChatMessage {
         role: Role::User,
@@ -699,9 +714,7 @@ pub(crate) async fn handle_extract_entities(
                 serde_json::json!({ "id": &id }),
                 std::time::Duration::from_secs(5),
             )
-            .await
-            .ok()
-            .is_some_and(|r| {
+            .await.is_ok_and(|r| {
                 r.get("entity")
                     .and_then(serde_json::Value::as_object)
                     .is_some()

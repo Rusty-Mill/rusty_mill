@@ -224,6 +224,12 @@ impl OllamaProvider {
     /// continuation of `prefix`. The ghost-text rendering still works
     /// — the user just loses the suffix-aware completion that FIM
     /// models do best.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError`] if the HTTP request fails, the Ollama server
+    /// responds with an authentication failure (401) or another
+    /// non-success status, or the response body can't be decoded.
     pub async fn fim_generate(
         &self,
         prefix: &str,

@@ -234,7 +234,7 @@ pub struct McpCallToolReply {
 )]
 #[serde(deny_unknown_fields)]
 pub struct McpRegisterServerArgs {
-    /// Stable server identifier (the BTreeMap key used by the host).
+    /// Stable server identifier (the `BTreeMap` key used by the host).
     pub name: String,
     /// Wire-level transport — one of `"stdio"`, `"http"`, `"websocket"`.
     /// Unknown values fall back to stdio at conversion time.
@@ -392,7 +392,7 @@ pub struct McpUnregisterToolReply {
 mod tests {
     use super::*;
 
-    /// G5a: HANDLER_LIST_TOOLS must forward the input_schema verbatim
+    /// G5a: `HANDLER_LIST_TOOLS` must forward the `input_schema` verbatim
     /// so AI tool-bridge consumers can drive function-calling. The
     /// struct also has to round-trip an entry that omits the field
     /// (for backwards compat with any external producer that hasn't

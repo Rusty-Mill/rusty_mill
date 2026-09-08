@@ -500,7 +500,7 @@ pub fn parse_str(
         raw.system_prompt.text.as_deref().map(str::trim),
         raw.system_prompt.path.as_deref().map(str::trim),
     ) {
-        (None, None) | (Some(""), None) | (None, Some("")) | (Some(""), Some("")) => {
+        (None | Some(""), None | Some("")) => {
             return Err(CustomAgentError::SystemPrompt {
                 path: path.to_path_buf(),
                 reason: "exactly one of `text` or `path` is required".to_string(),
@@ -569,6 +569,7 @@ pub fn resolve_system_prompt(
 /// Symlinks are followed once (matching `std::fs::read_dir`'s default);
 /// nested subdirectories under `<slug>/` are ignored — only
 /// `<slug>/agent.toml` counts.
+#[must_use]
 pub fn scan_forge(
     forge_root: &Path,
 ) -> (Vec<CustomAgentManifest>, Vec<(PathBuf, CustomAgentError)>) {

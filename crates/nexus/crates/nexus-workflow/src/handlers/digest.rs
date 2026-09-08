@@ -58,7 +58,7 @@ pub(crate) async fn handle_run(
 /// `Box::pin(async move { handle_set_config(...) })` so the
 /// `dispatch_async` signature still hands back a `CorePluginFuture`.
 pub(crate) fn handle_set_config(
-    cfg_handle: Arc<RwLock<DigestConfig>>,
+    cfg_handle: &Arc<RwLock<DigestConfig>>,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, PluginError> {
     let new_cfg: DigestConfig = serde_json::from_value(args)

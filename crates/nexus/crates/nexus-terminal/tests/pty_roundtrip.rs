@@ -45,7 +45,7 @@ fn sh_config() -> SessionConfig {
 fn spawn_echo_read_roundtrip() {
     let mut session = Session::spawn(sh_config()).expect("spawn /bin/sh under a PTY");
     assert!(session.pid().is_some(), "spawned session must have a pid");
-    assert!(matches!(session.state(), ProcessState::Running { .. }));
+    assert!(matches!(session.state(), ProcessState::Running));
 
     session
         .write(b"echo nexus-pty-roundtrip-marker\n")
@@ -80,7 +80,7 @@ fn exit_transitions_out_of_running() {
     }
     assert!(exited, "child must be reapable after `exit`");
     assert!(
-        !matches!(session.state(), ProcessState::Running { .. }),
+        !matches!(session.state(), ProcessState::Running),
         "latched state must leave Running once reaped, state: {:?}",
         session.state()
     );

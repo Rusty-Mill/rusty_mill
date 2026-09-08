@@ -163,8 +163,7 @@ impl SessionManager {
         let id = session.id().clone();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         self.sessions.insert(
             id.clone(),
             Entry {
@@ -933,7 +932,7 @@ mod tests {
     /// BL-062 — when the manager is at its cap and *every* session
     /// is still running, `spawn_or_evict` surfaces the underlying
     /// `spawn` cap error rather than silently killing a live session.
-    /// The DoD's "preserve current SessionLimitExceeded behaviour"
+    /// The `DoD`'s "preserve current `SessionLimitExceeded` behaviour"
     /// invariant lives here.
     #[cfg(unix)]
     #[test]
@@ -980,7 +979,7 @@ mod tests {
         assert_eq!(m.len(), 2, "no live session should have been killed");
     }
 
-    /// BL-062 — `lines_snapshot` is one of the read accessors the DoD
+    /// BL-062 — `lines_snapshot` is one of the read accessors the `DoD`
     /// wants to count as access; verify the timestamp moves.
     #[cfg(unix)]
     #[test]

@@ -109,7 +109,7 @@ fn serialize_block(tree: &BlockTree, id: BlockId, out: &mut String) {
             serialize_list_item(tree, block, *indent_level, Some(*number), out);
         }
         BlockType::CodeBlock { language, repl, .. } => {
-            serialize_code_block(language, *repl, block, out)
+            serialize_code_block(language, *repl, block, out);
         }
         BlockType::MathBlock { formula } => {
             out.push_str("$$\n");

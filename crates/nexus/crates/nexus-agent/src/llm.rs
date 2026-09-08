@@ -1,7 +1,7 @@
 //! LLM-driven planner (PRD-15 §3.2).
 //!
 //! [`LlmAgent`] produces plans by asking an LLM to emit
-//! provider-native tool-use blocks (Anthropic `tool_use` / OpenAI
+//! provider-native tool-use blocks (Anthropic `tool_use` / `OpenAI`
 //! `function_calls` / Ollama tool-calls), which the bootstrap-side
 //! [`ChatDriver`] surfaces as a structured [`Proposal`]. Each
 //! tool-use block becomes one [`Step`] in the resulting [`Plan`].

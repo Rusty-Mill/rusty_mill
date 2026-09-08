@@ -1016,6 +1016,7 @@ mod tests {
             stdout: Stdio::Inherit,
             stderr: Stdio::Inherit,
             group: GroupSpec::NewGroup,
+            detached: false,
         };
         let child = platform_linux::LinuxSpawner
             .spawn(&command)
@@ -1094,6 +1095,7 @@ mod tests {
             stdout: Stdio::Inherit,
             stderr: Stdio::Inherit,
             group: GroupSpec::NewGroup,
+            detached: false,
         };
         let child = platform_linux::LinuxSpawner
             .spawn(&command)

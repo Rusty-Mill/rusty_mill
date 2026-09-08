@@ -880,7 +880,7 @@ mod tests {
             .unwrap_err();
         match err {
             PluginError::ExecutionFailed { reason, .. } => {
-                assert!(reason.contains("invalid memory id"))
+                assert!(reason.contains("invalid memory id"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

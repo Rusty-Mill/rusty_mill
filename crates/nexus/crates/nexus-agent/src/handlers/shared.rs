@@ -172,7 +172,7 @@ pub(crate) fn agent_err(e: &AgentError) -> PluginError {
 /// manifests require.
 #[derive(Debug, Clone)]
 pub(crate) enum ArchetypeSource {
-    /// Caller passed nothing — DEFAULT_SYSTEM_PROMPT.
+    /// Caller passed nothing — `DEFAULT_SYSTEM_PROMPT`.
     Default,
     /// Caller passed one of the six built-in slugs.
     Builtin,
@@ -276,9 +276,8 @@ pub(crate) async fn load_custom_archetype_prompt(
     let manifest_path = std::path::Path::new(crate::custom_agent::AGENTS_DIR)
         .join(slug)
         .join(crate::custom_agent::MANIFEST_FILE_NAME);
-    let bytes = match ctx.read_file(&manifest_path).await {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
+    let Ok(bytes) = ctx.read_file(&manifest_path).await else {
+        return Ok(None);
     };
     let body = std::str::from_utf8(&bytes)
         .map_err(|e| format!("manifest not UTF-8 at {}: {e}", manifest_path.display()))?
@@ -833,7 +832,7 @@ pub fn round_requires_approval(
 ) -> bool {
     for tc in &round.tool_calls {
         match registry.lookup(&tc.name) {
-            Some(spec) if !spec.requires_approval => continue,
+            Some(spec) if !spec.requires_approval => {}
             _ => return true,
         }
     }
@@ -865,7 +864,7 @@ impl crate::SessionPolicy for BusBridgePolicy {
             Err(e) => {
                 return crate::RoundDecision::Abort(format!("session approval map poisoned: {e}"));
             }
-        };
+        }
 
         let registry = crate::AgentToolRegistry::global();
         let annotated: Vec<serde_json::Value> = round
@@ -1027,8 +1026,7 @@ mod pending_bounded_tests {
             "sess-stale".into(),
             PendingEntry {
                 tx: tx_old,
-                inserted_at: std::time::Instant::now()
-                    - std::time::Duration::from_secs(MAX_APPROVAL_TIMEOUT_SECS + 1),
+                inserted_at: std::time::Instant::now().checked_sub(std::time::Duration::from_secs(MAX_APPROVAL_TIMEOUT_SECS + 1)).unwrap(),
             },
         );
         let (tx_new, _rx_new) = tokio::sync::oneshot::channel();

@@ -810,8 +810,7 @@ mod tests {
         scan_dir_recursive(forge_root, forge_root, &mut results).unwrap();
         assert!(
             results.is_empty(),
-            "external-target symlink must not surface in reconcile; got {:?}",
-            results
+            "external-target symlink must not surface in reconcile; got {results:?}"
         );
     }
 }

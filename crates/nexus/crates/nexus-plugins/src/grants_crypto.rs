@@ -28,7 +28,7 @@
 //! generates a fresh random key and stores it; subsequent reads /
 //! writes fetch it. Removing the keyring entry effectively rotates the
 //! key — the next read fails to authenticate, the loader logs a
-//! warning, and grants reset to deny-all (per the BL-101 DoD: forces
+//! warning, and grants reset to deny-all (per the BL-101 `DoD`: forces
 //! re-consent).
 
 use chacha20poly1305::aead::rand_core::RngCore;
@@ -46,9 +46,7 @@ const KEYRING_SERVICE: &str = "nexus.plugin_grants";
 /// mode skips encryption with a `tracing::warn!` so operators see the
 /// reduced security level in logs.
 fn keyring_disabled() -> bool {
-    std::env::var("NEXUS_NO_KEYRING")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    std::env::var("NEXUS_NO_KEYRING").is_ok_and(|v| v == "1")
 }
 
 /// Detect the file's on-disk format from the leading bytes. Avoids a
@@ -153,7 +151,7 @@ impl GrantsKey {
 /// to plaintext + a `tracing::warn!`.
 pub(crate) fn encrypt_blob(key_src: &GrantsKey, plaintext: &[u8]) -> Option<Vec<u8>> {
     let key_bytes = key_src.fetch_key()?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
+    let cipher = ChaCha20Poly1305::new(&Key::from(key_bytes));
     let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher.encrypt(&nonce, plaintext).ok()?;
 
@@ -167,7 +165,7 @@ pub(crate) fn encrypt_blob(key_src: &GrantsKey, plaintext: &[u8]) -> Option<Vec<
 /// Reverse of [`encrypt_blob`]. Returns `None` for any failure
 /// (truncated header, missing keyring, AEAD authentication failure).
 /// Callers treat that as deny-all and emit a warning per the BL-101
-/// DoD ("decryption failure → log warning + clear grants").
+/// `DoD` ("decryption failure → log warning + clear grants").
 pub(crate) fn decrypt_blob(key_src: &GrantsKey, blob: &[u8]) -> Option<Vec<u8>> {
     if !looks_encrypted(blob) {
         return None;
@@ -176,9 +174,9 @@ pub(crate) fn decrypt_blob(key_src: &GrantsKey, blob: &[u8]) -> Option<Vec<u8>> 
         return None;
     }
     let key_bytes = key_src.fetch_key()?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
+    let cipher = ChaCha20Poly1305::new(&Key::from(key_bytes));
     let nonce_bytes = &blob[MAGIC.len()..MAGIC.len() + NONCE_LEN];
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce: &Nonce = nonce_bytes.into();
     let ciphertext = &blob[MAGIC.len() + NONCE_LEN..];
     cipher.decrypt(nonce, ciphertext).ok()
 }
@@ -197,7 +195,8 @@ fn decode_hex_key(s: &str) -> Option<[u8; KEY_LEN]> {
         return None;
     }
     let mut out = [0u8; KEY_LEN];
-    for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+    let (chunks, _remainder) = s.as_bytes().as_chunks::<2>();
+    for (i, chunk) in chunks.iter().enumerate() {
         let hi = hex_digit(chunk[0])?;
         let lo = hex_digit(chunk[1])?;
         out[i] = (hi << 4) | lo;
@@ -224,6 +223,10 @@ pub(crate) fn key_available(key_src: &GrantsKey) -> bool {
 mod tests {
     use super::*;
 
+    // Deterministic filler bytes for a test key — `i` never exceeds
+    // `KEY_LEN` (32), so the truncation this lint warns about can't
+    // actually happen here.
+    #[allow(clippy::cast_possible_truncation)]
     fn fixed_key() -> [u8; KEY_LEN] {
         let mut k = [0u8; KEY_LEN];
         for (i, slot) in k.iter_mut().enumerate() {

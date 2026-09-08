@@ -1315,6 +1315,7 @@ mod tests {
     #[test]
     fn apply_transaction_rejects_payload_above_structural_cap() {
         use crate::{Operation, Transaction, TransactionMetadata};
+        const MAX: usize = 16 * 1024 * 1024;
         let (_tmp, root) = setup_forge();
         write_note(&root, "notes/a.md", "Hello\n");
         let mut p = new_plugin(root);
@@ -1345,7 +1346,6 @@ mod tests {
         // Property 2: an oversized transaction is rejected before
         // any mutation. Build a single InsertText whose `text` is
         // 17 MiB (1 MiB above the 16 MiB ceiling).
-        const MAX: usize = 16 * 1024 * 1024;
         let big = "x".repeat(MAX + 1024 * 1024);
         let big_len = big.len();
         let tx_big = Transaction::new(

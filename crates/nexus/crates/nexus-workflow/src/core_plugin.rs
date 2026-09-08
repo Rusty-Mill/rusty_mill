@@ -199,8 +199,8 @@ pub struct RunHistoryArgs {
 /// Args for `com.nexus.workflow::next_fire` (handler id `12`,
 /// BL-054 Phase 4 follow-up). When `name` is set, the response
 /// returns at most one row matching that workflow; when omitted,
-/// every cron-triggered workflow is included. Manual / file_event
-/// / git_event / mcp_event / webhook workflows are skipped.
+/// every cron-triggered workflow is included. Manual / `file_event`
+/// / `git_event` / `mcp_event` / webhook workflows are skipped.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
 #[cfg_attr(
@@ -568,7 +568,7 @@ async fn digest_scheduler_loop(
         let now = chrono::Utc::now();
         let Some((kind, next)) = digests::next_fire(&cfg, now) else {
             tracing::warn!("digest scheduler: no schedules; parking");
-            tokio::time::sleep(Duration::from_secs(86_400)).await;
+            tokio::time::sleep(Duration::from_hours(24)).await;
             continue;
         };
         let wait = (next - now).to_std().unwrap_or(Duration::ZERO);
@@ -1545,7 +1545,7 @@ async fn scheduler_loop(
             tracing::warn!(workflow = %workflow_name, "cron schedule has no future fire time; parking forever");
             // Park on a very long sleep — the task stays alive so
             // drop-abort works, but does nothing.
-            tokio::time::sleep(std::time::Duration::from_secs(86_400 * 365)).await;
+            tokio::time::sleep(std::time::Duration::from_hours(8760)).await;
             continue;
         };
         let wait = (next - now).to_std().unwrap_or(std::time::Duration::ZERO);
@@ -1565,7 +1565,7 @@ async fn scheduler_loop(
         match call {
             Ok(_) => tracing::info!(workflow = %workflow_name, "cron fired"),
             Err(err) => {
-                tracing::warn!(workflow = %workflow_name, %err, "cron run failed; scheduler continues")
+                tracing::warn!(workflow = %workflow_name, %err, "cron run failed; scheduler continues");
             }
         }
     }
@@ -1622,7 +1622,7 @@ impl CorePlugin for WorkflowCorePlugin {
             let cfg_handle = Arc::clone(&self.digest_config);
             let args = args.clone();
             return Some(Box::pin(async move {
-                handlers::digest::handle_set_config(cfg_handle, args)
+                handlers::digest::handle_set_config(&cfg_handle, args)
             }));
         }
         // BL-056 — validate is async-capable so terminal-step slugs
@@ -1640,13 +1640,13 @@ impl CorePlugin for WorkflowCorePlugin {
         if handler_id != HANDLER_RUN {
             return None;
         }
-        handlers::run::prepare(
+        Some(handlers::run::prepare(
             &self.registry,
             self.context.clone(),
             &self.root,
             &self.run_history,
             args,
-        )
+        ))
     }
 
     fn wire_context(&mut self, ctx: Arc<KernelPluginContext>) {

@@ -1,4 +1,4 @@
-//! BL-134 Phase 2b-ii — typed AiEvent republisher.
+//! BL-134 Phase 2b-ii — typed `AiEvent` republisher.
 //!
 //! Subscribes to `com.nexus.ai.stream_*` and
 //! `com.nexus.agent.round_*` topics on the kernel bus, looks up

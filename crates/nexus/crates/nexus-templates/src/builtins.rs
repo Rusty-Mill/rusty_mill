@@ -18,9 +18,11 @@ pub fn all() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Parse every built-in. Panics on malformed built-ins (would only happen
-/// if the source strings below got corrupted in development — the tests
-/// catch this).
+/// Parse every built-in.
+///
+/// # Panics
+/// Panics on malformed built-ins (would only happen if the source strings
+/// below got corrupted in development — the tests catch this).
 #[must_use]
 pub fn parsed() -> Vec<Template> {
     all()

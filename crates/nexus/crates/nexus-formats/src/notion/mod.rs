@@ -29,6 +29,7 @@ pub mod property;
 pub use export::{export_to_notion, ExportReport};
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
@@ -97,7 +98,7 @@ pub fn import_notion_archive<R: Read + Seek>(reader: R, dest: &Path) -> Result<I
         if zf.is_dir() {
             continue;
         }
-        let mut buf = Vec::with_capacity(zf.size() as usize);
+        let mut buf = Vec::with_capacity(usize::try_from(zf.size()).unwrap_or(0));
         zf.read_to_end(&mut buf)?;
 
         let target_rel = index.target_for(&name);
@@ -107,12 +108,18 @@ pub fn import_notion_archive<R: Read + Seek>(reader: R, dest: &Path) -> Result<I
         }
         let target_abs = unique_path(&target_abs);
 
-        if name.ends_with(".md") {
+        let name_ext_md = Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+        let name_ext_csv = Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"));
+        if name_ext_md {
             let body_str = String::from_utf8_lossy(&buf).into_owned();
             let converted = convert_page(&body_str, &index, &name, &mut report);
             std::fs::write(&target_abs, converted)?;
             report.pages_written += 1;
-        } else if name.ends_with(".csv") {
+        } else if name_ext_csv {
             let csv_str = String::from_utf8_lossy(&buf).into_owned();
             let base_name = target_rel
                 .file_stem()
@@ -210,9 +217,9 @@ fn serialize_with_frontmatter(
             v.contains(':') || v.contains('#') || v.starts_with(' ') || v.contains('\n');
         if needs_quote {
             let escaped = v.replace('"', "\\\"");
-            out.push_str(&format!("{k}: \"{escaped}\"\n"));
+            let _ = writeln!(out, "{k}: \"{escaped}\"");
         } else {
-            out.push_str(&format!("{k}: {v}\n"));
+            let _ = writeln!(out, "{k}: {v}");
         }
     }
     out.push_str("---\n\n");
@@ -248,9 +255,8 @@ fn unique_path(p: &Path) -> PathBuf {
 /// stripped (Notion exports wrap everything in a single folder).
 fn common_root(entries: &HashMap<String, PathBuf>) -> String {
     let mut iter = entries.keys();
-    let first = match iter.next() {
-        Some(s) => s,
-        None => return String::new(),
+    let Some(first) = iter.next() else {
+        return String::new();
     };
     let first_root = first.split('/').next().unwrap_or("").to_string();
     if first_root.is_empty() {
@@ -321,7 +327,10 @@ fn build_link_index<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<
         entries.insert(name.clone(), cleaned.clone());
 
         // Encoded forms users may have in Notion mention links.
-        if name.ends_with(".md") {
+        let is_md = Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+        if is_md {
             let basename = Path::new(&name)
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -351,9 +360,11 @@ pub(crate) fn percent_encode(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out

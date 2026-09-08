@@ -491,6 +491,11 @@ impl AgentToolRegistry {
         duration: Duration,
         completed_at: std::time::SystemTime,
     ) {
+        // Bound the log so a long-running session can't OOM the process.
+        // 1024 entries is enough to debug a recent run; deeper history
+        // lives in the per-session transcript on disk.
+        const MAX_LOG_ENTRIES: usize = 1024;
+
         let completed_at_ms = completed_at
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
@@ -502,10 +507,6 @@ impl AgentToolRegistry {
             success,
             duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         });
-        // Bound the log so a long-running session can't OOM the process.
-        // 1024 entries is enough to debug a recent run; deeper history
-        // lives in the per-session transcript on disk.
-        const MAX_LOG_ENTRIES: usize = 1024;
         if log.len() > MAX_LOG_ENTRIES {
             let drop = log.len() - MAX_LOG_ENTRIES;
             log.drain(..drop);
@@ -522,6 +523,10 @@ impl AgentToolRegistry {
 /// Convenience wrapper that records the duration around a closure
 /// and appends to the access log on completion. Used by the session
 /// loop once it's wired through `KernelToolBridge`.
+///
+/// # Errors
+/// Propagates whatever error `f` returns; the access log records the
+/// call as failed either way.
 pub fn measure_dispatch<F, T, E>(
     registry: &AgentToolRegistry,
     agent_id: &str,
@@ -587,6 +592,7 @@ fn default_dispatch_timeout_ms() -> u64 {
 /// dynamically so `nexus tool list` works without a kernel context
 /// (CLI surface needs the catalogue at parse time).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn default_tool_catalog() -> Vec<AgentToolSpec> {
     vec![
         AgentToolSpec {
@@ -1110,7 +1116,7 @@ mod tests {
     }
 
     /// BL-132 follow-up: the agent tool registry now exposes the four
-    /// destructive operations the BL-132 DoD called for (the fourth —
+    /// destructive operations the BL-132 `DoD` called for (the fourth —
     /// `execute_command` — is covered by `terminal_run_saved`). Every
     /// one must carry `requires_approval = true` so the BL-132
     /// `--interactive` prompt fires before dispatch.
@@ -1199,7 +1205,7 @@ mod tests {
     /// Cross-check that the new tools point at handler ids that
     /// actually exist on the target plugin. Static pin only — the
     /// IPC dispatcher is what enforces this at runtime, but the
-    /// command_id strings have to match the manifest registrations
+    /// `command_id` strings have to match the manifest registrations
     /// or the call returns a "no handler" error before approval even
     /// runs.
     #[test]

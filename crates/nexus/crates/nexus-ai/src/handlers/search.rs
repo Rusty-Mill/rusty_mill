@@ -122,7 +122,7 @@ pub(crate) async fn handle_embed_text(
 /// caller treats "no matches" identically to "embedder missing"
 /// and falls back to the substring path. Error path is reserved
 /// for unconfigured embedder + IPC plumbing failures so the
-/// "happy fallback" stays a Result::Ok branch.
+/// "happy fallback" stays a `Result::Ok` branch.
 pub(crate) async fn handle_entity_recall(
     ctx: &KernelPluginContext,
     embed_cfg: Option<AiConfig>,
@@ -185,9 +185,7 @@ pub(crate) async fn handle_entity_recall(
     for (path, score) in ranked {
         let stem = std::path::Path::new(&path)
             .file_stem()
-            .and_then(|s| s.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| path.clone());
+            .and_then(|s| s.to_str()).map_or_else(|| path.clone(), str::to_string);
         let resp: serde_json::Value = ctx
             .ipc_call(
                 "com.nexus.storage",

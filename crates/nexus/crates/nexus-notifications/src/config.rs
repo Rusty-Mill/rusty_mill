@@ -35,7 +35,7 @@ use crate::{Channel, SmtpConfig};
 
 /// Severity associated with a [`crate::Notification`] dispatch.
 ///
-/// Wire form is snake_case (`debug` / `info` / `warn` / `error`). The
+/// Wire form is `snake_case` (`debug` / `info` / `warn` / `error`). The
 /// ordering matters — the router filters out events below a source's
 /// `min_severity`, so the `PartialOrd` derive must reflect the
 /// declaration order (`Debug < Info < Warn < Error`).
@@ -158,7 +158,7 @@ pub struct SourceConfig {
 
 /// Resolved view of a source's routing rules. Built once at config
 /// load time so the per-dispatch hot path doesn't reparse the
-/// channel names / quiet_hours string.
+/// channel names / `quiet_hours` string.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedSource {
     /// Channels resolved from `route` — unknown names dropped.
@@ -369,13 +369,14 @@ impl NotificationsConfig {
         for (name, src) in &self.sources {
             let mut channels = Vec::with_capacity(src.route.len());
             for raw in &src.route {
-                match channel_from_str(raw) {
-                    Some(c) => channels.push(c),
-                    None => tracing::warn!(
+                if let Some(c) = channel_from_str(raw) {
+                    channels.push(c);
+                } else {
+                    tracing::warn!(
                         source = %name,
                         channel = %raw,
                         "notifications.toml: unknown channel name in [sources.{name}].route — dropped"
-                    ),
+                    );
                 }
             }
             let quiet_hours = match src.quiet_hours.as_deref() {
@@ -395,7 +396,7 @@ impl NotificationsConfig {
     }
 }
 
-/// Map a wire channel name (the snake_case form of [`Channel`]) to
+/// Map a wire channel name (the `snake_case` form of [`Channel`]) to
 /// the enum. Returns `None` on unknown names.
 #[must_use]
 pub fn channel_from_str(s: &str) -> Option<Channel> {
@@ -489,10 +490,10 @@ max_age_days = 30
 
     #[test]
     fn rejects_unknown_top_level_field() {
-        let text = r#"
+        let text = r"
 [unknown_section]
 foo = 1
-"#;
+";
         let err = NotificationsConfig::parse(text).unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)));
     }

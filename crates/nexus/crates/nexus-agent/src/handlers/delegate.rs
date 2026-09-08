@@ -1,4 +1,4 @@
-//! DG-37 agent-to-agent delegation (HANDLER_DELEGATE).
+//! DG-37 agent-to-agent delegation (`HANDLER_DELEGATE`).
 //!
 //! ## BL-134 Phase 2b
 //!
@@ -127,7 +127,7 @@ const SUBMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// safety net for the unlikely "runtime IPC channel itself is wedged"
 /// case, set well above the runtime's internal ceiling so it's never
 /// the binding constraint under normal operation.
-const WAIT_FOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3 * 3600);
+const WAIT_FOR_TIMEOUT: std::time::Duration = std::time::Duration::from_hours(3);
 
 pub(crate) async fn handle_delegate(
     ctx: Arc<KernelPluginContext>,
@@ -269,7 +269,7 @@ fn extract_session_outcome(
                     "delegate: runtime sub-task ({task_id}) cancelled by {by}"
                 )));
             }
-            _ => continue,
+            _ => {}
         }
     }
     Err(exec_err(format!(
@@ -606,7 +606,7 @@ fn build_isolated_result(
 mod tests {
     use super::*;
 
-    fn wait_reply_with_events(events: serde_json::Value, timed_out: bool) -> serde_json::Value {
+    fn wait_reply_with_events(events: &serde_json::Value, timed_out: bool) -> serde_json::Value {
         serde_json::json!({
             "run": { "events": events },
             "timed_out": timed_out,
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn extract_returns_finished_outcome() {
         let reply = wait_reply_with_events(
-            serde_json::json!([
+            &serde_json::json!([
                 { "kind": "submitted", "task_id": "abc", "kind_label": "session", "priority": "interactive" },
                 { "kind": "started", "task_id": "abc", "attempt": 1 },
                 { "kind": "finished", "task_id": "abc", "outcome": { "session_id": "s1", "outcome": "Complete" } }
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn extract_returns_error_on_failed_event() {
         let reply = wait_reply_with_events(
-            serde_json::json!([
+            &serde_json::json!([
                 { "kind": "started", "task_id": "abc", "attempt": 1 },
                 { "kind": "failed", "task_id": "abc", "error": "session_run: ai.chat denied", "retriable": false }
             ]),
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn extract_returns_error_on_timed_out_envelope() {
-        let reply = wait_reply_with_events(serde_json::json!([]), true);
+        let reply = wait_reply_with_events(&serde_json::json!([]), true);
         let err = extract_session_outcome("abc", &reply).unwrap_err();
         assert!(format!("{err}").contains("WAIT_FOR_TIMEOUT"));
     }
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn extract_returns_error_when_no_terminal_event_present() {
         let reply = wait_reply_with_events(
-            serde_json::json!([
+            &serde_json::json!([
                 { "kind": "submitted", "task_id": "abc", "kind_label": "session", "priority": "interactive" },
                 { "kind": "started", "task_id": "abc", "attempt": 1 }
             ]),
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn extract_surfaces_cancelled_event() {
         let reply = wait_reply_with_events(
-            serde_json::json!([
+            &serde_json::json!([
                 { "kind": "cancelled", "task_id": "abc", "by": "deadline" }
             ]),
             false,
@@ -795,7 +795,7 @@ mod tests {
             "task_id": "abc",
             "outcome": { "ok": true }
         }));
-        let reply = wait_reply_with_events(serde_json::json!(events), false);
+        let reply = wait_reply_with_events(&serde_json::json!(events), false);
         let outcome = extract_session_outcome("abc", &reply).unwrap();
         assert_eq!(outcome, serde_json::json!({ "ok": true }));
     }

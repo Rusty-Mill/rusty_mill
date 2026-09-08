@@ -272,12 +272,11 @@ impl Scanner {
             input.to_string()
         } else {
             match self.policy {
-                InjectionPolicy::Off => input.to_string(),
                 InjectionPolicy::Warn => {
                     format!("[INJECTION RISK: {}] {}", unique_kinds(&findings), input)
                 }
                 InjectionPolicy::Redact => apply_redactions(input, &findings),
-                InjectionPolicy::Reject => input.to_string(),
+                InjectionPolicy::Off | InjectionPolicy::Reject => input.to_string(),
             }
         };
         ScanResult {
@@ -503,8 +502,7 @@ mod tests {
         let ids = ids_of(&r);
         assert!(
             ids.contains(&"hidden-html:comment".to_string()),
-            "got {:?}",
-            ids
+            "got {ids:?}"
         );
     }
 
@@ -667,7 +665,7 @@ mod tests {
         );
         // Two non-overlapping matches expected — but no duplicates.
         let mut starts: Vec<usize> = r.findings.iter().map(|f| f.start).collect();
-        starts.sort();
+        starts.sort_unstable();
         let unique: std::collections::BTreeSet<usize> = starts.iter().copied().collect();
         assert_eq!(
             starts.len(),

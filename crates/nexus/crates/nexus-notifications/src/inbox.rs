@@ -79,7 +79,7 @@ impl From<rusqlite::Error> for InboxError {
 )]
 #[serde(deny_unknown_fields)]
 pub struct InboxEntry {
-    /// Stable UUIDv4 generated at insert time.
+    /// Stable `UUIDv4` generated at insert time.
     pub id: String,
     /// Source tag from the router path, or `"override"` for explicit-
     /// channel sends.
@@ -158,7 +158,7 @@ pub struct InboxStats {
 }
 
 /// SQLite-backed inbox store. One connection per plugin instance —
-/// SQLite handles concurrent reads internally and dispatch_routed is
+/// SQLite handles concurrent reads internally and `dispatch_routed` is
 /// the single writer.
 pub struct Inbox {
     conn: Mutex<Connection>,
@@ -410,7 +410,8 @@ impl Inbox {
         binds.push(Box::new(i64::from(limit)));
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(&sql)?;
-            let bind_refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+            let bind_refs: Vec<&dyn rusqlite::ToSql> =
+                binds.iter().map(std::convert::AsRef::as_ref).collect();
             let mut rows = stmt.query(rusqlite::params_from_iter(bind_refs))?;
             let mut out = Vec::new();
             while let Some(r) = rows.next()? {
@@ -588,8 +589,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxEntry> {
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

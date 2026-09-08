@@ -128,6 +128,15 @@ impl Histogram {
     }
 }
 
+// `count` is a live metric counter (bounded well under 2^52 in practice) and
+// `target` is the ceiling of a non-negative product, so the f64<->u64
+// round-trip below never truncates, loses sign, or loses precision in a way
+// that matters for a percentile estimate.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn percentile(buckets: &[u64], count: u64, p: f64) -> u64 {
     if count == 0 {
         return 0;
@@ -503,11 +512,13 @@ fn render_counter_by_key(
     map: &HashMap<String, u64>,
     labels: &[&str],
 ) {
-    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+    use std::fmt::Write as _;
+
+    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter");
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
     for k in keys {
-        out.push_str(&format!("{name}{} {}\n", labels_for(k, labels), map[k]));
+        let _ = writeln!(out, "{name}{} {}", labels_for(k, labels), map[k]);
     }
 }
 
@@ -522,7 +533,9 @@ fn render_summary_by_key(
     map: &HashMap<String, HistogramSnapshot>,
     labels: &[&str],
 ) {
-    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} summary\n"));
+    use std::fmt::Write as _;
+
+    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} summary");
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
     for k in keys {
@@ -533,23 +546,11 @@ fn render_summary_by_key(
             let inner = base.trim_start_matches('{').trim_end_matches('}');
             format!("{{{inner},quantile=\"{q}\"}}")
         };
-        out.push_str(&format!(
-            "{name}{} {}\n",
-            with_q("0.5"),
-            ns_to_secs(h.p50_ns)
-        ));
-        out.push_str(&format!(
-            "{name}{} {}\n",
-            with_q("0.95"),
-            ns_to_secs(h.p95_ns)
-        ));
-        out.push_str(&format!(
-            "{name}{} {}\n",
-            with_q("0.99"),
-            ns_to_secs(h.p99_ns)
-        ));
-        out.push_str(&format!("{name}_sum{base} {}\n", ns_to_secs(h.sum_ns)));
-        out.push_str(&format!("{name}_count{base} {}\n", h.count));
+        let _ = writeln!(out, "{name}{} {}", with_q("0.5"), ns_to_secs(h.p50_ns));
+        let _ = writeln!(out, "{name}{} {}", with_q("0.95"), ns_to_secs(h.p95_ns));
+        let _ = writeln!(out, "{name}{} {}", with_q("0.99"), ns_to_secs(h.p99_ns));
+        let _ = writeln!(out, "{name}_sum{base} {}", ns_to_secs(h.sum_ns));
+        let _ = writeln!(out, "{name}_count{base} {}", h.count);
     }
 }
 
@@ -618,12 +619,16 @@ impl MetricsSnapshot {
             &["plugin_id", "hook"],
         );
 
-        out.push_str(&format!(
-            "# HELP nexus_event_bus_queue_depth Instantaneous broadcast-channel buffer occupancy.\n\
-             # TYPE nexus_event_bus_queue_depth gauge\n\
-             nexus_event_bus_queue_depth {}\n",
-            self.event_bus_queue_depth
-        ));
+        {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                out,
+                "# HELP nexus_event_bus_queue_depth Instantaneous broadcast-channel buffer occupancy.\n\
+                 # TYPE nexus_event_bus_queue_depth gauge\n\
+                 nexus_event_bus_queue_depth {}",
+                self.event_bus_queue_depth
+            );
+        }
 
         render_gauge_by_plugin(
             &mut out,
@@ -637,12 +642,16 @@ impl MetricsSnapshot {
             "A WASM plugin's linear-memory size, sampled after its most recent dispatch call.",
             &self.plugin_wasm_memory_bytes,
         );
-        out.push_str(&format!(
-            "# HELP nexus_metrics_dropped_total Metric writes dropped by the per-metric key cap.\n\
-             # TYPE nexus_metrics_dropped_total counter\n\
-             nexus_metrics_dropped_total {}\n",
-            self.metrics_dropped_total
-        ));
+        {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                out,
+                "# HELP nexus_metrics_dropped_total Metric writes dropped by the per-metric key cap.\n\
+                 # TYPE nexus_metrics_dropped_total counter\n\
+                 nexus_metrics_dropped_total {}",
+                self.metrics_dropped_total
+            );
+        }
 
         out
     }
@@ -665,7 +674,7 @@ pub fn install(metrics: Arc<KernelMetrics>) {
 /// skip recording rather than failing.
 #[must_use]
 pub fn global() -> Option<&'static KernelMetrics> {
-    GLOBAL_METRICS.get().map(|a| a.as_ref())
+    GLOBAL_METRICS.get().map(std::convert::AsRef::as_ref)
 }
 
 #[cfg(test)]

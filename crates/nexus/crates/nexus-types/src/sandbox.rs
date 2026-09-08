@@ -249,13 +249,13 @@ where
     A::Item: AsRef<OsStr>,
 {
     let policy_json = serde_json::to_string(policy)?;
-    let mut argv: Vec<OsString> = Vec::with_capacity(5);
-    argv.push(OsString::from(policy_json));
-    argv.push(cwd.as_os_str().to_owned());
-    argv.push(OsString::from("--"));
-    argv.push(program.as_ref().to_owned());
-    argv.extend(args.into_iter().map(|a| a.as_ref().to_owned()));
-    Ok(argv)
+    let mut out: Vec<OsString> = Vec::with_capacity(5);
+    out.push(OsString::from(policy_json));
+    out.push(cwd.as_os_str().to_owned());
+    out.push(OsString::from("--"));
+    out.push(program.as_ref().to_owned());
+    out.extend(args.into_iter().map(|a| a.as_ref().to_owned()));
+    Ok(out)
 }
 
 #[cfg(test)]

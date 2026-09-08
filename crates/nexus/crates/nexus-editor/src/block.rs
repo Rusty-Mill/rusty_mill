@@ -517,6 +517,9 @@ pub fn now_ms() -> i64 {
 /// Helper for `#[serde(skip_serializing_if = "is_false")]` so default
 /// boolean flags (BL-142's `CodeBlock.repl`) round-trip cleanly
 /// without polluting serialized JSON for the common `false` case.
+// Signature (`&bool`, not `bool`) is dictated by serde's
+// `skip_serializing_if = "is_false"`, which calls this with `&field`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
 }

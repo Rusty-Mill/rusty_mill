@@ -54,6 +54,7 @@ impl Default for UniqueNoteOptions {
 /// `true` iff `template` is a chrono `strftime` string with no invalid
 /// specifiers. Checked by walking [`StrftimeItems`] for `Item::Error`
 /// rather than formatting and catching a panic.
+#[must_use]
 pub fn validate_id_format(template: &str) -> bool {
     !StrftimeItems::new(template).any(|item| matches!(item, Item::Error))
 }
@@ -79,6 +80,7 @@ pub fn format_id_now(template: &str) -> Result<String, StorageError> {
 ///
 /// Removed: `/` `\`, Windows-reserved `< > : " | ? *`, and control
 /// characters (including NUL).
+#[must_use]
 pub fn sanitize_title(raw: &str) -> String {
     let kept: String = raw
         .chars()
@@ -90,6 +92,7 @@ pub fn sanitize_title(raw: &str) -> String {
 
 /// Forge-relative path for `(id, title)` on `attempt`. Attempt `0` is the
 /// bare filename; attempt `n >= 1` appends `-{n+1}` before `.md`.
+#[must_use]
 pub fn candidate_path(
     id: &str,
     separator: &str,

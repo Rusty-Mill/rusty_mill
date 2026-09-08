@@ -53,14 +53,14 @@ pub(crate) struct RunRow {
     /// BL-134 Phase 5 — cooperative cancellation gate. The
     /// `handle_cancel` IPC handler flips the flag and notifies; the
     /// worker observes via `tokio::select!` and emits `Cancelled`
-    /// before the inner ipc_call's result, suppressing the
+    /// before the inner `ipc_call`'s result, suppressing the
     /// underlying `Finished`/`Failed` event the call would otherwise
     /// produce. The token is checked once before the select arm
     /// (cancel-before-spawn race) and once inside the arm (cancel-
     /// during-execution).
     pub cancel: Arc<CancelGate>,
     /// Move 2 — live capability token for this run's session. `None`
-    /// for non-session task kinds (WorkflowAiStep, AiStream) until
+    /// for non-session task kinds (`WorkflowAiStep`, `AiStream`) until
     /// those task kinds grow their own capability envelopes. Set via
     /// [`Store::store_token`] after the session id is allocated;
     /// revoked via [`Store::revoke_token`] when the session is
@@ -134,7 +134,7 @@ impl CancelGate {
     /// moment `request` flips the gate — and stays resolved on every
     /// subsequent call, so the pre-check / post-check pattern around
     /// the worker's `tokio::select!` is no longer load-bearing
-    /// (Notify's "miss-the-edge" hazard is gone; CancellationToken
+    /// (Notify's "miss-the-edge" hazard is gone; `CancellationToken`
     /// is level-triggered).
     pub(crate) async fn cancelled(&self) {
         self.token.cancelled().await;

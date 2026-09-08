@@ -235,7 +235,7 @@ pub(crate) fn list_draft_relations(forge_root: &Path, args: &Value) -> Result<Va
         .max(1);
     let index = crate::entity_index::EntityIndex::load(forge_root);
     let (rows, total) = index.list_draft_relations(threshold, limit);
-    let truncated = (rows.len() as u32) < total;
+    let truncated = u32::try_from(rows.len()).unwrap_or(u32::MAX) < total;
     let result = crate::ipc::ListDraftRelationsResult {
         relations: rows
             .into_iter()

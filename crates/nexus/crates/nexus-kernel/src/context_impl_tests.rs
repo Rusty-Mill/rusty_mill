@@ -341,13 +341,11 @@ async fn spawn_blocking_sync_dispatch_counts_in_flight() {
         if in_flight_sync_dispatches() > baseline {
             break;
         }
-        if start.elapsed() > Duration::from_secs(2) {
-            panic!(
-                "counter never incremented; baseline={baseline}, \
-                 observed={}",
-                in_flight_sync_dispatches()
-            );
-        }
+        assert!(start.elapsed() <= Duration::from_secs(2), 
+            "counter never incremented; baseline={baseline}, \
+             observed={}",
+            in_flight_sync_dispatches()
+        );
         tokio::task::yield_now().await;
     }
 

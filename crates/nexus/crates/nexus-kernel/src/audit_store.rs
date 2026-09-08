@@ -91,7 +91,7 @@ pub fn query(filter: &AuditQuery) -> Vec<AuditEntry> {
 /// Delete entries older than `before_ts` from the global store. Returns
 /// the number of rows removed, or 0 if no store is installed.
 pub fn clear(before_ts: i64) -> u64 {
-    AUDIT_STORE.get().map(|s| s.clear(before_ts)).unwrap_or(0)
+    AUDIT_STORE.get().map_or(0, |s| s.clear(before_ts))
 }
 
 #[cfg(test)]
@@ -110,7 +110,7 @@ mod tests {
     impl AuditStore for FakeStore {
         fn append(&self, event_type: &str, plugin_id: Option<&str>, detail: &serde_json::Value) {
             let mut g = self.events.lock().unwrap();
-            let id = g.len() as i64 + 1;
+            let id = i64::try_from(g.len()).expect("test event count fits in i64") + 1;
             g.push(AuditEntry {
                 id,
                 ts_ms: id, // monotonic stand-in for the test

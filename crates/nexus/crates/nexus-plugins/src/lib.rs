@@ -1188,6 +1188,7 @@ impl PluginManager {
     /// Returns [`PluginError::PluginNotFound`] if the plugin id is
     /// unknown, or [`PluginError::ReloadFailed`] if the new sandbox
     /// cannot be built (after one retry for transient errors).
+    #[allow(clippy::too_many_lines)]
     pub fn reload_plugin(
         &mut self,
         plugin_id: &str,

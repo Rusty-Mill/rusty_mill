@@ -270,7 +270,7 @@ pub(crate) fn reflow_excerpt_ranges_for_source(excerpts: &[(u32, u32, u32)]) -> 
 
 /// Splice every entry in `splices` into `old`. Splices are applied
 /// in reverse-line-order so earlier splices don't shift the line
-/// numbers of later ones. Out-of-range entries (line_start past
+/// numbers of later ones. Out-of-range entries (`line_start` past
 /// `old`'s end) are skipped defensively rather than panicking — a
 /// stale multibuffer (e.g. one whose source was edited externally
 /// since the excerpt was captured) shouldn't crash the save.

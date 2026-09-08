@@ -331,8 +331,9 @@ pub enum TranscriptError {
 pub(crate) fn render_entry(entry: &MemoryEntry) -> (&'static str, String) {
     use std::fmt::Write as _;
     match entry {
-        MemoryEntry::UserGoal { text, .. } => ("user", text.clone()),
-        MemoryEntry::UserFeedback { text, .. } => ("user", text.clone()),
+        MemoryEntry::UserGoal { text, .. } | MemoryEntry::UserFeedback { text, .. } => {
+            ("user", text.clone())
+        }
         MemoryEntry::AgentPlan {
             plan_id,
             step_count,
@@ -438,9 +439,8 @@ pub fn rebuild_from_disk(
         if !dirent.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
-        let agent_id = match dirent.file_name().into_string() {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Ok(agent_id) = dirent.file_name().into_string() else {
+            continue;
         };
         if normalize_agent_id(&agent_id).is_err() {
             continue;
@@ -472,7 +472,7 @@ pub struct RebuildStats {
 
 // ── Process-global handle ───────────────────────────────────────────────────
 
-/// Singleton handle the agent core_plugin populates at `on_init`
+/// Singleton handle the agent `core_plugin` populates at `on_init`
 /// and `memory::append_entry_to_path` consults for live indexing.
 /// Returns `None` until [`initialize`] has set it.
 #[must_use]
@@ -484,6 +484,12 @@ pub fn global() -> Option<TranscriptStore> {
 /// success is a no-op, so a test that initialises an in-memory
 /// store + a production boot that initialises the disk store can
 /// coexist without contention.
+///
+/// # Errors
+/// Returns an error if the SQLite transcript DB can't be opened at
+/// `forge_root`. A failed rebuild from `history.jsonl` is logged and
+/// swallowed rather than propagated — an empty index still lets the
+/// store come up.
 pub fn initialize(forge_root: &Path) -> Result<TranscriptStore, TranscriptError> {
     if let Some(existing) = GLOBAL.get() {
         return Ok(existing.clone());
@@ -695,10 +701,10 @@ mod tests {
     #[test]
     fn search_limit_clamps_to_200_max() {
         let store = mk_store();
-        let entries: Vec<MemoryEntry> = (0..10)
+        let entries: Vec<MemoryEntry> = (0..10u64)
             .map(|i| MemoryEntry::UserGoal {
                 text: format!("foo target {i}"),
-                timestamp_ms: now_ms() + i as u64,
+                timestamp_ms: now_ms() + i,
             })
             .collect();
         store.replace_agent_history("coder", &entries).unwrap();

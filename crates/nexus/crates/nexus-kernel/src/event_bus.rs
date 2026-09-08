@@ -34,6 +34,7 @@ pub struct EventBus {
 /// nothing else — is the namespace anti-spoofing guarantee for
 /// `EventFilter::CustomPrefix` subscribers.
 #[doc(hidden)]
+#[must_use]
 pub fn type_id_in_namespace(type_id: &str, plugin_id: &str) -> bool {
     if type_id == plugin_id {
         return true;

@@ -216,8 +216,7 @@ fn detect_lan_ip() -> String {
             sock.connect("1.1.1.1:80")?;
             sock.local_addr()
         })
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
+        .map_or_else(|_| "127.0.0.1".to_string(), |addr| addr.ip().to_string())
 }
 
 /// Core plugin holding the local identity + a bus handle + (when
@@ -600,7 +599,7 @@ mod tests {
         let url = start["url"].as_str().expect("url present").to_string();
         assert!(url.starts_with("ws://"));
         assert!(url.contains("?token="));
-        let port = start["port"].as_u64().expect("port present") as u16;
+        let port = u16::try_from(start["port"].as_u64().expect("port present")).expect("port fits u16");
         assert!(port > 0, "OS picked a real port, got {port}");
 
         // started event was published.

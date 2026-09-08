@@ -224,7 +224,7 @@ impl SuggestionRule for CommandNotFoundRule {
             })?;
         Some(SuggestedCommand {
             text: format!("which {cmd}"),
-            reason: format!("Shell reported '{cmd}' missing. Check if it's installed or on PATH.",),
+            reason: format!("Shell reported '{cmd}' missing. Check if it's installed or on PATH."),
             severity: SuggestionSeverity::Warning,
             source_rule: self.id(),
         })

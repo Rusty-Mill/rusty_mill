@@ -83,7 +83,7 @@ pub(crate) async fn handle_stream_chat(
     let _cancel_guard = crate::cancel::CancelGuard(session_id.clone());
 
     // C27 (#380) — provider-reported token usage for this call.
-    let mut usage: Option<crate::provider::TokenUsage> = None;
+    let usage: Option<crate::provider::TokenUsage>;
     let outcome = match mode {
         AiStreamChatMode::Chat => {
             let registry = tools.unwrap_or_else(|| Arc::new(ToolRegistry::new()));

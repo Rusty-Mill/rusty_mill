@@ -20,6 +20,8 @@ const SAMPLE_LIMIT: usize = 256;
 /// Returns `Error::Io` if the CSV is malformed (wraps the csv crate's
 /// error inside `io::Error::InvalidData`).
 pub fn csv_to_bases(csv_str: &str, name: &str) -> crate::Result<String> {
+    use std::fmt::Write as _;
+
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
@@ -27,9 +29,9 @@ pub fn csv_to_bases(csv_str: &str, name: &str) -> crate::Result<String> {
 
     let headers: Vec<String> = rdr
         .headers()
-        .map_err(io_err)?
+        .map_err(|e| io_err(&e))?
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     if headers.is_empty() {
@@ -45,8 +47,8 @@ pub fn csv_to_bases(csv_str: &str, name: &str) -> crate::Result<String> {
         if i >= SAMPLE_LIMIT {
             break;
         }
-        let rec = rec.map_err(io_err)?;
-        samples.push(rec.iter().map(|s| s.to_string()).collect());
+        let rec = rec.map_err(|e| io_err(&e))?;
+        samples.push(rec.iter().map(std::string::ToString::to_string).collect());
     }
 
     // Infer one type per column from the sample.
@@ -57,12 +59,12 @@ pub fn csv_to_bases(csv_str: &str, name: &str) -> crate::Result<String> {
     // Emit TOML. Records are inlined as `[[records]]` array-of-tables; no
     // sentinel needed (the presence of `[[records]]` is the signal).
     let mut out = String::new();
-    out.push_str(&format!("name = \"{}\"\n\n", escape_toml_str(name)));
+    let _ = writeln!(out, "name = \"{}\"\n", escape_toml_str(name));
 
     for (header, ty) in headers.iter().zip(types.iter()) {
         out.push_str("[[fields]]\n");
-        out.push_str(&format!("id = \"{}\"\n", escape_toml_str(header)));
-        out.push_str(&format!("type = \"{ty}\"\n"));
+        let _ = writeln!(out, "id = \"{}\"", escape_toml_str(header));
+        let _ = writeln!(out, "type = \"{ty}\"");
         out.push('\n');
     }
 
@@ -75,13 +77,13 @@ pub fn csv_to_bases(csv_str: &str, name: &str) -> crate::Result<String> {
     for row in &samples {
         out.push_str("[[records]]\n");
         for (i, header) in headers.iter().enumerate() {
-            let cell = row.get(i).map(String::as_str).unwrap_or("");
+            let cell = row.get(i).map_or("", String::as_str);
             if cell.is_empty() {
                 continue;
             }
             let key = escape_toml_key(header);
             let value = format_typed_value(cell, types[i]);
-            out.push_str(&format!("{key} = {value}\n"));
+            let _ = writeln!(out, "{key} = {value}");
         }
         out.push('\n');
     }
@@ -89,7 +91,7 @@ pub fn csv_to_bases(csv_str: &str, name: &str) -> crate::Result<String> {
     Ok(out)
 }
 
-fn io_err(e: csv::Error) -> std::io::Error {
+fn io_err(e: &csv::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, format!("csv: {e}"))
 }
 
@@ -181,7 +183,6 @@ fn format_typed_value(cell: &str, ty: &str) -> String {
             _ => "false".to_string(),
         },
         "number" => cell.to_string(),
-        "date" | "string" => format!("\"{}\"", escape_toml_str(cell)),
         _ => format!("\"{}\"", escape_toml_str(cell)),
     }
 }

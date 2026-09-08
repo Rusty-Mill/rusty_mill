@@ -12,11 +12,18 @@ use crate::backend::{
 };
 use crate::AudioError;
 
+// `local_{stt,tts}_stub` (and the two LOCAL_* consts they use) are only
+// reachable from config.rs behind `#[cfg(not(feature = "local-audio"))]`;
+// an `--all-features` build takes the real backend instead, which leaves
+// them genuinely unreferenced in that configuration — not a real bug.
+#[cfg_attr(feature = "local-audio", allow(dead_code))]
 const LOCAL_STT_NAME: &str = "local";
+#[cfg_attr(feature = "local-audio", allow(dead_code))]
 const LOCAL_TTS_NAME: &str = "local";
 const PLATFORM_STT_NAME: &str = "platform";
 const PLATFORM_TTS_NAME: &str = "platform";
 
+#[cfg_attr(feature = "local-audio", allow(dead_code))]
 const LOCAL_REASON: &str =
     "build nexus-audio with `--features local-whisper` to enable on-device Whisper / Piper";
 const PLATFORM_REASON: &str =
@@ -65,6 +72,7 @@ impl TtsProvider for DisabledTts {
 
 /// Local-Whisper STT stub. Real implementation lands when the
 /// `local-whisper` feature ships.
+#[cfg_attr(feature = "local-audio", allow(dead_code))]
 #[must_use]
 pub fn local_stt_stub() -> Box<dyn SttProvider> {
     Box::new(DisabledStt {
@@ -74,6 +82,7 @@ pub fn local_stt_stub() -> Box<dyn SttProvider> {
 }
 
 /// Local-TTS (Piper) stub.
+#[cfg_attr(feature = "local-audio", allow(dead_code))]
 #[must_use]
 pub fn local_tts_stub() -> Box<dyn TtsProvider> {
     Box::new(DisabledTts {

@@ -217,7 +217,7 @@ mod tests {
         let list = reg.list();
         let names: Vec<_> = list.iter().map(|(n, _)| n.as_str()).collect();
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(names, sorted);
     }
 

@@ -215,6 +215,10 @@ impl CollabClient {
     /// [`ClientMessage::Hello`] payload — unreachable in practice
     /// because every field is a plain `String` and serde-json can
     /// serialise those without I/O.
+    // ConnectError's ws-transport variants wrap tungstenite::Error (>=136
+    // bytes); boxing them is a public-API/error-type change out of scope
+    // for a lint sweep.
+    #[allow(clippy::result_large_err)]
     pub async fn connect(
         params: ConnectParams,
         bus: Arc<EventBus>,

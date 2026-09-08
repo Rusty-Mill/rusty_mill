@@ -682,7 +682,7 @@ struct NexusContextOutput {
 struct ImpactReport {
     symbol: SymbolContext,
     /// `"LOW"` / `"MEDIUM"` / `"HIGH"` / `"CRITICAL"` — matches the
-    /// GitNexus rubric. v1 maps kinds to a fixed band; see
+    /// `GitNexus` rubric. v1 maps kinds to a fixed band; see
     /// `risk_for_kind` for thresholds.
     risk: String,
     /// One-line justification for the risk band.
@@ -3315,6 +3315,18 @@ impl NexusMcpServer {
         &self,
         Parameters(input): Parameters<CommentCreateThreadInput>,
     ) -> Json<CommentResultOutput> {
+        #[derive(Deserialize)]
+        struct TreeReply {
+            tree: TreeBody,
+        }
+        #[derive(Deserialize)]
+        struct TreeBody {
+            root_blocks: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct StampReply {
+            stable_id: String,
+        }
         let block_index = input.block_index.unwrap_or(0) as usize;
 
         if let Err(e) = self
@@ -3329,14 +3341,6 @@ impl NexusMcpServer {
             });
         }
 
-        #[derive(Deserialize)]
-        struct TreeReply {
-            tree: TreeBody,
-        }
-        #[derive(Deserialize)]
-        struct TreeBody {
-            root_blocks: Vec<String>,
-        }
         let tree = match self
             .editor_call::<TreeReply>(
                 "get_tree",
@@ -3363,10 +3367,6 @@ impl NexusMcpServer {
             });
         };
 
-        #[derive(Deserialize)]
-        struct StampReply {
-            stable_id: String,
-        }
         let stamp = match self
             .editor_call::<StampReply>(
                 "stamp_block",
@@ -3819,7 +3819,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             match &outcome {
                 Ok(_) => {
-                    nexus_kernel::audit::log_mcp_tool_call(&tool_name, duration_ms, "success", None)
+                    nexus_kernel::audit::log_mcp_tool_call(&tool_name, duration_ms, "success", None);
                 }
                 Err(e) => nexus_kernel::audit::log_mcp_tool_call(
                     &tool_name,
@@ -3957,6 +3957,10 @@ impl rmcp::ServerHandler for NexusMcpServer {
             path: String,
             size_bytes: u64,
         }
+        #[derive(Deserialize)]
+        struct TermSession {
+            id: String,
+        }
         let records: Vec<Rec> = self
             .storage_call("query_files", serde_json::json!({}))
             .await
@@ -3969,10 +3973,6 @@ impl rmcp::ServerHandler for NexusMcpServer {
         // RFC 0003 Track A — expose each live terminal session's VT-grid state as
         // resources. Best-effort: if the terminal plugin is absent or has no
         // sessions, just contribute none rather than failing the whole listing.
-        #[derive(Deserialize)]
-        struct TermSession {
-            id: String,
-        }
         let sessions: Vec<TermSession> = self
             .terminal_call("list_sessions", serde_json::json!({}))
             .await

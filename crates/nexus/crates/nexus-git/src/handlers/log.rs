@@ -69,8 +69,8 @@ pub(crate) fn file_log(
     // limit). The original hand-rolled `{path, limit?}` lookup ignored
     // unknown fields; the typed shape rejects typos like
     // `{ limitt: 50 }`.
-    let GitFileLogArgs { path, limit } = parse_args(args, "file_log")?;
     use super::shared::validate_path;
+    let GitFileLogArgs { path, limit } = parse_args(args, "file_log")?;
     let path = validate_path(forge_root, &path)?;
     let limit = usize::try_from(limit.unwrap_or(DEFAULT_LOG_LIMIT)).unwrap_or(usize::MAX);
     let entries = h.with(move |e| e.log_file(&path, limit)).map_err(map_err)?;

@@ -193,7 +193,7 @@ impl Supervisor {
         &self,
         parent: &CapabilityToken,
         child_session_id: uuid::Uuid,
-        requested: CapabilitySet,
+        requested: &CapabilitySet,
     ) -> CapabilityToken {
         parent.attenuate(child_session_id, requested)
     }

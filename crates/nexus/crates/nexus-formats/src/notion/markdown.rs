@@ -1,6 +1,7 @@
 //! Markdown body conversion: callouts, mention links, toggles.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use super::{filename, percent_decode};
 
@@ -24,7 +25,10 @@ pub fn has_unconverted_warning_marker(body: &str) -> bool {
 ///
 /// Pure function; no I/O.
 #[must_use]
-pub fn convert_notion_markdown(input: &str, link_rewrites: &HashMap<String, String>) -> String {
+pub fn convert_notion_markdown<S: ::std::hash::BuildHasher>(
+    input: &str,
+    link_rewrites: &HashMap<String, String, S>,
+) -> String {
     let after_links = rewrite_internal_links(input, link_rewrites);
     convert_callouts(&after_links)
 }
@@ -33,7 +37,7 @@ pub fn convert_notion_markdown(input: &str, link_rewrites: &HashMap<String, Stri
 
 /// Walk the body and replace `[Display](Encoded%20Path.md)` with `[[Title]]`
 /// when the encoded path resolves to a known page in the link index.
-fn rewrite_internal_links(input: &str, rewrites: &HashMap<String, String>) -> String {
+fn rewrite_internal_links<S: ::std::hash::BuildHasher>(input: &str, rewrites: &HashMap<String, String, S>) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     let bytes = input.as_bytes();
@@ -41,7 +45,10 @@ fn rewrite_internal_links(input: &str, rewrites: &HashMap<String, String>) -> St
     while i < input.len() {
         if bytes[i] == b'[' {
             if let Some((display, target, end)) = parse_inline_link(input, i) {
-                if target.ends_with(".md") {
+                if std::path::Path::new(target)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                {
                     if let Some(replacement) = lookup_link_replacement(target, display, rewrites) {
                         out.push_str(&replacement);
                         i = end;
@@ -129,10 +136,10 @@ fn parse_inline_link(s: &str, start: usize) -> Option<(&str, &str, usize)> {
     Some((display, target, j + 1))
 }
 
-fn lookup_link_replacement(
+fn lookup_link_replacement<S: ::std::hash::BuildHasher>(
     target: &str,
     display: &str,
-    rewrites: &HashMap<String, String>,
+    rewrites: &HashMap<String, String, S>,
 ) -> Option<String> {
     // Try the URL-encoded target as-is, then try its basename.
     if let Some(title) = rewrites.get(target) {
@@ -147,7 +154,10 @@ fn lookup_link_replacement(
     let decoded = percent_decode(target);
     let basename = decoded.rsplit('/').next().unwrap_or(&decoded);
     let (cleaned, _) = filename::strip_notion_uuid(basename);
-    if cleaned.ends_with(".md") {
+    let is_md = std::path::Path::new(&cleaned)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if is_md {
         let title = &cleaned[..cleaned.len() - 3];
         return Some(format_wikilink(display, title));
     }
@@ -168,11 +178,10 @@ fn format_wikilink(display: &str, target: &str) -> String {
 /// we recognize the common ones and fall back to `note` for everything else.
 fn callout_type_for_emoji(emoji: &str) -> &'static str {
     match emoji {
-        "💡" | "ℹ️" | "📝" | "📌" => "note",
-        "💭" | "🤔" => "tip",
+        // "💡" | "ℹ️" | "📝" | "📌" also map to "note", via the fallback below.
+        "💭" | "🤔" | "✅" | "🎉" | "👍" => "tip",
         "⚠️" | "⚠" | "🚧" => "warning",
         "❗" | "❌" | "🛑" | "🔥" => "danger",
-        "✅" | "🎉" | "👍" => "tip",
         "📖" | "🔍" | "🎯" => "info",
         _ => "note",
     }
@@ -194,9 +203,9 @@ fn convert_callouts(input: &str) -> String {
             if let Some((emoji, body)) = split_leading_emoji(rest) {
                 let kind = callout_type_for_emoji(emoji);
                 if body.is_empty() {
-                    out.push_str(&format!("> [!{kind}]"));
+                    let _ = write!(out, "> [!{kind}]");
                 } else {
-                    out.push_str(&format!("> [!{kind}] {body}"));
+                    let _ = write!(out, "> [!{kind}] {body}");
                 }
                 continue;
             }

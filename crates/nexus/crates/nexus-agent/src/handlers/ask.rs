@@ -78,23 +78,26 @@ pub(crate) async fn handle_ask(
         return Err(exec_err(format!("ask: publish {EVENT_ASK_REQUESTED}: {e}")));
     }
 
-    match tokio::time::timeout(Duration::from_secs(DEFAULT_ASK_TIMEOUT_SECS), rx).await {
-        Ok(Ok(answers)) => {
-            Ok(serde_json::json!({ "ask_id": ask_id, "answers": answers, "timed_out": false }))
-        }
+    if let Ok(Ok(answers)) =
+        tokio::time::timeout(Duration::from_secs(DEFAULT_ASK_TIMEOUT_SECS), rx).await
+    {
+        Ok(serde_json::json!({ "ask_id": ask_id, "answers": answers, "timed_out": false }))
+    } else {
         // Timed out, or the responder dropped the channel: clean up and report
         // a timeout rather than erroring, so the model can proceed without a
         // user (the common headless / auto-approve case).
-        _ => {
-            if let Ok(mut map) = pending.lock() {
-                map.remove(&ask_id);
-            }
-            Ok(serde_json::json!({ "ask_id": ask_id, "answers": [], "timed_out": true }))
+        if let Ok(mut map) = pending.lock() {
+            map.remove(&ask_id);
         }
+        Ok(serde_json::json!({ "ask_id": ask_id, "answers": [], "timed_out": true }))
     }
 }
 
 /// `ask_respond` — deliver a frontend's answers to the waiting `ask` call.
+// Kept async to match the other handlers dispatched through
+// `dispatch_async`'s uniform async handler signature, even though this
+// particular body never awaits.
+#[allow(clippy::unused_async)]
 pub(crate) async fn handle_ask_respond(
     pending: Arc<PendingAsks>,
     args: &serde_json::Value,

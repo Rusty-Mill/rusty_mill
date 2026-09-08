@@ -628,13 +628,27 @@ impl CorePlugin for LspCorePlugin {
                 }))
             }
 
-            HANDLER_COMPLETIONS => {
-                proxy_position_request(args, config, pool, bus, "textDocument/completion")
-            }
-            HANDLER_HOVER => proxy_position_request(args, config, pool, bus, "textDocument/hover"),
-            HANDLER_DEFINITION => {
-                proxy_position_request(args, config, pool, bus, "textDocument/definition")
-            }
+            HANDLER_COMPLETIONS => Some(proxy_position_request(
+                args,
+                config,
+                pool,
+                bus,
+                "textDocument/completion",
+            )),
+            HANDLER_HOVER => Some(proxy_position_request(
+                args,
+                config,
+                pool,
+                bus,
+                "textDocument/hover",
+            )),
+            HANDLER_DEFINITION => Some(proxy_position_request(
+                args,
+                config,
+                pool,
+                bus,
+                "textDocument/definition",
+            )),
             HANDLER_REFERENCES => {
                 // #190 / R7 — strict-parse via typed `LspReferencesArgs`.
                 let parsed: Result<LspReferencesArgs, _> = serde_json::from_value(args.clone());
@@ -850,9 +864,13 @@ impl CorePlugin for LspCorePlugin {
             }
             // signatureHelp has the identical `{ textDocument, position }`
             // wire shape as completions/hover/definition.
-            HANDLER_SIGNATURE_HELP => {
-                proxy_position_request(args, config, pool, bus, "textDocument/signatureHelp")
-            }
+            HANDLER_SIGNATURE_HELP => Some(proxy_position_request(
+                args,
+                config,
+                pool,
+                bus,
+                "textDocument/signatureHelp",
+            )),
             HANDLER_WORKSPACE_SYMBOL => {
                 // #190 / R7 — strict-parse via typed `LspWorkspaceSymbolArgs`.
                 let parsed: Result<LspWorkspaceSymbolArgs, _> =
@@ -894,9 +912,9 @@ fn proxy_position_request(
     pool: Arc<ConnectionPool>,
     bus: Option<Arc<EventBus>>,
     method: &'static str,
-) -> Option<CorePluginFuture> {
+) -> CorePluginFuture {
     let parsed: Result<LspPositionArgs, _> = serde_json::from_value(args.clone());
-    Some(Box::pin(async move {
+    Box::pin(async move {
         let LspPositionArgs {
             path,
             line,
@@ -918,7 +936,7 @@ fn proxy_position_request(
         proxy_request(&pool, &cfg, &server_name, bus, method, payload)
             .await
             .map_err(map_client_err)
-    }))
+    })
 }
 
 /// Send an LSP request through the pool's reconnect loop. The

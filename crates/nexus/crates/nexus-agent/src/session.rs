@@ -37,7 +37,7 @@ pub const MAX_AGENT_ROUNDS: u32 = LEGACY_MAX_AGENT_ROUNDS;
 
 /// The original Phase 2a shipping cap (8 rounds). Exposed so the
 /// existing regression test can pin the legacy behaviour through
-/// an explicit `SessionConfig` override (per BL-119 DoD).
+/// an explicit `SessionConfig` override (per BL-119 `DoD`).
 pub const LEGACY_MAX_AGENT_ROUNDS: u32 = 8;
 
 /// BL-119 — new default for [`SessionConfig::max_iterations`].
@@ -50,7 +50,7 @@ pub const DEFAULT_MAX_ITERATIONS: u32 = 32;
 
 /// BL-119 — default cap on tool calls per iteration. The agent
 /// dispatcher already accepts whatever the model emits; this cap
-/// guards against a runaway round that emits 100 tool_use blocks
+/// guards against a runaway round that emits 100 `tool_use` blocks
 /// at once. Excess calls are dropped (with a tracing warning) at
 /// the start of [`execute_round`] so the dispatcher's downstream
 /// work and the per-call result fan-out stay bounded.
@@ -106,7 +106,7 @@ pub struct SessionConfig {
     pub max_context_tokens: u32,
 
     /// Provider-routing hint. v1 accepts the field for forward-
-    /// compat with BL-119's "provider-routing hints" DoD bullet but
+    /// compat with BL-119's "provider-routing hints" `DoD` bullet but
     /// the dispatch loop does not yet consult it — the AI plugin's
     /// configured provider is still authoritative. A future BL
     /// (Hermes Features 2–3) will let an agent pick a different
@@ -644,7 +644,7 @@ where
 /// The compressor only fires when [`SessionConfig::max_context_tokens`] > 0.
 // Session driver wiring plus the compressor + seed; folding these into a struct
 // would just move the arguments around.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn run_session_resumed_with_compressor<D, P, T, C>(
     driver: &D,
     dispatcher: &T,
@@ -664,6 +664,11 @@ where
     T: ToolDispatcher + ?Sized,
     C: crate::compression::Compressor + ?Sized,
 {
+    // Working-set size: the most recent N rounds always stay
+    // verbatim so the model can reason about the in-flight work
+    // even after older rounds have been rolled up.
+    const WORKING_SET_ROUNDS: usize = 4;
+
     let config = config.sanitized();
     // Phase 5.5 follow-up — the set of tool names the retry policy must
     // not auto-retry on a transient failure (non-idempotent tools).
@@ -719,10 +724,6 @@ where
     // first compaction fires.
     let mut live_rounds_start: usize = 0;
     let mut live_summary = String::new();
-    // Working-set size: the most recent N rounds always stay
-    // verbatim so the model can reason about the in-flight work
-    // even after older rounds have been rolled up.
-    const WORKING_SET_ROUNDS: usize = 4;
 
     // BL-131 — per-iteration mechanical-waste passes applied to the
     // tool-result turn contents (see `sanitize_turns`). With ordinary
@@ -900,8 +901,8 @@ where
                         )
                     }
                 };
-                let first_round = to_compress.first().map(|r| r.round).unwrap_or(0);
-                let last_round = to_compress.last().map(|r| r.round).unwrap_or(0);
+                let first_round = to_compress.first().map_or(0, |r| r.round);
+                let last_round = to_compress.last().map_or(0, |r| r.round);
                 let timestamp_ms =
                     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
                 session
@@ -1120,8 +1121,7 @@ async fn execute_round<T: ToolDispatcher + ?Sized>(
                 // this id, so safer to reject than to guess.
                 let entry = entries.iter().find(|e| e.tool_use_id == p.id);
                 let (approve, reason) = entry
-                    .map(|e| (e.approve, e.reason.clone()))
-                    .unwrap_or((false, "no decision provided".to_string()));
+                    .map_or((false, "no decision provided".to_string()), |e| (e.approve, e.reason.clone()));
                 let retry_safe = !non_idempotent.contains(p.name.as_str());
                 let record = dispatch_one(
                     dispatcher,
@@ -2221,7 +2221,10 @@ mod tests {
         )
         .await;
         assert_eq!(session.outcome, SessionOutcome::MaxRounds);
-        assert_eq!(session.rounds.len() as u32, LEGACY_MAX_AGENT_ROUNDS);
+        assert_eq!(
+            u32::try_from(session.rounds.len()).expect("round count fits in u32"),
+            LEGACY_MAX_AGENT_ROUNDS
+        );
     }
 
     // ── C27 (#380) — token budget ceiling ────────────────────────────
@@ -2401,7 +2404,7 @@ mod tests {
 
     // ── BL-120 compression tests ──────────────────────────────────────
 
-    /// DoD scenario: a 50-turn synthetic session with a tight
+    /// `DoD` scenario: a 50-turn synthetic session with a tight
     /// `max_context_tokens` budget should compress at least once,
     /// keep the working set untouched, and preserve every decision
     /// in either the live rounds or the captured summaries.

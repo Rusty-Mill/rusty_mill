@@ -142,8 +142,7 @@ impl PluginSignatureVerifier {
     #[must_use]
     pub fn from_user_home() -> Self {
         let dir = dirs::home_dir()
-            .map(|h| h.join(".nexus").join("keys"))
-            .unwrap_or_else(|| PathBuf::from(".nexus/keys"));
+            .map_or_else(|| PathBuf::from(".nexus/keys"), |h| h.join(".nexus").join("keys"));
         Self::with_keys_dir(&dir).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "BL-099: failed to load community keyring; treating as empty");
             Self {

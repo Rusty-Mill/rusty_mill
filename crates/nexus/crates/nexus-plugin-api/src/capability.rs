@@ -98,7 +98,7 @@ pub enum Capability {
     /// Phase-1 callers do not need this capability — the handlers
     /// it gates return a "Phase 5" error.
     AiRuntimeControl,
-    /// Read AgentRun state via `get` / `list` / `events` /
+    /// Read `AgentRun` state via `get` / `list` / `events` /
     /// `pool_stats` on `com.nexus.ai.runtime` (BL-134 Phase 1, ADR
     /// 0028). Granted to the shell observability panel; community
     /// plugins do not get this by default.

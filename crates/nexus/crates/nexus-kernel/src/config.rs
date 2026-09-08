@@ -74,9 +74,9 @@ pub struct KernelConfig {
 pub struct WasmCapsCeiling {
     /// Max linear-memory limit in mebibytes. Default 128.
     pub max_memory_mb: u32,
-    /// Max wasmtime fuel budget per dispatch. Default 100_000_000.
+    /// Max wasmtime fuel budget per dispatch. Default `100_000_000`.
     pub max_fuel: u64,
-    /// Max wall-clock milliseconds per dispatch call. Default 30_000.
+    /// Max wall-clock milliseconds per dispatch call. Default `30_000`.
     pub max_execution_ms: u64,
 }
 
@@ -189,6 +189,10 @@ struct RawConfig {
 }
 
 /// Raw TOML shape for the `[wasm_caps]` table.
+// Field names mirror the `[wasm_caps]` TOML keys verbatim (`max_memory_mb`,
+// `max_fuel`, `max_execution_ms`); they're not free to rename to drop the
+// shared `max` prefix without breaking config file compatibility.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, serde::Deserialize)]
 struct RawWasmCaps {
     max_memory_mb: Option<u32>,

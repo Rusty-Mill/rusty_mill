@@ -35,7 +35,7 @@ struct RouterState {
 /// Outcome of a routing decision. Returned by [`Router::resolve`]
 /// so callers can distinguish "no matching source" (silent drop —
 /// caller may want to fall back to a default channel) from
-/// "matched but filtered out by severity / quiet_hours" (intentional
+/// "matched but filtered out by severity / `quiet_hours`" (intentional
 /// drop — caller should *not* fall back).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
@@ -102,7 +102,7 @@ impl Router {
 
     /// Look up the routing for a source-tagged notification. Returns
     /// [`Resolution::UnknownSource`] when the tag isn't configured,
-    /// [`Resolution::Filtered`] when severity / quiet_hours drops the
+    /// [`Resolution::Filtered`] when severity / `quiet_hours` drops the
     /// event, and [`Resolution::Routed`] otherwise.
     #[must_use]
     pub fn resolve(&self, source: &str, severity: Severity, min_of_day: u16) -> Resolution {
@@ -233,10 +233,10 @@ quiet_hours = "22:00-08:00"
 
     #[test]
     fn empty_route_filters() {
-        let r = Router::from_config(&cfg(r#"
+        let r = Router::from_config(&cfg(r"
 [sources.workflow]
 route = []
-"#))
+"))
         .unwrap();
         assert_eq!(
             r.resolve("workflow", Severity::Info, 600),

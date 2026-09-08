@@ -468,7 +468,7 @@ impl SqliteSessionStore {
         }
         sql.push_str(" ORDER BY ts_ms DESC, line_index ASC LIMIT ?");
         binds.push(Box::new(limit));
-        let bound: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let bound: Vec<&dyn rusqlite::ToSql> = binds.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -503,7 +503,7 @@ impl SqliteSessionStore {
             binds.push(Box::new(ts));
         }
         sql.push_str(" ORDER BY ts_ms DESC, line_index ASC");
-        let bound: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let bound: Vec<&dyn rusqlite::ToSql> = binds.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -567,8 +567,7 @@ pub(crate) fn unix_now() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_secs()),
     )
     .unwrap_or(i64::MAX)
 }
@@ -580,8 +579,7 @@ fn unix_now_millis() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX)
 }

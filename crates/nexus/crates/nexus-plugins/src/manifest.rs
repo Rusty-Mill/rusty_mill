@@ -1744,6 +1744,15 @@ template = "---\n\u0000"
     }
 }
 
+// Rule 0 (issue #85): bound the registration vec lengths before any
+// per-entry validation. A 10M-entry `[[registrations.ipc_command]]` would
+// otherwise allocate gigabytes during parse and validation. 1024 entries
+// per kind is far past anything realistic — the heaviest in-tree plugin
+// (nexus-storage core) has ~55 IPC commands. Capping per-vec means a
+// malicious or accidentally-pathological manifest fails fast with a clear
+// error class instead of OOM-ing or chewing seconds of CPU.
+const MAX_REGISTRATIONS_PER_KIND: usize = 1024;
+
 /// Validate a parsed [`PluginManifest`] against semantic rules.
 ///
 /// `plugin_dir` is the directory that contains the plugin's files (WASM
@@ -1759,17 +1768,6 @@ template = "---\n\u0000"
 #[allow(clippy::too_many_lines)]
 pub fn validate(manifest: &PluginManifest, plugin_dir: &Path) -> Result<(), PluginError> {
     let id = &manifest.id;
-
-    // Rule 0 (issue #85): bound the registration vec lengths
-    // before any per-entry validation. A 10M-entry
-    // `[[registrations.ipc_command]]` would otherwise allocate
-    // gigabytes during parse and validation. 1024 entries per kind
-    // is far past anything realistic — the heaviest in-tree plugin
-    // (nexus-storage core) has ~55 IPC commands. Capping per-vec
-    // means a malicious or accidentally-pathological manifest
-    // fails fast with a clear error class instead of OOM-ing or
-    // chewing seconds of CPU.
-    const MAX_REGISTRATIONS_PER_KIND: usize = 1024;
     let regs = &manifest.registrations;
     let oversized: &[(&str, usize)] = &[
         ("cli_subcommand", regs.cli_subcommands.len()),

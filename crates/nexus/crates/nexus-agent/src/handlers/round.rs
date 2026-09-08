@@ -1,4 +1,4 @@
-//! `com.nexus.agent::round_decide` (HANDLER_ROUND_DECIDE).
+//! `com.nexus.agent::round_decide` (`HANDLER_ROUND_DECIDE`).
 //!
 //! Phase 2b bus-bridge reply path — the caller pushes a
 //! [`crate::RoundDecision`]-shaped reply for a pending session round.
@@ -41,6 +41,10 @@ impl From<RoundDecideKind> for crate::RoundDecision {
     }
 }
 
+// Kept async to match the other handlers dispatched through
+// `dispatch_async`'s uniform async handler signature, even though this
+// particular body never awaits.
+#[allow(clippy::unused_async)]
 pub(crate) async fn handle_round_decide(
     pending: Arc<PendingApprovals>,
     args: &serde_json::Value,

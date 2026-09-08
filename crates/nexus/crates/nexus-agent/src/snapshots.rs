@@ -159,9 +159,9 @@ pub fn patch_paths(patch: &str) -> Vec<String> {
         let Some(inner) = rest.strip_suffix(']') else {
             continue;
         };
-        let path = inner.rsplit_once('#').map_or(inner, |(p, _)| p).trim();
-        if !path.is_empty() && !out.iter().any(|p| p == path) {
-            out.push(path.to_string());
+        let header_path = inner.rsplit_once('#').map_or(inner, |(p, _)| p).trim();
+        if !header_path.is_empty() && !out.iter().any(|p| p == header_path) {
+            out.push(header_path.to_string());
         }
     }
     out
@@ -289,10 +289,9 @@ pub(crate) async fn commit_after(
         None => SessionSnapshots::default(),
     };
     trail.session_id = session_id.to_string();
-    let mut seq = trail.entries.last().map_or(0, |e| e.seq);
+    let seq_start = trail.entries.last().map_or(0, |e| e.seq) + 1;
     let now = crate::handlers::shared::now_unix_ms();
-    for capture in pending {
-        seq += 1;
+    for (seq, capture) in (seq_start..).zip(pending) {
         let post_hash = if capture.path == "*" {
             None
         } else {

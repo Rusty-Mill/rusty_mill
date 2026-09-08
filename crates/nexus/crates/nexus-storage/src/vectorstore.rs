@@ -277,11 +277,10 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 
 /// Deserialize a flat little-endian byte blob back into an embedding vector.
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|chunk| {
-            let bytes: [u8; 4] = chunk.try_into().expect("chunks_exact guarantees 4 bytes");
-            f32::from_le_bytes(bytes)
-        })
+    let (chunks, _remainder) = blob.as_chunks::<4>();
+    chunks
+        .iter()
+        .map(|&bytes| f32::from_le_bytes(bytes))
         .collect()
 }
 

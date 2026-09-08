@@ -843,6 +843,11 @@ fn build_server_request_reply(
 /// Inner table — returns `Some(result)` for methods we know how to
 /// answer with a no-op-shaped value, `None` to signal "fall through
 /// to method-not-found error".
+// Several arms below share the `Some(Value::Null)` body but are kept
+// separate because each documents a distinct LSP-spec rationale for why
+// that particular method is answered that way; collapsing them would
+// lose that per-method justification.
+#[allow(clippy::match_same_arms)]
 fn build_known_reply(
     method: &str,
     params: Option<&serde_json::Value>,
@@ -920,8 +925,8 @@ mod tests {
     /// the wire shape, and pull out the JSON-RPC `result` (or panic
     /// on error). Centralised so each method's test stays focused on
     /// the result payload, not the envelope plumbing.
-    fn reply_result_for(method: &str, params: serde_json::Value) -> serde_json::Value {
-        let msg = build_server_request_reply(method, Some(&params), serde_json::json!(42));
+    fn reply_result_for(method: &str, params: &serde_json::Value) -> serde_json::Value {
+        let msg = build_server_request_reply(method, Some(params), serde_json::json!(42));
         let JsonRpcMessage::Response(resp) = msg else {
             panic!("expected Response, got {msg:?}")
         };

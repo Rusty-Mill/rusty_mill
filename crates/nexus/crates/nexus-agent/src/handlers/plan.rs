@@ -1,4 +1,4 @@
-//! `com.nexus.agent::plan` (HANDLER_PLAN).
+//! `com.nexus.agent::plan` (`HANDLER_PLAN`).
 
 use std::sync::Arc;
 

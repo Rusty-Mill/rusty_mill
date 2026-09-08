@@ -263,6 +263,7 @@ impl StorageEngine {
     /// # Panics
     ///
     /// Panics if the internal write-connection mutex is poisoned.
+    #[allow(clippy::too_many_lines)]
     fn index_file_content(&self, path: &str, content: &[u8]) -> Result<FileMetadata, StorageError> {
         // 2. Lock write_conn and open a transaction. All SQLite mutations below
         //    go through `&tx`; the in-memory knowledge graph is only touched
@@ -1660,8 +1661,10 @@ impl StorageEngine {
         let meta = trash::restore(self.forge.root(), trash_id)?;
         let abs = self.forge.root().join(&meta.original_path);
         for rel in trash::walk_restored_files(&abs, &meta.original_path) {
-            let lower = rel.to_lowercase();
-            if lower.ends_with(".md") || lower.ends_with(".markdown") {
+            let ext_is_markdown = std::path::Path::new(&rel)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"));
+            if ext_is_markdown {
                 if let Ok(bytes) = std::fs::read(self.forge.root().join(&rel)) {
                     // Full reindex; a parse failure must not abort the
                     // restore — the file is already back on disk.
@@ -1688,8 +1691,7 @@ impl StorageEngine {
         let cutoff = older_than_days.map(|days| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-                .unwrap_or(0);
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
             now - i64::try_from(days).unwrap_or(0) * 24 * 60 * 60 * 1000
         });
         trash::empty(self.forge.root(), cutoff)

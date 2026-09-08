@@ -10,7 +10,7 @@
 //!     catches that and retries without the suffix, producing a
 //!     plain continuation of `prefix` — still useful as ghost text,
 //!     just without the suffix-aware fill.
-//!   - **OpenAI / Anthropic**: chat-shaped FIM prompt — both providers
+//!   - **`OpenAI` / Anthropic**: chat-shaped FIM prompt — both providers
 //!     ship code-model variants without a dedicated FIM endpoint, so
 //!     we describe the task in the system prompt and put the
 //!     `<PREFIX>…</PREFIX><SUFFIX>…</SUFFIX>` markers in a user turn.

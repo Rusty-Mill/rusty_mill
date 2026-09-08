@@ -213,8 +213,7 @@ fn outbound_builder() -> reqwest::ClientBuilder {
 #[must_use]
 pub fn build_pinned_client(tls_pinning_enabled: bool) -> reqwest::Client {
     let env_opt_in = std::env::var("NEXUS_TLS_PINNING")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+        .is_ok_and(|v| v == "1");
     if !tls_pinning_enabled && !env_opt_in {
         return match outbound_builder().build() {
             Ok(c) => c,

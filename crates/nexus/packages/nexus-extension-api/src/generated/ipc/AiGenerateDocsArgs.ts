@@ -26,7 +26,7 @@ name?: string | null,
 /**
  * Doc-comment style hint (`"rustdoc"` / `"jsdoc"` / `"godoc"` /
  * `"docstring"`). When `None` the handler picks a default per
- * the symbol's language (rustdoc for Rust, JSDoc for TS/JS,
+ * the symbol's language (rustdoc for Rust, `JSDoc` for TS/JS,
  * godoc for Go, Python docstrings for Python).
  */
 style?: string | null, };

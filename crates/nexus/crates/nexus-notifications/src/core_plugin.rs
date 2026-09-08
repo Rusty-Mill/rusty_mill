@@ -31,7 +31,7 @@
 //!   topic.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use nexus_kernel::{EventBus, EventFilter, Events as _, KernelPluginContext, NexusEvent};
@@ -369,6 +369,10 @@ impl NotificationsCorePlugin {
     /// existing tests in this crate and the bootstrap's pre-BL-135
     /// callsite (back-compat fallback when `notifications.toml` is
     /// absent) don't need to change.
+    ///
+    /// # Panics
+    /// Never in practice — the config built here has no `quiet_hours`
+    /// strings, so `resolve_sources` (invoked internally) cannot fail.
     #[must_use]
     pub fn with_defaults(
         bus: Option<Arc<EventBus>>,
@@ -411,6 +415,10 @@ impl NotificationsCorePlugin {
     /// Build a plugin with both an arbitrary transport map and a
     /// pre-loaded config (so the router is non-empty). Used by unit
     /// tests covering the router path.
+    ///
+    /// # Panics
+    /// Panics if `config` is not a valid notifications config (test
+    /// fixtures only — callers own the config they pass in).
     #[must_use]
     pub fn with_transports_and_config(
         transports: HashMap<Channel, Box<dyn Transport>>,
@@ -431,6 +439,10 @@ impl NotificationsCorePlugin {
 
     /// Construct a plugin with an in-memory inbox attached. Used by
     /// the integration tests that exercise the IPC surface end-to-end.
+    ///
+    /// # Panics
+    /// Panics if `config` is not a valid notifications config (test
+    /// fixtures only — callers own the config they pass in).
     #[must_use]
     pub fn with_transports_and_inmemory_inbox(
         transports: HashMap<Channel, Box<dyn Transport>>,
@@ -473,10 +485,10 @@ impl NotificationsCorePlugin {
     /// (Discord/Telegram/Email) are *not* reloaded on this path —
     /// changing them requires a restart so an in-flight transport
     /// can't see a half-applied config. Routing rules
-    /// (`[sources.*]`) and severity/quiet_hours filters reload live.
+    /// (`[sources.*]`) and `severity/quiet_hours` filters reload live.
     ///
     /// `Ok(())` on a successful swap (including the "file is absent"
-    /// case which resets to an empty router). Parse / quiet_hours
+    /// case which resets to an empty router). Parse / `quiet_hours`
     /// errors propagate so the watcher path can log them without
     /// crashing.
     ///
@@ -484,9 +496,8 @@ impl NotificationsCorePlugin {
     /// Returns [`crate::config::ConfigError`] on any parse / IO
     /// failure.
     pub fn reload_config_from_disk(&self) -> Result<(), crate::config::ConfigError> {
-        let path = match self.config_path.as_deref() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(path) = self.config_path.as_deref() else {
+            return Ok(());
         };
         let new_config = NotificationsConfig::load_from(path)?;
         self.router.swap_config(&new_config)?;
@@ -513,6 +524,7 @@ impl NotificationsCorePlugin {
     /// Returns `(channels_dispatched, failures)`. Always returns
     /// `Ok` even when every channel fails — caller decides whether
     /// to log / re-raise.
+    #[must_use]
     pub fn dispatch_routed(
         &self,
         source: &str,
@@ -526,6 +538,7 @@ impl NotificationsCorePlugin {
     /// attached to the inbox row. Producers that want to cross-link
     /// back to their own event (`task_id`, run id, etc.) populate
     /// this; the default `dispatch_routed` passes `None`.
+    #[must_use]
     pub fn dispatch_routed_with_payload(
         &self,
         source: &str,
@@ -718,7 +731,7 @@ impl CorePlugin for NotificationsCorePlugin {
                                 }
                             }
                         }
-                        Err(nexus_kernel::RecvError::Lagged(_)) => continue,
+                        Err(nexus_kernel::RecvError::Lagged(_)) => {}
                         Err(nexus_kernel::RecvError::Closed) => break,
                     }
                 }
@@ -726,7 +739,7 @@ impl CorePlugin for NotificationsCorePlugin {
         }
 
         // Spawn the live-reload watcher when we have a config path.
-        if let Some(path) = self.config_path.clone() {
+        if let Some(path) = self.config_path.as_deref() {
             spawn_config_watcher(path, self.router.clone(), self.config.clone());
         }
 
@@ -935,7 +948,7 @@ fn translate_ai_runtime_event(type_id: &str, payload: &serde_json::Value) -> Opt
 /// any error setting up the watcher logs + drops back to a
 /// no-watcher state; the loaded config still works, just without
 /// live reload.
-fn spawn_config_watcher(path: PathBuf, router: Router, config: Arc<RwLock<NotificationsConfig>>) {
+fn spawn_config_watcher(path: &Path, router: Router, config: Arc<RwLock<NotificationsConfig>>) {
     use notify::{event::ModifyKind, EventKind, RecursiveMode, Watcher};
     // notify watchers want to watch a directory; watching the file
     // directly is unreliable on platforms (atomic-rename editors
@@ -948,17 +961,14 @@ fn spawn_config_watcher(path: PathBuf, router: Router, config: Arc<RwLock<Notifi
         );
         return;
     };
-    let filename = match path.file_name().map(|f| f.to_os_string()) {
-        Some(f) => f,
-        None => {
-            tracing::warn!(
-                path = %path.display(),
-                "notifications.toml: cannot derive file name; live-reload disabled"
-            );
-            return;
-        }
+    let Some(filename) = path.file_name().map(std::ffi::OsStr::to_os_string) else {
+        tracing::warn!(
+            path = %path.display(),
+            "notifications.toml: cannot derive file name; live-reload disabled"
+        );
+        return;
     };
-    let watch_path = path.clone();
+    let watch_path = path.to_path_buf();
     let result = std::thread::Builder::new()
         .name("nexus-notifications-watcher".to_string())
         .spawn(move || {
@@ -1009,10 +1019,12 @@ fn spawn_config_watcher(path: PathBuf, router: Router, config: Arc<RwLock<Notifi
                         if !matches!(
                             event.kind,
                             EventKind::Create(_)
-                                | EventKind::Modify(ModifyKind::Data(_))
-                                | EventKind::Modify(ModifyKind::Name(_))
-                                | EventKind::Modify(ModifyKind::Any)
-                                | EventKind::Modify(ModifyKind::Other)
+                                | EventKind::Modify(
+                                    ModifyKind::Data(_)
+                                        | ModifyKind::Name(_)
+                                        | ModifyKind::Any
+                                        | ModifyKind::Other,
+                                )
                                 | EventKind::Remove(_)
                         ) {
                             continue;

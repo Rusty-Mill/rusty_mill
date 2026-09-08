@@ -30,7 +30,7 @@
 //! - `storage`
 //! - `capability`
 //!
-//! The format matches the BL-052 / BL-057 DoD literally so the shell's
+//! The format matches the BL-052 / BL-057 `DoD` literally so the shell's
 //! `origin` filter chip can render labels by splitting on the first `:`.
 
 use serde::{Deserialize, Serialize};
@@ -325,7 +325,7 @@ impl ActivityEntry {
     /// `surface`. Fields the recorder will fill (`id`, `timestamp`)
     /// get sensible defaults; everything else is up to the caller.
     #[must_use]
-    pub fn now(session_id: String, surface: ActivitySurface, origin: ActivityOrigin) -> Self {
+    pub fn now(session_id: String, surface: ActivitySurface, origin: &ActivityOrigin) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -349,7 +349,7 @@ impl ActivityEntry {
     /// new code.
     #[must_use]
     pub fn now_ai(session_id: String, surface: ActivitySurface) -> Self {
-        Self::now(session_id, surface, ActivityOrigin::Ai)
+        Self::now(session_id, surface, &ActivityOrigin::Ai)
     }
 }
 
@@ -430,7 +430,7 @@ mod tests {
         let entry = ActivityEntry::now(
             "sess-1".into(),
             ActivitySurface::Process,
-            ActivityOrigin::Terminal("tty-1".into()),
+            &ActivityOrigin::Terminal("tty-1".into()),
         );
         let line = serde_json::to_string(&entry).unwrap();
         assert!(line.contains("\"origin\":\"terminal:tty-1\""));

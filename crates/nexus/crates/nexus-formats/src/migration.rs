@@ -248,6 +248,10 @@ pub struct VersionTally {
 /// hidden directories.
 ///
 /// Returns a tally sorted by version (descending major.minor).
+///
+/// # Errors
+/// Returns an error if `forge_root` cannot be walked (e.g. it doesn't
+/// exist or a directory read fails).
 pub fn scan_versions(forge_root: &std::path::Path) -> std::io::Result<Vec<VersionTally>> {
     let mut counts: HashMap<String, u64> = HashMap::new();
     walk_markdown(forge_root, &mut |path| {

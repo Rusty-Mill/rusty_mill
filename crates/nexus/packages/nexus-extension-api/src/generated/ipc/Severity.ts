@@ -3,7 +3,7 @@
 /**
  * Severity associated with a [`crate::Notification`] dispatch.
  *
- * Wire form is snake_case (`debug` / `info` / `warn` / `error`). The
+ * Wire form is `snake_case` (`debug` / `info` / `warn` / `error`). The
  * ordering matters — the router filters out events below a source's
  * `min_severity`, so the `PartialOrd` derive must reflect the
  * declaration order (`Debug < Info < Warn < Error`).

@@ -49,7 +49,7 @@ pub struct AiConfig {
     /// Falls back to `nexus_ai::openai::DEFAULT_CHAT_MODEL`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openai_chat_model: Option<String>,
-    /// P2-04 — per-provider embedding default for OpenAI. Falls back
+    /// P2-04 — per-provider embedding default for `OpenAI`. Falls back
     /// to `nexus_ai::openai::DEFAULT_EMBEDDING_MODEL`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openai_embedding_model: Option<String>,

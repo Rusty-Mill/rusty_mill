@@ -26,6 +26,12 @@ use std::collections::BTreeMap;
 ///   immediately after the H1.
 /// - `remaining_body` is the input with the H1 and the property table
 ///   removed (or the original input if nothing matched).
+///
+/// # Panics
+/// Does not panic on malformed input: a candidate table row is only
+/// treated as part of the property table once it's confirmed to start and
+/// end with `|`, so the internal slicing in [`split_row`] never runs on a
+/// line that can't support it.
 #[must_use]
 pub fn extract_property_table(input: &str) -> (Option<BTreeMap<String, String>>, String) {
     let mut lines = input.lines().enumerate().peekable();
@@ -36,8 +42,8 @@ pub fn extract_property_table(input: &str) -> (Option<BTreeMap<String, String>>,
     }
 
     // 2. Optional H1 — we drop it (title goes in frontmatter via filename).
-    let _h1_consumed = matches!(lines.peek(), Some((_, l)) if l.starts_with("# "));
-    if _h1_consumed {
+    let h1_consumed = matches!(lines.peek(), Some((_, l)) if l.starts_with("# "));
+    if h1_consumed {
         lines.next();
     }
 
@@ -138,7 +144,7 @@ fn count_columns(line: &str) -> usize {
 fn split_row(line: &str) -> Vec<String> {
     let trimmed = line.trim();
     let inner = &trimmed[1..trimmed.len() - 1];
-    inner.split('|').map(|c| c.to_string()).collect()
+    inner.split('|').map(std::string::ToString::to_string).collect()
 }
 
 #[cfg(test)]

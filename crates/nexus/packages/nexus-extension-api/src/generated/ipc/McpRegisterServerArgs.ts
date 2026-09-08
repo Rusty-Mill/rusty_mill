@@ -8,7 +8,7 @@
  */
 export type McpRegisterServerArgs = { 
 /**
- * Stable server identifier (the BTreeMap key used by the host).
+ * Stable server identifier (the `BTreeMap` key used by the host).
  */
 name: string, 
 /**

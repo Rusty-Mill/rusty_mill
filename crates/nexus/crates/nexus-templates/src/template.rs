@@ -272,7 +272,7 @@ impl Template {
     }
 
     /// Render the body and target path against `values`. Returns the
-    /// rendered (body, target_path).
+    /// rendered `(body, target_path)`.
     ///
     /// # Errors
     /// [`ApplyError::Substitution`] if either render fails.

@@ -167,8 +167,7 @@ fn relative_forward_slash(root: &Path, path: &Path) -> String {
 fn now_rfc3339_utc() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     format_rfc3339_utc(secs)
 }
 

@@ -4,7 +4,7 @@
 //!
 //! - Each `.md` file becomes `Title <uuid>.md`. The UUID comes from the
 //!   `notion_id` frontmatter field if present (round-trip fidelity); otherwise
-//!   a fresh UUIDv7 is generated.
+//!   a fresh `UUIDv7` is generated.
 //! - Wikilinks (`[[Title]]`, `[[Title|alias]]`) are rewritten to Notion mention
 //!   links (`[Title](Title%20uuid.md)`).
 //! - Callouts (`> [!note] body`) become emoji block-quotes (`> 💡 body`).
@@ -18,6 +18,7 @@
 //! both passes run on the same content.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
@@ -199,7 +200,7 @@ fn export_markdown(
 
     // Build the page body: optional H1 + property table + converted body.
     let mut out = String::new();
-    out.push_str(&format!("# {stem}\n\n"));
+    let _ = writeln!(out, "# {stem}\n");
 
     // Property table from frontmatter (skip notion_id and source; those
     // are import-side metadata, not user-visible properties).
@@ -211,7 +212,7 @@ fn export_markdown(
         out.push_str("|  |  |\n");
         out.push_str("| --- | --- |\n");
         for (k, v) in &displayable {
-            out.push_str(&format!("| {k} | {v} |\n"));
+            let _ = writeln!(out, "| {k} | {v} |");
         }
         out.push('\n');
     }
@@ -314,9 +315,9 @@ fn convert_callouts_to_emoji(input: &str) -> String {
                 let after = rest[close + 1..].trim_start();
                 let emoji = emoji_for_callout(kind);
                 if after.is_empty() {
-                    out.push_str(&format!("> {emoji}"));
+                    let _ = write!(out, "> {emoji}");
                 } else {
-                    out.push_str(&format!("> {emoji} {after}"));
+                    let _ = write!(out, "> {emoji} {after}");
                 }
                 continue;
             }
@@ -344,7 +345,7 @@ fn rewrite_wikilinks(input: &str, index: &ExportIndex, report: &mut ExportReport
                             .and_then(|s| s.to_str())
                             .unwrap_or(""),
                     );
-                    out.push_str(&format!("[{display}]({url})"));
+                    let _ = write!(out, "[{display}]({url})");
                     i = end;
                     continue;
                 }
@@ -430,6 +431,9 @@ fn parse_frontmatter(body: &str) -> Option<(HashMap<String, String>, &str)> {
 /// Convert a `.bases` TOML body to a CSV string. Reads `[[fields]]` for the
 /// header and `[[records]]` for the data rows. Records that are missing a
 /// field render as an empty cell.
+/// # Errors
+/// Returns an error if `toml_body` is not valid TOML or lacks the shape
+/// this converter expects (`[[fields]]` / `[[records]]`).
 pub fn bases_to_csv(toml_body: &str) -> Result<String> {
     let parsed: toml::Value = toml::from_str(toml_body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("toml: {e}")))?;
@@ -517,7 +521,9 @@ mod tests {
             .into_string()
             .unwrap();
         assert!(name.starts_with("Hello "), "got {name}");
-        assert!(name.ends_with(".md"));
+        assert!(std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md")));
         // Should be 32-hex UUID between "Hello " and ".md".
         let uid = &name[6..name.len() - 3];
         assert_eq!(uid.len(), 32);

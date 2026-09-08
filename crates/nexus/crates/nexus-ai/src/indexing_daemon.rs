@@ -358,7 +358,7 @@ impl IndexingDaemon {
     }
 
     /// P2-06 — same as [`Self::start`] plus an explicit debounce
-    /// window. Use when the AiConfig override is in play; otherwise
+    /// window. Use when the `AiConfig` override is in play; otherwise
     /// the no-arg form falls through to [`DEFAULT_DEBOUNCE`].
     ///
     /// # Errors

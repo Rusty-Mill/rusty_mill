@@ -334,6 +334,7 @@ impl TriggerRegistry {
     }
 
     /// Register a trigger. Returns the trigger's id.
+    #[must_use]
     pub fn register(&self, trigger: AmbientTrigger) -> TriggerId {
         let id = trigger.id.clone();
         self.lock_inner().insert(id.clone(), trigger);
@@ -341,6 +342,7 @@ impl TriggerRegistry {
     }
 
     /// Remove a trigger by id. Returns `true` if it was present.
+    #[must_use]
     pub fn unregister(&self, id: &TriggerId) -> bool {
         self.lock_inner().remove(id).is_some()
     }
@@ -525,8 +527,8 @@ mod tests {
     fn trigger_registry_register_and_list_sorted_by_name() {
         let reg = TriggerRegistry::new();
         assert!(reg.is_empty());
-        reg.register(AmbientTrigger::new("z-trigger", TriggerFilter::All, "z"));
-        reg.register(AmbientTrigger::new("a-trigger", TriggerFilter::All, "a"));
+        let _ = reg.register(AmbientTrigger::new("z-trigger", TriggerFilter::All, "z"));
+        let _ = reg.register(AmbientTrigger::new("a-trigger", TriggerFilter::All, "a"));
         let list = reg.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "a-trigger");
@@ -548,7 +550,7 @@ mod tests {
         let reg = TriggerRegistry::new();
         let mut t = AmbientTrigger::new("t", TriggerFilter::All, "x");
         t.enabled = false;
-        reg.register(t);
+        let _ = reg.register(t);
         assert!(reg.matching(&custom_event("any")).is_empty());
     }
 
@@ -556,7 +558,7 @@ mod tests {
     fn trigger_registry_clone_shares_state() {
         let reg = TriggerRegistry::new();
         let reg2 = reg.clone();
-        reg.register(AmbientTrigger::new("t", TriggerFilter::All, "x"));
+        let _ = reg.register(AmbientTrigger::new("t", TriggerFilter::All, "x"));
         assert_eq!(reg2.len(), 1); // clone sees the registration
     }
 

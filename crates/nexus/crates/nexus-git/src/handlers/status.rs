@@ -110,8 +110,7 @@ pub(crate) fn lfs_status(forge_root: &Path) -> Value {
         .stderr(std::process::Stdio::null())
         .current_dir(forge_root)
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .is_ok_and(|s| s.success());
 
     let (pointer_files, available_files) = if git_lfs_installed {
         match std::process::Command::new("git")

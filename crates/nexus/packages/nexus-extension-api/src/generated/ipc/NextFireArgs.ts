@@ -4,8 +4,8 @@
  * Args for `com.nexus.workflow::next_fire` (handler id `12`,
  * BL-054 Phase 4 follow-up). When `name` is set, the response
  * returns at most one row matching that workflow; when omitted,
- * every cron-triggered workflow is included. Manual / file_event
- * / git_event / mcp_event / webhook workflows are skipped.
+ * every cron-triggered workflow is included. Manual / `file_event`
+ * / `git_event` / `mcp_event` / webhook workflows are skipped.
  */
 export type NextFireArgs = { 
 /**

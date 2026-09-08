@@ -237,14 +237,14 @@ impl CorePlugin for SecurityCorePlugin {
                     Err(SecurityError::CredentialNotFound(_) | SecurityError::KeyringDisabled) => {
                         None
                     }
-                    Err(e) => return Err(map_err(e)),
+                    Err(e) => return Err(map_err(&e)),
                 };
                 to_typed(&crate::ipc::GetSecretResult { value }, "get_secret")
             }
             HANDLER_SET_SECRET => {
                 let typed: crate::ipc::SetSecretArgs = parse_args(args, "set_secret")?;
                 let key = format!("{}:{}", typed.plugin_id, typed.name);
-                self.vault.store(&key, &typed.value).map_err(map_err)?;
+                self.vault.store(&key, &typed.value).map_err(|e| map_err(&e))?;
                 self.known_names.insert(key);
                 to_typed(&crate::ipc::SetSecretResult { ok: true }, "set_secret")
             }
@@ -257,7 +257,7 @@ impl CorePlugin for SecurityCorePlugin {
                         true
                     }
                     Err(SecurityError::KeyringDisabled) => false,
-                    Err(e) => return Err(map_err(e)),
+                    Err(e) => return Err(map_err(&e)),
                 };
                 to_typed(&crate::ipc::DeleteSecretResult { ok }, "delete_secret")
             }
@@ -438,7 +438,7 @@ fn to_typed<T: serde::Serialize>(reply: &T, verb: &str) -> Result<serde_json::Va
 }
 
 /// Map a `SecurityError` to a `PluginError` for IPC return.
-fn map_err(e: SecurityError) -> PluginError {
+fn map_err(e: &SecurityError) -> PluginError {
     PluginError::ExecutionFailed {
         plugin_id: PLUGIN_ID.to_string(),
         reason: e.to_string(),

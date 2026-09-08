@@ -350,13 +350,14 @@ pub fn events_from_session(
 /// Duplicate entries are not removed — the underlying log is
 /// append-only; if the same decision is recorded twice it shows
 /// twice. Caps the two pools independently so a session full of
-/// recent ToolCalls doesn't squeeze out the decision history.
+/// recent `ToolCalls` doesn't squeeze out the decision history.
 ///
 /// **Output shape** is a single string suitable for appending to a
 /// system prompt with a blank-line separator. Empty input or
 /// caps-of-zero return `None` so callers can skip the splice
 /// without checking the string.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn format_memory_preamble(
     entries: &[MemoryEntry],
     decision_cap: usize,
@@ -429,7 +430,7 @@ pub fn format_memory_preamble(
                     summary,
                     ..
                 } => {
-                    let _ = writeln!(out, "- COMPACTED {rounds_compressed} rounds: {summary}",);
+                    let _ = writeln!(out, "- COMPACTED {rounds_compressed} rounds: {summary}");
                 }
                 MemoryEntry::ToolCall {
                     tool,
@@ -569,7 +570,7 @@ pub fn append_entry_to_path(path: &Path, entry: &MemoryEntry) -> Result<(), Memo
 }
 
 /// Count newline-terminated lines in a file. Returns 0 if the file
-/// doesn't exist. BL-121 uses this to compute the entry_idx of the
+/// doesn't exist. BL-121 uses this to compute the `entry_idx` of the
 /// next append for the live FTS index.
 fn count_lines_in_file(path: &Path) -> usize {
     use std::io::BufRead;
@@ -648,6 +649,7 @@ pub fn read_entries_from_path(path: &Path) -> Result<Vec<MemoryEntry>, MemoryErr
 /// principal text field (goal / feedback text, summary, error
 /// message, decision summary + rationale, artifact description).
 /// Case-insensitive.
+#[must_use]
 pub fn query_entries(entries: &[MemoryEntry], pattern: &str, limit: usize) -> Vec<MemoryEntry> {
     let needle = pattern.to_ascii_lowercase();
     let mut out = Vec::new();
@@ -660,7 +662,8 @@ pub fn query_entries(entries: &[MemoryEntry], pattern: &str, limit: usize) -> Ve
             MemoryEntry::UserGoal { text, .. } | MemoryEntry::UserFeedback { text, .. } => {
                 text.to_ascii_lowercase()
             }
-            MemoryEntry::StepExecution { summary, .. } => summary.to_ascii_lowercase(),
+            MemoryEntry::StepExecution { summary, .. }
+            | MemoryEntry::CompactedTurns { summary, .. } => summary.to_ascii_lowercase(),
             MemoryEntry::ToolCall { tool, .. } => tool.to_ascii_lowercase(),
             MemoryEntry::Error { message, .. } => message.to_ascii_lowercase(),
             MemoryEntry::Decision {
@@ -670,7 +673,6 @@ pub fn query_entries(entries: &[MemoryEntry], pattern: &str, limit: usize) -> Ve
                 path, description, ..
             } => format!("{path} {description}").to_ascii_lowercase(),
             MemoryEntry::AgentPlan { plan_id, .. } => plan_id.to_ascii_lowercase(),
-            MemoryEntry::CompactedTurns { summary, .. } => summary.to_ascii_lowercase(),
         };
         if needle.is_empty() || haystack.contains(&needle) {
             out.push(entry.clone());
@@ -908,7 +910,7 @@ mod tests {
 
     #[test]
     fn query_honours_limit() {
-        let entries: Vec<_> = (0..10).map(|i| goal(&format!("g{i}"), i as u64)).collect();
+        let entries: Vec<_> = (0..10u64).map(|i| goal(&format!("g{i}"), i)).collect();
         let hits = query_entries(&entries, "", 3);
         assert_eq!(hits.len(), 3);
     }
@@ -1055,7 +1057,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(i, calls)| RoundRecord {
-                    round: (i + 1) as u32,
+                    round: u32::try_from(i + 1).expect("test fixture round count fits in u32"),
                     text: String::new(),
                     tool_calls: calls,
                 })
@@ -1393,7 +1395,7 @@ mod tests {
         ];
         let bytes = serialize_entries_jsonl(&entries, Path::new("/tmp/h.jsonl")).unwrap();
         // Two newline-terminated records.
-        assert_eq!(bytes.iter().filter(|b| **b == b'\n').count(), 2);
+        assert_eq!(String::from_utf8_lossy(&bytes).matches('\n').count(), 2);
         let parsed: Vec<MemoryEntry> = bytes
             .split(|b| *b == b'\n')
             .filter(|line| !line.is_empty())

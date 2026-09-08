@@ -59,10 +59,9 @@ fn page_path(topic: &str) -> String {
 }
 
 fn require_ctx(
-    ctx: &Option<Arc<KernelPluginContext>>,
+    ctx: Option<&Arc<KernelPluginContext>>,
 ) -> Result<&Arc<KernelPluginContext>, String> {
-    ctx.as_ref()
-        .ok_or_else(|| "wiki: plugin context not wired".to_string())
+    ctx.ok_or_else(|| "wiki: plugin context not wired".to_string())
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -80,7 +79,9 @@ pub(crate) async fn wiki_compile(
     ctx: Option<Arc<KernelPluginContext>>,
     args: &Value,
 ) -> Result<Value, String> {
-    let ctx = require_ctx(&ctx)?;
+    use std::fmt::Write as _;
+
+    let ctx = require_ctx(ctx.as_ref())?;
     let topic = str_arg(args, "topic")?;
     let query = args.get("query").and_then(Value::as_str).unwrap_or(topic);
     let limit = args
@@ -98,7 +99,7 @@ pub(crate) async fn wiki_compile(
 
     let mut prompt = format!("Topic: {topic}\n\nMemories to synthesize:\n");
     for (i, m) in memories.iter().enumerate() {
-        prompt.push_str(&format!("{}. {}\n", i + 1, m.content.replace('\n', " ")));
+        let _ = writeln!(prompt, "{}. {}", i + 1, m.content.replace('\n', " "));
     }
 
     let generated = ctx
@@ -140,7 +141,7 @@ pub(crate) async fn wiki_read(
     ctx: Option<Arc<KernelPluginContext>>,
     args: &Value,
 ) -> Result<Value, String> {
-    let ctx = require_ctx(&ctx)?;
+    let ctx = require_ctx(ctx.as_ref())?;
     let topic = str_arg(args, "topic")?;
     let path = page_path(topic);
     let resp = ctx
@@ -157,7 +158,7 @@ pub(crate) async fn wiki_read(
         Some(arr) => {
             let bytes: Vec<u8> = arr
                 .iter()
-                .filter_map(|n| n.as_u64().map(|v| v as u8))
+                .filter_map(|n| n.as_u64().and_then(|v| u8::try_from(v).ok()))
                 .collect();
             Ok(json!({ "path": path, "content": String::from_utf8_lossy(&bytes) }))
         }
@@ -170,7 +171,7 @@ pub(crate) async fn wiki_list(
     ctx: Option<Arc<KernelPluginContext>>,
     _args: &Value,
 ) -> Result<Value, String> {
-    let ctx = require_ctx(&ctx)?;
+    let ctx = require_ctx(ctx.as_ref())?;
     let resp = ctx
         .ipc_call(
             STORAGE_PLUGIN,
@@ -190,7 +191,11 @@ pub(crate) async fn wiki_list(
                     !e.get("is_dir").and_then(Value::as_bool).unwrap_or(false)
                         && e.get("name")
                             .and_then(Value::as_str)
-                            .is_some_and(|n| n.ends_with(".md"))
+                            .is_some_and(|n| {
+                                std::path::Path::new(n)
+                                    .extension()
+                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                            })
                 })
                 .filter_map(|e| {
                     let name = e.get("name").and_then(Value::as_str)?;

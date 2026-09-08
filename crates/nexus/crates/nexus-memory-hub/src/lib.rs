@@ -165,6 +165,8 @@ impl HubStore {
         exclude_node: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Value>> {
+        use std::fmt::Write as _;
+
         let limit = limit.clamp(1, MAX_PULL_LIMIT);
         let conn = self.pool.get()?;
 
@@ -180,13 +182,14 @@ impl HubStore {
             args.push(Box::new(since.to_string()));
         }
         if let Some(node) = exclude_node {
-            sql.push_str(&format!(
+            let _ = write!(
+                sql,
                 " AND (origin_node IS NULL OR origin_node != ?{})",
                 args.len() + 1
-            ));
+            );
             args.push(Box::new(node.to_string()));
         }
-        sql.push_str(&format!(" ORDER BY updated_at ASC, id ASC LIMIT {limit}"));
+        let _ = write!(sql, " ORDER BY updated_at ASC, id ASC LIMIT {limit}");
 
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(AsRef::as_ref).collect();

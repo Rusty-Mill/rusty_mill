@@ -1,5 +1,5 @@
 //! R8 / #191 — internal test module lifted out of `lib.rs` (which exceeded
-//! 3,000 LoC). Kept as an in-crate `#[cfg(test)] mod tests;` (vs. an external
+//! 3,000 `LoC`). Kept as an in-crate `#[cfg(test)] mod tests;` (vs. an external
 //! `tests/` integration file) because the tests reach for the crate-private
 //! helpers (`resolve_within`, `infer_file_type`, `coerce_property_value`, …)
 //! through `super::*`. An external integration test would only see the
@@ -1163,9 +1163,9 @@ fn edit_surfaces_conflict_without_writing() {
 
 // ── Phase 5.2: com.nexus.storage::read_lines ──────────────────────────────
 
-fn read_lines(engine: &StorageEngine, args: serde_json::Value) -> serde_json::Value {
+fn read_lines(engine: &StorageEngine, args: &serde_json::Value) -> serde_json::Value {
     let mut snaps = nexus_hashline::SnapshotStore::new();
-    crate::handlers::files::read_lines(engine, &mut snaps, &args).expect("read_lines ok")
+    crate::handlers::files::read_lines(engine, &mut snaps, args).expect("read_lines ok")
 }
 
 #[test]
@@ -1178,7 +1178,7 @@ fn read_lines_returns_requested_inclusive_range() {
 
     let r = read_lines(
         &engine,
-        serde_json::json!({ "path": "notes/big.md", "start": 2, "end": 4 }),
+        &serde_json::json!({ "path": "notes/big.md", "start": 2, "end": 4 }),
     );
     assert_eq!(r["content"], "l2\nl3\nl4");
     assert_eq!(r["start"], 2);
@@ -1200,7 +1200,7 @@ fn read_lines_defaults_to_first_window_and_clamps_end() {
         .expect("write");
 
     // No start/end → from line 1; end clamps to the 3-line total.
-    let r = read_lines(&engine, serde_json::json!({ "path": "notes/s.md" }));
+    let r = read_lines(&engine, &serde_json::json!({ "path": "notes/s.md" }));
     assert_eq!(r["content"], "a\nb\nc");
     assert_eq!(r["start"], 1);
     assert_eq!(r["end"], 3);
@@ -1215,7 +1215,7 @@ fn read_lines_past_eof_is_empty_not_an_error() {
 
     let r = read_lines(
         &engine,
-        serde_json::json!({ "path": "notes/s.md", "start": 9 }),
+        &serde_json::json!({ "path": "notes/s.md", "start": 9 }),
     );
     assert_eq!(r["content"], ""); // empty slice, not null
     assert_eq!(r["end"], 0);
@@ -1226,7 +1226,7 @@ fn read_lines_past_eof_is_empty_not_an_error() {
 fn read_lines_missing_file_yields_nulls() {
     let dir = tmp();
     let engine = StorageEngine::init(dir.path()).expect("init");
-    let r = read_lines(&engine, serde_json::json!({ "path": "notes/nope.md" }));
+    let r = read_lines(&engine, &serde_json::json!({ "path": "notes/nope.md" }));
     assert!(r["content"].is_null());
     assert!(r["tag"].is_null());
     assert_eq!(r["total_lines"], 0);

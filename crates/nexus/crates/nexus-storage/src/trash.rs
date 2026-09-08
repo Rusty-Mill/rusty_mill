@@ -53,8 +53,7 @@ pub struct TrashBucket {
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 fn bucket_dir(forge_root: &Path, trash_id: &str) -> Result<PathBuf, StorageError> {
@@ -148,7 +147,7 @@ pub fn list(forge_root: &Path) -> Result<Vec<TrashBucket>, StorageError> {
             size_bytes,
         });
     }
-    out.sort_by(|a, b| b.meta.deleted_at_ms.cmp(&a.meta.deleted_at_ms));
+    out.sort_by_key(|b| std::cmp::Reverse(b.meta.deleted_at_ms));
     Ok(out)
 }
 

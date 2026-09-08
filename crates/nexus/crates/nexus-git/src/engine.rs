@@ -404,11 +404,11 @@ impl GitEngine {
     /// Returns [`GitError`] on any libgit2 failure or invalid hunk index.
     pub fn stage_hunks(&self, path: &Path, hunk_indices: &[usize]) -> Result<(), GitError> {
         let hunks = self.diff_file(path)?;
-        let patch = build_patch_for_hunks(path, &hunks, hunk_indices, false);
-        if patch.is_empty() {
+        let built_patch = build_patch_for_hunks(path, &hunks, hunk_indices, false);
+        if built_patch.is_empty() {
             return Ok(());
         }
-        let diff = git2::Diff::from_buffer(&patch)?;
+        let diff = git2::Diff::from_buffer(&built_patch)?;
         self.repo.apply(&diff, ApplyLocation::Index, None)?;
         Ok(())
     }
@@ -430,11 +430,11 @@ impl GitEngine {
             .find(|(p, _)| p == path_str.as_ref())
             .map(|(_, h)| h)
             .unwrap_or_default();
-        let patch = build_patch_for_hunks(path, &hunks, hunk_indices, true);
-        if patch.is_empty() {
+        let built_patch = build_patch_for_hunks(path, &hunks, hunk_indices, true);
+        if built_patch.is_empty() {
             return Ok(());
         }
-        let diff = git2::Diff::from_buffer(&patch)?;
+        let diff = git2::Diff::from_buffer(&built_patch)?;
         self.repo.apply(&diff, ApplyLocation::Index, None)?;
         Ok(())
     }
@@ -462,11 +462,11 @@ impl GitEngine {
     /// tree is left untouched.
     pub fn discard_hunks(&self, path: &Path, hunk_indices: &[usize]) -> Result<(), GitError> {
         let hunks = self.diff_file(path)?;
-        let patch = build_patch_for_hunks(path, &hunks, hunk_indices, true);
-        if patch.is_empty() {
+        let built_patch = build_patch_for_hunks(path, &hunks, hunk_indices, true);
+        if built_patch.is_empty() {
             return Ok(());
         }
-        let diff = git2::Diff::from_buffer(&patch)?;
+        let diff = git2::Diff::from_buffer(&built_patch)?;
         self.repo.apply(&diff, ApplyLocation::WorkDir, None)?;
         Ok(())
     }
@@ -1410,6 +1410,8 @@ fn build_patch_for_hunks(
     indices: &[usize],
     reverse: bool,
 ) -> Vec<u8> {
+    use std::fmt::Write as _;
+
     // Collect only the valid, in-range indices up front.
     let selected: Vec<&HunkDiff> = indices.iter().filter_map(|&i| all_hunks.get(i)).collect();
     if selected.is_empty() {
@@ -1438,14 +1440,12 @@ fn build_patch_for_hunks(
             )
         };
 
-        out.push_str(&format!("@@ -{os},{oc} +{ns},{nc} @@\n"));
+        let _ = writeln!(out, "@@ -{os},{oc} +{ns},{nc} @@");
 
         for line in &hunk.lines {
             let prefix = match (reverse, &line.kind) {
-                (false, DiffLineKind::Added) => '+',
-                (false, DiffLineKind::Removed) => '-',
-                (true, DiffLineKind::Added) => '-',
-                (true, DiffLineKind::Removed) => '+',
+                (false, DiffLineKind::Added) | (true, DiffLineKind::Removed) => '+',
+                (false, DiffLineKind::Removed) | (true, DiffLineKind::Added) => '-',
                 _ => ' ',
             };
             // Normalize: strip any trailing newline then re-add exactly one.

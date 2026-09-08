@@ -186,7 +186,7 @@ pub const HANDLER_PROPOSE_TOOL_CALLS: u32 = 20;
 pub const HANDLER_GENERATE_DOCS: u32 = 22;
 
 /// BL-117 — return the live AI chat provider's resolved credentials
-/// (provider name, base URL, api_key) so sibling subsystems like
+/// (provider name, base URL, `api_key`) so sibling subsystems like
 /// `nexus-audio` can talk to the same provider endpoint without
 /// asking the user to configure a second key. Reads from the
 /// `ai_config` `RwLock` so a runtime `set_config` push by the shell
@@ -234,7 +234,7 @@ pub const HANDLER_INFER_ENTITY_RELATIONS: u32 = 25;
 /// Args: [`crate::ipc::AiPredictArgs`]. Returns
 /// [`crate::ipc::AiPredictReply`]. Routes to Ollama's `/api/generate`
 /// (with `suffix`) when the configured provider is `ollama`, falls
-/// back to a chat-shaped FIM prompt for OpenAI / Anthropic.
+/// back to a chat-shaped FIM prompt for `OpenAI` / Anthropic.
 pub const HANDLER_PREDICT: u32 = 26;
 
 /// `embed_text` — embed one or more strings with the configured embedding
@@ -432,6 +432,7 @@ impl CorePlugin for AiCorePlugin {
 
     /// Async dispatch path. Captures the context + configs into the returned
     /// future so nothing outlives the `&mut self` borrow.
+    #[allow(clippy::too_many_lines)]
     fn dispatch_async(
         &mut self,
         handler_id: u32,
@@ -667,7 +668,7 @@ impl CorePlugin for AiCorePlugin {
 
 #[cfg(test)]
 mod aig05_local_embedding_config_tests {
-    //! AIG-05 — set_config / config_snapshot / status round-trip for
+    //! AIG-05 — `set_config` / `config_snapshot` / status round-trip for
     //! the `provider = "local"` embedding case. These cover the
     //! parse-layer wiring; the `local-embeddings` feature gate is
     //! exercised separately via `dimension_for` (only callable when
@@ -1987,8 +1988,7 @@ mod bl102_tls_pinning_status_tests {
         // Match build_client semantics: in the absence of the env
         // opt-in, an unconfigured AI surface reports unpinned.
         let env_opt_in = std::env::var("NEXUS_TLS_PINNING")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .is_ok_and(|v| v == "1");
         assert_eq!(tls_pinning_effective(None), env_opt_in);
 
         let cfg = AiConfig::default();

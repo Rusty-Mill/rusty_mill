@@ -449,13 +449,11 @@ pub fn find_in_files(
     };
     let max_files = args
         .max_files
-        .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
-        .unwrap_or(DEFAULT_MAX_FILES)
+        .map_or(DEFAULT_MAX_FILES, |n| usize::try_from(n).unwrap_or(usize::MAX))
         .max(1);
     let max_results = args
         .max_results
-        .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
-        .unwrap_or(DEFAULT_MAX_RESULTS)
+        .map_or(DEFAULT_MAX_RESULTS, |n| usize::try_from(n).unwrap_or(usize::MAX))
         .max(1);
 
     let files = collect_text_files(forge_root)?;
@@ -466,9 +464,8 @@ pub fn find_in_files(
             break;
         }
         let abs = forge_root.join(&relpath);
-        let bytes = match std::fs::read(&abs) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Ok(bytes) = std::fs::read(&abs) else {
+            continue;
         };
         let Ok(content) = std::str::from_utf8(&bytes) else {
             continue;
@@ -538,7 +535,7 @@ pub fn replace_in_files(
     let restrict: Option<std::collections::HashSet<&str>> = args
         .files
         .as_ref()
-        .map(|v| v.iter().map(|s| s.as_str()).collect());
+        .map(|v| v.iter().map(String::as_str).collect());
     let candidates = collect_text_files(forge_root)?;
     let mut report = ReplaceReport::default();
     for relpath in candidates {
@@ -592,18 +589,16 @@ pub(crate) fn collect_text_files(forge_root: &Path) -> Result<Vec<PathBuf>, Stor
 }
 
 fn walk_into(dir: &Path, forge_root: &Path, out: &mut Vec<PathBuf>) -> Result<(), StorageError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(it) => it,
-        Err(_) => return Ok(()),
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if should_ignore(&path) {
             continue;
         }
-        let meta = match entry.file_type() {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(meta) = entry.file_type() else {
+            continue;
         };
         if meta.is_symlink() {
             // Same skip rule as `reconcile::scan_directory`.
@@ -735,7 +730,7 @@ mod tests {
         let err = find_in_files(forge, &a).unwrap_err();
         match err {
             StorageError::ConfigInvalid(msg) => {
-                assert!(msg.contains("invalid regex"), "{msg}")
+                assert!(msg.contains("invalid regex"), "{msg}");
             }
             other => panic!("unexpected: {other:?}"),
         }

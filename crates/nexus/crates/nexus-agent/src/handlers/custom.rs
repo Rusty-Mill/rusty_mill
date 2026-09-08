@@ -1,7 +1,7 @@
-//! `com.nexus.agent::list_custom` (HANDLER_LIST_CUSTOM).
+//! `com.nexus.agent::list_custom` (`HANDLER_LIST_CUSTOM`).
 //!
 //! Scans `<forge>/.forge/agents/*/agent.toml` and returns parsed
-//! manifests + per-file parse_args errors.
+//! manifests + per-file `parse_args` errors.
 
 use std::sync::Arc;
 
@@ -12,14 +12,11 @@ pub(crate) async fn handle_list_custom(
     ctx: Arc<KernelPluginContext>,
 ) -> Result<serde_json::Value, PluginError> {
     let agents_dir = std::path::Path::new(crate::custom_agent::AGENTS_DIR);
-    let entries = match ctx.list_files(agents_dir).await {
-        Ok(e) => e,
-        Err(_) => {
-            return Ok(serde_json::json!({
-                "manifests": [],
-                "errors": []
-            }));
-        }
+    let Ok(entries) = ctx.list_files(agents_dir).await else {
+        return Ok(serde_json::json!({
+            "manifests": [],
+            "errors": []
+        }));
     };
 
     let mut manifests: Vec<crate::CustomAgentManifest> = Vec::new();

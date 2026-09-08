@@ -225,8 +225,7 @@ pub(crate) fn build_local_embedding_provider(
 pub(crate) fn tls_pinning_effective(ai_cfg: Option<&AiConfig>) -> bool {
     let cfg_flag = ai_cfg.is_some_and(|c| c.tls_pinning_enabled);
     let env_opt_in = std::env::var("NEXUS_TLS_PINNING")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+        .is_ok_and(|v| v == "1");
     cfg_flag || env_opt_in
 }
 
@@ -297,10 +296,10 @@ pub(crate) fn config_snapshot(
     })
 }
 
-/// BL-117 — assemble the resolve_credentials reply. Returns
+/// BL-117 — assemble the `resolve_credentials` reply. Returns
 /// `Value::Null` when no AI chat provider is configured so the
 /// caller can branch cleanly without parsing an error string. The
-/// api_key is included verbatim because the caller (`nexus-audio`)
+/// `api_key` is included verbatim because the caller (`nexus-audio`)
 /// needs to talk to the same provider endpoint; this is a
 /// sensitive payload — the manifest gates dispatch under
 /// `ipc.call`, the activity log records each call.

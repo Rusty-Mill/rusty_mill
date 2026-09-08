@@ -369,6 +369,7 @@ impl CorePlugin for McpHostPlugin {
     }
 
     fn on_stop(&mut self) {
+        const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
         // Best-effort: drop pool — McpClient's Drop sends graceful close.
         // A misbehaving MCP child that ignores the close signal would
         // pre-#85 hang `join()` indefinitely and block kernel shutdown.
@@ -386,16 +387,15 @@ impl CorePlugin for McpHostPlugin {
                 });
             }
         });
-        const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
         let start = std::time::Instant::now();
-        let poll = std::time::Duration::from_millis(50);
+        let poll_interval = std::time::Duration::from_millis(50);
         while start.elapsed() < SHUTDOWN_DEADLINE {
             if handle.is_finished() {
                 let _ = handle.join();
                 tracing::info!(plugin_id = PLUGIN_ID, "MCP host stopped");
                 return;
             }
-            std::thread::sleep(poll);
+            std::thread::sleep(poll_interval);
         }
         tracing::warn!(
             audit = true,
@@ -603,7 +603,7 @@ impl CorePlugin for McpHostPlugin {
                                 serde_json::Value::Object(t.input_schema.as_ref().clone());
                             McpToolEntry {
                                 name: t.name.to_string(),
-                                description: t.description.as_ref().map(|d| d.to_string()),
+                                description: t.description.as_ref().map(std::string::ToString::to_string),
                                 input_schema: Some(input_schema),
                             }
                         })
@@ -684,6 +684,14 @@ impl CorePlugin for McpHostPlugin {
                 // posture as the other dispatch_async branches.
                 let parsed: Result<McpCallToolArgs, _> = serde_json::from_value(args.clone());
                 Some(Box::pin(async move {
+                    // Issue #85. Cap the aggregated tool response so a
+                    // misbehaving / malicious MCP server can't stream
+                    // gigabyte responses into our memory. We measure
+                    // the per-content-item size as we accumulate so
+                    // the early items still surface even if the tail
+                    // is rejected.
+                    const MAX_TOOL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+                    const MAX_TOOL_RESPONSE_ITEMS: usize = 1024;
                     let McpCallToolArgs {
                         server,
                         tool,
@@ -712,14 +720,6 @@ impl CorePlugin for McpHostPlugin {
                         .call_tool(tool.clone(), tool_args)
                         .await
                         .map_err(map_client_err)?;
-                    // Issue #85. Cap the aggregated tool response so a
-                    // misbehaving / malicious MCP server can't stream
-                    // gigabyte responses into our memory. We measure
-                    // the per-content-item size as we accumulate so
-                    // the early items still surface even if the tail
-                    // is rejected.
-                    const MAX_TOOL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-                    const MAX_TOOL_RESPONSE_ITEMS: usize = 1024;
                     let mut content: Vec<serde_json::Value> = Vec::new();
                     let mut total_bytes: usize = 0;
                     let mut truncated = false;
@@ -731,7 +731,7 @@ impl CorePlugin for McpHostPlugin {
                         let Ok(v) = serde_json::to_value(item) else {
                             continue;
                         };
-                        let item_bytes = serde_json::to_vec(&v).map(|b| b.len()).unwrap_or(0);
+                        let item_bytes = serde_json::to_vec(&v).map_or(0, |b| b.len());
                         if total_bytes.saturating_add(item_bytes) > MAX_TOOL_RESPONSE_BYTES {
                             truncated = true;
                             break;

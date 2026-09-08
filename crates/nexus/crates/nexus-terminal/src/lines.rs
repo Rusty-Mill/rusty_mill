@@ -305,7 +305,7 @@ mod tests {
         b.flush_pending();
         assert_eq!(b.len(), 1);
         assert_eq!(b.iter().next().unwrap().text_only, "no-newline");
-        assert!(b.pending_len() == 0);
+        assert_eq!(b.pending_len(), 0);
     }
 
     #[test]

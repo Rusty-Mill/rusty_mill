@@ -984,17 +984,14 @@ pub fn merge_records(keep: &EntityRecord, drop: &EntityRecord) -> MergedEntity {
     }
     for r in &drop.relations {
         let k = (r.target.clone(), r.kind.clone());
-        match by_key.get_mut(&k) {
-            Some(existing) => {
-                if r.confidence > *existing {
-                    *existing = r.confidence;
-                }
+        if let Some(existing) = by_key.get_mut(&k) {
+            if r.confidence > *existing {
+                *existing = r.confidence;
             }
-            None => {
-                by_key.insert(k.clone(), r.confidence);
-                order.push(k);
-                relations_added += 1;
-            }
+        } else {
+            by_key.insert(k.clone(), r.confidence);
+            order.push(k);
+            relations_added += 1;
         }
     }
     let relations: Vec<EntityUpsertRelation> = order

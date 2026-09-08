@@ -1,4 +1,4 @@
-//! Persisted plan history handlers (HANDLER_HISTORY_LIST / _GET / _DELETE).
+//! Persisted plan history handlers (`HANDLER_HISTORY_LIST` / _GET / _DELETE).
 //!
 //! These read pre-Phase-2a transcripts written by the legacy `run`
 //! handler; new sessions go through `handlers::session` instead.

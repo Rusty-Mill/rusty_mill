@@ -208,6 +208,9 @@ async fn pull(db: &MemoryDb, client: &reqwest::Client, cfg: &HubConfig) -> Resul
 }
 
 /// Map a db error to the engine's `String` error.
+// By-value so it can be used directly as `.map_err(de)` at every call
+// site (10+) instead of `.map_err(|e| de(&e))` everywhere.
+#[allow(clippy::needless_pass_by_value)]
 fn de(e: crate::db::MemoryDbError) -> String {
     format!("sync: db: {e}")
 }

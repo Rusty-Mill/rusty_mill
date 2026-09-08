@@ -49,7 +49,7 @@ const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum length of a synthesised tool name — Anthropic accepts up
-/// to 64 chars in `^[a-zA-Z0-9_-]+$`; OpenAI's limit is the same.
+/// to 64 chars in `^[a-zA-Z0-9_-]+$`; `OpenAI`'s limit is the same.
 const MAX_TOOL_NAME_LEN: usize = 64;
 
 /// Decoded shape of one entry in `com.nexus.mcp.host::list_servers`.
@@ -279,7 +279,7 @@ mod tests {
     }
 
     /// Stub IPC dispatcher: returns canned `list_servers` /
-    /// `list_tools` responses so we can exercise discover_mcp_tools
+    /// `list_tools` responses so we can exercise `discover_mcp_tools`
     /// without spinning up a real MCP host.
     struct StubMcp {
         servers: serde_json::Value,

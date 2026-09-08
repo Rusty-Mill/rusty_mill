@@ -43,7 +43,7 @@ pub enum RelationError {
 ///
 /// Scalar source values match a single target record (or none); list
 /// source values match in the order they appear. Soft-deleted
-/// (deleted_at != None) target records are filtered out so the UI
+/// (`deleted_at` != None) target records are filtered out so the UI
 /// never sees stale references.
 ///
 /// # Errors
@@ -242,7 +242,7 @@ fn percentage(values: &[&serde_json::Value], target_empty: bool) -> serde_json::
 }
 
 /// Parse a string into [`RollupAggregation`]. Accepts the same
-/// snake_case form the serde tag uses; case-insensitive.
+/// `snake_case` form the serde tag uses; case-insensitive.
 #[must_use]
 pub fn parse_aggregation(s: &str) -> Option<RollupAggregation> {
     match s.to_ascii_lowercase().as_str() {

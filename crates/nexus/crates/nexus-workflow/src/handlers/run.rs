@@ -32,15 +32,15 @@ pub(crate) fn prepare(
     root: &std::path::Path,
     run_history: &Arc<crate::run_history::RunHistoryStore>,
     args: &serde_json::Value,
-) -> Option<CorePluginFuture> {
+) -> CorePluginFuture {
     let args = args.clone();
     let workflow = match lookup_by_args(registry, &args) {
         Ok(wf) => wf,
-        Err(err) => return Some(Box::pin(async move { Err(err) })),
+        Err(err) => return Box::pin(async move { Err(err) }),
     };
     let variables = match extract_variables(&args) {
         Ok(v) => v,
-        Err(err) => return Some(Box::pin(async move { Err(err) })),
+        Err(err) => return Box::pin(async move { Err(err) }),
     };
     let run_history = Arc::clone(run_history);
 
@@ -70,12 +70,12 @@ pub(crate) fn prepare(
                     error: None,
                 });
                 let value = to_value(&run, "run");
-                return Some(Box::pin(async move { value }));
+                return Box::pin(async move { value });
             }
             Ok(true) => {}
             Err(e) => {
                 let err = exec_err(format!("run: condition: {e}"));
-                return Some(Box::pin(async move { Err(err) }));
+                return Box::pin(async move { Err(err) });
             }
         }
     }
@@ -101,7 +101,7 @@ pub(crate) fn prepare(
         );
     }
 
-    Some(Box::pin(async move {
+    Box::pin(async move {
         let ctx = ctx.ok_or_else(|| {
             exec_err("workflow plugin context not wired (bootstrap incomplete)".into())
         })?;
@@ -139,7 +139,7 @@ pub(crate) fn prepare(
         });
         let run = result.map_err(|e| exec_err(format!("run: {e}")))?;
         to_value(&run, "run")
-    }))
+    })
 }
 
 fn lookup_by_args(
@@ -264,7 +264,7 @@ impl NotifyStepArgs {
             .extra
             .get("severity")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let message = step
             .extra
             .get("message")
@@ -275,7 +275,7 @@ impl NotifyStepArgs {
             .extra
             .get("title")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         Ok(Self {
             channel,
             source,
@@ -500,6 +500,7 @@ impl KernelActionDispatcher {
 
 #[async_trait]
 impl ActionDispatcher for KernelActionDispatcher {
+    #[allow(clippy::too_many_lines)]
     async fn run(&self, step: &Step) -> Result<serde_json::Value, String> {
         match step.step_type.as_str() {
             // Direct IPC dispatch: requires `target` + `command`; optional `args` object.
@@ -693,7 +694,7 @@ impl ActionDispatcher for KernelActionDispatcher {
 /// record stores `task_id` so a follow-up step can `wait_for` it.
 ///
 /// Failures (e.g. runtime not registered, caps denied) surface as
-/// step errors with `submit_async:` prefix so the on_error policy
+/// step errors with `submit_async:` prefix so the `on_error` policy
 /// path is the same as for any other IPC failure.
 /// Pure builder for the `com.nexus.ai.runtime::submit` envelope a
 /// workflow async step emits. Factored out so the wire shape can be
@@ -702,7 +703,7 @@ fn build_async_submit_args(
     step: &crate::Step,
     target_plugin: &str,
     command: &str,
-    ipc_args: serde_json::Value,
+    ipc_args: &serde_json::Value,
 ) -> serde_json::Value {
     serde_json::json!({
         "task": {
@@ -725,7 +726,7 @@ async fn submit_async_step(
     ipc_args: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use nexus_kernel::Ipc as _;
-    let submit_args = build_async_submit_args(step, target_plugin, command, ipc_args);
+    let submit_args = build_async_submit_args(step, target_plugin, command, &ipc_args);
     ctx.ipc_call(
         "com.nexus.ai.runtime",
         "submit",
@@ -1087,10 +1088,10 @@ prompt = "What time is it?"
             retry_initial_delay_ms: None,
             retry_max_delay_ms: None,
             retry_jitter: None,
-            extra: Default::default(),
+            extra: std::collections::BTreeMap::default(),
         };
         let ipc_args = serde_json::json!({ "question": "What time is it?" });
-        let submit = build_async_submit_args(&step, "com.nexus.ai", "ask", ipc_args.clone());
+        let submit = build_async_submit_args(&step, "com.nexus.ai", "ask", &ipc_args);
         // Top-level shape.
         assert_eq!(
             submit.get("priority").and_then(serde_json::Value::as_str),
@@ -1134,13 +1135,13 @@ prompt = "What time is it?"
             retry_initial_delay_ms: None,
             retry_max_delay_ms: None,
             retry_jitter: None,
-            extra: Default::default(),
+            extra: std::collections::BTreeMap::default(),
         };
         let submit = build_async_submit_args(
             &step,
             "com.nexus.notifications",
             "send",
-            serde_json::json!({ "channel": "desktop", "message": "x" }),
+            &serde_json::json!({ "channel": "desktop", "message": "x" }),
         );
         assert_eq!(
             submit

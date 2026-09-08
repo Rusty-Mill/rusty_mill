@@ -191,6 +191,9 @@ impl RelayServer {
     /// Per-connection handler. Public-but-`pub(crate)` so the
     /// integration tests can drive a connection directly without going
     /// through a TCP listener.
+    // HandleError's ws-transport variants wrap tungstenite::Error
+    // (>=136 bytes); see the same note on `Client::connect`.
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn handle_connection(&self, stream: TcpStream) -> Result<(), HandleError> {
         let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
         config.max_message_size = Some(MAX_FRAME_BYTES);
@@ -204,6 +207,7 @@ impl RelayServer {
     /// Drive one accepted WebSocket through the handshake and message
     /// loop. Generic over the stream so tests can plug an in-memory
     /// duplex pipe in place of `TcpStream`.
+    #[allow(clippy::result_large_err, clippy::too_many_lines)]
     pub(crate) async fn run_peer<S>(&self, ws: WebSocketStream<S>) -> Result<(), HandleError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -332,6 +336,7 @@ impl RelayServer {
     }
 
     /// Inbound message pump for a single connected peer.
+    #[allow(clippy::result_large_err)]
     async fn pump_reads<S>(
         &self,
         peer_id: &str,
@@ -435,6 +440,7 @@ async fn send_error<S>(
     let _ = sink.close().await;
 }
 
+#[allow(clippy::result_large_err)]
 async fn send_server<S>(
     sink: &mut futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     msg: &ServerMessage,

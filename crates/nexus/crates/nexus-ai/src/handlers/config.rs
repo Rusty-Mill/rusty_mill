@@ -116,7 +116,14 @@ pub(crate) fn parse_config_field(
     let ollama_temperature = obj
         .get("ollama_temperature")
         .and_then(serde_json::Value::as_f64)
-        .map(|v| v as f32);
+        // Temperature is stored as JSON f64 but the config field is f32;
+        // exact-precision f64->f32 has no lossless `try_from`.
+        .map(|v| {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                v as f32
+            }
+        });
     Ok(Some(AiConfig {
         provider,
         model,

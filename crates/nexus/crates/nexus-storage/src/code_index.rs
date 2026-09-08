@@ -100,7 +100,7 @@ pub struct ExtractedSymbol {
     /// Index into the `Vec<ExtractedSymbol>` of the enclosing symbol,
     /// or `None` for top-level items.
     pub parent_idx: Option<usize>,
-    /// Leading doc comment (rustdoc / godoc / JSDoc / docstring),
+    /// Leading doc comment (rustdoc / godoc / `JSDoc` / docstring),
     /// trimmed and joined with `\n`. `None` when no doc was detected.
     pub doc_comment: Option<String>,
 }
@@ -366,7 +366,7 @@ fn line_end(node: Node<'_>) -> u32 {
 /// `comment_kinds` lists the tree-sitter node kinds counted as comment
 /// trivia for this language. `is_doc` is a predicate over the literal
 /// comment text: rustdoc keeps only `///` lines, godoc keeps `//`,
-/// JSDoc keeps only `/** */` blocks. When `is_doc` returns false the
+/// `JSDoc` keeps only `/** */` blocks. When `is_doc` returns false the
 /// comment is treated as separator, halting the walk so a stray `//
 /// TODO` doesn't accidentally become the doc.
 fn leading_doc<F>(node: Node<'_>, src: &[u8], comment_kinds: &[&str], is_doc: F) -> Option<String>
@@ -399,6 +399,7 @@ where
 
 // ─── Rust ──────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn walk_rust(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, parent: Option<usize>) {
     fn push_named(
         kind: &str,
@@ -531,7 +532,7 @@ fn walk_js_ts(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, parent
         src: &[u8],
         out: &mut Vec<ExtractedSymbol>,
         parent: Option<usize>,
-    ) -> Option<usize> {
+    ) -> usize {
         out.push(ExtractedSymbol {
             kind: kind.to_string(),
             name,
@@ -540,7 +541,7 @@ fn walk_js_ts(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, parent
             parent_idx: parent,
             doc_comment: js_doc(node, src),
         });
-        Some(out.len() - 1)
+        out.len() - 1
     }
     match node.kind() {
         "function_declaration" | "generator_function_declaration" => {
@@ -550,11 +551,8 @@ fn walk_js_ts(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, parent
             return;
         }
         "class_declaration" => {
-            let idx = if let Some(name) = child_text(node, "name", src) {
-                push("class", name, node, src, out, parent)
-            } else {
-                None
-            };
+            let idx = child_text(node, "name", src)
+                .map(|name| push("class", name, node, src, out, parent));
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
@@ -795,7 +793,7 @@ mod tests {
 
     #[test]
     fn rust_extracts_function_struct_and_methods() {
-        let src = r#"
+        let src = r"
 /// Doc one.
 /// Doc two.
 pub fn top_level() {}
@@ -812,7 +810,7 @@ pub trait Greet {
 }
 
 const MAX: u32 = 42;
-"#;
+";
         let syms = extract_symbols(CodeLanguage::Rust, src);
         let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"top_level"));
@@ -834,7 +832,7 @@ const MAX: u32 = 42;
 
     #[test]
     fn typescript_extracts_class_methods_and_interfaces() {
-        let src = r#"
+        let src = r"
 /** JSDoc for foo. */
 export function foo(): number { return 1; }
 
@@ -846,7 +844,7 @@ export class Bar {
 export interface User { id: string; name: string }
 export type Id = string;
 export const arrowFn = (x: number) => x + 1;
-"#;
+";
         let syms = extract_symbols(CodeLanguage::TypeScript, src);
         let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"foo"));
@@ -990,11 +988,11 @@ type Greeter interface { Greet() string }
     #[test]
     fn parent_id_resolved_after_insert() {
         let conn = db();
-        let src = r#"
+        let src = r"
 impl Counter {
     pub fn new() -> Self { Self {} }
 }
-"#;
+";
         let syms = extract_symbols(CodeLanguage::Rust, src);
         upsert_file_symbols(&conn, "a.rs", CodeLanguage::Rust, &syms).unwrap();
         let rows = query_symbols(

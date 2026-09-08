@@ -90,13 +90,13 @@ const DEFAULT_CALLER_PLUGIN_ID: &str = "com.nexus.unknown";
 /// Picked to comfortably exceed the agent's own
 /// `approval_timeout_secs` default (1800s) plus the maximum tool-loop
 /// runtime we've observed in the wild.
-const SESSION_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
+const SESSION_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_hours(2);
 
 /// Per-call IPC timeout for `WorkflowAiStep` dispatches. Workflow
 /// steps are bounded by `nexus_workflow::DEFAULT_STEP_TIMEOUT` (5 min)
 /// — we mirror that ceiling here so the runtime doesn't outlast the
 /// step the workflow would otherwise have awaited inline.
-const WORKFLOW_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const WORKFLOW_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Grace period the worker holds a session→task correlation entry
 /// past the terminal `AiEvent`. The kernel event bus is async-delivery
@@ -320,6 +320,7 @@ impl CorePlugin for AiRuntimeCorePlugin {
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn handle_submit(
     store: &Store,
     ctx: &Arc<KernelPluginContext>,
@@ -348,7 +349,7 @@ fn handle_submit(
             .take(256)
             .collect(),
         AgentTaskKind::WorkflowAiStep { workflow, step, .. } => {
-            format!("workflow {} step {}", workflow, step)
+            format!("workflow {workflow} step {step}")
         }
         AgentTaskKind::AiStream { .. } => "ai_stream".into(),
     };
@@ -494,7 +495,7 @@ fn handle_submit(
         // Emit session-lifecycle bus event before the terminal AiEvent
         // so subscribers see the semantic outcome (completed/cancelled)
         // before the raw task event.
-        let elapsed_ms = task_start.elapsed().as_millis() as u64;
+        let elapsed_ms = u64::try_from(task_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         if let Some(ref sid) = allocated_session_id {
             match &event {
                 AiEvent::Finished { .. } => {
@@ -568,36 +569,6 @@ async fn republish_loop(store: Store, ctx: Arc<KernelPluginContext>) {
     use crate::republisher::{TOPIC_ROUND_PROPOSED, TOPIC_STREAM_CHUNK};
     use nexus_kernel::{EventFilter, Events as _};
 
-    // Two separate subscriptions because `CustomPrefix` would over-
-    // match (e.g. `stream_start` / `stream_done` carry session_id
-    // but we don't translate them). One `CustomExact` filter per
-    // topic keeps the dispatch cheap and the translate set explicit.
-    let mut sub_stream = ctx.subscribe(EventFilter::CustomExact(TOPIC_STREAM_CHUNK.to_string()));
-    let mut sub_round = ctx.subscribe(EventFilter::CustomExact(TOPIC_ROUND_PROPOSED.to_string()));
-
-    tracing::info!(
-        plugin_id = PLUGIN_ID,
-        "BL-134 Phase 2b-ii: ai-runtime republisher subscribed to stream_chunk + round_proposed"
-    );
-
-    loop {
-        tokio::select! {
-            evt = sub_stream.recv() => match evt {
-                Ok(published) => handle_inner_event(&store, &ctx, &published.event),
-                Err(_closed) => break,
-            },
-            evt = sub_round.recv() => match evt {
-                Ok(published) => handle_inner_event(&store, &ctx, &published.event),
-                Err(_closed) => break,
-            },
-        }
-    }
-
-    tracing::debug!(
-        plugin_id = PLUGIN_ID,
-        "ai-runtime republisher loop exited (bus subscription closed)"
-    );
-
     /// Inline helper so both select arms share the same translate +
     /// publish flow. Pure dispatch + correlation lookup; the actual
     /// payload translation lives in `republisher`.
@@ -633,6 +604,37 @@ async fn republish_loop(store: Store, ctx: Arc<KernelPluginContext>) {
         };
         record_and_publish(store, ctx.as_ref(), &ring, &typed);
     }
+
+    // Two separate subscriptions because `CustomPrefix` would over-
+    // match (e.g. `stream_start` / `stream_done` carry session_id
+    // but we don't translate them). One `CustomExact` filter per
+    // topic keeps the dispatch cheap and the translate set explicit.
+    let mut sub_stream = ctx.subscribe(EventFilter::CustomExact(TOPIC_STREAM_CHUNK.to_string()));
+    let mut sub_round = ctx.subscribe(EventFilter::CustomExact(TOPIC_ROUND_PROPOSED.to_string()));
+
+    tracing::info!(
+        plugin_id = PLUGIN_ID,
+        "BL-134 Phase 2b-ii: ai-runtime republisher subscribed to stream_chunk + round_proposed"
+    );
+
+    loop {
+        tokio::select! {
+            evt = sub_stream.recv() => match evt {
+                Ok(published) => handle_inner_event(&store, &ctx, &published.event),
+                Err(_closed) => break,
+            },
+            evt = sub_round.recv() => match evt {
+                Ok(published) => handle_inner_event(&store, &ctx, &published.event),
+                Err(_closed) => break,
+            },
+        }
+    }
+
+    tracing::debug!(
+        plugin_id = PLUGIN_ID,
+        "ai-runtime republisher loop exited (bus subscription closed)"
+    );
+
 }
 
 /// BL-134 Phase 2b-ii — pre-allocate a session id for the worker
@@ -648,7 +650,7 @@ async fn republish_loop(store: Store, ctx: Arc<KernelPluginContext>) {
 ///
 /// Non-Session kinds are returned unchanged; only `session_run`
 /// emits the bus topics we correlate today (`stream_*`,
-/// `round_proposed`). Workflow async steps and AiStream get their
+/// `round_proposed`). Workflow async steps and `AiStream` get their
 /// own correlation pass in future phases.
 fn inject_session_id(
     kind: AgentTaskKind,
@@ -685,7 +687,7 @@ fn inject_session_id(
 /// The worker observes the signal in its `select!` arm and emits
 /// `Cancelled { by }` instead of the underlying Finished/Failed —
 /// the cancel arm is `biased` so it wins a same-tick race against
-/// the in-flight ipc_call's reply.
+/// the in-flight `ipc_call`'s reply.
 fn handle_cancel(
     store: &Store,
     ctx: &KernelPluginContext,
@@ -937,65 +939,62 @@ async fn trigger_watcher_loop(
     );
 
     loop {
-        match sub.recv().await {
-            Ok(published) => {
-                let matching = triggers.matching(&published.event);
-                for trigger in matching {
-                    let input = EventInput::from_published(&published, trigger.mode);
-                    let goal = trigger.render_goal(&published);
+        if let Ok(published) = sub.recv().await {
+            let matching = triggers.matching(&published.event);
+            for trigger in matching {
+                let input = EventInput::from_published(&published, trigger.mode);
+                let goal = trigger.render_goal(&published);
 
-                    tracing::info!(
-                        plugin_id = PLUGIN_ID,
-                        trigger_name = %trigger.name,
-                        trigger_id = %trigger.id,
-                        event_type = %input.event_type,
-                        "Move 7: trigger matched — spawning SignalTriggered session",
-                    );
+                tracing::info!(
+                    plugin_id = PLUGIN_ID,
+                    trigger_name = %trigger.name,
+                    trigger_id = %trigger.id,
+                    event_type = %input.event_type,
+                    "Move 7: trigger matched — spawning SignalTriggered session",
+                );
 
-                    // Build a SignalTriggered submit args. The session args
-                    // carry both the rendered goal and the typed EventInput so
-                    // the agent handler can expose the structured observation.
-                    let session_args = serde_json::json!({
-                        "goal": goal,
-                        "trigger_id": trigger.id.0.to_string(),
-                        "event_input": input,
-                    });
-                    let submit_args = crate::AiRuntimeSubmitArgs {
-                        task: crate::AgentTaskKind::Session { args: session_args },
-                        priority: crate::TaskPriority::Background,
-                        kind: crate::SessionKind::SignalTriggered,
-                        parent: None,
-                        capabilities: vec![],
-                    };
-                    let args_value = match serde_json::to_value(&submit_args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(
-                                plugin_id = PLUGIN_ID,
-                                trigger_name = %trigger.name,
-                                ?e,
-                                "Move 7: failed to serialize trigger session args"
-                            );
-                            continue;
-                        }
-                    };
-                    if let Err(e) = handle_submit(&store, &ctx, &pool_handle, &args_value) {
+                // Build a SignalTriggered submit args. The session args
+                // carry both the rendered goal and the typed EventInput so
+                // the agent handler can expose the structured observation.
+                let session_args = serde_json::json!({
+                    "goal": goal,
+                    "trigger_id": trigger.id.0.to_string(),
+                    "event_input": input,
+                });
+                let submit_args = crate::AiRuntimeSubmitArgs {
+                    task: crate::AgentTaskKind::Session { args: session_args },
+                    priority: crate::TaskPriority::Background,
+                    kind: crate::SessionKind::SignalTriggered,
+                    parent: None,
+                    capabilities: vec![],
+                };
+                let args_value = match serde_json::to_value(&submit_args) {
+                    Ok(v) => v,
+                    Err(e) => {
                         tracing::warn!(
                             plugin_id = PLUGIN_ID,
                             trigger_name = %trigger.name,
                             ?e,
-                            "Move 7: trigger session spawn failed"
+                            "Move 7: failed to serialize trigger session args"
                         );
+                        continue;
                     }
+                };
+                if let Err(e) = handle_submit(&store, &ctx, &pool_handle, &args_value) {
+                    tracing::warn!(
+                        plugin_id = PLUGIN_ID,
+                        trigger_name = %trigger.name,
+                        ?e,
+                        "Move 7: trigger session spawn failed"
+                    );
                 }
             }
-            Err(_) => {
-                tracing::info!(
-                    plugin_id = PLUGIN_ID,
-                    "Move 7: trigger watcher stopped (bus subscription closed)"
-                );
-                break;
-            }
+        } else {
+            tracing::info!(
+                plugin_id = PLUGIN_ID,
+                "Move 7: trigger watcher stopped (bus subscription closed)"
+            );
+            break;
         }
     }
 }
@@ -1033,7 +1032,7 @@ fn publish_session_started(
     let mut activity = ActivityEntry::now(
         session_id.to_string(),
         ActivitySurface::Other,
-        ActivityOrigin::Agent(session_id.to_string()),
+        &ActivityOrigin::Agent(session_id.to_string()),
     );
     activity.prompt = goal.chars().take(256).collect();
     activity.outcome = ActivityOutcome::Ok;
@@ -1077,7 +1076,7 @@ fn publish_session_completed(
     let mut activity = ActivityEntry::now(
         session_id.to_string(),
         ActivitySurface::Other,
-        ActivityOrigin::Agent(session_id.to_string()),
+        &ActivityOrigin::Agent(session_id.to_string()),
     );
     activity.prompt = goal.chars().take(256).collect();
     activity.outcome = ActivityOutcome::Ok;
@@ -1124,7 +1123,7 @@ fn publish_session_failed(
     let mut activity = ActivityEntry::now(
         session_id.to_string(),
         ActivitySurface::Other,
-        ActivityOrigin::Agent(session_id.to_string()),
+        &ActivityOrigin::Agent(session_id.to_string()),
     );
     activity.prompt = goal.chars().take(256).collect();
     activity.outcome = ActivityOutcome::Error;
@@ -1171,7 +1170,7 @@ fn publish_session_cancelled(
     let mut activity = ActivityEntry::now(
         session_id.to_string(),
         ActivitySurface::Other,
-        ActivityOrigin::Agent(session_id.to_string()),
+        &ActivityOrigin::Agent(session_id.to_string()),
     );
     activity.prompt = goal.chars().take(256).collect();
     activity.outcome = ActivityOutcome::Cancelled;
