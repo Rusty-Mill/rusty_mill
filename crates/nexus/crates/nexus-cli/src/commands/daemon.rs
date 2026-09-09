@@ -201,18 +201,28 @@ bytes = [70, 73, 82, 69, 68]
 
             let notes_dir = forge.path().join("notes");
             std::fs::create_dir_all(&notes_dir).unwrap();
-            std::fs::write(notes_dir.join("observed.md"), b"hello").unwrap();
+            let observed = notes_dir.join("observed.md");
+            std::fs::write(&observed, b"hello").unwrap();
 
             // See nexus-bootstrap's workflow_ipc.rs file_event_trigger test
-            // for why this budget is this large: under heavy nextest
+            // for why this budget is this large and why the watched file
+            // gets re-touched partway through: under heavy nextest
             // parallelism contention on Windows CI runners, routine,
             // logically-instant tests in the same binary have been
-            // clocked at 150-380s wall-clock.
+            // clocked at 150-380s wall-clock, and a lone OS-level watcher
+            // notification can be dropped outright under that much I/O
+            // contention.
             let marker = forge.path().join("fired.marker");
-            let deadline = Instant::now() + Duration::from_secs(180);
+            let start = Instant::now();
+            let deadline = start + Duration::from_secs(300);
+            let mut renudged = false;
             while Instant::now() < deadline {
                 if marker.exists() {
                     break;
+                }
+                if !renudged && start.elapsed() > Duration::from_secs(90) {
+                    std::fs::write(&observed, b"hello again").unwrap();
+                    renudged = true;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

@@ -363,20 +363,32 @@ bytes = [70, 73, 82, 69, 68]  # "FIRED" as bytes
 
     let notes_dir = forge.path().join("notes");
     std::fs::create_dir_all(&notes_dir).unwrap();
-    std::fs::write(notes_dir.join("observed.md"), b"hello").unwrap();
+    let observed = notes_dir.join("observed.md");
+    std::fs::write(&observed, b"hello").unwrap();
 
     // Poll for the marker. Storage watcher → bus → workflow trigger →
     // ipc_call → write_file can take a couple of debounce cycles on
     // slow CI. Under heavy nextest parallelism contention on Windows
-    // runners this has been observed needing well over 30s -- other,
+    // runners this has been observed needing well over 180s -- other,
     // logically-instant tests in this same binary have been clocked at
-    // 150-380s wall-clock in the worst observed runs -- so the budget
-    // here is generous rather than tuned to the (sub-second) local case.
+    // up to 250s wall-clock in the worst observed runs. On top of the
+    // generous budget, re-touch the watched file partway through: a
+    // single OS-level watcher notification can be dropped outright
+    // under heavy I/O contention (a known ReadDirectoryChangesW
+    // failure mode on Windows when its internal buffer overflows), so
+    // a lone missed event shouldn't be able to fail this test — only a
+    // genuinely broken trigger path should.
     let marker = forge.path().join("fired.marker");
-    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_secs(300);
+    let mut renudged = false;
     while std::time::Instant::now() < deadline {
         if marker.exists() {
             break;
+        }
+        if !renudged && start.elapsed() > Duration::from_secs(90) {
+            std::fs::write(&observed, b"hello again").unwrap();
+            renudged = true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
