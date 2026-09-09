@@ -140,10 +140,21 @@ fn run_child_and_crash(root: &Path, save_first: bool) {
     let status = cmd.status().expect("spawn child test process");
     // An abort is reported as a signal on Unix (`code() == None`); the
     // harness would otherwise exit 0 (test passed) or 101 (test failed).
+    // Windows has no signal-based termination — `std::process::abort()`
+    // there raises a fail-fast exception and the process exits with the
+    // fixed code `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409), which
+    // `Command::status()` reports as a normal (non-`None`) exit code.
+    #[cfg(unix)]
     assert_eq!(
         status.code(),
         None,
         "child must die by abort, not finish the test harness normally: {status}"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        status.code(),
+        Some(0xC0000409_u32 as i32),
+        "child must die by abort (fail-fast), not finish the test harness normally: {status}"
     );
 }
 
