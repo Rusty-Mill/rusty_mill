@@ -203,8 +203,13 @@ bytes = [70, 73, 82, 69, 68]
             std::fs::create_dir_all(&notes_dir).unwrap();
             std::fs::write(notes_dir.join("observed.md"), b"hello").unwrap();
 
+            // See nexus-bootstrap's workflow_ipc.rs file_event_trigger test
+            // for why this budget is this large: under heavy nextest
+            // parallelism contention on Windows CI runners, routine,
+            // logically-instant tests in the same binary have been
+            // clocked at 150-380s wall-clock.
             let marker = forge.path().join("fired.marker");
-            let deadline = Instant::now() + Duration::from_secs(8);
+            let deadline = Instant::now() + Duration::from_secs(180);
             while Instant::now() < deadline {
                 if marker.exists() {
                     break;
