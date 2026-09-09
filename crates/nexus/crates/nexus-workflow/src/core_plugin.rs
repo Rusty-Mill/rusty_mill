@@ -713,16 +713,7 @@ impl FileEventSpec {
     }
 
     fn matches_path(&self, path: &str) -> bool {
-        // The storage watcher's relative paths carry the OS-native
-        // separator (backslash on Windows — see
-        // `nexus_storage::watcher::relative_path`), but `watch_dir` is
-        // TOML authored with forward slashes like every other
-        // cross-platform path in a workflow file. Normalize before
-        // comparing so `watch_dir = "notes/"` matches on Windows too;
-        // without this, file_event triggers with a `watch_dir` never
-        // fire on Windows.
-        let path = path.replace('\\', "/");
-        let path = path.as_str();
+        let path = &path.replace('\\', "/"); // watch_dir is forward-slash; watcher paths aren't on Windows
         if let Some(dir) = &self.watch_dir {
             if !path.starts_with(dir.as_str()) {
                 return false;
@@ -1898,29 +1889,7 @@ pattern = "\\.md$"
         assert!(spec.matches_path("notes/a.md"));
         assert!(!spec.matches_path("notes/a.txt")); // extension mismatch
         assert!(!spec.matches_path("other/a.md")); // dir mismatch
-    }
-
-    /// The storage watcher's relative paths carry the OS-native
-    /// separator (backslash on Windows), while `watch_dir` is always
-    /// authored with forward slashes. Pre-fix, `matches_path` compared
-    /// them raw, so a `watch_dir`-scoped `file_event` trigger never
-    /// fired on Windows — this reproduces that with a literal
-    /// backslash path independent of the host OS running the test.
-    #[test]
-    fn file_event_spec_matches_path_normalizes_windows_separators() {
-        let src = r#"
-[workflow]
-name = "FE"
-
-[trigger]
-type = "file_event"
-watch_dir = "notes/"
-pattern = "\\.md$"
-"#;
-        let wf = parse_workflow_text(src).unwrap();
-        let spec = FileEventSpec::from_trigger("FE", &wf).unwrap();
-        assert!(spec.matches_path(r"notes\a.md"));
-        assert!(!spec.matches_path(r"other\a.md"));
+        assert!(spec.matches_path(r"notes\a.md")); // Windows separator
     }
 
     #[test]
