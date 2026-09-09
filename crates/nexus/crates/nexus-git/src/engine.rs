@@ -1477,6 +1477,13 @@ mod tests {
         let mut config = repo.config().unwrap();
         config.set_str("user.name", "Test User").unwrap();
         config.set_str("user.email", "test@example.com").unwrap();
+        // Windows CI runners commonly ship a global `core.autocrlf =
+        // true`; without overriding it per-repo, libgit2's workdir
+        // writes (e.g. `Repository::apply` in `discard_hunks`) convert
+        // LF to CRLF, breaking every test that asserts exact file
+        // content against LF fixtures. Pin it off so these tests are
+        // deterministic regardless of the host's global git config.
+        config.set_bool("core.autocrlf", false).unwrap();
 
         let engine = GitEngine { repo };
         (dir, engine)
