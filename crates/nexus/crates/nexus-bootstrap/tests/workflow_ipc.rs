@@ -367,12 +367,13 @@ bytes = [70, 73, 82, 69, 68]  # "FIRED" as bytes
 
     // Poll for the marker. Storage watcher → bus → workflow trigger →
     // ipc_call → write_file can take a couple of debounce cycles on
-    // slow CI — observed needing well over 8s under heavy nextest
-    // parallelism contention on Windows runners, where even trivial
-    // tests in this same binary take 70-80s wall-clock, so the budget
-    // here is generous rather than tuned to the (fast) local case.
+    // slow CI. Under heavy nextest parallelism contention on Windows
+    // runners this has been observed needing well over 30s -- other,
+    // logically-instant tests in this same binary have been clocked at
+    // 150-380s wall-clock in the worst observed runs -- so the budget
+    // here is generous rather than tuned to the (sub-second) local case.
     let marker = forge.path().join("fired.marker");
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
     while std::time::Instant::now() < deadline {
         if marker.exists() {
             break;
