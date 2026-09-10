@@ -41,7 +41,11 @@ preserved. A sixth merge outside the `baileyrd/rusty_*` wave numbering
   collision needed, not a behavior choice of this crate's own.
 - **Verified:** `cargo tree -p rusty_multimodal_db --all-features`
   resolves to one `rusqlite v0.39.0`; `cargo check -p rusty_multimodal_db
-  --all-features` compiles clean.
+  --features research,server,perf-events` compiles clean. The
+  `external-db-bench` feature (DuckDB's bundled from-source build,
+  already a documented one-time cost — see this crate's own
+  `docs/decisions/ADR-0015-external-database-benchmark.md`) was checked
+  separately given how long that build takes.
 
 ## Migrate nexus into the monorepo
 **2026-09-08** · branch [`claude/nexus-rusty-mill-migration-ic3fqa`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/nexus-rusty-mill-migration-ic3fqa)
