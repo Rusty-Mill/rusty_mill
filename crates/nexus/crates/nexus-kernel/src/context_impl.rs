@@ -308,6 +308,57 @@ impl KernelPluginContext {
         .into())
     }
 
+    /// Best-effort: rewrite an absolute `path` to forge-root-relative
+    /// form when it already resolves inside the forge, so
+    /// `ForgePathValidator::validate_for_write` (which treats any
+    /// absolute input as relative to the forge root) doesn't
+    /// re-apply the forge root and double it up.
+    ///
+    /// A literal `path.strip_prefix(&self.forge_root_canonical)` isn't
+    /// enough: on Windows, `Path::canonicalize` prepends the `\\?\`
+    /// verbatim prefix (and can resolve 8.3 short names), so an
+    /// un-canonicalized caller-supplied absolute path that is
+    /// genuinely inside the forge — e.g. `TempDir::path().join(...)`
+    /// in tests, or any real caller building on a non-canonical forge
+    /// root — never matches the raw string prefix and silently falls
+    /// through unchanged, producing a bogus doubled path.
+    ///
+    /// Walks up to the deepest existing ancestor (mirroring
+    /// `validate_for_write`'s own TOCTOU-safe walk) and canonicalizes
+    /// *that*, so it resolves through the same OS quirks
+    /// `forge_root_canonical` did. Falls back to `path` unchanged if
+    /// it's relative already, no ancestor can be canonicalized, or
+    /// the canonical ancestor isn't inside the forge root — in which
+    /// case `validate_for_write`'s existing absolute-path handling
+    /// (including traversal rejection) still applies.
+    fn relative_to_forge_root(&self, path: &Path) -> PathBuf {
+        if !path.is_absolute() {
+            return path.to_path_buf();
+        }
+        let mut ancestor = path;
+        let mut tail = Vec::new();
+        loop {
+            if let Ok(canonical_ancestor) = ancestor.canonicalize() {
+                return match canonical_ancestor.strip_prefix(&self.forge_root_canonical) {
+                    Ok(relative_ancestor) => {
+                        tail.reverse();
+                        tail.into_iter()
+                            .fold(relative_ancestor.to_path_buf(), |acc, name| acc.join(name))
+                    }
+                    Err(_) => path.to_path_buf(),
+                };
+            }
+            let Some(name) = ancestor.file_name() else {
+                return path.to_path_buf();
+            };
+            tail.push(name);
+            let Some(parent) = ancestor.parent() else {
+                return path.to_path_buf();
+            };
+            ancestor = parent;
+        }
+    }
+
     /// Canonicalize `path` and verify it falls within `forge_root`.
     ///
     /// Relative paths are resolved against `forge_root_canonical`; absolute
@@ -411,12 +462,10 @@ impl FileSystem for KernelPluginContext {
         // path inside `forge_root_canonical` (e.g. tests joining on
         // `dir.path()`) therefore need their input rewritten to the
         // forge-root-relative form before validation.
-        let relative_view = path
-            .strip_prefix(&self.forge_root_canonical)
-            .unwrap_or(path);
+        let relative_view = self.relative_to_forge_root(path);
         let target = self
             .path_validator
-            .validate_for_write(relative_view)
+            .validate_for_write(&relative_view)
             .map_err(|e| match e {
                 PathValidationError::PathTraversal(ref bad) => {
                     audit::log_path_traversal_denied(
