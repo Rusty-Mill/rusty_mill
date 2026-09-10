@@ -39,6 +39,21 @@ preserved. A sixth merge outside the `baileyrd/rusty_*` wave numbering
   `links`-declaring crate in the whole dependency graph; unifying on the
   higher version is the same fix the `nexus` merge's `sqlx`/`rusqlite`
   collision needed, not a behavior choice of this crate's own.
+- **Fixed:** two `clippy::chunks_exact_to_as_chunks` failures
+  (`src/durability/mmap_store.rs`, `src/server/pem.rs`) — this workspace's
+  clippy version flags `chunks_exact(N)` with a constant `N` in favor of
+  `as_chunks::<N>().0`; behavior unchanged, same trailing-partial-chunk
+  drop either way. The upstream repo hit the identical failure on its own
+  `main` (unrelated to this merge — its clippy toolchain updated
+  independently) and carries the same fix.
+- **Changed:** `rusty_multimodal_db` added to the `windows-latest`
+  `windows-exclude` list alongside `rusty_stream`/`rusty_fedora_agent` —
+  its optional `external-db-bench` feature's `duckdb` dependency vendors
+  DuckDB's own C++ amalgamation, and this workspace's `--all-features` is
+  what first compiles it on `windows-latest`; that native build fails
+  under the runner's current MSVC toolchain (a third-party build issue,
+  no Rust-side fix available here). The upstream repo's own CI never ran
+  a Windows job at all, so this wasn't a regression, just first exposure.
 - **Verified:** `cargo tree -p rusty_multimodal_db --all-features`
   resolves to one `rusqlite v0.39.0`; `cargo check -p rusty_multimodal_db
   --features research,server,perf-events` compiles clean, and separately

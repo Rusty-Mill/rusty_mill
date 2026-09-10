@@ -39,6 +39,15 @@ Removed / Fixed / Security, newest first.
 - `repo-inspector-report.md` gained a **Disposition** section recording
   what was done, or deliberately not, for every row of both sections.
 ### Changed
+- `rusty_multimodal_db` added to the `windows-latest` `windows-exclude`
+  list (alongside `rusty_stream`/`rusty_fedora_agent`) — its optional
+  `external-db-bench` feature's `duckdb` dependency vendors DuckDB's own
+  C++ amalgamation, and this workspace's `--all-features` is what first
+  compiles it on `windows-latest`; that native build fails under the
+  runner's current MSVC toolchain, a third-party build issue with no
+  Rust-side fix available here. The crate's own standalone repo never ran
+  a Windows CI job at all, so this wasn't a regression, just first
+  exposure.
 - `rusty_multimodal_db`'s pinned git dependency on `rusty_tls`
   (`Rusty-Mill/rusty_mill` at a specific commit) retired to a plain path
   dependency on this workspace's own `crates/rusty_tls`, now that both
@@ -50,6 +59,15 @@ Removed / Fixed / Security, newest first.
   `links = "sqlite3"`, and Cargo allows only one version of a
   `links`-declaring crate in the whole graph; the same fix the
   `sqlx`/`rusqlite` collision below needed.
+### Fixed
+- `rusty_multimodal_db`'s two `clippy::chunks_exact_to_as_chunks`
+  failures (`src/durability/mmap_store.rs`, `src/server/pem.rs`) — this
+  workspace's clippy version flags `chunks_exact(N)` with a constant `N`
+  in favor of `as_chunks::<N>().0`; behavior unchanged, same
+  trailing-partial-chunk drop either way. The upstream repo hit the
+  identical failure on its own `main` independently of this merge (its
+  clippy toolchain updated on its own) and carries the same fix.
+### Changed
 - `sqlx` bumped `0.8` → `0.9`, workspace-wide: `sqlx-sqlite` 0.8.x pins
   `libsqlite3-sys ^0.30.1`, which collided (Cargo's `links = "sqlite3"`
   uniqueness rule) with the `libsqlite3-sys ^0.37` that nexus's
