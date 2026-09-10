@@ -35,6 +35,7 @@ closer analogue is a **dependency layering** convention, not ports/adapters:
 | Runtime / platform | `rusty_tokio`, `rustils_async`, `platform-async*`, `threading` | Async runtime and OS-abstraction layer other crates opt into. |
 | Application / client | `rusty_proxmox`, `rusty_opnsense`, `rusty_homelab_mcp`, `rusty_request`, `rusty_search-*` backends | Consume the layers below to talk to a specific external system. |
 | Terminal / shell | `rusty_term`, `rush`, `mill-term`, `rusty_lines`, `rusty_ansi` | The interactive-tool cluster; several of these were the subject of the duplication sweeps below. |
+| Application (microkernel) | `crates/nexus/*` (`nexus-kernel`, `nexus-storage`, `nexus-ai`, …) | An outlier in this table: unlike the rest of the workspace, `nexus/` *is* one system with its own internal ports-and-adapters structure — a microkernel (`nexus-kernel`) that subsystem plugin crates depend on but never the reverse, all reached through one `context.ipc_call(...)` path rather than direct cross-crate calls. See `crates/nexus/CLAUDE.md` for that structure's own invariants; this table's layering convention doesn't apply inside it. |
 
 This table is illustrative, not exhaustive — see each crate's own README
 for what it actually depends on and provides; `Cargo.toml`'s `[workspace]

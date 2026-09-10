@@ -7,7 +7,9 @@ use futures_util::StreamExt;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
 use sqlx::pool::PoolConnection;
 use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use sqlx::{Column as _, Connection as _, MySql, MySqlPool, Row as _, TypeInfo as _};
+use sqlx::{
+    AssertSqlSafe, Column as _, Connection as _, MySql, MySqlPool, Row as _, TypeInfo as _,
+};
 
 use rusty_db_core::dialect::MySqlDialect;
 use rusty_db_core::value::array_to_json;
@@ -50,7 +52,7 @@ impl MySqlDriver {
             options = options.after_connect(move |conn, _meta| {
                 let sql = Arc::clone(&sql);
                 Box::pin(async move {
-                    sqlx::query(&sql).execute(conn).await?;
+                    sqlx::query(AssertSqlSafe(sql)).execute(conn).await?;
                     Ok(())
                 })
             });
@@ -59,7 +61,7 @@ impl MySqlDriver {
             options = options.before_acquire(move |conn, _meta| {
                 let sql = Arc::clone(&sql);
                 Box::pin(async move {
-                    sqlx::query(&sql).execute(conn).await?;
+                    sqlx::query(AssertSqlSafe(sql)).execute(conn).await?;
                     Ok(true)
                 })
             });
@@ -68,7 +70,7 @@ impl MySqlDriver {
             options = options.after_release(move |conn, _meta| {
                 let sql = Arc::clone(&sql);
                 Box::pin(async move {
-                    sqlx::query(&sql).execute(conn).await?;
+                    sqlx::query(AssertSqlSafe(sql)).execute(conn).await?;
                     Ok(true)
                 })
             });
@@ -498,13 +500,13 @@ macro_rules! bind_params {
 #[async_trait]
 impl Executor for MySqlConnection {
     async fn execute(&mut self, sql: &str, params: &[Value]) -> Result<u64> {
-        let query = bind_params!(sqlx::query(sql), params);
+        let query = bind_params!(sqlx::query(AssertSqlSafe(sql)), params);
         let result = query.execute(&mut *self.conn).await.map_err(to_core_err)?;
         Ok(result.rows_affected())
     }
 
     async fn fetch_all(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
-        let query = bind_params!(sqlx::query(sql), params);
+        let query = bind_params!(sqlx::query(AssertSqlSafe(sql)), params);
         let rows = query
             .fetch_all(&mut *self.conn)
             .await
@@ -513,7 +515,7 @@ impl Executor for MySqlConnection {
     }
 
     async fn fetch_optional(&mut self, sql: &str, params: &[Value]) -> Result<Option<Row>> {
-        let query = bind_params!(sqlx::query(sql), params);
+        let query = bind_params!(sqlx::query(AssertSqlSafe(sql)), params);
         let row = query
             .fetch_optional(&mut *self.conn)
             .await
@@ -542,7 +544,7 @@ impl Executor for MySqlConnection {
 async fn raw_execute(conn: &mut sqlx::MySqlConnection, sql: &str) -> Result<u64> {
     use sqlx::Executor as _;
     let result = conn
-        .execute(sqlx::raw_sql(sql))
+        .execute(sqlx::raw_sql(AssertSqlSafe(sql)))
         .await
         .map_err(to_core_err)?;
     Ok(result.rows_affected())
@@ -567,7 +569,7 @@ impl Connection for MySqlConnection {
     ) -> rusty_db_core::BoxStream<'static, Result<Row>> {
         let MySqlConnection { mut conn } = *self;
         Box::pin(async_stream::try_stream! {
-            let query = bind_params!(sqlx::query(&sql), &params);
+            let query = bind_params!(sqlx::query(AssertSqlSafe(sql.as_str())), &params);
             let mut rows = query.fetch(&mut *conn);
             while let Some(row) = rows.next().await {
                 yield row_from_mysql(&row.map_err(to_core_err)?)?;

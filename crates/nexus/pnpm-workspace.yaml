@@ -1,0 +1,8 @@
+packages:
+  - shell
+  - packages/*
+allowBuilds:
+  core-js: false
+  edgedriver: false
+  esbuild: false
+  geckodriver: false

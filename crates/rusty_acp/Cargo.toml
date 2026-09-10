@@ -90,7 +90,13 @@ async-trait = { version = "0.1", optional = true }
 # shared
 tokio = { version = "1", optional = true, features = ["rt", "sync", "time", "macros"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json"], optional = true }
+# Bumped 0.8.6 -> 0.9 by the nexus merge: this crate's `postgres-store`
+# feature never enables sqlx's `sqlite` feature, but Cargo's `links`
+# uniqueness check still resolves every optional dependency reachable in
+# the graph (not just activated ones), so sqlx-sqlite's pinned
+# `libsqlite3-sys` requirement collides workspace-wide regardless. See the
+# root Cargo.toml's `sqlx` entry for the full account.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json"], optional = true }
 metrics = { version = "0.24.6", optional = true }
 
 [dev-dependencies]
