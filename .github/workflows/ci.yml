@@ -29,6 +29,15 @@ env:
   # not to produce a debuggable binary.
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
+  # GitHub-hosted runners don't run a D-Bus session/Secret Service provider,
+  # so nexus-security's ADR-0009 startup keyring probe (`CredentialVault
+  # ::available()`, called from `com.nexus.security`'s `on_init`) always
+  # fails there -- not a flake, deterministic on every ubuntu-latest/
+  # windows-latest run. `NEXUS_NO_KEYRING=1` is that crate's own documented
+  # escape hatch (crates/nexus/crates/nexus-security/src/credential.rs):
+  # the probe returns Ok and individual credential operations return
+  # KeyringDisabled instead, exactly the CI-without-a-real-keyring case.
+  NEXUS_NO_KEYRING: '1'
 
 concurrency:
   group: ci-${{ github.ref }}
