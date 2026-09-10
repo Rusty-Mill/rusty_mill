@@ -7,6 +7,22 @@ use std::path::Path;
 
 use nexus_git::{AutoCommitter, DiffLineKind, FileStatus, GitEngine, RepoState};
 
+/// Build a `file://` URL git2 can resolve on both Unix and Windows.
+/// `format!("file://{}", path.display())` breaks on Windows: a
+/// backslash-separated `C:\Users\...` path glued straight onto
+/// `file://` isn't a URL libgit2 can parse. Forward-slash the path and
+/// anchor it with a leading `/` (already present on Unix; added here
+/// for a drive-letter path) so it comes out `file:///C:/Users/...`.
+fn file_url(path: &Path) -> String {
+    let slashed = path.display().to_string().replace('\\', "/");
+    let anchored = if slashed.starts_with('/') {
+        slashed
+    } else {
+        format!("/{slashed}")
+    };
+    format!("file://{anchored}")
+}
+
 /// Create a temp dir, init a git repo, configure user, and return engine.
 fn setup() -> (tempfile::TempDir, GitEngine) {
     let dir = tempfile::tempdir().unwrap();
@@ -424,8 +440,7 @@ fn push_pull_local_bare_repo() {
     let (dir, engine) = setup();
     {
         let repo = git2::Repository::open(dir.path()).unwrap();
-        repo.remote("origin", &format!("file://{}", bare_dir.path().display()))
-            .unwrap();
+        repo.remote("origin", &file_url(bare_dir.path())).unwrap();
     }
 
     // Create a commit and push.
@@ -438,11 +453,7 @@ fn push_pull_local_bare_repo() {
 
     // Clone into a second working copy to verify push worked.
     let clone_dir = tempfile::tempdir().unwrap();
-    git2::Repository::clone(
-        &format!("file://{}", bare_dir.path().display()),
-        clone_dir.path(),
-    )
-    .unwrap();
+    git2::Repository::clone(&file_url(bare_dir.path()), clone_dir.path()).unwrap();
     assert!(
         clone_dir.path().join("file.txt").exists(),
         "cloned repo should have file.txt"
