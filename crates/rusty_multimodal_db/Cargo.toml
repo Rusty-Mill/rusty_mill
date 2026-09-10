@@ -280,19 +280,18 @@ dashmap = "6"
 # treatment above, `research`-only) rather than `dep:`-gated — it's tiny and dependency-free.
 subtle = "2"
 # New as of the server transport-encryption work (ADR-0014, `SERVER-TLS-DESIGN.md`): native TLS
-# for `serve`'s optional `TlsConfig`. This crate's first git dependency — a pinned git dependency
-# on `rusty_tls`, this owner's own ecosystem-wide `rustls` wrapper (`Rusty-Mill/rusty_mill`,
-# `crates/rusty_tls`), rather than depending on `rustls` directly: `rusty_tls` exists specifically
-# so no consumer in this owner's ecosystem depends on `rustls` (or picks its own crypto-provider
-# crate, cipher policy, or trust-anchor handling) independently, and its server-side
-# `TlsAcceptor`/`TlsServerStream` is a close-to-drop-in fit for this crate's own thread-per-
-# connection, sync-`Read`/`Write` model — see `docs/design/SERVER-TLS-DESIGN.md`'s "Ecosystem
-# check" for the full reasoning. `dep:`-gated (only the `server` feature needs it), pinned to a
-# specific commit rather than tracking `main`, matching `rusty_tls`'s own sibling-pinning
-# convention (`rustils`' `docs/versioning.md` §3: a bare SHA carries the same guarantee as a tag).
-# Bumped for `TlsServerStream::peer_certificate_der` (`CLS-FR-001`, ADR-0028's upstream
-# prerequisite for class-from-certificate) — Rusty-Mill/rusty_mill PR #148, no new dependency.
-rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "cf284712988f09ee444dddfa5086e7019f4f786c", optional = true }
+# for `serve`'s optional `TlsConfig` — this owner's own ecosystem-wide `rustls` wrapper, rather
+# than depending on `rustls` directly: `rusty_tls` exists specifically so no consumer in this
+# owner's ecosystem depends on `rustls` (or picks its own crypto-provider crate, cipher policy, or
+# trust-anchor handling) independently, and its server-side `TlsAcceptor`/`TlsServerStream` is a
+# close-to-drop-in fit for this crate's own thread-per-connection, sync-`Read`/`Write` model — see
+# `docs/design/SERVER-TLS-DESIGN.md`'s "Ecosystem check" for the full reasoning. `dep:`-gated
+# (only the `server` feature needs it). Was a pinned git dependency on `Rusty-Mill/rusty_mill`
+# (matching `rusty_tls`'s own sibling-pinning convention, `rustils`' `docs/versioning.md` §3);
+# retired to a plain path dependency now that this crate itself lives in that same workspace as
+# `crates/rusty_tls` — the same-workspace-source rule ADR-0002 (root `docs/adr/`) requires, and
+# the same swap `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made on their own merges.
+rusty_tls = { path = "../rusty_tls", optional = true }
 # External-database comparison benchmark (benches/external_db.rs, ADR-0015) — never used by this
 # crate's own library code, only by that one bench target, but declared here rather than under
 # `[dev-dependencies]` specifically because Cargo does not support optional dev-dependencies:
@@ -304,8 +303,13 @@ rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "cf2847129
 # gating this behind `external-db-bench`). `optional = true` here plus the `dep:` feature entries
 # below is the only mechanism that actually keeps a bench-only dependency out of a default build
 # — the same reason `rusty_tls` above lives in `[dependencies]` rather than `[dev-dependencies]`
-# despite `server`-feature code being the only real consumer.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# despite `server`-feature code being the only real consumer. Bumped `0.32` -> `0.39` on this
+# crate's own merge into the `rusty_mill` workspace (`crates/rusty_multimodal_db`): `rusqlite`
+# declares `links = "sqlite3"`, and Cargo allows only one version of a `links`-declaring crate in
+# the whole graph — `inventory-core` (`crates/rusty_inventrory`) already pins `0.39` there,
+# unconditionally. Same fix as the `sqlx`/`rusqlite` unification the `nexus` merge needed (root
+# `RELEASE_NOTES.md`), not a behavior choice of this crate's own.
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 # "bundled" here compiles DuckDB's own (large, C++) amalgamation from source — a real, one-time
 # build-time cost, called out explicitly rather than glossed over (see
 # `docs/decisions/ADR-0015-external-database-benchmark.md`), accepted for the same

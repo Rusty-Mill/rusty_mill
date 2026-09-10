@@ -13,6 +13,36 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Migrate rusty_multimodal_db into the monorepo
+**2026-09-10** · branch [`claude/loving-bell-kntf9l`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/loving-bell-kntf9l)
+
+`baileyrd/rusty_multimodal_db` — a benchmark harness comparing AoS, SoA,
+and UUID-canonical-store record backends, plus the production store,
+network server, and schema-driven client built on the winning design —
+merged into `crates/rusty_multimodal_db/` via `git subtree`, full history
+preserved. A sixth merge outside the `baileyrd/rusty_*` wave numbering
+(ADR-0001), same treatment as the `nexus` merge above.
+
+- **Added:** `crates/rusty_multimodal_db` joins this root's member list
+  directly (it was already a single, non-nested `Cargo.toml`, unlike
+  `nexus`/`rusty_agent_gateway`/`rusty_yirp` — nothing to de-nest).
+- **Changed:** its one pinned git dependency on `rusty_tls`
+  (`Rusty-Mill/rusty_mill` at a specific commit) retired to a plain path
+  dependency on this workspace's own `crates/rusty_tls` — the
+  same-workspace-source rule ADR-0002 requires, and the same swap
+  `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made on their own
+  merges.
+- **Changed:** its `rusqlite` pin (used only by the optional
+  `external-db-bench` benchmark feature) bumped `0.32` → `0.39` to match
+  `crates/rusty_inventrory`'s `inventory-core` — `rusqlite` declares
+  `links = "sqlite3"`, and Cargo allows only one version of a
+  `links`-declaring crate in the whole dependency graph; unifying on the
+  higher version is the same fix the `nexus` merge's `sqlx`/`rusqlite`
+  collision needed, not a behavior choice of this crate's own.
+- **Verified:** `cargo tree -p rusty_multimodal_db --all-features`
+  resolves to one `rusqlite v0.39.0`; `cargo check -p rusty_multimodal_db
+  --all-features` compiles clean.
+
 ## Migrate nexus into the monorepo
 **2026-09-08** · branch [`claude/nexus-rusty-mill-migration-ic3fqa`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/nexus-rusty-mill-migration-ic3fqa)
 
