@@ -9,6 +9,20 @@ use super::*;
 use crate::event::NexusEvent;
 use crate::kv_store::InMemoryKvStore;
 
+/// A real file outside any forge, for exercising `confine_path`'s
+/// traversal-rejection path on every platform. A hardcoded literal
+/// like `/etc/passwd` is Unix-specific: `Path::is_absolute` doesn't
+/// treat a leading `/` as absolute on Windows (no drive prefix), so
+/// `confine_path` takes the relative-join branch there and produces a
+/// nonexistent path, failing with `NotFound` before ever reaching the
+/// traversal check. Keep the returned `TempDir` alive for the read.
+fn outside_forge_file() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("outside.txt");
+    std::fs::write(&file, b"outside").unwrap();
+    (dir, file)
+}
+
 fn make_context(dir: &Path, caps: &[Capability]) -> KernelPluginContext {
     let kv: Arc<dyn KvStore> = Arc::new(InMemoryKvStore::new());
     let bus = Arc::new(EventBus::new(16));
@@ -199,10 +213,11 @@ fn capability_denial_emits_audit_event_through_gate() {
 /// `audit::log_path_traversal_denied` and reaches the structured channel.
 #[test]
 fn path_traversal_emits_audit_event_through_gate() {
+    let (_outside_dir, outside_file) = outside_forge_file();
     let events = audit::test_support::with_captured_events_async(|| async {
         let dir = tempfile::tempdir().unwrap();
         let ctx = make_context(dir.path(), &[Capability::FsRead]);
-        let _ = ctx.read_file(Path::new("/etc/passwd")).await;
+        let _ = ctx.read_file(&outside_file).await;
     });
     let traversal = events
         .iter()
@@ -228,8 +243,8 @@ async fn read_write_file_with_capability() {
 async fn confine_path_blocks_traversal() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = make_context(dir.path(), &[Capability::FsRead]);
-    // Try to read /etc/passwd via traversal
-    let result = ctx.read_file(Path::new("/etc/passwd")).await;
+    let (_outside_dir, outside_file) = outside_forge_file();
+    let result = ctx.read_file(&outside_file).await;
     assert!(result.is_err());
 }
 
@@ -243,8 +258,9 @@ async fn confine_path_blocks_traversal() {
 async fn read_file_absolute_outside_forge_returns_typed_traversal_error() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = make_context(dir.path(), &[Capability::FsRead]);
+    let (_outside_dir, outside_file) = outside_forge_file();
     let err = ctx
-        .read_file(Path::new("/etc/passwd"))
+        .read_file(&outside_file)
         .await
         .expect_err("absolute outside-forge read must fail");
     match err {
