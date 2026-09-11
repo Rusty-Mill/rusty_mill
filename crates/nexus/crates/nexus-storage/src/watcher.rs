@@ -147,7 +147,10 @@ pub fn should_ignore(path: &Path) -> bool {
     false
 }
 
-/// Convert an absolute path to a relative path string from the forge root.
+/// Convert an absolute path to a relative path string from the forge root,
+/// using forward slashes (this crate's forge-relative-path convention --
+/// see `reconcile.rs`'s own normalisation) regardless of the host OS's
+/// native separator.
 ///
 /// Returns `None` if `absolute` is not under `forge_root`.
 #[must_use]
@@ -155,7 +158,7 @@ pub fn relative_path(forge_root: &Path, absolute: &Path) -> Option<String> {
     absolute
         .strip_prefix(forge_root)
         .ok()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
 // ── Watcher ───────────────────────────────────────────────────────────────────
