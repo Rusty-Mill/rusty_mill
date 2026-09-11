@@ -92,10 +92,26 @@ impl Segment {
     ) -> std::io::Result<Segment> {
         let file = UringFile::open_on(driver, path).await?;
 
-        let header_buf = vec![0u8; HEADER_LEN as usize];
-        let BufResult(result, header_buf) = file.read_at(header_buf, 0).await;
-        let n = result?;
-        if n < HEADER_LEN as usize || &header_buf[0..4] != MAGIC {
+        // Same short-read gap as everywhere else in this function (see
+        // the recovery loop's own doc comment below): a single `read_at`
+        // isn't guaranteed to return the full header even though it's
+        // only HEADER_LEN bytes.
+        let mut header_buf = vec![0u8; HEADER_LEN as usize];
+        let mut header_have = 0usize;
+        while header_have < HEADER_LEN as usize {
+            let chunk = vec![0u8; HEADER_LEN as usize - header_have];
+            let BufResult(result, chunk) = file.read_at(chunk, header_have as u64).await;
+            let n = result?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "not a rusty_stream segment file (bad magic or truncated header)",
+                ));
+            }
+            header_buf[header_have..header_have + n].copy_from_slice(&chunk[..n]);
+            header_have += n;
+        }
+        if &header_buf[0..4] != MAGIC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "not a rusty_stream segment file (bad magic or truncated header)",
@@ -250,10 +266,34 @@ impl Segment {
         }
         let start = self.index[idx];
         let end = self.index[idx + 1];
-        let buf = vec![0u8; (end - start) as usize];
-        let BufResult(result, buf) = self.file.read_at(buf, start).await;
-        let n = result?;
-        let (payload, _len) = record::decode(&buf[..n])
+        let want = (end - start) as usize;
+        // A single `read_at` isn't guaranteed to return the full record
+        // even though the index promises it's all durably on disk --
+        // exactly the short-read gap `open_on`'s recovery loop already
+        // guards against (see its own doc comment), just not previously
+        // applied here. A read returning zero new bytes before `have`
+        // reaches `want` means the file is shorter than the index
+        // claims, a real corruption the caller must see as an error, not
+        // silently decode a truncated buffer against.
+        let mut buf = vec![0u8; want];
+        let mut have = 0usize;
+        while have < want {
+            let chunk = vec![0u8; want - have];
+            let BufResult(result, chunk) = self.file.read_at(chunk, start + have as u64).await;
+            let n = result?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "record at offset {} is shorter on disk ({have} bytes) than its index entry promises ({want} bytes)",
+                        offset.0
+                    ),
+                ));
+            }
+            buf[have..have + n].copy_from_slice(&chunk[..n]);
+            have += n;
+        }
+        let (payload, _len) = record::decode(&buf[..have])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
         Ok(payload.to_vec())
     }
@@ -570,9 +610,10 @@ mod tests {
         seg.sync().await.unwrap();
 
         // Cap set to exactly the segment file header's length: the
-        // (out-of-scope) header read still succeeds in one call, but
-        // every 64 KiB recovery-loop read is capped far below both
-        // records' actual encoded sizes.
+        // header read happens to still succeed in one call at this cap,
+        // but every 64 KiB recovery-loop read is capped far below both
+        // records' actual encoded sizes. A header read short enough to
+        // need its own reassembly is covered separately below.
         let short_reads: Arc<dyn OpDriver> = Arc::new(ShortReadDriver {
             inner: driver,
             cap: HEADER_LEN as u32,
@@ -585,6 +626,26 @@ mod tests {
             seg.read(Offset(1)).await.unwrap(),
             b"second record definitely exceeds the short-read cap"
         );
+    }
+
+    /// Regression test: same short-read gap as the payload-recovery loop
+    /// above, but for the fixed-size segment header itself -- a driver
+    /// capped well below `HEADER_LEN` must not fail to open a segment
+    /// whose header is completely present and valid on disk.
+    #[rusty_tokio::test]
+    async fn open_on_reassembles_a_header_read_via_genuinely_short_reads() {
+        let driver = SimDriver::new();
+        let path = "/segments/short-header.log";
+        let seg = Segment::create_on(driver.clone(), path, Offset(0), Epoch::INITIAL)
+            .await
+            .unwrap();
+        drop(seg);
+
+        let short_reads: Arc<dyn OpDriver> = Arc::new(ShortReadDriver { inner: driver, cap: 5 });
+        let seg = Segment::open_on(short_reads, path).await.unwrap();
+        assert_eq!(seg.epoch(), Epoch::INITIAL);
+        assert_eq!(seg.base_offset(), Offset(0));
+        assert_eq!(seg.len(), 0);
     }
 
     /// An [`OpDriver`] wrapper whose `write_at` genuinely writes and
