@@ -641,7 +641,10 @@ mod tests {
             .unwrap();
         drop(seg);
 
-        let short_reads: Arc<dyn OpDriver> = Arc::new(ShortReadDriver { inner: driver, cap: 5 });
+        let short_reads: Arc<dyn OpDriver> = Arc::new(ShortReadDriver {
+            inner: driver,
+            cap: 5,
+        });
         let seg = Segment::open_on(short_reads, path).await.unwrap();
         assert_eq!(seg.epoch(), Epoch::INITIAL);
         assert_eq!(seg.base_offset(), Offset(0));
