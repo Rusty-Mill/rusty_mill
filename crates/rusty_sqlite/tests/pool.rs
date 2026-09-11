@@ -87,3 +87,56 @@ fn acquire_times_out_when_the_pool_stays_exhausted() {
     let err = pool.get().unwrap_err();
     assert!(matches!(err, rusty_sqlite::Error::PoolTimeout));
 }
+
+#[test]
+fn a_dropped_lease_with_an_open_transaction_is_rolled_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pool.db");
+    let pool = build_pool_with_timeout(&path, 1, Duration::from_secs(5)).unwrap();
+
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+            .unwrap();
+    }
+
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch("BEGIN;").unwrap();
+        conn.execute("INSERT INTO t (v) VALUES ('uncommitted')", [])
+            .unwrap();
+        // Dropped here without COMMIT -- the pool must roll this back
+        // before the connection is handed to the next borrower.
+    }
+
+    let conn = pool.get().unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "uncommitted write from a dropped lease must not be visible"
+    );
+
+    // The recycled connection must be usable, i.e. not left mid-transaction.
+    conn.execute_batch("BEGIN;").unwrap();
+    conn.execute("INSERT INTO t (v) VALUES ('committed')", [])
+        .unwrap();
+    conn.execute_batch("COMMIT;").unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn zero_max_size_is_rejected_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pool.db");
+    match build_pool_with_timeout(&path, 0, Duration::from_secs(30)) {
+        Ok(_) => panic!("expected InvalidPoolSize error, got Ok"),
+        Err(rusty_sqlite::Error::InvalidPoolSize) => {}
+        Err(other) => panic!("expected InvalidPoolSize, got {other:?}"),
+    }
+}

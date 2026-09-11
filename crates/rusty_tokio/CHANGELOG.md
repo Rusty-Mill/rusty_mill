@@ -43,6 +43,12 @@ anything prior to v0.2.0.
   than fabricated; this session's `gh` access was unavailable to open one.
 
 ### Fixed
+- `io::uring_fs::UringFile::write_at` now loops over successive driver
+  writes until the whole buffer is written (or a zero-progress write
+  returns a clean `WriteZero` error), instead of returning a short write's
+  byte count as if it were a complete write -- `rusty_stream`, this
+  module's only consumer, could previously index a short-written record as
+  valid.
 
 - The Windows reactor could permanently stop monitoring a socket if the
   `IOCTL_AFD_POLL` re-arm submitted after a completion (AFD poll is

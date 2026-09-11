@@ -2,7 +2,7 @@
 
 use adk_core::{MemoryEntry, MemoryService, Result, Session};
 use async_trait::async_trait;
-use rusqlite::params;
+use rusty_sqlite::rusqlite::{self, params};
 
 use super::{Db, SqlExt};
 

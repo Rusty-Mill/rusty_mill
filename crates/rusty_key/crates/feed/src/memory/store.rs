@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
+use rusty_sqlite::rusqlite::{self, Connection};
 
 use super::embed::{cosine, pack, unpack};
 use super::{MemType, Memory, Store};

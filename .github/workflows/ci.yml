@@ -11,8 +11,8 @@ name: CI
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
 # Pushes to main, and PRs that touch a workspace-wide file (root
-# Cargo.toml/Cargo.lock, or this CI config itself), still get the full
-# sweep.
+# Cargo.toml/Cargo.lock, this CI config itself, or workspace-wide tooling
+# config under .config/, e.g. nextest's), still get the full sweep.
 on:
   push:
     branches: [main]
@@ -110,7 +110,7 @@ jobs:
           echo "Changed files:"
           echo "$changed"
 
-          if echo "$changed" | grep -Eq '^(Cargo\.toml|Cargo\.lock|\.github/(workflows|actions|scripts)/)'; then
+          if echo "$changed" | grep -Eq '^(Cargo\.toml|Cargo\.lock|\.config/|\.github/(workflows|actions|scripts)/)'; then
             echo "A workspace-wide file changed -- running the full workspace sweep."
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
@@ -361,3 +361,28 @@ jobs:
         run: cargo check -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std
       - name: cargo clippy --target x86_64-pc-windows-gnu
         run: cargo clippy -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std -- -D warnings
+
+  # Every other Rust job above passes --all-features, and rusty_config's
+  # own `default = ["std"]` (see crates/rusty_config/Cargo.toml) means
+  # --all-features never disables it -- so CI has never actually compiled
+  # the crate's documented `#![no_std]` + alloc-only code path (see the
+  # `#![cfg_attr(not(feature = "std"), no_std)]` line in its src/lib.rs).
+  # This is a small, additive check dedicated to that one crate's
+  # non-default configuration, not a general no_std feature-matrix
+  # mechanism for every no_std crate in the workspace. rusty_config is
+  # `alloc`-only (no hardware/platform-specific code), so the host triple
+  # is sufficient -- no `--target` cross-compile is needed the way
+  # rusty_win32's check above needs one.
+  rusty-config-no-std-check:
+    name: rusty_config no_std (--no-default-features)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_config')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-config-no-std
+      - name: cargo check -p rusty_config --no-default-features
+        run: cargo check -p rusty_config --no-default-features --all-targets

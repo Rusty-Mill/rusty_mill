@@ -453,7 +453,7 @@ mod tests {
                 }],
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
             send_response(&mut peer, header.correlation_id, &writer.into_vec())
                 .await
                 .unwrap();
@@ -472,7 +472,7 @@ mod tests {
                 }],
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
             send_response(&mut peer, header.correlation_id, &writer.into_vec())
                 .await
                 .unwrap();
@@ -491,7 +491,7 @@ mod tests {
                 }],
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
             send_response(&mut peer, header.correlation_id, &writer.into_vec())
                 .await
                 .unwrap();

@@ -8,6 +8,36 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- CI's full-workspace-sweep trigger pattern now includes `.config/`
+  (`.config/nextest.toml` lives outside every crate directory, so a
+  nextest-config-only PR previously produced an empty affected-package
+  list and skipped build/test/clippy for a change that governs every
+  crate's test execution).
+### Added
+- `rusty-config-no-std-check` CI job: `cargo check -p rusty_config
+  --no-default-features --all-targets`, exercising `rusty_config`'s
+  `no_std`+`alloc` code path for the first time — `--all-features` alone
+  can never reach it, since the crate's own default is `default =
+  ["std"]` (`CODEX-MONOREPO-REVIEW.md` finding #33).
+- `rusty_uuid` gained `.simple()` formatting (32 lowercase hex digits, no
+  hyphens) and an optional `rusty_serde`-backed `Serialize`/`Deserialize`
+  (canonical hyphenated string) behind a new `rusty_serde` feature —
+  deliberately built on this workspace's own dependency-free `rusty_serde`
+  rather than external `serde` (repo-inspector Section 2 "uuid" row).
+  Does **not** yet unblock `rusty-acp`/`rusty-db-core` dropping external
+  `uuid`: both use external `serde` (a different trait than
+  `rusty_serde`'s) for their own derives, and both also need `sqlx`
+  wire-format support this pass deliberately left untouched — no live
+  Postgres/MySQL was available to verify a hand-rolled UUID column
+  encoding, and a wrong one would silently corrupt data. Same open
+  prerequisite the report named, now documented more precisely.
+### Changed
+- `adk-sessions`, `rp-router`, `rk-feed`, and `inventory-core` now depend
+  on `rusty_sqlite::rusqlite` instead of external `rusqlite` directly
+  (repo-inspector Section 2 "rusqlite" row — a pure re-export, so this is
+  an import-path change only, zero behavior change).
+
 ### Added
 - `crates/rusty_multimodal_db` — new workspace member: `baileyrd/rusty_multimodal_db`,
   a benchmark harness comparing AoS, SoA, and UUID-canonical-store record

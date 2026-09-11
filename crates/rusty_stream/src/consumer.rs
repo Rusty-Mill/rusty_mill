@@ -29,10 +29,15 @@ pub struct ConsumerOffsets {
     committed: HashMap<String, Offset>,
 }
 
+/// # Panics
+/// Panics if `consumer_id`'s UTF-8 byte length doesn't fit in a `u16` --
+/// callers (just [`ConsumerOffsets::commit`]) must validate that first.
 fn encode_commit(consumer_id: &str, offset: Offset) -> Vec<u8> {
     let id = consumer_id.as_bytes();
+    let id_len = u16::try_from(id.len())
+        .expect("consumer id length must be validated by the caller before encoding");
     let mut buf = Vec::with_capacity(2 + id.len() + 8);
-    buf.extend_from_slice(&(id.len() as u16).to_le_bytes());
+    buf.extend_from_slice(&id_len.to_le_bytes());
     buf.extend_from_slice(id);
     buf.extend_from_slice(&offset.0.to_le_bytes());
     buf
@@ -95,6 +100,12 @@ impl ConsumerOffsets {
     /// `offset`. Does not sync — call [`sync`](Self::sync) explicitly, same
     /// fsync-policy-is-the-caller's-call stance as [`Segment::append`].
     pub async fn commit(&mut self, consumer_id: &str, offset: Offset) -> std::io::Result<()> {
+        if u16::try_from(consumer_id.len()).is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "consumer id is too long to commit (must be at most 65535 UTF-8 bytes)",
+            ));
+        }
         let record = encode_commit(consumer_id, offset);
         self.segment.append(&record).await?;
         self.committed.insert(consumer_id.to_string(), offset);
@@ -201,5 +212,44 @@ mod tests {
         let offsets = ConsumerOffsets::open_on(recovered, path).await.unwrap();
 
         assert_eq!(offsets.last_committed("reader-a"), Some(Offset(1)));
+    }
+
+    /// A consumer id of exactly `u16::MAX` UTF-8 bytes is the largest
+    /// value `encode_commit`'s length prefix can represent -- it must
+    /// still commit and survive a recovery round trip.
+    #[rusty_tokio::test]
+    async fn a_consumer_id_of_exactly_the_max_u16_length_commits_and_reopens() {
+        let driver = SimDriver::new();
+        let path = "/offsets/max-id.log";
+        let id = "a".repeat(u16::MAX as usize);
+        let mut offsets = ConsumerOffsets::create_on(driver.clone(), path)
+            .await
+            .unwrap();
+
+        offsets.commit(&id, Offset(7)).await.unwrap();
+        offsets.sync().await.unwrap();
+
+        let recovered = driver.crash_and_reopen();
+        let offsets = ConsumerOffsets::open_on(recovered, path).await.unwrap();
+        assert_eq!(offsets.last_committed(&id), Some(Offset(7)));
+    }
+
+    /// Regression test: a consumer id one byte past `u16::MAX` used to
+    /// get silently truncated by `encode_commit`'s `as u16` cast,
+    /// producing a corrupt record `decode_commit` would only reject much
+    /// later, on the next `open_on`. It must instead be rejected
+    /// immediately at `commit` time, before any encoding or mutation.
+    #[rusty_tokio::test]
+    async fn a_consumer_id_longer_than_u16_max_is_rejected_at_commit_time() {
+        let driver = SimDriver::new();
+        let mut offsets = ConsumerOffsets::create_on(driver, "/offsets/too-long.log")
+            .await
+            .unwrap();
+        let id = "a".repeat(u16::MAX as usize + 1);
+
+        let err = offsets.commit(&id, Offset(1)).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        // Rejected before any mutation -- no bogus offset was recorded.
+        assert_eq!(offsets.last_committed(&id), None);
     }
 }

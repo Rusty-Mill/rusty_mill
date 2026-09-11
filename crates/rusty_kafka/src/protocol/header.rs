@@ -24,11 +24,12 @@ pub struct RequestHeader {
 
 impl RequestHeader {
     /// Encodes this header onto `writer`, ahead of the request body.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i16(writer, self.api_key);
         write_i16(writer, self.api_version);
         write_i32(writer, self.correlation_id);
-        write_nullable_string(writer, self.client_id.as_deref());
+        write_nullable_string(writer, self.client_id.as_deref())?;
+        Ok(())
     }
 }
 
@@ -64,7 +65,7 @@ mod tests {
             client_id: Some("rusty_meshed".to_string()),
         };
         let mut writer = Writer::new();
-        header.encode(&mut writer);
+        header.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -86,7 +87,7 @@ mod tests {
             client_id: None,
         };
         let mut writer = Writer::new();
-        header.encode(&mut writer);
+        header.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
         // api_key(2) + api_version(2) + correlation_id(4) + client_id len -1(2)
         assert_eq!(bytes.len(), 10);

@@ -1377,20 +1377,55 @@ impl UringFile {
     /// Writes `buf`'s initialized bytes ([`IoBuf::bytes_init`]) starting
     /// at absolute file offset `pos`. Always hands `buf` back, success
     /// or failure.
+    ///
+    /// Loops over successive [`OpDriver::write_at`] calls until every
+    /// byte is written -- an `OpDriver` is only required to report *some*
+    /// non-negative byte count on success (mirroring `write(2)`'s own
+    /// short-write contract), not that the whole buffer landed in one
+    /// call. Callers therefore never observe a short count on success:
+    /// this returns either the full length written, or the first error
+    /// (including a synthesized error if a call reports zero bytes
+    /// written with no error -- genuine zero forward progress, treated
+    /// as a fault rather than looped on forever).
     pub async fn write_at<B: IoBuf>(&self, buf: B, pos: u64) -> BufResult<usize, B> {
-        let ptr = buf.stable_ptr() as usize;
-        let len = buf.bytes_init() as u32;
-        let (result, keepalive) = self
-            .driver
-            .write_at(self.handle, ptr, len, pos, Box::new(buf))
-            .await;
+        let base_ptr = buf.stable_ptr() as usize;
+        let total = buf.bytes_init();
+        let mut keepalive: Box<dyn Any + Send> = Box::new(buf);
+        let mut written = 0usize;
+        while written < total {
+            let ptr = base_ptr + written;
+            let len = (total - written) as u32;
+            let (result, ka) = self
+                .driver
+                .write_at(self.handle, ptr, len, pos + written as u64, keepalive)
+                .await;
+            keepalive = ka;
+            match result_to_io(result) {
+                Ok(n) if n == 0 => {
+                    let buf = *keepalive
+                        .downcast::<B>()
+                        .expect("OpDriver returned a buffer of a different type than it was given");
+                    return BufResult(
+                        Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "write_at made no forward progress",
+                        )),
+                        buf,
+                    );
+                }
+                Ok(n) => written += n as usize,
+                Err(e) => {
+                    let buf = *keepalive
+                        .downcast::<B>()
+                        .expect("OpDriver returned a buffer of a different type than it was given");
+                    return BufResult(Err(e), buf);
+                }
+            }
+        }
         let buf = *keepalive
             .downcast::<B>()
             .expect("OpDriver returned a buffer of a different type than it was given");
-        match result_to_io(result) {
-            Ok(n) => BufResult(Ok(n as usize), buf),
-            Err(e) => BufResult(Err(e), buf),
-        }
+        BufResult(Ok(written), buf)
     }
 
     /// Flushes both data and metadata to disk. See `fsync(2)`.

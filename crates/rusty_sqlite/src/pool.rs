@@ -102,6 +102,18 @@ impl Pool {
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            // A caller may have exposed the connection (via Deref) and run
+            // `BEGIN`/DML without committing or rolling back before the
+            // lease was dropped. Returning it to the pool in that state
+            // would leak an open transaction onto the next borrower.
+            if !conn.is_autocommit() && conn.execute_batch("ROLLBACK").is_err() {
+                // The connection couldn't be brought back to a known-good
+                // state -- it may be unusable, so drop it for good rather
+                // than handing it to the next caller.
+                self.pool.state.lock().unwrap().total -= 1;
+                self.pool.available.notify_one();
+                return;
+            }
             self.pool.state.lock().unwrap().idle.push_back(conn);
             self.pool.available.notify_one();
         }
@@ -138,12 +150,16 @@ pub fn build_pool(path: impl AsRef<Path>, max_size: u32) -> Result<Pool> {
 }
 
 /// Like [`build_pool`], with a configurable acquire timeout instead of the
-/// 30s default.
+/// 30s default. Errors immediately with [`Error::InvalidPoolSize`] if
+/// `max_size` is `0` (such a pool could never satisfy an acquire).
 pub fn build_pool_with_timeout(
     path: impl AsRef<Path>,
     max_size: u32,
     acquire_timeout: Duration,
 ) -> Result<Pool> {
+    if max_size == 0 {
+        return Err(Error::InvalidPoolSize);
+    }
     Ok(Pool(Arc::new(Shared {
         path: path.as_ref().to_path_buf(),
         max_size,

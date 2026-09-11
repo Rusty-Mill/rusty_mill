@@ -1,18 +1,25 @@
 //! A sans-IO stream compression and decompression abstraction crate.
 //!
-//! Provides clean, safe zero-dependency helper functions for DEFLATE, Gzip, and Zlib streaming formats.
+//! Currently implements only raw stored-block RFC 1951 DEFLATE (non-compressed
+//! blocks): [`compress_deflate`] always emits stored blocks and
+//! [`decompress_deflate`] only accepts stored blocks, returning
+//! [`Error::CorruptData`] for any other DEFLATE block type. Gzip and Zlib
+//! wrapper support is not yet implemented.
 
 use core::fmt;
 
 /// Compression level preference.
+///
+/// This parameter currently has no effect: [`compress_deflate`] always emits
+/// raw stored (uncompressed) DEFLATE blocks regardless of the selected level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionLevel {
-    /// Fast compression (level 1).
+    /// Fast compression (level 1). Currently unused.
     Fast,
-    /// Default compression (level 6).
+    /// Default compression (level 6). Currently unused.
     #[default]
     Default,
-    /// Best compression ratio (level 9).
+    /// Best compression ratio (level 9). Currently unused.
     Best,
 }
 
@@ -37,6 +44,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Compress input slice `data` using RFC 1951 DEFLATE non-compressed (stored) block format.
+///
+/// `level` is currently ignored; only stored blocks are produced.
 pub fn compress_deflate(data: &[u8], _level: CompressionLevel) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 5 + (data.len() / 65535) * 5);
     let mut offset = 0;
@@ -71,15 +80,17 @@ pub fn compress_deflate(data: &[u8], _level: CompressionLevel) -> Vec<u8> {
 }
 
 /// Decompress raw DEFLATE data slice `data`.
+///
+/// Only raw stored-block data (as produced by [`compress_deflate`]) is
+/// supported; any other DEFLATE block type (fixed/dynamic Huffman) returns
+/// [`Error::CorruptData`]. An input that is empty or ends before a block with
+/// the BFINAL bit set has been observed returns [`Error::TruncatedInput`].
 pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut cursor = 0;
+    let mut final_block_seen = false;
 
     while cursor < data.len() {
-        if cursor >= data.len() {
-            return Err(Error::TruncatedInput);
-        }
-
         let header = data[cursor];
         cursor += 1;
 
@@ -87,7 +98,7 @@ pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, Error> {
         let btype = (header >> 1) & 0x03;
 
         if btype == 0b00 {
-            // Uncompressed block
+            // Uncompressed (stored) block
             if cursor + 4 > data.len() {
                 return Err(Error::TruncatedInput);
             }
@@ -105,13 +116,19 @@ pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, Error> {
             out.extend_from_slice(&data[cursor..cursor + len]);
             cursor += len;
         } else {
-            // Compressed block fallback
+            // Compressed block types (BTYPE 01/10/11) are not implemented by
+            // this crate: only raw stored-block DEFLATE is supported today.
             return Err(Error::CorruptData);
         }
 
         if is_last {
+            final_block_seen = true;
             break;
         }
+    }
+
+    if !final_block_seen {
+        return Err(Error::TruncatedInput);
     }
 
     Ok(out)
@@ -127,5 +144,38 @@ mod tests {
         let compressed = compress_deflate(original, CompressionLevel::Default);
         let decompressed = decompress_deflate(&compressed).unwrap();
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn deflate_roundtrips_empty_input() {
+        let compressed = compress_deflate(b"", CompressionLevel::Default);
+        let decompressed = decompress_deflate(&compressed).unwrap();
+        assert_eq!(decompressed, b"");
+    }
+
+    #[test]
+    fn decompress_rejects_empty_slice_as_truncated() {
+        let result = decompress_deflate(&[]);
+        assert_eq!(result, Err(Error::TruncatedInput));
+    }
+
+    #[test]
+    fn decompress_rejects_non_final_stored_block_with_no_successor() {
+        // A single non-final (BFINAL=0), empty stored block with no following
+        // block: the stream ends without ever setting BFINAL, so this must be
+        // treated as truncated input rather than a successful empty decode.
+        let truncated = [0x00, 0x00, 0x00, 0xff, 0xff];
+        let result = decompress_deflate(&truncated);
+        assert_eq!(result, Err(Error::TruncatedInput));
+    }
+
+    #[test]
+    fn decompress_distinguishes_unsupported_block_type_from_truncated_input() {
+        // BFINAL=0, BTYPE=01 (fixed Huffman compressed block): unsupported by
+        // this crate, and must be reported distinctly from truncated input.
+        let compressed_block_type = [0x02];
+        let result = decompress_deflate(&compressed_block_type);
+        assert_eq!(result, Err(Error::CorruptData));
+        assert_ne!(result, Err(Error::TruncatedInput));
     }
 }

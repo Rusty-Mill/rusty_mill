@@ -65,10 +65,10 @@ pub struct CreateTopicsRequest {
 
 impl CreateTopicsRequest {
     /// Encodes the v0 body.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.num_partitions);
             write_i16(writer, topic.replication_factor);
 
@@ -83,11 +83,12 @@ impl CreateTopicsRequest {
 
             write_i32(writer, topic.configs.len() as i32);
             for config in &topic.configs {
-                write_string(writer, &config.name);
-                write_nullable_string(writer, config.value.as_deref());
+                write_string(writer, &config.name)?;
+                write_nullable_string(writer, config.value.as_deref())?;
             }
         }
         write_i32(writer, self.timeout_ms);
+        Ok(())
     }
 
     /// Decodes a v0 body -- symmetric with [`encode`](Self::encode), for
@@ -175,12 +176,13 @@ impl CreateTopicsResponse {
     /// This crate is client-only (see the crate's module doc), so the
     /// only consumer of `encode` on a *response* type is test code
     /// standing in as a fake broker via [`crate::testing`].
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i16(writer, topic.error_code);
         }
+        Ok(())
     }
 }
 
@@ -210,7 +212,7 @@ mod tests {
             timeout_ms: 5000,
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -251,7 +253,7 @@ mod tests {
             timeout_ms: 1000,
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -270,7 +272,7 @@ mod tests {
         let mut writer = Writer::new();
         write_i32(&mut writer, results.len() as i32);
         for (name, error_code) in results {
-            write_string(&mut writer, name);
+            write_string(&mut writer, name).unwrap();
             write_i16(&mut writer, *error_code);
         }
         writer.into_vec()
@@ -317,7 +319,7 @@ mod tests {
             timeout_ms: 5000,
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

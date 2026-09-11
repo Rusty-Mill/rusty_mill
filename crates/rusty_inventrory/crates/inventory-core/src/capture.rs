@@ -5,6 +5,7 @@ use crate::index::Inventory;
 use crate::model::{now_unix, Clip, Note};
 use crate::search::{SearchQuery, SearchResponse};
 use crate::Result;
+use rusty_sqlite::rusqlite;
 
 const SETTING_LAST_EXPORT: &str = "scratchpad_last_export_at";
 /// How many clips, or how long, before offering to export and clear.

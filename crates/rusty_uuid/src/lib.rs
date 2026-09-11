@@ -40,6 +40,18 @@ impl Uuid {
         &self.0
     }
 
+    /// The UUID as 32 lowercase hex digits with no hyphens, e.g.
+    /// `"67e5504410b1426f9247bb680e5fe0c8"` — matches the external `uuid`
+    /// crate's `Uuid::simple()` formatting, for callers that need a
+    /// hyphen-free identifier (e.g. as a SQL table-name suffix).
+    pub fn simple(&self) -> String {
+        let mut out = String::with_capacity(32);
+        for byte in self.0 {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+
     /// True if every byte is zero.
     pub fn is_nil(&self) -> bool {
         self.0 == [0; 16]
@@ -105,6 +117,45 @@ impl FromStr for Uuid {
     }
 }
 
+#[cfg(feature = "rusty_serde")]
+impl rusty_serde::Serialize for Uuid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: rusty_serde::ser::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[cfg(feature = "rusty_serde")]
+impl<'de> rusty_serde::Deserialize<'de> for Uuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: rusty_serde::de::Deserializer<'de>,
+    {
+        struct UuidVisitor;
+        impl<'de> rusty_serde::de::Visitor<'de> for UuidVisitor {
+            type Value = Uuid;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a hyphenated UUID string")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: rusty_serde::error::Error,
+            {
+                v.parse::<Uuid>().map_err(E::custom)
+            }
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: rusty_serde::error::Error,
+            {
+                v.parse::<Uuid>().map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_str(UuidVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +207,36 @@ mod tests {
         assert!("00000000-0000-0000-0000-00000000000"
             .parse::<Uuid>()
             .is_err()); // too short
+    }
+
+    #[test]
+    fn simple_is_32_lowercase_hex_digits_no_hyphens() {
+        let id = Uuid::new_v4();
+        let simple = id.simple();
+        assert_eq!(simple.len(), 32);
+        assert!(simple.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(simple, id.to_string().chars().filter(|&c| c != '-').collect::<String>());
+    }
+
+    #[test]
+    fn nil_simple_is_32_zeros() {
+        assert_eq!(Uuid::nil().simple(), "0".repeat(32));
+    }
+
+    #[cfg(feature = "rusty_serde")]
+    #[test]
+    fn rusty_serde_json_round_trips_as_hyphenated_string() {
+        let id = Uuid::new_v4();
+        let json = rusty_serde::json::to_string(&id).unwrap();
+        assert_eq!(json, format!("\"{id}\""));
+        let parsed: Uuid = rusty_serde::json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[cfg(feature = "rusty_serde")]
+    #[test]
+    fn rusty_serde_json_rejects_malformed_string() {
+        let json = "\"not-a-uuid\"";
+        assert!(rusty_serde::json::from_str::<Uuid>(json).is_err());
     }
 }

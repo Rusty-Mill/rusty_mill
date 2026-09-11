@@ -43,15 +43,16 @@ pub struct SyncGroupRequest {
 
 impl SyncGroupRequest {
     /// Encodes the v0 body.
-    pub fn encode(&self, writer: &mut Writer) {
-        write_string(writer, &self.group_id);
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
+        write_string(writer, &self.group_id)?;
         write_i32(writer, self.generation_id);
-        write_string(writer, &self.member_id);
+        write_string(writer, &self.member_id)?;
         write_i32(writer, self.assignments.len() as i32);
         for assignment in &self.assignments {
-            write_string(writer, &assignment.member_id);
-            write_nullable_bytes(writer, Some(&assignment.assignment));
+            write_string(writer, &assignment.member_id)?;
+            write_nullable_bytes(writer, Some(&assignment.assignment))?;
         }
+        Ok(())
     }
 
     /// Decodes a v0 body -- symmetric with [`encode`](Self::encode),
@@ -104,9 +105,10 @@ impl SyncGroupResponse {
     /// Encodes the response body -- symmetric with
     /// [`decode`](Self::decode), for a fake broker standing in for
     /// tests.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i16(writer, self.error_code);
-        write_nullable_bytes(writer, Some(&self.assignment));
+        write_nullable_bytes(writer, Some(&self.assignment))?;
+        Ok(())
     }
 }
 
@@ -125,11 +127,12 @@ mod tests {
                 assignment: crate::protocol::consumer_protocol::encode_assignment(&[(
                     "manpower.personnel-lifecycle.assignments".to_string(),
                     vec![0, 1, 2],
-                )]),
+                )])
+                .unwrap(),
             }],
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -145,7 +148,7 @@ mod tests {
             assignments: vec![],
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -158,13 +161,14 @@ mod tests {
         let assignment = crate::protocol::consumer_protocol::encode_assignment(&[(
             "manpower.personnel-lifecycle.assignments".to_string(),
             vec![0, 1, 2],
-        )]);
+        )])
+        .unwrap();
         let response = SyncGroupResponse {
             error_code: 0,
             assignment: assignment.clone(),
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

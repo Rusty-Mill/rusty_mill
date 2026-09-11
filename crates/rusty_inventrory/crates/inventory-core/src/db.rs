@@ -15,7 +15,7 @@ use crate::keychain::KeyProvider;
 use crate::{Error, Result};
 use aes_gcm::aead::{Aead, KeyInit, Nonce, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key};
-use rusqlite::Connection;
+use rusty_sqlite::rusqlite::{self, Connection};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 

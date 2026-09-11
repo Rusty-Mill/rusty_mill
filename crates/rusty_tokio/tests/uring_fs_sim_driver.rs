@@ -252,3 +252,194 @@ fn rename_on_and_remove_file_on_work_against_sim_driver() {
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     });
 }
+
+/// An [`OpDriver`] wrapper whose `write_at` genuinely writes and reports
+/// only up to `cap` bytes per call -- an honest short write (matching
+/// `write(2)`'s own documented contract), distinct from
+/// [`SimDriver::inject_torn_write`]'s "reports full success, silently
+/// drops the rest" hazard. Every other operation delegates to `inner`.
+struct ShortWriteDriver {
+    inner: Arc<dyn OpDriver>,
+    cap: u32,
+}
+
+impl OpDriver for ShortWriteDriver {
+    fn open(
+        &self,
+        path: std::path::PathBuf,
+        flags: i32,
+        mode: u32,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<u64>> {
+        self.inner.open(path, flags, mode)
+    }
+    fn read_at(
+        &self,
+        handle: u64,
+        buf_ptr: usize,
+        buf_len: u32,
+        pos: u64,
+        keepalive: Box<dyn std::any::Any + Send>,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, (i32, Box<dyn std::any::Any + Send>)> {
+        self.inner.read_at(handle, buf_ptr, buf_len, pos, keepalive)
+    }
+    fn write_at(
+        &self,
+        handle: u64,
+        buf_ptr: usize,
+        buf_len: u32,
+        pos: u64,
+        keepalive: Box<dyn std::any::Any + Send>,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, (i32, Box<dyn std::any::Any + Send>)> {
+        let capped = buf_len.min(self.cap);
+        self.inner.write_at(handle, buf_ptr, capped, pos, keepalive)
+    }
+    fn fsync(&self, handle: u64, datasync: bool) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.fsync(handle, datasync)
+    }
+    fn fallocate(
+        &self,
+        handle: u64,
+        offset: u64,
+        len: u64,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.fallocate(handle, offset, len)
+    }
+    fn set_len(&self, handle: u64, len: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.set_len(handle, len)
+    }
+    fn close(&self, handle: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.close(handle)
+    }
+    fn close_sync(&self, handle: u64) {
+        self.inner.close_sync(handle)
+    }
+    fn rename(
+        &self,
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.rename(from, to)
+    }
+    fn remove_file(&self, path: std::path::PathBuf) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.remove_file(path)
+    }
+}
+
+/// Regression test: `UringFile::write_at` used to submit a single
+/// driver-level write and hand back whatever (possibly short) count the
+/// driver reported, without looping to cover a short write. Against a
+/// driver that only ever writes `cap` bytes per call, the whole buffer
+/// must still land, in full, before `write_at` resolves.
+#[test]
+fn write_at_loops_to_cover_a_driver_that_only_writes_a_few_bytes_per_call() {
+    let rt = rt();
+    let sim = SimDriver::new();
+    let short_writes: Arc<dyn OpDriver> = Arc::new(ShortWriteDriver {
+        inner: sim.clone(),
+        cap: 3,
+    });
+
+    rt.block_on(async {
+        let file = UringFile::create_on(short_writes, "/virtual/short-write.dat")
+            .await
+            .unwrap();
+        let payload = b"a payload much longer than three bytes per call".to_vec();
+        let result = file.write_at(payload.clone(), 0).await;
+        assert_eq!(result.0.unwrap(), payload.len());
+
+        // Read back through the plain, uncapped driver: the whole
+        // payload actually landed, not just the first few bytes.
+        let plain_file = UringFile::open_on(sim, "/virtual/short-write.dat")
+            .await
+            .unwrap();
+        let buf = vec![0u8; payload.len()];
+        let read_result = plain_file.read_at(buf, 0).await;
+        assert_eq!(read_result.0.unwrap(), payload.len());
+        assert_eq!(read_result.1, payload);
+    });
+}
+
+/// An [`OpDriver`] wrapper whose `write_at` always reports zero bytes
+/// written with no error -- a real driver pathology that must surface as
+/// a clean error rather than an infinite retry loop.
+struct ZeroProgressWriteDriver {
+    inner: Arc<dyn OpDriver>,
+}
+
+impl OpDriver for ZeroProgressWriteDriver {
+    fn open(
+        &self,
+        path: std::path::PathBuf,
+        flags: i32,
+        mode: u32,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<u64>> {
+        self.inner.open(path, flags, mode)
+    }
+    fn read_at(
+        &self,
+        handle: u64,
+        buf_ptr: usize,
+        buf_len: u32,
+        pos: u64,
+        keepalive: Box<dyn std::any::Any + Send>,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, (i32, Box<dyn std::any::Any + Send>)> {
+        self.inner.read_at(handle, buf_ptr, buf_len, pos, keepalive)
+    }
+    fn write_at(
+        &self,
+        _handle: u64,
+        _buf_ptr: usize,
+        _buf_len: u32,
+        _pos: u64,
+        keepalive: Box<dyn std::any::Any + Send>,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, (i32, Box<dyn std::any::Any + Send>)> {
+        Box::pin(std::future::ready((0, keepalive)))
+    }
+    fn fsync(&self, handle: u64, datasync: bool) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.fsync(handle, datasync)
+    }
+    fn fallocate(
+        &self,
+        handle: u64,
+        offset: u64,
+        len: u64,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.fallocate(handle, offset, len)
+    }
+    fn set_len(&self, handle: u64, len: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.set_len(handle, len)
+    }
+    fn close(&self, handle: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.close(handle)
+    }
+    fn close_sync(&self, handle: u64) {
+        self.inner.close_sync(handle)
+    }
+    fn rename(
+        &self,
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.rename(from, to)
+    }
+    fn remove_file(&self, path: std::path::PathBuf) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+        self.inner.remove_file(path)
+    }
+}
+
+/// Regression test: zero forward progress on a write must resolve as a
+/// clean, propagated error, not hang forever.
+#[test]
+fn write_at_errors_cleanly_on_zero_forward_progress() {
+    let rt = rt();
+    let sim = SimDriver::new();
+    let zero_progress: Arc<dyn OpDriver> = Arc::new(ZeroProgressWriteDriver { inner: sim });
+
+    rt.block_on(async {
+        let file = UringFile::create_on(zero_progress, "/virtual/zero-progress.dat")
+            .await
+            .unwrap();
+        let err = file.write_at(b"never lands".to_vec(), 0).await.0.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+    });
+}

@@ -2,7 +2,7 @@
 
 use adk_core::{AdkError, ArtifactService, Part, Result, USER_PREFIX};
 use async_trait::async_trait;
-use rusqlite::{params, OptionalExtension};
+use rusty_sqlite::rusqlite::{self, params, OptionalExtension};
 
 use super::{Db, SqlExt};
 

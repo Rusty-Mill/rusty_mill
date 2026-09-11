@@ -79,9 +79,12 @@ impl SearchBackend for MemoryBackend {
             .get_mut(index)
             .ok_or_else(|| SearchError::IndexNotFound(index.to_string()))?;
         for mut document in documents {
-            let id = document.id.clone().unwrap_or_else(|| {
+            let id = document.id.clone().unwrap_or_else(|| loop {
                 idx.next_id += 1;
-                format!("_auto_{}", idx.next_id)
+                let candidate = format!("_auto_{}", idx.next_id);
+                if !idx.documents.contains_key(&candidate) {
+                    break candidate;
+                }
             });
             document.id = Some(id.clone());
             idx.documents.insert(id, document);
@@ -271,6 +274,76 @@ mod tests {
             .unwrap();
         assert_eq!(results.total, 1);
         assert!(!results.hits[0].id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_id_does_not_collide_with_prior_explicit_id() {
+        let backend = MemoryBackend::new();
+        backend
+            .create_index("a", Schema::builder().build())
+            .await
+            .unwrap();
+        backend
+            .index_batch(
+                "a",
+                vec![Document::new()
+                    .with_id("_auto_1")
+                    .set("title", "explicit")],
+            )
+            .await
+            .unwrap();
+        backend
+            .index_batch("a", vec![Document::new().set("title", "no id")])
+            .await
+            .unwrap();
+
+        let explicit = backend
+            .search("a", Query::term("title", "explicit").into())
+            .await
+            .unwrap();
+        assert_eq!(explicit.total, 1);
+        assert_eq!(explicit.hits[0].id, "_auto_1");
+
+        let results = backend
+            .search("a", Query::match_all().into())
+            .await
+            .unwrap();
+        assert_eq!(results.total, 2);
+        assert!(results.hits.iter().any(|h| h.id == "_auto_1"));
+        assert!(results.hits.iter().any(|h| h.id != "_auto_1"));
+    }
+
+    #[tokio::test]
+    async fn auto_id_does_not_collide_with_explicit_id_in_same_batch() {
+        let backend = MemoryBackend::new();
+        backend
+            .create_index("a", Schema::builder().build())
+            .await
+            .unwrap();
+        backend
+            .index_batch(
+                "a",
+                vec![
+                    Document::new()
+                        .with_id("_auto_1")
+                        .set("title", "explicit"),
+                    Document::new().set("title", "no id"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let results = backend
+            .search("a", Query::match_all().into())
+            .await
+            .unwrap();
+        assert_eq!(results.total, 2);
+        let explicit = backend
+            .search("a", Query::term("title", "explicit").into())
+            .await
+            .unwrap();
+        assert_eq!(explicit.total, 1);
+        assert_eq!(explicit.hits[0].id, "_auto_1");
     }
 
     #[tokio::test]

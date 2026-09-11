@@ -83,7 +83,7 @@ impl Default for FetchRequest {
 
 impl FetchRequest {
     /// Encodes the v4 body.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.replica_id);
         write_i32(writer, self.max_wait_ms);
         write_i32(writer, self.min_bytes);
@@ -91,7 +91,7 @@ impl FetchRequest {
         write_i8(writer, self.isolation_level);
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
@@ -99,6 +99,7 @@ impl FetchRequest {
                 write_i32(writer, partition.partition_max_bytes);
             }
         }
+        Ok(())
     }
 
     /// Decodes a v4 body -- symmetric with [`encode`](Self::encode),
@@ -231,11 +232,11 @@ impl FetchResponse {
     /// [`record_batch::encode_batch`] stamps every encoded record
     /// with (this crate's fake broker never needs per-record
     /// timestamps to vary).
-    pub fn encode(&self, writer: &mut Writer, base_timestamp_ms: i64) {
+    pub fn encode(&self, writer: &mut Writer, base_timestamp_ms: i64) -> Result<(), CodecError> {
         write_i32(writer, self.throttle_time_ms);
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
@@ -256,6 +257,7 @@ impl FetchResponse {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -285,7 +287,7 @@ mod tests {
     fn request_encode_then_decode_round_trips() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -296,7 +298,7 @@ mod tests {
     fn request_encodes_replica_id_negative_one_for_a_consumer() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -324,7 +326,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer, 1_735_689_600_000);
+        response.encode(&mut writer, 1_735_689_600_000).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -354,7 +356,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer, 0);
+        response.encode(&mut writer, 0).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -379,7 +381,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer, 0);
+        response.encode(&mut writer, 0).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
