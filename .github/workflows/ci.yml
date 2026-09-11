@@ -175,12 +175,24 @@ jobs:
       # cfg-gated portable shims like rusty_win32 does the other way.
       # rusty_fedora_agent gets the same treatment: it shells out to
       # systemctl/journalctl/dnf, none of which exist on Windows either.
+      # rusty_multimodal_db is a different case -- its own library and every
+      # feature but one are portable, and its standalone repo's own CI never
+      # ran a Windows job at all (single-OS, so this was simply untested,
+      # not previously green). --all-features here is what first exercises
+      # `external-db-bench`, whose optional `duckdb` dependency vendors
+      # DuckDB's own C++ amalgamation ("bundled") -- that native build fails
+      # under windows-latest's current MSVC toolchain (cc-rs exit code 2
+      # compiling ub_src_storage_compression_chimp.cpp), a third-party
+      # native-build issue with no Rust-side fix available here. Whole-crate
+      # exclusion is coarser than the actual problem (one optional feature),
+      # matching this mechanism's existing granularity rather than adding a
+      # new one for a single crate.
       - uses: ./.github/actions/select-packages
         id: scope
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent
+          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
 
       - name: Clippy
         if: steps.scope.outputs.args != ''
@@ -206,7 +218,7 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent
+          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
 
       # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
       # walking target/{debug,release} at runtime rather than through a

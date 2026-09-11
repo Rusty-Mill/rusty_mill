@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Caches `~/.cargo/registry`/`~/.cargo/git` and `target/`, keyed on Cargo.lock (falls back
+      # to the base branch's cache on a lockfile miss). Added specifically because `duckdb`'s
+      # `bundled` feature (`external-db-bench`, pulled in by `--all-features`) compiles DuckDB's
+      # own C++ amalgamation from source — a real, ~20-minute cost on every run without this,
+      # since a fresh runner starts with an empty `target/` every time. See ADR-0015's
+      # Consequences, which named this cost explicitly and left the mitigation for if it became a
+      # real friction point.
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      # `--all-features` alone lets dead code hide behind `research`-gated callers (PR #196):
+      # a definition used only from `generic_spike` is "never used" in the default and
+      # `client` builds, which is what consumers actually compile. Lint each front-door
+      # feature set so the crate is warning-free under every one, not just the union.
+      - name: cargo clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy (client feature only)
+        run: cargo clippy --all-targets --features client -- -D warnings
+      # `ECO-FR-008` (ADR-0043): the Python reference client's offline conformance test —
+      # every line of tests/fixtures/wire-vectors.txt decodes and re-encodes byte-for-byte.
+      # Its own step so a failure is attributed to the client, not to Rust; `python3` is
+      # part of `ubuntu-latest`. The live half runs inside `cargo test --all-features`
+      # below (tests/server_python_client.rs).
+      - name: python reference client (offline conformance vectors)
+        run: python3 -m unittest discover -s clients/python/tests -v
+      - name: cargo test
+        run: cargo test --all-features
+      # `ECO-FR-003` (ADR-0043): the client-only feature set builds and tests with no
+      # server compiled — a consumer that only talks to a server depends on this.
+      - name: cargo test (client feature only)
+        run: cargo test --features client
+      - name: cargo doc
+        run: cargo doc --all-features --no-deps
+
+  # `Cargo.toml`'s `rust-version` is only a promise if something builds at it.
+  # This job builds every target with every feature on exactly that compiler,
+  # so a dependency bump that raises the real floor fails here — with the
+  # floor named — instead of on the next person whose toolchain is older than
+  # `stable`. Keep the version below equal to `rust-version` in `Cargo.toml`.
+  # `--all-features` pulls DuckDB's amalgamation, so the first run costs the
+  # same ~20 minutes the `check` job's comment describes; the cache is keyed on
+  # the rustc version, so this job warms its own.
+  msrv:
+    name: msrv (rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check on the declared rust-version
+        run: cargo check --all-features --all-targets

@@ -51,6 +51,7 @@ members = [
     "crates/rusty_fedora",
     "crates/rusty_homelab_mcp",
     "crates/rusty_fedora_agent",
+    "crates/rusty_multimodal_db",
     "crates/rustils_async/crates/reactor-core",
     "crates/rustils_async/crates/platform-async",
     "crates/rustils_async/crates/platform-async-mock",

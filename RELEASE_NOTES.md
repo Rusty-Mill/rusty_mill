@@ -13,6 +13,55 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Migrate rusty_multimodal_db into the monorepo
+**2026-09-10** · branch [`claude/loving-bell-kntf9l`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/loving-bell-kntf9l)
+
+`baileyrd/rusty_multimodal_db` — a benchmark harness comparing AoS, SoA,
+and UUID-canonical-store record backends, plus the production store,
+network server, and schema-driven client built on the winning design —
+merged into `crates/rusty_multimodal_db/` via `git subtree`, full history
+preserved. A sixth merge outside the `baileyrd/rusty_*` wave numbering
+(ADR-0001), same treatment as the `nexus` merge above.
+
+- **Added:** `crates/rusty_multimodal_db` joins this root's member list
+  directly (it was already a single, non-nested `Cargo.toml`, unlike
+  `nexus`/`rusty_agent_gateway`/`rusty_yirp` — nothing to de-nest).
+- **Changed:** its one pinned git dependency on `rusty_tls`
+  (`Rusty-Mill/rusty_mill` at a specific commit) retired to a plain path
+  dependency on this workspace's own `crates/rusty_tls` — the
+  same-workspace-source rule ADR-0002 requires, and the same swap
+  `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made on their own
+  merges.
+- **Changed:** its `rusqlite` pin (used only by the optional
+  `external-db-bench` benchmark feature) bumped `0.32` → `0.39` to match
+  `crates/rusty_inventrory`'s `inventory-core` — `rusqlite` declares
+  `links = "sqlite3"`, and Cargo allows only one version of a
+  `links`-declaring crate in the whole dependency graph; unifying on the
+  higher version is the same fix the `nexus` merge's `sqlx`/`rusqlite`
+  collision needed, not a behavior choice of this crate's own.
+- **Fixed:** two `clippy::chunks_exact_to_as_chunks` failures
+  (`src/durability/mmap_store.rs`, `src/server/pem.rs`) — this workspace's
+  clippy version flags `chunks_exact(N)` with a constant `N` in favor of
+  `as_chunks::<N>().0`; behavior unchanged, same trailing-partial-chunk
+  drop either way. The upstream repo hit the identical failure on its own
+  `main` (unrelated to this merge — its clippy toolchain updated
+  independently) and carries the same fix.
+- **Changed:** `rusty_multimodal_db` added to the `windows-latest`
+  `windows-exclude` list alongside `rusty_stream`/`rusty_fedora_agent` —
+  its optional `external-db-bench` feature's `duckdb` dependency vendors
+  DuckDB's own C++ amalgamation, and this workspace's `--all-features` is
+  what first compiles it on `windows-latest`; that native build fails
+  under the runner's current MSVC toolchain (a third-party build issue,
+  no Rust-side fix available here). The upstream repo's own CI never ran
+  a Windows job at all, so this wasn't a regression, just first exposure.
+- **Verified:** `cargo tree -p rusty_multimodal_db --all-features`
+  resolves to one `rusqlite v0.39.0`; `cargo check -p rusty_multimodal_db
+  --features research,server,perf-events` compiles clean, and separately
+  `--features research,external-db-bench` compiles clean too (DuckDB's
+  bundled from-source build, already a documented one-time cost — see
+  this crate's own `docs/decisions/ADR-0015-external-database-benchmark.md`
+  — checked on its own given how long that build takes, ~10.5 minutes).
+
 ## Migrate nexus into the monorepo
 **2026-09-08** · branch [`claude/nexus-rusty-mill-migration-ic3fqa`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/nexus-rusty-mill-migration-ic3fqa)
 

@@ -9,6 +9,12 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `crates/rusty_multimodal_db` — new workspace member: `baileyrd/rusty_multimodal_db`,
+  a benchmark harness comparing AoS, SoA, and UUID-canonical-store record
+  backends, plus the production store, network server, and schema-driven
+  client built on the winning design, merged via `git subtree` with full
+  history. Already a single, non-nested `Cargo.toml`, so nothing to
+  de-nest on merge (unlike `nexus`/`rusty_agent_gateway`/`rusty_yirp`).
 - `crates/nexus` — new workspace members: `baileyrd/nexus`, a 42-crate
   microkernel note-taking/AI-agent workspace, merged via `git subtree`
   with full history (separate from the `baileyrd/rusty_*` wave numbering).
@@ -32,6 +38,35 @@ Removed / Fixed / Security, newest first.
   `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp` (row 8).
 - `repo-inspector-report.md` gained a **Disposition** section recording
   what was done, or deliberately not, for every row of both sections.
+### Changed
+- `rusty_multimodal_db` added to the `windows-latest` `windows-exclude`
+  list (alongside `rusty_stream`/`rusty_fedora_agent`) — its optional
+  `external-db-bench` feature's `duckdb` dependency vendors DuckDB's own
+  C++ amalgamation, and this workspace's `--all-features` is what first
+  compiles it on `windows-latest`; that native build fails under the
+  runner's current MSVC toolchain, a third-party build issue with no
+  Rust-side fix available here. The crate's own standalone repo never ran
+  a Windows CI job at all, so this wasn't a regression, just first
+  exposure.
+- `rusty_multimodal_db`'s pinned git dependency on `rusty_tls`
+  (`Rusty-Mill/rusty_mill` at a specific commit) retired to a plain path
+  dependency on this workspace's own `crates/rusty_tls`, now that both
+  live in the same workspace (ADR-0002's same-workspace-source rule) —
+  the same swap `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made.
+- `rusty_multimodal_db`'s `rusqlite` pin (its optional
+  `external-db-bench` benchmark feature) bumped `0.32` → `0.39` to match
+  `inventory-core`'s existing pin — `rusqlite` declares
+  `links = "sqlite3"`, and Cargo allows only one version of a
+  `links`-declaring crate in the whole graph; the same fix the
+  `sqlx`/`rusqlite` collision below needed.
+### Fixed
+- `rusty_multimodal_db`'s two `clippy::chunks_exact_to_as_chunks`
+  failures (`src/durability/mmap_store.rs`, `src/server/pem.rs`) — this
+  workspace's clippy version flags `chunks_exact(N)` with a constant `N`
+  in favor of `as_chunks::<N>().0`; behavior unchanged, same
+  trailing-partial-chunk drop either way. The upstream repo hit the
+  identical failure on its own `main` independently of this merge (its
+  clippy toolchain updated on its own) and carries the same fix.
 ### Changed
 - `sqlx` bumped `0.8` → `0.9`, workspace-wide: `sqlx-sqlite` 0.8.x pins
   `libsqlite3-sys ^0.30.1`, which collided (Cargo's `links = "sqlite3"`

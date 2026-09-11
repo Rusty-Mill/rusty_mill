@@ -28,6 +28,17 @@ Tauri desktop shell, `shell/src-tauri`) is `exclude`d the same way as
 `rusty_key`'s `desktop/src-tauri` — it's a separate pnpm-driven Tauri
 workspace, not a `cargo test` target.
 
+A sixth merge, also outside the wave numbering, brought in
+`baileyrd/rusty_multimodal_db` — a single-crate benchmark harness for
+record-store backend design — under `crates/rusty_multimodal_db/`, the
+same `git subtree` process. Its one pinned git dependency on `rusty_tls`
+(`Rusty-Mill/rusty_mill`, a specific commit) retired to a plain path
+dependency on this workspace's own `crates/rusty_tls` (ADR-0002), and its
+`rusqlite` pin bumped `0.32` → `0.39` to match `crates/rusty_inventrory`'s
+`inventory-core` — `rusqlite`'s `links = "sqlite3"` key allows only one
+version in the whole dependency graph, the same constraint the `nexus`
+merge hit.
+
 ## Crates
 
 | Crate | Path | Purpose |
@@ -245,6 +256,7 @@ workspace, not a `cargo test` target.
 | [`nexus-memory-hub`](crates/nexus/crates/nexus-memory-hub) | `crates/nexus/crates/nexus-memory-hub` | Nexus: standalone `axum` HTTP sync server for `nexus-memory` — a deployable binary, not a bootstrap plugin |
 | [`nexus-context`](crates/nexus/crates/nexus-context) | `crates/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`nexus-protocol`](crates/nexus/crates/nexus-protocol) | `crates/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
+| [`rusty_multimodal_db`](crates/rusty_multimodal_db) | `crates/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,
