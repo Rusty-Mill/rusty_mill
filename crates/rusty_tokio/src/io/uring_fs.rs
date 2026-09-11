@@ -1401,7 +1401,7 @@ impl UringFile {
                 .await;
             keepalive = ka;
             match result_to_io(result) {
-                Ok(n) if n == 0 => {
+                Ok(0) => {
                     let buf = *keepalive
                         .downcast::<B>()
                         .expect("OpDriver returned a buffer of a different type than it was given");
