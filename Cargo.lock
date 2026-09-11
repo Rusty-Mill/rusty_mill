@@ -289,7 +289,7 @@ version = "0.1.0"
 dependencies = [
  "adk-core",
  "async-trait",
- "rusqlite",
+ "rusty_sqlite",
  "serde",
  "serde_json",
  "tokio",
@@ -6001,7 +6001,7 @@ dependencies = [
  "keyring",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
- "rusqlite",
+ "rusty_sqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -11336,7 +11336,7 @@ dependencies = [
  "rk-config",
  "rk-constrain",
  "rk-observe",
- "rusqlite",
+ "rusty_sqlite",
  "rusty_url",
  "schemars 1.2.2",
  "serde",
@@ -11590,9 +11590,9 @@ dependencies = [
  "ring",
  "rp-core",
  "rp-providers",
- "rusqlite",
  "rustls",
  "rustls-native-certs",
+ "rusty_sqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -12963,6 +12963,7 @@ name = "rusty_uuid"
 version = "0.1.0"
 dependencies = [
  "rusty_rand",
+ "rusty_serde",
 ]
 
 [[package]]

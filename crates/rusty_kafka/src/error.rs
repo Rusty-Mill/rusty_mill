@@ -24,6 +24,23 @@ pub enum CodecError {
     /// `-1`.
     #[error("bytes length {0} is invalid (must be -1 or >= 0)")]
     InvalidBytesLength(i32),
+    /// A Kafka `STRING`/`NULLABLE_STRING` field's payload didn't fit in
+    /// Kafka's `INT16` length prefix (max `32767` bytes) -- rejected
+    /// before writing a wrapped, negative length prefix followed by the
+    /// full oversized payload.
+    #[error("string of {0} bytes is too long to encode (max 32767)")]
+    StringTooLong(usize),
+    /// A Kafka `NULLABLE_BYTES` field's payload didn't fit in Kafka's
+    /// `INT32` length prefix (max `2147483647` bytes).
+    #[error("bytes payload of {0} bytes is too long to encode (max 2147483647)")]
+    BytesTooLong(usize),
+    /// A Kafka array's declared length claims more elements than the
+    /// remaining buffer could possibly hold, given the smallest an
+    /// element of that array could encode as -- rejected before
+    /// `Vec::with_capacity` allocates for it, so a corrupt or hostile
+    /// length prefix can't force a huge allocation.
+    #[error("array length {0} would require more bytes than the {1} remaining in the buffer")]
+    ArrayLengthExceedsBuffer(i32, usize),
     /// A record batch's `magic` byte wasn't `2` -- this crate only
     /// encodes/decodes record batch v2 (see
     /// [`crate::record_batch`]'s module doc for why).

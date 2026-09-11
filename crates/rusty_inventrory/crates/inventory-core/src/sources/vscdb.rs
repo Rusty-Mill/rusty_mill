@@ -14,6 +14,8 @@
 use super::{derive_title, snapshot, ScanContext};
 use crate::model::{Conversation, Message, ParsedConversation, Role, SourceId};
 use crate::Result;
+#[cfg(test)]
+use rusty_sqlite::rusqlite;
 use serde_json::Value;
 use std::path::PathBuf;
 

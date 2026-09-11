@@ -62,17 +62,18 @@ pub struct ListOffsetsRequest {
 
 impl ListOffsetsRequest {
     /// Encodes the v1 body.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.replica_id);
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
                 write_i64(writer, partition.timestamp);
             }
         }
+        Ok(())
     }
 
     /// Decodes a v1 body -- symmetric with [`encode`](Self::encode),
@@ -155,10 +156,10 @@ impl ListOffsetsResponse {
     /// Encodes the response body -- symmetric with
     /// [`decode`](Self::decode), for a fake broker standing in for
     /// tests.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
@@ -167,6 +168,7 @@ impl ListOffsetsResponse {
                 write_i64(writer, partition.offset);
             }
         }
+        Ok(())
     }
 }
 
@@ -187,7 +189,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -222,7 +224,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -243,7 +245,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -266,7 +268,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

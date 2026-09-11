@@ -113,3 +113,29 @@ fn failed_step_rolls_back_and_does_not_advance_version() {
         .unwrap();
     assert_eq!(version, 0);
 }
+
+#[test]
+fn zero_version_migration_is_rejected() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    let migrations = Migrations::new().add(0, "zeroth", "SELECT 1;");
+
+    let err = conn.migrate(&migrations).unwrap_err();
+    assert!(matches!(
+        err,
+        rusty_sqlite::Error::InvalidMigrationVersion { version: 0 }
+    ));
+}
+
+#[test]
+fn zero_then_positive_version_sequence_is_rejected() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    let migrations = Migrations::new()
+        .add(0, "zeroth", "SELECT 1;")
+        .add(1, "first", "SELECT 1;");
+
+    let err = conn.migrate(&migrations).unwrap_err();
+    assert!(matches!(
+        err,
+        rusty_sqlite::Error::InvalidMigrationVersion { version: 0 }
+    ));
+}

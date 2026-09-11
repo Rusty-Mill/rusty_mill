@@ -59,21 +59,22 @@ pub struct OffsetCommitRequest {
 
 impl OffsetCommitRequest {
     /// Encodes the v2 body.
-    pub fn encode(&self, writer: &mut Writer) {
-        write_string(writer, &self.group_id);
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
+        write_string(writer, &self.group_id)?;
         write_i32(writer, self.group_generation_id);
-        write_string(writer, &self.member_id);
+        write_string(writer, &self.member_id)?;
         write_i64(writer, self.retention_time_ms);
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
                 write_i64(writer, partition.committed_offset);
-                write_nullable_string(writer, partition.committed_metadata.as_deref());
+                write_nullable_string(writer, partition.committed_metadata.as_deref())?;
             }
         }
+        Ok(())
     }
 
     /// Decodes a v2 body -- symmetric with [`encode`](Self::encode),
@@ -153,16 +154,17 @@ impl OffsetCommitResponse {
     /// Encodes the response body -- symmetric with
     /// [`decode`](Self::decode), for a fake broker standing in for
     /// tests.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
                 write_i16(writer, partition.error_code);
             }
         }
+        Ok(())
     }
 }
 
@@ -191,7 +193,7 @@ mod tests {
     fn request_encode_then_decode_round_trips() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -202,7 +204,7 @@ mod tests {
     fn request_encodes_group_generation_and_member_before_topics() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -227,7 +229,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -246,7 +248,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

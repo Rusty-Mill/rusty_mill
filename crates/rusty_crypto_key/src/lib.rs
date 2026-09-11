@@ -80,26 +80,99 @@ mod file {
     use std::path::Path;
 
     impl SecretBytes {
-        /// Persists this secret to `path`, creating (or truncating) it with
+        /// Persists this secret to `path`, creating (or replacing) it with
         /// permissions restricted to the owner only.
         ///
-        /// On Unix this opens the file with mode `0600` from the moment of
-        /// creation (`O_CREAT` and the mode are applied atomically by the
-        /// OS, so there is no window where the file exists world-readable).
+        /// On Unix this writes the secret to a freshly-created sibling temp
+        /// file (mode `0600` from the moment of creation, so it is never
+        /// world/group-readable) and then atomically renames it over
+        /// `path`. This guarantees restrictive permissions on the final
+        /// file even when `path` already exists and was previously created
+        /// with looser permissions — opening an existing file with a
+        /// creation-only mode does not retroactively tighten it, which is
+        /// why a rename-based swap is used instead of truncating in place.
+        /// If `path` already exists as a symlink, this refuses to follow
+        /// it and returns an error, rather than silently replacing
+        /// whatever the link points at.
+        ///
         /// **On Windows there is currently no equivalent ACL restriction**
         /// applied — the file inherits whatever permissions its containing
         /// directory grants. That gap is a known, documented limitation,
         /// not a silent claim of parity with the Unix behavior.
+        #[cfg(unix)]
         pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
             use std::io::Write;
-            #[cfg_attr(not(unix), allow(unused_mut))]
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            // Refuse to write through a pre-existing symlink: silently
+            // following it could redirect the secret to an
+            // attacker-controlled location outside the intended directory.
+            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                if meta.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "refusing to save secret through a symlink",
+                    ));
+                }
+            }
+
+            let dir = match path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            let file_name = path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
+            })?;
+
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let pid = std::process::id();
+
+            let (mut tmp_file, tmp_path) = loop {
+                let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let mut tmp_name = file_name.to_os_string();
+                tmp_name.push(format!(".{pid}.{n}.tmp"));
+                let tmp_path = dir.join(&tmp_name);
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&tmp_path)
+                {
+                    Ok(f) => break (f, tmp_path),
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e),
+                }
+            };
+
+            let write_result = tmp_file.write_all(&self.buf).and_then(|_| tmp_file.flush());
+            drop(tmp_file);
+            if let Err(e) = write_result {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+
+            if let Err(e) = std::fs::rename(&tmp_path, path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+
+            Ok(())
+        }
+
+        /// Persists this secret to `path`, creating (or truncating) it.
+        ///
+        /// **On Windows there is currently no ACL restriction applied** —
+        /// the file inherits whatever permissions its containing directory
+        /// grants. That gap is a known, documented limitation, not a
+        /// silent claim of parity with the Unix behavior (see the Unix
+        /// implementation of this method for the restricted-permissions
+        /// guarantee it provides).
+        #[cfg(not(unix))]
+        pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
+            use std::io::Write;
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
             let mut f = options.open(path)?;
             f.write_all(&self.buf)?;
             f.flush()
@@ -166,6 +239,40 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "file should be owner-only read/write");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(all(feature = "std", unix))]
+    #[test]
+    fn save_to_file_tightens_permissions_on_preexisting_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "rusty_crypto_key_test_preexisting_{}.bin",
+            std::process::id()
+        ));
+
+        // Pre-create the target with loose (world/group-readable)
+        // permissions and placeholder content, as if it had been written
+        // by some other, less careful process.
+        std::fs::write(&path, b"placeholder").expect("setup write should succeed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("setup chmod should succeed");
+
+        let secret = SecretBytes::new(vec![9, 8, 7, 6, 5]);
+        secret.save_to_file(&path).expect("save should succeed");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "save_to_file must tighten permissions of a pre-existing readable file"
+        );
+
+        let loaded = SecretBytes::load_from_file(&path).expect("load should succeed");
+        assert_eq!(secret, loaded);
 
         let _ = std::fs::remove_file(&path);
     }

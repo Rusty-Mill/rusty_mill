@@ -50,16 +50,17 @@ pub struct JoinGroupRequest {
 
 impl JoinGroupRequest {
     /// Encodes the v0 body.
-    pub fn encode(&self, writer: &mut Writer) {
-        write_string(writer, &self.group_id);
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
+        write_string(writer, &self.group_id)?;
         write_i32(writer, self.session_timeout_ms);
-        write_string(writer, &self.member_id);
-        write_string(writer, &self.protocol_type);
+        write_string(writer, &self.member_id)?;
+        write_string(writer, &self.protocol_type)?;
         write_i32(writer, self.protocols.len() as i32);
         for protocol in &self.protocols {
-            write_string(writer, &protocol.name);
-            write_nullable_bytes(writer, Some(&protocol.metadata));
+            write_string(writer, &protocol.name)?;
+            write_nullable_bytes(writer, Some(&protocol.metadata))?;
         }
+        Ok(())
     }
 
     /// Decodes a v0 body -- symmetric with [`encode`](Self::encode),
@@ -158,17 +159,18 @@ impl JoinGroupResponse {
     /// Encodes the response body -- symmetric with
     /// [`decode`](Self::decode), for a fake broker standing in for
     /// tests.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i16(writer, self.error_code);
         write_i32(writer, self.generation_id);
-        write_string(writer, &self.group_protocol);
-        write_string(writer, &self.leader_id);
-        write_string(writer, &self.member_id);
+        write_string(writer, &self.group_protocol)?;
+        write_string(writer, &self.leader_id)?;
+        write_string(writer, &self.member_id)?;
         write_i32(writer, self.members.len() as i32);
         for member in &self.members {
-            write_string(writer, &member.member_id);
-            write_nullable_bytes(writer, Some(&member.metadata));
+            write_string(writer, &member.member_id)?;
+            write_nullable_bytes(writer, Some(&member.metadata))?;
         }
+        Ok(())
     }
 
     /// Whether this connection's own member ID was elected group
@@ -194,7 +196,8 @@ mod tests {
                 name: "range".to_string(),
                 metadata: crate::protocol::consumer_protocol::encode_subscription(&[
                     "manpower.personnel-lifecycle.assignments".to_string(),
-                ]),
+                ])
+                .unwrap(),
             }],
         }
     }
@@ -203,7 +206,7 @@ mod tests {
     fn request_encode_then_decode_round_trips() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -214,7 +217,7 @@ mod tests {
     fn request_sends_an_empty_member_id_on_first_join() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -224,7 +227,8 @@ mod tests {
 
     #[test]
     fn response_decodes_when_this_member_is_the_leader() {
-        let metadata = crate::protocol::consumer_protocol::encode_subscription(&["t".to_string()]);
+        let metadata =
+            crate::protocol::consumer_protocol::encode_subscription(&["t".to_string()]).unwrap();
         let response = JoinGroupResponse {
             error_code: 0,
             generation_id: 1,
@@ -237,7 +241,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -262,7 +266,7 @@ mod tests {
             members: vec![],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

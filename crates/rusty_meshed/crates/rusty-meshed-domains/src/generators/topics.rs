@@ -228,7 +228,7 @@ mod tests {
                     .collect(),
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
             send_response(&mut peer, header.correlation_id, writer.as_slice())
                 .await
                 .unwrap();
@@ -334,7 +334,7 @@ mod tests {
                     .collect(),
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
             send_response(&mut peer, header.correlation_id, writer.as_slice())
                 .await
                 .unwrap();

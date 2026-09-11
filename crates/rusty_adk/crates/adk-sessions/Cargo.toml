@@ -11,7 +11,7 @@ description = "Session, artifact, and memory service implementations for the Rus
 default = []
 # A durable SessionService backed by SQLite. `bundled` compiles SQLite itself,
 # so nothing needs to be installed on the host.
-sqlite = ["dep:rusqlite", "tokio/rt"]
+sqlite = ["dep:rusty_sqlite", "tokio/rt"]
 
 [dependencies]
 adk-core.workspace = true
@@ -20,9 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
-# Held at 0.37: newer libsqlite3-sys build scripts need `cfg_select!`, which is
-# not stable on this workspace's MSRV.
-rusqlite = { workspace = true, features = ["bundled"], optional = true }
+rusty_sqlite = { path = "../../../rusty_sqlite", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

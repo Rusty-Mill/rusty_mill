@@ -60,13 +60,13 @@ pub struct ProduceRequest {
 impl ProduceRequest {
     /// Encodes the v3 body. `transactional_id` is always sent as null
     /// -- this client has no transaction support.
-    pub fn encode(&self, writer: &mut Writer) {
-        write_nullable_string(writer, None);
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
+        write_nullable_string(writer, None)?;
         write_i16(writer, self.acks);
         write_i32(writer, self.timeout_ms);
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
@@ -75,6 +75,7 @@ impl ProduceRequest {
                 writer.write_bytes(&batch);
             }
         }
+        Ok(())
     }
 
     /// Decodes a v3 body -- symmetric with [`encode`](Self::encode),
@@ -179,10 +180,10 @@ impl ProduceResponse {
     /// Encodes the response body -- symmetric with
     /// [`decode`](Self::decode), for a fake broker standing in for
     /// tests.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i32(writer, self.topics.len() as i32);
         for topic in &self.topics {
-            write_string(writer, &topic.name);
+            write_string(writer, &topic.name)?;
             write_i32(writer, topic.partitions.len() as i32);
             for partition in &topic.partitions {
                 write_i32(writer, partition.partition_index);
@@ -192,6 +193,7 @@ impl ProduceResponse {
             }
         }
         write_i32(writer, self.throttle_time_ms);
+        Ok(())
     }
 }
 
@@ -225,7 +227,7 @@ mod tests {
     fn request_encodes_a_null_transactional_id_and_the_given_acks_timeout() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -243,7 +245,7 @@ mod tests {
     fn request_encode_then_decode_round_trips_topics_and_records() {
         let request = sample_request();
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -268,7 +270,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -291,7 +293,7 @@ mod tests {
             throttle_time_ms: 0,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -315,7 +317,7 @@ mod tests {
             throttle_time_ms: 0,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

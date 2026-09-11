@@ -54,6 +54,18 @@ pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
 }
 
+// SAFETY: `SpinLockGuard` only holds `&'a SpinLock<T>`, and `SpinLock<T>` is
+// `Sync` whenever `T: Send` (see the `unsafe impl` above). Left to
+// auto-derivation, that would make `SpinLockGuard<T>` itself `Sync` for any
+// `T: Send`, even when `T` is not `Sync` (e.g. `Cell<u32>`) — sharing
+// `&SpinLockGuard<T>` across threads would then let multiple threads call
+// `Deref` concurrently and obtain simultaneous `&T` references, racing
+// unsynchronized interior mutation through types like `Cell` that are
+// deliberately `!Sync`. This explicit impl overrides that unsound
+// auto-derivation: `SpinLockGuard<T>` is `Sync` only when `T: Sync`, which
+// is exactly the bound required to soundly hand out concurrent `&T`s.
+unsafe impl<'a, T: Sync> Sync for SpinLockGuard<'a, T> {}
+
 impl<'a, T> core::ops::Deref for SpinLockGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {
@@ -269,6 +281,60 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(*lock.lock(), 8000);
+    }
+
+    #[test]
+    fn spinlock_guard_sync_requires_target_sync() {
+        // Compiles only because `SpinLockGuard<T>: Sync` is bounded on
+        // `T: Sync` (not merely `T: Send`, which is the bug this guards
+        // against — see the `unsafe impl Sync for SpinLockGuard` SAFETY
+        // comment). `AtomicUsize: Sync`, so this instantiation is sound.
+        fn assert_sync<T: Sync>(_: &T) {}
+
+        let lock = SpinLock::new(AtomicUsize::new(0));
+        let guard = lock.lock();
+        assert_sync(&guard);
+    }
+
+    #[test]
+    fn spinlock_guard_shared_across_scoped_threads_for_sync_target() {
+        // A `SpinLockGuard<AtomicUsize>` held on the main thread can be
+        // borrowed by multiple worker threads at once, because
+        // `AtomicUsize: Sync` satisfies the guard's `Sync` bound. (Before
+        // the fix, `SpinLockGuard<T>` was unsoundly `Sync` for any
+        // `T: Send`, which would have let this same pattern compile for
+        // `!Sync` types like `Cell<u32>` too — see the module-level
+        // SAFETY comment.)
+        let lock = SpinLock::new(AtomicUsize::new(0));
+        let guard = lock.lock();
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..1000 {
+                        guard.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(guard.load(Ordering::SeqCst), 4000);
+    }
+
+    #[test]
+    fn spinlock_of_atomic_usize_works_across_scoped_threads() {
+        // A more typical usage: the `SpinLock` itself (not a single held
+        // guard) is shared by reference across scoped threads, each
+        // acquiring and releasing the lock independently.
+        let lock = SpinLock::new(AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..1000 {
+                        lock.lock().fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(lock.lock().load(Ordering::SeqCst), 4000);
     }
 
     #[test]

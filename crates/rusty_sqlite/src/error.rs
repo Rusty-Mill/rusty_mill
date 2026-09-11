@@ -26,9 +26,21 @@ pub enum Error {
     /// Migrations were registered out of order.
     OutOfOrderMigration { version: i64, previous: i64 },
 
+    /// A migration was registered with a non-positive `version`. Versions
+    /// are tracked via `PRAGMA user_version`, which is `0` for a fresh,
+    /// unmigrated database, so a migration at version `0` (or negative)
+    /// could never be distinguished from "nothing applied yet" and would
+    /// be silently skipped by [`crate::Migrations::run`].
+    InvalidMigrationVersion { version: i64 },
+
     /// A pooled connection could not be acquired within the pool's timeout.
     #[cfg(feature = "pool")]
     PoolTimeout,
+
+    /// A pool was configured with `max_size` of `0`, which can never
+    /// satisfy an acquire since no connection could ever be opened.
+    #[cfg(feature = "pool")]
+    InvalidPoolSize,
 }
 
 impl fmt::Display for Error {
@@ -58,8 +70,14 @@ impl fmt::Display for Error {
                 f,
                 "migrations must be registered in strictly increasing version order; version {version} was registered after version {previous}"
             ),
+            Error::InvalidMigrationVersion { version } => write!(
+                f,
+                "migration version {version} is invalid; versions must be positive (PRAGMA user_version starts at 0 on a fresh database)"
+            ),
             #[cfg(feature = "pool")]
             Error::PoolTimeout => write!(f, "timed out waiting for a pooled connection"),
+            #[cfg(feature = "pool")]
+            Error::InvalidPoolSize => write!(f, "pool max_size must be greater than 0"),
         }
     }
 }
@@ -69,9 +87,13 @@ impl std::error::Error for Error {
         match self {
             Error::Sqlite(e) => Some(e),
             Error::Migration { source, .. } => Some(source),
-            Error::SchemaTooNew { .. } | Error::OutOfOrderMigration { .. } => None,
+            Error::SchemaTooNew { .. }
+            | Error::OutOfOrderMigration { .. }
+            | Error::InvalidMigrationVersion { .. } => None,
             #[cfg(feature = "pool")]
             Error::PoolTimeout => None,
+            #[cfg(feature = "pool")]
+            Error::InvalidPoolSize => None,
         }
     }
 }

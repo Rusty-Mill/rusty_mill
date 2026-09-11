@@ -54,8 +54,9 @@ impl Config {
                 let key = key.trim().to_string();
                 let val = val.trim();
                 // Strip optional surrounding quotes
-                let val = if (val.starts_with('"') && val.ends_with('"'))
-                    || (val.starts_with('\'') && val.ends_with('\''))
+                let val = if val.len() >= 2
+                    && ((val.starts_with('"') && val.ends_with('"'))
+                        || (val.starts_with('\'') && val.ends_with('\'')))
                 {
                     &val[1..val.len() - 1]
                 } else {
@@ -142,5 +143,29 @@ ssl = true
         assert_eq!(cfg.get("database", "host"), Some("localhost"));
         assert_eq!(cfg.get("database", "port"), Some("5432"));
         assert_eq!(cfg.get_bool("database", "ssl"), Some(true));
+    }
+
+    #[test]
+    fn lone_quote_value_does_not_panic() {
+        let cfg = Config::parse("key='").unwrap();
+        assert_eq!(cfg.get_global("key"), Some("'"));
+
+        let cfg = Config::parse("key=\"").unwrap();
+        assert_eq!(cfg.get_global("key"), Some("\""));
+    }
+
+    #[test]
+    fn matched_quotes_still_strip_and_empty_quotes_yield_empty_string() {
+        let cfg = Config::parse("key=''").unwrap();
+        assert_eq!(cfg.get_global("key"), Some(""));
+
+        let cfg = Config::parse("key=\"\"").unwrap();
+        assert_eq!(cfg.get_global("key"), Some(""));
+
+        let cfg = Config::parse("key='v'").unwrap();
+        assert_eq!(cfg.get_global("key"), Some("v"));
+
+        let cfg = Config::parse("key=\"v\"").unwrap();
+        assert_eq!(cfg.get_global("key"), Some("v"));
     }
 }

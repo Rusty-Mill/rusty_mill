@@ -136,10 +136,20 @@ impl SessionService for InMemorySessionService {
             .iter()
             .filter(|((app, user, _), _)| app == app_name && user == user_id)
             .map(|(_, session)| {
-                // Listings omit history: callers use this to pick a thread, and
-                // materializing every event would be wasteful.
-                let mut summary = session.clone();
-                summary.events.clear();
+                // Listings omit history: callers use this to pick a thread,
+                // and materializing every event would be wasteful. Build the
+                // summary from the metadata/state fields directly instead of
+                // cloning the full session and clearing `events` afterward,
+                // which would clone (and immediately discard) every event
+                // payload while the store's lock is held.
+                let mut summary = Session {
+                    id: session.id.clone(),
+                    app_name: session.app_name.clone(),
+                    user_id: session.user_id.clone(),
+                    state: session.state.clone(),
+                    events: Vec::new(),
+                    last_update_time: session.last_update_time,
+                };
                 Self::hydrate(&store, &mut summary);
                 summary
             })

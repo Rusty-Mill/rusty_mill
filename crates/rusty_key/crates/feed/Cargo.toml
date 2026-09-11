@@ -19,13 +19,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # port replaced the external crate. `reqwest` still pulls external `url`
 # transitively -- this only retires the direct edge.
 rusty_url = { path = "../../../rusty_url" }
-# Was pinned at 0.32 for a stable-toolchain reason: libsqlite3-sys 0.38
-# (rusqlite 0.40)'s build script uses the unstable `cfg_select`, which does
-# not compile on stable. Bumped to 0.39 (-> libsqlite3-sys ^0.37.0, still
-# below the problematic 0.38) by the nexus merge, to unify on the single
-# rusqlite version Cargo's `links = "sqlite3"` rule requires
-# workspace-wide -- see the root Cargo.toml's `rusqlite` entry.
-rusqlite = { version = "0.39", features = ["bundled"] }
+# Direct rusqlite pin retired in favor of rusty_sqlite, this workspace's
+# sovereignty wrapper crate (a pure `pub use rusqlite;` re-export); it
+# already pins rusqlite 0.39 workspace-wide for the same
+# `links = "sqlite3"` / stable-toolchain reasons this crate used to
+# explain here directly -- see crates/rusty_sqlite/Cargo.toml.
+rusty_sqlite = { path = "../../../rusty_sqlite" }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

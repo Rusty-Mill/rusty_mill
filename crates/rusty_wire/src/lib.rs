@@ -246,25 +246,41 @@ impl Writer {
 
     /// Overwrite two bytes at `offset` with a big-endian `u16`.
     pub fn patch_u16_be(&mut self, offset: usize, v: u16) -> Result<()> {
-        if offset + 2 > self.buf.len() {
-            return Err(Error::InvalidValue {
+        let end = offset
+            .checked_add(2)
+            .filter(|&end| end <= self.buf.len())
+            .ok_or_else(|| Error::InvalidValue {
                 field: "patch offset",
                 value: offset.to_string(),
-            });
-        }
-        self.buf[offset..offset + 2].copy_from_slice(&v.to_be_bytes());
+            })?;
+        let slot = self
+            .buf
+            .get_mut(offset..end)
+            .ok_or_else(|| Error::InvalidValue {
+                field: "patch offset",
+                value: offset.to_string(),
+            })?;
+        slot.copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
 
     /// Overwrite four bytes at `offset` with a big-endian `u32`.
     pub fn patch_u32_be(&mut self, offset: usize, v: u32) -> Result<()> {
-        if offset + 4 > self.buf.len() {
-            return Err(Error::InvalidValue {
+        let end = offset
+            .checked_add(4)
+            .filter(|&end| end <= self.buf.len())
+            .ok_or_else(|| Error::InvalidValue {
                 field: "patch offset",
                 value: offset.to_string(),
-            });
-        }
-        self.buf[offset..offset + 4].copy_from_slice(&v.to_be_bytes());
+            })?;
+        let slot = self
+            .buf
+            .get_mut(offset..end)
+            .ok_or_else(|| Error::InvalidValue {
+                field: "patch offset",
+                value: offset.to_string(),
+            })?;
+        slot.copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
 
@@ -334,5 +350,47 @@ mod tests {
         w.write_bytes(&[0xAA, 0xBB]);
         w.patch_u16_be(0, w.len() as u16).unwrap();
         assert_eq!(w.into_vec(), [0x00, 0x04, 0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn patch_u16_be_offset_overflow_errors() {
+        let mut w = Writer::new();
+        w.write_bytes(&[0xAA, 0xBB]);
+        assert_eq!(
+            w.patch_u16_be(usize::MAX, 0x1234).unwrap_err(),
+            Error::InvalidValue {
+                field: "patch offset",
+                value: usize::MAX.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn patch_u32_be_offset_overflow_errors() {
+        let mut w = Writer::new();
+        w.write_bytes(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(
+            w.patch_u32_be(usize::MAX, 0xDEAD_BEEF).unwrap_err(),
+            Error::InvalidValue {
+                field: "patch offset",
+                value: usize::MAX.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn patch_u16_be_at_exact_end_of_buffer_succeeds() {
+        let mut w = Writer::new();
+        w.write_bytes(&[0xAA, 0xBB, 0x00, 0x00]);
+        w.patch_u16_be(2, 0x1234).unwrap();
+        assert_eq!(w.into_vec(), [0xAA, 0xBB, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn patch_u32_be_at_exact_end_of_buffer_succeeds() {
+        let mut w = Writer::new();
+        w.write_bytes(&[0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00]);
+        w.patch_u32_be(2, 0xDEAD_BEEF).unwrap();
+        assert_eq!(w.into_vec(), [0xAA, 0xBB, 0xDE, 0xAD, 0xBE, 0xEF]);
     }
 }

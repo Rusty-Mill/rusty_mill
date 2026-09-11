@@ -2,7 +2,7 @@
 
 use adk_core::{AdkError, Event, Result, Session, SessionService, State, StateScope};
 use async_trait::async_trait;
-use rusqlite::{params, Connection, OptionalExtension, Statement, ToSql};
+use rusty_sqlite::rusqlite::{params, Connection, OptionalExtension, Statement, ToSql};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;

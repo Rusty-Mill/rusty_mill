@@ -10,6 +10,7 @@
 use super::{derive_title, extract_text, snapshot, ScanContext, Source};
 use crate::model::{Conversation, Message, ParsedConversation, Role, SourceId};
 use crate::Result;
+use rusty_sqlite::rusqlite;
 use serde_json::Value;
 use std::path::PathBuf;
 

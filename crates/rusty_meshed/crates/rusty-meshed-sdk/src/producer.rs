@@ -583,7 +583,7 @@ mod tests {
                 .collect(),
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, correlation_id, writer.as_slice())
             .await
             .unwrap();
@@ -605,7 +605,7 @@ mod tests {
             throttle_time_ms: 0,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, &writer.into_vec())
             .await
             .unwrap();

@@ -28,15 +28,15 @@ const VERSION: i16 = 0;
 /// Encodes a `ConsumerProtocolSubscription`'s `topics` list -- what a
 /// `JoinGroupRequest`'s `metadata` field carries per declared
 /// protocol.
-pub fn encode_subscription(topics: &[String]) -> Vec<u8> {
+pub fn encode_subscription(topics: &[String]) -> Result<Vec<u8>, CodecError> {
     let mut writer = Writer::new();
     write_i16(&mut writer, VERSION);
     write_i32(&mut writer, topics.len() as i32);
     for topic in topics {
-        write_string(&mut writer, topic);
+        write_string(&mut writer, topic)?;
     }
-    write_nullable_bytes(&mut writer, None); // user_data
-    writer.into_vec()
+    write_nullable_bytes(&mut writer, None)?; // user_data
+    Ok(writer.into_vec())
 }
 
 /// Decodes a `ConsumerProtocolSubscription`, returning its `topics`
@@ -56,19 +56,19 @@ pub fn decode_subscription(bytes: &[u8]) -> Result<Vec<String>, CodecError> {
 
 /// Encodes a `ConsumerProtocolAssignment` -- `SyncGroupRequest`'s
 /// per-member `assignment` payload, as `(topic, partitions)` pairs.
-pub fn encode_assignment(partitions: &[(String, Vec<i32>)]) -> Vec<u8> {
+pub fn encode_assignment(partitions: &[(String, Vec<i32>)]) -> Result<Vec<u8>, CodecError> {
     let mut writer = Writer::new();
     write_i16(&mut writer, VERSION);
     write_i32(&mut writer, partitions.len() as i32);
     for (topic, partition_indexes) in partitions {
-        write_string(&mut writer, topic);
+        write_string(&mut writer, topic)?;
         write_i32(&mut writer, partition_indexes.len() as i32);
         for partition_index in partition_indexes {
             write_i32(&mut writer, *partition_index);
         }
     }
-    write_nullable_bytes(&mut writer, None); // user_data
-    writer.into_vec()
+    write_nullable_bytes(&mut writer, None)?; // user_data
+    Ok(writer.into_vec())
 }
 
 /// Decodes a `ConsumerProtocolAssignment`, returning its
@@ -102,13 +102,13 @@ mod tests {
             "manpower.personnel-lifecycle.assignments".to_string(),
             "manpower.personnel-lifecycle.promotions".to_string(),
         ];
-        let bytes = encode_subscription(&topics);
+        let bytes = encode_subscription(&topics).unwrap();
         assert_eq!(decode_subscription(&bytes).unwrap(), topics);
     }
 
     #[test]
     fn subscription_round_trips_an_empty_topic_list() {
-        let bytes = encode_subscription(&[]);
+        let bytes = encode_subscription(&[]).unwrap();
         assert!(decode_subscription(&bytes).unwrap().is_empty());
     }
 
@@ -124,13 +124,13 @@ mod tests {
                 vec![0],
             ),
         ];
-        let bytes = encode_assignment(&assignments);
+        let bytes = encode_assignment(&assignments).unwrap();
         assert_eq!(decode_assignment(&bytes).unwrap(), assignments);
     }
 
     #[test]
     fn assignment_round_trips_no_topics() {
-        let bytes = encode_assignment(&[]);
+        let bytes = encode_assignment(&[]).unwrap();
         assert!(decode_assignment(&bytes).unwrap().is_empty());
     }
 }
