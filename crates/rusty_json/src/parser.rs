@@ -54,6 +54,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The number of input bytes consumed so far.
+    #[cfg(feature = "serde")]
     pub(crate) fn byte_pos(&self) -> usize {
         self.pos
     }
@@ -251,7 +252,12 @@ fn utf8_len(byte: u8) -> usize {
     }
 }
 
-#[cfg(test)]
+// Exercises this module's tokenizing (numbers/strings/literals/arrays/
+// objects) through the generic serde-based `crate::from_str::<Value>` path.
+// The equivalent serde-free path (`Value::from_json_str`, same underlying
+// `Parser`) has its own coverage in `crate::value_io`'s tests, which run
+// regardless of the `serde` feature.
+#[cfg(all(test, feature = "serde"))]
 mod tests {
     use super::*;
     use crate::Map;

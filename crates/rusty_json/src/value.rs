@@ -28,6 +28,26 @@ impl Default for Value {
 }
 
 impl Value {
+    /// Parses a JSON value from a string slice, with **no dependency on
+    /// `serde`** -- works identically whether or not the `serde` feature is
+    /// enabled. Errors if any non-whitespace trailing content follows the
+    /// value. Equivalent to `s.parse::<Value>()`.
+    pub fn from_json_str(s: &str) -> Result<Value, crate::Error> {
+        crate::value_io::parse_str(s)
+    }
+
+    /// Writes this value as compact JSON text, with **no dependency on
+    /// `serde`**.
+    pub fn to_json_string(&self) -> alloc::string::String {
+        crate::value_io::to_json_string(self)
+    }
+
+    /// Writes this value as pretty-printed JSON text (two-space indent,
+    /// empty arrays/objects inline), with **no dependency on `serde`**.
+    pub fn to_json_string_pretty(&self) -> alloc::string::String {
+        crate::value_io::to_json_string_pretty(self)
+    }
+
     /// Looks up a key if this is an object, returning `None` otherwise
     /// (including when the key is absent).
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -332,9 +352,10 @@ impl core::str::FromStr for Value {
     type Err = crate::Error;
 
     /// Parses a JSON value from a string slice; delegates to
-    /// [`crate::from_str`].
+    /// [`Value::from_json_str`]. Available with the `serde` feature
+    /// disabled, unlike the generic [`crate::from_str`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::from_str(s)
+        Value::from_json_str(s)
     }
 }
 

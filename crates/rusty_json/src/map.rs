@@ -8,7 +8,9 @@ use alloc::collections::btree_map::{self, BTreeMap};
 use alloc::string::String;
 use core::fmt;
 use core::iter::FromIterator;
+#[cfg(feature = "serde")]
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+#[cfg(feature = "serde")]
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
 /// An owned JSON object: a string-keyed map of [`Value`]s, iterating in
@@ -394,6 +396,7 @@ impl<'a> VacantEntry<'a> {
     }
 }
 
+#[cfg(feature = "serde")]
 impl Serialize for Map {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -407,6 +410,7 @@ impl Serialize for Map {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for Map {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -566,6 +570,7 @@ mod tests {
         assert!(debug.contains("\"a\""));
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn serializes_and_deserializes_through_serde_json() {
         let map = m(&[("a", Value::Bool(true)), ("b", Value::Null)]);

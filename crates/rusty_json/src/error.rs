@@ -50,6 +50,7 @@ impl Error {
     /// A data-shape error: JSON parsed fine but didn't match what a
     /// `Deserialize` impl expected. Has no meaningful position, since it's
     /// raised after parsing succeeds; `line()`/`column()` are `0`.
+    #[cfg(feature = "serde")]
     fn data(msg: impl Into<String>) -> Self {
         Error {
             msg: msg.into(),
@@ -129,12 +130,14 @@ impl fmt::Display for Error {
 // supertrait regardless of serde's own `std` feature.
 impl core::error::Error for Error {}
 
+#[cfg(feature = "serde")]
 impl serde::de::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Error::data(alloc::format!("{msg}"))
     }
 }
 
+#[cfg(feature = "serde")]
 impl serde::ser::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Error::data(alloc::format!("{msg}"))
@@ -177,6 +180,7 @@ mod tests {
         assert!(!eof.is_syntax());
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn serde_custom_errors_classify_as_data() {
         let de_err = <Error as serde::de::Error>::custom("bad shape");

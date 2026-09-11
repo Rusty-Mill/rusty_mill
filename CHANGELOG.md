@@ -37,6 +37,18 @@ Removed / Fixed / Security, newest first.
   on `rusty_sqlite::rusqlite` instead of external `rusqlite` directly
   (repo-inspector Section 2 "rusqlite" row — a pure re-export, so this is
   an import-path change only, zero behavior change).
+- `rusty_json`'s `serde` dependency is now optional, behind a `serde`
+  feature that stays on by default (zero behavior change for existing
+  dependents). With `default-features = false`, the crate has no `serde`
+  dependency at all: `Value` parsing (`s.parse::<Value>()` /
+  `Value::from_json_str`) and writing (`Value::to_json_string`/
+  `Value::to_json_string_pretty`) work via a new direct recursive-descent
+  path (`src/value_io.rs`) that reuses the existing hand-rolled tokenizer
+  (`src/parser.rs`) and `Formatter` trait instead of going through
+  `serde::Deserializer`/`Serializer`. Unblocks repo-inspector Section 1 row
+  7 (`rusty_oauth`/`rusty_request`'s hand-rolled `Value` types, hand-rolled
+  specifically to avoid a `serde` dependency) from adopting `rusty_json` —
+  those two crates' own migration is a separate follow-up, not done here.
 
 ### Added
 - `crates/rusty_multimodal_db` — new workspace member: `baileyrd/rusty_multimodal_db`,

@@ -13,6 +13,35 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Make rusty_json's serde dependency optional
+**2026-09-11** · branch [`claude/clever-wright-y6qkyq`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/clever-wright-y6qkyq)
+
+Resumes `repo-inspector-report.md` Section 1 row 7 (hand-rolled JSON
+`Value` in `rusty_oauth`/`rusty_request`), left blocked in an earlier pass
+on `rusty_json` having a non-optional `serde` dependency — contradicting
+the exact "no `serde`" rationale both hand-rolled crates state in their own
+doc comments.
+
+- **Added:** a `serde` Cargo feature on `rusty_json`, on by default (zero
+  behavior change for its 16 existing workspace dependents — none needed
+  any change, spot-checked). With `default-features = false`, the crate
+  pulls in no `serde` dependency at all: `Value` parsing
+  (`s.parse::<Value>()` / `Value::from_json_str`) and writing
+  (`Value::to_json_string`/`Value::to_json_string_pretty`) go through a new
+  direct recursive-descent path (`src/value_io.rs`) that reuses the
+  existing hand-rolled tokenizer (`src/parser.rs`) and `Formatter` trait
+  instead of `serde::Deserializer`/`Serializer`. String-escaping logic
+  moved to a shared `src/escape.rs` so the serde-based and serde-free
+  writers can't drift apart. Verified standalone: full test suite green in
+  both feature configurations (`cargo test -p rusty_json` and
+  `--no-default-features --features std`), plus clippy clean in both.
+- **Not done here:** `rusty_oauth` and `rusty_request` still hand-roll
+  their own `Value` — this PR only removes the prerequisite blocking their
+  migration to `rusty_json`, which touches 14 and 4 call sites
+  respectively and is left as a separate, deliberately-scoped follow-up.
+
+---
+
 ## Migrate rusty_multimodal_db into the monorepo
 **2026-09-10** · branch [`claude/loving-bell-kntf9l`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/loving-bell-kntf9l)
 
