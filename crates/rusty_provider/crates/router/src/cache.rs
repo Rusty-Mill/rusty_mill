@@ -366,7 +366,11 @@ mod tests {
             "B's reinserted value should be the one retained"
         );
         assert!(cache.entries.contains_key(&key_c), "C should be present");
-        assert_eq!(cache.entries.len(), 2, "capacity 2 should be fully utilized");
+        assert_eq!(
+            cache.entries.len(),
+            2,
+            "capacity 2 should be fully utilized"
+        );
         assert_eq!(
             cache.order.len(),
             2,

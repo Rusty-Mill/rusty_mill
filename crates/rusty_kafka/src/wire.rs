@@ -77,7 +77,8 @@ pub(crate) fn write_nullable_string(
     match value {
         None => write_i16(writer, -1),
         Some(text) => {
-            let len = i16::try_from(text.len()).map_err(|_| CodecError::StringTooLong(text.len()))?;
+            let len =
+                i16::try_from(text.len()).map_err(|_| CodecError::StringTooLong(text.len()))?;
             write_i16(writer, len);
             writer.write_bytes(text.as_bytes());
         }
@@ -117,7 +118,10 @@ pub(crate) fn read_checked_array_len(
     let len = read_array_len(reader)?.max(0);
     let count = len as usize;
     if count.saturating_mul(min_element_len) > reader.remaining() {
-        return Err(CodecError::ArrayLengthExceedsBuffer(len, reader.remaining()));
+        return Err(CodecError::ArrayLengthExceedsBuffer(
+            len,
+            reader.remaining(),
+        ));
     }
     Ok(count)
 }
@@ -148,7 +152,8 @@ pub(crate) fn write_nullable_bytes(
     match value {
         None => write_i32(writer, -1),
         Some(bytes) => {
-            let len = i32::try_from(bytes.len()).map_err(|_| CodecError::BytesTooLong(bytes.len()))?;
+            let len =
+                i32::try_from(bytes.len()).map_err(|_| CodecError::BytesTooLong(bytes.len()))?;
             write_i32(writer, len);
             writer.write_bytes(bytes);
         }
@@ -284,7 +289,6 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         assert_eq!(read_i8(&mut reader).unwrap(), -1);
     }
-
 
     #[test]
     fn write_nullable_string_accepts_the_maximum_i16_length() {

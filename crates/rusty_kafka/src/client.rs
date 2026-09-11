@@ -570,7 +570,9 @@ mod tests {
                 }],
             };
             let mut response_body = Writer::new();
-            response.encode(&mut response_body, 1_735_689_600_000).unwrap();
+            response
+                .encode(&mut response_body, 1_735_689_600_000)
+                .unwrap();
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
 

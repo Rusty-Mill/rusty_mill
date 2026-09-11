@@ -293,7 +293,11 @@ impl OpDriver for ShortWriteDriver {
         let capped = buf_len.min(self.cap);
         self.inner.write_at(handle, buf_ptr, capped, pos, keepalive)
     }
-    fn fsync(&self, handle: u64, datasync: bool) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+    fn fsync(
+        &self,
+        handle: u64,
+        datasync: bool,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.fsync(handle, datasync)
     }
     fn fallocate(
@@ -304,7 +308,11 @@ impl OpDriver for ShortWriteDriver {
     ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.fallocate(handle, offset, len)
     }
-    fn set_len(&self, handle: u64, len: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+    fn set_len(
+        &self,
+        handle: u64,
+        len: u64,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.set_len(handle, len)
     }
     fn close(&self, handle: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
@@ -320,7 +328,10 @@ impl OpDriver for ShortWriteDriver {
     ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.rename(from, to)
     }
-    fn remove_file(&self, path: std::path::PathBuf) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+    fn remove_file(
+        &self,
+        path: std::path::PathBuf,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.remove_file(path)
     }
 }
@@ -395,7 +406,11 @@ impl OpDriver for ZeroProgressWriteDriver {
     ) -> rusty_tokio::io::UringBoxFuture<'static, (i32, Box<dyn std::any::Any + Send>)> {
         Box::pin(std::future::ready((0, keepalive)))
     }
-    fn fsync(&self, handle: u64, datasync: bool) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+    fn fsync(
+        &self,
+        handle: u64,
+        datasync: bool,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.fsync(handle, datasync)
     }
     fn fallocate(
@@ -406,7 +421,11 @@ impl OpDriver for ZeroProgressWriteDriver {
     ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.fallocate(handle, offset, len)
     }
-    fn set_len(&self, handle: u64, len: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+    fn set_len(
+        &self,
+        handle: u64,
+        len: u64,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.set_len(handle, len)
     }
     fn close(&self, handle: u64) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
@@ -422,7 +441,10 @@ impl OpDriver for ZeroProgressWriteDriver {
     ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.rename(from, to)
     }
-    fn remove_file(&self, path: std::path::PathBuf) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
+    fn remove_file(
+        &self,
+        path: std::path::PathBuf,
+    ) -> rusty_tokio::io::UringBoxFuture<'static, std::io::Result<()>> {
         self.inner.remove_file(path)
     }
 }
@@ -439,7 +461,11 @@ fn write_at_errors_cleanly_on_zero_forward_progress() {
         let file = UringFile::create_on(zero_progress, "/virtual/zero-progress.dat")
             .await
             .unwrap();
-        let err = file.write_at(b"never lands".to_vec(), 0).await.0.unwrap_err();
+        let err = file
+            .write_at(b"never lands".to_vec(), 0)
+            .await
+            .0
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
     });
 }

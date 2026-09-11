@@ -121,9 +121,9 @@ mod file {
                 Some(p) if !p.as_os_str().is_empty() => p,
                 _ => Path::new("."),
             };
-            let file_name = path
-                .file_name()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+            let file_name = path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
+            })?;
 
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let pid = std::process::id();

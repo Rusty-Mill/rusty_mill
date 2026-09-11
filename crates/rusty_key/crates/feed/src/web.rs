@@ -358,9 +358,7 @@ mod tests {
         // so byte index FETCH_CAP (50_000) lands mid-character.
         let body = format!("{}é{}", "a".repeat(49_999), "a".repeat(20));
         let url = spawn_raw_http_server(http_response_with_length(body.as_bytes()));
-        let text = fetch_and_strip(&url)
-            .await
-            .expect("fetch should not error");
+        let text = fetch_and_strip(&url).await.expect("fetch should not error");
         assert!(text.len() <= FETCH_CAP + "… (truncated)".len());
         assert!(text.ends_with("… (truncated)"));
         assert_eq!(text, format!("{}… (truncated)", "a".repeat(49_999)));
@@ -372,9 +370,7 @@ mod tests {
         // so byte index FETCH_CAP (50_000) lands mid-character.
         let body = format!("{}€{}", "a".repeat(49_999), "a".repeat(20));
         let url = spawn_raw_http_server(http_response_with_length(body.as_bytes()));
-        let text = fetch_and_strip(&url)
-            .await
-            .expect("fetch should not error");
+        let text = fetch_and_strip(&url).await.expect("fetch should not error");
         assert!(text.len() <= FETCH_CAP + "… (truncated)".len());
         assert!(text.ends_with("… (truncated)"));
         assert_eq!(text, format!("{}… (truncated)", "a".repeat(49_999)));
@@ -386,9 +382,7 @@ mod tests {
         // so byte index FETCH_CAP (50_000) lands mid-character.
         let body = format!("{}🎉{}", "a".repeat(49_998), "a".repeat(20));
         let url = spawn_raw_http_server(http_response_with_length(body.as_bytes()));
-        let text = fetch_and_strip(&url)
-            .await
-            .expect("fetch should not error");
+        let text = fetch_and_strip(&url).await.expect("fetch should not error");
         assert!(text.len() <= FETCH_CAP + "… (truncated)".len());
         assert!(text.ends_with("… (truncated)"));
         assert_eq!(text, format!("{}… (truncated)", "a".repeat(49_998)));
@@ -399,7 +393,10 @@ mod tests {
         let body = vec![b'a'; MAX_FETCH_BYTES + 500_000];
         let url = spawn_raw_http_server(http_response_with_length(&body));
         let result = fetch_and_strip(&url).await;
-        assert!(result.is_err(), "response over the receive budget must error");
+        assert!(
+            result.is_err(),
+            "response over the receive budget must error"
+        );
     }
 
     #[tokio::test]

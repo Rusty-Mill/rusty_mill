@@ -74,10 +74,7 @@ impl SearchIndex {
             .map(|(idx, doc)| (idx, rusty_simd::dot_product(&doc.embedding, query_vec)))
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
         scored.truncate(limit);
 
         scored
@@ -117,10 +114,7 @@ impl SearchIndex {
             }
         }
 
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
         scored.truncate(limit);
 
         scored
@@ -268,7 +262,9 @@ mod tests {
         // Incompatible documents must be excluded entirely, not ranked with a
         // fake 0.0 score that would outrank the valid negative-scoring doc.
         assert_eq!(hits.len(), 2);
-        assert!(hits.iter().all(|h| h.doc.id != "empty" && h.doc.id != "mismatch"));
+        assert!(hits
+            .iter()
+            .all(|h| h.doc.id != "empty" && h.doc.id != "mismatch"));
 
         // The valid positive-scoring doc must rank above the valid negative one.
         assert_eq!(hits[0].doc.id, "positive");

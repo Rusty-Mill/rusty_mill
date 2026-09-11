@@ -214,8 +214,16 @@ mod tests {
         let id = Uuid::new_v4();
         let simple = id.simple();
         assert_eq!(simple.len(), 32);
-        assert!(simple.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        assert_eq!(simple, id.to_string().chars().filter(|&c| c != '-').collect::<String>());
+        assert!(simple
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(
+            simple,
+            id.to_string()
+                .chars()
+                .filter(|&c| c != '-')
+                .collect::<String>()
+        );
     }
 
     #[test]

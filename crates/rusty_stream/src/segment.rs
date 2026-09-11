@@ -135,8 +135,7 @@ impl Segment {
                     Err(DecodeError::HeaderTruncated) => {
                         let missing = record::HEADER_LEN - have;
                         let more = vec![0u8; missing];
-                        let BufResult(result, more) =
-                            file.read_at(more, pos + have as u64).await;
+                        let BufResult(result, more) = file.read_at(more, pos + have as u64).await;
                         let n = result?;
                         if n == 0 {
                             // Genuinely nothing more on disk -- a real
@@ -151,8 +150,7 @@ impl Segment {
                         let total_needed = record::HEADER_LEN + declared as usize;
                         let missing = total_needed - have;
                         let more = vec![0u8; missing];
-                        let BufResult(result, more) =
-                            file.read_at(more, pos + have as u64).await;
+                        let BufResult(result, more) = file.read_at(more, pos + have as u64).await;
                         let n = result?;
                         if n == 0 {
                             file.set_len(pos).await?;
@@ -486,7 +484,12 @@ mod tests {
     }
 
     impl OpDriver for ShortReadDriver {
-        fn open(&self, path: PathBuf, flags: i32, mode: u32) -> UringBoxFuture<'static, std::io::Result<u64>> {
+        fn open(
+            &self,
+            path: PathBuf,
+            flags: i32,
+            mode: u32,
+        ) -> UringBoxFuture<'static, std::io::Result<u64>> {
             self.inner.open(path, flags, mode)
         }
         fn read_at(
@@ -508,12 +511,22 @@ mod tests {
             pos: u64,
             keepalive: Box<dyn Any + Send>,
         ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
-            self.inner.write_at(handle, buf_ptr, buf_len, pos, keepalive)
+            self.inner
+                .write_at(handle, buf_ptr, buf_len, pos, keepalive)
         }
-        fn fsync(&self, handle: u64, datasync: bool) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn fsync(
+            &self,
+            handle: u64,
+            datasync: bool,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.fsync(handle, datasync)
         }
-        fn fallocate(&self, handle: u64, offset: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn fallocate(
+            &self,
+            handle: u64,
+            offset: u64,
+            len: u64,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.fallocate(handle, offset, len)
         }
         fn set_len(&self, handle: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
@@ -525,7 +538,11 @@ mod tests {
         fn close_sync(&self, handle: u64) {
             self.inner.close_sync(handle)
         }
-        fn rename(&self, from: PathBuf, to: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn rename(
+            &self,
+            from: PathBuf,
+            to: PathBuf,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.rename(from, to)
         }
         fn remove_file(&self, path: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
@@ -582,7 +599,12 @@ mod tests {
     }
 
     impl OpDriver for ShortWriteDriver {
-        fn open(&self, path: PathBuf, flags: i32, mode: u32) -> UringBoxFuture<'static, std::io::Result<u64>> {
+        fn open(
+            &self,
+            path: PathBuf,
+            flags: i32,
+            mode: u32,
+        ) -> UringBoxFuture<'static, std::io::Result<u64>> {
             self.inner.open(path, flags, mode)
         }
         fn read_at(
@@ -606,10 +628,19 @@ mod tests {
             let capped = buf_len.min(self.cap);
             self.inner.write_at(handle, buf_ptr, capped, pos, keepalive)
         }
-        fn fsync(&self, handle: u64, datasync: bool) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn fsync(
+            &self,
+            handle: u64,
+            datasync: bool,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.fsync(handle, datasync)
         }
-        fn fallocate(&self, handle: u64, offset: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn fallocate(
+            &self,
+            handle: u64,
+            offset: u64,
+            len: u64,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.fallocate(handle, offset, len)
         }
         fn set_len(&self, handle: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
@@ -621,7 +652,11 @@ mod tests {
         fn close_sync(&self, handle: u64) {
             self.inner.close_sync(handle)
         }
-        fn rename(&self, from: PathBuf, to: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn rename(
+            &self,
+            from: PathBuf,
+            to: PathBuf,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.rename(from, to)
         }
         fn remove_file(&self, path: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
@@ -667,7 +702,12 @@ mod tests {
     }
 
     impl OpDriver for ZeroProgressWriteDriver {
-        fn open(&self, path: PathBuf, flags: i32, mode: u32) -> UringBoxFuture<'static, std::io::Result<u64>> {
+        fn open(
+            &self,
+            path: PathBuf,
+            flags: i32,
+            mode: u32,
+        ) -> UringBoxFuture<'static, std::io::Result<u64>> {
             self.inner.open(path, flags, mode)
         }
         fn read_at(
@@ -690,10 +730,19 @@ mod tests {
         ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
             Box::pin(std::future::ready((0, keepalive)))
         }
-        fn fsync(&self, handle: u64, datasync: bool) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn fsync(
+            &self,
+            handle: u64,
+            datasync: bool,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.fsync(handle, datasync)
         }
-        fn fallocate(&self, handle: u64, offset: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn fallocate(
+            &self,
+            handle: u64,
+            offset: u64,
+            len: u64,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.fallocate(handle, offset, len)
         }
         fn set_len(&self, handle: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
@@ -705,7 +754,11 @@ mod tests {
         fn close_sync(&self, handle: u64) {
             self.inner.close_sync(handle)
         }
-        fn rename(&self, from: PathBuf, to: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
+        fn rename(
+            &self,
+            from: PathBuf,
+            to: PathBuf,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
             self.inner.rename(from, to)
         }
         fn remove_file(&self, path: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
@@ -720,8 +773,13 @@ mod tests {
     async fn a_write_driver_reporting_zero_progress_errors_cleanly() {
         let sim = SimDriver::new();
         let zero_progress: Arc<dyn OpDriver> = Arc::new(ZeroProgressWriteDriver { inner: sim });
-        let result =
-            Segment::create_on(zero_progress, "/segments/zero.log", Offset(0), Epoch::INITIAL).await;
+        let result = Segment::create_on(
+            zero_progress,
+            "/segments/zero.log",
+            Offset(0),
+            Epoch::INITIAL,
+        )
+        .await;
         assert!(result.is_err());
     }
 }

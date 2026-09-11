@@ -286,9 +286,7 @@ mod tests {
         backend
             .index_batch(
                 "a",
-                vec![Document::new()
-                    .with_id("_auto_1")
-                    .set("title", "explicit")],
+                vec![Document::new().with_id("_auto_1").set("title", "explicit")],
             )
             .await
             .unwrap();
@@ -324,9 +322,7 @@ mod tests {
             .index_batch(
                 "a",
                 vec![
-                    Document::new()
-                        .with_id("_auto_1")
-                        .set("title", "explicit"),
+                    Document::new().with_id("_auto_1").set("title", "explicit"),
                     Document::new().set("title", "no id"),
                 ],
             )

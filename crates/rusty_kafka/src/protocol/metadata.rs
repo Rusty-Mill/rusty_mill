@@ -2,7 +2,9 @@
 //! list and, optionally, per-topic partition/leader/replica info.
 
 use crate::error::CodecError;
-use crate::wire::{read_checked_array_len, read_i16, read_i32, read_string, write_i32, write_string};
+use crate::wire::{
+    read_checked_array_len, read_i16, read_i32, read_string, write_i32, write_string,
+};
 use rusty_wire::{Reader, Writer};
 
 /// `MetadataRequest` v0. `topics: None` requests metadata for every
@@ -256,7 +258,6 @@ mod tests {
         assert!(response.topics.is_empty());
     }
 
-
     #[test]
     fn request_encode_accepts_a_topic_name_at_the_maximum_i16_length() {
         let request = MetadataRequest {
@@ -287,7 +288,10 @@ mod tests {
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         let err = MetadataResponse::decode(&mut reader).unwrap_err();
-        assert!(matches!(err, CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)));
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)
+        ));
     }
 
     #[test]
@@ -299,7 +303,10 @@ mod tests {
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         let err = MetadataResponse::decode(&mut reader).unwrap_err();
-        assert!(matches!(err, CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)));
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
     }
 
     #[test]
@@ -314,7 +321,10 @@ mod tests {
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         let err = MetadataResponse::decode(&mut reader).unwrap_err();
-        assert!(matches!(err, CodecError::ArrayLengthExceedsBuffer(i32::MAX, 3)));
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 3)
+        ));
     }
 
     #[test]
@@ -333,7 +343,10 @@ mod tests {
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         let err = MetadataResponse::decode(&mut reader).unwrap_err();
-        assert!(matches!(err, CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)));
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)
+        ));
     }
 
     #[test]
@@ -353,6 +366,9 @@ mod tests {
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         let err = MetadataResponse::decode(&mut reader).unwrap_err();
-        assert!(matches!(err, CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)));
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
     }
 }

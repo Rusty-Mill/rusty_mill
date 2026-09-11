@@ -195,7 +195,12 @@ impl DateTime {
         } else {
             let sign = if offset < 0 { '-' } else { '+' };
             let magnitude = offset.unsigned_abs();
-            format!("{}{:02}:{:02}", sign, magnitude / 3600, (magnitude % 3600) / 60)
+            format!(
+                "{}{:02}:{:02}",
+                sign,
+                magnitude / 3600,
+                (magnitude % 3600) / 60
+            )
         };
 
         format!(

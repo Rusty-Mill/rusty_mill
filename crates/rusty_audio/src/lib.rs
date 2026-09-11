@@ -109,7 +109,8 @@ fn resample_linear(
     // `from_rate` and `to_rate` are now known nonzero, but an extreme
     // (though individually valid) ratio between them can still force a
     // multi-gigabyte `Vec::with_capacity` request.
-    if !out_len_f64.is_finite() || out_len_f64 > samples.len() as f64 * MAX_RESAMPLE_EXPANSION as f64
+    if !out_len_f64.is_finite()
+        || out_len_f64 > samples.len() as f64 * MAX_RESAMPLE_EXPANSION as f64
     {
         return Err(ResampleError::ExcessiveExpansion);
     }
