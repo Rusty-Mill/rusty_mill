@@ -220,17 +220,27 @@ jobs:
           packages: ${{ needs.plan.outputs.packages }}
           windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
 
-      # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
-      # walking target/{debug,release} at runtime rather than through a
+      # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
+      # by walking target/{debug,release} at runtime rather than through a
       # Cargo dependency (see the root README's "How the crates relate") --
-      # mill-term only has a *library* dependency on rusty_git, so nothing
-      # in the dependency graph forces cargo to finish building rusty_git's
-      # own `rgit` binary before mill-term's test binary starts running. A
-      # separate, blocking build step first guarantees every selected
-      # workspace binary exists on disk before any test executes (see #12).
-      - name: Build
-        if: steps.scope.outputs.args != ''
-        run: cargo build ${{ steps.scope.outputs.args }} --all-features
+      # mill-term only has a *library* dependency on rusty_git, and none at
+      # all on rush/rusty_text, so nothing in the dependency graph forces
+      # cargo to finish building those binaries before mill-term's test
+      # binary starts running. A separate, blocking build step first
+      # guarantees those specific binaries exist on disk before any test
+      # executes (see #12).
+      #
+      # Scoped to just the three crates that own those binaries, not the
+      # job's full package selection (`--workspace` on a full sweep) --
+      # this used to build the entire selected scope a second time before
+      # `cargo nextest run` built it all again for test-cfg, roughly
+      # doubling compile time on every full-sweep run for a requirement
+      # that only ever concerns three small CLI-tool crates. Only runs
+      # when mill-term is actually in scope; every other PR skips this
+      # step entirely.
+      - name: Build (mill-term's sibling-binary prerequisites)
+        if: steps.scope.outputs.args != '' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'mill-term'))
+        run: cargo build -p rush -p rusty_git -p rusty_text --all-features
 
       - name: Install cargo-nextest
         if: steps.scope.outputs.args != ''
