@@ -1,14 +1,17 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (bootstrap commit).
+Last updated: 2026-09-12 (ADR-0002/ADR-0003 decided).
 
 ## Where this is
 
-**Bootstrap stage.** This commit establishes the crate cluster, the
-capability inventory, and the two open decision-requests that block further
-work — it contains **no port implementation logic**. Every `rusty-hister-*`
-crate compiles as an empty skeleton with a module doc comment pointing back
-to the capability inventory and the relevant ADR.
+**Bootstrap stage, architecture decided.** The crate cluster, capability
+inventory, and both engine/crawler decision-requests (ADR-0002, ADR-0003)
+are done — the user decided both directly rather than waiting on the
+recommended scoping spike. **Still no port implementation logic** in any
+`rusty-hister-*` crate; every one still compiles as an empty skeleton with
+a module doc comment pointing back to the capability inventory and the
+relevant ADR. Nothing in this update starts Phase 1-4 implementation —
+deciding the ADRs unblocks that work, it doesn't perform it.
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -29,20 +32,22 @@ TypeScript/Svelte and Manifest V3 respectively — "port to Rust" doesn't
 apply to them; what's tracked is that `rusty-hister-server`'s HTTP contract
 must stay byte-compatible with what they already call.
 
-## Blocking decisions (open)
+## Decided (no longer blocking)
 
-| ADR | Subject | Status |
-|---|---|---|
-| [ADR-0002](decisions/ADR-0002-search-indexing-engine-approach-proposal.md) | Search/indexing engine approach | **Proposed — awaiting sign-off** |
-| [ADR-0003](decisions/ADR-0003-js-rendering-crawler-approach-proposal.md) | JS-rendering crawler approach | **Proposed — awaiting sign-off** |
+| ADR | Subject | Status | Decision |
+|---|---|---|---|
+| [ADR-0002](decisions/ADR-0002-search-indexing-engine-approach-proposal.md) | Search/indexing engine approach | **Accepted** | `rusty_search` + `rusty-search-sqlite-fts5`; multi-language federation, `url_re:` filtering, and highlight rendering built as hister-layer composition, not backend changes; `sqlite-vec` (C extension, vendored) for SQLite semantic search, `pgvector` for Postgres |
+| [ADR-0003](decisions/ADR-0003-js-rendering-crawler-approach-proposal.md) | JS-rendering crawler approach | **Accepted** | `chromiumoxide` (Tier A adapter dependency) for the CDP path; WebDriver BiDi explicitly **descoped** for v1 |
 
-`rusty-hister-indexer`'s query-DSL-to-`Query`-tree compiler and
-`rusty-hister-vectorstore`'s storage side cannot start until ADR-0002
-resolves. `rusty-hister-crawler`'s `chromedp`- and `bidi`-equivalent
-backends cannot start until ADR-0003 resolves. The HTTP-only crawler
-backend, the extractor SDK, the model schema, the server route table, and
-the MCP tool surface are **not** blocked by either and can proceed in
-parallel — see `docs/roadmap/ROADMAP.md`.
+Both were decided directly by the user (baileyrd/Nano) on 2026-09-12,
+rather than after the scoping spike ADR-0002 recommended — see each ADR's
+own "Accepted risk (spike not run)" note for what that trades away.
+`rusty-hister-indexer`'s query-DSL-to-`Query`-tree compiler,
+`rusty-hister-vectorstore`'s storage side, and `rusty-hister-crawler`'s
+`chromedp`-equivalent (CDP) backend are now unblocked to start (roadmap
+Phases 3-4); none of that implementation has started yet as of this update.
+The `bidi`-equivalent backend is not merely unblocked-but-pending — it is
+now **out of v1 scope**, per ADR-0003's decision.
 
 ## Open items carried from the capability inventory (not blocking, but
 unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
@@ -68,8 +73,8 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 | `rusty-hister-core` | Skeleton only |
 | `rusty-hister-model` | Skeleton only |
 | `rusty-hister-extractor` | Skeleton only |
-| `rusty-hister-indexer` | Skeleton only — blocked on ADR-0002 |
-| `rusty-hister-vectorstore` | Skeleton only — storage side blocked on ADR-0002 |
-| `rusty-hister-crawler` | Skeleton only — JS-rendering backends blocked on ADR-0003 |
+| `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
+| `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
+| `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |
 | `rusty-hister-server` | Skeleton only |
 | `rusty-hister-mcp` | Skeleton only |

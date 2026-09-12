@@ -24,9 +24,9 @@ decision-requests that block indexer and crawler work. See
 | [`rusty-hister-core`](crates/rusty-hister-core) | `crates/rusty_hister/crates/rusty-hister-core` | Shared types, IDs, error types, and the `Document`/extractor-SDK data model |
 | [`rusty-hister-model`](crates/rusty-hister-model) | `crates/rusty_hister/crates/rusty-hister-model` | Persisted schema on `rusty_db` (dual SQLite/Postgres) — history, links, users, crawl jobs, embedding queue, sessions |
 | [`rusty-hister-extractor`](crates/rusty-hister-extractor) | `crates/rusty_hister/crates/rusty-hister-extractor` | Extractor SDK and the 20 built-in per-site/format content extractors |
-| [`rusty-hister-indexer`](crates/rusty-hister-indexer) | `crates/rusty_hister/crates/rusty-hister-indexer` | Query language + full-text indexing on `rusty_search` (engine choice pending ADR-0002) |
+| [`rusty-hister-indexer`](crates/rusty-hister-indexer) | `crates/rusty_hister/crates/rusty-hister-indexer` | Query language + full-text indexing on `rusty_search` + `rusty-search-sqlite-fts5` (ADR-0002) |
 | [`rusty-hister-vectorstore`](crates/rusty-hister-vectorstore) | `crates/rusty_hister/crates/rusty-hister-vectorstore` | Embedding pipeline and vector storage for semantic search |
-| [`rusty-hister-crawler`](crates/rusty-hister-crawler) | `crates/rusty_hister/crates/rusty-hister-crawler` | HTTP and JS-rendering crawler backends (JS-rendering approach pending ADR-0003) |
+| [`rusty-hister-crawler`](crates/rusty-hister-crawler) | `crates/rusty_hister/crates/rusty-hister-crawler` | HTTP and CDP (`chromiumoxide`) crawler backends; WebDriver BiDi descoped for v1 (ADR-0003) |
 | [`rusty-hister-server`](crates/rusty-hister-server) | `crates/rusty_hister/crates/rusty-hister-server` | HTTP/JSON API + WebSocket search protocol — the v1 backend surface |
 | [`rusty-hister-mcp`](crates/rusty-hister-mcp) | `crates/rusty_hister/crates/rusty-hister-mcp` | MCP JSON-RPC tool surface (search, get_preview, get_history) on `rusty_mcp` |
 

@@ -13,6 +13,44 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Decide rusty_hister's ADR-0002 and ADR-0003
+**2026-09-12** · branch [`claude/decide-hister-adr-0002-0003`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/decide-hister-adr-0002-0003)
+
+Decides the two open decision-requests from `rusty_hister`'s bootstrap
+(previous entry below), on the user's (baileyrd/Nano's) direct instruction
+("Decide ADR-0002 and ADR-0003 now"), ahead of ADR-0002's own recommended
+scoping spike — each ADR records that as an accepted risk, not a silently
+skipped step. No implementation code changes; docs only.
+
+- **Changed:** `crates/rusty_hister/docs/decisions/ADR-0002-…md` → Accepted.
+  Engine: `rusty_search` + `rusty-search-sqlite-fts5`, chosen over Tantivy
+  for single-SQLite-file cohesion with the model DB and with `sqlite-vec`
+  (below). Multi-language `IndexAlias` federation, `url_re:` custom
+  filtering, and the three highlight styles are decided as
+  `rusty-hister-indexer`-layer composition over `rusty-search-core`'s
+  `Query` tree, not changes to the shared `rusty_search` crate. BM25 parity
+  accepted as result-set, not byte-exact. Semantic-search storage:
+  vendored `sqlite-vec` C extension (SQLite path), `pgvector` (Postgres
+  path) — no pure-Rust reimplementation for v1.
+- **Changed:** `crates/rusty_hister/docs/decisions/ADR-0003-…md` → Accepted.
+  CDP crawler backend: `chromiumoxide` as a Tier A adapter dependency (root
+  ADR-0002's tiers), since Hister's own `chromedp` backend already wraps an
+  external library rather than hand-rolling CDP. WebDriver BiDi: **explicitly
+  descoped for v1** (not deferred) — its only advantage over CDP (no
+  driver-binary/library dependency) is moot once `chromiumoxide` is already
+  accepted; the Notion extractor's JS-rendering requirement is unaffected,
+  satisfied by the CDP backend.
+- **Changed:** `docs/PROJECT-STATUS.md` and `docs/roadmap/ROADMAP.md`
+  updated: Phase 3 (indexer + vectorstore) and Phase 4 (CDP crawler
+  backend) are unblocked; Phase 4's BiDi-equivalent line item is marked out
+  of v1 scope rather than merely blocked. Crate module doc comments in
+  `rusty-hister-{indexer,vectorstore,crawler}` updated to match.
+- **Not done here:** no implementation of either decision — the indexer,
+  vectorstore storage, or CDP crawler backend. That's Phase 3/4 work,
+  tracked but not started.
+
+---
+
 ## Bootstrap rusty_hister: a Rust port of asciimoo/hister
 **2026-09-12** · branch [`claude/hister-rust-port-quq3ho`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-rust-port-quq3ho)
 
