@@ -56,12 +56,26 @@ independent of ADR-0002/0003)
       express, so those three use raw SQL rendered dialect-portably via
       `Engine::dialect().placeholder(..)`; untested against real Postgres
       (no instance available), see PROJECT-STATUS.md's open items.
+- [x] `rusty-hister-model` (`WebSession` query layer): `session.go`'s
+      lookup/expiry helpers as `WebSession` associated functions —
+      `create`/`get`/`refresh`/`delete` (`refresh`, not `update`, to avoid
+      colliding with `#[derive(Mapped)]`'s own generated `update()`
+      instance method). Done — 7 new unit tests (50 total in the crate),
+      clippy/fmt clean. `create` is this crate's first database-assigned
+      surrogate key: `Mapped::insert()` always supplies the primary key's
+      current value, so `create` drops to a raw `INSERT` that omits `id`
+      and recovers the generated value dialect-appropriately (`RETURNING
+      id` on Postgres, `SELECT last_insert_rowid()` on SQLite) — the same
+      recipe `User`/`Link`/`History`/`HistoryLink`/`DocumentVersion` will
+      need for their own `create`s. The dialect-placeholder helper
+      introduced for the embedding queue is now shared (`crate::placeholders`,
+      hoisted to `lib.rs` on this second real call site).
 - `rusty-hister-model` (remaining query layer): the domain operations the
-  other six Go model files build on top of their tables — `history.go`'s
+  other five Go model files build on top of their tables — `history.go`'s
   search/pin/timeline queries, `user.go`'s auth/token helpers,
-  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`, `WebSession`'s
-  lookup/expiry helpers, and `SaveDocumentVersion`/`GetDocumentVersionsUntil`
-  — separate increments from the embedding queue above, same split
+  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`, and
+  `SaveDocumentVersion`/`GetDocumentVersionsUntil` — separate increments
+  from the embedding queue and `WebSession` above, same split
   `rusty-hister-extractor` used (mechanism before concrete extractors).
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive

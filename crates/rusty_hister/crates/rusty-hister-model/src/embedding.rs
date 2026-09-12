@@ -16,11 +16,8 @@
 //! `complete`, `fail`, `reset_in_progress`, `in_progress_exists`,
 //! `delete`) are plain enough to use `Select`/`Update`/`Delete` directly.
 
-use rusty_db::{prelude::*, Dialect};
-
-fn placeholders(dialect: &dyn Dialect, count: usize) -> Vec<String> {
-    (1..=count).map(|i| dialect.placeholder(i)).collect()
-}
+use crate::placeholders;
+use rusty_db::prelude::*;
 
 /// `EmbeddingJob.status` values (Go: untyped string constants
 /// `EmbeddingJobPending`/`EmbeddingJobInProgress`/`EmbeddingJobFailed`).
