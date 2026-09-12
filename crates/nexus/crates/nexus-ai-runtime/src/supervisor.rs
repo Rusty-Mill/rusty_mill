@@ -199,6 +199,15 @@ impl std::fmt::Debug for Supervisor {
             .field("proposals_pending", &self.proposals.pending_count())
             .field("triggers_registered", &self.triggers.len())
             .field("admission", &self.admission)
+            .field(
+                "admission_state",
+                &self
+                    .admission_state
+                    .counts
+                    .iter()
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }

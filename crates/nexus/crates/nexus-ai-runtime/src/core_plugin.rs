@@ -1636,7 +1636,10 @@ mod tests {
             &admission_config,
             &admission_tracker,
         );
-        assert!(first.is_ok(), "first submission under the cap must be admitted");
+        assert!(
+            first.is_ok(),
+            "first submission under the cap must be admitted"
+        );
 
         // The cap is 1 — a second concurrent SignalTriggered submission
         // must be rejected rather than spawned unconditionally.
@@ -1664,7 +1667,10 @@ mod tests {
             &admission_config,
             &admission_tracker,
         );
-        assert!(ambient.is_ok(), "a different session kind must not be blocked");
+        assert!(
+            ambient.is_ok(),
+            "a different session kind must not be blocked"
+        );
     }
 
     #[test]

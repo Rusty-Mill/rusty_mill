@@ -257,6 +257,9 @@ fn mcp_tool_name(server: &str, tool: &str) -> String {
     // and ("a", "bc") hash differently despite an identical concatenation.
     0xffu8.hash(&mut hasher);
     tool.hash(&mut hasher);
+    // Intentional: only the low 32 bits are needed for an 8-hex-char
+    // disambiguator, not the full 64-bit digest.
+    #[allow(clippy::cast_possible_truncation)]
     let digest = format!("{:08x}", hasher.finish() as u32);
     // Char-boundary safe: combined is ASCII after sanitize.
     let prefix_len = MAX_TOOL_NAME_LEN - digest.len() - 1;
@@ -308,7 +311,10 @@ mod tests {
         // 64 characters, so a naive `[..64]` slice would collide them.
         let combined_a = format!("mcp__{server}__{tool_a}");
         let combined_b = format!("mcp__{server}__{tool_b}");
-        assert_eq!(&combined_a[..MAX_TOOL_NAME_LEN], &combined_b[..MAX_TOOL_NAME_LEN]);
+        assert_eq!(
+            &combined_a[..MAX_TOOL_NAME_LEN],
+            &combined_b[..MAX_TOOL_NAME_LEN]
+        );
 
         let name_a = mcp_tool_name(server, &tool_a);
         let name_b = mcp_tool_name(server, &tool_b);

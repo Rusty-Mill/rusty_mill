@@ -32,14 +32,14 @@ pub mod core_plugin;
 /// DG-39 / PRD-14 §10 — runtime registry that lets plugins publish
 /// tools to the MCP server's exposed surface.
 pub mod dynamic_tools;
-/// Wire-mirror IPC arg/reply types — the authoritative contract that
-/// the schema generator and the shell consume (audit P1-3, #113).
-pub mod ipc;
 /// Cap-matrix-derived `internal = true` lookup used to keep the DG-39
 /// dynamic-tool registry from becoming a confused-deputy bypass of
 /// `nexus_kernel`'s Core-trust-only handler gate. Crate-internal —
 /// see [`core_plugin`] (registration) and [`server`] (invocation).
 mod internal_gate;
+/// Wire-mirror IPC arg/reply types — the authoritative contract that
+/// the schema generator and the shell consume (audit P1-3, #113).
+pub mod ipc;
 pub mod pool;
 mod server;
 

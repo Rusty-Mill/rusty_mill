@@ -40,9 +40,8 @@ mod tests {
         // call downstream reads only up to that first NUL) — a caller
         // asking for `"secret\0.txt"` would silently operate on `"secret"`
         // instead, the same class of bug `CString::new` guards against.
-        let err = to_wide("secret\0.txt").expect_err(
-            "a string with an embedded NUL should be rejected, not silently truncated",
-        );
+        let err = to_wide("secret\0.txt")
+            .expect_err("a string with an embedded NUL should be rejected, not silently truncated");
         assert_eq!(err, Win32Error::ERROR_INVALID_PARAMETER);
     }
 }

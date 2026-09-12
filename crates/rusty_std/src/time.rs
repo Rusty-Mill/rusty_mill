@@ -81,14 +81,14 @@ impl Instant {
         let now = Self::now();
         let secs = now.secs.saturating_sub(self.secs);
         let (secs, nanos) = if now.nanos < self.nanos {
-            (secs.saturating_sub(1), now.nanos + 1_000_000_000 - self.nanos)
+            (
+                secs.saturating_sub(1),
+                now.nanos + 1_000_000_000 - self.nanos,
+            )
         } else {
             (secs, now.nanos - self.nanos)
         };
-        Duration {
-            secs,
-            nanos,
-        }
+        Duration { secs, nanos }
     }
 }
 
@@ -106,7 +106,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         let elapsed = start.elapsed();
 
-        let elapsed_nanos = elapsed.as_secs() as u128 * 1_000_000_000 + elapsed.subsec_nanos() as u128;
+        let elapsed_nanos =
+            elapsed.as_secs() as u128 * 1_000_000_000 + elapsed.subsec_nanos() as u128;
         assert!(
             elapsed_nanos >= 10_000_000,
             "elapsed() reported {elapsed_nanos}ns after a real 20ms sleep -- \

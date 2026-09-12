@@ -282,7 +282,10 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(1),
             "oversized like_match should bail out quickly via the size guard"
         );
-        assert!(!matched, "oversized input should report a defined no-match result");
+        assert!(
+            !matched,
+            "oversized input should report a defined no-match result"
+        );
 
         let start = std::time::Instant::now();
         let matched = glob_match(&text, &pattern.replace('%', "*"));
@@ -290,6 +293,9 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(1),
             "oversized glob_match should bail out quickly via the size guard"
         );
-        assert!(!matched, "oversized input should report a defined no-match result");
+        assert!(
+            !matched,
+            "oversized input should report a defined no-match result"
+        );
     }
 }

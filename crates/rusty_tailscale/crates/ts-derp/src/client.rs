@@ -402,7 +402,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-
     #[test]
     fn url_parsing() {
         assert_eq!(
@@ -507,12 +506,15 @@ mod tests {
         });
 
         let url = format!("http://{addr}");
-        let result = DerpClient::connect_with_timeout(&url, &client_key, Duration::from_secs(5)).await;
+        let result =
+            DerpClient::connect_with_timeout(&url, &client_key, Duration::from_secs(5)).await;
 
         match result {
             Err(DerpError::BadServerInfo) => {}
             Err(other) => panic!("expected BadServerInfo, got: {other}"),
-            Ok(_) => panic!("handshake accepted an unvalidated ServerInfo frame sent after a KeepAlive"),
+            Ok(_) => {
+                panic!("handshake accepted an unvalidated ServerInfo frame sent after a KeepAlive")
+            }
         }
 
         server_task.await.unwrap();

@@ -518,7 +518,9 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
 
         let mut excess = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        excess.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        excess
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let mut buf = [0u8; 1];
         match excess.read(&mut buf) {
             Ok(0) => {} // closed, as expected

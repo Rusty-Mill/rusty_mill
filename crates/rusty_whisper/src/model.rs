@@ -429,8 +429,8 @@ mod tests {
         w32(&mut buf, 0); // n_mel
         w32(&mut buf, 0); // n_fft_bins
         w32(&mut buf, 0); // n_tokens
-        // Tensor descriptor declaring 4 dims — the fixed `dims` array only
-        // holds 3, so this used to panic on an out-of-bounds slice.
+                          // Tensor descriptor declaring 4 dims — the fixed `dims` array only
+                          // holds 3, so this used to panic on an out-of-bounds slice.
         w32(&mut buf, 4); // n_dims
         w32(&mut buf, 1); // name_len
         w32(&mut buf, 0); // dtype f32

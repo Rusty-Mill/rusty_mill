@@ -86,7 +86,10 @@ impl ChatBackend for AisfStageBackend {
         let skill_text = extract_skill_text(&messages[0].content)?;
 
         let scratch = new_scratch_dir(&self.stage)?;
-        std::fs::write(scratch.path().join(format!("{}.md", self.stage)), skill_text)?;
+        std::fs::write(
+            scratch.path().join(format!("{}.md", self.stage)),
+            skill_text,
+        )?;
 
         let mut child = tokio::process::Command::new(&self.binary_path)
             .arg("eval-stage")

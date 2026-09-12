@@ -188,7 +188,9 @@ mod tests {
         })
         .expect("TcpStream::connect should reach the real loopback listener");
 
-        stream.write_all(b"hello").expect("write_all should succeed");
+        stream
+            .write_all(b"hello")
+            .expect("write_all should succeed");
 
         let mut echoed = [0u8; 5];
         let mut read_total = 0;
@@ -201,7 +203,9 @@ mod tests {
         }
         assert_eq!(&echoed, b"hello");
 
-        accept_thread.join().expect("accept thread should not panic");
+        accept_thread
+            .join()
+            .expect("accept thread should not panic");
     }
 
     #[test]

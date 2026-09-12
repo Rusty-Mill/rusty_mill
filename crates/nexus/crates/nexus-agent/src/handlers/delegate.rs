@@ -763,7 +763,10 @@ mod tests {
         let err = delegate_shared(ctx, a).await.unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("nesting depth limit"), "actual: {msg}");
-        assert!(msg.contains(&MAX_DELEGATION_DEPTH.to_string()), "actual: {msg}");
+        assert!(
+            msg.contains(&MAX_DELEGATION_DEPTH.to_string()),
+            "actual: {msg}"
+        );
     }
 
     /// A depth one below the cap is still admitted (the check is `>=`, not

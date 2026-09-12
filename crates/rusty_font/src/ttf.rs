@@ -484,7 +484,11 @@ impl Font {
     /// outline concatenation. `cache` is the same memoization map the
     /// top-level [`Font::glyph_outline`] call created, threaded through so
     /// a component glyph referenced by more than one composite (directly
-    /// or transitively) is only ever resolved once.
+    /// or transitively) is only ever resolved once. (`min_x`/`min_y`/
+    /// `max_x`/`max_y` are a bbox accumulator threaded alongside the
+    /// recursion, not independent parameters a params struct would
+    /// meaningfully consolidate.)
+    #[allow(clippy::too_many_arguments)]
     fn parse_composite_glyph(
         &self,
         glyph_data: &[u8],

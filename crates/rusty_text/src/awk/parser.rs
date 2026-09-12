@@ -410,7 +410,11 @@ mod tests {
         // nesting level with no depth guard, overflowing the native stack
         // and aborting the process. With the guard this must return a
         // clean `Err` instead.
-        let src = format!("BEGIN{{print {}1{}}}", "(".repeat(10_000), ")".repeat(10_000));
+        let src = format!(
+            "BEGIN{{print {}1{}}}",
+            "(".repeat(10_000),
+            ")".repeat(10_000)
+        );
         let tokens = Lexer::new(&src).tokenize().unwrap();
         let result = Parser::new(tokens).parse_program();
         assert!(result.is_err());
@@ -441,7 +445,11 @@ mod tests {
     fn deeply_nested_program_via_public_entry_point_returns_err() {
         // Exercises the public entry point (`AwkProgram::parse`, used by
         // the `rawk` CLI) end to end rather than the internal `Parser`.
-        let src = format!("BEGIN{{print {}1{}}}", "(".repeat(10_000), ")".repeat(10_000));
+        let src = format!(
+            "BEGIN{{print {}1{}}}",
+            "(".repeat(10_000),
+            ")".repeat(10_000)
+        );
         let result = super::super::AwkProgram::parse(&src);
         assert!(result.is_err());
     }
