@@ -12068,6 +12068,7 @@ name = "rusty-hister-extractor"
 version = "0.1.0"
 dependencies = [
  "rusty-hister-core",
+ "rusty_json",
 ]
 
 [[package]]
