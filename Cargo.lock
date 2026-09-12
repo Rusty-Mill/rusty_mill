@@ -12089,6 +12089,7 @@ version = "0.1.0"
 dependencies = [
  "rusty-db",
  "rusty-hister-core",
+ "rusty_rand",
  "serde_json",
  "tokio",
 ]

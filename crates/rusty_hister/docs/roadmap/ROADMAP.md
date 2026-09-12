@@ -80,13 +80,28 @@ independent of ADR-0002/0003)
       document-versioning diff format/algorithm (capability inventory
       §11) stays a separate, undecided concern — this layer only stores
       and retrieves whatever diff text the caller already computed.
+- [x] `rusty-hister-model` (`CrawlJob` lifecycle query layer): `crawl.go`'s
+      job-level helpers as `CrawlJob` associated functions —
+      `generate_id`/`create`/`create_with_urls`/`get`/`update_status`/
+      `list`/`delete` (Go: `GenerateCrawlJobID`/`CreateCrawlJob`/
+      `CreateNamedCrawlJobWithURLs`/`GetCrawlJob`/`UpdateCrawlJobStatus`/
+      `ListCrawlJobs`/`DeleteCrawlJob`). Done — 9 new unit tests (65 total
+      in the crate), clippy/fmt clean. `generate_id` uses the existing
+      first-party `rusty_rand` crate (sovereignty check: already in this
+      workspace, so no new external `rand` dependency). `create_with_urls`
+      atomically creates a job and its initial URL queue inside a
+      `Transaction`, retrying with a `-2`/`-3`/... suffix on id collision —
+      both that retry and the per-URL dedup need `ON CONFLICT DO NOTHING`,
+      so it drops to raw SQL, same pattern as `EmbeddingJob::enqueue`.
+      `CrawlURL`'s own queue mechanics (bulk insert, per-URL status
+      updates, the `ForEach*` streaming iterators, job stats) are a
+      separate, not-yet-started increment.
 - `rusty-hister-model` (remaining query layer): the domain operations the
-  other three Go model files build on top of their tables — `history.go`'s
-  search/pin/timeline queries, `user.go`'s auth/token helpers, and
-  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs` — separate increments
-  from the embedding queue, `WebSession`, and `DocumentVersion` above,
-  same split `rusty-hister-extractor` used (mechanism before concrete
-  extractors).
+  other two Go model files build on top of their tables — `history.go`'s
+  search/pin/timeline queries and `user.go`'s auth/token helpers —
+  separate increments from the embedding queue, `WebSession`,
+  `DocumentVersion`, and `CrawlJob` above, same split
+  `rusty-hister-extractor` used (mechanism before concrete extractors).
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive
       duplicate rejection), the two-phase enrich-then-extract chain,

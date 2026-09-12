@@ -1,7 +1,7 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s
-`DocumentVersion` query layer).
+Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s `CrawlJob`
+lifecycle query layer).
 
 ## Where this is
 
@@ -59,9 +59,24 @@ licensing policy) are settled. Three crates now have real implementation:
   for `save`. The document-versioning diff format/algorithm itself
   (capability inventory §11) stays a separate, not-yet-decided concern —
   this crate only stores whatever diff text the caller already computed.
-  The remaining four domain files' query-layer helpers (`history.go`'s
-  search/pin/timeline queries, `user.go`'s auth helpers, `CreateCrawlJob`/
-  `CreateNamedCrawlJobWithURLs`) are still a separate, not-yet-started
+  **`CrawlJob`'s own lifecycle is ported too**: `generate_id`/`create`/
+  `create_with_urls`/`get`/`update_status`/`list`/`delete` (Go:
+  `GenerateCrawlJobID`/`CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`/
+  `GetCrawlJob`/`UpdateCrawlJobStatus`/`ListCrawlJobs`/`DeleteCrawlJob`).
+  `generate_id` uses the existing first-party `rusty_rand` crate for its
+  OS-backed CSPRNG bytes rather than adding the external `rand` crate — a
+  sovereignty-loop pass found `rusty_rand` already exists in this
+  workspace precisely to avoid that. `create_with_urls`'s job-id-collision
+  retry loop and its per-URL dedup both need `ON CONFLICT DO NOTHING`
+  inside one atomic unit, so it drops to raw SQL inside a `Transaction`
+  (`Engine::begin()`/`Transaction::execute`/`commit`) — the same
+  raw-SQL-for-conflict-handling pattern as `EmbeddingJob::enqueue`,
+  extended here to a multi-statement transaction. `CrawlURL`'s own queue
+  mechanics (bulk insert, per-URL status updates, the streaming
+  iterators, job stats) are a separate, not-yet-started increment — this
+  file's query layer covers `CrawlJob` only. The remaining two domain
+  files' query-layer helpers (`history.go`'s search/pin/timeline queries,
+  `user.go`'s auth helpers) are still a separate, not-yet-started
   increment.
 
 All three have unit tests, `clippy`, and `fmt` clean. Still not started:
@@ -150,17 +165,20 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
   decide the format, so this item is unaffected by that increment landing.
 - `rusty-hister-model`'s remaining query-layer helpers (the domain
   operations each Go model file builds on top of its table — the
-  embedding-queue state machine, `WebSession`, and `DocumentVersion` are
-  now done, see the crate status table below — leaving `history.go`
-  search/pin/timeline queries, `user.go` auth helpers, and crawl-job
-  lifecycle) — deliberately deferred past the schema increment, the same
-  split `rusty-hister-extractor` used (mechanism before concrete
-  extractors); not yet started.
+  embedding-queue state machine, `WebSession`, `DocumentVersion`, and
+  `CrawlJob`'s own lifecycle are now done, see the crate status table
+  below — leaving `history.go` search/pin/timeline queries, `user.go`
+  auth helpers, and `CrawlURL`'s queue mechanics: bulk insert, per-URL
+  status updates, the `ForEach*` streaming iterators, job stats) —
+  deliberately deferred past the schema increment, the same split
+  `rusty-hister-extractor` used (mechanism before concrete extractors);
+  not yet started.
 - Postgres path for `rusty-hister-model`'s raw-SQL query-layer functions
   (`EmbeddingJob::enqueue`/`retry`/`release`, `WebSession::create`,
-  `DocumentVersion::save`) is untested — only SQLite is exercised in unit
-  tests (no Postgres available in this environment). The SQL is written
-  to be dialect-portable (ANSI-standard `ON CONFLICT ... DO UPDATE SET`/
+  `DocumentVersion::save`, `CrawlJob::create_with_urls`) is untested —
+  only SQLite is exercised in unit tests (no Postgres available in this
+  environment). The SQL is written to be dialect-portable (ANSI-standard
+  `ON CONFLICT ... DO UPDATE SET`/`ON CONFLICT ... DO NOTHING`/
   `CASE WHEN`/`RETURNING`, placeholders rendered per-dialect via
   `Engine::dialect().placeholder(..)`, and the `RETURNING`-vs-
   `last_insert_rowid()` branch keyed off `Dialect::supports_returning()`)
@@ -173,7 +191,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 | Crate | Status |
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
-| `rusty-hister-model` | **In progress** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), and `DocumentVersion`'s save/move/count/list helpers (5 functions) done; the other three domain files' query helpers not yet started. 56 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior), clippy/fmt clean. |
+| `rusty-hister-model` | **In progress** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), and `CrawlJob`'s own lifecycle (7 functions, including the atomic job-plus-initial-queue creation with id-collision retry) done; `history.go`/`user.go`'s query helpers and `CrawlURL`'s queue mechanics not yet started. 65 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`'s create/get/update_status/list/delete and the id-collision-retry/empty-URL-list-rejection behavior of `create_with_urls`), clippy/fmt clean. |
 | `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging). 18 unit tests, clippy/fmt clean. No concrete extractors yet. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
