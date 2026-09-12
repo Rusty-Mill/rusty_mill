@@ -67,6 +67,12 @@ pub enum McpError {
     /// A wrapped tool-dispatch error.
     #[error(transparent)]
     Tool(#[from] rk_feed::ToolError),
+    /// A configured server name contains the `__` tool-namespacing delimiter,
+    /// which would make `mcp__<server>__<tool>` splitting ambiguous (a
+    /// non-allowlisted server named `"<allowed>__side"` could otherwise be
+    /// misattributed to an allowlisted server's prefix).
+    #[error("mcp server name {0:?} must not contain '__' (reserved for tool namespacing)")]
+    InvalidServerName(String),
     /// A configuration error.
     #[error(transparent)]
     Config(#[from] rk_config::ConfigError),

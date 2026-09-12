@@ -128,13 +128,20 @@ pub fn reconcile(conn: &Connection, forge_root: &Path) -> Result<ReconcileDelta,
             };
             let parsed = parse_markdown(&content)?;
             // Clean up orphaned FTS rows before hard-deleting the file row.
-            conn.execute(
+            // BL-15: wrapped in a transaction so a mid-sequence failure
+            // (e.g. insert_file erroring after delete_file already ran)
+            // rolls back cleanly instead of permanently dropping the file
+            // from the index. refresh_code_symbols runs after commit with
+            // its own inner transaction, matching lib.rs::index_file_content.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "DELETE FROM fts_blocks WHERE file_path = ?1",
                 rusqlite::params![rel_path],
             )?;
-            delete_file(conn, record.id)?;
+            delete_file(&tx, record.id)?;
             let file_type = infer_file_type(rel_path);
-            insert_file(conn, rel_path, &file_type, size_bytes, &parsed)?;
+            insert_file(&tx, rel_path, &file_type, size_bytes, &parsed)?;
+            tx.commit()?;
             refresh_code_symbols(conn, rel_path, &content);
             if record.is_deleted {
                 delta.created += 1;
@@ -158,20 +165,25 @@ pub fn reconcile(conn: &Connection, forge_root: &Path) -> Result<ReconcileDelta,
                 // Rename: update path in-place (and clear any soft-delete
                 // flag, in case we're reviving a deleted row at a new path),
                 // also update fts_blocks file_path.
-                conn.execute(
+                // BL-15: wrapped in a transaction so a mid-sequence
+                // failure rolls back cleanly instead of leaving the
+                // rename half-applied across files/fts_blocks/code_symbols.
+                let tx = conn.unchecked_transaction()?;
+                tx.execute(
                     "UPDATE files SET path = ?1, is_deleted = 0 WHERE id = ?2",
                     rusqlite::params![rel_path, old_record.id.cast_signed()],
                 )?;
-                conn.execute(
+                tx.execute(
                     "UPDATE fts_blocks SET file_path = ?1 WHERE file_path = ?2",
                     rusqlite::params![rel_path, &old_record.path],
                 )?;
                 // BL-114: re-key any code symbols under the new path so
                 // queries by path still resolve after a rename.
-                conn.execute(
+                tx.execute(
                     "UPDATE code_symbols SET path = ?1 WHERE path = ?2",
                     rusqlite::params![rel_path, &old_record.path],
                 )?;
+                tx.commit()?;
                 renamed_source_ids.insert(old_record.id);
                 delta.renamed += 1;
             } else {
@@ -511,6 +523,67 @@ mod tests {
         let all_files = query_files(&conn, &filter).unwrap();
         assert_eq!(all_files.len(), 1);
         assert!(all_files[0].is_deleted);
+    }
+
+    // ── 4b. reconcile_modified_file_replace_is_transactional ──────────────────
+    #[test]
+    fn reconcile_modified_file_replace_is_transactional() {
+        // Finding 15: the modified-file replace branch (delete_file +
+        // insert_file) must be atomic. Simulate a failure injected
+        // between the two steps and assert the original row survives
+        // intact rather than being silently dropped from the index.
+        let dir = TempDir::new().unwrap();
+        let forge_root = dir.path();
+        std::fs::create_dir_all(forge_root.join("notes")).unwrap();
+        write_file(forge_root, "notes/note.md", "# Original\n");
+
+        let conn = setup_db();
+        let delta1 = reconcile(&conn, forge_root).unwrap();
+        assert_eq!(delta1.created, 1);
+
+        let before = query_files(&conn, &FileFilter::default()).unwrap();
+        assert_eq!(before.len(), 1);
+        let original = before[0].clone();
+
+        // Modify the file on disk so the next reconcile takes the
+        // modified-file replace branch.
+        write_file(forge_root, "notes/note.md", "# Modified content\n");
+
+        // Inject a failure between delete_file and insert_file: a
+        // trigger that rejects the very `INSERT INTO files` statement
+        // insert_file issues to re-create the row, simulating a
+        // transient SQLite failure mid-replace.
+        conn.execute_batch(
+            "CREATE TRIGGER fail_note_reinsert
+             BEFORE INSERT ON files
+             WHEN NEW.path = 'notes/note.md'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected failure for transaction test');
+             END;",
+        )
+        .unwrap();
+
+        let result = reconcile(&conn, forge_root);
+        assert!(
+            result.is_err(),
+            "expected reconcile to surface the injected insert_file failure"
+        );
+
+        conn.execute_batch("DROP TRIGGER fail_note_reinsert;")
+            .unwrap();
+
+        // The delete_file + insert_file sequence must be atomic: a
+        // failure partway through must roll back the delete, leaving
+        // the original row (and its content_hash) intact rather than
+        // gone from the index.
+        let after = query_files(&conn, &FileFilter::default()).unwrap();
+        assert_eq!(
+            after.len(),
+            1,
+            "original file row must survive a rolled-back replace"
+        );
+        assert_eq!(after[0].id, original.id);
+        assert_eq!(after[0].content_hash, original.content_hash);
     }
 
     // ── 5. reconcile_detects_renamed_files ────────────────────────────────────

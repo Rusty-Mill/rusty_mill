@@ -125,13 +125,26 @@ where
     // certainly a protocol bug or a server going off-piste, and we
     // don't want to OOM the host trying to honour it.
     const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+    // Guards the header block itself against a peer that never
+    // terminates a header line (or never terminates the block at all),
+    // independent of and prior to the `Content-Length` cap above.
+    const MAX_HEADER_BYTES: usize = 8 * 1024;
     // Header block: zero or more `Key: Value\r\n` lines, terminated by
     // an empty line (`\r\n`).
     let mut content_length: Option<usize> = None;
     let mut header_bytes = 0usize;
     loop {
+        let remaining = MAX_HEADER_BYTES.saturating_sub(header_bytes);
+        if remaining == 0 {
+            return Err(TransportError::BadHeader(format!(
+                "header block exceeds {MAX_HEADER_BYTES}-byte cap"
+            )));
+        }
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
+        let n = (&mut *reader)
+            .take(remaining as u64)
+            .read_line(&mut line)
+            .await?;
         if n == 0 {
             // EOF before any header — clean exit.
             if header_bytes == 0 {
@@ -140,6 +153,13 @@ where
             return Err(TransportError::BadHeader(
                 "stream closed mid-header".to_string(),
             ));
+        }
+        if n == remaining && !line.ends_with('\n') {
+            // The artificial cap above (not a real newline) is what
+            // stopped this read: the line itself is oversized.
+            return Err(TransportError::BadHeader(format!(
+                "header line exceeds {MAX_HEADER_BYTES}-byte cap"
+            )));
         }
         header_bytes += n;
         // `read_line` keeps the `\n`. LSP uses `\r\n`; tolerate either.
@@ -278,5 +298,36 @@ mod tests {
             TransportError::BadHeader(s) => assert!(s.contains("cap")),
             other => panic!("expected BadHeader, got {other:?}"),
         }
+    }
+
+    /// A reader that never produces a `\n` and never reaches EOF -- the
+    /// shape of a hostile/broken peer that would otherwise grow the
+    /// header-line buffer without bound.
+    struct EndlessLine;
+
+    impl tokio::io::AsyncRead for EndlessLine {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let fill = vec![b'a'; buf.remaining()];
+            buf.put_slice(&fill);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_unterminated_header_line_is_rejected_not_unbounded() {
+        let mut reader = BufReader::new(EndlessLine);
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), read_message(&mut reader))
+                .await;
+        let message =
+            result.expect("read_message must not hang reading an unterminated header line");
+        assert!(
+            matches!(message, Err(TransportError::BadHeader(_))),
+            "an unterminated, oversized header line must be rejected"
+        );
     }
 }

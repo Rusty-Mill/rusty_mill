@@ -17,6 +17,7 @@ rusty_serde = { workspace = true }
 # rather than being replaced by it - see convert.rs.
 serde_json = { workspace = true }
 rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
+percent-encoding = "2"
 tokio = { workspace = true, features = ["sync", "time"] }
 rusty_uuid = { path = "../../../rusty_uuid" }
 

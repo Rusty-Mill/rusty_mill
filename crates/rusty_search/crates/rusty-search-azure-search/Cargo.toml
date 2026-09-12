@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
 tokio = { workspace = true, features = ["sync"] }
 rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_time = { path = "../../../rusty_time" }
 
 [dev-dependencies]
 tokio = { workspace = true }

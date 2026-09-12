@@ -1015,7 +1015,7 @@ fn edit_is_atomic_across_sections() {
     // Section for a.md is valid; section for b.md carries a stale TAG.
     let tag_a = nexus_hashline::tag("one\n");
     let patch =
-        format!("[notes/a.md#{tag_a}]\nSWAP 1.=1:\n+ONE\n\n[notes/b.md#0000]\nSWAP 1.=1:\n+TWO\n");
+        format!("[notes/a.md#{tag_a}]\nSWAP 1.=1:\n+ONE\n\n[notes/b.md#0000000000000000]\nSWAP 1.=1:\n+TWO\n");
     let err = crate::handlers::files::edit_file(
         &engine,
         &nexus_hashline::SnapshotStore::new(),
@@ -1039,7 +1039,7 @@ fn edit_stale_tag_errors_without_writing() {
         .write_file("notes/s.md", b"current\n")
         .expect("write");
 
-    let patch = "[notes/s.md#0000]\nSWAP 1.=1:\n+x\n";
+    let patch = "[notes/s.md#0000000000000000]\nSWAP 1.=1:\n+x\n";
     let err = crate::handlers::files::edit_file(
         &engine,
         &nexus_hashline::SnapshotStore::new(),

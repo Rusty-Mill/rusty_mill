@@ -21,6 +21,10 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWr
 const CONTENT_LENGTH: &str = "content-length";
 /// Guards against a malformed/hostile `Content-Length` exhausting memory.
 const MAX_CONTENT_LENGTH: usize = 256 * 1024 * 1024;
+/// Guards against a peer that never terminates a header line (or never
+/// terminates the header block) from growing the read buffer without
+/// bound, independent of and prior to the `Content-Length` check above.
+const MAX_HEADER_BYTES: usize = 8 * 1024;
 
 /// Read a single framed [`Message`] from `reader`.
 ///
@@ -58,10 +62,20 @@ where
     let mut content_length: Option<usize> = None;
     let mut line = String::new();
     let mut saw_any_byte = false;
+    let mut header_bytes = 0usize;
 
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
+        let remaining = MAX_HEADER_BYTES.saturating_sub(header_bytes);
+        if remaining == 0 {
+            return Err(Error::protocol(format!(
+                "header block exceeds {MAX_HEADER_BYTES}-byte cap"
+            )));
+        }
+        let bytes_read = (&mut *reader)
+            .take(remaining as u64)
+            .read_line(&mut line)
+            .await?;
         if bytes_read == 0 {
             // EOF. Clean only if it lands exactly on a frame boundary.
             return if saw_any_byte {
@@ -70,7 +84,15 @@ where
                 Ok(None)
             };
         }
+        if bytes_read == remaining && !line.ends_with('\n') {
+            // The artificial cap above (not a real newline) is what
+            // stopped this read: the line itself is oversized.
+            return Err(Error::protocol(format!(
+                "header line exceeds {MAX_HEADER_BYTES}-byte cap"
+            )));
+        }
         saw_any_byte = true;
+        header_bytes += bytes_read;
 
         // A bare CRLF (or LF) terminates the header block.
         let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -201,6 +223,37 @@ mod tests {
     #[tokio::test]
     async fn malformed_header_line_is_an_error() {
         assert!(parse(b"not a header\r\n\r\n").await.is_err());
+    }
+
+    /// A reader that never produces a `\n` and never reaches EOF -- the
+    /// shape of a hostile/broken peer that would otherwise grow the
+    /// header-line buffer without bound.
+    struct EndlessLine;
+
+    impl tokio::io::AsyncRead for EndlessLine {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let fill = vec![b'a'; buf.remaining()];
+            buf.put_slice(&fill);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_unterminated_header_line_is_rejected_not_unbounded() {
+        let mut reader = buffered(EndlessLine);
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), read_message(&mut reader))
+                .await;
+        let message =
+            result.expect("read_message must not hang reading an unterminated header line");
+        assert!(
+            message.is_err(),
+            "an unterminated, oversized header line must be rejected"
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use crate::engine::{Engine, Transaction};
 use crate::error::{Error, Result};
 use crate::mapping::{Entity, FromRow, Identifiable, Lifecycle, Mapped};
 use crate::migration::{self, Migration};
-use crate::query::{BulkInsert, Column, Delete, Expr, Insert, Select, Table, ToSql, Update};
+use crate::query::{BinOp, BulkInsert, Column, Delete, Expr, Insert, Select, Table, ToSql, Update};
 use crate::value::Value;
 
 /// One write queued by `add`/`update`/`delete`, tagged with what it's for
@@ -921,20 +921,53 @@ fn downcast_cached<T: 'static>(cached: &Rc<dyn Any>) -> Rc<RefCell<T>> {
 
 /// Shared by `delete`/`delete_mut`: a `#[table(soft_delete)]` type gets a
 /// marker `UPDATE` instead of `entity`'s own (always-hard) `delete_query()`.
+/// Reuses `entity.delete_query()`'s own filter (primary key, and — for a
+/// `#[table(version)]` type — `AND <version> = self.<version>` too) so the
+/// soft-delete branch can't silently drift out of sync with the hard-delete
+/// one and bypass optimistic locking the way it used to: previously this
+/// filtered by primary key alone, so a stale in-memory copy could
+/// soft-delete a row someone else had already changed, with the
+/// `requires_row_affected`/`Error::Conflict` check in `flush` never
+/// tripping because the `UPDATE` always matched. Also bumps the stored
+/// version the same way `update()` does, so a delete is indistinguishable
+/// from an update for anyone else's subsequent optimistic-locked write.
 fn delete_query_for<T: Identifiable>(entity: &T) -> Box<dyn ToSql + Send> {
     match T::SOFT_DELETE_COLUMN {
         Some(soft_delete_column) => {
-            let pk_column = T::PRIMARY_KEY.expect(
-                "#[table(soft_delete)] requires a #[table(primary_key)] field too \
-                 (enforced when #[derive(Mapped)] expands)",
-            );
             let table = Table::new(T::TABLE_NAME);
-            Box::new(
-                Update::table(&table)
-                    .set(soft_delete_column, true)
-                    .filter(table.col(pk_column).eq(entity.primary_key_value())),
-            )
+            let hard_delete_filter = entity.delete_query().filter_expr().cloned().expect(
+                "#[table(soft_delete)] requires a #[table(primary_key)] field too \
+                 (enforced when #[derive(Mapped)] expands), so delete_query() always \
+                 builds a WHERE clause",
+            );
+            let mut update = Update::table(&table).set(soft_delete_column, true);
+            if let Some(version_column) = T::VERSION_COLUMN {
+                if let Some(Value::I64(current)) =
+                    literal_eq_value(&hard_delete_filter, version_column)
+                {
+                    update = update.set(version_column, current + 1);
+                }
+            }
+            Box::new(update.filter(hard_delete_filter))
         }
         None => Box::new(entity.delete_query()),
+    }
+}
+
+/// Recursively finds the literal value compared for equality against
+/// `column_name` in `expr` — a `WHERE`-clause tree built by `Column::eq`/
+/// `Expr::and`, the shape `Identifiable::delete_query()`'s own filter
+/// always has (one `col.eq(value)` `BinOp`, or several joined by
+/// `Expr::And` when a `#[table(version)]` field is present too).
+fn literal_eq_value<'e>(expr: &'e Expr, column_name: &str) -> Option<&'e Value> {
+    match expr {
+        Expr::BinOp(lhs, BinOp::Eq, rhs) => match (lhs.as_ref(), rhs.as_ref()) {
+            (Expr::Column(col), Expr::Literal(value)) if col.name() == column_name => Some(value),
+            _ => None,
+        },
+        Expr::And(clauses) => clauses
+            .iter()
+            .find_map(|c| literal_eq_value(c, column_name)),
+        _ => None,
     }
 }

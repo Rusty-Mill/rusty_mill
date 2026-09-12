@@ -21,13 +21,13 @@
 //! replacements that the RGA can't merge) still surface as
 //! [`Conflict::ConcurrentBlockEdit`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nexus_editor::{BlockId, BlockTree, Operation};
 use serde::{Deserialize, Serialize};
 
 use crate::conflict::Conflict;
-use crate::error::Result;
+use crate::error::{CrdtError, Result};
 use crate::id::{Lamport, OpId, SiteId, VersionVector};
 use crate::log::OpLog;
 use crate::merge::{baseline_op_id, byte_to_char_pos, subop_id};
@@ -173,10 +173,17 @@ impl CrdtDoc {
     /// tree rejects the op for reasons other than the conflict cases
     /// the CRDT detects (e.g. malformed wire data). Concurrency
     /// conflicts are returned via [`RemoteOutcome::Conflict`], not as
-    /// errors.
+    /// errors. Returns [`crate::CrdtError::CausallyPending`] when the
+    /// op's `rga_ops` reference an RGA parent this doc hasn't
+    /// observed yet (e.g. a gossip hop was missed) — the op is left
+    /// untouched in the caller's hands and nothing is marked applied,
+    /// so retrying once the dependency arrives is safe.
     pub fn apply_remote(&mut self, op: CrdtOp) -> Result<RemoteOutcome> {
         if self.log.contains(op.id) {
             return Ok(RemoteOutcome::Duplicate);
+        }
+        if let Some(missing) = self.missing_rga_parent(&op) {
+            return Err(CrdtError::CausallyPending(missing));
         }
         // Track the highest lamport observed so future locally-authored
         // ops dominate it.
@@ -206,6 +213,36 @@ impl CrdtDoc {
         let appended = self.log.append(op);
         debug_assert!(appended, "non-duplicate remote op must append");
         Ok(RemoteOutcome::Applied)
+    }
+
+    /// First RGA parent referenced by `op.rga_ops` that this doc has
+    /// not yet observed — neither in the target block's local RGA
+    /// mirror nor introduced earlier within this same batch (a
+    /// multi-character `InsertText` chains each character onto the
+    /// previous one's freshly-minted id, so those forward references
+    /// are causally ready by construction). `None` when every
+    /// referenced parent is ready, including for non-text ops (which
+    /// carry no `rga_ops`).
+    fn missing_rga_parent(&self, op: &CrdtOp) -> Option<OpId> {
+        if op.rga_ops.is_empty() {
+            return None;
+        }
+        let primary = primary_block_id(&op.op);
+        let rga = self.rga.get(&primary);
+        let mut introduced: HashSet<OpId> = HashSet::new();
+        for rga_op in &op.rga_ops {
+            if let RgaTextOp::Insert { id, parent, .. } = rga_op {
+                if let Some(parent) = parent {
+                    let known =
+                        rga.is_some_and(|r| r.contains(*parent)) || introduced.contains(parent);
+                    if !known {
+                        return Some(*parent);
+                    }
+                }
+                introduced.insert(*id);
+            }
+        }
+        None
     }
 
     /// Borrow the per-block RGA mirror — used by Phase 4 persistence
@@ -600,6 +637,41 @@ mod tests {
         assert!(matches!(dup, RemoteOutcome::Duplicate));
         assert_eq!(doc.log().len(), 1);
         assert_eq!(doc.tree().get(b).unwrap().content, "hi");
+    }
+
+    #[test]
+    fn remote_insert_with_unknown_parent_is_causally_pending() {
+        // Finding 14: site B never saw site A's op, but receives site
+        // C's follow-up insert anchored on it. `apply_remote` must
+        // surface `CrdtError::CausallyPending` instead of silently
+        // dropping the character — and must not mark the op applied,
+        // so a later retry (once A's op arrives) can still succeed.
+        let s_local = SiteId::new();
+        let s_remote = SiteId::new();
+        let (tree, b) = empty_tree_with_block();
+        let mut doc = CrdtDoc::new(s_local, tree);
+
+        let unknown_parent = OpId::new(SiteId::new(), Lamport(1));
+        let insert_id = OpId::new(s_remote, Lamport(5));
+        let remote_op = CrdtOp {
+            id: insert_id,
+            vv_at_creation: doc.log().version_vector().clone(),
+            op: insert_text_op(b, 0, "x"),
+            rga_ops: vec![RgaTextOp::Insert {
+                id: insert_id,
+                parent: Some(unknown_parent),
+                ch: 'x',
+            }],
+        };
+
+        let err = doc.apply_remote(remote_op).unwrap_err();
+        assert!(matches!(err, CrdtError::CausallyPending(id) if id == unknown_parent));
+
+        // Not silently dropped-but-applied: content untouched and no
+        // applied-marker recorded for the pending op.
+        assert_eq!(doc.tree().get(b).unwrap().content, "");
+        assert!(doc.log().is_empty());
+        assert!(!doc.log().contains(insert_id));
     }
 
     #[test]

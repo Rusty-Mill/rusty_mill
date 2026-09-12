@@ -815,9 +815,16 @@ async fn send_with_redirects(
 
         // A redirect to a different host/port must not carry credentials
         // meant for the original origin along with it (the same class of
-        // leak `requests` itself fixed after CVE-2018-18074).
-        let cross_origin =
-            !next_url.host.eq_ignore_ascii_case(&url.host) || next_url.port != url.port;
+        // leak `requests` itself fixed after CVE-2018-18074). That fix
+        // also treats any downgrade off `https` as cross-origin
+        // regardless of host/port match -- an http-to-https upgrade on
+        // the same host/port is fine, but an https-to-http downgrade
+        // must strip credentials even when host and port are identical,
+        // since the token would otherwise be replayed in plaintext.
+        let scheme_downgrade = url.scheme == "https" && next_url.scheme != "https";
+        let cross_origin = scheme_downgrade
+            || !next_url.host.eq_ignore_ascii_case(&url.host)
+            || next_url.port != url.port;
         if cross_origin {
             hop_headers.remove("Authorization");
         }
@@ -980,8 +987,12 @@ async fn send_with_redirects_streaming(
             .to_string();
         let next_url = url.resolve_redirect(&location)?;
 
-        let cross_origin =
-            !next_url.host.eq_ignore_ascii_case(&url.host) || next_url.port != url.port;
+        // Same downgrade-off-https rule as `send_with_redirects` above
+        // (see the comment there for the CVE-2018-18074 rationale).
+        let scheme_downgrade = url.scheme == "https" && next_url.scheme != "https";
+        let cross_origin = scheme_downgrade
+            || !next_url.host.eq_ignore_ascii_case(&url.host)
+            || next_url.port != url.port;
         if cross_origin {
             hop_headers.remove("Authorization");
         }

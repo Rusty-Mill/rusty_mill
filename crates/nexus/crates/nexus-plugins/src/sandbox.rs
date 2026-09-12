@@ -495,6 +495,28 @@ impl WasmSandbox {
         let result_ptr = (ret >> 32) as u32;
         let result_len = (ret & 0xFFFF_FFFF) as u32;
 
+        // Review finding #10 — `result_len` is guest-controlled, unpacked
+        // straight from the guest's own `nexus_dispatch` return value.
+        // Clamp it against the module's actual linear-memory size
+        // *before* allocating the host-side read buffer, so a
+        // malicious/buggy guest that returns e.g.
+        // `result_len = 0xFFFF_FFFE` can't force a ~4 GiB host
+        // allocation on every dispatch — a cheap, repeatable
+        // memory-pressure/OOM primitive independent of the `memory_mb`
+        // sandbox cap, which only bounds *guest* linear memory, not
+        // this host-heap `Vec`.
+        let memory_size = memory.data_size(&self.store) as u64;
+        // `u64::from(u32) + u64::from(u32)` cannot overflow `u64`.
+        let result_end = u64::from(result_ptr) + u64::from(result_len);
+        if result_end > memory_size {
+            return Err(PluginError::ExecutionFailed {
+                plugin_id: plugin_id.clone(),
+                reason: format!(
+                    "nexus_dispatch returned an out-of-bounds result region: ptr={result_ptr} len={result_len} (memory size {memory_size} bytes)"
+                ),
+            });
+        }
+
         // Read result from WASM memory.
         let mut result_bytes = vec![0u8; result_len as usize];
         memory
@@ -886,5 +908,48 @@ mod tests {
             .unwrap();
         let after = sandbox.memory_size_bytes().expect("module exports memory");
         assert!(after > 0);
+    }
+
+    // ── Finding #10 regression: guest-controlled result_len ────────────────
+
+    #[test]
+    fn dispatch_rejects_oversized_guest_result_len() {
+        // Review finding #10: `result_len` is unpacked straight from the
+        // untrusted guest's own `nexus_dispatch` return value, before any
+        // validation against actual memory size. A malicious/buggy guest
+        // that returns an oversized `result_len` (e.g. the trigger's
+        // 0xFFFF_FFFE, ~4 GiB) must be rejected *before* the host
+        // allocates a buffer sized by that value, not merely fail later
+        // on the bounds-checked `memory.read`.
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "nexus_alloc") (param i32) (result i32)
+                i32.const 0)
+              (func (export "nexus_dispatch") (param i32 i32 i32) (result i64)
+                ;; Packed (ptr << 32 | len): ptr=0, len=0xFFFF_FFFE — far
+                ;; larger than this module's single 64 KiB memory page.
+                i64.const 4294967294)
+            )
+            "#,
+        )
+        .expect("parse malicious-guest probe wat");
+
+        let mut sandbox = WasmSandbox::new(&wasm_bytes, &test_config(), test_plugin_data())
+            .expect("load malicious-guest probe");
+        let result = sandbox.dispatch(0, &serde_json::json!({}));
+
+        match result {
+            Err(PluginError::ExecutionFailed { reason, .. }) => {
+                assert!(
+                    reason.contains("out-of-bounds"),
+                    "expected an out-of-bounds result-region error, got: {reason}"
+                );
+            }
+            other => panic!(
+                "expected PluginError::ExecutionFailed for an oversized guest result_len, got: {other:?}"
+            ),
+        }
     }
 }

@@ -117,3 +117,54 @@ async fn up_rejects_duplicate_versions() -> rusty_db::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn up_rolls_back_and_leaves_the_connection_clean_after_a_mid_migration_failure(
+) -> rusty_db::Result<()> {
+    // A single-connection pool: the next checkout below is then guaranteed
+    // to reuse the exact physical connection `up()` ran the failed
+    // migration on, so a leaked open transaction is deterministically
+    // observable instead of depending on which connection the pool happens
+    // to hand back.
+    let driver = SqliteDriver::connect_with("sqlite::memory:", PoolConfig::new(1)).await?;
+    let engine = Engine::new(std::sync::Arc::new(driver));
+    let migrator = engine.migrator();
+
+    const BROKEN: &[Migration] = &[Migration {
+        version: 1,
+        name: "broken",
+        // The first statement succeeds; the second is invalid SQL, so the
+        // whole migration -- including the first statement -- must be
+        // rolled back rather than left half-applied with an open
+        // transaction leaked back into the pool.
+        up: &[
+            "CREATE TABLE broken (id INTEGER PRIMARY KEY)",
+            "NOT VALID SQL AT ALL",
+        ],
+        down: &["DROP TABLE broken"],
+    }];
+
+    let result = migrator.up(BROKEN).await;
+    assert!(result.is_err(), "the invalid second statement should fail");
+
+    // The first statement was rolled back too: creating the same table
+    // again succeeds, since it was never actually left behind. Before the
+    // fix this would fail with "table broken already exists", because the
+    // first CREATE TABLE was still visible (uncommitted but unrolled-back)
+    // on this same connection.
+    engine
+        .connect()
+        .await?
+        .execute("CREATE TABLE broken (id INTEGER PRIMARY KEY)", &[])
+        .await?;
+
+    // And the connection itself has no leftover open transaction: starting
+    // a brand-new one succeeds. Before the fix, `up`'s failed statement
+    // left a `BEGIN` open with no matching `COMMIT`/`ROLLBACK`, so this
+    // would fail with sqlite's "cannot start a transaction within a
+    // transaction".
+    let txn = engine.begin().await?;
+    txn.rollback().await?;
+
+    Ok(())
+}

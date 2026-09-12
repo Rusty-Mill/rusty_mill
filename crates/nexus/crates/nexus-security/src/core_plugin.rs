@@ -361,7 +361,14 @@ fn prepare_download(
         .get("dest")
         .and_then(Value::as_str)
         .ok_or_else(|| "download: missing 'dest'".to_string())?;
-    let dest = std::path::PathBuf::from(dest);
+    // `dest` is untrusted plugin-supplied JSON. `WritableRoot::is_path_writable`
+    // is documented as lexical-only (`Path::starts_with`) and requires the
+    // caller to canonicalize/normalize first — a `..`-laden dest would
+    // otherwise pass the writable-root check via component-prefix matching
+    // while actually resolving outside the root. Normalize lexically (not
+    // `fs::canonicalize`: the destination is typically a new file that does
+    // not exist yet) before it's used for anything, including deriving `cwd`.
+    let dest = crate::path::normalize_lexical(std::path::Path::new(dest));
     let cwd = args
         .get("cwd")
         .and_then(Value::as_str)
@@ -580,6 +587,38 @@ mod tests {
         assert!(prepare_download(&open, &json!({ "dest": "/work/a" }))
             .unwrap_err()
             .contains("missing 'url'"));
+    }
+
+    #[test]
+    fn prepare_download_rejects_dest_traversal_outside_writable_root() {
+        // Finding 16: `WritableRoot::is_path_writable` is lexical-only
+        // (`Path::starts_with`) and documents that the caller must
+        // canonicalize/normalize first. The raw, un-normalized dest below
+        // has a component-prefix that lexically matches the `/work`
+        // writable root, but its `..` segments actually resolve to
+        // `/etc/evil` — outside the root. `prepare_download` must
+        // normalize before validating and refuse it, not approve it.
+        use nexus_types::SandboxPolicy;
+
+        let cfg = crate::SandboxConfig {
+            policy: SandboxPolicy::new_workspace_write(vec![std::path::PathBuf::from("/work")]),
+            downloads: crate::DownloadPolicy {
+                enabled: true,
+                allowed_hosts: vec!["host.example".to_string()],
+                max_bytes: 64,
+            },
+            ..Default::default()
+        };
+        let args = json!({
+            "url": "https://host.example/a",
+            "dest": "/work/root/../../etc/evil",
+            "cwd": "/work",
+        });
+        let err = prepare_download(&cfg, &args).unwrap_err();
+        assert!(
+            err.contains("not inside a writable root"),
+            "expected the normalized (escaped) dest to be refused, got: {err}"
+        );
     }
 
     #[test]

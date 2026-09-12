@@ -16,6 +16,7 @@ use crate::schema_map::{FieldMap, FieldMeta};
 /// final `q` is always grounded as `*:* AND (<tree>)` (or just `*:*` for a
 /// trivial tree) so a lone negative clause like `Query::match_all().not()`
 /// still parses as a well-formed query instead of an invalid bare `NOT`.
+#[derive(Debug)]
 pub struct SearchParams {
     pub q: String,
     pub fq: Vec<String>,
@@ -183,9 +184,14 @@ fn range_literal(field_type: FieldType, value: &Value) -> Result<String, SearchE
             .as_f64()
             .map(|v| v.to_string())
             .ok_or_else(|| SearchError::InvalidQuery("expected a number".to_string())),
-        FieldType::Date => value.as_str().map(|s| s.to_string()).ok_or_else(|| {
-            SearchError::InvalidQuery("expected an RFC 3339 date string".to_string())
-        }),
+        FieldType::Date => {
+            let s = value.as_str().ok_or_else(|| {
+                SearchError::InvalidQuery("expected an RFC 3339 date string".to_string())
+            })?;
+            rusty_time::DateTime::parse(s)
+                .map(|_| s.to_string())
+                .map_err(|e| SearchError::InvalidQuery(format!("invalid RFC 3339 date `{s}`: {e}")))
+        }
         other => unreachable!("caller already validated field_type is I64/F64/Date, got {other:?}"),
     }
 }
@@ -276,6 +282,33 @@ mod tests {
 
     #[test]
     fn range_supports_date_fields_unlike_meilisearch() {
+        let q = Query::range("created_at", Some("2024-01-01T00:00:00Z".into()), None);
+        let params = build_search_params(&q, &fields()).unwrap();
+        assert_eq!(params.q, "*:* AND (created_at:[2024-01-01T00:00:00Z TO *])");
+    }
+
+    #[test]
+    fn range_rejects_unescaped_date_bound_injection() {
+        // A Date bound that isn't a valid RFC 3339 timestamp must be
+        // rejected rather than spliced verbatim into the Lucene range
+        // clause, where it could close the bracket early and append an
+        // arbitrary extra clause (see rusty_mill review finding 28).
+        let q = Query::range(
+            "created_at",
+            Some("2024-01-01T00:00:00Z] OR secret_field:*".into()),
+            None,
+        );
+        let err = build_search_params(&q, &fields()).unwrap_err();
+        assert!(matches!(err, SearchError::InvalidQuery(_)));
+
+        let q = Query::range(
+            "created_at",
+            None,
+            Some("2024-01-01T00:00:00Z] OR secret_field:*".into()),
+        );
+        assert!(build_search_params(&q, &fields()).is_err());
+
+        // A well-formed RFC 3339 date bound still works correctly.
         let q = Query::range("created_at", Some("2024-01-01T00:00:00Z".into()), None);
         let params = build_search_params(&q, &fields()).unwrap();
         assert_eq!(params.q, "*:* AND (created_at:[2024-01-01T00:00:00Z TO *])");

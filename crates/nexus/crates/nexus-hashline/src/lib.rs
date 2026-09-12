@@ -10,11 +10,11 @@
 //! ## Shape of a patch
 //!
 //! A patch is one or more file sections. Each section header is `[PATH#TAG]`,
-//! where `TAG` is a 4-uppercase-hex content hash of the *normalized* file text
-//! ([`tag`]). The body is a sequence of line/insert operations:
+//! where `TAG` is a 16-uppercase-hex (64-bit) content hash of the *normalized*
+//! file text ([`tag`]). The body is a sequence of line/insert operations:
 //!
 //! ```text
-//! [src/main.rs#1A2B]
+//! [src/main.rs#1A2B3C4D5E6F7A8B]
 //! SWAP 10.=12:
 //! +    let x = compute();
 //! +    use_it(x);

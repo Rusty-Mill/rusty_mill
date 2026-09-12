@@ -449,6 +449,103 @@ where
     }
 }
 
+/// A server for exactly one scenario an https -> http downgrade
+/// redirect that lands on an *identical* host and port can't be
+/// reproduced with two separately-bound [`start_test_server`] /
+/// [`start_tls_test_server`] instances (which necessarily get two
+/// different ports): this listens on a single port and speaks TLS
+/// (like [`start_tls_test_server`]) only on the first connection it
+/// accepts, then serves every connection after that as plain HTTP --
+/// so a client that gets redirected from `https://host:port/...` to
+/// `http://host:port/...` reconnects to the very same address and is
+/// served by the very same listener, just without TLS the second time.
+/// Each handler is also given the listener's own address, so a
+/// `Location` header can point back at `http://<addr>/...` without the
+/// caller needing to know the OS-assigned port up front.
+pub struct TestDowngradeServer {
+    pub addr: SocketAddr,
+}
+
+pub fn start_https_then_http_test_server<F, G>(
+    https_handler: F,
+    http_handler: G,
+) -> TestDowngradeServer
+where
+    F: Fn(&TestRequest, SocketAddr) -> Vec<u8> + Send + Sync + 'static,
+    G: Fn(&TestRequest, SocketAddr) -> Vec<u8> + Send + Sync + 'static,
+{
+    use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+    use std::io::Write;
+
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "rusty_request test CA");
+    ca_params.distinguished_name = dn;
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+    let leaf_params =
+        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]).unwrap();
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
+
+    // Same rationale as `start_tls_test_server`'s identical block: name
+    // the crypto provider explicitly so an `--all-features` build with
+    // more than one rustls provider compiled in doesn't panic trying to
+    // auto-detect one.
+    let config = Arc::new(
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports rustls's default protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf_cert.der().clone()], key_der)
+            .expect("valid test cert/key"),
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("failed to bind https-then-http test server");
+    let addr = listener.local_addr().expect("failed to read local_addr");
+    let https_handler = Arc::new(https_handler);
+    let http_handler = Arc::new(http_handler);
+    let mut first_connection = true;
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(tcp) = stream else { break };
+            if first_connection {
+                first_connection = false;
+                let config = config.clone();
+                let handler = https_handler.clone();
+                std::thread::spawn(move || {
+                    let Ok(conn) = ServerConnection::new(config) else {
+                        return;
+                    };
+                    let mut tls = StreamOwned::new(conn, tcp);
+                    if let Ok(req) = read_request_sync(&mut tls) {
+                        let response = handler(&req, addr);
+                        let _ = tls.write_all(&response);
+                    }
+                });
+            } else {
+                let handler = http_handler.clone();
+                std::thread::spawn(move || {
+                    let mut tcp = tcp;
+                    if let Ok(req) = read_request_sync(&mut tcp) {
+                        let response = handler(&req, addr);
+                        let _ = tcp.write_all(&response);
+                    }
+                });
+            }
+        }
+    });
+
+    TestDowngradeServer { addr }
+}
+
 /// A minimal synchronous request-line-and-headers reader over anything
 /// `std::io::Read` -- what [`start_tls_test_server`] needs, since its
 /// connections are driven by a blocking `rustls::StreamOwned`, not

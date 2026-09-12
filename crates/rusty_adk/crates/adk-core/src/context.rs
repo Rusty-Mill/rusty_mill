@@ -109,6 +109,17 @@ pub struct InvocationContext {
     cancelled: Arc<AtomicBool>,
     end_invocation: Arc<AtomicBool>,
     llm_calls: Arc<AtomicU64>,
+    /// A private state-write buffer for this clone, seeded from the shared
+    /// session's state when set.
+    ///
+    /// `None` for every context obtained directly from [`InvocationContext::new`]
+    /// or [`InvocationContext::for_agent`], which write straight through to the
+    /// shared session as before. Set only by [`InvocationContext::scoped_for_state`],
+    /// so that several clones of one invocation can run concurrently (e.g. one
+    /// per node in a graph frontier) without their writes landing in a single
+    /// shared delta that `take_state_delta` would drain for whichever clone
+    /// happens to call it first.
+    local_state: Option<Arc<RwLock<State>>>,
 }
 
 impl InvocationContext {
@@ -127,6 +138,7 @@ impl InvocationContext {
             cancelled: Arc::new(AtomicBool::new(false)),
             end_invocation: Arc::new(AtomicBool::new(false)),
             llm_calls: Arc::new(AtomicU64::new(0)),
+            local_state: None,
         }
     }
 
@@ -158,6 +170,24 @@ impl InvocationContext {
         &self.services
     }
 
+    /// Returns a clone of this context whose state writes accumulate in a
+    /// private buffer seeded from the current effective state, instead of the
+    /// shared session's buffer.
+    ///
+    /// Use this to run several clones of the same invocation concurrently
+    /// (e.g. one per node in a graph frontier) so each accumulates only the
+    /// writes it made itself. Without scoping, concurrent clones would share
+    /// one delta and `take_state_delta` would attribute whichever writes
+    /// happened to be pending to whichever clone called it first, regardless
+    /// of which clone actually made them.
+    pub fn scoped_for_state(&self) -> Self {
+        let snapshot = self.with_state(State::to_map);
+        Self {
+            local_state: Some(Arc::new(RwLock::new(State::from_map(snapshot)))),
+            ..self.clone()
+        }
+    }
+
     /// Reads the session under a shared lock.
     pub fn with_session<R>(&self, f: impl FnOnce(&Session) -> R) -> R {
         // A poisoned lock means another thread panicked mid-run. There is no
@@ -175,7 +205,12 @@ impl InvocationContext {
 
     /// Reads state under a shared lock.
     pub fn with_state<R>(&self, f: impl FnOnce(&State) -> R) -> R {
-        self.with_session(|s| f(&s.state))
+        if let Some(local) = &self.local_state {
+            let guard = local.read().unwrap_or_else(|e| e.into_inner());
+            f(&guard)
+        } else {
+            self.with_session(|s| f(&s.state))
+        }
     }
 
     /// Mutates state under an exclusive lock.
@@ -183,7 +218,12 @@ impl InvocationContext {
     /// Writes are staged, not persisted. They land when an event carrying the
     /// resulting delta is processed by the runner.
     pub fn with_state_mut<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
-        self.with_session_mut(|s| f(&mut s.state))
+        if let Some(local) = &self.local_state {
+            let mut guard = local.write().unwrap_or_else(|e| e.into_inner());
+            f(&mut guard)
+        } else {
+            self.with_session_mut(|s| f(&mut s.state))
+        }
     }
 
     /// Reads one state key.

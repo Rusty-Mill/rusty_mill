@@ -143,6 +143,39 @@ impl EpollReactor {
         Ok(())
     }
 
+    /// Removes `fd`'s pending registration without waiting for the
+    /// fire path in [`Self::run`] to observe it — used by a future
+    /// that is being dropped before ever seeing readiness (e.g. the
+    /// losing side of [`platform_async::process::wait_any`], or a
+    /// timeout that elapses before every sibling finishes). Mirrors
+    /// that fire path's own cleanup exactly: only the registry entry
+    /// is removed, with no separate `EPOLL_CTL_DEL` — this reactor's
+    /// `fd` owners close their descriptor immediately once done with
+    /// it (see [`Self::register`]'s doc comment), and closing a
+    /// descriptor already drops every epoll registration for it.
+    ///
+    /// Returns `true` if an entry was actually removed. `false` means
+    /// the fire path already claimed this fd first — safe to ignore;
+    /// the caller has nothing left to clean up.
+    pub fn deregister(&self, fd: RawFd) -> bool {
+        self.registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&fd)
+            .is_some()
+    }
+
+    /// Test-only introspection: how many fds currently have a live
+    /// registration. Lets regression tests assert the registry does
+    /// not grow unboundedly when a multiplexed wait is abandoned.
+    #[cfg(test)]
+    pub(crate) fn registered_len(&self) -> usize {
+        self.registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
+
     fn run(self: Arc<Self>) {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
         loop {

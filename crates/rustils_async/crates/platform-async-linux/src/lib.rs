@@ -258,6 +258,30 @@ impl Future for PidfdReady {
     }
 }
 
+/// Deregisters this future's own fd from the reactor if it was ever
+/// registered and the fire path hasn't already claimed it. Without
+/// this, every `wait_any` sibling that loses the race — or every
+/// child abandoned when a timeout fires first — would leak its
+/// registry entry forever, since [`EpollReactor::run`]'s fire path is
+/// otherwise the *only* place an entry is ever removed.
+///
+/// Checking `ready` rather than unconditionally calling
+/// [`EpollReactor::deregister`] matters once fd numbers can be
+/// reused: `self.fd` is still open at this point (its own `Drop` runs
+/// after this one, in field-declaration order), so no other
+/// registration could have reused this exact fd number yet — but if
+/// the fire path already removed and fired this entry (`ready` is
+/// `true`), skipping the call avoids ever touching the registry for a
+/// no-longer-ours fd number on the (unrelated) off chance one showed
+/// up between the fire and this drop.
+impl Drop for PidfdReady {
+    fn drop(&mut self) {
+        if self.registered && !self.ready.load(Ordering::Acquire) {
+            self.reactor.deregister(self.fd.as_raw_fd());
+        }
+    }
+}
+
 /// Runs the *blocking* `waitpid(pid, WUNTRACED|WCONTINUED)` on a
 /// disclosed one-shot background thread and resolves once it returns.
 ///
@@ -315,5 +339,91 @@ impl Future for WaitJob {
             });
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod wait_any_leak_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Wake;
+    use std::time::Duration;
+
+    struct CountingWaker(AtomicUsize);
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Same tiny blocking-with-timeout executor `tests/spawn_and_wait.rs`
+    /// uses — duplicated here because unit tests (this module, compiled
+    /// with `--cfg test` as part of the library itself, which is what
+    /// lets it reach the `#[cfg(test)]` `EpollReactor::registered_len`
+    /// introspection below) and that separate integration-test binary
+    /// cannot share code.
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let woken = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&woken));
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(fut);
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while woken.0.load(Ordering::SeqCst) == 0 {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "reactor never woke the waiting future"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    woken.0.store(0, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    /// Regression test for the `EpollReactor` registry leak (monorepo
+    /// review finding 49): `wait_any`'s losing sibling — here the slow
+    /// child, still pending when the fast one wins — used to leave its
+    /// pidfd registered in the reactor forever, since nothing ever
+    /// deregistered it once its `PidfdReady` future was dropped instead
+    /// of polled to `Ready`. Races a fast and a slow real child through
+    /// the real `wait_any`/`EpollReactor` path; `block_on` drops the
+    /// `WaitAny` future (and therefore the slow child's still-pending
+    /// `ready()`/`PidfdReady`) before returning, exactly like any real
+    /// caller does once it has its answer.
+    #[test]
+    fn losing_wait_any_sibling_is_deregistered_on_drop() {
+        let spawner = AsyncLinuxSpawner::new().expect("construct reactor");
+        let fast = spawner
+            .spawn(&Command::new("/bin/true", "/"))
+            .expect("spawn fast child");
+        let slow = spawner
+            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+            .expect("spawn slow child");
+        let mut children: Vec<Box<dyn AsyncChild>> = vec![fast, slow];
+
+        let index = block_on(spawner.wait_any(&mut children, Some(Duration::from_secs(5))))
+            .expect("wait_any")
+            .expect("Some(index), not a timeout");
+        assert_eq!(index, 0, "the fast child should win the race");
+
+        assert_eq!(
+            spawner.reactor.registered_len(),
+            0,
+            "losing wait_any sibling's registry entry leaked once WaitAny was dropped"
+        );
+
+        let slow_child = children.remove(1);
+        let _ = slow_child.kill_single(Signal::Kill);
+        let _ = block_on(slow_child.wait());
     }
 }

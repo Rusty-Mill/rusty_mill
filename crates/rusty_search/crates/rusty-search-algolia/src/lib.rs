@@ -52,6 +52,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -206,6 +207,14 @@ fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError
     SearchError::Backend(BoxError::new(e))
 }
 
+/// Percent-encodes a single path segment so caller-supplied values (index
+/// names, document ids) can never smuggle `/`, `..`, `?`, or `#` into the
+/// request path and cross an index boundary once path normalization
+/// happens anywhere downstream.
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, NON_ALPHANUMERIC).to_string()
+}
+
 fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
     let bytes = serde_json::to_vec(value).map_err(backend_err)?;
     builder
@@ -302,11 +311,13 @@ impl SearchBackend for AlgoliaBackend {
     async fn delete(&self, index: &str, id: &str) -> Result<()> {
         self.require_known(index).await?;
 
+        let encoded_index = encode_path_segment(index);
+        let encoded_id = encode_path_segment(id);
         let resp = self
             .request(
                 Method::Delete,
                 &self.write_host,
-                &format!("1/indexes/{index}/{id}"),
+                &format!("1/indexes/{encoded_index}/{encoded_id}"),
             )?
             .send()
             .await
@@ -337,7 +348,7 @@ impl SearchBackend for AlgoliaBackend {
 
         let needs_fallback_sort = request.sort.iter().any(|s| matches!(s, Sort::Field { .. }));
         if needs_fallback_sort {
-            let cap = FALLBACK_SORT_CAP.max(request.offset + request.limit);
+            let cap = FALLBACK_SORT_CAP.max(request.offset.saturating_add(request.limit));
             body["offset"] = json!(0);
             body["length"] = json!(cap);
         } else {
@@ -626,6 +637,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_percent_encodes_a_slash_in_the_id() {
+        let server = MockServer::start().await;
+        let backend = backend_with_articles_index(&server).await;
+
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "taskID": 4 })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/1/indexes/articles/task/4"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "status": "published" })),
+            )
+            .mount(&server)
+            .await;
+
+        // A `/` in the id must not be able to escape the `articles` index
+        // segment once path normalization happens anywhere downstream.
+        backend.delete("articles", "1/2").await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let delete_req = requests
+            .iter()
+            .find(|r| r.method.as_str() == "DELETE")
+            .expect("delete request was sent");
+        assert_eq!(delete_req.url.path(), "/1/indexes/articles/1%2F2");
+    }
+
+    #[tokio::test]
     async fn commit_makes_no_http_call() {
         let server = MockServer::start().await;
         let backend = backend_with_articles_index(&server).await;
@@ -741,5 +781,33 @@ mod tests {
         let ids: Vec<_> = results.hits.iter().map(|h| h.id.clone()).collect();
         assert_eq!(ids, vec!["2", "3", "1"]);
         assert_eq!(results.total, 3);
+    }
+
+    #[tokio::test]
+    async fn search_with_max_offset_and_fallback_sort_does_not_overflow() {
+        let server = MockServer::start().await;
+        let backend = backend_with_articles_index(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/1/indexes/articles/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "nbHits": 1,
+                "hits": [ { "objectID": "1", "views": 10 } ]
+            })))
+            .mount(&server)
+            .await;
+
+        // `FALLBACK_SORT_CAP.max(offset + limit)` used to panic on overflow
+        // (debug builds) / wrap silently (release builds) for an offset
+        // this close to usize::MAX; `saturating_add` must keep it a plain,
+        // non-panicking, empty result instead.
+        let mut request =
+            SearchRequest::new(Query::match_all()).sort(Sort::field("views", SortOrder::Asc));
+        request.offset = usize::MAX;
+        request.limit = 5;
+
+        let results = backend.search("articles", request).await.unwrap();
+        assert_eq!(results.hits.len(), 0);
+        assert_eq!(results.total, 1);
     }
 }

@@ -606,15 +606,19 @@ fn percent_decode(raw: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                let hex = &raw[i + 1..i + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte);
+            b'%' => {
+                let hi = bytes.get(i + 1).copied().and_then(hex_digit);
+                let lo = bytes.get(i + 2).copied().and_then(hex_digit);
+                match (hi, lo) {
+                    (Some(hi), Some(lo)) => {
+                        out.push((hi << 4) | lo);
                         i += 3;
                     }
-                    // Not a real escape; keep it verbatim rather than guessing.
-                    Err(_) => {
+                    // Not a real escape -- including a raw, non-percent-encoded
+                    // multi-byte UTF-8 byte sitting right after a literal `%`,
+                    // which `httparse`/`http` accept in a request target --
+                    // keep the `%` verbatim rather than guessing.
+                    _ => {
                         out.push(b'%');
                         i += 1;
                     }
@@ -628,4 +632,31 @@ fn percent_decode(raw: &str) -> String {
     }
 
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The value of one ASCII hex digit, or `None` if `byte` is not one.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `httparse`/`http` accept raw, non-percent-encoded bytes `0x80..=0xFF`
+    /// in a request target, so a client can place a literal multi-byte UTF-8
+    /// character straight after a `%` with no percent-encoding at all. That
+    /// must not panic, and since `%` is not followed by two hex digits it is
+    /// not a real escape, so it is kept verbatim.
+    #[test]
+    fn percent_decode_does_not_panic_on_raw_utf8_after_percent() {
+        // `%` + the raw 3-byte UTF-8 encoding of '€' (bytes 25 E2 82 AC).
+        let raw = "x=%€";
+        assert_eq!(percent_decode(raw), "x=%€");
+    }
 }

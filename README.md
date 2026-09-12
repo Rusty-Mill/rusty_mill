@@ -80,6 +80,8 @@ merge hit.
 | [`rusty_proxmox`](crates/rusty_proxmox) | `crates/rusty_proxmox` | Async client for the Proxmox VE REST API: nodes, guests (QEMU/LXC), and power control |
 | [`rusty_opnsense`](crates/rusty_opnsense) | `crates/rusty_opnsense` | Async client for the OPNsense REST API: system status, services, interfaces, firewall aliases, and gateways |
 | [`rusty_homelab_mcp`](crates/rusty_homelab_mcp) | `crates/rusty_homelab_mcp` | MCP server exposing homelab control (Proxmox VE, OPNsense) as tools, built on the `rusty-mcp` scaffold |
+| [`rusty_fedora_agent`](crates/rusty_fedora_agent) | `crates/rusty_fedora_agent` | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP — the backend `rusty_homelab_mcp`'s fedora module talks to |
+| [`rusty_fedora`](crates/rusty_fedora) | `crates/rusty_fedora` | Async client for `rusty_fedora_agent`'s local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write |
 | [`reactor-core`](crates/rustils_async/crates/reactor-core) | `crates/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
 | [`platform-async`](crates/rustils_async/crates/platform-async) | `crates/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
 | [`platform-async-mock`](crates/rustils_async/crates/platform-async-mock) | `crates/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |
@@ -257,6 +259,21 @@ merge hit.
 | [`nexus-context`](crates/nexus/crates/nexus-context) | `crates/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`nexus-protocol`](crates/nexus/crates/nexus-protocol) | `crates/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`rusty_multimodal_db`](crates/rusty_multimodal_db) | `crates/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
+| [`rusty_sha1`](crates/rusty_sha1) | `crates/rusty_sha1` | Zero-dependency SHA-1 (FIPS 180-1) implementation, shared by `rusty_git`'s object hashing and `rusty_term`'s WebSocket handshake |
+| [`rusty_base64`](crates/rusty_base64) | `crates/rusty_base64` | Hand-rolled, dependency-free Base64 (RFC 4648) codec (standard and URL-safe alphabets, encode/decode), extracted from `rusty_oauth` and now shared by `rusty_acp`/`rusty-mcp`/`rusty_a2a` |
+| [`rusty_rand`](crates/rusty_rand) | `crates/rusty_rand` | OS-backed cryptographically secure random bytes (`/dev/urandom`/`BCryptGenRandom`), the CSPRNG shared by `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc` |
+| [`rusty_retry`](crates/rusty_retry) | `crates/rusty_retry` | Exponential backoff with jitter and `Retry-After` delta-seconds parsing, the retry mechanism shared by `rusty_request` and `rusty_acp` |
+| [`rusty_rsa`](crates/rusty_rsa) | `crates/rusty_rsa` | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256, the primitives `rusty_oauth` and `rusty_rdp` each independently reimplemented for RSA public-key verification/encryption |
+| [`rusty_kafka`](crates/rusty_kafka) | `crates/rusty_kafka` | Hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on `rusty_wire` and `rusty_tokio` |
+| [`rusty-meshed-core`](crates/rusty_meshed/crates/rusty-meshed-core) | `crates/rusty_meshed/crates/rusty-meshed-core` | `rusty_meshed`'s shared platform config: env-prefixed settings loaded once and injected into every other `rusty_meshed` crate |
+| [`rusty-meshed-schema-registry`](crates/rusty_meshed/crates/rusty-meshed-schema-registry) | `crates/rusty_meshed/crates/rusty-meshed-schema-registry` | Confluent Schema Registry client and compatibility-mode enforcement, ported from `meshed.schema_registry` |
+| [`rusty-meshed-governance`](crates/rusty_meshed/crates/rusty-meshed-governance) | `crates/rusty_meshed/crates/rusty-meshed-governance` | Policy-as-code governance engine and built-in policies, ported from `meshed.governance` |
+| [`rusty-meshed-observability`](crates/rusty_meshed/crates/rusty-meshed-observability) | `crates/rusty_meshed/crates/rusty-meshed-observability` | Lineage tracking, metrics collection, SLO monitoring, and the CI contract gate, ported from `meshed.observability` |
+| [`rusty-meshed-sdk`](crates/rusty_meshed/crates/rusty-meshed-sdk) | `crates/rusty_meshed/crates/rusty-meshed-sdk` | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from `meshed.sdk`/`meshed.infrastructure` |
+| [`rusty-meshed-registry`](crates/rusty_meshed/crates/rusty-meshed-registry) | `crates/rusty_meshed/crates/rusty-meshed-registry` | The data-product registry HTTP API: models, CRUD routers, and governance/lineage/metrics/monitor endpoints, ported from `meshed.registry` |
+| [`rusty-meshed-cli`](crates/rusty_meshed/crates/rusty-meshed-cli) | `crates/rusty_meshed/crates/rusty-meshed-cli` | The meshed operator CLI (health/lineage/metrics/slo commands), ported from `meshed.cli` |
+| [`rusty-meshed-domains`](crates/rusty_meshed/crates/rusty-meshed-domains) | `crates/rusty_meshed/crates/rusty-meshed-domains` | The manpower domain: event schemas, domain data products, scenario builder, and demo generators, ported from `meshed.domains` |
+| [`rusty-meshed-trace`](crates/rusty_meshed/crates/rusty-meshed-trace) | `crates/rusty_meshed/crates/rusty-meshed-trace` | Reverse-trace and domain-maturity model: outcome → domains → sources, with a fidelity verdict and worst-first bottleneck list |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,

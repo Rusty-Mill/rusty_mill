@@ -298,6 +298,70 @@ mod tests {
         assert!(err.to_string().contains("gather"), "got: {err}");
     }
 
+    // ---- concurrent frontier reconciliation ----
+
+    #[tokio::test]
+    async fn a_sibling_error_does_not_discard_a_successful_branchs_events() {
+        let bad = FunctionNode::new("bad", NodeConfig::default(), |_ctx| {
+            Box::pin(async { Err(AdkError::validation("bad", "boom")) })
+        })
+        .shared();
+
+        let graph = Graph::new(
+            vec![
+                value_node("dispatch", json!("go")),
+                bad,
+                value_node("good", json!("ok")),
+            ],
+            EdgeBuilder::new()
+                .start("dispatch")
+                .add_fan_out("dispatch", ["bad", "good"])
+                .build(),
+        )
+        .unwrap();
+
+        let raw: Vec<adk_core::Result<Event>> =
+            graph.run(context(), None).collect::<Vec<_>>().await;
+        assert!(
+            raw.iter()
+                .any(|r| matches!(r, Ok(e) if e.author == "good" && e.output == Some(json!("ok")))),
+            "the successful sibling's completion event must still be surfaced"
+        );
+        assert!(
+            raw.iter().any(|r| r.is_err()),
+            "the failing branch's error must still propagate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_join_with_duplicate_edges_from_one_source_fires_on_distinct_predecessors() {
+        let graph = Graph::new(
+            vec![
+                value_node("a", json!("alpha")),
+                value_node("b", json!("beta")),
+                JoinNode::new("gather").shared(),
+            ],
+            EdgeBuilder::new()
+                .start("a")
+                .start("b")
+                .add("a", "gather")
+                .add("a", "gather")
+                .add("b", "gather")
+                .build(),
+        )
+        .unwrap();
+
+        let events = collect(&graph, context()).await;
+        let joined = events
+            .iter()
+            .find(|e| e.author == "gather")
+            .expect("join must fire once both distinct predecessors have arrived")
+            .output
+            .clone()
+            .unwrap();
+        assert_eq!(joined, json!({"a": "alpha", "b": "beta"}));
+    }
+
     // ---- retries ----
 
     #[tokio::test]
@@ -342,6 +406,35 @@ mod tests {
         let graph = Graph::new(vec![bad], chain(["bad"])).unwrap();
         assert!(collect_result(&graph, context()).await.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_retried_attempts_events_do_not_leak_into_the_successful_output() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&attempts);
+        let flaky = FunctionNode::new("flaky", NodeConfig::default().with_retries(1), move |ctx| {
+            let counter = Arc::clone(&counter);
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    ctx.emit_message("failed attempt progress")?;
+                    return Err(AdkError::model("m", "transient"));
+                }
+                ctx.emit_message("succeeded attempt progress")?;
+                Ok(NodeOutcome::output(json!("done")))
+            })
+        })
+        .shared();
+
+        let graph = Graph::new(vec![flaky], chain(["flaky"])).unwrap();
+        let events = collect(&graph, context()).await;
+        let messages: Vec<String> = events
+            .iter()
+            .map(|e| e.text())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(messages, vec!["succeeded attempt progress".to_string()]);
     }
 
     // ---- interrupts and resume ----
@@ -492,5 +585,50 @@ mod tests {
             events.last().unwrap().actions.state_delta.get("attempts"),
             Some(&json!(1))
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_frontier_writers_keep_separate_state_deltas() {
+        let writer_a = FunctionNode::new("writer_a", NodeConfig::default(), |ctx| {
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                ctx.invocation.set_state("from_a", "a-value");
+                Ok(NodeOutcome::empty())
+            })
+        })
+        .shared();
+        let writer_b = FunctionNode::new("writer_b", NodeConfig::default(), |ctx| {
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                ctx.invocation.set_state("from_b", "b-value");
+                Ok(NodeOutcome::empty())
+            })
+        })
+        .shared();
+
+        let graph = Graph::new(
+            vec![value_node("dispatch", json!("go")), writer_a, writer_b],
+            EdgeBuilder::new()
+                .start("dispatch")
+                .add_fan_out("dispatch", ["writer_a", "writer_b"])
+                .build(),
+        )
+        .unwrap();
+
+        let events = collect(&graph, context()).await;
+        let a_event = events.iter().find(|e| e.author == "writer_a").unwrap();
+        let b_event = events.iter().find(|e| e.author == "writer_b").unwrap();
+
+        assert_eq!(
+            a_event.actions.state_delta.get("from_a"),
+            Some(&json!("a-value"))
+        );
+        assert!(!a_event.actions.state_delta.contains_key("from_b"));
+
+        assert_eq!(
+            b_event.actions.state_delta.get("from_b"),
+            Some(&json!("b-value"))
+        );
+        assert!(!b_event.actions.state_delta.contains_key("from_a"));
     }
 }
