@@ -28,6 +28,16 @@
 //!   key the real API never returns. Fixed here: the port-matching
 //!   filter compares against `description` instead, so a
 //!   register-then-look-up-by-name round trip actually works.
+//! - **`get_output_port`'s unpaginated `/data-products` scan (SDK-042).**
+//!   The source sends an unsupported `name` query filter (the registry
+//!   has no such filter -- only `domain`/`owner`/`tag`/`event_type`)
+//!   and just reads whatever the server's default page returns, so a
+//!   product past the first page is silently unfindable once the
+//!   registry holds more than one page of products. Fixed here: page
+//!   through `/data-products` with `limit`/`offset` (the registry's
+//!   actual pagination parameters, `GET /data-products`'s `list`
+//!   handler) until a matching product is found or a short page (one
+//!   with fewer than `limit` rows) proves there are no more pages.
 
 use crate::error::RegistryError;
 use rusty_meshed_core::EventType;
@@ -137,38 +147,55 @@ impl RegistryClient {
 
     /// Resolves an output port by product name and port name: first
     /// finds the product by exact `name` match (a real field on
-    /// `DataProduct`), then finds the port among that product's output
-    /// ports by exact `description` match (see the module doc for why
-    /// `description`, not `name`).
+    /// `DataProduct`), paging through `/data-products` with
+    /// `limit`/`offset` (SDK-042) since the registry has no `name`
+    /// filter and a product can land on any page, then finds the port
+    /// among that product's output ports by exact `description` match
+    /// (see the module doc for why `description`, not `name`).
     pub async fn get_output_port(
         &self,
         product_name: &str,
         port_name: &str,
     ) -> Result<Json, RegistryError> {
+        const PAGE_SIZE: i64 = 100;
         let products_url = format!("{}/data-products", self.base_url);
-        let response = Client::new()
-            .get(&products_url)
-            .map_err(http_err)?
-            .query([("name", product_name)])
-            .send()
-            .await
-            .map_err(http_err)?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            return Err(RegistryError::new(format!(
-                "Failed to search for product '{product_name}': HTTP {status}"
-            )));
-        }
-        let products = response.json().map_err(http_err)?;
-        let products = products.as_array().map(Vec::as_slice).unwrap_or(&[]);
-        let product_id = products
-            .iter()
-            .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(product_name))
-            .and_then(|p| p.get("id"))
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| {
-                RegistryError::new(format!("No product found with name '{product_name}'"))
-            })? as i64;
+        let mut offset: i64 = 0;
+        let product_id = loop {
+            let response = Client::new()
+                .get(&products_url)
+                .map_err(http_err)?
+                .query([
+                    ("limit", PAGE_SIZE.to_string()),
+                    ("offset", offset.to_string()),
+                ])
+                .send()
+                .await
+                .map_err(http_err)?;
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                return Err(RegistryError::new(format!(
+                    "Failed to search for product '{product_name}': HTTP {status}"
+                )));
+            }
+            let products = response.json().map_err(http_err)?;
+            let products = products.as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let page_len = products.len() as i64;
+            let found = products
+                .iter()
+                .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(product_name))
+                .and_then(|p| p.get("id"))
+                .and_then(|v| v.as_f64());
+            if let Some(id) = found {
+                break id as i64;
+            }
+            if page_len < PAGE_SIZE {
+                // A short (or empty) page is the last page -- no match anywhere.
+                return Err(RegistryError::new(format!(
+                    "No product found with name '{product_name}'"
+                )));
+            }
+            offset += PAGE_SIZE;
+        };
 
         let ports_url = format!("{}/data-products/{product_id}/output-ports", self.base_url);
         let response = Client::new()
@@ -247,8 +274,8 @@ mod tests {
 
     /// Serves `responses.len()` sequential request/response exchanges
     /// on one listener (`get_output_port` makes two calls per test).
-    fn start_fake_server(
-        responses: Vec<(u16, &'static str)>,
+    fn start_fake_server<S: Into<String> + Send + 'static>(
+        responses: Vec<(u16, S)>,
     ) -> (String, rusty_tokio::JoinHandle<Vec<CapturedRequest>>) {
         let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("failed to bind");
         let addr = listener.local_addr().expect("failed to read local_addr");
@@ -257,6 +284,7 @@ mod tests {
         let handle = rusty_tokio::spawn(async move {
             let mut captured = Vec::new();
             for (status, response_body) in responses {
+                let response_body: String = response_body.into();
                 let (stream, _peer) = listener.accept().await.expect("failed to accept");
                 let mut transport = AsyncTransport::new(stream);
                 let head = transport
@@ -419,8 +447,44 @@ mod tests {
             .unwrap();
 
         let requests = server.await.unwrap();
-        assert_eq!(requests[0].target, "/data-products?name=orders");
+        assert_eq!(requests[0].target, "/data-products?limit=100&offset=0");
         assert_eq!(requests[1].target, "/data-products/2/output-ports");
+        assert_eq!(result.get("id").unwrap().as_f64(), Some(10.0));
+    }
+
+    #[rusty_tokio::test]
+    async fn get_output_port_paginates_past_the_first_page_to_find_a_later_product() {
+        // Page 1 is a full 100-item page with no matching product, so the
+        // client must keep paginating (SDK-042) instead of giving up after
+        // the registry's default first page.
+        let mut page_one = String::from("[");
+        for i in 0..100 {
+            if i > 0 {
+                page_one.push(',');
+            }
+            page_one.push_str(&format!(r#"{{"id": {i}, "name": "product-{i}"}}"#));
+        }
+        page_one.push(']');
+
+        let (url, server) = start_fake_server(vec![
+            (200, page_one),
+            (200, r#"[{"id": 101, "name": "orders"}]"#.to_string()),
+            (
+                200,
+                r#"[{"id": 10, "topic_name": "orders.created", "description": "orders-created"}]"#
+                    .to_string(),
+            ),
+        ]);
+        let client = RegistryClient::new(&url);
+        let result = client
+            .get_output_port("orders", "orders-created")
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0].target, "/data-products?limit=100&offset=0");
+        assert_eq!(requests[1].target, "/data-products?limit=100&offset=100");
+        assert_eq!(requests[2].target, "/data-products/101/output-ports");
         assert_eq!(result.get("id").unwrap().as_f64(), Some(10.0));
     }
 

@@ -11,7 +11,7 @@ use crate::model::{GuestKind, PowerAction};
 /// Proxmox's API token auth (`PVEAPIToken=<user>@<realm>!<token-id>=<secret>`)
 /// is the only auth this crate speaks -- it's the form meant for
 /// automation, unlike the ticket/CSRF-token pair the web UI uses.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProxmoxConfig {
     /// The API base URL, e.g. `https://pve.lan:8006`. No trailing slash
     /// needed -- one is stripped if present.
@@ -30,6 +30,18 @@ pub struct ProxmoxConfig {
     pub timeout: Option<Duration>,
 }
 
+impl std::fmt::Debug for ProxmoxConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxmoxConfig")
+            .field("base_url", &self.base_url)
+            .field("token_id", &self.token_id)
+            .field("token_secret", &"***redacted***")
+            .field("insecure", &self.insecure)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 /// An async client for one Proxmox VE cluster/node's REST API.
 ///
 /// Every method returns the response's `data` field as-is (every Proxmox API
@@ -41,11 +53,21 @@ pub struct ProxmoxConfig {
 /// [`ProxmoxClient::task_status`]/[`ProxmoxClient::task_log`]. Cheap to
 /// clone -- it shares the same underlying `rusty_request::Client`
 /// (connection pool included).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProxmoxClient {
     http: Client,
     base_url: String,
     auth_header: String,
+}
+
+impl std::fmt::Debug for ProxmoxClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxmoxClient")
+            .field("http", &self.http)
+            .field("base_url", &self.base_url)
+            .field("auth_header", &"***redacted***")
+            .finish()
+    }
 }
 
 impl ProxmoxClient {
@@ -77,13 +99,17 @@ impl ProxmoxClient {
     /// `GET /nodes/{node}/status` -- one node's detailed status (CPU, memory,
     /// swap, load average, kernel version, uptime).
     pub async fn node_status(&self, node: &str) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/status")).await
+        self.get(&node_status_path(node)).await
     }
 
     /// `GET /nodes/{node}/qemu` or `.../lxc` -- every guest of the given kind
     /// on that node, with `vmid`, `name`, and `status` (`running`/`stopped`).
     pub async fn list_guests(&self, node: &str, kind: GuestKind) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/{kind}")).await
+        self.get(&format!(
+            "/api2/json/nodes/{}/{kind}",
+            encode_path_segment(node)
+        ))
+        .await
     }
 
     /// `GET /nodes/{node}/{qemu,lxc}/{vmid}/status/current` -- one guest's
@@ -91,7 +117,8 @@ impl ProxmoxClient {
     /// resources.
     pub async fn guest_status(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<Value> {
         self.get(&format!(
-            "/api2/json/nodes/{node}/{kind}/{vmid}/status/current"
+            "/api2/json/nodes/{}/{kind}/{vmid}/status/current",
+            encode_path_segment(node)
         ))
         .await
     }
@@ -109,7 +136,10 @@ impl ProxmoxClient {
         vmid: u32,
         action: PowerAction,
     ) -> Result<String> {
-        let path = format!("/api2/json/nodes/{node}/{kind}/{vmid}/status/{action}");
+        let path = format!(
+            "/api2/json/nodes/{}/{kind}/{vmid}/status/{action}",
+            encode_path_segment(node)
+        );
         self.post(&path).await.and_then(Self::expect_upid)
     }
 
@@ -117,8 +147,11 @@ impl ProxmoxClient {
     /// configuration: CPU, memory, disks, network interfaces, boot order,
     /// and everything else Proxmox stores per-guest.
     pub async fn guest_config(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/{kind}/{vmid}/config"))
-            .await
+        self.get(&format!(
+            "/api2/json/nodes/{}/{kind}/{vmid}/config",
+            encode_path_segment(node)
+        ))
+        .await
     }
 
     /// `PUT /nodes/{node}/{qemu,lxc}/{vmid}/config` -- update a guest's
@@ -137,7 +170,10 @@ impl ProxmoxClient {
         fields: Value,
     ) -> Result<Value> {
         self.put_json(
-            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/config"),
+            &format!(
+                "/api2/json/nodes/{}/{kind}/{vmid}/config",
+                encode_path_segment(node)
+            ),
             &fields,
         )
         .await
@@ -149,17 +185,23 @@ impl ProxmoxClient {
     /// `scsi0`, `net0`, ...) and LXC (`ostemplate`, `rootfs`, ...) --
     /// passed through as-is. Runs asynchronously; returns the task UPID.
     pub async fn create_guest(&self, node: &str, kind: GuestKind, fields: Value) -> Result<String> {
-        self.post_json(&format!("/api2/json/nodes/{node}/{kind}"), &fields)
-            .await
-            .and_then(Self::expect_upid)
+        self.post_json(
+            &format!("/api2/json/nodes/{}/{kind}", encode_path_segment(node)),
+            &fields,
+        )
+        .await
+        .and_then(Self::expect_upid)
     }
 
     /// `DELETE /nodes/{node}/{qemu,lxc}/{vmid}` -- delete a guest. Runs
     /// asynchronously; returns the task UPID.
     pub async fn delete_guest(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<String> {
-        self.delete(&format!("/api2/json/nodes/{node}/{kind}/{vmid}"))
-            .await
-            .and_then(Self::expect_upid)
+        self.delete(&format!(
+            "/api2/json/nodes/{}/{kind}/{vmid}",
+            encode_path_segment(node)
+        ))
+        .await
+        .and_then(Self::expect_upid)
     }
 
     /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/clone` -- clone a guest.
@@ -174,7 +216,10 @@ impl ProxmoxClient {
         fields: Value,
     ) -> Result<String> {
         self.post_json(
-            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/clone"),
+            &format!(
+                "/api2/json/nodes/{}/{kind}/{vmid}/clone",
+                encode_path_segment(node)
+            ),
             &fields,
         )
         .await
@@ -184,8 +229,11 @@ impl ProxmoxClient {
     /// `GET /nodes/{node}/{qemu,lxc}/{vmid}/snapshot` -- every snapshot
     /// taken of a guest, with its creation time and description.
     pub async fn list_snapshots(&self, node: &str, kind: GuestKind, vmid: u32) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/{kind}/{vmid}/snapshot"))
-            .await
+        self.get(&format!(
+            "/api2/json/nodes/{}/{kind}/{vmid}/snapshot",
+            encode_path_segment(node)
+        ))
+        .await
     }
 
     /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/snapshot` -- create a
@@ -200,7 +248,10 @@ impl ProxmoxClient {
         fields: Value,
     ) -> Result<String> {
         self.post_json(
-            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/snapshot"),
+            &format!(
+                "/api2/json/nodes/{}/{kind}/{vmid}/snapshot",
+                encode_path_segment(node)
+            ),
             &fields,
         )
         .await
@@ -216,11 +267,9 @@ impl ProxmoxClient {
         vmid: u32,
         snapname: &str,
     ) -> Result<String> {
-        self.delete(&format!(
-            "/api2/json/nodes/{node}/{kind}/{vmid}/snapshot/{snapname}"
-        ))
-        .await
-        .and_then(Self::expect_upid)
+        self.delete(&delete_snapshot_path(node, kind, vmid, snapname))
+            .await
+            .and_then(Self::expect_upid)
     }
 
     /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/snapshot/{snapname}/rollback`
@@ -234,7 +283,9 @@ impl ProxmoxClient {
         snapname: &str,
     ) -> Result<String> {
         self.post(&format!(
-            "/api2/json/nodes/{node}/{kind}/{vmid}/snapshot/{snapname}/rollback"
+            "/api2/json/nodes/{}/{kind}/{vmid}/snapshot/{}/rollback",
+            encode_path_segment(node),
+            encode_path_segment(snapname)
         ))
         .await
         .and_then(Self::expect_upid)
@@ -249,7 +300,8 @@ impl ProxmoxClient {
         match resource_type {
             Some(resource_type) => {
                 self.get(&format!(
-                    "/api2/json/cluster/resources?type={resource_type}"
+                    "/api2/json/cluster/resources?type={}",
+                    encode_query_value(resource_type)
                 ))
                 .await
             }
@@ -267,7 +319,11 @@ impl ProxmoxClient {
     /// `GET /nodes/{node}/storage` -- status for every datastore visible
     /// from one node: usage, availability, and content types.
     pub async fn node_storage_status(&self, node: &str) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/storage")).await
+        self.get(&format!(
+            "/api2/json/nodes/{}/storage",
+            encode_path_segment(node)
+        ))
+        .await
     }
 
     /// `GET /cluster/backup` -- every scheduled vzdump backup job.
@@ -282,9 +338,12 @@ impl ProxmoxClient {
     /// vs. every guest, snapshot vs. stop mode, ...). Runs asynchronously;
     /// returns the task UPID.
     pub async fn run_backup(&self, node: &str, fields: Value) -> Result<String> {
-        self.post_json(&format!("/api2/json/nodes/{node}/vzdump"), &fields)
-            .await
-            .and_then(Self::expect_upid)
+        self.post_json(
+            &format!("/api2/json/nodes/{}/vzdump", encode_path_segment(node)),
+            &fields,
+        )
+        .await
+        .and_then(Self::expect_upid)
     }
 
     /// `POST /nodes/{node}/{qemu,lxc}/{vmid}/migrate` -- migrate a guest to
@@ -302,7 +361,10 @@ impl ProxmoxClient {
         fields: Value,
     ) -> Result<String> {
         self.post_json(
-            &format!("/api2/json/nodes/{node}/{kind}/{vmid}/migrate"),
+            &format!(
+                "/api2/json/nodes/{}/{kind}/{vmid}/migrate",
+                encode_path_segment(node)
+            ),
             &fields,
         )
         .await
@@ -314,16 +376,24 @@ impl ProxmoxClient {
     /// action Proxmox runs in the background) is still running, and if not,
     /// whether it succeeded (`status: "OK"` vs. an error message).
     pub async fn task_status(&self, node: &str, upid: &str) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/tasks/{upid}/status"))
-            .await
+        self.get(&format!(
+            "/api2/json/nodes/{}/tasks/{}/status",
+            encode_path_segment(node),
+            encode_path_segment(upid)
+        ))
+        .await
     }
 
     /// `GET /nodes/{node}/tasks/{upid}/log` -- an asynchronous task's log
     /// output, most useful for finding out *why* a task in `task_status`
     /// failed.
     pub async fn task_log(&self, node: &str, upid: &str) -> Result<Value> {
-        self.get(&format!("/api2/json/nodes/{node}/tasks/{upid}/log"))
-            .await
+        self.get(&format!(
+            "/api2/json/nodes/{}/tasks/{}/log",
+            encode_path_segment(node),
+            encode_path_segment(upid)
+        ))
+        .await
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -403,5 +473,119 @@ impl ProxmoxClient {
             Some(data) => Ok(data),
             None => Err(Error::MissingData(text)),
         }
+    }
+}
+
+/// Builds the request path for [`ProxmoxClient::node_status`], pulled out
+/// of the async method so the percent-encoding it applies to `node` is
+/// directly unit-testable without a network call.
+fn node_status_path(node: &str) -> String {
+    format!("/api2/json/nodes/{}/status", encode_path_segment(node))
+}
+
+/// Builds the request path for [`ProxmoxClient::delete_snapshot`], pulled
+/// out of the async method for the same reason as [`node_status_path`].
+fn delete_snapshot_path(node: &str, kind: GuestKind, vmid: u32, snapname: &str) -> String {
+    format!(
+        "/api2/json/nodes/{}/{kind}/{vmid}/snapshot/{}",
+        encode_path_segment(node),
+        encode_path_segment(snapname)
+    )
+}
+
+/// Percent-encodes a value embedded directly in a path segment (a node
+/// name, a snapshot name, a task UPID) -- narrower than
+/// [`encode_query_value`] since a path segment must not contain a literal
+/// `/`. Without this, a `node`/`snapname` string taken from an MCP tool
+/// argument containing `/` or `..` would splice extra path segments into
+/// the request instead of being treated as opaque data.
+fn encode_path_segment(value: &str) -> String {
+    encode(value, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
+    })
+}
+
+/// Percent-encodes a query-string value.
+fn encode_query_value(value: &str) -> String {
+    encode(value, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
+    })
+}
+
+fn encode(value: &str, is_safe: impl Fn(char) -> bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let c = byte as char;
+        if c.is_ascii() && is_safe(c) {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_status_path_percent_encodes_path_traversal() {
+        // Trigger from finding 51: a `node` value containing `/`/`..`
+        // must not splice extra segments into the request path.
+        let path = node_status_path("pve1/../../access/ticket");
+        assert_eq!(
+            path,
+            "/api2/json/nodes/pve1%2F..%2F..%2Faccess%2Fticket/status"
+        );
+        assert!(!path.contains("/access/ticket"));
+    }
+
+    #[test]
+    fn delete_snapshot_path_percent_encodes_slash_in_snapname() {
+        let path = delete_snapshot_path("pve1", GuestKind::Qemu, 100, "../../etc/passwd");
+        assert_eq!(
+            path,
+            "/api2/json/nodes/pve1/qemu/100/snapshot/..%2F..%2Fetc%2Fpasswd"
+        );
+        assert!(!path.contains("/etc/passwd"));
+    }
+
+    #[test]
+    fn path_segment_encoding_leaves_typical_names_alone() {
+        assert_eq!(encode_path_segment("pve1"), "pve1");
+    }
+
+    #[test]
+    fn query_value_encoding_escapes_spaces_and_ampersands() {
+        assert_eq!(encode_query_value("vm & storage"), "vm%20%26%20storage");
+    }
+
+    #[test]
+    fn config_debug_redacts_token_secret() {
+        let config = ProxmoxConfig {
+            base_url: "https://pve.lan:8006".to_string(),
+            token_id: "automation@pve!homelab-mcp".to_string(),
+            token_secret: "super-secret-value".to_string(),
+            insecure: false,
+            timeout: None,
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("super-secret-value"));
+        assert!(rendered.contains("***redacted***"));
+    }
+
+    #[test]
+    fn client_debug_redacts_auth_header() {
+        let client = ProxmoxClient::new(ProxmoxConfig {
+            base_url: "https://pve.lan:8006".to_string(),
+            token_id: "automation@pve!homelab-mcp".to_string(),
+            token_secret: "super-secret-value".to_string(),
+            insecure: false,
+            timeout: None,
+        });
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains("super-secret-value"));
+        assert!(rendered.contains("***redacted***"));
     }
 }

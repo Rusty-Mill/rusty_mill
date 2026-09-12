@@ -701,10 +701,12 @@ impl Engine {
                 WgAction::ToPeer(dg) => self.send_to_peer(peer, dg).await,
                 WgAction::ToLocal(_) if !self.want_running => {}
                 WgAction::ToLocal(ip_pkt) => {
-                    // Enforce the inbound ACL: drop packets the packet filter
-                    // doesn't permit (Phase 6). Non-IPv4 is passed through to
-                    // the OS (we don't yet parse IPv6 for filtering).
-                    if !self.filter_allows_inbound(&ip_pkt) {
+                    // Enforce the inbound ACL (Phase 6): drop packets the
+                    // packet filter doesn't permit, packets whose plaintext
+                    // source isn't actually one of the sending peer's
+                    // netmap-assigned addresses (cryptokey routing), and
+                    // anything we can't confidently classify (e.g. IPv6).
+                    if !self.filter_allows_inbound(peer, &ip_pkt) {
                         tracing::debug!("engine: inbound packet denied by ACL");
                         continue;
                     }
@@ -727,27 +729,22 @@ impl Engine {
         }
     }
 
-    /// Checks a decrypted inbound IPv4 packet against the packet filter.
-    /// Non-IPv4 packets are allowed (IPv6 filtering isn't implemented yet).
-    fn filter_allows_inbound(&self, ip_pkt: &[u8]) -> bool {
-        let Some(view) = icmp::parse_ipv4(ip_pkt) else {
-            return true; // not IPv4 (or too short): don't filter here
-        };
-        // Destination L4 port for port-bearing protocols (TCP/UDP/SCTP live at
-        // bytes 2..4 of the transport header); 0 for port-less protocols.
-        let dst_port = match view.protocol {
-            6 | 17 | 132 => ip_pkt
-                .get(view.payload_offset + 2..view.payload_offset + 4)
-                .map(|b| u16::from_be_bytes([b[0], b[1]]))
-                .unwrap_or(0),
-            _ => 0,
-        };
-        self.filter.allows(
-            IpAddr::V4(view.src),
-            IpAddr::V4(view.dst),
-            view.protocol,
-            dst_port,
-        )
+    /// Checks a decrypted inbound IPv4 packet against the packet filter,
+    /// after verifying its plaintext source actually belongs to `peer`.
+    ///
+    /// A decrypted WireGuard payload's IP header is written by the
+    /// *sending* peer, so its claimed source address can't be trusted for
+    /// ACL purposes until it's confirmed to be one of that peer's
+    /// netmap-assigned addresses (`PeerMeta::ips`/`allowed_ips`) — otherwise
+    /// peer A could forge a packet claiming to be from peer B and inherit
+    /// B's ACL rules. This is the engine's stand-in for cryptokey routing.
+    ///
+    /// Everything this can't confidently classify — a non-IPv4 packet (all
+    /// IPv6 traffic isn't filtered yet), a peer with no known netmap
+    /// metadata, or a spoofed source — is denied rather than defaulted to
+    /// allowed.
+    fn filter_allows_inbound(&self, peer: NodePublic, ip_pkt: &[u8]) -> bool {
+        packet_allowed(&self.filter, self.peers_meta.get(&peer), ip_pkt)
     }
 
     /// Handles a decrypted inbound IP packet: answer ICMP echo requests,
@@ -996,4 +993,159 @@ fn ipv4_addrs(prefixes: &[ts_types::IpPrefix]) -> Vec<Ipv4Addr> {
             std::net::IpAddr::V6(_) => None,
         })
         .collect()
+}
+
+/// Checks a decrypted inbound IPv4 packet against `filter`, after verifying
+/// its plaintext source actually belongs to the sending peer (`peer_meta`,
+/// looked up by the caller from `Engine::peers_meta`).
+///
+/// Default-deny: a packet that doesn't parse as IPv4, a peer with no known
+/// netmap metadata, or a source that isn't one of the peer's assigned
+/// addresses is dropped without ever consulting `filter`.
+fn packet_allowed(filter: &Filter, peer_meta: Option<&PeerMeta>, ip_pkt: &[u8]) -> bool {
+    let Some(view) = icmp::parse_ipv4(ip_pkt) else {
+        return false; // not IPv4 (or too short): deny, don't guess
+    };
+    let Some(meta) = peer_meta else {
+        return false; // no netmap metadata for this peer: can't verify source
+    };
+    if !source_owned_by_peer(meta, IpAddr::V4(view.src)) {
+        return false; // spoofed source: not one of the peer's assigned IPs
+    }
+    // Destination L4 port for port-bearing protocols (TCP/UDP/SCTP live at
+    // bytes 2..4 of the transport header); 0 for port-less protocols.
+    let dst_port = match view.protocol {
+        6 | 17 | 132 => ip_pkt
+            .get(view.payload_offset + 2..view.payload_offset + 4)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+            .unwrap_or(0),
+        _ => 0,
+    };
+    filter.allows(
+        IpAddr::V4(view.src),
+        IpAddr::V4(view.dst),
+        view.protocol,
+        dst_port,
+    )
+}
+
+/// Whether `src` is one of `meta`'s netmap-assigned addresses: an exact
+/// match against its own tailnet IPs, or containment in one of its
+/// `AllowedIPs` prefixes.
+fn source_owned_by_peer(meta: &PeerMeta, src: IpAddr) -> bool {
+    meta.ips.contains(&src) || meta.allowed_ips.iter().any(|p| prefix_contains(*p, src))
+}
+
+/// True if `ip` lies within the CIDR `prefix` (same address family, matching
+/// high bits).
+fn prefix_contains(prefix: ts_types::IpPrefix, ip: IpAddr) -> bool {
+    match (prefix.addr, ip) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) => bits_match(&net.octets(), &ip.octets(), prefix.bits),
+        (IpAddr::V6(net), IpAddr::V6(ip)) => bits_match(&net.octets(), &ip.octets(), prefix.bits),
+        _ => false, // cross-family never matches
+    }
+}
+
+/// Compares the first `bits` bits of two equal-length octet strings.
+fn bits_match(a: &[u8], b: &[u8], bits: u8) -> bool {
+    let full = (bits / 8) as usize;
+    if a[..full] != b[..full] {
+        return false;
+    }
+    let rem = bits % 8;
+    if rem == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - rem);
+    (a[full] & mask) == (b[full] & mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Builds a minimal well-formed IPv4/UDP packet with the given
+    /// source/destination and a destination port of 5000, long enough for
+    /// `icmp::parse_ipv4` to read the L4 port bytes.
+    fn ipv4_udp_packet(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
+        let mut pkt = vec![0u8; 24];
+        pkt[0] = 0x45; // version 4, IHL 5 (20-byte header)
+        pkt[9] = 17; // UDP
+        pkt[12..16].copy_from_slice(&src.octets());
+        pkt[16..20].copy_from_slice(&dst.octets());
+        pkt[20..22].copy_from_slice(&5000u16.to_be_bytes()); // src port
+        pkt[22..24].copy_from_slice(&443u16.to_be_bytes()); // dst port
+        pkt
+    }
+
+    fn meta_with_ip(addr: &str) -> PeerMeta {
+        PeerMeta {
+            ips: vec![ip(addr)],
+            ..PeerMeta::default()
+        }
+    }
+
+    /// Finding 20: a peer must not be able to forge a decrypted packet's
+    /// plaintext source to impersonate another peer and inherit that peer's
+    /// ACL allowances (no cryptokey-routing check).
+    #[test]
+    fn spoofed_source_outside_peers_assigned_ips_is_denied() {
+        let filter = Filter::allow_all();
+        // Peer's own assigned tailnet IP is 100.64.0.5, but the decrypted
+        // packet it handed us claims to be from 100.64.0.9 (another peer).
+        let meta = meta_with_ip("100.64.0.5");
+        let spoofed = ipv4_udp_packet("100.64.0.9".parse().unwrap(), "100.64.0.1".parse().unwrap());
+        assert!(
+            !packet_allowed(&filter, Some(&meta), &spoofed),
+            "packet with a source outside the sending peer's assigned IPs must be denied \
+             even though the allow-all filter would otherwise permit it"
+        );
+
+        // Sanity: the same packet is allowed once the source genuinely
+        // matches the peer's assigned IP.
+        let genuine = ipv4_udp_packet("100.64.0.5".parse().unwrap(), "100.64.0.1".parse().unwrap());
+        assert!(packet_allowed(&filter, Some(&meta), &genuine));
+    }
+
+    /// Finding 20 (allowed_ips variant): a subnet router's advertised range
+    /// is also an accepted source, via `PeerMeta::allowed_ips`.
+    #[test]
+    fn source_within_peers_allowed_ips_prefix_is_accepted() {
+        let filter = Filter::allow_all();
+        let meta = PeerMeta {
+            allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
+            ..PeerMeta::default()
+        };
+        let pkt = ipv4_udp_packet("10.0.0.42".parse().unwrap(), "100.64.0.1".parse().unwrap());
+        assert!(packet_allowed(&filter, Some(&meta), &pkt));
+    }
+
+    /// Finding 20: with no netmap metadata for the peer at all, the source
+    /// can't be verified, so the packet is denied.
+    #[test]
+    fn unknown_peer_metadata_denies() {
+        let filter = Filter::allow_all();
+        let pkt = ipv4_udp_packet("100.64.0.9".parse().unwrap(), "100.64.0.1".parse().unwrap());
+        assert!(!packet_allowed(&filter, None, &pkt));
+    }
+
+    /// Finding 21: a packet that doesn't parse as IPv4 (here, an IPv6
+    /// version nibble) must now be denied instead of defaulted to allowed.
+    #[test]
+    fn non_ipv4_packet_is_denied_not_defaulted_to_allow() {
+        let filter = Filter::allow_all();
+        let meta = meta_with_ip("100.64.0.5");
+        // A well-formed IPv6 header: version nibble 6, otherwise zeroed but
+        // long enough to pass the minimum-length check.
+        let mut ipv6_pkt = vec![0u8; 40];
+        ipv6_pkt[0] = 0x60;
+        assert!(
+            !packet_allowed(&filter, Some(&meta), &ipv6_pkt),
+            "non-IPv4 packets must be denied, not defaulted to allowed"
+        );
+    }
 }

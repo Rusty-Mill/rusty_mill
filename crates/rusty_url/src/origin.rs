@@ -83,13 +83,29 @@ fn serialize_tuple(scheme: &str, host: &Host<String>, port: u16) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpaqueOrigin(usize);
 
+/// Maximum recursion depth for nested `blob:` URLs before falling back to
+/// an opaque origin. `blob:` is not a special scheme, so `Url::parse`
+/// happily accepts arbitrarily deep `blob:blob:blob:...` nesting in the
+/// path; without a cap, computing the origin of such a URL would recurse
+/// once per nesting level and overflow the stack.
+const MAX_BLOB_ORIGIN_DEPTH: usize = 10;
+
 /// <https://url.spec.whatwg.org/#concept-url-origin>
 pub(crate) fn url_origin(url: &Url) -> Origin {
+    url_origin_with_depth(url, 0)
+}
+
+fn url_origin_with_depth(url: &Url, depth: usize) -> Origin {
     match url.scheme() {
-        "blob" => match Url::parse(url.path()) {
-            Ok(ref inner) => url_origin(inner),
-            Err(_) => Origin::new_opaque(),
-        },
+        "blob" => {
+            if depth >= MAX_BLOB_ORIGIN_DEPTH {
+                return Origin::new_opaque();
+            }
+            match &Url::parse(url.path()) {
+                Ok(inner) => url_origin_with_depth(inner, depth + 1),
+                Err(_) => Origin::new_opaque(),
+            }
+        }
         "ftp" | "http" | "https" | "ws" | "wss" => Origin::Tuple(
             url.scheme().to_owned(),
             url.host().unwrap().to_owned(),
@@ -171,5 +187,15 @@ mod tests {
         let a = Url::parse("https://example.com/a").unwrap().origin();
         let b = Url::parse("https://example.com/b").unwrap().origin();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn deeply_nested_blob_url_is_capped_to_opaque_origin_without_stack_overflow() {
+        // Exceeds MAX_BLOB_ORIGIN_DEPTH (10) by a wide margin while still
+        // parsing and computing the origin quickly.
+        let nested = "blob:".repeat(50_000) + "x";
+        let url = Url::parse(&format!("blob:{nested}")).unwrap();
+        let origin = url.origin();
+        assert!(!origin.is_tuple());
     }
 }

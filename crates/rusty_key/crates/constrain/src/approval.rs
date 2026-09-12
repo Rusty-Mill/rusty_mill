@@ -57,7 +57,7 @@ pub struct ApprovalGate {
     triggers: Vec<ApprovalTrigger>,
     tx: mpsc::Sender<ApprovalRequest>,
     auto_approve: Mutex<HashSet<String>>,
-    fired: Mutex<HashSet<&'static str>>,
+    fired: Mutex<HashSet<String>>,
 }
 
 impl ApprovalGate {
@@ -74,18 +74,23 @@ impl ApprovalGate {
     }
 
     /// Which configured trigger (if any) this call matches. `*FirstUse` triggers
-    /// fire at most once per session.
+    /// fire at most once per session — `McpToolFirstUse` fires at most once per
+    /// configured `server`, keyed by that server (not just any `mcp__`-prefixed
+    /// tool), so approving one server's first call does not silently satisfy
+    /// another server's separately configured trigger.
     fn match_trigger(&self, name: &str) -> Option<ApprovalTrigger> {
         let mut fired = self.fired.lock().unwrap_or_else(|p| p.into_inner());
         for t in &self.triggers {
-            let (key, hit): (&'static str, bool) = match t {
-                ApprovalTrigger::BashFirstUse => ("bash_first_use", name == "bash"),
-                ApprovalTrigger::NewFilePath => {
-                    ("new_file_path", matches!(name, "write_file" | "edit_file"))
-                }
-                ApprovalTrigger::McpToolFirstUse { .. } => {
-                    ("mcp_first_use", name.starts_with("mcp_"))
-                }
+            let (key, hit): (String, bool) = match t {
+                ApprovalTrigger::BashFirstUse => ("bash_first_use".to_string(), name == "bash"),
+                ApprovalTrigger::NewFilePath => (
+                    "new_file_path".to_string(),
+                    matches!(name, "write_file" | "edit_file"),
+                ),
+                ApprovalTrigger::McpToolFirstUse { server } => (
+                    format!("mcp_first_use:{server}"),
+                    Self::mcp_server_of(name) == Some(server.as_str()),
+                ),
             };
             if !hit {
                 continue;
@@ -95,7 +100,7 @@ impl ApprovalGate {
                 ApprovalTrigger::BashFirstUse | ApprovalTrigger::McpToolFirstUse { .. }
             );
             if once {
-                if fired.contains(key) {
+                if fired.contains(&key) {
                     continue;
                 }
                 fired.insert(key);
@@ -103,6 +108,13 @@ impl ApprovalGate {
             return Some(t.clone());
         }
         None
+    }
+
+    /// The server segment of a `mcp__<server>__<tool>` namespaced tool name.
+    fn mcp_server_of(name: &str) -> Option<&str> {
+        name.strip_prefix("mcp__")
+            .and_then(|rest| rest.split_once("__"))
+            .map(|(server, _)| server)
     }
 }
 
@@ -232,6 +244,46 @@ mod tests {
         let gate = ApprovalGate::new(vec![ApprovalTrigger::BashFirstUse], tx);
         assert!(matches!(
             gate.before_tool("bash", &json!({"command": "ls"})).await,
+            Err(PolicyError::ApprovalDenied)
+        ));
+    }
+
+    #[tokio::test]
+    async fn mcp_first_use_is_scoped_per_server() {
+        // Two separately configured McpToolFirstUse triggers, one per server.
+        // Only ONE response is scripted (for the first server). If the gate
+        // incorrectly keys `fired` by a single shared "mcp_first_use" bucket
+        // (the pre-fix bug), the first call marks that shared bucket fired
+        // and the second server's call would never re-consult the adapter,
+        // silently returning `Ok`. Post-fix, the second server's own
+        // trigger has not fired yet, so it must consult the adapter again;
+        // since responses are exhausted, the scripted adapter answers
+        // `Block`, and the call must be denied.
+        let (tx, rx) = mpsc::channel(8);
+        let _adapter = responder(rx, vec![ApprovalResponse::Allow]);
+        let gate = ApprovalGate::new(
+            vec![
+                ApprovalTrigger::McpToolFirstUse {
+                    server: "filesystem".into(),
+                },
+                ApprovalTrigger::McpToolFirstUse {
+                    server: "web".into(),
+                },
+            ],
+            tx,
+        );
+
+        // First server's first tool call: consults the adapter, approved.
+        assert!(gate
+            .before_tool("mcp__filesystem__read_file", &json!({"path": "a"}))
+            .await
+            .is_ok());
+        // Second server's first tool call must still require its own
+        // approval, not be silently let through by the first server's
+        // already-fired trigger.
+        assert!(matches!(
+            gate.before_tool("mcp__web__fetch", &json!({"url": "b"}))
+                .await,
             Err(PolicyError::ApprovalDenied)
         ));
     }

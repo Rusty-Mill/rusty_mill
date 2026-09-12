@@ -27,7 +27,10 @@
 
 mod common;
 
-use common::{http_response, run, start_connect_proxy, start_tls_test_server};
+use common::{
+    http_response, run, start_connect_proxy, start_https_then_http_test_server,
+    start_tls_test_server,
+};
 use rusty_request::{Client, Error, TrustPolicy};
 
 #[allow(dead_code)]
@@ -196,5 +199,52 @@ fn request_level_trust_policy_overrides_the_client_default() {
             .expect("a request-level DangerNoVerification override should accept the cert");
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(resp.text().unwrap(), "override");
+    });
+}
+
+#[test]
+fn https_to_http_downgrade_redirect_on_the_same_host_and_port_strips_authorization() {
+    run(async {
+        // `start_https_then_http_test_server` puts both hops on the
+        // exact same host:port -- the one shape that can prove the
+        // `Authorization` header is stripped because the *scheme*
+        // downgraded (https -> http), not because the host or port
+        // changed (see `cross_origin_redirect_strips_authorization_header`
+        // in `tests/client.rs` for that, separate, case).
+        let server = start_https_then_http_test_server(
+            |req, addr| {
+                assert_eq!(req.header("authorization"), Some("Bearer secret-token"));
+                http_response(
+                    302,
+                    "Found",
+                    &[("Location", &format!("http://{addr}/end"))],
+                    b"",
+                )
+            },
+            |req, _addr| {
+                assert_eq!(
+                    req.header("authorization"),
+                    None,
+                    "Authorization must not survive an https -> http downgrade redirect"
+                );
+                http_response(200, "OK", &[], b"downgraded")
+            },
+        );
+        let url = format!("https://{}/start", server.addr);
+
+        let client = Client::builder()
+            .trust_policy(TrustPolicy::DangerNoVerification)
+            .build();
+        let resp = client
+            .get(&url)
+            .unwrap()
+            .bearer_auth("secret-token")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.text().unwrap(), "downgraded");
     });
 }

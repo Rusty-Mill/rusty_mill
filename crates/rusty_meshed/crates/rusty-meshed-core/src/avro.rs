@@ -23,6 +23,8 @@ pub enum AvroDecodeError {
     InvalidUtf8,
     #[error("unexpected end of input decoding an Avro double")]
     UnexpectedEofInDouble,
+    #[error("Avro array block count {0} has no valid negation (i64::MIN)")]
+    InvalidBlockCount(i64),
 }
 
 /// Encodes an Avro `long`: zigzag then variable-length base-128,
@@ -112,7 +114,9 @@ pub fn decode_string_array(bytes: &[u8], pos: &mut usize) -> Result<Vec<String>,
         }
         let item_count = if count < 0 {
             decode_long(bytes, pos)?; // block byte-size, unused by an item-by-item decode
-            -count
+            count
+                .checked_neg()
+                .ok_or(AvroDecodeError::InvalidBlockCount(count))?
         } else {
             count
         };
@@ -216,6 +220,18 @@ mod tests {
         assert_eq!(
             decode_double(&buf, &mut pos),
             Err(AvroDecodeError::UnexpectedEofInDouble)
+        );
+    }
+
+    #[test]
+    fn decode_string_array_rejects_i64_min_block_count_instead_of_panicking() {
+        let mut buf = Vec::new();
+        encode_long(i64::MIN, &mut buf);
+        encode_long(0, &mut buf); // block byte-size field, unused by an item-by-item decode
+        let mut pos = 0;
+        assert_eq!(
+            decode_string_array(&buf, &mut pos),
+            Err(AvroDecodeError::InvalidBlockCount(i64::MIN))
         );
     }
 }

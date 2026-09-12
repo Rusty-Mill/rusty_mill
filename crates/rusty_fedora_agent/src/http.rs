@@ -38,6 +38,9 @@ pub struct AgentState<S, P> {
 
 /// Binds `addr` (a private/Tailscale address, never `0.0.0.0` -- see this
 /// crate's README) and serves requests until the process exits.
+/// `main::validate_bind_addr` enforces that invariant on `addr` before
+/// this function is ever called; this function trusts its caller and
+/// does not re-check.
 pub fn serve<S, P>(addr: &str, state: AgentState<S, P>) -> std::io::Result<()>
 where
     S: SystemController,

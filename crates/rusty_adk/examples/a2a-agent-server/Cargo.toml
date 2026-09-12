@@ -12,4 +12,7 @@ rusty-adk = { path = "../../crates/rusty-adk", features = ["a2a"] }
 adk-a2a.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
+# `axum` "0.7" is a deliberate split against this workspace's root ("0.8")
+# -- see the root Cargo.toml's "Hoisted from rusty_adk" comment block: a
+# real Router/axum::serve API break, tracked as a migration, not drift.
 axum = "0.7"

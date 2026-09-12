@@ -18,7 +18,9 @@ use crate::http::router::Router;
 use rusty_http::StatusCode;
 use rusty_request::Json;
 use rusty_sqlite::rusqlite::types::ToSql;
-use rusty_sqlite::rusqlite::{params, Connection, OptionalExtension};
+use rusty_sqlite::rusqlite::{
+    params, Connection, Error as SqliteError, ErrorCode, OptionalExtension,
+};
 use std::sync::Arc;
 
 fn parse_id(req: &Request, name: &str) -> Option<i64> {
@@ -85,6 +87,43 @@ fn grant_exists(
     )
 }
 
+/// Whether `err` is a SQLite `UNIQUE` constraint violation -- the
+/// signature a duplicate `(output_port_id, consumer_group_id)` INSERT
+/// produces once it races past the `grant_exists` pre-check above
+/// (two requests whose own pre-checks both passed before either
+/// inserted).
+fn is_unique_violation(err: &SqliteError) -> bool {
+    err.sqlite_error_code() == Some(ErrorCode::ConstraintViolation)
+}
+
+/// Inserts a new grant row, converting a `UNIQUE`-constraint violation
+/// on `(output_port_id, consumer_group_id)` into the documented 409
+/// (GOV-015) instead of a generic 500 -- the DB-level backstop for the
+/// race the `grant_exists` pre-check alone can't close.
+fn insert_grant_or_conflict(
+    conn: &Connection,
+    output_port_id: i64,
+    consumer_group_id: &str,
+    granted_by: &str,
+    granted_at: &str,
+) -> Result<(), Response> {
+    match conn.execute(
+        "INSERT INTO port_access_grants (output_port_id, consumer_group_id, granted_by, granted_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![output_port_id, consumer_group_id, granted_by, granted_at],
+    ) {
+        Ok(_) => Ok(()),
+        Err(err) if is_unique_violation(&err) => Err(detail_error(
+            StatusCode::CONFLICT,
+            format!(
+                "Access grant for output_port_id={output_port_id} and \
+                 consumer_group_id='{consumer_group_id}' already exists."
+            ),
+        )),
+        Err(_) => Err(internal_error()),
+    }
+}
+
 // ---------------------------------------------------------------------
 // Access grants CRUD
 // ---------------------------------------------------------------------
@@ -121,6 +160,10 @@ async fn create(state: Arc<AppState>, req: Request) -> Response {
         Err(_) => return internal_error(),
     }
     // GOV-015: 409 on a duplicate (output_port_id, consumer_group_id) pair.
+    // This pre-check narrows the race window but can't close it alone --
+    // two concurrent requests can both observe `Ok(false)` here before
+    // either inserts; `insert_grant_or_conflict` below is the DB-level
+    // backstop (the composite `UNIQUE` index) for that case.
     match grant_exists(&conn, output_port_id, consumer_group_id) {
         Ok(true) => {
             return detail_error(
@@ -137,13 +180,14 @@ async fn create(state: Arc<AppState>, req: Request) -> Response {
 
     // REG-090: server-generated ISO-8601 UTC timestamp.
     let granted_at = now_iso();
-    let inserted = conn.execute(
-        "INSERT INTO port_access_grants (output_port_id, consumer_group_id, granted_by, granted_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![output_port_id, consumer_group_id, granted_by, granted_at],
-    );
-    if inserted.is_err() {
-        return internal_error();
+    if let Err(response) = insert_grant_or_conflict(
+        &conn,
+        output_port_id,
+        consumer_group_id,
+        granted_by,
+        &granted_at,
+    ) {
+        return response;
     }
 
     let mut json = Json::object();
@@ -514,6 +558,57 @@ mod tests {
             ))
             .await;
         assert_eq!(response.status, StatusCode::CONFLICT);
+    }
+
+    #[rusty_tokio::test]
+    async fn create_race_window_only_one_grant_persists_and_conflict_is_returned() {
+        // Simulates the race the finding describes: two requests whose
+        // own `grant_exists` pre-checks both observe `false` before
+        // either inserts (GOV-015's documented Trigger). `create()`
+        // can't be driven through that exact interleaving
+        // deterministically, so this exercises the same
+        // `insert_grant_or_conflict` call `create()` makes once its
+        // pre-check passes -- the DB-level `UNIQUE` index is what
+        // actually closes the race, not the pre-check alone.
+        let state = temp_state();
+        let (_product_id, port_id) = create_product_and_port(&state);
+        let conn = state.get_session().unwrap();
+
+        let first = insert_grant_or_conflict(
+            &conn,
+            port_id,
+            "billing-service",
+            "admin@example.com",
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(
+            first.is_ok(),
+            "the first insert of a novel pair must succeed"
+        );
+
+        let second = insert_grant_or_conflict(
+            &conn,
+            port_id,
+            "billing-service",
+            "admin@example.com",
+            "2026-01-01T00:00:01Z",
+        );
+        let Err(response) = second else {
+            panic!("a second insert for the identical (port, grantee) pair must be rejected");
+        };
+        assert_eq!(response.status, StatusCode::CONFLICT);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM port_access_grants WHERE output_port_id = ?1 AND consumer_group_id = ?2",
+                params![port_id, "billing-service"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the rejected duplicate insert must not have persisted a second row"
+        );
     }
 
     #[rusty_tokio::test]

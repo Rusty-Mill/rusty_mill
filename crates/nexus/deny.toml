@@ -1,9 +1,15 @@
 # cargo-deny configuration (V6, docs/0.1.2/audits/repo-review-2026-06-10.md).
 #
 # Supply-chain gate for the Rust workspace: security advisories, license
-# policy, duplicate-version hygiene, and registry provenance. Runs on every
-# PR via .github/workflows/ci.yml (cargo-deny job); run locally with
-# `cargo deny check`.
+# policy, duplicate-version hygiene, and registry provenance. Local/manual
+# tool only -- not run in CI. Wiring this into `.github/workflows/ci.yml`
+# was attempted (2026-09-12 monorepo review, finding 59) and reverted:
+# enforcing it against this workspace's real, shared Cargo.lock surfaces a
+# large pre-existing backlog (unmaintained/yanked transitive crates, two
+# real wasmtime CVEs, an rmcp DNS-rebinding CVE, license-metadata gaps in
+# `rusty_rusqlite`/`rusty_stream`, and dozens of the workspace's own
+# deliberate duplicate-version splits tripping `[bans]`) that is a separate
+# triage project, not a CI-gate change. Run locally with `cargo deny check`.
 
 [graph]
 # The platforms Nexus actually ships on. Limiting the graph keeps the check
@@ -22,6 +28,20 @@ ignore = [
     # no runtime code and upstream archived it with no successor. Revisit if
     # the direct dependents migrate off it.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc-macro, no runtime code" },
+    # rsa 0.9.x (Marvin Attack timing side-channel): present in the shared
+    # workspace Cargo.lock via jsonwebtoken's `rust_crypto` feature in
+    # agentgateway-auth (rusty_agent_gateway) and rusty-mcp's `jwt`
+    # feature, not a nexus dependency itself -- cargo-deny resolves the
+    # whole workspace graph regardless of which crate's config invokes it.
+    # Reviewed: both crates' production code only calls
+    # `jsonwebtoken::decode`/`DecodingKey` (signature *verification*,
+    # public-key only); `encode`/`EncodingKey` (the private-key signing
+    # path the advisory concerns) appears only in each crate's own test
+    # suite, never in shipped code. The Marvin Attack leaks private-key
+    # bits through timing in RSA decrypt/sign operations; verifying a
+    # signature with the public modulus/exponent has no secret-dependent
+    # computation to leak. Revisit once a patched `rsa` release exists.
+    { id = "RUSTSEC-2023-0071", reason = "RS256 verify-only usage (DecodingKey/decode); the private-key sign/decrypt path the Marvin Attack targets is never exercised in production code" },
 ]
 
 [licenses]

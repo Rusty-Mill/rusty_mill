@@ -7,8 +7,8 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum HashlineError {
     /// A `[PATH#TAG]` header was malformed (missing `#`, empty path, or a TAG
-    /// that is not exactly four hex digits).
-    #[error("malformed section header on line {line}: expected `[PATH#TAG]` with a 4-hex TAG")]
+    /// that is not exactly sixteen hex digits).
+    #[error("malformed section header on line {line}: expected `[PATH#TAG]` with a 16-hex TAG")]
     BadSectionHeader {
         /// 1-based line number within the patch text.
         line: usize,

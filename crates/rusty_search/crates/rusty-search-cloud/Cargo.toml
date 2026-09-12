@@ -13,3 +13,4 @@ rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true }

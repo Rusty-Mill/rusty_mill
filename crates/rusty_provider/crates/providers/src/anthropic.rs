@@ -26,6 +26,14 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Anthropic rejects `budget_tokens` below this.
 const MIN_THINKING_BUDGET: u32 = 1024;
+/// Upper bound clamp for `budget_tokens`/`reasoning.max_tokens`. Anthropic
+/// models in this workspace's own config (see `config.example.toml`,
+/// `README.md`) advertise a 200_000-token context window; 128_000 is a
+/// generous ceiling comfortably inside that window while still leaving
+/// room for `max_tokens = budget_tokens + DEFAULT_MAX_TOKENS` (below) to
+/// stay a sane, non-overflowing value even when a caller supplies an
+/// unbounded `reasoning.max_tokens` (e.g. `u32::MAX`).
+const MAX_THINKING_BUDGET: u32 = 128_000;
 
 pub struct AnthropicProvider {
     base_url: String,
@@ -346,12 +354,16 @@ fn forced_structured_output_tool(req: &ChatRequest) -> Result<Option<WireTool<'_
 /// request field, picking `budget_tokens` the same way Gemini's
 /// `thinkingBudget` is picked (explicit `reasoning.max_tokens` if set, else
 /// a fraction of the request's own `max_tokens`, else a flat default) but
-/// clamped to Anthropic's minimum of `MIN_THINKING_BUDGET`.
+/// clamped to Anthropic's minimum of `MIN_THINKING_BUDGET` and capped at
+/// `MAX_THINKING_BUDGET` -- `reasoning.max_tokens` is deserialized
+/// straight from the public request body with no upper bound of its own,
+/// so an attacker-supplied value (e.g. `u32::MAX`) must not be allowed to
+/// reach the `budget + DEFAULT_MAX_TOKENS` arithmetic below unclamped.
 fn thinking_config(reasoning: &ReasoningConfig, req_max_tokens: Option<u32>) -> Value {
     let budget = reasoning
         .max_tokens
         .unwrap_or_else(|| effort_thinking_budget(reasoning.effort.as_deref(), req_max_tokens))
-        .max(MIN_THINKING_BUDGET);
+        .clamp(MIN_THINKING_BUDGET, MAX_THINKING_BUDGET);
     json!({"type": "enabled", "budget_tokens": budget})
 }
 
@@ -421,7 +433,7 @@ impl<'a> WireRequest<'a> {
         if let Some(budget) = budget_tokens {
             // Anthropic requires `max_tokens > budget_tokens`.
             if max_tokens <= budget {
-                max_tokens = budget + DEFAULT_MAX_TOKENS;
+                max_tokens = budget.saturating_add(DEFAULT_MAX_TOKENS);
             }
         }
         let exclude_reasoning = req
@@ -1022,6 +1034,36 @@ mod tests {
         assert!(wire.forced_output_tool_name.is_none());
         assert!(wire.tools.is_none());
         assert!(wire.tool_choice.is_none());
+    }
+
+    #[test]
+    fn from_core_clamps_an_attacker_supplied_reasoning_budget_instead_of_overflowing_max_tokens() {
+        let mut req = request_with_response_format(None);
+        req.reasoning = Some(ReasoningConfig {
+            effort: None,
+            max_tokens: Some(u32::MAX),
+            exclude: None,
+        });
+        // Must not panic (debug-mode overflow trap) and must not wrap to a
+        // value smaller than budget_tokens (release-mode silent wraparound).
+        let wire = WireRequest::from_core(&req, "claude-sonnet-5", false).unwrap();
+        let budget_tokens = wire
+            .thinking
+            .as_ref()
+            .unwrap()
+            .get("budget_tokens")
+            .and_then(Value::as_u64)
+            .unwrap();
+        assert!(
+            budget_tokens <= MAX_THINKING_BUDGET as u64,
+            "budget_tokens should be clamped to MAX_THINKING_BUDGET, got {budget_tokens}"
+        );
+        assert!(
+            (wire.max_tokens as u64) > budget_tokens,
+            "Anthropic requires max_tokens > budget_tokens, got max_tokens={} budget_tokens={}",
+            wire.max_tokens,
+            budget_tokens,
+        );
     }
 
     // --- to_wire_tool_choice -------------------------------------------------

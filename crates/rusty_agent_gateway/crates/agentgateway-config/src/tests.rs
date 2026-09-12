@@ -177,6 +177,74 @@ binds:
 }
 
 #[test]
+fn rejects_wildcard_cors_origin_combined_with_credentials() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              cors:
+                allowOrigins: ["*"]
+                allowCredentials: true
+            backends:
+              - host: "backend:8080"
+"#,
+    )
+    .expect("should parse");
+
+    let err = config.validate().expect_err("should not validate");
+    assert!(
+        err.to_string().contains("allowCredentials"),
+        "error should explain the CORS restriction, got: {err}"
+    );
+}
+
+#[test]
+fn accepts_wildcard_cors_origin_without_credentials() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              cors:
+                allowOrigins: ["*"]
+            backends:
+              - host: "backend:8080"
+"#,
+    )
+    .expect("should parse");
+
+    config.validate().expect("a bare wildcard origin is safe");
+}
+
+#[test]
+fn accepts_cors_credentials_with_explicit_origins() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              cors:
+                allowOrigins: ["https://example.com"]
+                allowCredentials: true
+            backends:
+              - host: "backend:8080"
+"#,
+    )
+    .expect("should parse");
+
+    config
+        .validate()
+        .expect("explicit origins with credentials is the safe combination");
+}
+
+#[test]
 fn parses_remote_and_sse_targets_with_defaulted_paths() {
     let config = Config::from_yaml(
         r#"

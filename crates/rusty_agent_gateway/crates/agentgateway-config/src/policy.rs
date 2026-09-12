@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::ConfigError;
 use crate::oneof::one_of_enum;
 
 /// The policy bundle attached to a route.
@@ -84,6 +85,14 @@ impl Policies {
         if let Some(guardrails) = &self.mcp_guardrails {
             guardrails.lint(&format!("{at}.policies.mcpGuardrails"), findings);
         }
+    }
+
+    /// Reject policy combinations that parse but cannot be served safely.
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(cors) = &self.cors {
+            cors.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -770,6 +779,29 @@ pub struct CorsPolicy {
     /// Whether credentialed requests are permitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_credentials: Option<bool>,
+}
+
+impl CorsPolicy {
+    /// Reject a wildcard origin combined with credentials.
+    ///
+    /// `allowOrigins: ["*"]` with `allowCredentials: true` cannot be served
+    /// as a true wildcard: browsers refuse `Access-Control-Allow-Origin: *`
+    /// on a credentialed request, so the CORS matcher falls back to echoing
+    /// the caller's `Origin` header verbatim instead, with credentials
+    /// enabled. That silently turns "any origin" into "any origin, with
+    /// cookies" -- the canonical dangerous CORS misconfiguration -- so it is
+    /// rejected here rather than served.
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if self.allow_credentials == Some(true) && self.allow_origins.iter().any(|o| o == "*") {
+            return Err(ConfigError::Invalid(
+                "cors: allowOrigins: [\"*\"] combined with allowCredentials: true would \
+                 reflect any origin's credentials; list the exact origins that may send \
+                 credentialed requests instead"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// JWT bearer token validation.

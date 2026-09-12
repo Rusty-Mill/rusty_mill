@@ -140,7 +140,10 @@ impl std::str::FromStr for SessionId {
         if s.len() != ID_LEN {
             return Err(SessionIdError::WrongLength { got: s.len() });
         }
-        if let Some(bad) = s.chars().find(|c| !ALPHABET.contains(&(*c as u8))) {
+        if let Some(bad) = s
+            .chars()
+            .find(|c| !c.is_ascii() || !ALPHABET.contains(&(*c as u8)))
+        {
             return Err(SessionIdError::BadCharacter { got: bad });
         }
         Ok(SessionId(s.to_owned()))
@@ -770,6 +773,27 @@ mod tests {
         assert_eq!(
             "abc".parse::<SessionId>(),
             Err(SessionIdError::WrongLength { got: 3 })
+        );
+    }
+
+    #[test]
+    fn parsing_rejects_non_ascii_chars_that_alias_alphabet_bytes() {
+        // U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) is codepoint
+        // 0x130; naively truncating it to a `u8` (`0x30`) aliases the
+        // ASCII digit `0`, which *is* in `ALPHABET`. A non-ASCII
+        // character must never be treated as a valid alphabet character
+        // just because its low byte happens to coincide with one --
+        // otherwise the "structurally impossible path traversal"
+        // invariant is a lie.
+        let bad = format!("0123456789{}", '\u{130}');
+        assert_eq!(
+            bad.len(),
+            ID_LEN,
+            "fixture must occupy exactly ID_LEN bytes"
+        );
+        assert!(
+            bad.parse::<SessionId>().is_err(),
+            "a non-ASCII character must never parse as a valid session id"
         );
     }
 

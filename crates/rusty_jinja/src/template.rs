@@ -20,6 +20,14 @@ use crate::ast::{Expr, Node};
 use crate::lexer::tokenize;
 use crate::parser::Parser;
 
+/// Cap on nested `{% if %}`/`{% for %}` block depth. Each nested block adds
+/// one level of native recursion (`parse_block` -> `parse_if_chain`/
+/// `parse_for_chain` -> `parse_block` -> ...); an externally-sourced
+/// template with tens of thousands of nested blocks would otherwise
+/// overflow the stack and abort the process. 250 mirrors `rusty_regx`'s
+/// `MAX_NESTING_DEPTH`.
+const MAX_NESTING_DEPTH: u32 = 250;
+
 /// Errors compiling a template.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JinjaError {
@@ -159,7 +167,13 @@ fn parse_block(
     scanner: &mut Scanner,
     kind: BlockKind,
     initial_trim: bool,
+    depth: u32,
 ) -> Result<(Vec<Node>, Terminator), JinjaError> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(JinjaError::Syntax(
+            "template block nesting exceeds the maximum depth",
+        ));
+    }
     let mut nodes: Vec<Node> = Vec::new();
     let mut trim_next_text_start = initial_trim;
 
@@ -210,12 +224,12 @@ fn parse_block(
         let inner_trimmed = inner.trim();
         match classify_tag(inner_trimmed)? {
             RawTag::If(cond) => {
-                let (node, tail_trim) = parse_if_chain(scanner, cond, trim_right)?;
+                let (node, tail_trim) = parse_if_chain(scanner, cond, trim_right, depth)?;
                 nodes.push(node);
                 trim_next_text_start = tail_trim;
             }
             RawTag::For(spec) => {
-                let (node, tail_trim) = parse_for_chain(scanner, spec, trim_right)?;
+                let (node, tail_trim) = parse_for_chain(scanner, spec, trim_right, depth)?;
                 nodes.push(node);
                 trim_next_text_start = tail_trim;
             }
@@ -260,13 +274,14 @@ fn parse_if_chain(
     scanner: &mut Scanner,
     first_cond_src: &str,
     first_trim: bool,
+    depth: u32,
 ) -> Result<(Node, bool), JinjaError> {
     let mut branches = Vec::new();
     let mut cond_src: String = first_cond_src.trim().into();
     let mut body_trim = first_trim;
     loop {
         let cond = parse_expr_src(&cond_src)?;
-        let (body, terminator) = parse_block(scanner, BlockKind::If, body_trim)?;
+        let (body, terminator) = parse_block(scanner, BlockKind::If, body_trim, depth + 1)?;
         branches.push((cond, body));
         match terminator {
             Terminator::Elif(next_cond, trim) => {
@@ -274,7 +289,8 @@ fn parse_if_chain(
                 body_trim = trim;
             }
             Terminator::Else(else_trim) => {
-                let (else_body, terminator2) = parse_block(scanner, BlockKind::If, else_trim)?;
+                let (else_body, terminator2) =
+                    parse_block(scanner, BlockKind::If, else_trim, depth + 1)?;
                 match terminator2 {
                     Terminator::Endif(tail_trim) => {
                         return Ok((
@@ -311,12 +327,13 @@ fn parse_for_chain(
     scanner: &mut Scanner,
     spec: &str,
     first_trim: bool,
+    depth: u32,
 ) -> Result<(Node, bool), JinjaError> {
     let (var, iterable_src) = spec
         .split_once(" in ")
         .ok_or(JinjaError::Syntax("expected 'for x in y'"))?;
     let iterable = parse_expr_src(iterable_src.trim())?;
-    let (body, terminator) = parse_block(scanner, BlockKind::For, first_trim)?;
+    let (body, terminator) = parse_block(scanner, BlockKind::For, first_trim, depth + 1)?;
     match terminator {
         Terminator::Endfor(tail_trim) => Ok((
             Node::For {
@@ -333,7 +350,7 @@ fn parse_for_chain(
 /// Compiles `src` into a node tree.
 pub fn compile(src: &str) -> Result<Vec<Node>, JinjaError> {
     let mut scanner = Scanner::new(src);
-    let (nodes, terminator) = parse_block(&mut scanner, BlockKind::Top, false)?;
+    let (nodes, terminator) = parse_block(&mut scanner, BlockKind::Top, false, 0)?;
     match terminator {
         Terminator::Eof => Ok(nodes),
         _ => Err(JinjaError::Syntax("unexpected closing tag at top level")),
@@ -463,5 +480,23 @@ mod tests {
     fn unterminated_tag_is_an_error() {
         assert!(compile("{{ x").is_err());
         assert!(compile("{% if x %}").is_err());
+    }
+
+    #[test]
+    fn deeply_nested_if_blocks_error_instead_of_overflowing_the_stack() {
+        // Tens of thousands of nested `{% if %}` blocks would recurse
+        // `parse_block` -> `parse_if_chain` -> `parse_block` -> ... once
+        // per level with no depth guard, overflowing the native stack and
+        // aborting the process. With the guard this must return a clean
+        // `JinjaError` instead.
+        let opens = "{% if x %}".repeat(50_000);
+        let closes = "{% endif %}".repeat(50_000);
+        let src = alloc::format!("{opens}{closes}");
+        assert_eq!(
+            compile(&src),
+            Err(JinjaError::Syntax(
+                "template block nesting exceeds the maximum depth"
+            ))
+        );
     }
 }

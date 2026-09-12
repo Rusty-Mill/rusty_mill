@@ -65,7 +65,7 @@ impl AutoCommitter {
             }
         }
 
-        let engine = GitEngine::open(&self.repo_root)?;
+        let mut engine = GitEngine::open(&self.repo_root)?;
         let state = engine.state()?;
 
         if !state.is_dirty {
@@ -164,7 +164,7 @@ mod tests {
     }
 
     fn manual_commit(dir: &Path, msg: &str) {
-        let engine = GitEngine::open(dir).unwrap();
+        let mut engine = GitEngine::open(dir).unwrap();
         engine.stage_all().unwrap();
         engine.commit(msg).unwrap();
     }

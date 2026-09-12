@@ -1,10 +1,11 @@
-# cargo-deny configuration — supply-chain hygiene for a dependency graph
-# that includes five git-pinned sibling crates (rusty_regx, rusty_lines,
-# rusty_libc, rusty_win32, rpath), all from the same author as rush itself.
-# Run locally with `cargo deny check`, or see .github/workflows/ci.yml for
-# the CI job.
-#
-# https://embarkstudios.github.io/cargo-deny/
+# cargo-deny configuration — supply-chain hygiene for rush's dependency
+# graph. rush's five first-party sibling crates (rusty_regx, rusty_lines,
+# rusty_libc, rusty_win32, rpath — all from the same author) migrated from
+# git-pinned dependencies to workspace `path` dependencies with real
+# `version =` fields under ADR-0002's same-workspace-source policy; see
+# Cargo.toml. Local/manual tool only -- not run in CI (see nexus/deny.toml's
+# header for why enforcing it workspace-wide was attempted and reverted).
+# Run locally with `cargo deny check`.
 
 [graph]
 targets = [
@@ -28,6 +29,22 @@ exclude = ["criterion"]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+ignore = [
+    # rsa 0.9.x (Marvin Attack timing side-channel): present in the shared
+    # workspace Cargo.lock via jsonwebtoken's `rust_crypto` feature in
+    # agentgateway-auth (rusty_agent_gateway) and rusty-mcp's `jwt`
+    # feature, not a rush dependency itself -- cargo-deny resolves the
+    # whole workspace graph regardless of which crate's config invokes it.
+    # Reviewed: both crates' production code only calls
+    # `jsonwebtoken::decode`/`DecodingKey` (signature *verification*,
+    # public-key only); `encode`/`EncodingKey` (the private-key signing
+    # path the advisory concerns) appears only in each crate's own test
+    # suite, never in shipped code. The Marvin Attack leaks private-key
+    # bits through timing in RSA decrypt/sign operations; verifying a
+    # signature with the public modulus/exponent has no secret-dependent
+    # computation to leak. Revisit once a patched `rsa` release exists.
+    { id = "RUSTSEC-2023-0071", reason = "RS256 verify-only usage (DecodingKey/decode); the private-key sign/decrypt path the Marvin Attack targets is never exercised in production code" },
+]
 
 [licenses]
 # rush itself is MIT (Cargo.toml). Allow the licenses actually present in
@@ -48,16 +65,12 @@ confidence-threshold = 0.8
 # tighten to "deny" once the graph is small enough to keep at exactly one
 # version per crate.
 multiple-versions = "warn"
-# rush's own sibling crates (rusty_regx, rusty_lines, rusty_libc,
-# rusty_win32, rpath, all first-party, same author, see Cargo.toml's own
-# comments on each) are
-# deliberate git dependencies with no crates.io `version =` requirement —
-# exactly what this lint flags as a "wildcard" dependency, but here it's
-# the intended architecture (actively co-developed alongside rush itself,
-# rusty_regx additionally pinned to an exact `rev`), not an accidental
-# unconstrained version bound. Left as "allow"; `[sources]` below is what
-# actually constrains *which* git sources are trusted.
-wildcards = "allow"
+# rush's five sibling crates (rusty_regx, rusty_lines, rusty_libc,
+# rusty_win32, rpath) are workspace `path` dependencies with real
+# crates.io-style `version =` fields (see Cargo.toml) since the ADR-0002
+# same-workspace-source migration completed -- no longer an exception to
+# this lint.
+wildcards = "deny"
 # A crate rush deliberately dropped and never wants back (the `=~` engine
 # swap, C56 — see CHANGELOG.md "Changed: `=~` regex engine replaced").
 deny = [
@@ -68,14 +81,3 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The sibling crates this project pulls straight from GitHub instead of
-# crates.io (see Cargo.toml's own comments on each) — anything else over
-# git is unreviewed and should fail the build until it's added here
-# deliberately.
-allow-git = [
-    "https://github.com/baileyrd/rusty_regx",
-    "https://github.com/baileyrd/rusty_lines",
-    "https://github.com/baileyrd/rusty_libc",
-    "https://github.com/baileyrd/rusty_win32",
-    "https://github.com/baileyrd/rpath",
-]

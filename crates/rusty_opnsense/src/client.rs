@@ -12,7 +12,7 @@ use crate::model::ServiceAction;
 /// is the only auth this crate speaks -- generated per user under **System
 /// -> Access -> Users**, "API keys" section, and independent of that user's
 /// own login password.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpnsenseConfig {
     /// The API base URL, e.g. `https://opnsense.lan`. No trailing slash
     /// needed -- one is stripped if present.
@@ -30,6 +30,18 @@ pub struct OpnsenseConfig {
     pub timeout: Option<Duration>,
 }
 
+impl std::fmt::Debug for OpnsenseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpnsenseConfig")
+            .field("base_url", &self.base_url)
+            .field("key", &"[REDACTED]")
+            .field("secret", &"[REDACTED]")
+            .field("insecure", &self.insecure)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 /// An async client for one OPNsense firewall's REST API.
 ///
 /// Unlike Proxmox's uniform `{"data": ...}` envelope, OPNsense's response
@@ -45,12 +57,22 @@ pub struct OpnsenseConfig {
 /// own -- OPNsense buffers each config area's changes until its own
 /// `apply_*_changes` method is called, the same way the web UI's "Apply
 /// changes" banner implies.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpnsenseClient {
     http: Client,
     base_url: String,
     key: String,
     secret: String,
+}
+
+impl std::fmt::Debug for OpnsenseClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpnsenseClient")
+            .field("base_url", &self.base_url)
+            .field("key", &"[REDACTED]")
+            .field("secret", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpnsenseClient {
@@ -90,8 +112,11 @@ impl OpnsenseClient {
     /// named service (the short id from [`OpnsenseClient::list_services`],
     /// e.g. `unbound`, `dhcpd`, `sshd`).
     pub async fn service_control(&self, name: &str, action: ServiceAction) -> Result<Value> {
-        self.post(&format!("/api/core/service/{action}/{name}"))
-            .await
+        self.post(&format!(
+            "/api/core/service/{action}/{}",
+            encode_path_segment(name)
+        ))
+        .await
     }
 
     /// `GET /diagnostics/interface/getInterfaceNames` -- every network
@@ -123,8 +148,11 @@ impl OpnsenseClient {
 
     /// `GET /firewall/filter/getRule/{uuid}` -- one rule's full field set.
     pub async fn get_firewall_rule(&self, uuid: &str) -> Result<Value> {
-        self.get(&format!("/api/firewall/filter/getRule/{uuid}"))
-            .await
+        self.get(&format!(
+            "/api/firewall/filter/getRule/{}",
+            encode_path_segment(uuid)
+        ))
+        .await
     }
 
     /// `POST /firewall/filter/addRule` -- create a rule. `fields` is the
@@ -152,7 +180,7 @@ impl OpnsenseClient {
     /// called.
     pub async fn update_firewall_rule(&self, uuid: &str, fields: Value) -> Result<Value> {
         self.post_json(
-            &format!("/api/firewall/filter/setRule/{uuid}"),
+            &format!("/api/firewall/filter/setRule/{}", encode_path_segment(uuid)),
             &serde_json::json!({ "rule": fields }),
         )
         .await
@@ -161,8 +189,11 @@ impl OpnsenseClient {
     /// `POST /firewall/filter/delRule/{uuid}` -- delete a rule. Doesn't take
     /// effect until [`OpnsenseClient::apply_firewall_changes`] is called.
     pub async fn delete_firewall_rule(&self, uuid: &str) -> Result<Value> {
-        self.post(&format!("/api/firewall/filter/delRule/{uuid}"))
-            .await
+        self.post(&format!(
+            "/api/firewall/filter/delRule/{}",
+            encode_path_segment(uuid)
+        ))
+        .await
     }
 
     /// `POST /firewall/filter/toggleRule/{uuid}[/{0,1}]` -- flip a rule's
@@ -170,6 +201,7 @@ impl OpnsenseClient {
     /// take effect until [`OpnsenseClient::apply_firewall_changes`] is
     /// called.
     pub async fn toggle_firewall_rule(&self, uuid: &str, enabled: Option<bool>) -> Result<Value> {
+        let uuid = encode_path_segment(uuid);
         let path = match enabled {
             Some(true) => format!("/api/firewall/filter/toggleRule/{uuid}/1"),
             Some(false) => format!("/api/firewall/filter/toggleRule/{uuid}/0"),
@@ -240,8 +272,11 @@ impl OpnsenseClient {
     /// `GET /interfaces/vlan_settings/getItem/{uuid}` -- one VLAN's full
     /// field set.
     pub async fn get_vlan(&self, uuid: &str) -> Result<Value> {
-        self.get(&format!("/api/interfaces/vlan_settings/getItem/{uuid}"))
-            .await
+        self.get(&format!(
+            "/api/interfaces/vlan_settings/getItem/{}",
+            encode_path_segment(uuid)
+        ))
+        .await
     }
 
     /// `POST /interfaces/vlan_settings/addItem` -- create a VLAN. `fields`
@@ -263,7 +298,10 @@ impl OpnsenseClient {
     /// called.
     pub async fn update_vlan(&self, uuid: &str, fields: Value) -> Result<Value> {
         self.post_json(
-            &format!("/api/interfaces/vlan_settings/setItem/{uuid}"),
+            &format!(
+                "/api/interfaces/vlan_settings/setItem/{}",
+                encode_path_segment(uuid)
+            ),
             &serde_json::json!({ "vlan": fields }),
         )
         .await
@@ -273,8 +311,11 @@ impl OpnsenseClient {
     /// Doesn't take effect until [`OpnsenseClient::apply_vlan_changes`] is
     /// called.
     pub async fn delete_vlan(&self, uuid: &str) -> Result<Value> {
-        self.post(&format!("/api/interfaces/vlan_settings/delItem/{uuid}"))
-            .await
+        self.post(&format!(
+            "/api/interfaces/vlan_settings/delItem/{}",
+            encode_path_segment(uuid)
+        ))
+        .await
     }
 
     /// `POST /interfaces/vlan_settings/reconfigure` -- apply every pending
@@ -312,7 +353,11 @@ impl OpnsenseClient {
     /// filename [`OpnsenseClient::download_backup`]/
     /// [`OpnsenseClient::restore_backup`] take.
     pub async fn list_backups(&self, host: &str) -> Result<Value> {
-        self.get(&format!("/api/core/backup/backups/{host}")).await
+        self.get(&format!(
+            "/api/core/backup/backups/{}",
+            encode_path_segment(host)
+        ))
+        .await
     }
 
     /// `GET /core/backup/download/{host}[/{backup}]` -- one backup's raw
@@ -321,8 +366,12 @@ impl OpnsenseClient {
     /// serves the config file itself -- so it's returned as raw text rather
     /// than parsed.
     pub async fn download_backup(&self, host: &str, backup: Option<&str>) -> Result<String> {
+        let host = encode_path_segment(host);
         let path = match backup {
-            Some(backup) => format!("/api/core/backup/download/{host}/{backup}"),
+            Some(backup) => format!(
+                "/api/core/backup/download/{host}/{}",
+                encode_path_segment(backup)
+            ),
             None => format!("/api/core/backup/download/{host}"),
         };
         self.get_text(&path).await
@@ -334,8 +383,11 @@ impl OpnsenseClient {
     /// OPNsense reloads its configuration from the reverted-to backup as
     /// part of this call, there's no separate apply step.
     pub async fn restore_backup(&self, backup: &str) -> Result<Value> {
-        self.post(&format!("/api/core/backup/revertBackup/{backup}"))
-            .await
+        self.post(&format!(
+            "/api/core/backup/revertBackup/{}",
+            encode_path_segment(backup)
+        ))
+        .await
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -398,5 +450,88 @@ impl OpnsenseClient {
             });
         }
         Ok(serde_json::from_str(&text)?)
+    }
+}
+
+/// Percent-encodes a value embedded directly in a path segment (a
+/// service name, a firewall-rule/VLAN uuid, a backup provider host or
+/// filename) -- narrower than a query-value encoder since a path
+/// segment must not contain a literal `/`.
+fn encode_path_segment(value: &str) -> String {
+    encode(value, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
+    })
+}
+
+fn encode(value: &str, is_safe: impl Fn(char) -> bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let c = byte as char;
+        if c.is_ascii() && is_safe(c) {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_segment_encoding_leaves_typical_names_alone() {
+        assert_eq!(encode_path_segment("unbound"), "unbound");
+    }
+
+    #[test]
+    fn path_segment_encoding_escapes_a_slash() {
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+    }
+
+    #[test]
+    fn backup_name_containing_traversal_is_escaped_in_request_path() {
+        // Mirrors restore_backup's own path-building -- a `backup` value
+        // containing `/`/`..` must not introduce an extra path segment
+        // (i.e. route to an unintended endpoint) once encoded, since
+        // revertBackup takes effect immediately with no apply step.
+        let backup = "../../etc/passwd";
+        let encoded = encode_path_segment(backup);
+        let path = format!("/api/core/backup/revertBackup/{encoded}");
+        assert_eq!(path, "/api/core/backup/revertBackup/..%2F..%2Fetc%2Fpasswd");
+        // The one segment appended by this call must not itself contain a
+        // literal `/` -- that's the property that keeps it from being
+        // routed as extra path segments.
+        assert!(!encoded.contains('/'));
+    }
+
+    #[test]
+    fn config_debug_output_does_not_leak_key_or_secret() {
+        let config = OpnsenseConfig {
+            base_url: "https://opnsense.lan".to_string(),
+            key: "super-secret-key".to_string(),
+            secret: "super-secret-value".to_string(),
+            insecure: false,
+            timeout: None,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super-secret-key"));
+        assert!(!debug.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn client_debug_output_does_not_leak_key_or_secret() {
+        let config = OpnsenseConfig {
+            base_url: "https://opnsense.lan".to_string(),
+            key: "super-secret-key".to_string(),
+            secret: "super-secret-value".to_string(),
+            insecure: false,
+            timeout: None,
+        };
+        let client = OpnsenseClient::new(config);
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("super-secret-key"));
+        assert!(!debug.contains("super-secret-value"));
     }
 }

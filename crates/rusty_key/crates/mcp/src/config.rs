@@ -62,6 +62,21 @@ pub struct McpConfig {
     pub servers: Vec<ServerSpec>,
 }
 
+/// Reject server names containing `__` — the delimiter `mcp__<server>__<tool>`
+/// namespacing (`namespaced()`) relies on. `McpPolicy::server_of` recovers the
+/// server segment by splitting on the *first* `"__"` after `mcp__`; a server
+/// named e.g. `"core__side"` next to an allowlisted `"core"` would let
+/// `server_of` misattribute its tools to `"core"`, bypassing the allowlist.
+/// Keeping server names free of `"__"` keeps that split provably unambiguous.
+fn validate_servers(config: &McpConfig) -> Result<(), McpError> {
+    for server in &config.servers {
+        if server.name.contains("__") {
+            return Err(McpError::InvalidServerName(server.name.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// Load `mcp.toml` from `path` (legacy standalone file, top-level
 /// `[[servers]]`). A missing file yields an empty config (no MCP).
 pub fn load_mcp_config(path: &Path) -> Result<McpConfig, McpError> {
@@ -70,7 +85,10 @@ pub fn load_mcp_config(path: &Path) -> Result<McpConfig, McpError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(McpConfig::default()),
         Err(e) => return Err(McpError::Transport(e.to_string())),
     };
-    toml::from_str(&body).map_err(|e| McpError::Transport(format!("mcp.toml: {e}")))
+    let config: McpConfig =
+        toml::from_str(&body).map_err(|e| McpError::Transport(format!("mcp.toml: {e}")))?;
+    validate_servers(&config)?;
+    Ok(config)
 }
 
 /// The `[mcp]` table of the unified project config file; other tables (e.g.
@@ -94,6 +112,7 @@ pub fn load_mcp_config_for_workspace(workspace: &Path) -> Result<McpConfig, McpE
             let parsed: UnifiedFile = toml::from_str(&body)
                 .map_err(|e| McpError::Transport(format!("config.toml: {e}")))?;
             if !parsed.mcp.servers.is_empty() {
+                validate_servers(&parsed.mcp)?;
                 return Ok(parsed.mcp);
             }
             // Unified file present but declares no servers → try legacy file.
@@ -222,6 +241,51 @@ command = "npx"
         let ws = workspace("empty");
         let cfg = load_mcp_config_for_workspace(&ws).unwrap();
         assert!(cfg.servers.is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rejects_server_name_containing_double_underscore() {
+        // Finding 45: `McpPolicy::server_of` recovers the server segment of a
+        // `mcp__<server>__<tool>` name by splitting on the *first* `"__"`. If a
+        // non-allowlisted server is literally named `"core__side"` alongside an
+        // allowlisted `"core"`, its tool `mcp__core__side__footool` would be
+        // misattributed to `"core"` and let through. Rejecting `"__"` in server
+        // names at config-load time keeps that split provably unambiguous, so
+        // such a server can never be configured in the first place.
+        let dir = std::env::temp_dir().join(format!("rk-mcpcfg-amb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[servers]]
+name = "core"
+transport = "stdio"
+command = "cat"
+
+[[servers]]
+name = "core__side"
+transport = "stdio"
+command = "cat"
+"#,
+        )
+        .unwrap();
+        let err = load_mcp_config(&path).unwrap_err();
+        assert!(matches!(err, McpError::InvalidServerName(n) if n == "core__side"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_double_underscore_server_in_unified_workspace_config() {
+        let ws = workspace("ambiguous");
+        std::fs::write(
+            ws.join(".rustykeys").join("config.toml"),
+            "[[mcp.servers]]\nname = \"core__side\"\ntransport = \"stdio\"\ncommand = \"cat\"\n",
+        )
+        .unwrap();
+        let err = load_mcp_config_for_workspace(&ws).unwrap_err();
+        assert!(matches!(err, McpError::InvalidServerName(n) if n == "core__side"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

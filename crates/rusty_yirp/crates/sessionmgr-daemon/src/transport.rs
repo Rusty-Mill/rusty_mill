@@ -7,13 +7,79 @@
 //! transport there.
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use rusty_tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, UnixStream};
+use rusty_tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, UnixStream};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+
+/// A generous ceiling on one framed line's length.
+///
+/// This module's own doc comment plus `sessionmgr-protocol`'s docs both
+/// describe this protocol's messages as small and infrequent, with
+/// `SessionEvent::Output` (a base64-encoded, `worker.rs`-sized PTY read,
+/// a handful of KB once JSON-escaped) as the single high-volume
+/// exception -- this leaves over 20x that much headroom. Without a cap,
+/// any local process that connects to the daemon's public socket or a
+/// worker's private socket and streams bytes with no `\n` grows this
+/// process's heap without bound until it is OOM-killed.
+const MAX_LINE_LEN: usize = 256 * 1024;
+
+/// [`AsyncBufReadExt::read_line`]'s own contract, except it refuses to
+/// grow `buf` past `max_len` bytes instead of buffering forever waiting
+/// for a `\n` that may never come.
+///
+/// `Ok(n)` for `n > 0` where the appended bytes do not end in `\n` means
+/// `max_len` was reached with no terminator found -- the caller's
+/// contract (mirrored by both call sites below) is to treat that as a
+/// protocol violation and close the connection, not call this again
+/// expecting the rest of the line.
+async fn read_line_capped<R>(
+    reader: &mut R,
+    buf: &mut String,
+    max_len: usize,
+) -> std::io::Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut found_newline = false;
+    while bytes.len() < max_len {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break; // Clean EOF.
+        }
+        let budget = max_len - bytes.len();
+        let (used, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(pos) if pos < budget => (pos + 1, true),
+            _ => (available.len().min(budget), false),
+        };
+        bytes.extend_from_slice(&available[..used]);
+        Pin::new(&mut *reader).consume(used);
+        if done {
+            found_newline = true;
+            break;
+        }
+    }
+    if !found_newline && bytes.len() >= max_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("line exceeds the {max_len}-byte limit with no `\\n` terminator"),
+        ));
+    }
+    let n = bytes.len();
+    let text = String::from_utf8(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })?;
+    buf.push_str(&text);
+    Ok(n)
+}
 
 /// A framed connection: one JSON value per `\n`-terminated line.
 pub struct Connection {
@@ -57,11 +123,12 @@ impl Connection {
 
     pub async fn read<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
         self.line.clear();
-        let read = self
-            .reader
-            .read_line(&mut self.line)
+        let read = read_line_capped(&mut self.reader, &mut self.line, MAX_LINE_LEN)
             .await
-            .map_err(|e| Error::io("reading from a socket", None, e))?;
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::InvalidData => Error::protocol(e.to_string()),
+                _ => Error::io("reading from a socket", None, e),
+            })?;
         if read == 0 {
             return Ok(None);
         }
@@ -111,10 +178,12 @@ pub async fn read_framed<T: DeserializeOwned>(
     reader: &mut BufReader<rusty_tokio::io::OwnedUnixReadHalf>,
 ) -> Result<Option<T>> {
     let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
+    let read = read_line_capped(reader, &mut line, MAX_LINE_LEN)
         .await
-        .map_err(|e| Error::io("reading from a socket", None, e))?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::InvalidData => Error::protocol(e.to_string()),
+            _ => Error::io("reading from a socket", None, e),
+        })?;
     if read == 0 {
         return Ok(None);
     }
@@ -294,5 +363,56 @@ impl Drop for Listener {
         // `bind` clears anyway, and this runs on shutdown paths where a
         // failure has nowhere useful to go.
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_oversized_unterminated_line_is_rejected_not_grown_without_bound() {
+        // Finding 25's trigger: any local peer that connects and streams
+        // bytes with no `\n` must not be able to grow this process's
+        // heap without bound.
+        let rt = rusty_tokio::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let (mut tx, rx) = rusty_tokio::io::simplex(MAX_LINE_LEN + 4096);
+            let payload = vec![b'a'; MAX_LINE_LEN + 1024];
+            tx.write_all(&payload)
+                .await
+                .expect("write the oversized, unterminated payload");
+            drop(tx); // EOF once the reader drains what is buffered.
+
+            let mut reader = BufReader::new(rx);
+            let mut line = String::new();
+            let err = read_line_capped(&mut reader, &mut line, MAX_LINE_LEN)
+                .await
+                .expect_err("a line past the cap with no terminator must be rejected");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            // Bounded: never grew past the configured cap even though
+            // the peer sent far more than that.
+            assert!(line.len() <= MAX_LINE_LEN);
+        });
+    }
+
+    #[test]
+    fn a_line_within_the_cap_is_read_normally() {
+        let rt = rusty_tokio::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let (mut tx, rx) = rusty_tokio::io::simplex(4096);
+            tx.write_all(b"{\"ok\":true}\n")
+                .await
+                .expect("write a small terminated line");
+            drop(tx);
+
+            let mut reader = BufReader::new(rx);
+            let mut line = String::new();
+            let n = read_line_capped(&mut reader, &mut line, MAX_LINE_LEN)
+                .await
+                .expect("a small terminated line must succeed");
+            assert_eq!(line, "{\"ok\":true}\n");
+            assert_eq!(n, line.len());
+        });
     }
 }

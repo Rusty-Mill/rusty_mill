@@ -28,6 +28,14 @@ impl Delete {
         self
     }
 
+    /// The filter this `Delete` was built with, if any. Used by
+    /// `Session::delete_query_for` to reuse `Identifiable::delete_query()`'s
+    /// primary-key(-and-version) condition for the soft-delete `UPDATE`
+    /// branch too, instead of re-deriving (and risking drifting from) it.
+    pub(crate) fn filter_expr(&self) -> Option<&Expr> {
+        self.filter.as_ref()
+    }
+
     /// Request columns back via `RETURNING` (only honored by dialects where
     /// `Dialect::supports_returning()` is true; ignored otherwise).
     pub fn returning(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {

@@ -89,10 +89,11 @@ pub struct DataContract {
 /// routes, not part of the governance engine itself (see that crate's
 /// module doc for the same note). Unlike [`InputPort`]/[`OutputPort`],
 /// `output_port_id` has no `ON DELETE CASCADE`, matching the source's
-/// plain `foreign_key="output_ports.id"` with no cascade declared, and
-/// there's no DB-level uniqueness on `(output_port_id,
-/// consumer_group_id)` either (REG-091) -- duplicates are rejected
-/// only at the API layer (409, GOV-015).
+/// plain `foreign_key="output_ports.id"` with no cascade declared.
+/// `(output_port_id, consumer_group_id)` is backstopped by a DB-level
+/// `UNIQUE` index (REG-091) in addition to the API-layer 409 check
+/// (GOV-015), so a check-then-insert race can no longer produce two
+/// grant rows for the same pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortAccessGrant {
     pub id: i64,
@@ -163,7 +164,8 @@ pub fn ensure_schema(conn: &Connection) -> SqlResult<()> {
             granted_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_port_access_grants_output_port_id ON port_access_grants(output_port_id);
-        CREATE INDEX IF NOT EXISTS idx_port_access_grants_consumer_group_id ON port_access_grants(consumer_group_id);",
+        CREATE INDEX IF NOT EXISTS idx_port_access_grants_consumer_group_id ON port_access_grants(consumer_group_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_port_access_grants_unique_port_consumer ON port_access_grants(output_port_id, consumer_group_id);",
     )
 }
 
@@ -309,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn port_access_grants_has_no_composite_uniqueness_at_the_db_level() {
+    fn port_access_grants_enforces_composite_uniqueness_at_the_db_level() {
         let conn = seeded_connection();
         let product_id = insert_product(&conn);
         conn.execute(
@@ -319,14 +321,23 @@ mod tests {
         .unwrap();
         let port_id = conn.last_insert_rowid();
 
-        for _ in 0..2 {
-            conn.execute(
-                "INSERT INTO port_access_grants (output_port_id, consumer_group_id, granted_by, granted_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![port_id, "billing-service", "admin@example.com", "2026-01-01T00:00:00Z"],
-            )
-            .unwrap();
-        }
+        conn.execute(
+            "INSERT INTO port_access_grants (output_port_id, consumer_group_id, granted_by, granted_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![port_id, "billing-service", "admin@example.com", "2026-01-01T00:00:00Z"],
+        )
+        .unwrap();
+
+        let second_insert = conn.execute(
+            "INSERT INTO port_access_grants (output_port_id, consumer_group_id, granted_by, granted_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![port_id, "billing-service", "admin@example.com", "2026-01-01T00:00:01Z"],
+        );
+        assert!(
+            second_insert.is_err(),
+            "REG-091: (output_port_id, consumer_group_id) must be UNIQUE at the DB level, \
+             backstopping the API-layer 409 check against a check-then-insert race"
+        );
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM port_access_grants", [], |row| {
@@ -334,8 +345,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            count, 2,
-            "REG-091: no DB-level composite uniqueness on (output_port_id, consumer_group_id)"
+            count, 1,
+            "the rejected duplicate insert must not have persisted a second row"
         );
     }
 }

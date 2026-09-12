@@ -79,6 +79,6 @@ fn read_file_on_existing_path_returns_bytes_array() {
         .get("tag")
         .and_then(|v| v.as_str())
         .expect("tag must be present for an existing text file");
-    assert_eq!(tag.len(), 4, "tag is 4 hex digits, got {tag:?}");
+    assert_eq!(tag.len(), 16, "tag is 16 hex digits, got {tag:?}");
     assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()));
 }

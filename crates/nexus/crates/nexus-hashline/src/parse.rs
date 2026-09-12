@@ -14,7 +14,7 @@ pub struct Patch {
 pub struct FileSection {
     /// Target file path, as written in the header.
     pub path: String,
-    /// The 4-uppercase-hex TAG the patch was authored against.
+    /// The 16-uppercase-hex TAG the patch was authored against.
     pub tag: String,
     /// Operations to apply to the file, in order.
     pub ops: Vec<Op>,
@@ -282,10 +282,10 @@ mod tests {
 
     #[test]
     fn parses_swap_with_body() {
-        let p = parse("[a.rs#ABCD]\nSWAP 2.=3:\n+x\n+y\n").unwrap();
+        let p = parse("[a.rs#ABCDABCDABCDABCD]\nSWAP 2.=3:\n+x\n+y\n").unwrap();
         assert_eq!(p.sections.len(), 1);
         assert_eq!(p.sections[0].path, "a.rs");
-        assert_eq!(p.sections[0].tag, "ABCD");
+        assert_eq!(p.sections[0].tag, "ABCDABCDABCDABCD");
         assert_eq!(
             p.sections[0].ops,
             vec![Op::Swap {
@@ -298,14 +298,14 @@ mod tests {
 
     #[test]
     fn parses_del_without_body() {
-        let p = parse("[a#0001]\nDEL 5.=7\n").unwrap();
+        let p = parse("[a#0000000000000001]\nDEL 5.=7\n").unwrap();
         assert_eq!(p.sections[0].ops, vec![Op::Del { start: 5, end: 7 }]);
     }
 
     #[test]
     fn parses_all_insert_forms() {
         let p = parse(
-            "[a#00ff]\nINS.HEAD:\n+top\nINS.TAIL:\n+bottom\nINS.PRE 3:\n+before\nINS.POST 3:\n+after\n",
+            "[a#00ff00ff00ff00ff]\nINS.HEAD:\n+top\nINS.TAIL:\n+bottom\nINS.PRE 3:\n+before\nINS.POST 3:\n+after\n",
         )
         .unwrap();
         assert_eq!(
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn blank_body_row_and_escapes() {
         // `+` alone = blank line; `++x` decodes to `+x`; `+-y` decodes to `-y`.
-        let p = parse("[a#ABCD]\nSWAP 1.=1:\n+\n++x\n+-y\n").unwrap();
+        let p = parse("[a#ABCDABCDABCDABCD]\nSWAP 1.=1:\n+\n++x\n+-y\n").unwrap();
         let Op::Swap { body, .. } = &p.sections[0].ops[0] else {
             panic!("expected swap");
         };
@@ -341,7 +341,8 @@ mod tests {
 
     #[test]
     fn multi_file_patch() {
-        let p = parse("[a#AAAA]\nDEL 1.=1\n\n[b#BBBB]\nDEL 2.=2\n").unwrap();
+        let p =
+            parse("[a#AAAAAAAAAAAAAAAA]\nDEL 1.=1\n\n[b#BBBBBBBBBBBBBBBB]\nDEL 2.=2\n").unwrap();
         assert_eq!(p.sections.len(), 2);
         assert_eq!(p.sections[0].path, "a");
         assert_eq!(p.sections[1].path, "b");
@@ -349,7 +350,9 @@ mod tests {
 
     #[test]
     fn block_ops_parse_but_flag_as_block() {
-        let p = parse("[a#ABCD]\nSWAP.BLK 4:\n+repl\nDEL.BLK 9\nINS.BLK.POST 2:\n+tail\n").unwrap();
+        let p =
+            parse("[a#ABCDABCDABCDABCD]\nSWAP.BLK 4:\n+repl\nDEL.BLK 9\nINS.BLK.POST 2:\n+tail\n")
+                .unwrap();
         assert!(p.sections[0].ops.iter().all(Op::is_block));
         assert_eq!(p.sections[0].ops.len(), 3);
     }
@@ -357,8 +360,8 @@ mod tests {
     #[test]
     fn tag_is_uppercased_and_validated() {
         assert_eq!(
-            parse("[a#abcd]\nDEL 1.=1\n").unwrap().sections[0].tag,
-            "ABCD"
+            parse("[a#abcdabcdabcdabcd]\nDEL 1.=1\n").unwrap().sections[0].tag,
+            "ABCDABCDABCDABCD"
         );
         assert!(matches!(
             parse("[a#XYZ]\nDEL 1.=1\n"),
@@ -373,7 +376,7 @@ mod tests {
     #[test]
     fn rejects_unknown_op_and_orphan_body() {
         assert!(matches!(
-            parse("[a#ABCD]\nFROBNICATE 1\n"),
+            parse("[a#ABCDABCDABCDABCD]\nFROBNICATE 1\n"),
             Err(HashlineError::BadOp { line: 2, .. })
         ));
         assert!(matches!(
@@ -384,7 +387,7 @@ mod tests {
 
     #[test]
     fn crlf_patch_text_is_tolerated() {
-        let p = parse("[a#ABCD]\r\nSWAP 1.=1:\r\n+x\r\n").unwrap();
+        let p = parse("[a#ABCDABCDABCDABCD]\r\nSWAP 1.=1:\r\n+x\r\n").unwrap();
         let Op::Swap { body, .. } = &p.sections[0].ops[0] else {
             panic!("expected swap");
         };

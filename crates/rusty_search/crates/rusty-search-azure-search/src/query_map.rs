@@ -306,9 +306,14 @@ fn range_literal(field_type: FieldType, value: &Value) -> Result<String, SearchE
             .as_f64()
             .map(|v| v.to_string())
             .ok_or_else(|| SearchError::InvalidQuery("expected a number".to_string())),
-        FieldType::Date => value.as_str().map(|s| s.to_string()).ok_or_else(|| {
-            SearchError::InvalidQuery("expected an RFC 3339 date string".to_string())
-        }),
+        FieldType::Date => {
+            let s = value.as_str().ok_or_else(|| {
+                SearchError::InvalidQuery("expected an RFC 3339 date string".to_string())
+            })?;
+            rusty_time::DateTime::parse(s)
+                .map(|_| s.to_string())
+                .map_err(|e| SearchError::InvalidQuery(format!("invalid RFC 3339 date `{s}`: {e}")))
+        }
         other => unreachable!("caller already validated field_type is I64/F64/Date, got {other:?}"),
     }
 }
@@ -316,7 +321,11 @@ fn range_literal(field_type: FieldType, value: &Value) -> Result<String, SearchE
 fn odata_literal(field_type: FieldType, value: &str) -> Result<String, SearchError> {
     match field_type {
         FieldType::Keyword => Ok(odata_quote(value)),
-        FieldType::Date => Ok(value.to_string()),
+        FieldType::Date => rusty_time::DateTime::parse(value)
+            .map(|_| value.to_string())
+            .map_err(|e| {
+                SearchError::InvalidQuery(format!("invalid RFC 3339 date `{value}`: {e}"))
+            }),
         FieldType::I64 => value
             .parse::<i64>()
             .map(|v| v.to_string())
@@ -516,6 +525,59 @@ mod tests {
             params.filter.as_deref(),
             Some("created_at eq 2024-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn filter_date_term_rejects_odata_injection() {
+        let q = Query::Bool {
+            must: vec![],
+            should: vec![],
+            must_not: vec![],
+            filter: vec![Query::term("created_at", "2024-01-01T00:00:00Z or 1 eq 1")],
+        };
+        assert!(build_search_params(&q, &fields()).is_err());
+    }
+
+    #[test]
+    fn filter_date_range_rejects_odata_injection() {
+        let q = Query::Bool {
+            must: vec![],
+            should: vec![],
+            must_not: vec![],
+            filter: vec![Query::range(
+                "created_at",
+                Some("2024-01-01T00:00:00Z or 1 eq 1".into()),
+                None,
+            )],
+        };
+        assert!(build_search_params(&q, &fields()).is_err());
+    }
+
+    #[test]
+    fn range_date_literal_uses_lucene_bracket_syntax_when_well_formed() {
+        let params = build_search_params(
+            &Query::range(
+                "created_at",
+                Some("2024-01-01T00:00:00Z".into()),
+                Some("2024-12-31T23:59:59Z".into()),
+            ),
+            &fields(),
+        )
+        .unwrap();
+        assert_eq!(
+            params.search,
+            "* AND (created_at:[2024-01-01T00:00:00Z TO 2024-12-31T23:59:59Z])"
+        );
+    }
+
+    #[test]
+    fn range_date_literal_rejects_lucene_injection() {
+        let q = Query::range(
+            "created_at",
+            Some("2024-01-01T00:00:00Z] OR secret_field:*".into()),
+            None,
+        );
+        assert!(build_search_params(&q, &fields()).is_err());
     }
 
     #[test]

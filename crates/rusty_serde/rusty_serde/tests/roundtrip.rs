@@ -156,6 +156,12 @@ fn trailing_garbage_is_an_error() {
     assert!(err.to_string().contains("trailing"));
 }
 
+#[test]
+fn raw_control_character_in_string_is_an_error() {
+    let err = json::from_str::<String>("\"a\tb\"").unwrap_err();
+    assert!(err.to_string().contains("control character"));
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct GenericPoint<T> {
     x: T,

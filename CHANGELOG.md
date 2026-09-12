@@ -50,6 +50,59 @@ Removed / Fixed / Security, newest first.
   warning and passes instead of failing CI outright. A full sweep is
   unaffected (thousands of tests always exist there).
 ### Fixed
+- 63 correctness/security/reliability findings from a second `/codex-build`
+  review (`CODEX-MONOREPO-REVIEW-2026-09-12.md`), across ~45 crates spanning
+  the `nexus` microkernel, `rusty_adk`, `rusty_agent_gateway`,
+  `rusty_tailscale`, `rusty_yirp`, `rusty_meshed`, `rusty_search`'s backend
+  crates, `rusty_db`, `rusty_key`/`rusty_provider`, `rustils`/`rustils_async`,
+  the homelab-management clients, and several standalone protocol crates —
+  each with a regression test that fails pre-fix and passes post-fix (see
+  the review's own **Disposition** section for the one-line outcome of
+  every finding). Highlights: an unauthenticated pre-auth panic in
+  `agentgateway-core`'s query-string decoder on any request containing a
+  raw multi-byte UTF-8 byte after `%`; a CORS `allowOrigins: ["*"]` +
+  `allowCredentials: true` misconfiguration now rejected at config-lint
+  time instead of silently reflecting any origin with credentials;
+  `ts-engine`'s inbound packet filter no longer trusts a decrypted
+  WireGuard packet's plaintext source IP without verifying it against the
+  sending peer's own netmap-assigned addresses (no cryptokey routing), and
+  no longer default-allows non-IPv4-parseable packets (including all
+  IPv6 traffic); `rusty_db`'s soft-delete path no longer bypasses
+  optimistic locking, and `Migrator::up`/`down` no longer leak an open
+  transaction back into the pool on a mid-migration failure; six
+  `rusty_search` backends had Lucene/OData query-injection or path-
+  injection gaps closed, and `rusty-search-cloud`'s backend — previously a
+  silent no-op reporting fabricated success for every write — now returns
+  an explicit not-implemented error; `rusty_request`'s redirect-following
+  client now strips `Authorization` on an HTTPS→HTTP downgrade to the same
+  host/port, closing the CVE-2018-18074-class gap its own doc comment
+  claimed was already closed; workspace `reqwest` unified from a 0.12/0.13
+  split onto 0.13 (two follow-on feature additions, `query` and `form`,
+  that the version bump itself required); `rmcp`'s and `axum`'s remaining
+  version splits (`rk-mcp`/`rk-app` on `rmcp` 0.9 against the root's 3.1;
+  `adk-a2a`/`a2a-agent-server`/`rk-app` on `axum` 0.7 against the root's
+  0.8) were investigated for a same-session bump and found to be genuine
+  API breaks rather than mechanical version-number edits — documented as
+  deliberate, tracked splits instead, matching this file's own established
+  convention for the workspace's other pre-existing version splits.
+  Wiring a real `cargo-deny` CI job for the four crates that carry a
+  `deny.toml` (previously claimed by two of those files but not actually
+  enforced) was attempted and reverted: running it against this
+  workspace's real, shared `Cargo.lock` surfaced a large unrelated
+  pre-existing backlog (two Wasmtime CVEs, an `rmcp` DNS-rebinding CVE, a
+  yanked crate, six unmaintained-crate advisories, license-metadata gaps
+  in this workspace's own `rusty_rusqlite`/`rusty_stream`, and dozens of
+  `[bans]` failures against this workspace's own deliberate
+  duplicate-version splits) that is a separate, open-ended dependency-audit
+  project. The four `deny.toml` files now honestly document themselves as
+  local/manual tools, not CI-enforced, and each carries a documented
+  `ignore` entry for RUSTSEC-2023-0071 (`rsa` 0.9.x, Marvin Attack, present
+  via `jsonwebtoken`'s `rust_crypto` feature in `agentgateway-auth`'s/
+  `rusty-mcp`'s production JWT dependency graph, reviewed: only the
+  verification path uses it, not the vulnerable signing/decrypt path) for
+  a maintainer running `cargo deny check` by hand.
+
+### Fixed
 - CI's full-workspace-sweep trigger pattern now includes `.config/`
   (`.config/nextest.toml` lives outside every crate directory, so a
   nextest-config-only PR previously produced an empty affected-package
