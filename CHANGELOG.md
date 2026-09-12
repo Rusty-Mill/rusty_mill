@@ -9,6 +9,58 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s embedding-queue query layer (`rusty_hister`'s
+  Phase 1, continued): `EmbeddingJob::{enqueue, claim_next, complete,
+  retry, fail, release, in_progress_exists, delete, reset_in_progress}`,
+  a Rust port of `embedding.go`'s dedup/claim/retry state machine
+  (capability inventory §5.9). `enqueue`'s `ON CONFLICT` upsert and
+  `retry`/`release`'s `CASE`-based `SET` clauses need SQL the portable
+  query builder can't express (`rusty_db::Update::set` only ever assigns
+  a plain `Value`, never an `Expr`), so those three drop to
+  `Engine::connect()`/raw `Connection::execute`, built dialect-portably
+  by rendering placeholders through `Engine::dialect().placeholder(..)`
+  rather than hardcoding `?`/`$N` — untested against real Postgres (no
+  instance available in this environment), same risk profile as the
+  schema increment's untested `POSTGRES_MIGRATIONS`. The other six model
+  files' query-layer helpers remain a separate, not-yet-started
+  increment. 18 new unit tests (43 total in the crate), clippy/fmt clean.
+- `rusty-hister-model`'s schema (`rusty_hister`'s Phase 1, continued): the
+  nine `#[derive(Mapped)]` types from Hister's `automigrate()` list
+  (capability inventory §7.2 — `User`, `Link`, `History`, `HistoryLink`,
+  `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`)
+  on `rusty_db`, soft-delete via `rusty_db`'s `#[table(soft_delete)]`
+  (replacing Go's nullable `DeletedAt` convention), and a fresh-install
+  migration (`SQLITE_MIGRATIONS`/`POSTGRES_MIGRATIONS`) that creates all
+  nine tables plus indexes via `rusty_db::Migrator` — whose own bookkeeping
+  table substitutes for Hister's `Database` singleton-row version tracker.
+  Deliberately schema-only: each Go model file's domain/query helpers
+  (the embedding-queue state machine, history search/pin/timeline
+  queries, user auth helpers, ...) are a separate, not-yet-started
+  increment, and Hister's three historical migrations plus the legacy
+  `indexer_versions` read path are not reproduced (they only matter for
+  opening a pre-existing Hister-Go-created database file — a still-open
+  question, see `crates/rusty_hister/docs/PROJECT-STATUS.md`). 25 unit
+  tests (real SQLite round-trips via an in-memory engine, unique-
+  constraint/duplicate-rejection checks, migration up/down/status),
+  clippy/fmt clean.
+- `rusty-hister-extractor`'s `Registry` (`rusty_hister`'s Phase 1,
+  continued): the chain-of-responsibility mechanism (capability inventory
+  §4.2) — case-insensitive `register`/`register_before` with duplicate
+  rejection, the two-phase enrich-then-extract execution (enricher
+  fallback never stops the chain, only abort does; enrichment carries
+  forward into the extract phase), a separate preview chain with
+  case-insensitive starting-point selection (unregistered/disabled/
+  non-preview/non-matching starting points are hard errors), and
+  `apply_configs` for merging pre-parsed per-extractor config. 18 unit
+  tests, clippy/fmt clean. No concrete extractors yet — this is the
+  generic mechanism they'll register into.
+- `rusty-hister-core` (`rusty_hister`'s Phase 1): the `Document` working
+  type, the `Extractor` trait and its supporting types (`Capabilities`,
+  `ExtractorConfig`, `ExtractOutcome`/`PreviewOutcome`, `PreviewResponse` —
+  capability inventory §4.1), and the shared `HisterError` type, on
+  `rusty_json` (for `Metadata`) and `rusty_err` (for the error type). 16
+  unit tests, clippy/fmt clean. First real implementation in the cluster;
+  every other `rusty-hister-*` crate is still a skeleton.
 - Bootstrapped `rusty_hister` — a native (not `git subtree`-imported) crate
   cluster under `crates/rusty_hister/` for a Rust port of
   [asciimoo/hister](https://github.com/asciimoo/hister). Eight new
@@ -22,6 +74,12 @@ Removed / Fixed / Security, newest first.
   engine and the JS-rendering crawler approach, both since **decided** —
   see below) — see `crates/rusty_hister/docs/PROJECT-STATUS.md`.
 ### Changed
+- `rusty_hister`'s ADR-0001 §7 licensing recommendation confirmed by the
+  user: the cluster ships under this workspace's standard `MIT OR
+  Apache-2.0`, and no Hister source file — test files included — is copied
+  verbatim into it; extractor and query-grammar tests are written fresh
+  from independently reading the Go behavior instead. Binds every future
+  PR touching those tests.
 - `rusty_hister`'s ADR-0002 (search/indexing engine) and ADR-0003
   (JS-rendering crawler) decided by the user, ahead of ADR-0002's own
   recommended scoping spike: `rusty_search` + `rusty-search-sqlite-fts5`

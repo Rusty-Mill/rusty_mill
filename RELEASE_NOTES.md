@@ -13,6 +13,207 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's embedding-queue query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-embedding-queue`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-embedding-queue)
+
+Fourth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, and `rusty-hister-model`'s schema, previous entries below). Scoped
+to `EmbeddingJob`'s query-layer alone — the first of the six model files'
+domain operations flagged as a follow-up when the schema increment landed
+— since it's fully self-contained (no dependency on any other table) and
+exercises the two genuinely hard parts of this crate's remaining work
+(a dialect-portable upsert, and an optimistic-concurrency claim loop) in
+isolation before touching anything else.
+
+- **Added:** `EmbeddingJob::enqueue`/`claim_next`/`complete`/`retry`/
+  `fail`/`release`/`in_progress_exists`/`delete`/`reset_in_progress` — a
+  field-for-field port of `embedding.go`'s durable, deduplicated embedding
+  work queue: enqueuing a pending job is a no-op, enqueuing an active job
+  marks it dirty instead of resetting it, `claim_next` atomically claims
+  the oldest available job (retrying its select-then-claim pair when
+  another worker races ahead), and `complete`/`fail` return a dirty job to
+  pending instead of deleting/failing it.
+- **Added:** a small dialect-portable raw-SQL path for the three
+  operations (`enqueue`'s `ON CONFLICT ... DO UPDATE SET` upsert,
+  `retry`'s and `release`'s `CASE WHEN ... THEN ... ELSE ... END` SET
+  clauses) that `rusty_db`'s query builder can't express — `Update::set`
+  only ever takes a `Value`, never an `Expr`. Placeholders are rendered
+  per-dialect via `Engine::dialect().placeholder(..)` rather than
+  hardcoding `?`/`$N`, so the same SQL text works against both SQLite and
+  Postgres; the other six functions use the ordinary `Select`/`Update`/
+  `Delete` builder.
+- **Known limitation:** the Postgres path is untested — only SQLite is
+  exercised (no Postgres instance available in this environment). Flagged
+  in `crates/rusty_hister/docs/PROJECT-STATUS.md`'s open items, same risk
+  profile as the schema increment's untested `POSTGRES_MIGRATIONS`.
+- **Added:** 18 new unit tests (43 total in the crate) — enqueue's
+  three outcomes (fresh/idempotent/dirty-marking/failed-job-reset),
+  claim_next's ordering and availability filtering, complete/fail's
+  dirty-job-returns-to-pending branch, retry's immediate-vs-scheduled
+  branch, release's never-negative attempt count, and
+  in_progress_exists/delete/reset_in_progress. clippy/fmt clean.
+
+## Continue rusty_hister Phase 1: implement rusty-hister-model's schema
+**2026-09-12** · branch [`claude/hister-phase1-model`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model)
+
+Third Phase 1 increment (after `rusty-hister-core` and
+`rusty-hister-extractor`'s registry, previous entries below). Scoped to
+`rusty-hister-model`'s **schema** — the nine `#[derive(Mapped)]` types and
+the migration that creates them — not the domain/query-layer behavior each
+Go model file builds on top of its table, which is a separate follow-up
+increment (same schema-mechanism-first split `rusty-hister-extractor`'s
+registry used).
+
+- **Added:** `User`, `Link`, `History`, `HistoryLink`, `CrawlJob`,
+  `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob` — Hister's
+  nine `automigrate()`-list models (capability inventory §7.2), ported
+  field-for-field from `server/model/*.go`. `CrawlJobStatus`/
+  `CrawlUrlStatus`/`EmbeddingJobStatus` are `#[derive(MappedEnum)]` closed
+  enums rather than Go's untyped string constants, making each field's
+  "only these values are valid" invariant checkable by the type system.
+- **Added:** soft-delete on the four models that embedded Go's
+  `CommonFields` (`User`, `Link`, `History`, `HistoryLink`) via `rusty_db`'s
+  first-party `#[table(soft_delete)]`, rather than hand-rolling
+  `CommonFields`' nullable `DeletedAt` convention — an equivalent
+  capability via a different, already-available mechanism, not a
+  simplification.
+- **Added:** `SQLITE_MIGRATIONS`/`POSTGRES_MIGRATIONS` — a fresh-install
+  migration (one per backend, since `rusty_db` migrations are plain,
+  non-portable SQL) that creates all nine tables and their unique/lookup
+  indexes, run through `rusty_db::Migrator`. Hister's own `Database`
+  singleton-row schema-version tracker has no Rust equivalent: `Migrator`'s
+  own bookkeeping table already solves the same problem, so this is a
+  documented substitution, not a dropped capability.
+- **Known limitation (by design, flagged for explicit follow-up):** this
+  is a fresh-install-only schema. Hister's three historical Go migrations
+  (the `history_links.pinned` backfill, the `web_sessions.last_seen_at`
+  column drop, the mixed-offset-to-UTC timestamp rewrite) and the legacy
+  `indexer_versions` read path are **not** reproduced, since they only
+  matter for opening a pre-existing Hister-Go-created database file — a
+  new, still-unresolved question (does `rusty_hister` ever need to do
+  that at all?) recorded in `crates/rusty_hister/docs/PROJECT-STATUS.md`'s
+  open items, alongside the already-flagged `indexer_versions` item it
+  subsumes.
+- **Added:** 25 unit tests — real round-trips through an in-memory SQLite
+  engine (`sqlite::memory:`) for every model, unique-constraint/duplicate-
+  rejection checks for every `uniqueIndex` in the Go source
+  (`username`, `url`, `(user_id, query)`, `(history_id, link_id)`,
+  `(job_id, url)`, `token_hash`), a soft-delete round-trip
+  (`Session::delete`/`get`/`load_active`), and migration up/down/status
+  checks (including that the schema is actually created and is
+  reversible). clippy/fmt clean.
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's registry
+**2026-09-12** · branch [`claude/hister-phase1-extractor-registry`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-registry)
+
+Second Phase 1 increment (after `rusty-hister-core`, previous entry below).
+Scoped to `rusty-hister-extractor`'s `Registry` alone — the
+chain-of-responsibility mechanism, not any concrete extractor — since it
+only depends on `rusty-hister-core` (already merged) and is a
+self-contained, well-specified unit on its own.
+
+- **Added:** `Registry` (capability inventory §4.2): `register`/
+  `register_before` with case-insensitive duplicate-name rejection;
+  `apply_configs` to merge a pre-parsed name→config map into matching
+  extractors (unknown names ignored, matching Hister's own "config for an
+  unregistered extractor is a no-op" behavior — parsing an actual config
+  *file* into that map is a separate, not-yet-decided concern); `list`/
+  `list_enabled`/`list_matching`/`list_matching_preview` introspection.
+- **Added:** the two-phase extraction chain — every matching enabled
+  enricher runs in chain order first (a `Fallback` is skipped over, only
+  `Abort` halts everything), with its enrichment carried forward into the
+  next stage; then matching enabled content extractors run in chain order
+  until one succeeds or aborts. Verified with a test that actually checks
+  the second-phase extractor receives the first phase's enrichment (not
+  just that the chain doesn't crash).
+- **Added:** the separate preview chain — an optional case-insensitive
+  starting-point name skips ahead in chain order without disabling the
+  fallback chain after it; a starting point that's unregistered, disabled,
+  non-preview-capable, or non-matching is a hard `Abort`, never silently
+  ignored.
+- **Verified:** 18 unit tests (including every hard-error path and the
+  enrichment hand-off), clippy/fmt clean, whole-cluster `cargo check`
+  clean, dependency-sovereignty policy clean. `Registry` is deliberately
+  not internally synchronized (no mutex) — Hister's Go version guards its
+  list because it's shared across concurrent HTTP handlers; that's a
+  caller-side concern (e.g. `rusty-hister-server` wrapping it in a
+  `Mutex`/`RwLock`), not something to build in speculatively here.
+- **Not done here:** no concrete extractors — `rusty-hister-extractor` has
+  a working chain mechanism and nothing registered into it yet. That's the
+  next increment (capability inventory §4.3-§4.5, in default-chain order).
+
+---
+
+## Start rusty_hister Phase 1: implement rusty-hister-core
+**2026-09-12** · branch [`claude/hister-phase1-core`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-core)
+
+First real implementation in the `rusty_hister` cluster (previously all
+eight crates were empty skeletons). Scoped to `rusty-hister-core` alone —
+the shared contract every other `rusty-hister-*` crate depends on — rather
+than all of Phase 1 (`rusty-hister-model`, `-extractor`, `-crawler`'s `http`
+backend) in one PR, matching this project's established pattern of
+PR-sized increments.
+
+- **Added:** `Document` — the extractor pipeline's working document type
+  (url, title, text, html, favicon, label, document type, language,
+  metadata), distinct from `rusty-hister-model`'s persisted `History`/`Link`
+  rows. `DocumentType` (`Web`/`Local`/`RemoteFile`) deliberately leaves its
+  wire-format integer encoding unassigned — capability inventory review
+  only confirmed one value ("2 = remote-file snapshot"), and v1's
+  byte-compatibility requirement means guessing the rest would risk a wire
+  mismatch against real Hister clients; assign it when `rusty-hister-server`
+  needs it and the exact values can be confirmed.
+- **Added:** the `Extractor` trait (capability inventory §4.1) — `name`,
+  `description`, `capabilities`, `matches`, `extract`, `preview`, `config`,
+  `set_config` — plus `Capabilities` (independent enrich/extract/preview
+  booleans), `ExtractorConfig` (enabled + options bag, enabled by default),
+  `PreviewResponse`, and the tri-state `ExtractOutcome`/`PreviewOutcome`
+  enums reproducing Hister's `ExtractorSuccess`/`ExtractorFallback`/
+  `ExtractorAbort` chain-of-responsibility pattern as a closed Rust enum
+  (no opaque-type/factory-function indirection needed — the enum itself
+  makes a fourth state unrepresentable). Synchronous by design: every
+  extractor operates on an already-fetched `Document`, no I/O to make
+  async worth it. The chain-of-responsibility *registry* (§4.2) is left to
+  `rusty-hister-extractor`, which will depend on this trait.
+- **Added:** `HisterError`, on `rusty_err` (this workspace's own
+  `thiserror`+`anyhow` analog) — `InvalidConfig`, `Extraction`, and a
+  `BoxError`-backed catch-all, kept deliberately small pending concrete
+  failure modes from later phases rather than speculative variants.
+- **Verified:** `cargo test -p rusty-hister-core --all-features` (16/16),
+  `clippy --all-targets --all-features -- -D warnings`, and `fmt --check`
+  all clean; the other seven `rusty-hister-*` skeleton crates still build
+  against the new `rusty-hister-core` API; `check_workspace_deps.py`
+  (dependency-sovereignty policy) passes.
+- **Not done here:** `rusty-hister-model`, `rusty-hister-extractor`'s
+  registry and concrete extractors, and `rusty-hister-crawler`'s `http`
+  backend — the rest of Phase 1, tracked in `docs/roadmap/ROADMAP.md` as
+  separate follow-up increments.
+
+---
+
+## Confirm rusty_hister's AGPL test-fixture licensing policy
+**2026-09-12** · branch [`claude/confirm-hister-licensing`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/confirm-hister-licensing)
+
+Confirms the last open item from `rusty_hister`'s bootstrap (ADR-0001 §7),
+on the user's (baileyrd/Nano's) direct instruction. Docs only.
+
+- **Changed:** `crates/rusty_hister/docs/decisions/ADR-0001-…md` §7 →
+  confirmed. `rusty_hister` ships under this workspace's standard `MIT OR
+  Apache-2.0`; no Hister source file — test files included — is copied
+  verbatim into this cluster. Fresh Rust tests are written from
+  independently reading and understanding each Go test's behavior instead,
+  traceable via the capability inventory's per-extractor test-file
+  citations. Binds every future PR touching extractor or query-grammar
+  tests, not just this bootstrap.
+- **Changed:** `docs/PROJECT-STATUS.md`, `docs/roadmap/ROADMAP.md`, and
+  `WORKFLOW.md` updated: Phase 0 is now fully complete (all three
+  decision items resolved — crate split/scope, search/crawler approach,
+  and now licensing); no items block Phase 1-4 implementation start.
+- **Not done here:** no implementation of any kind — this is a licensing
+  policy confirmation, not code.
+
+---
+
 ## Decide rusty_hister's ADR-0002 and ADR-0003
 **2026-09-12** · branch [`claude/decide-hister-adr-0002-0003`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/decide-hister-adr-0002-0003)
 

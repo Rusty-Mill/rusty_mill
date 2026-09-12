@@ -10,3 +10,12 @@ publish = false
 
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
+rusty-db = { path = "../../../rusty_db/rusty_db", features = [
+    "derive",
+    "sqlite",
+    "postgres",
+] }
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true
