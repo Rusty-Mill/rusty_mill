@@ -10,12 +10,21 @@ name: CI
 # touches (plus everything that transitively depends on them) and every
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
-# Pushes to main, and PRs that touch root Cargo.toml, this CI config
-# itself, or workspace-wide tooling config under .config/ (e.g.
-# nextest's), still get the full sweep. A Cargo.lock-only change (no
-# Cargo.toml edit -- a plain `cargo update`) is narrower instead: only the
-# workspace crates whose dependency graph actually includes whatever
-# package moved, per `.github/scripts/lockfile_diff.py`.
+# Pushes to main, and PRs that touch this CI config itself or workspace-wide
+# tooling config under .config/ (e.g. nextest's), still get the full sweep --
+# those can change how every crate builds or tests. A root Cargo.toml edit
+# used to force the same full sweep unconditionally, but the single most
+# common edit to that file is adding a handful of brand-new, independent
+# workspace members with nothing else in the file touched (e.g. #170's
+# rusty_hister bootstrap, eight new crates, zero existing lines changed) --
+# that has no blast radius on any existing crate, so `.github/scripts/
+# cargo_toml_diff.py` classifies the change first and only forces the full
+# sweep when it's more than a pure `[workspace.members]` addition (a
+# dependency version bump, a removed/renamed member, a `[profile]` edit,
+# ...). A Cargo.lock-only change (no Cargo.toml edit -- a plain `cargo
+# update`) is narrower still: only the workspace crates whose dependency
+# graph actually includes whatever package moved, per `.github/scripts/
+# lockfile_diff.py`.
 on:
   push:
     branches: [main]
@@ -115,13 +124,27 @@ jobs:
           echo "Changed files:"
           echo "$changed"
 
-          if echo "$changed" | grep -Eq '^(Cargo\.toml|\.config/|\.github/(workflows|actions|scripts)/)'; then
-            echo "A workspace-wide file changed -- running the full workspace sweep."
+          if echo "$changed" | grep -Eq '^(\.config/|\.github/(workflows|actions|scripts)/)'; then
+            echo "Workspace-wide CI/tooling config changed -- running the full workspace sweep."
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          if echo "$changed" | grep -Eq '^Cargo\.toml$'; then
+            git show "$base:Cargo.toml" > /tmp/old-Cargo.toml
+            classification="$(python3 .github/scripts/cargo_toml_diff.py /tmp/old-Cargo.toml Cargo.toml)"
+            if [ "$classification" != "safe" ]; then
+              echo "Root Cargo.toml changed beyond a pure [workspace.members] addition -- running the full workspace sweep."
+              echo "full=true" >> "$GITHUB_OUTPUT"
+              echo "packages=" >> "$GITHUB_OUTPUT"
+              echo "dashboard=true" >> "$GITHUB_OUTPUT"
+              echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Root Cargo.toml changed, but only added new [workspace.members] entries -- narrowing normally instead of a full sweep."
           fi
 
           # rusty_meshed's vendored data-mesh-monitor (Vite/React) isn't a
