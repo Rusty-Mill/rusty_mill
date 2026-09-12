@@ -1,9 +1,17 @@
-# ADR-0003: JS-rendering crawler approach — DECISION REQUEST
+# ADR-0003: JS-rendering crawler approach
 
-Status: Proposed — awaiting sign-off
-Date: 2026-09-12
+Status: Accepted
+Date: 2026-09-12 (decided; superseding the same-day decision-request below)
 
-## This is a decision-request, not a decision
+## Decided, not just requested
+
+This ADR was opened as a decision-request and decided later the same day on
+the user's (baileyrd/Nano's) explicit instruction — "Decide ADR-0002 and
+ADR-0003 now." The Context and Options sections below are unchanged from
+the request; the Decision section after them records what was chosen and
+why.
+
+## This was a decision-request, not a decision (as originally opened)
 
 Per the kickoff brief: headless-browser/CDP control for JS-rendered
 crawling has no coverage anywhere in this workspace today (confirmed by
@@ -105,24 +113,58 @@ marketed as dependency-free").
    binary, and dropping it changes an operational property of the
    crawler, not just which code implements it.
 
-## Recommended framing (not a decision)
+## Recommended framing, as originally written
 
 Treat the CDP path (Option A vs. B) and the BiDi sub-decision as two
 separate calls, since their risk profiles and available off-the-shelf
 answers are completely different — bundling them into one "headless browser
 support: yes/no" decision would hide that the BiDi half is the genuinely
-open-ended one.
+open-ended one. (This framing held: the two calls below are decided
+separately, for different reasons.)
 
-## What this ADR is asking the user to decide
+## Decision
 
-1. CDP path: hand-roll (Option A) or take on `chromiumoxide`/similar as a
-   Tier A dependency (Option B)?
-2. BiDi path: re-implement it, or explicitly descope it (keeping only the
-   CDP-equivalent JS-rendering backend)? If descoped, the Notion extractor's
-   dependency on *some* JS-rendering backend still needs to be satisfied by
-   whichever CDP path is chosen in (1) — descoping BiDi does not mean
-   descoping Notion.
-3. Whether the qutebrowser-companion daemon's own separate CDP client
-   (deferred to a later phase per ADR-0001) should be scoped now as "reuse
-   whatever this ADR produces" or left as its own future decision when that
-   phase starts.
+**CDP path: Option B — `chromiumoxide`** (or a substantively equivalent,
+actively-maintained Rust CDP client; the exact crate pick is left to
+`rusty-hister-crawler`'s implementation phase to re-confirm against current
+maintenance status, not re-litigated here) **as a documented Tier A adapter
+dependency**, per root ADR-0002's dependency-sovereignty policy.
+
+Rationale: Hister's own `chromedp` backend already wraps an external Go
+library rather than hand-rolling CDP itself — matching that with a
+hand-rolled *Rust* CDP client (Option A) would mean this port doing *more*
+from-scratch work than the reference implementation it's porting, for a
+protocol surface (Target, Page, Runtime, Network domains at minimum) that's
+large and moves with each Chrome release. That maintenance burden is closer
+in kind to TLS or a SQL wire protocol — both already accepted as Tier A
+adapters in this workspace (root ADR-0002) — than to something worth this
+port owning end-to-end. JS-rendering is a means to an end for Hister (get
+the DOM after scripts run), not its differentiating feature, so the lower-
+engineering-cost path is the right default here.
+
+**BiDi path: explicit descope for v1.** Not re-implemented.
+
+Rationale: BiDi's entire selling point in the Go original is avoiding a
+CDP-library/driver-binary dependency — a benefit that evaporates the moment
+this port already accepts `chromiumoxide` (a CDP library) for the primary
+path above. Paying to hand-roll a second, immature-in-Rust protocol for a
+benefit already given up elsewhere isn't a good trade. This is recorded
+here as the explicit, sign-off-worthy scope reduction the capability
+inventory flagged it as being (capability inventory §8.1's `bidi` backend
+row moves from REQUIRED to **OUT-OF-SCOPE, decided 2026-09-12** by this
+ADR) — not silently dropped. The **Notion extractor's** JS-rendering
+requirement (capability inventory §4.5.16) is unaffected: it's satisfied by
+the CDP path above, which is not descoped. BiDi support can be revisited as
+a later-phase addition if a concrete driver-free-deployment need shows up;
+nothing here forecloses that.
+
+**qutebrowser-companion's own CDP client**: decided to **reuse whatever CDP
+client this ADR produces** (`chromiumoxide`, or its replacement if one is
+adopted later) when that later phase starts, rather than leaving it as a
+separate future decision — no reason to re-litigate the same CDP-client
+choice twice for two consumers within the same cluster.
+
+This decision does not itself add `chromiumoxide` (or any CDP crate) to any
+`Cargo.toml` — it lands when `rusty-hister-crawler`'s JS-rendering backend
+actually starts consuming it (roadmap Phase 4), not in this decision
+record.

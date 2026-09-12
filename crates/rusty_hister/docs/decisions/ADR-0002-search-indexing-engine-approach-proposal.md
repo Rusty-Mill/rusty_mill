@@ -1,9 +1,22 @@
-# ADR-0002: Search/indexing engine approach — DECISION REQUEST
+# ADR-0002: Search/indexing engine approach
 
-Status: Proposed — awaiting sign-off
-Date: 2026-09-12
+Status: Accepted
+Date: 2026-09-12 (decided; superseding the same-day decision-request below)
 
-## This is a decision-request, not a decision
+## Decided, not just requested
+
+This ADR was opened the same day as a decision-request (the "This is a
+decision-request, not a decision" framing below is kept as the historical
+record of what was asked and why) and decided later the same day on the
+user's (baileyrd/Nano's) explicit instruction — "Decide ADR-0002 and
+ADR-0003 now" — rather than after the recommended scoping spike. The
+Context and Options sections below are unchanged from the request; the
+Decision section after them records what was chosen and why, in place of
+running the spike first. Nothing here claims spike-validated certainty —
+where the spike would have reduced risk, that risk is accepted explicitly
+rather than measured, and is called out as such.
+
+## This was a decision-request, not a decision (as originally opened)
 
 Per the kickoff brief: Hister's BM25 + custom query language is the single
 hardest piece to port, and this ADR exists to get an explicit answer before
@@ -119,7 +132,7 @@ engine internals `rusty_search`'s trait doesn't expose cleanly.
   Option A/B and finding a concrete blocker; loses the reuse benefit for
   future `rusty_search` consumers.
 
-## Recommended next step (not a decision)
+## Recommended next step, as originally written (superseded — no spike was run)
 
 A **small scoping spike** before committing to any option, per the kickoff
 brief's explicit instruction: implement a throwaway prototype that runs
@@ -133,14 +146,73 @@ does `rusty-search-core`'s `Query` tree round-trip cleanly, does the
 custom-filter hook exist or need adding, how bad is the federation gap in
 practice — should inform the actual choice, rather than picking abstractly.
 
-## What this ADR is asking the user to decide
+## Decision
 
-1. Which option (A/B/C) to pursue, or whether to run the scoping spike
-   first and let its outcome decide.
-2. Whether "BM25 scoring will not be bit-identical to bleve's" is an
-   acceptable parity bar (recommended: yes — result *set* parity matters
-   far more than exact score-based ordering for a personal search tool).
-3. The `sqlite-vec` sub-decision from ADR-0001 §6: load the same C extension
-   from Rust (via the `cc` crate, vendoring the same upstream source), use a
-   pure-Rust vector index instead, or support only the Postgres/pgvector
-   path for semantic search initially and defer SQLite+vectors.
+**Engine: Option B — `rusty_search` + `rusty-search-sqlite-fts5`**, kept
+strictly behind `rusty-search-core`'s `SearchBackend` trait so a Tantivy or
+a future Postgres-native full-text backend can be swapped in later without
+touching `rusty-hister-indexer`'s call sites — the query-grammar compiler is
+written against `rusty-search-core`'s `Query` tree, not against FTS5
+directly.
+
+Rationale: Hister's own common deployment is a single-user, single-SQLite-file
+tool (Postgres is the multi-user/shared-server path). FTS5 keeps the
+full-text index inside that same SQLite file rather than standing up a
+second storage engine (a Tantivy index directory) alongside it, and it sits
+naturally beside `sqlite-vec` (below) in one file for the SQLite deployment
+path — fewer moving parts for the common case, at the cost of FTS5's
+somewhat less mature Rust tooling versus Tantivy's, which is accepted.
+Tantivy remains available as a documented alternative backend if FTS5 proves
+insufficient once real query volume is thrown at it (nothing here forecloses
+that swap).
+
+The three sub-capabilities `rusty_search` doesn't provide (items 2, 4, 5
+above) are decided as **hister-layer composition, not `rusty-search-core`
+changes** — keeping that shared crate's scope untouched by this port:
+
+- **Multi-language federation** (item 2): `rusty-hister-indexer` owns one
+  `rusty-search-sqlite-fts5`-backed index per detected language and fans a
+  query out across all of them, merging/re-ranking results itself — the
+  same shape as bleve's `IndexAlias`, implemented one layer up instead of
+  inside the search engine.
+- **`url_re:` custom filtering** (item 4): implemented as a post-retrieval
+  filter in `rusty-hister-indexer` — a broader candidate query through
+  `rusty_search`, then the compiled regex applied against the stored/
+  normalized URL field in Rust before final ranking and pagination. Same
+  architecture as bleve's `CustomFilterQueryWithFilter`, just not a backend
+  feature.
+- **Three highlight styles** (item 5): implemented as three renderers in
+  `rusty-hister-indexer` over match spans/snippets, independent of how
+  mature any given backend's own highlighting API is.
+
+**BM25 parity**: accepted as **result-set parity, not byte-exact score
+ordering** — FTS5's `bm25()` will not reproduce bleve's scoring constants,
+and that's fine for a personal search tool; ranking *quality* is what
+matters, not bit-for-bit reproduction of Go bleve's numbers.
+
+**`sqlite-vec` sub-decision**: vendor the upstream `sqlite-vec` C extension
+via a `cc`-crate build (Tier A adapter dependency under root ADR-0002's
+tiers — the same precedent `rusty_sqlite`'s bundled SQLite already
+established), confined behind a narrow FFI boundary inside
+`rusty-hister-vectorstore`, for the SQLite deployment path. The Postgres
+deployment path uses `pgvector`, matching Hister's own presumed approach and
+Postgres's standard vector-extension story. No pure-Rust vector-index
+reimplementation is pursued for v1 — both are proven, narrow, widely-used C
+extensions, and reimplementing either from scratch would be exactly the
+kind of hand-rolling-for-its-own-sake this workspace's own README
+disclaims for anything security- or correctness-sensitive at this scale.
+
+**Accepted risk (spike not run)**: whether `rusty-search-core`'s `Query`
+tree actually round-trips every grammar construct cleanly against
+`rusty-search-sqlite-fts5` (in particular alternation groups, `-*`, and
+numeric/time ranges) is not yet empirically verified. If
+`rusty-hister-indexer`'s implementation phase (roadmap Phase 3) hits a
+construct the `Query` tree can't express, the fallback is a `rusty-search-core`
+API change proposed upstream in that crate (per its own review process),
+not a silent reversal of this decision.
+
+This decision does not itself add `rusty-search-sqlite-fts5`,
+`sqlite-vec`'s C source, or `pgvector` bindings to any `Cargo.toml` —
+those land when `rusty-hister-indexer`/`rusty-hister-vectorstore` actually
+start consuming them (roadmap Phase 3), not in this bootstrap-adjacent
+decision record.
