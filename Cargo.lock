@@ -448,6 +448,7 @@ dependencies = [
  "agentgateway-config",
  "http",
  "regex",
+ "rusty_retry",
  "thiserror 2.0.20",
  "tracing",
 ]
@@ -11592,6 +11593,7 @@ dependencies = [
  "rp-providers",
  "rustls",
  "rustls-native-certs",
+ "rusty_retry",
  "rusty_sqlite",
  "serde",
  "serde_json",
