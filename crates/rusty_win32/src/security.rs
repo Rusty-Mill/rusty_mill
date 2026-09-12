@@ -326,7 +326,7 @@ pub fn path_security_info(
     path: &str,
     info: SecurityInfoFlags,
 ) -> Result<PathSecurityInfo, crate::error::Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     let mut owner: *mut core::ffi::c_void = core::ptr::null_mut();
     let mut group: *mut core::ffi::c_void = core::ptr::null_mut();
     let mut dacl: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -377,7 +377,7 @@ pub unsafe fn set_path_security_info(
     path: &str,
     info: &PathSecurityInfo,
 ) -> Result<(), crate::error::Win32Error> {
-    let mut wide: Vec<u16> = crate::wide::to_wide(path);
+    let mut wide: Vec<u16> = crate::wide::to_wide(path)?;
     let mut security_info: u32 = 0;
     if info.owner.is_some() {
         security_info |= OWNER_SECURITY_INFORMATION;
@@ -816,7 +816,7 @@ pub unsafe fn lookup_account_sid(
 /// [`build_trustee_with_sid`]/[`build_acl`] need, the way `chown` accepts
 /// a username rather than requiring a raw SID.
 pub fn lookup_account_name(name: &str) -> Result<(SidBuf, AccountName), crate::error::Win32Error> {
-    let wide_name: Vec<u16> = crate::wide::to_wide(name);
+    let wide_name: Vec<u16> = crate::wide::to_wide(name)?;
     let mut sid_len: u32 = 0;
     let mut domain_len: u32 = 0;
     let mut sid_name_use: i32 = 0;
@@ -941,7 +941,7 @@ impl Drop for ConvertedSid {
 /// Parse a `S-1-5-...` string SID back into a `PSID` —
 /// `ConvertStringSidToSidW`. The reverse of [`sid_to_string`].
 pub fn string_to_sid(s: &str) -> Result<ConvertedSid, crate::error::Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(s);
+    let wide: Vec<u16> = crate::wide::to_wide(s)?;
     let mut sid: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string live for the
     // whole call; `sid` is a valid out-pointer.
@@ -1240,11 +1240,27 @@ pub unsafe fn sd_to_string(
     if ok == 0 {
         return Err(crate::error::Win32Error::last());
     }
-    // `len` counts the terminating NUL; trim it before decoding.
-    let char_len = (len as usize).saturating_sub(1);
-    // SAFETY: a successful call guarantees `string_sd` points to at least
-    // `len` valid `u16`s (including the trailing NUL this crate trims),
-    // all part of the same allocation this call just made.
+    // `len` is documented as the string length in characters including
+    // the terminating NUL, but real systems have been observed reporting
+    // a `len` padded past the actual NUL-terminated content (trailing
+    // NULs beyond the first) — this was previously masked end-to-end by
+    // `wide::to_wide` silently truncating at the first embedded NUL on
+    // the next `string_to_sd` round trip, which no longer happens now
+    // that `to_wide` rejects embedded NULs instead. Scanning for the
+    // real first NUL, the same way `sid_to_string` already does for
+    // `ConvertSidToStringSidW`'s output just above, is robust to that
+    // padding rather than trusting `len` to be exact.
+    // SAFETY: a successful call guarantees `string_sd` points to at
+    // least `len` valid `u16`s, all part of the same allocation this
+    // call just made; bounding the scan by `len` keeps it within that
+    // allocation even if, contrary to documentation, it contains no NUL
+    // at all.
+    let char_len = unsafe {
+        (0..len as usize)
+            .find(|&i| *string_sd.add(i) == 0)
+            .unwrap_or(len as usize)
+    };
+    // SAFETY: `char_len` is within the allocation per the scan above.
     let text = alloc::string::String::from_utf16_lossy(unsafe {
         core::slice::from_raw_parts(string_sd, char_len)
     });
@@ -1259,7 +1275,7 @@ pub unsafe fn sd_to_string(
 /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. The reverse of
 /// [`sd_to_string`].
 pub fn string_to_sd(s: &str) -> Result<ConvertedSecurityDescriptor, crate::error::Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(s);
+    let wide: Vec<u16> = crate::wide::to_wide(s)?;
     let mut sd: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string live for the
     // whole call; `sd` is a valid out-pointer.
@@ -1453,7 +1469,8 @@ mod tests {
 
     #[test]
     fn build_trustee_with_name_names_the_given_wide_string() {
-        let mut wide: alloc::vec::Vec<u16> = crate::wide::to_wide("Everyone");
+        let mut wide: alloc::vec::Vec<u16> =
+            crate::wide::to_wide("Everyone").expect("a plain literal has no embedded NUL");
         let expected_ptr = wide.as_mut_ptr();
 
         // SAFETY: `wide` is a valid, NUL-terminated UTF-16 buffer that

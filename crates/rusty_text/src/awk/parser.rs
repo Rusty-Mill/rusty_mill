@@ -8,11 +8,25 @@ use super::lexer::Token;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: u32,
 }
+
+/// Cap on nested-construct recursion depth (parenthesized expressions,
+/// unary `-`/`!` chains, and nested `{ ... }` blocks). Each nesting level
+/// re-enters the full ~10-frame precedence chain (`parse_expr` ->
+/// `parse_assign` -> ... -> `parse_primary`), not just one frame, so a
+/// deeply nested but otherwise tiny awk program (e.g. thousands of nested
+/// `(`) can overflow the native stack without a guard. Mirrors the fix
+/// applied to rusty_jinja's parser for the identical bug class.
+const MAX_NESTING_DEPTH: u32 = 64;
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -89,7 +103,15 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
         match self.peek() {
-            Token::LBrace => Ok(Stmt::Block(self.parse_block_stmts()?)),
+            Token::LBrace => {
+                self.depth += 1;
+                if self.depth > MAX_NESTING_DEPTH {
+                    return Err("block nesting exceeds the maximum depth".to_string());
+                }
+                let stmts = self.parse_block_stmts()?;
+                self.depth -= 1;
+                Ok(Stmt::Block(stmts))
+            }
             Token::Print => {
                 self.advance();
                 let mut exprs = Vec::new();
@@ -284,11 +306,23 @@ impl Parser {
         match self.peek() {
             Token::Minus => {
                 self.advance();
-                Ok(Expr::Neg(Box::new(self.parse_unary()?)))
+                self.depth += 1;
+                if self.depth > MAX_NESTING_DEPTH {
+                    return Err("expression nesting exceeds the maximum depth".to_string());
+                }
+                let inner = self.parse_unary()?;
+                self.depth -= 1;
+                Ok(Expr::Neg(Box::new(inner)))
             }
             Token::Not => {
                 self.advance();
-                Ok(Expr::Not(Box::new(self.parse_unary()?)))
+                self.depth += 1;
+                if self.depth > MAX_NESTING_DEPTH {
+                    return Err("expression nesting exceeds the maximum depth".to_string());
+                }
+                let inner = self.parse_unary()?;
+                self.depth -= 1;
+                Ok(Expr::Not(Box::new(inner)))
             }
             _ => self.parse_primary(),
         }
@@ -309,7 +343,12 @@ impl Parser {
                 Ok(Expr::Field(Box::new(inner)))
             }
             Token::LParen => {
+                self.depth += 1;
+                if self.depth > MAX_NESTING_DEPTH {
+                    return Err("expression nesting exceeds the maximum depth".to_string());
+                }
                 let inner = self.parse_expr()?;
+                self.depth -= 1;
                 self.expect(&Token::RParen)?;
                 Ok(inner)
             }
@@ -362,5 +401,56 @@ mod tests {
             }
         }
         panic!("unexpected parse shape");
+    }
+
+    #[test]
+    fn deeply_nested_parens_return_err_instead_of_overflowing_stack() {
+        // `parse_primary`'s `Token::LParen` arm recurses through the full
+        // `parse_expr` -> ... -> `parse_primary` precedence chain once per
+        // nesting level with no depth guard, overflowing the native stack
+        // and aborting the process. With the guard this must return a
+        // clean `Err` instead.
+        let src = format!(
+            "BEGIN{{print {}1{}}}",
+            "(".repeat(10_000),
+            ")".repeat(10_000)
+        );
+        let tokens = Lexer::new(&src).tokenize().unwrap();
+        let result = Parser::new(tokens).parse_program();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_unary_not_returns_err_instead_of_overflowing_stack() {
+        // `parse_unary`'s `Token::Not` arm is self-recursive with no depth
+        // guard.
+        let src = format!("BEGIN{{print {}1}}", "!".repeat(100_000));
+        let tokens = Lexer::new(&src).tokenize().unwrap();
+        let result = Parser::new(tokens).parse_program();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_blocks_return_err_instead_of_overflowing_stack() {
+        // `parse_stmt`'s `Token::LBrace` arm recurses through
+        // `parse_block_stmts` -> `parse_stmt` -> `parse_block_stmts` once
+        // per nesting level with no depth guard.
+        let src = format!("{}1;{}", "{".repeat(10_000), "}".repeat(10_000));
+        let tokens = Lexer::new(&src).tokenize().unwrap();
+        let result = Parser::new(tokens).parse_program();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_program_via_public_entry_point_returns_err() {
+        // Exercises the public entry point (`AwkProgram::parse`, used by
+        // the `rawk` CLI) end to end rather than the internal `Parser`.
+        let src = format!(
+            "BEGIN{{print {}1{}}}",
+            "(".repeat(10_000),
+            ")".repeat(10_000)
+        );
+        let result = super::super::AwkProgram::parse(&src);
+        assert!(result.is_err());
     }
 }

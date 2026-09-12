@@ -95,9 +95,17 @@ impl TomlValue {
     }
 }
 
+/// Maximum recursion depth for nested arrays/inline-tables, matching this
+/// workspace's `rusty_regx::parser::MAX_NESTING_DEPTH` guard pattern —
+/// caps mutual recursion between `parse_value`/`parse_array`/
+/// `parse_inline_table` so a maliciously (or accidentally) deeply nested
+/// document errors out instead of overflowing the stack.
+const MAX_NESTING_DEPTH: u32 = 64;
+
 struct Parser {
     chars: Vec<char>,
     pos: usize,
+    depth: u32,
 }
 
 type PResult<T> = Result<T, &'static str>;
@@ -107,6 +115,7 @@ impl Parser {
         Parser {
             chars: input.chars().collect(),
             pos: 0,
+            depth: 0,
         }
     }
 
@@ -385,6 +394,10 @@ impl Parser {
     }
 
     fn parse_array(&mut self) -> PResult<TomlValue> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err("maximum nesting depth exceeded");
+        }
         self.expect_char('[')?;
         let mut items = Vec::new();
         loop {
@@ -399,10 +412,15 @@ impl Parser {
                 self.advance();
             }
         }
+        self.depth -= 1;
         Ok(TomlValue::Array(items))
     }
 
     fn parse_inline_table(&mut self) -> PResult<TomlValue> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err("maximum nesting depth exceeded");
+        }
         self.expect_char('{')?;
         let mut table = BTreeMap::new();
         loop {
@@ -422,6 +440,7 @@ impl Parser {
                 self.advance();
             }
         }
+        self.depth -= 1;
         Ok(TomlValue::Table(table))
     }
 }
@@ -597,6 +616,17 @@ mod tests {
                 .as_str(),
             Some("../rusty_wire")
         );
+    }
+
+    #[test]
+    fn deeply_nested_arrays_are_rejected_instead_of_overflowing_the_stack() {
+        // 10_000 levels of nesting is far past MAX_NESTING_DEPTH but far
+        // below anything that would itself overflow the test harness's
+        // stack — the parser must bail with an `Err` well before that.
+        let mut doc = String::from("a = ");
+        doc.push_str(&"[".repeat(10_000));
+        let result = TomlValue::parse_str(&doc);
+        assert!(result.is_err());
     }
 }
 

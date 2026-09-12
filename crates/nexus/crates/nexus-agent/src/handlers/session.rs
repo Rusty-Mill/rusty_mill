@@ -47,6 +47,15 @@ struct SessionRunArgs {
     /// unset and gets the same UUID-per-run shape as before.
     #[serde(default)]
     session_id: Option<String>,
+    /// Nesting depth of this session's own delegation chain (RFC 0007
+    /// follow-up). Set by `handlers::delegate::delegate_shared` when
+    /// submitting a delegated sub-session; `0` for a session started
+    /// directly (not via delegate). Threaded into this session's own
+    /// `KernelToolBridge` so a further `delegate_to_agent` call from
+    /// inside this session's tool loop carries the correct incremented
+    /// depth rather than resetting to `0`.
+    #[serde(default)]
+    delegation_depth: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,6 +190,7 @@ struct SessionRunRequest {
     follow_up: Option<String>,
     parent_id: Option<String>,
     branch_point: Option<u32>,
+    delegation_depth: u32,
 }
 
 pub(crate) async fn handle_session_run(
@@ -208,6 +218,7 @@ pub(crate) async fn handle_session_run(
         follow_up: None,
         parent_id: None,
         branch_point: None,
+        delegation_depth: parsed.delegation_depth,
     };
     run_and_persist_session(ctx, pending_approvals, req).await
 }
@@ -257,6 +268,10 @@ async fn fork_session(
         follow_up: message,
         parent_id: Some(parent_id),
         branch_point: Some(branch_point),
+        // Resume/branch/rewind aren't part of the `delegate_to_agent`
+        // recursion chain (only a fresh `session_run` is), so a fork
+        // always starts at depth 0.
+        delegation_depth: 0,
     };
     run_and_persist_session(ctx, pending_approvals, req).await
 }
@@ -368,6 +383,7 @@ async fn run_and_persist_session(
         timeout: DEFAULT_TOOL_TIMEOUT,
         // C29 (#382) — key the write-snapshot trail by this session.
         session_id: Some(req.session_id.clone()),
+        delegation_depth: req.delegation_depth,
     });
 
     let resolved = match &req.archetype {

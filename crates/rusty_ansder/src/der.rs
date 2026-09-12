@@ -162,6 +162,18 @@ pub fn read_integer_u32(r: &mut Reader<'_>) -> Result<u32> {
         });
     }
     let bytes = r.read_bytes(len)?;
+    if bytes[0] & 0x80 != 0 {
+        return Err(Error::InvalidValue {
+            field: "DER integer",
+            value: "negative value is not representable as u32".to_string(),
+        });
+    }
+    if bytes[0] == 0x00 && bytes.len() > 1 && bytes[1] & 0x80 == 0 {
+        return Err(Error::InvalidValue {
+            field: "DER integer",
+            value: "non-canonical encoding: redundant leading 0x00".to_string(),
+        });
+    }
     let mut val = 0u32;
     for &b in bytes {
         val = (val << 8) | (b as u32);
@@ -227,6 +239,16 @@ mod tests {
         assert_eq!(read_integer_u32(&mut r).unwrap(), 255);
         assert_eq!(read_integer_u32(&mut r).unwrap(), 65535);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn read_integer_u32_rejects_a_negative_der_encoding() {
+        // DER encoding of -1: tag INTEGER, length 1, content 0xFF. The
+        // high bit of the leading content byte is set, so this must be
+        // rejected rather than reinterpreted as the unsigned value 255.
+        let bytes = [0x02u8, 0x01, 0xFF];
+        let mut r = Reader::new(&bytes);
+        assert!(read_integer_u32(&mut r).is_err());
     }
 
     #[test]

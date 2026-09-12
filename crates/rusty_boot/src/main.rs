@@ -19,7 +19,9 @@ pub fn main() {
         *guard += 50;
     }
 
-    let encoded_binary = rusty_codec::serialize(b"Sovereign Payload");
+    let encoded_binary = rusty_codec::serialize(b"Sovereign Payload")
+        .context("Failed encoding payload")
+        .unwrap();
     let _decoded = rusty_codec::deserialize(&encoded_binary)
         .context("Failed decoding payload")
         .unwrap();

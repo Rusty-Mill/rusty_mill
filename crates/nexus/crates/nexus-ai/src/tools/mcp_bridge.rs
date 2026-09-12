@@ -25,6 +25,7 @@
 //!
 //! [`AiToolPolicy::AutoWithMcp`]: crate::ipc::AiToolPolicy::AutoWithMcp
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -224,8 +225,16 @@ pub async fn discover_mcp_tools(
 
 /// Compose `mcp__<server>__<tool>`, sanitised so the result matches
 /// the provider tool-name regex (`^[a-zA-Z0-9_-]+$`) and fits the
-/// 64-char cap. Non-conforming chars become `_`; the tail is
-/// truncated rather than the head so the prefix stays parseable.
+/// 64-char cap. Non-conforming chars become `_`.
+///
+/// When the combined name fits, it's returned as-is. When it doesn't,
+/// a bare prefix slice would silently collide two distinct
+/// `(server, tool)` pairs that happen to share their first 64
+/// characters — `ToolRegistry::register` overwrites on a name clash,
+/// so one of the two tools would simply vanish. Instead the last
+/// `_` + 8 hex chars are reserved for a deterministic disambiguator
+/// (a hash of the *untruncated* pair), so distinct pairs still
+/// produce distinct names even after truncation.
 fn mcp_tool_name(server: &str, tool: &str) -> String {
     fn sanitize(s: &str) -> String {
         s.chars()
@@ -240,11 +249,21 @@ fn mcp_tool_name(server: &str, tool: &str) -> String {
     }
     let combined = format!("mcp__{}__{}", sanitize(server), sanitize(tool));
     if combined.len() <= MAX_TOOL_NAME_LEN {
-        combined
-    } else {
-        // Char-boundary safe: combined is ASCII after sanitize.
-        combined[..MAX_TOOL_NAME_LEN].to_string()
+        return combined;
     }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    server.hash(&mut hasher);
+    // Separator byte outside the sanitised alphabet so e.g. ("ab", "c")
+    // and ("a", "bc") hash differently despite an identical concatenation.
+    0xffu8.hash(&mut hasher);
+    tool.hash(&mut hasher);
+    // Intentional: only the low 32 bits are needed for an 8-hex-char
+    // disambiguator, not the full 64-bit digest.
+    #[allow(clippy::cast_possible_truncation)]
+    let digest = format!("{:08x}", hasher.finish() as u32);
+    // Char-boundary safe: combined is ASCII after sanitize.
+    let prefix_len = MAX_TOOL_NAME_LEN - digest.len() - 1;
+    format!("{}_{digest}", &combined[..prefix_len])
 }
 
 #[cfg(test)]
@@ -276,6 +295,35 @@ mod tests {
         let out = mcp_tool_name(&server, &tool);
         assert_eq!(out.len(), 64);
         assert!(out.starts_with("mcp__"));
+    }
+
+    /// Regression test — a bare 64-char prefix slice previously let two
+    /// distinct `(server, tool)` pairs that share the same first 64
+    /// characters collapse to the identical registry key (the second
+    /// silently overwrites the first in `ToolRegistry::register`). The
+    /// reserved disambiguator suffix must keep them distinct.
+    #[test]
+    fn mcp_tool_name_disambiguates_shared_64_char_prefix() {
+        let server = "svc";
+        let tool_a = format!("{}AAA", "x".repeat(100));
+        let tool_b = format!("{}BBB", "x".repeat(100));
+        // Sanity: the two untruncated names really do share their first
+        // 64 characters, so a naive `[..64]` slice would collide them.
+        let combined_a = format!("mcp__{server}__{tool_a}");
+        let combined_b = format!("mcp__{server}__{tool_b}");
+        assert_eq!(
+            &combined_a[..MAX_TOOL_NAME_LEN],
+            &combined_b[..MAX_TOOL_NAME_LEN]
+        );
+
+        let name_a = mcp_tool_name(server, &tool_a);
+        let name_b = mcp_tool_name(server, &tool_b);
+        assert_ne!(
+            name_a, name_b,
+            "distinct (server, tool) pairs must not collide after truncation"
+        );
+        assert_eq!(name_a.len(), MAX_TOOL_NAME_LEN);
+        assert_eq!(name_b.len(), MAX_TOOL_NAME_LEN);
     }
 
     /// Stub IPC dispatcher: returns canned `list_servers` /

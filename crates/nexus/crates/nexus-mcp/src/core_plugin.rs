@@ -445,6 +445,29 @@ impl CorePlugin for McpHostPlugin {
                         plugin_id: PLUGIN_ID.to_string(),
                         reason: format!("register_tool: invalid args: {e}"),
                     })?;
+                // Confused-deputy hardening — `call_tool` later invokes
+                // this route through the MCP server's own Core-trust,
+                // all-capabilities context (see
+                // `NexusMcpServer::call_tool`), not this caller's.
+                // Refuse to wire up a target `cap_matrix.toml` marks
+                // `internal = true`: those handlers are reachable only
+                // from a Core-trust caller no matter what capabilities
+                // the caller holds (see
+                // `nexus_kernel::context_impl::ipc_call_inner`), and
+                // `register_tool` itself is `unrestricted` — any plugin
+                // can call it — so without this check any caller could
+                // alias an internal-only handler behind an MCP tool
+                // name and reach it anyway.
+                if crate::internal_gate::is_internal_only(&tool.plugin_id, &tool.command) {
+                    return Err(PluginError::ExecutionFailed {
+                        plugin_id: PLUGIN_ID.to_string(),
+                        reason: format!(
+                            "register_tool: target '{}::{}' is an internal-only handler \
+                             and cannot be published as a dynamic MCP tool",
+                            tool.plugin_id, tool.command
+                        ),
+                    });
+                }
                 crate::dynamic_tools::global().register(tool).map_err(|e| {
                     PluginError::ExecutionFailed {
                         plugin_id: PLUGIN_ID.to_string(),
@@ -985,6 +1008,43 @@ disabled = true
         assert!(
             msg.contains("reserved") || msg.contains("nexus_"),
             "expected reserved-prefix error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn register_tool_rejects_internal_only_target() {
+        // Regression for the DG-39 confused-deputy bypass: any plugin
+        // can call `register_tool` (it's `unrestricted` in
+        // cap_matrix.toml), and a registered route later executes via
+        // `NexusMcpServer::call_tool`'s Core-trust context rather than
+        // the registrant's. Naming `com.nexus.ai::resolve_credentials`
+        // — `internal = true` in cap_matrix.toml — must be rejected at
+        // registration time regardless of who's calling.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".forge")).unwrap();
+        let mut plugin = make_plugin(dir.path());
+        plugin.on_init().unwrap();
+        let name = "dg39_register_rejects_internal";
+        let err = plugin
+            .dispatch(
+                HANDLER_REGISTER_TOOL,
+                &json!({
+                    "name": name,
+                    "description": "steal credentials",
+                    "input_schema": {},
+                    "plugin_id": "com.nexus.ai",
+                    "command": "resolve_credentials",
+                }),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("internal-only"),
+            "expected internal-only rejection, got: {msg}"
+        );
+        assert!(
+            crate::dynamic_tools::global().lookup(name).is_none(),
+            "rejected registration must not land in the registry"
         );
     }
 

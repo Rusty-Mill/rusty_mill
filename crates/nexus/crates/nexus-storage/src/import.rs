@@ -171,7 +171,7 @@ fn walk_for_import(
                 ))
             })?
             .to_string_lossy()
-            .into_owned();
+            .replace('\\', "/");
 
         let dest_path = dest_root.join(&relpath);
         let source_bytes = fs::read(&path).map_err(StorageError::Io)?;
@@ -317,7 +317,7 @@ fn next_rename_target(
         *counter += 1;
         if !candidate_abs.exists() {
             let target_rel = parent_rel.join(&candidate_name);
-            return Some(target_rel.to_string_lossy().into_owned());
+            return Some(target_rel.to_string_lossy().replace('\\', "/"));
         }
     }
     None

@@ -146,6 +146,15 @@ where
     T: IsAny,
 {
     let (n, m) = (text.len(), tokens.len());
+    // The DP table below is `(n + 1) * (m + 1)` cells; an attacker-sized
+    // `text`/`pattern` pair (or one that's simply huge by accident) could
+    // otherwise force a multi-GB allocation. Bail out with a "no match"
+    // instead of attempting it.
+    const MAX_DP_CELLS: usize = 4_000_000;
+    match (n + 1).checked_mul(m + 1) {
+        Some(cells) if cells <= MAX_DP_CELLS => {}
+        _ => return false,
+    }
     let mut dp = vec![vec![false; m + 1]; n + 1];
     dp[0][0] = true;
     for (j, token) in tokens.iter().enumerate() {
@@ -254,5 +263,39 @@ mod tests {
     fn glob_negated_char_class() {
         assert!(!glob_match("cat", "[^bc]at"));
         assert!(glob_match("rat", "[^bc]at"));
+    }
+
+    #[test]
+    fn oversized_text_and_pattern_bail_out_instead_of_huge_allocation() {
+        // 500_000 chars against a pattern with 40 tokens would need a DP
+        // table of ~20.5M `bool` cells; comfortably over the crate's
+        // guard, but still small enough that a naive allocation wouldn't
+        // itself crash the test process on most machines -- the point
+        // here is that this returns quickly with a defined answer rather
+        // than proceeding to allocate at all.
+        let text = "a".repeat(500_000);
+        let pattern = "%a".repeat(20);
+
+        let start = std::time::Instant::now();
+        let matched = like_match(&text, &pattern, None);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "oversized like_match should bail out quickly via the size guard"
+        );
+        assert!(
+            !matched,
+            "oversized input should report a defined no-match result"
+        );
+
+        let start = std::time::Instant::now();
+        let matched = glob_match(&text, &pattern.replace('%', "*"));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "oversized glob_match should bail out quickly via the size guard"
+        );
+        assert!(
+            !matched,
+            "oversized input should report a defined no-match result"
+        );
     }
 }

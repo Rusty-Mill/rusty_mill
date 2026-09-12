@@ -418,7 +418,7 @@ fn resume_and_primer_carry_a_conversation_elsewhere() {
         .expect("claude code conversation");
 
     let cmd = inv.resume(claude.conversation.id).unwrap();
-    assert_eq!(cmd.display(), "claude --resume sess-1");
+    assert_eq!(cmd.display(), "claude '--resume' 'sess-1'");
     // /work/api does not exist on this machine, so it falls back — "even if
     // the project folder has moved".
     assert!(cmd.project_moved);
