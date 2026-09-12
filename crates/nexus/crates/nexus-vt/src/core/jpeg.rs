@@ -19,6 +19,16 @@ pub(crate) struct Image {
 /// Pixel-count cap (4M px) so a malformed SOF can't request a vast allocation.
 const MAX_PIXELS: usize = 4 * 1024 * 1024;
 
+/// Cap on the total MCU-padded sample count summed across every component's
+/// plane (checked in `decode_scan`). Chroma subsampling and MCU alignment
+/// round each component's plane dimensions up independently, so an extreme
+/// aspect ratio can pass the nominal `MAX_PIXELS` check (on the declared,
+/// unpadded `width * height`) while the padded planes are amplified far past
+/// it. Sized to comfortably admit a full-resolution 4:4:4 image at the pixel
+/// cap (~3x `MAX_PIXELS` for its three planes) while still rejecting that
+/// amplification.
+const MAX_PADDED_PIXELS: usize = 4 * MAX_PIXELS;
+
 /// JPEG zig-zag order: maps a coefficient's position in the entropy stream to its
 /// row-major index in the natural 8x8 block.
 #[rustfmt::skip]
@@ -264,6 +274,9 @@ fn parse_sof(
     width: &mut usize,
     height: &mut usize,
 ) -> Option<()> {
+    if !comps.is_empty() {
+        return None; // a second SOF marker isn't a supported multi-frame stream
+    }
     if seg.len() < 6 || seg[0] != 8 {
         return None; // only 8-bit precision
     }
@@ -399,6 +412,22 @@ fn decode_scan(
     let mcus_x = width.div_ceil(mcu_w);
     let mcus_y = height.div_ceil(mcu_h);
 
+    // Total padded sample count across every component's whole-MCU plane.
+    // Chroma subsampling and MCU padding round each component's plane
+    // dimensions up independently, so an extreme aspect ratio can pass the
+    // nominal `width * height` cap in `parse_sof` while this still amplifies
+    // far past it (e.g. a 1px-tall image at maximum sampling factors). Reject
+    // before allocating rather than trusting the nominal check alone.
+    let mut total_padded = 0usize;
+    for c in comps.iter() {
+        let cw = mcus_x.checked_mul(c.h)?.checked_mul(8)?;
+        let ch = mcus_y.checked_mul(c.v)?.checked_mul(8)?;
+        total_padded = total_padded.checked_add(cw.checked_mul(ch)?)?;
+    }
+    if total_padded > MAX_PADDED_PIXELS {
+        return None;
+    }
+
     // Allocate each component's sample plane, padded to whole MCUs.
     for c in comps.iter_mut() {
         c.cw = mcus_x * c.h * 8;
@@ -445,7 +474,7 @@ fn decode_scan(
         }
     }
 
-    Some(to_rgba(comps, width, height, hmax, vmax))
+    to_rgba(comps, width, height, hmax, vmax)
 }
 
 /// Decode one 8x8 block: DC difference (predicted) then run-length AC, writing
@@ -541,7 +570,13 @@ fn idct_matrix() -> [[f32; 8]; 8] {
 
 /// Upsample each component to full resolution (nearest-neighbor) and convert
 /// YCbCr -> RGB (or replicate luma for grayscale) into packed RGBA8.
-fn to_rgba(comps: &[Component], width: usize, height: usize, hmax: usize, vmax: usize) -> Image {
+fn to_rgba(
+    comps: &[Component],
+    width: usize,
+    height: usize,
+    hmax: usize,
+    vmax: usize,
+) -> Option<Image> {
     let mut rgba = vec![0u8; width * height * 4];
     let sample = |c: &Component, x: usize, y: usize| -> u8 {
         let sx = x * c.h / hmax;
@@ -551,21 +586,28 @@ fn to_rgba(comps: &[Component], width: usize, height: usize, hmax: usize, vmax: 
     for y in 0..height {
         for x in 0..width {
             let o = (y * width + x) * 4;
-            let (r, g, b) = if comps.len() == 1 {
-                let l = sample(&comps[0], x, y);
-                (l, l, l)
-            } else {
-                let yc = sample(&comps[0], x, y) as f32;
-                let cb = sample(&comps[1], x, y) as f32 - 128.0;
-                let cr = sample(&comps[2], x, y) as f32 - 128.0;
-                let r = yc + 1.402 * cr;
-                let g = yc - 0.344136 * cb - 0.714136 * cr;
-                let b = yc + 1.772 * cb;
-                (
-                    r.round().clamp(0.0, 255.0) as u8,
-                    g.round().clamp(0.0, 255.0) as u8,
-                    b.round().clamp(0.0, 255.0) as u8,
-                )
+            let (r, g, b) = match comps.len() {
+                1 => {
+                    let l = sample(&comps[0], x, y);
+                    (l, l, l)
+                }
+                3 => {
+                    let yc = sample(&comps[0], x, y) as f32;
+                    let cb = sample(&comps[1], x, y) as f32 - 128.0;
+                    let cr = sample(&comps[2], x, y) as f32 - 128.0;
+                    let r = yc + 1.402 * cr;
+                    let g = yc - 0.344136 * cb - 0.714136 * cr;
+                    let b = yc + 1.772 * cb;
+                    (
+                        r.round().clamp(0.0, 255.0) as u8,
+                        g.round().clamp(0.0, 255.0) as u8,
+                        b.round().clamp(0.0, 255.0) as u8,
+                    )
+                }
+                // Only grayscale (1) or YCbCr (3) are supported; anything else
+                // (e.g. a malformed stream that slipped past `parse_sof`)
+                // can't be interpreted as a color space.
+                _ => return None,
             };
             rgba[o] = r;
             rgba[o + 1] = g;
@@ -573,9 +615,9 @@ fn to_rgba(comps: &[Component], width: usize, height: usize, hmax: usize, vmax: 
             rgba[o + 3] = 255;
         }
     }
-    Image {
+    Some(Image {
         width,
         height,
         rgba,
-    }
+    })
 }

@@ -63,7 +63,11 @@ pub fn map_reqwest_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Network(err.to_string())
+        // `reqwest::Error`'s `Display` impl can embed the full request URL
+        // (query string included), which for a provider like Gemini means
+        // the `?key=...` API key would otherwise leak into a client-facing
+        // error response. `without_url()` strips it before formatting.
+        ProviderError::Network(err.without_url().to_string())
     }
 }
 
@@ -147,5 +151,29 @@ mod tests {
     #[test]
     fn extract_error_message_is_none_for_an_empty_body() {
         assert_eq!(extract_error_message(""), None);
+    }
+
+    // --- map_reqwest_error -----------------------------------------------------
+
+    #[tokio::test]
+    async fn map_reqwest_error_strips_the_api_key_from_the_request_url() {
+        // A connection failure to an unreachable port surfaces a
+        // `reqwest::Error` whose `Display` embeds the full request URL --
+        // including any query-string API key, e.g. Gemini's `?key=...`.
+        let client = build_client(Duration::from_secs(5));
+        let err = client
+            .get("http://127.0.0.1:1/v1/models?key=SECRET")
+            .send()
+            .await
+            .unwrap_err();
+        // Sanity check: the unmodified error really would have leaked it.
+        assert!(err.to_string().contains("SECRET"));
+
+        let mapped = map_reqwest_error(err);
+        let message = match mapped {
+            ProviderError::Network(message) => message,
+            other => panic!("expected ProviderError::Network, got {other:?}"),
+        };
+        assert!(!message.contains("SECRET"), "leaked API key: {message}");
     }
 }

@@ -55,9 +55,9 @@ impl Default for RedisStoreConfig {
 
 /// Session metadata held alongside the message list.
 ///
-/// History URLs are *derived* from message indices at read time rather than
-/// stored, which is what lets an append be a single atomic `RPUSH`: the URL for
-/// message `i` is a pure function of `i`.
+/// History URLs for messages are built from each entry's own stored base URL
+/// — see [`StoredMessage`] — rather than from anything here, so a later
+/// append with a different base URL cannot rewrite an earlier message's link.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SessionMeta {
     id: SessionId,
@@ -67,9 +67,18 @@ struct SessionMeta {
     /// before anything this deployment stores.
     #[serde(default)]
     prefix_history: Vec<String>,
-    /// Base URL recorded on first append, so reads can rebuild history URLs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    base_url: Option<String>,
+}
+
+/// One session message, paired with the base URL in effect when it was
+/// appended.
+///
+/// Stored per message — rather than once per session — so a request that
+/// appends under one `Host` header cannot retroactively change the URL of a
+/// message an earlier request already appended under a different one.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StoredMessage {
+    message: Message,
+    base_url: String,
 }
 
 /// Keeps runs and sessions in Redis, using pub/sub for notifications.
@@ -422,14 +431,22 @@ impl Store for RedisStore {
             .lrange(self.session_messages_key(session_id), 0, -1)
             .await
             .map_err(|err| redis_error("read session messages", err))?;
-        let messages: Vec<Message> =
+        let stored: Vec<StoredMessage> =
             encoded.iter().map(|entry| decode(entry)).collect::<StoreResult<_>>()?;
 
         // Rebuild history: entries hosted elsewhere first, then one URL per
-        // message this deployment stores.
-        let base_url = meta.base_url.as_deref().unwrap_or_default();
+        // message this deployment stores. Each URL uses *that message's own*
+        // stored base URL — the one in effect when it was appended — so a
+        // later append with a different base URL cannot retroactively rewrite
+        // an earlier message's link.
         let mut history = meta.prefix_history.clone();
-        history.extend((0..messages.len()).map(|index| message_url(base_url, session_id, index)));
+        history.extend(
+            stored
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| message_url(&entry.base_url, session_id, index)),
+        );
+        let messages: Vec<Message> = stored.into_iter().map(|entry| entry.message).collect();
 
         Ok(Some(SessionRecord {
             session: Session { id: meta.id, history, state: meta.state },
@@ -443,7 +460,6 @@ impl Store for RedisStore {
             id: session.id,
             state: session.state.clone(),
             prefix_history: session.history.clone(),
-            base_url: None,
         };
 
         let mut connection = self.connection.clone();
@@ -478,31 +494,30 @@ impl Store for RedisStore {
         let messages_key = self.session_messages_key(session_id);
         let mut connection = self.connection.clone();
 
-        // Ensure the session exists and knows the base URL its history links
-        // resolve against.
-        let raw: Option<String> =
-            connection.get(&meta_key).await.map_err(|err| redis_error("read session", err))?;
-        let mut meta: SessionMeta = match raw.as_deref() {
-            Some(raw) => decode(raw)?,
-            None => SessionMeta {
-                id: session_id,
-                state: None,
-                prefix_history: Vec::new(),
-                base_url: None,
-            },
-        };
-        if meta.base_url.as_deref() != Some(base_url) {
-            meta.base_url = Some(base_url.to_string());
+        // Ensure the session exists, seeding it if this is the first append.
+        let exists: bool =
+            connection.exists(&meta_key).await.map_err(|err| redis_error("check session", err))?;
+        if !exists {
+            let meta = SessionMeta { id: session_id, state: None, prefix_history: Vec::new() };
+            // SET NX: another replica may have created it between the check
+            // above and here.
             let _: () = connection
-                .set(&meta_key, encode(&meta)?)
+                .set_nx(&meta_key, encode(&meta)?)
                 .await
-                .map_err(|err| redis_error("write session", err))?;
+                .map_err(|err| redis_error("create session", err))?;
         }
 
         // A single RPUSH keeps concurrent appends from interleaving, and the
         // index each message lands at is exactly what its history URL uses.
-        let encoded: Vec<String> =
-            messages.iter().map(encode).collect::<StoreResult<Vec<String>>>()?;
+        // Each entry carries the base URL in effect when it was appended, so a
+        // later append using a different base URL — e.g. a different `Host`
+        // header — cannot retroactively change an already-issued message URL.
+        let encoded: Vec<String> = messages
+            .iter()
+            .map(|message| {
+                encode(&StoredMessage { message: message.clone(), base_url: base_url.to_string() })
+            })
+            .collect::<StoreResult<Vec<String>>>()?;
         let _: () = connection
             .rpush(&messages_key, encoded)
             .await
@@ -638,12 +653,7 @@ impl Store for RedisStore {
             connection.get(&meta_key).await.map_err(|err| redis_error("read session", err))?;
         let mut meta: SessionMeta = match raw.as_deref() {
             Some(raw) => decode(raw)?,
-            None => SessionMeta {
-                id: session_id,
-                state: None,
-                prefix_history: Vec::new(),
-                base_url: None,
-            },
+            None => SessionMeta { id: session_id, state: None, prefix_history: Vec::new() },
         };
         meta.state = Some(state_url(base_url, session_id));
         let _: () = connection

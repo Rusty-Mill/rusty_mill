@@ -157,6 +157,7 @@ pub fn parse(input: &str) -> Result<CommandList, ParseError> {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
+        depth: 0,
     };
 
     let list = p.parse_list()?;
@@ -170,9 +171,17 @@ pub fn parse(input: &str) -> Result<CommandList, ParseError> {
     Ok(list)
 }
 
+/// Cap on nested subshells (`(...)`), brace groups (`{...}`), and compound
+/// bodies (`if`/`while`/`for`/`case`) — each level re-enters the full
+/// `parse_command` -> ... -> `parse_command` mutual-recursion cycle, so
+/// without a cap a deeply (or maliciously) nested script overflows the
+/// stack and aborts the process instead of returning a `ParseError`.
+const MAX_NESTING_DEPTH: u32 = 200;
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    depth: u32,
 }
 
 impl Parser {
@@ -315,6 +324,10 @@ impl Parser {
     }
 
     fn parse_subshell(&mut self) -> Result<RawCommand, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(ParseError::Syntax("nesting too deep".into()));
+        }
         self.pos += 1; // `(`
         let list = self.parse_list()?;
         match self.peek() {
@@ -322,14 +335,20 @@ impl Parser {
             None => return Err(ParseError::Incomplete),
             _ => return Err(ParseError::Syntax("expected `)`".into())),
         }
+        self.depth -= 1;
         Ok(RawCommand::Compound(Box::new(Compound::Subshell(list))))
     }
 
     /// Parse `{ list; }`.
     fn parse_brace_body(&mut self) -> Result<CommandList, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(ParseError::Syntax("nesting too deep".into()));
+        }
         self.expect_keyword("{")?;
         let list = self.parse_list()?;
         self.expect_keyword("}")?;
+        self.depth -= 1;
         Ok(list)
     }
 
@@ -390,6 +409,10 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<RawCommand, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(ParseError::Syntax("nesting too deep".into()));
+        }
         self.expect_keyword("if")?;
         let mut branches = Vec::new();
         branches.push(self.parse_cond_then()?);
@@ -404,6 +427,7 @@ impl Parser {
             None
         };
         self.expect_keyword("fi")?;
+        self.depth -= 1;
         Ok(RawCommand::Compound(Box::new(Compound::If {
             branches,
             else_body,
@@ -418,11 +442,16 @@ impl Parser {
     }
 
     fn parse_loop(&mut self, until: bool) -> Result<RawCommand, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(ParseError::Syntax("nesting too deep".into()));
+        }
         self.expect_keyword(if until { "until" } else { "while" })?;
         let cond = self.parse_list()?;
         self.expect_keyword("do")?;
         let body = self.parse_list()?;
         self.expect_keyword("done")?;
+        self.depth -= 1;
         Ok(RawCommand::Compound(Box::new(Compound::Loop {
             until,
             cond,
@@ -431,6 +460,10 @@ impl Parser {
     }
 
     fn parse_for(&mut self) -> Result<RawCommand, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(ParseError::Syntax("nesting too deep".into()));
+        }
         self.expect_keyword("for")?;
         let var = self.expect_name()?;
 
@@ -450,6 +483,7 @@ impl Parser {
         self.expect_keyword("do")?;
         let body = self.parse_list()?;
         self.expect_keyword("done")?;
+        self.depth -= 1;
         Ok(RawCommand::Compound(Box::new(Compound::For {
             var,
             words,
@@ -458,6 +492,10 @@ impl Parser {
     }
 
     fn parse_case(&mut self) -> Result<RawCommand, ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(ParseError::Syntax("nesting too deep".into()));
+        }
         self.expect_keyword("case")?;
         let word = self.expect_word_token()?;
         self.expect_keyword("in")?;
@@ -495,6 +533,7 @@ impl Parser {
         }
 
         self.expect_keyword("esac")?;
+        self.depth -= 1;
         Ok(RawCommand::Compound(Box::new(Compound::Case {
             word,
             items,
@@ -851,5 +890,16 @@ mod tests {
     fn stray_terminator_is_error() {
         assert!(matches!(parse("fi"), Err(ParseError::Syntax(_))));
         assert!(matches!(parse("then echo"), Err(ParseError::Syntax(_))));
+    }
+
+    #[test]
+    fn deeply_nested_subshells_are_rejected_instead_of_overflowing_the_stack() {
+        // 50,000 unmatched `(` is far past MAX_NESTING_DEPTH but far below
+        // anything that would itself overflow the test harness's stack —
+        // the parser must bail with an `Err` well before that, rather than
+        // recursing through parse_command -> parse_subshell -> parse_list
+        // -> ... once per `(` and aborting the process.
+        let script = "(".repeat(50_000);
+        assert!(matches!(parse(&script), Err(ParseError::Syntax(_))));
     }
 }

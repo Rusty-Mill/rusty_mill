@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::Session;
+use rk_constrain::{ApprovalGate, ApprovalTrigger};
 
 /// Gateway session model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,8 +91,11 @@ where
             secret: std::env::var("RUSTYKEYS_GATEWAY_SECRET")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            cors_origin: std::env::var("RUSTYKEYS_GATEWAY_CORS_ORIGIN")
-                .unwrap_or_else(|_| "*".to_string()),
+            // Same-origin by default (round-4 finding 1c): an unconfigured
+            // origin allows no cross-origin caller, rather than mirroring `*`
+            // back to everyone. Set `RUSTYKEYS_GATEWAY_CORS_ORIGIN` explicitly
+            // to allow a specific origin (or `*`, if genuinely wanted).
+            cors_origin: std::env::var("RUSTYKEYS_GATEWAY_CORS_ORIGIN").unwrap_or_default(),
             ttl: Duration::from_secs(ttl_secs),
             max_sessions,
             single: Mutex::new(None),
@@ -112,7 +116,22 @@ where
     }
 
     fn build_session(&self) -> anyhow::Result<Arc<Session<M>>> {
-        Ok(Arc::new(Session::new(&self.config, self.model.clone())?))
+        // No interactive adapter answers the gateway's approval prompts, so
+        // the channel receiver is intentionally dropped: `ApprovalGate`
+        // already fails closed when no adapter is listening (`approval.rs`),
+        // which blocks first-bash-use / new-file-write actions exactly like
+        // ACP/desktop gate them behind a human, instead of leaving the
+        // gateway tool-approval-free (round-4 finding 1d).
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let gate = ApprovalGate::new(
+            vec![ApprovalTrigger::NewFilePath, ApprovalTrigger::BashFirstUse],
+            tx,
+        );
+        Ok(Arc::new(Session::new_with_policy(
+            &self.config,
+            self.model.clone(),
+            Arc::new(gate),
+        )?))
     }
 
     /// Authorize a request: when a secret is set, require `Authorization:
@@ -125,7 +144,7 @@ where
             .map(str::to_string);
         match &self.secret {
             Some(expected) => match &presented {
-                Some(tok) if tok == expected => Ok(presented),
+                Some(tok) if constant_time_eq(tok, expected) => Ok(presented),
                 _ => Err(StatusCode::UNAUTHORIZED),
             },
             None => Ok(presented),
@@ -181,15 +200,25 @@ where
 
     /// The axum router over this gateway.
     pub fn router(self: Arc<Self>) -> Router {
+        // Methods/headers are scoped to what the gateway's routes actually
+        // use, not `Any` (round-4 finding 1). An empty/unconfigured
+        // `cors_origin` allows no origin at all (same-origin default).
+        let allow_origin = if self.cors_origin.is_empty() {
+            tower_http::cors::AllowOrigin::list(Vec::<axum::http::HeaderValue>::new())
+        } else {
+            self.cors_origin
+                .parse::<axum::http::HeaderValue>()
+                .map(tower_http::cors::AllowOrigin::exact)
+                .unwrap_or_else(|_| tower_http::cors::AllowOrigin::list(Vec::new()))
+        };
         let cors = tower_http::cors::CorsLayer::new()
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
-            .allow_origin(
-                self.cors_origin
-                    .parse::<axum::http::HeaderValue>()
-                    .map(tower_http::cors::AllowOrigin::exact)
-                    .unwrap_or_else(|_| tower_http::cors::AllowOrigin::any()),
-            );
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderName::from_static("x-session-id"),
+            ])
+            .allow_origin(allow_origin);
         Router::new()
             .route("/health", get(health::<M>))
             .route("/ready", get(ready::<M>))
@@ -453,6 +482,18 @@ where
     Json(json!(session.metrics_snapshot())).into_response()
 }
 
+/// Constant-time byte comparison for the bearer secret: `a == b` on `&str` is
+/// a short-circuiting, non-constant-time comparison for a security secret
+/// (round-4 finding 4) — this compares every byte regardless of where the
+/// first mismatch falls.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (&x, &y)| acc | (x ^ y)) == 0
+}
+
 fn now_tag() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -460,14 +501,42 @@ fn now_tag() -> u128 {
         .unwrap_or(0)
 }
 
-/// Serve the gateway on `addr` until shutdown.
+/// Serve the gateway on `addr` until shutdown. Refuses to start unless a
+/// bearer secret is configured: a gateway is network-exposed by definition,
+/// so silently disabling auth when `RUSTYKEYS_GATEWAY_SECRET` is unset is not
+/// a safe default (round-4 finding 1b).
 pub async fn serve<M>(config: Config, model: M, addr: &str) -> anyhow::Result<()>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
-    let gw = Arc::new(Gateway::new(config, model));
+    let gw = Gateway::new(config, model);
+    if gw.secret.is_none() {
+        anyhow::bail!(
+            "refusing to start the gateway: RUSTYKEYS_GATEWAY_SECRET is not set. Set it to a \
+             bearer token callers must present, or the gateway would serve every request \
+             unauthenticated on the network."
+        );
+    }
+    let gw = Arc::new(gw);
     let app = gw.router();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_accepts_matching_and_rejects_mismatched_tokens() {
+        // A full timing-side-channel test isn't practical in a unit test; this
+        // proves the comparison remains correct (matching accepted, any
+        // mismatch rejected) after switching off the short-circuiting `==`.
+        assert!(constant_time_eq("s3cr3t-token", "s3cr3t-token"));
+        assert!(!constant_time_eq("s3cr3t-token", "s3cr3t-tokeX"));
+        assert!(!constant_time_eq("s3cr3t-token", "shorter"));
+        assert!(!constant_time_eq("", "nonempty"));
+        assert!(constant_time_eq("", ""));
+    }
 }

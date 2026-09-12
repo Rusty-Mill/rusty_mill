@@ -173,12 +173,27 @@ fn json_value_to_csv(value: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => sanitize_csv_field(s),
         serde_json::Value::Array(arr) => {
             let parts: Vec<String> = arr.iter().map(json_value_to_csv).collect();
             parts.join("; ")
         }
         serde_json::Value::Object(_) => value.to_string(),
+    }
+}
+
+/// Neutralize CSV/DDE formula-injection triggers.
+///
+/// Spreadsheet applications (Excel, `LibreOffice`, Google Sheets) treat a
+/// cell whose value starts with `=`, `+`, `-`, `@`, a tab, or a carriage
+/// return as a formula, which can be abused to execute commands when the
+/// exported CSV is later opened. Prefixing such values with `'` forces
+/// the cell to be treated as plain text (per OWASP CSV injection
+/// guidance).
+fn sanitize_csv_field(s: &str) -> String {
+    match s.chars().next() {
+        Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{s}"),
+        _ => s.to_string(),
     }
 }
 
@@ -257,6 +272,36 @@ mod tests {
         assert!(output.contains("name,score"));
         assert!(output.contains("Alice,95"));
         assert!(output.contains("Bob,87"));
+    }
+
+    #[test]
+    fn export_csv_neutralizes_formula_injection() {
+        let records = vec![nexus_types::bases::BaseRecord {
+            id: "r1".to_string(),
+            deleted_at: None,
+            fields: {
+                let mut m = serde_json::Map::new();
+                m.insert("name".to_string(), serde_json::json!("=cmd|'/c calc'!A1"));
+                m
+            },
+        }];
+
+        let fields = vec!["name".to_string()];
+        let mut buf = Vec::new();
+        export_csv(&mut buf, &records, &fields).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(
+            output.contains("'=cmd|'/c calc'!A1") || output.contains("\"'=cmd|'/c calc'!A1\""),
+            "expected neutralized formula cell, got: {output}"
+        );
+        // The raw, unprefixed formula-triggering value must never appear —
+        // every occurrence of the payload must be preceded by the
+        // neutralizing `'`.
+        assert!(
+            !output.contains(",=cmd|'/c calc'!A1") && !output.contains("\n=cmd|'/c calc'!A1"),
+            "raw formula-injection payload leaked unescaped into CSV: {output}"
+        );
     }
 
     #[test]

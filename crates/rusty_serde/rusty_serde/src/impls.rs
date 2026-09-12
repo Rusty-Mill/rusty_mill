@@ -231,13 +231,23 @@ macro_rules! impl_deserialize_for_int {
                         where
                             E: crate::error::Error,
                         {
-                            Ok(v as $ty)
+                            <$ty>::try_from(v).map_err(|_| {
+                                E::custom(format_args!(
+                                    "integer `{v}` out of range for `{}`",
+                                    stringify!($ty)
+                                ))
+                            })
                         }
                         fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
                         where
                             E: crate::error::Error,
                         {
-                            Ok(v as $ty)
+                            <$ty>::try_from(v).map_err(|_| {
+                                E::custom(format_args!(
+                                    "integer `{v}` out of range for `{}`",
+                                    stringify!($ty)
+                                ))
+                            })
                         }
                     }
                     deserializer.$deserialize_method(IntVisitor)

@@ -760,11 +760,29 @@ impl Gateway {
 
                 // Gating needs the method, and the method is in the body, so
                 // the body has to be read. It is handed to the proxy already
-                // buffered rather than re-read.
-                let Ok(collected) = body.collect().await else {
-                    return status(StatusCode::BAD_REQUEST, "could not read the request body");
+                // buffered rather than re-read. Capped the same way the
+                // `extAuthz` body read above is: an A2A call has no reason to
+                // be larger than an LLM request, so it reuses that bound
+                // rather than buffering an unbounded body.
+                let bytes = match collect_limited(
+                    body,
+                    agentgateway_llm::MAX_REQUEST_BYTES as usize,
+                )
+                .await
+                {
+                    Ok(bytes) => bytes,
+                    Err(()) => {
+                        tracing::info!(
+                            route = ?selection.route.name,
+                            limit = agentgateway_llm::MAX_REQUEST_BYTES,
+                            "refusing an A2A request body that is too large"
+                        );
+                        return status(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "the request body is larger than this gateway accepts for an A2A call",
+                        );
+                    }
                 };
-                let bytes = collected.to_bytes();
 
                 match a2a.check(&bytes) {
                     Decision::Refused { method, body } => {

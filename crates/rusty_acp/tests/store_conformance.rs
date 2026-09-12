@@ -207,3 +207,152 @@ async fn a_broken_backend_is_caught() {
     // what makes the report worth reading.
     assert!(!report.passed.is_empty(), "one failure aborted the whole suite");
 }
+
+/// A backend that persists one mutable base URL per session and rebuilds
+/// every message's URL from it at read time — the pre-fix shape of the
+/// Postgres and Redis stores — is also caught.
+///
+/// A later `append_session_messages` call with a different `base_url` (e.g. a
+/// request carrying a different `Host` header) must not retroactively change
+/// the URL of a message an earlier call already appended.
+#[tokio::test]
+async fn a_backend_that_lets_a_later_base_url_rewrite_history_is_caught() {
+    use rusty_acp::server::store::{
+        message_url, Notification, NotificationStream, RecoveryRecord, SessionRecord, StoreResult,
+    };
+    use rusty_acp::types::{Event, Message, Run, RunId, Session, SessionId};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// Wraps a correct [`InMemoryStore`] but reconstructs message history from
+    /// one mutable per-session `base_url`, overwritten on every append —
+    /// exactly what let a later request's `Host` header retroactively rewrite
+    /// links a session had already handed out.
+    #[derive(Debug, Default)]
+    struct MutableSessionBaseUrl {
+        inner: InMemoryStore,
+        base_urls: Mutex<HashMap<SessionId, String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Store for MutableSessionBaseUrl {
+        async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64> {
+            self.inner.append_event(run_id, event).await
+        }
+        async fn put_run(&self, run: &Run) -> StoreResult<()> {
+            self.inner.put_run(run).await
+        }
+        async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>> {
+            self.inner.get_run(run_id).await
+        }
+        async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
+            self.inner.events(run_id).await
+        }
+        async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+            self.inner.events_from(run_id, from).await
+        }
+        async fn earliest_event(&self, run_id: RunId) -> StoreResult<u64> {
+            self.inner.earliest_event(run_id).await
+        }
+        async fn publish(&self, run_id: RunId, notification: Notification) -> StoreResult<()> {
+            self.inner.publish(run_id, notification).await
+        }
+        async fn subscribe(&self, run_id: RunId) -> StoreResult<NotificationStream> {
+            self.inner.subscribe(run_id).await
+        }
+        async fn get_session(&self, session_id: SessionId) -> StoreResult<Option<SessionRecord>> {
+            let Some(mut record) = self.inner.get_session(session_id).await? else {
+                return Ok(None);
+            };
+            // Rebuild every message URL from the *current* base URL, the way
+            // the pre-fix Postgres and Redis stores did.
+            let base_url = self
+                .base_urls
+                .lock()
+                .expect("base url map poisoned")
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default();
+            let rebuilt: Vec<String> = (0..record.messages.len())
+                .map(|index| message_url(&base_url, session_id, index))
+                .collect();
+            let prefix_len = record.session.history.len() - rebuilt.len();
+            record.session.history.truncate(prefix_len);
+            record.session.history.extend(rebuilt);
+            Ok(Some(record))
+        }
+        async fn ensure_session(&self, session: Session) -> StoreResult<SessionRecord> {
+            self.inner.ensure_session(session).await
+        }
+        async fn append_session_messages(
+            &self,
+            session_id: SessionId,
+            base_url: &str,
+            messages: Vec<Message>,
+        ) -> StoreResult<()> {
+            self.base_urls
+                .lock()
+                .expect("base url map poisoned")
+                .insert(session_id, base_url.to_string());
+            self.inner.append_session_messages(session_id, base_url, messages).await
+        }
+        async fn get_session_state(
+            &self,
+            session_id: SessionId,
+        ) -> StoreResult<Option<serde_json::Value>> {
+            self.inner.get_session_state(session_id).await
+        }
+        async fn put_session_state(
+            &self,
+            session_id: SessionId,
+            base_url: &str,
+            state: serde_json::Value,
+        ) -> StoreResult<()> {
+            self.inner.put_session_state(session_id, base_url, state).await
+        }
+        async fn renew_lease(&self, run_id: RunId, owner: &str, ttl: Duration) -> StoreResult<()> {
+            self.inner.renew_lease(run_id, owner, ttl).await
+        }
+        async fn lease_owner(&self, run_id: RunId) -> StoreResult<Option<String>> {
+            self.inner.lease_owner(run_id).await
+        }
+        async fn try_claim_lease(
+            &self,
+            run_id: RunId,
+            owner: &str,
+            ttl: Duration,
+        ) -> StoreResult<bool> {
+            self.inner.try_claim_lease(run_id, owner, ttl).await
+        }
+        async fn recovery_record(&self, run_id: RunId) -> StoreResult<Option<RecoveryRecord>> {
+            self.inner.recovery_record(run_id).await
+        }
+        async fn put_recovery_record(
+            &self,
+            run_id: RunId,
+            record: Option<&RecoveryRecord>,
+        ) -> StoreResult<()> {
+            self.inner.put_recovery_record(run_id, record).await
+        }
+        async fn release_lease(&self, run_id: RunId) -> StoreResult<()> {
+            self.inner.release_lease(run_id).await
+        }
+    }
+
+    let report =
+        testkit::verify(|| async { Arc::new(MutableSessionBaseUrl::default()) as Arc<dyn Store> })
+            .await;
+
+    assert!(
+        !report.is_ok(),
+        "the suite passed a backend that lets a later base URL rewrite earlier history"
+    );
+    assert!(
+        report.failed.iter().any(|(name, _)| name.contains("pinned")),
+        "the report did not name the broken invariant: {report}"
+    );
+    // And it kept going rather than stopping at the first failure, which is
+    // what makes the report worth reading.
+    assert!(!report.passed.is_empty(), "one failure aborted the whole suite");
+}

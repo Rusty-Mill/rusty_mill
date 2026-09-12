@@ -51,7 +51,7 @@ use crate::types::{
 use super::auth::{authenticate_against, AuthContext, AuthVerifier, Credentials};
 use super::executor::{AgentExecutor, EventSink, RequestContext};
 use super::push::PushNotifier;
-use super::store::TaskStore;
+use super::store::{TaskStore, MAX_PUSH_CONFIGS_PER_TASK};
 
 /// Ids assigned to a `SendMessage` invocation before its outcome (task or
 /// bare message) is known.
@@ -403,7 +403,10 @@ impl Engine {
                     .map_err(A2aError::InvalidParams)?;
                 config.task_id = Some(task_id.clone());
                 config.tenant = req.tenant.clone();
-                self.store.put_push_config(req.tenant.as_deref(), config).await;
+                self.store
+                    .put_push_config(req.tenant.as_deref(), config)
+                    .await
+                    .map_err(|_| push_config_limit_error(&task_id))?;
             }
         }
 
@@ -964,7 +967,10 @@ impl Engine {
             .await
             .ok_or_else(|| A2aError::TaskNotFound(task_id.clone()))?;
         self.authorize_task(auth, tenant.as_deref(), &task).await?;
-        Ok(self.store.put_push_config(tenant.as_deref(), config).await)
+        self.store
+            .put_push_config(tenant.as_deref(), config)
+            .await
+            .map_err(|_| push_config_limit_error(&task_id))
     }
 
     /// `GetTaskPushNotificationConfig` (spec Section 3.1.8). Spec Section
@@ -1178,6 +1184,16 @@ fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
             }
         }
     }
+}
+
+/// Builds the [`A2aError::InvalidParams`] returned when
+/// [`TaskStore::put_push_config`] rejects a registration for `task_id`
+/// because [`MAX_PUSH_CONFIGS_PER_TASK`] has already been reached.
+fn push_config_limit_error(task_id: &str) -> A2aError {
+    A2aError::InvalidParams(format!(
+        "task {task_id} already has the maximum of {MAX_PUSH_CONFIGS_PER_TASK} push notification \
+         configs registered"
+    ))
 }
 
 /// Spec Section 3.1.4's field description for `pageSize` ("The minimum

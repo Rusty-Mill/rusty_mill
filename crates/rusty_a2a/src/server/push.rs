@@ -8,7 +8,7 @@
 //! the [`AgentExecutor`](super::AgentExecutor) invocation that produced
 //! the update.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -64,31 +64,52 @@ impl PushNotifier {
     /// fires.
     pub(crate) async fn check_webhook_url(&self, url: &str) -> std::result::Result<(), String> {
         if self.ssrf_protection {
-            validate_webhook_url(url).await
+            validate_webhook_url(url).await.map(|_| ())
         } else {
             Ok(())
         }
     }
 
     pub(crate) async fn notify(&self, config: &TaskPushNotificationConfig, task: &Task) {
-        if self.ssrf_protection {
-            if let Err(reason) = validate_webhook_url(&config.url).await {
-                tracing::warn!(
-                    task_id = %task.id,
-                    url = %config.url,
-                    %reason,
-                    "skipping push notification delivery to a disallowed webhook URL"
-                );
-                return;
+        // Pinned once per delivery (covering every retry below) to the
+        // exact addresses just validated, rather than trusting `reqwest`
+        // to resolve `config.url`'s host again independently for the
+        // real connection - see [`pinned_client`].
+        let client = if self.ssrf_protection {
+            let addrs = match validate_webhook_url(&config.url).await {
+                Ok(addrs) => addrs,
+                Err(reason) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        url = %config.url,
+                        %reason,
+                        "skipping push notification delivery to a disallowed webhook URL"
+                    );
+                    return;
+                }
+            };
+            match pinned_client(&config.url, &addrs) {
+                Ok(client) => client,
+                Err(reason) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        url = %config.url,
+                        %reason,
+                        "skipping push notification delivery: failed to pin its validated address"
+                    );
+                    return;
+                }
             }
-        }
+        } else {
+            self.client.clone()
+        };
 
         // Spec Section 4.3.3: the webhook payload is a `StreamResponse`
         // object (i.e. `{"task": {...}}`), not the bare `Task`.
         let payload = StreamResponse::Task { task: task.clone() };
 
         for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
-            match self.attempt_delivery(config, &payload).await {
+            match self.attempt_delivery(&client, config, &payload).await {
                 Ok(()) => return,
                 Err(DeliveryFailure::Permanent(reason)) => {
                     tracing::warn!(
@@ -124,10 +145,11 @@ impl PushNotifier {
 
     async fn attempt_delivery(
         &self,
+        client: &Client,
         config: &TaskPushNotificationConfig,
         payload: &StreamResponse,
     ) -> std::result::Result<(), DeliveryFailure> {
-        let mut request = self.client.post(&config.url).json(payload);
+        let mut request = client.post(&config.url).json(payload);
         if let Some(token) = &config.token {
             request = request.header("X-A2A-Notification-Token", token);
         }
@@ -181,11 +203,20 @@ fn apply_authentication(
 /// this same opt-in flag since both guard the same delivery path, and
 /// plain `http` would ship task content (which can carry message/artifact
 /// data) in cleartext. A literal IP-address host is checked directly with
-/// no DNS lookup involved; a hostname is resolved fresh every call (rather
-/// than caching the result) so this also catches DNS rebinding - a
-/// hostname that resolved to a public address at registration time but a
-/// private one by the time of a later delivery.
-pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<(), String> {
+/// no DNS lookup involved; a hostname is resolved fresh every call
+/// (rather than caching the result), so a webhook that resolved to a
+/// private address the last time it was checked but a public one now is
+/// re-evaluated correctly.
+///
+/// Returns the exact address(es) this check resolved and approved, so
+/// callers (see [`pinned_client`]) can pin the real delivery connection
+/// to one of them instead of letting the HTTP client perform its own,
+/// later, independent DNS resolution - which would otherwise leave a
+/// TOCTOU window for DNS rebinding (a hostname resolving to a public
+/// address for this check, then to a private one moments later for an
+/// independently-resolved real connection) to slip straight past this
+/// check.
+pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<Vec<SocketAddr>, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid webhook URL: {e}"))?;
     match parsed.scheme() {
         "https" => {}
@@ -199,6 +230,7 @@ pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<(), S
     let host = parsed
         .host_str()
         .ok_or_else(|| "webhook URL has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(0);
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         return if is_disallowed(ip) {
@@ -206,17 +238,15 @@ pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<(), S
                 "webhook URL host {host} is a private/loopback/link-local address, which is not allowed"
             ))
         } else {
-            Ok(())
+            Ok(vec![SocketAddr::new(ip, port)])
         };
     }
 
-    let port = parsed.port_or_known_default().unwrap_or(0);
-    let addrs = tokio::net::lookup_host((host, port))
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|e| format!("failed to resolve webhook URL host {host:?}: {e}"))?;
-    let mut resolved_any = false;
-    for addr in addrs {
-        resolved_any = true;
+        .map_err(|e| format!("failed to resolve webhook URL host {host:?}: {e}"))?
+        .collect();
+    for addr in &addrs {
         if is_disallowed(addr.ip()) {
             return Err(format!(
                 "webhook URL host {host:?} resolves to a private/loopback/link-local address ({}), which is not allowed",
@@ -224,12 +254,12 @@ pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<(), S
             ));
         }
     }
-    if resolved_any {
-        Ok(())
-    } else {
+    if addrs.is_empty() {
         Err(format!(
             "webhook URL host {host:?} did not resolve to any address"
         ))
+    } else {
+        Ok(addrs)
     }
 }
 
@@ -243,5 +273,79 @@ fn is_disallowed(ip: IpAddr) -> bool {
                 || v4.is_broadcast()
         }
         IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
+    }
+}
+
+/// Builds a one-off HTTP client whose only allowed DNS resolution for the
+/// webhook's host is `addrs` - the exact addresses
+/// [`validate_webhook_url`] already resolved and approved - so every
+/// attempt one [`PushNotifier::notify`] call makes (including retries)
+/// connects to one of them instead of letting `reqwest` perform its own,
+/// independent DNS resolution and possibly land on a different (rebound)
+/// address than the one that was actually validated.
+fn pinned_client(url: &str, addrs: &[SocketAddr]) -> std::result::Result<Client, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid webhook URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "webhook URL has no host".to_string())?;
+    Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .map_err(|e| format!("failed to build a DNS-pinned HTTP client for {host:?}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn validate_webhook_url_reports_the_exact_address_it_checked() {
+        let addrs = validate_webhook_url("https://203.0.113.5/hook")
+            .await
+            .expect("a public-looking IP literal should validate");
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)), 443)]
+        );
+    }
+
+    /// Regression test for the DNS-rebinding TOCTOU: delivery must go
+    /// through a client pinned to the exact address
+    /// [`validate_webhook_url`] already validated, not one that performs
+    /// its own later, independent DNS resolution. Proven here by pointing
+    /// [`pinned_client`] at a hostname reserved by RFC 2606 to never
+    /// resolve via real DNS (`.invalid`) - if the delivery client fell
+    /// back to resolving it for real (the bug this guards against), the
+    /// request would fail with a resolution error and the local listener
+    /// below would never see a connection.
+    #[tokio::test]
+    async fn pinned_client_connects_to_the_validated_address_not_a_fresh_dns_lookup() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("https://webhook.invalid:{port}/hook");
+        let addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)];
+
+        let client = pinned_client(&url, &addrs).expect("building a pinned client should succeed");
+        let accept =
+            tokio::spawn(
+                async move { tokio::time::timeout(Duration::from_secs(5), listener.accept()).await },
+            );
+
+        // The request itself will still fail (there's no real TLS server
+        // behind `listener`), which is fine - what's under test is
+        // whether the TCP connection was even attempted against the
+        // pinned address, which only happens if DNS resolution was
+        // actually overridden rather than performed fresh against the
+        // unresolvable `webhook.invalid` host.
+        let _ = client.get(&url).send().await;
+
+        let accepted = accept.await.expect("accept task panicked");
+        assert!(
+            accepted.is_ok(),
+            "pinned client never connected to the validated address - it must have performed its own DNS lookup instead"
+        );
     }
 }

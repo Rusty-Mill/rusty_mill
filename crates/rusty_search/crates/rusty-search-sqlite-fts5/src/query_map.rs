@@ -68,8 +68,16 @@ pub fn compile(
         plan.predicate,
     );
     let mut select_params = base_params.clone();
-    select_params.push(SqlValue::Integer(request.limit as i64));
-    select_params.push(SqlValue::Integer(request.offset as i64));
+    // usize -> i64: clamp instead of a bare `as` cast, since a `limit`/
+    // `offset` at or above `i64::MAX + 1` would otherwise wrap negative -
+    // which SQLite treats as "unlimited" - silently defeating the caller's
+    // requested bound.
+    select_params.push(SqlValue::Integer(
+        request.limit.min(i64::MAX as usize) as i64
+    ));
+    select_params.push(SqlValue::Integer(
+        request.offset.min(i64::MAX as usize) as i64
+    ));
 
     let count_sql = format!(
         "SELECT COUNT(*) FROM content {join_clause} WHERE {}",
@@ -231,4 +239,38 @@ fn lookup<'a>(
     fields
         .get(name)
         .ok_or_else(|| SearchError::InvalidQuery(format!("unknown field `{name}`")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_search_core::SearchRequest;
+
+    #[test]
+    fn compile_clamps_usize_max_limit_and_offset_to_non_negative_i64() {
+        let fields: HashMap<String, FieldMeta> = HashMap::new();
+        let request = SearchRequest::new(CoreQuery::MatchAll)
+            .limit(usize::MAX)
+            .offset(usize::MAX);
+
+        let compiled = compile(&request, &fields).unwrap();
+        let n = compiled.select_params.len();
+        // select_params is [.. filter params, limit, offset] - the last two
+        // positional binds are always LIMIT then OFFSET (see `compile`).
+        let limit = &compiled.select_params[n - 2];
+        let offset = &compiled.select_params[n - 1];
+
+        // Pre-fix, `usize::MAX as i64` wraps to -1, which SQLite treats as
+        // "no limit" - silently defeating the caller's requested bound
+        // instead of erroring or clamping. A correctly clamped bind must
+        // stay non-negative (i64::MAX).
+        match limit {
+            SqlValue::Integer(v) => assert!(*v >= 0, "LIMIT must not wrap negative, got {v}"),
+            other => panic!("expected an Integer LIMIT bind, got {other:?}"),
+        }
+        match offset {
+            SqlValue::Integer(v) => assert!(*v >= 0, "OFFSET must not wrap negative, got {v}"),
+            other => panic!("expected an Integer OFFSET bind, got {other:?}"),
+        }
+    }
 }

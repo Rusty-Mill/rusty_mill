@@ -42,12 +42,17 @@ fn token_is_secret(tok: &str) -> bool {
         })
 }
 
-/// Scrub secret-looking whitespace-separated tokens out of free text.
+/// Scrub secret-looking tokens out of free text. Detection and scrubbing both
+/// split on `char::is_whitespace` (`split_whitespace`) — splitting only on
+/// literal ASCII space (as an earlier version did) let a tab/newline-delimited
+/// secret pass the detection check but survive the scrub unredacted. Original
+/// whitespace formatting is not preserved; tokens are rejoined with a single
+/// space.
 pub fn redact_text(s: &str) -> String {
     if !s.split_whitespace().any(token_is_secret) {
         return s.to_string();
     }
-    s.split(' ')
+    s.split_whitespace()
         .map(|tok| if token_is_secret(tok) { REDACTED } else { tok })
         .collect::<Vec<_>>()
         .join(" ")
@@ -95,5 +100,18 @@ mod tests {
             "use key [redacted] now"
         );
         assert_eq!(redact_text("a normal sentence"), "a normal sentence");
+    }
+
+    #[test]
+    fn scrubs_secrets_delimited_by_non_space_whitespace() {
+        // No literal ASCII space anywhere: a tab/newline-delimited secret must
+        // still be caught. Pre-fix, `split(' ')` scrubbed nothing here (it saw
+        // one unbroken "token"), so the secret survived unredacted even though
+        // `split_whitespace()`-based detection correctly flagged it.
+        let secret = format!("sk-{}", "a".repeat(40));
+        let input = format!("prefix\n{secret}\tsuffix");
+        let out = redact_text(&input);
+        assert!(!out.contains(&secret), "secret leaked into: {out}");
+        assert!(out.contains(REDACTED));
     }
 }

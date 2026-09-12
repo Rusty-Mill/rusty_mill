@@ -136,6 +136,12 @@ const OSC_IMAGE_MAX: usize = 8 * 1024 * 1024;
 /// be large but are bounded here; past this we keep consuming but stop storing.
 const DCS_MAX: usize = 4 * 1024 * 1024;
 
+/// Upper bound on the bytes buffered for a single CSI parameter string.
+/// Real parameter lists are a handful of digits; past this we keep consuming
+/// (to stay in sync with the CSI state machine) but stop storing, like the
+/// OSC/DCS/APC buffers above.
+const PARAM_MAX: usize = 4096;
+
 impl Default for AnsiParser {
     fn default() -> Self {
         Self::new()
@@ -201,6 +207,13 @@ impl AnsiParser {
         self.pen.bg = super::color::remap(self.pen.bg, &old, &new);
         self.palette.retheme(&old, &new);
         old
+    }
+
+    /// Length of the in-flight CSI parameter buffer, exposed for the
+    /// regression test covering [`PARAM_MAX`]'s cap.
+    #[cfg(test)]
+    pub(crate) fn param_buffer_len(&self) -> usize {
+        self.param_buffer.len()
     }
 
     /// Feed a chunk of bytes, applying their effects to `g`. Parser state
@@ -322,7 +335,11 @@ impl AnsiParser {
                 },
                 ParserState::Csi => match b {
                     // Parameter bytes.
-                    b'0'..=b'9' | b';' => self.param_buffer.push(b as char),
+                    b'0'..=b'9' | b';' => {
+                        if self.param_buffer.len() < PARAM_MAX {
+                            self.param_buffer.push(b as char);
+                        }
+                    }
                     // Private markers (`<`, `=`, `>`, `?`): flag, remember which,
                     // and keep collecting.
                     0x3c..=0x3f => {

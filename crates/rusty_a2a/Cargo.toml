@@ -220,6 +220,11 @@ path = "tests/webhook_ssrf_protection.rs"
 required-features = ["client", "server"]
 
 [[test]]
+name = "push_notification_config_limit"
+path = "tests/push_notification_config_limit.rs"
+required-features = ["client", "server"]
+
+[[test]]
 name = "agent_card_caching"
 path = "tests/agent_card_caching.rs"
 required-features = ["server"]

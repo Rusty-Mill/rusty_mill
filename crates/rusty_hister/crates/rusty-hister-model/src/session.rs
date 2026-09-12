@@ -91,7 +91,11 @@ impl WebSession {
     pub async fn get(engine: &Engine, token_hash: &str) -> rusty_db::Result<Option<Self>> {
         let table = Self::table();
         engine
-            .fetch_optional_as(&Select::from(&table).filter(table.col("token_hash").eq(token_hash)))
+            .fetch_optional_as(
+                &Select::from(&table)
+                    .filter(table.col("token_hash").eq(token_hash))
+                    .filter(table.col("expires_at").gt(Utc::now())),
+            )
             .await
     }
 
@@ -196,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn create_assigns_an_id_and_is_retrievable_by_token_hash() {
         let engine = migrated_engine().await;
-        let expires_at: DateTime<Utc> = "2024-02-01T00:00:00Z".parse().unwrap();
+        let expires_at: DateTime<Utc> = "2030-02-01T00:00:00Z".parse().unwrap();
 
         let id = WebSession::create(&engine, "token-hash-1", b"session-data", expires_at)
             .await
@@ -231,6 +235,20 @@ mod tests {
         let engine = migrated_engine().await;
         assert_eq!(
             WebSession::get(&engine, "no-such-hash").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_for_an_expired_session() {
+        let engine = migrated_engine().await;
+        let expired_at: DateTime<Utc> = "2024-01-01T00:00:00Z".parse().unwrap();
+        WebSession::create(&engine, "token-hash-1", b"session-data", expired_at)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            WebSession::get(&engine, "token-hash-1").await.unwrap(),
             None
         );
     }

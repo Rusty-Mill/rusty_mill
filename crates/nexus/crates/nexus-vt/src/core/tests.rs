@@ -2686,6 +2686,104 @@ fn jpeg_rejects_unsupported() {
     assert!(jpeg::decode(&[0xFF, 0xD8, 0xFF]).is_none()); // SOI then truncated
 }
 
+/// Append a JPEG marker segment (`FF <marker> <len:u16 be> <payload>`); `len`
+/// counts itself plus `payload`, per the marker-length convention
+/// `jpeg::decode` expects.
+fn jpeg_marker(data: &mut Vec<u8>, marker: u8, payload: &[u8]) {
+    data.push(0xFF);
+    data.push(marker);
+    let len = payload.len() + 2;
+    data.push((len >> 8) as u8);
+    data.push((len & 0xFF) as u8);
+    data.extend_from_slice(payload);
+}
+
+/// Build a minimal SOF0 payload for `width`x`height` with the given
+/// `(id, h, v, tq)` components.
+fn jpeg_sof_payload(width: usize, height: usize, comps: &[(u8, u8, u8, u8)]) -> Vec<u8> {
+    let mut p = vec![
+        8,
+        (height >> 8) as u8,
+        (height & 0xFF) as u8,
+        (width >> 8) as u8,
+        (width & 0xFF) as u8,
+        comps.len() as u8,
+    ];
+    for &(id, h, v, tq) in comps {
+        p.push(id);
+        p.push((h << 4) | v);
+        p.push(tq);
+    }
+    p
+}
+
+/// Build a minimal SOS payload selecting DC/AC table 0 for each of `ids`.
+fn jpeg_sos_payload(ids: &[u8]) -> Vec<u8> {
+    let mut p = vec![ids.len() as u8];
+    for &id in ids {
+        p.push(id);
+        p.push(0);
+    }
+    p.extend_from_slice(&[0, 63, 0]); // Ss, Se, Ah/Al
+    p
+}
+
+/// A canonical DHT table with a single length-1 code (bit `0`) mapped to
+/// `symbol` -- the minimal Huffman table letting `decode_block` decode a
+/// block from all-zero entropy bits.
+fn jpeg_dht_table(tc_th: u8, symbol: u8) -> Vec<u8> {
+    let mut t = vec![tc_th, 1];
+    t.extend(std::iter::repeat_n(0u8, 15));
+    t.push(symbol);
+    t
+}
+
+#[test]
+fn jpeg_rejects_mcu_padded_plane_amplification() {
+    // width=64527, height=65 passes the nominal `width * height <= MAX_PIXELS`
+    // cap trivially (4,194,255 <= 4,194,304), but at Hi=Vi=4 for all three
+    // components the MCU-padded planes balloon to 18,588,672 total samples
+    // (~17.7 MiB). The Huffman tables and entropy data below are real and
+    // sufficient to fully decode every block (all-zero coefficients), so
+    // without the padded-size cap this would actually succeed and allocate
+    // the full amplified planes; `decode_scan` must reject it before that.
+    let mut data = vec![0xFF, 0xD8]; // SOI
+    let comps = [(1u8, 4u8, 4u8, 0u8), (2, 4, 4, 0), (3, 4, 4, 0)];
+    jpeg_marker(&mut data, 0xC0, &jpeg_sof_payload(64527, 65, &comps));
+    let mut dqt_payload = vec![0u8]; // pq=0, tq=0
+    dqt_payload.extend([16u8; 64]);
+    jpeg_marker(&mut data, 0xDB, &dqt_payload);
+    let mut dht_payload = jpeg_dht_table(0x00, 0); // DC table 0: symbol 0 (category 0)
+    dht_payload.extend(jpeg_dht_table(0x10, 0x00)); // AC table 0: symbol 0x00 (EOB)
+    jpeg_marker(&mut data, 0xC4, &dht_payload);
+    jpeg_marker(&mut data, 0xDA, &jpeg_sos_payload(&[1, 2, 3]));
+    // 2017x3 MCUs * 3 comps * 16 blocks/comp * 2 bits/block (DC cat0 + AC EOB)
+    // = 580,896 bits = 72,612 bytes; every bit is `0` under our tables.
+    data.extend(std::iter::repeat_n(0u8, 72_620));
+    assert!(jpeg::decode(&data).is_none());
+}
+
+#[test]
+fn jpeg_rejects_duplicate_sof() {
+    // A second SOF marker previously just appended more components without
+    // clearing or rejecting; `to_rgba` then indexed `comps[2]` assuming
+    // exactly 1 or 3 components, panicking on this 2-component case.
+    // `parse_sof` must reject the duplicate outright.
+    let mut data = vec![0xFF, 0xD8]; // SOI
+    let comp = [(1u8, 1u8, 1u8, 0u8)];
+    jpeg_marker(&mut data, 0xC0, &jpeg_sof_payload(8, 8, &comp));
+    jpeg_marker(&mut data, 0xC0, &jpeg_sof_payload(8, 8, &comp)); // duplicate SOF
+    let mut dqt_payload = vec![0u8]; // pq=0, tq=0
+    dqt_payload.extend([16u8; 64]);
+    jpeg_marker(&mut data, 0xDB, &dqt_payload);
+    let mut dht_payload = jpeg_dht_table(0x00, 0); // DC table 0: symbol 0 (category 0)
+    dht_payload.extend(jpeg_dht_table(0x10, 0x00)); // AC table 0: symbol 0x00 (EOB)
+    jpeg_marker(&mut data, 0xC4, &dht_payload);
+    jpeg_marker(&mut data, 0xDA, &jpeg_sos_payload(&[1]));
+    data.extend_from_slice(&[0x00, 0x00]); // entropy bits: DC cat0, AC EOB, per block
+    assert!(jpeg::decode(&data).is_none());
+}
+
 #[test]
 fn iterm2_inline_jpeg_renders_image() {
     // OSC 1337 ; File=inline=1 : <base64 JPEG> BEL
@@ -3618,6 +3716,41 @@ fn su_huge_count_clears_region_without_flooding_scrollback() {
         g.scrollback.len(),
         2,
         "only the region's rows reach scrollback"
+    );
+}
+
+#[test]
+fn render_image_huge_aspect_ratio_is_bounded() {
+    // A 1px-wide, 1,000,000px-tall image only gets its width shrunk to fit
+    // (`render_image` never adjusted height), so `cell_rows` would otherwise
+    // track the full source height (500,000) and spin the synchronous
+    // half-block render loop under the held grid lock.
+    let mut g = Grid::new(80, 24);
+    let pixels = vec![Some(0xFF0000u32); 1_000_000];
+    g.render_image(1, 1_000_000, &pixels);
+    // `total_scrolled` counts every newline() the render loop issued;
+    // unbounded it would be roughly cell_rows (500,000) minus the visible rows.
+    assert!(
+        g.total_scrolled < 1000,
+        "cell_rows must be capped to a small multiple of the grid's rows, scrolled {} lines",
+        g.total_scrolled
+    );
+}
+
+#[test]
+fn csi_param_buffer_is_bounded() {
+    // `ESC [` followed by millions of digit bytes with no final byte: unlike
+    // the capped OSC/DCS/APC buffers, `param_buffer` previously grew without
+    // bound while the CSI sequence never terminates.
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[");
+    let digits = vec![b'0'; 5_000_000];
+    p.advance(&mut g, &digits);
+    assert!(
+        p.param_buffer_len() < 10_000,
+        "param_buffer must be capped, got {} bytes",
+        p.param_buffer_len()
     );
 }
 

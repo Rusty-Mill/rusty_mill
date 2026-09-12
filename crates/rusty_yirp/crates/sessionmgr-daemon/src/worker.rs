@@ -580,8 +580,25 @@ impl Worker {
         }
     }
 
+    /// A sane ceiling on either terminal dimension. `SessionResize`
+    /// carries client-supplied `u16`s straight off the wire; rejecting
+    /// an out-of-range request here, before it reaches either the
+    /// `vt100` watcher or the PTY backend, means neither of those has to
+    /// re-derive its own idea of "reasonable" -- both still clamp on
+    /// their own as a second line of defense, but this is the one place
+    /// a bad request is actually reported as an error to the client
+    /// rather than silently narrowed.
+    const MAX_RESIZE_DIM: u16 = 500;
+
     /// Tells the session's terminal it has been resized.
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        if rows > Self::MAX_RESIZE_DIM || cols > Self::MAX_RESIZE_DIM {
+            return Err(Error::protocol(format!(
+                "resize of {rows}x{cols} exceeds the {}x{} limit",
+                Self::MAX_RESIZE_DIM,
+                Self::MAX_RESIZE_DIM
+            )));
+        }
         if let Some(agent) = &self.agent {
             if let Some(watcher) = agent
                 .lock()
@@ -758,5 +775,46 @@ where
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `Worker` with no real session process behind it -- enough to
+    /// exercise `resize`'s own validation, which must run before either
+    /// the `vt100` watcher or the PTY backend ever sees the request.
+    fn piped_worker() -> Worker {
+        let (events, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+        Worker {
+            root: PathBuf::new(),
+            id: SessionId::new(1_700_000_000_000, 1),
+            events,
+            backend: Backend::Piped(Mutex::new(None)),
+            shutdown: Notify::new(),
+            child_pid: 0,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_resize_is_rejected_rather_than_forwarded() {
+        // The exact defect this check exists to close: a client-supplied
+        // `SessionResize` with no cap would otherwise reach the `vt100`
+        // watcher and the PTY backend's own allocation unclamped.
+        let worker = piped_worker();
+        let err = worker
+            .resize(65535, 65535)
+            .expect_err("an out-of-range resize must be rejected, not silently clamped");
+        assert_eq!(err.kind(), ErrorKind::Protocol);
+    }
+
+    #[test]
+    fn a_normal_resize_is_accepted() {
+        let worker = piped_worker();
+        worker
+            .resize(50, 200)
+            .expect("an in-range resize must succeed");
     }
 }

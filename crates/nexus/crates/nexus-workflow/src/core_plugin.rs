@@ -2166,6 +2166,32 @@ events = ["nope"]
     }
 
     #[test]
+    fn templates_init_rejects_filename_with_drive_prefix() {
+        // On Windows, `PathBuf::join` treats a drive-prefixed
+        // component like `C:evil.toml` as a full path replacement
+        // rather than an append, so a filename containing none of
+        // `/`, `\`, or `..` could still escape the forge's
+        // `.workflows/` directory. Guarded by rejecting `:`.
+        let tmp = TempDir::new().unwrap();
+        let mut plugin = WorkflowCorePlugin::open(tmp.path().to_path_buf());
+        let err = plugin
+            .dispatch(
+                HANDLER_TEMPLATES_INIT,
+                &serde_json::json!({
+                    "slug": "daily-journal",
+                    "filename": "C:evil.toml"
+                }),
+            )
+            .unwrap_err();
+        match err {
+            PluginError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("bare basename"));
+            }
+            _ => panic!("unexpected"),
+        }
+    }
+
+    #[test]
     fn templates_init_then_reload_picks_up_new_workflow() {
         let tmp = TempDir::new().unwrap();
         let mut plugin = WorkflowCorePlugin::open(tmp.path().to_path_buf());

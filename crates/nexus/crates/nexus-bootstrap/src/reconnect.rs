@@ -132,7 +132,7 @@ impl SshConnectionFactory {
 
 impl ConnectionFactory for SshConnectionFactory {
     fn build<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<RemoteRuntime>> + Send + 'a>> {
-        Box::pin(async move { build_remote_runtime_ssh(&self.uri) })
+        Box::pin(async move { build_remote_runtime_ssh(&self.uri).await })
     }
 }
 
