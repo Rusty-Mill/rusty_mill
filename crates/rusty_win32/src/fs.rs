@@ -421,7 +421,7 @@ pub struct FileInfoByHandle {
 /// (matching the real call's own documented behavior) if nothing exists at
 /// `path`, rather than this wrapper inventing a distinct "not found" result.
 pub fn stat(path: &str) -> Result<FileInfo, Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     let mut data = Win32FileAttributeData::default();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `data` is a
     // valid, correctly-sized out-pointer matching what
@@ -456,7 +456,7 @@ const INVALID_FILE_SIZE: u32 = 0xFFFF_FFFF;
 /// common case), this equals [`stat`]'s logical `size`; it's meaningfully
 /// smaller only for a file NTFS is actually compressing on disk.
 pub fn compressed_file_size(path: &str) -> Result<u64, Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     let mut size_high: u32 = 0;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `size_high`
     // is a valid out-pointer.
@@ -583,8 +583,8 @@ pub unsafe fn unlock_file(handle: RawHandle, offset: u64, length: u64) -> Result
 /// same choice `CopyFileW`'s own `bFailIfExists` parameter makes — this
 /// crate doesn't decide that policy itself.
 pub fn copy_file(from: &str, to: &str, fail_if_exists: bool) -> Result<(), Win32Error> {
-    let from_wide: Vec<u16> = crate::wide::to_wide(from);
-    let to_wide: Vec<u16> = crate::wide::to_wide(to);
+    let from_wide: Vec<u16> = crate::wide::to_wide(from)?;
+    let to_wide: Vec<u16> = crate::wide::to_wide(to)?;
     // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings.
     let ok = unsafe {
         CopyFileW(
@@ -608,8 +608,8 @@ pub fn copy_file(from: &str, to: &str, fail_if_exists: bool) -> Result<(), Win32
 /// `MOVEFILE_COPY_ALLOWED` lets this succeed across volumes (falling back
 /// to a copy-then-delete internally) rather than failing.
 pub fn move_file(from: &str, to: &str, flags: u32) -> Result<(), Win32Error> {
-    let from_wide: Vec<u16> = crate::wide::to_wide(from);
-    let to_wide: Vec<u16> = crate::wide::to_wide(to);
+    let from_wide: Vec<u16> = crate::wide::to_wide(from)?;
+    let to_wide: Vec<u16> = crate::wide::to_wide(to)?;
     // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings;
     // `flags` is a plain bitmask, not a pointer.
     let ok = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) };
@@ -625,7 +625,7 @@ pub fn move_file(from: &str, to: &str, flags: u32) -> Result<(), Win32Error> {
 /// own scope (`RemoveDirectoryW`, out of this crate's current scope, is the
 /// directory-removal counterpart).
 pub fn delete_file(path: &str) -> Result<(), Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { DeleteFileW(wide.as_ptr()) };
     if ok == 0 {
@@ -639,7 +639,7 @@ pub fn delete_file(path: &str) -> Result<(), Win32Error> {
 /// an `mkdir` builtin. Only creates the final path component (unlike `mkdir
 /// -p`); every parent directory must already exist.
 pub fn create_directory(path: &str) -> Result<(), Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
     // `security_attributes = NULL` requests default (non-inheritable)
     // security attributes, a documented valid input.
@@ -656,7 +656,7 @@ pub fn create_directory(path: &str) -> Result<(), Win32Error> {
 /// refuses to remove one with any contents (no `rm -rf`-style recursive
 /// behavior here).
 pub fn remove_directory(path: &str) -> Result<(), Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { RemoveDirectoryW(wide.as_ptr()) };
     if ok == 0 {
@@ -682,8 +682,8 @@ pub fn create_symlink(
     target_path: &str,
     target_is_directory: bool,
 ) -> Result<(), Win32Error> {
-    let link_wide: Vec<u16> = crate::wide::to_wide(link_path);
-    let target_wide: Vec<u16> = crate::wide::to_wide(target_path);
+    let link_wide: Vec<u16> = crate::wide::to_wide(link_path)?;
+    let target_wide: Vec<u16> = crate::wide::to_wide(target_path)?;
     let flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
         | if target_is_directory {
             SYMBOLIC_LINK_FLAG_DIRECTORY
@@ -709,8 +709,8 @@ pub fn create_symlink(
 /// documented `CreateHardLinkW` restriction, not something this wrapper
 /// checks itself.
 pub fn create_hard_link(link_path: &str, target_path: &str) -> Result<(), Win32Error> {
-    let link_wide: Vec<u16> = crate::wide::to_wide(link_path);
-    let target_wide: Vec<u16> = crate::wide::to_wide(target_path);
+    let link_wide: Vec<u16> = crate::wide::to_wide(link_path)?;
+    let target_wide: Vec<u16> = crate::wide::to_wide(target_path)?;
     // SAFETY: `link_wide`/`target_wide` are valid, NUL-terminated UTF-16
     // strings; `security_attributes = NULL` requests default security
     // attributes, a documented valid input.
@@ -775,7 +775,7 @@ pub unsafe fn final_path(handle: RawHandle) -> Result<alloc::string::String, Win
 /// what Unix `readlink` reports, since it's the same string
 /// [`create_symlink`]'s own `target_path` argument produces.
 pub fn readlink(path: &str) -> Result<alloc::string::String, Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
     // `desired_access = 0` (query-only, no read/write) and
     // `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` are
@@ -833,12 +833,39 @@ pub fn readlink(path: &str) -> Result<alloc::string::String, Win32Error> {
         return Err(Win32Error::ERROR_NOT_SUPPORTED);
     }
 
+    parse_symlink_print_name(&buf, bytes_returned as usize, &header)
+}
+
+/// Extracts `IO_REPARSE_TAG_SYMLINK`'s "print name" substring out of a raw
+/// `FSCTL_GET_REPARSE_POINT` result buffer, bounds-checking
+/// `header`'s `print_name_offset`/`print_name_length` against the buffer's
+/// actually-valid length first. `buf` comes straight from a `DeviceIoControl`
+/// call into an untrusted (filesystem/driver-controlled) reparse point —
+/// `print_name_offset`/`print_name_length` are attacker/corruption-
+/// controlled `u16`s, not values this crate itself ever wrote, so slicing
+/// `buf` with them unchecked would let a malformed reparse point read past
+/// `buf`'s end. `valid_len` is `bytes_returned`, not `buf.len()` (`buf` is
+/// always allocated at [`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`], but Windows
+/// only guarantees the first `bytes_returned` bytes of it are meaningful).
+fn parse_symlink_print_name(
+    buf: &[u8],
+    valid_len: usize,
+    header: &ReparseDataBufferSymlinkHeader,
+) -> Result<alloc::string::String, Win32Error> {
     // `PathBuffer` starts immediately after this fixed header;
     // `*_offset`/`*_length` are documented as byte offsets/lengths relative
     // to the start of `PathBuffer`, not the whole struct.
     const PATH_BUFFER_START: usize = 20;
-    let print_name_start = PATH_BUFFER_START + header.print_name_offset as usize;
-    let print_name_end = print_name_start + header.print_name_length as usize;
+    let print_name_start = PATH_BUFFER_START
+        .checked_add(header.print_name_offset as usize)
+        .ok_or(Win32Error::ERROR_INVALID_DATA)?;
+    let print_name_end = print_name_start
+        .checked_add(header.print_name_length as usize)
+        .ok_or(Win32Error::ERROR_INVALID_DATA)?;
+    let valid_len = valid_len.min(buf.len());
+    if print_name_start > valid_len || print_name_end > valid_len {
+        return Err(Win32Error::ERROR_INVALID_DATA);
+    }
     let print_name_bytes = &buf[print_name_start..print_name_end];
     // Reconstructed manually from raw bytes (rather than casting to a
     // `[u16]` slice) since `buf`'s allocation isn't guaranteed 2-byte
@@ -939,7 +966,7 @@ impl Drop for ReadDir {
 /// every entry in a directory, matching the standard idiom every Win32
 /// directory-listing example uses.
 pub fn read_dir(pattern: &str) -> Result<ReadDir, Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(pattern);
+    let wide: Vec<u16> = crate::wide::to_wide(pattern)?;
     let mut data = FindDataW::default();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `data` is a
     // valid, correctly-sized out-pointer.
@@ -981,7 +1008,7 @@ fn create_file_impl(
     desired_access: u32,
     creation_disposition: u32,
 ) -> Result<RawHandle, Win32Error> {
-    let wide: Vec<u16> = crate::wide::to_wide(path);
+    let wide: Vec<u16> = crate::wide::to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; sharing both
     // read and write with other opens matches Unix `open`'s default (no
     // exclusive lock); `security_attributes = NULL` and
@@ -1218,6 +1245,59 @@ mod tests {
         assert_eq!(err, Win32Error::ERROR_NOT_A_REPARSE_POINT);
 
         std::fs::remove_file(&path).expect("cleaning up the test file should succeed");
+    }
+
+    #[test]
+    fn parse_symlink_print_name_rejects_an_out_of_bounds_offset_instead_of_panicking() {
+        // A `DeviceIoControl(FSCTL_GET_REPARSE_POINT)` result buffer is raw,
+        // untrusted filesystem/driver data — `print_name_offset`/
+        // `print_name_length` are attacker/corruption-controlled `u16`s,
+        // not values this crate wrote itself. Before this function's
+        // bounds check existed, `readlink` sliced `buf` with these fields
+        // completely unchecked, which panics (slice index out of range)
+        // on a buffer that claims a print name reaching past the end of
+        // what `DeviceIoControl` actually returned, rather than reporting
+        // a `Win32Error`.
+        let buf = alloc::vec![0u8; 24];
+        let header = ReparseDataBufferSymlinkHeader {
+            reparse_tag: IO_REPARSE_TAG_SYMLINK,
+            reparse_data_length: 0,
+            reserved: 0,
+            substitute_name_offset: 0,
+            substitute_name_length: 0,
+            print_name_offset: 0,
+            print_name_length: 0xFFFF,
+            flags: 0,
+        };
+        let err = parse_symlink_print_name(&buf, buf.len(), &header)
+            .expect_err("an out-of-bounds print_name_length should be rejected, not panic");
+        assert_eq!(err, Win32Error::ERROR_INVALID_DATA);
+    }
+
+    #[test]
+    fn parse_symlink_print_name_extracts_an_in_bounds_print_name() {
+        // The bounds check added alongside the out-of-bounds rejection
+        // above must not reject legitimate, fully in-bounds data.
+        const PATH_BUFFER_START: usize = 20;
+        let print_name: &[u16] = &[b'C' as u16, b':' as u16, b'\\' as u16];
+        let mut buf = alloc::vec![0u8; PATH_BUFFER_START + print_name.len() * 2];
+        for (i, unit) in print_name.iter().enumerate() {
+            buf[PATH_BUFFER_START + i * 2..PATH_BUFFER_START + i * 2 + 2]
+                .copy_from_slice(&unit.to_le_bytes());
+        }
+        let header = ReparseDataBufferSymlinkHeader {
+            reparse_tag: IO_REPARSE_TAG_SYMLINK,
+            reparse_data_length: 0,
+            reserved: 0,
+            substitute_name_offset: 0,
+            substitute_name_length: 0,
+            print_name_offset: 0,
+            print_name_length: (print_name.len() * 2) as u16,
+            flags: 0,
+        };
+        let name = parse_symlink_print_name(&buf, buf.len(), &header)
+            .expect("an in-bounds print name should parse successfully");
+        assert_eq!(name, "C:\\");
     }
 
     #[test]

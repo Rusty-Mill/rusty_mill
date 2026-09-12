@@ -50,6 +50,18 @@ struct Jwks {
     keys: Vec<Jwk>,
 }
 
+/// Total per-request timeout for the JWKS `reqwest::Client` -- covers
+/// connecting, sending, and reading the full response. A JWKS document
+/// is a small, static-ish JSON payload served by whatever OIDC provider
+/// is configured, so this can be far tighter than a provider adapter's
+/// multi-minute completion timeout; it only needs to bound "the JWKS
+/// endpoint hangs forever," not accommodate a legitimately slow response.
+const JWKS_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Separate, tighter timeout for the connect phase specifically -- a
+/// misconfigured or unreachable `jwks_url` should fail fast rather than
+/// waiting out the full request timeout just to establish a connection.
+const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 enum Mode {
     /// No network call ever needed -- the key is fixed at startup.
     Hs256(DecodingKey),
@@ -59,6 +71,15 @@ enum Mode {
         url: String,
         cache_ttl: Duration,
         cache: RwLock<Option<(Instant, HashMap<String, DecodingKey>)>>,
+        /// `kid`s looked up in a freshly-fetched JWKS document and not
+        /// found there, recorded with the time of that miss. `jwks_key`
+        /// only retries a refetch for the *same* unresolvable `kid` once
+        /// `cache_ttl` has elapsed since this recorded miss, not on every
+        /// request bearing that `kid` -- `verify` calls this before any
+        /// signature is checked, so without this an unauthenticated
+        /// caller could force a JWKS refetch on every single request by
+        /// varying the `kid` header.
+        negative_cache: RwLock<HashMap<String, Instant>>,
     },
 }
 
@@ -86,6 +107,7 @@ impl JwtVerifier {
                 url: url.clone(),
                 cache_ttl: Duration::from_secs(cfg.jwks_cache_secs),
                 cache: RwLock::new(None),
+                negative_cache: RwLock::new(HashMap::new()),
             }
         } else {
             return None;
@@ -96,7 +118,11 @@ impl JwtVerifier {
             issuer: cfg.issuer.clone(),
             audience: cfg.audience.clone(),
             client_claim: cfg.client_claim.clone(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(JWKS_HTTP_TIMEOUT)
+                .connect_timeout(JWKS_CONNECT_TIMEOUT)
+                .build()
+                .expect("reqwest client should build with a timeout configured"),
         })
     }
 
@@ -152,6 +178,7 @@ impl JwtVerifier {
             url,
             cache_ttl,
             cache,
+            negative_cache,
         } = &self.mode
         else {
             unreachable!("jwks_key is only ever called in Mode::Jwks")
@@ -164,15 +191,36 @@ impl JwtVerifier {
                     if let Some(key) = keys.get(kid) {
                         return Some(key.clone());
                     }
-                    // Stale-but-not-expired cache with no matching kid --
-                    // fall through to a refresh rather than failing
-                    // immediately, in case a key just rotated in.
+                    // Cache is fresh but has no entry for this kid. A
+                    // brand-new key can legitimately rotate in before
+                    // `cache_ttl` elapses, so this isn't an automatic
+                    // failure -- but `verify` calls this before any
+                    // signature is checked, so refetching on *every*
+                    // request bearing an unrecognized `kid` would let an
+                    // unauthenticated caller force network calls to
+                    // `jwks_url` on demand. Only actually refetch once
+                    // per `kid` per `cache_ttl`: a still-fresh
+                    // negative-cache entry for this exact `kid` short-
+                    // circuits straight to "not found" instead.
+                    let missed_recently = match negative_cache.read().unwrap().get(kid) {
+                        Some(missed_at) => missed_at.elapsed() < *cache_ttl,
+                        None => false,
+                    };
+                    if missed_recently {
+                        return None;
+                    }
                 }
             }
         }
 
         let keys = self.fetch_jwks(url).await?;
         let key = keys.get(kid).cloned();
+        if key.is_none() {
+            negative_cache
+                .write()
+                .unwrap()
+                .insert(kid.to_string(), Instant::now());
+        }
         *cache.write().unwrap() = Some((Instant::now(), keys));
         key
     }
@@ -436,6 +484,45 @@ mod tests {
             verifier.verify(&token).await.is_none(),
             "a reachable JWKS with no matching kid must still fail closed"
         );
+    }
+
+    #[tokio::test]
+    async fn jwks_key_negative_caches_an_unknown_kid_instead_of_refetching_every_time() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "keys": [
+                    {"kty": "RSA", "kid": "some-other-key", "n": "AQAB", "e": "AQAB"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = JwtConfig {
+            jwks_url: Some(format!("{}/jwks.json", server.uri())),
+            hs256_secret_env: None,
+            issuer: None,
+            audience: None,
+            jwks_cache_secs: 300,
+            client_claim: None,
+        };
+        let verifier = JwtVerifier::new(&cfg, None).unwrap();
+        let header = base64url(&json!({"alg": "RS256", "kid": "unknown-kid"}).to_string());
+        let payload = base64url(&json!({"sub": "alice", "exp": future_exp()}).to_string());
+        let token = format!("{header}.{payload}.not-a-real-signature");
+
+        // Two lookups for the same never-resolvable kid, well within the
+        // 300s cache_ttl window, must only trigger one actual JWKS fetch.
+        // Pre-fix, `jwks_key` refetched unconditionally on every miss --
+        // an unauthenticated caller (this happens before any signature
+        // check) could force a fetch on every single request just by
+        // varying the `kid` header. `Mock::expect(1)` above is verified
+        // when `server` drops at the end of this test and panics if a
+        // second request ever arrives.
+        assert!(verifier.verify(&token).await.is_none());
+        assert!(verifier.verify(&token).await.is_none());
     }
 
     #[tokio::test]

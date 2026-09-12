@@ -5,7 +5,7 @@
 //! immediately, poll later" is a thread plus an in-memory registry rather
 //! than a spawned future.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -18,7 +18,50 @@ use crate::error::AgentError;
 use crate::ports::PackageController;
 use crate::process_util::run_captured;
 
-type TaskRegistry = Mutex<HashMap<TaskId, TaskStatus>>;
+/// Bounds how many *completed* (`Succeeded`/`Failed`) tasks the in-memory
+/// registry keeps at once. Each entry carries the full captured
+/// stdout/stderr of one `dnf install`/`remove` run, so a long-lived agent
+/// that's serviced many of them would otherwise grow this map forever --
+/// once a new completion would push the registry past this cap, the
+/// oldest completed task is evicted first. A still-`Running` task is
+/// never evicted; only completions count against the cap.
+const MAX_COMPLETED_TASKS: usize = 50;
+
+/// The task map plus the FIFO order completed tasks finished in --
+/// tracked separately because a `HashMap`'s iteration order can't tell
+/// "finished before this one" from "finished after it".
+#[derive(Default)]
+struct Tasks {
+    by_id: HashMap<TaskId, TaskStatus>,
+    completed_order: VecDeque<TaskId>,
+}
+
+impl Tasks {
+    /// Records a freshly started task. Not itself subject to eviction --
+    /// only [`Tasks::insert_completed`] grows `completed_order`.
+    fn insert_running(&mut self, id: TaskId, status: TaskStatus) {
+        self.by_id.insert(id, status);
+    }
+
+    /// Records a task's final status, then evicts the oldest completed
+    /// task(s) until the registry is back at or under
+    /// [`MAX_COMPLETED_TASKS`].
+    fn insert_completed(&mut self, id: TaskId, status: TaskStatus) {
+        self.by_id.insert(id.clone(), status);
+        self.completed_order.push_back(id);
+        while self.completed_order.len() > MAX_COMPLETED_TASKS {
+            if let Some(oldest) = self.completed_order.pop_front() {
+                self.by_id.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&self, id: &TaskId) -> Option<TaskStatus> {
+        self.by_id.get(id).cloned()
+    }
+}
+
+type TaskRegistry = Mutex<Tasks>;
 
 pub struct DnfController {
     spawner: Arc<dyn Spawner + Send + Sync>,
@@ -32,7 +75,7 @@ impl DnfController {
         Self {
             spawner,
             allowlist,
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(Tasks::default())),
             next_task_id: AtomicU64::new(1),
         }
     }
@@ -40,6 +83,13 @@ impl DnfController {
     fn new_task_id(&self) -> TaskId {
         let n = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         TaskId(format!("task-{n}"))
+    }
+
+    /// The number of tasks currently held in the registry -- test-only,
+    /// to assert the eviction cap actually bounds it.
+    #[cfg(test)]
+    fn task_count(&self) -> usize {
+        lock_tasks(&self.tasks).by_id.len()
     }
 
     /// Checks every package against the allowlist -- the whole batch is
@@ -62,7 +112,7 @@ impl DnfController {
         }
 
         let task_id = self.new_task_id();
-        lock_tasks(&self.tasks).insert(
+        lock_tasks(&self.tasks).insert_running(
             task_id.clone(),
             TaskStatus {
                 id: task_id.clone(),
@@ -100,7 +150,7 @@ impl DnfController {
                     exit_code: None,
                 },
             };
-            lock_tasks(&tasks).insert(task_id_for_thread, status);
+            lock_tasks(&tasks).insert_completed(task_id_for_thread, status);
         });
 
         Ok(task_id)
@@ -152,12 +202,11 @@ impl PackageController for DnfController {
     fn task_status(&self, id: &TaskId) -> Result<TaskStatus, AgentError> {
         lock_tasks(&self.tasks)
             .get(id)
-            .cloned()
             .ok_or_else(|| AgentError::UnknownTask(id.0.clone()))
     }
 }
 
-fn lock_tasks(tasks: &TaskRegistry) -> MutexGuard<'_, HashMap<TaskId, TaskStatus>> {
+fn lock_tasks(tasks: &TaskRegistry) -> MutexGuard<'_, Tasks> {
     // Recover rather than panic if a previous task thread poisoned the
     // lock -- a lost stdout/stderr capture on one crashed task shouldn't
     // wedge every later `install`/`remove`/`task_status` call.
@@ -346,5 +395,46 @@ mod tests {
             .list_updates()
             .expect_err("unparseable exit-100 output should not silently mean no updates");
         assert!(matches!(err, AgentError::DnfParse(_)));
+    }
+
+    #[test]
+    fn completed_tasks_beyond_the_cap_are_evicted_oldest_first() {
+        let spawner: Arc<dyn Spawner + Send + Sync> =
+            Arc::new(MockSpawner::new().script("dnf", ExitStatus::Code(0)));
+        let controller = DnfController::new(spawner, allowlist(&["htop"]));
+
+        let total = MAX_COMPLETED_TASKS + 10;
+        let mut task_ids = Vec::with_capacity(total);
+        for _ in 0..total {
+            let id = controller
+                .install(&["htop".to_string()])
+                .expect("allowlisted install starts");
+            wait_for_completion(&controller, &id);
+            task_ids.push(id);
+        }
+
+        assert!(
+            controller.task_count() <= MAX_COMPLETED_TASKS,
+            "registry grew to {} entries for {total} completed tasks, past the {MAX_COMPLETED_TASKS} cap",
+            controller.task_count(),
+        );
+
+        let oldest = &task_ids[0];
+        assert!(
+            matches!(
+                controller.task_status(oldest),
+                Err(AgentError::UnknownTask(_))
+            ),
+            "oldest completed task should have been evicted once the cap was exceeded"
+        );
+
+        let newest = task_ids.last().expect("at least one task was run");
+        assert_eq!(
+            controller
+                .task_status(newest)
+                .expect("most recently completed task is retained")
+                .state,
+            TaskState::Succeeded
+        );
     }
 }

@@ -123,8 +123,8 @@ unsafe extern "system" {
 /// no validity promise left for a caller to make.
 #[cfg(windows)]
 pub fn write(target_name: &str, user_name: &str, secret: &[u8]) -> Result<(), Win32Error> {
-    let mut target_w = to_wide(target_name);
-    let mut user_w = to_wide(user_name);
+    let mut target_w = to_wide(target_name)?;
+    let mut user_w = to_wide(user_name)?;
     let mut blob = secret.to_vec();
 
     let cred = CredentialW {
@@ -162,7 +162,7 @@ pub fn write(target_name: &str, user_name: &str, secret: &[u8]) -> Result<(), Wi
 /// so nothing the caller holds points into OS-owned memory.
 #[cfg(windows)]
 pub fn read(target_name: &str) -> Result<Option<Vec<u8>>, Win32Error> {
-    let target_w = to_wide(target_name);
+    let target_w = to_wide(target_name)?;
     let mut pcred: *mut CredentialW = core::ptr::null_mut();
     // SAFETY: `target_w` is a valid NUL-terminated UTF-16 string alive
     // across the call; `pcred` is a valid out-pointer that `CredReadW`

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 use std::time::Instant;
 
@@ -90,20 +90,46 @@ pub struct RateLimitStatus {
     pub retry_after_secs: f64,
 }
 
+/// Hard cap on the number of distinct rate-limit identities tracked at
+/// once. `check`'s `key` is caller-supplied (a client name, provider
+/// name, or IP address) and never validated against a fixed set, so
+/// without a cap an attacker who can vary that key (e.g. spoofed
+/// `X-Forwarded-For` values) could grow `buckets` without bound and
+/// exhaust memory. Once the cap is hit, the oldest bucket (by insertion
+/// order, not last-use) is evicted to make room -- the same
+/// "insertion-order-only, no read-refresh" tradeoff `ResponseCache` and
+/// `GenerationCache` already make.
+const MAX_BUCKETS: usize = 100_000;
+
 /// A named collection of independent token-bucket rate limiters, keyed by
 /// an arbitrary identity string (a client name, provider name, or IP
 /// address). Each key's capacity (requests per minute) is supplied by the
 /// caller at check time rather than fixed on construction, so one
 /// `RateLimiter` can back many identities with different limits — e.g.
 /// every configured client, or every provider, each with its own rate.
-#[derive(Default)]
 pub struct RateLimiter {
+    max_buckets: usize,
+    order: RwLock<VecDeque<String>>,
     buckets: RwLock<HashMap<String, TokenBucket>>,
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::with_capacity(MAX_BUCKETS)
+    }
 }
 
 impl RateLimiter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn with_capacity(max_buckets: usize) -> Self {
+        Self {
+            max_buckets,
+            order: RwLock::new(VecDeque::new()),
+            buckets: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Attempt to consume one token from `key`'s bucket, creating it with
@@ -117,6 +143,15 @@ impl RateLimiter {
         requests_per_minute: u32,
     ) -> Result<RateLimitStatus, RateLimitStatus> {
         let mut buckets = self.buckets.write().unwrap();
+        if !buckets.contains_key(key) {
+            let mut order = self.order.write().unwrap();
+            order.push_back(key.to_string());
+            if order.len() > self.max_buckets {
+                if let Some(oldest) = order.pop_front() {
+                    buckets.remove(&oldest);
+                }
+            }
+        }
         let bucket = buckets
             .entry(key.to_string())
             .or_insert_with(|| TokenBucket::new(requests_per_minute as f64));
@@ -214,5 +249,27 @@ mod tests {
             "expected ~6.0, got {}",
             status.reset_secs
         );
+    }
+
+    #[test]
+    fn buckets_are_bounded_and_evict_oldest_first() {
+        // Capacity of 3 -- far below the 10 distinct keys below, so an
+        // unbounded map (the pre-fix behavior) would retain all 10.
+        let limiter = RateLimiter::with_capacity(3);
+        for i in 0..10 {
+            limiter.check(&format!("key-{i}"), 5).unwrap();
+        }
+
+        let buckets = limiter.buckets.read().unwrap();
+        assert_eq!(
+            buckets.len(),
+            3,
+            "bucket map must stay bounded at the configured capacity"
+        );
+        // Oldest-inserted keys were evicted first; the most recent ones survive.
+        assert!(!buckets.contains_key("key-0"));
+        assert!(!buckets.contains_key("key-6"));
+        assert!(buckets.contains_key("key-7"));
+        assert!(buckets.contains_key("key-9"));
     }
 }

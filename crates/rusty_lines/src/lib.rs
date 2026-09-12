@@ -3467,7 +3467,7 @@ fn word_back(s: &str, pos: usize) -> usize {
     let before = &s[..pos];
     let trimmed = before.trim_end();
     match trimmed.rfind(char::is_whitespace) {
-        Some(i) => i + 1,
+        Some(i) => next_char_end(trimmed, i).unwrap_or(trimmed.len()),
         None => 0,
     }
 }
@@ -4573,6 +4573,31 @@ mod tests {
         assert_eq!(word_back("echo hello", 10), 5);
         assert_eq!(word_back("echo hello", 5), 0);
         assert_eq!(word_back("word", 4), 0);
+    }
+
+    #[test]
+    fn word_back_multibyte_whitespace_char_boundary() {
+        // U+00A0 NO-BREAK SPACE is 2 bytes in UTF-8; the returned index must
+        // land on a char boundary, not one byte into the space.
+        let s = "a\u{00A0}b";
+        let start = word_back(s, s.len());
+        assert!(s.is_char_boundary(start), "index {start} splits a char");
+        assert_eq!(&s[start..], "b");
+    }
+
+    #[test]
+    fn unix_word_rubout_multibyte_whitespace_no_panic() {
+        // Regression: word_back used to return a raw `i + 1` byte offset
+        // that fell inside a multi-byte whitespace character, panicking
+        // kill_span's slice — reproduced here via the same C-w path
+        // (word_back + kill_span) that UnixWordRubout dispatches to.
+        let mut ring = VecDeque::new();
+        let s = "a\u{00A0}b";
+        let mut st = state(s, s.len());
+        let (start, cur) = (word_back(&st.buffer, st.cursor), st.cursor);
+        kill_span(&mut st, &mut ring, start, cur, false);
+        assert_eq!(st.buffer, "a\u{00A0}");
+        assert_eq!(ring, vec!["b".to_string()]);
     }
 
     #[test]

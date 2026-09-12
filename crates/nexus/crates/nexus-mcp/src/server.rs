@@ -3792,20 +3792,40 @@ impl rmcp::ServerHandler for NexusMcpServer {
         let static_fut = tcc_opt.map(|tcc| self.tool_router.call(tcc));
         async move {
             let outcome = if let Some(tool) = dynamic {
-                // Plugin-published tool — route through ipc_call.
-                let args = request.arguments.map_or_else(
-                    || serde_json::Value::Object(serde_json::Map::new()),
-                    serde_json::Value::Object,
-                );
-                match kernel_ctx
-                    .ipc_call(&tool.plugin_id, &tool.command, args, IPC_TIMEOUT)
-                    .await
-                {
-                    Ok(value) => Ok(CallToolResult::structured(value)),
-                    Err(e) => Err(rmcp::ErrorData::internal_error(
-                        format!("dynamic tool '{}' failed: {e}", tool.name),
+                // Defense-in-depth: `HANDLER_REGISTER_TOOL` already
+                // refuses to register a route into a `cap_matrix.toml`
+                // `internal = true` handler (see
+                // `crate::internal_gate::is_internal_only`), but this
+                // executes through the MCP server's own Core-trust,
+                // all-capabilities `KernelPluginContext` rather than
+                // the original registrant's — re-check here so the
+                // gate holds even for an entry that predates the
+                // registration-time check or reaches this path by some
+                // other means.
+                if crate::internal_gate::is_internal_only(&tool.plugin_id, &tool.command) {
+                    Err(rmcp::ErrorData::internal_error(
+                        format!(
+                            "dynamic tool '{}' targets an internal-only handler and cannot be invoked",
+                            tool.name
+                        ),
                         None,
-                    )),
+                    ))
+                } else {
+                    // Plugin-published tool — route through ipc_call.
+                    let args = request.arguments.map_or_else(
+                        || serde_json::Value::Object(serde_json::Map::new()),
+                        serde_json::Value::Object,
+                    );
+                    match kernel_ctx
+                        .ipc_call(&tool.plugin_id, &tool.command, args, IPC_TIMEOUT)
+                        .await
+                    {
+                        Ok(value) => Ok(CallToolResult::structured(value)),
+                        Err(e) => Err(rmcp::ErrorData::internal_error(
+                            format!("dynamic tool '{}' failed: {e}", tool.name),
+                            None,
+                        )),
+                    }
                 }
             } else if let Some(fut) = static_fut {
                 fut.await

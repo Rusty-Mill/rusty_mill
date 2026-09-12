@@ -9,7 +9,20 @@
 
 use crate::cff::{self, CffTable};
 use crate::glyph::{GlyphOutline, Point};
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+
+// Per-thread count of real (non-memoized) glyph outline resolutions
+// performed by `Font::glyph_outline_at_depth` -- test-only
+// instrumentation letting a test assert that memoization actually
+// bounds total work (a deterministic call count, not wall-clock
+// timing). The standard test harness gives each `#[test]` its own OS
+// thread, so a thread-local count is free of cross-test interference.
+#[cfg(test)]
+std::thread_local! {
+    static RESOLVE_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
 
 /// Errors parsing a font file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,14 +384,40 @@ impl Font {
     pub fn glyph_outline(&self, glyph_id: u16) -> Option<GlyphOutline> {
         match &self.outline_source {
             OutlineSource::Cff(table) => cff::glyph_outline(&self.data, table, glyph_id),
-            OutlineSource::TrueType { .. } => self.glyph_outline_at_depth(glyph_id, 0),
+            OutlineSource::TrueType { .. } => {
+                // A fresh memoization cache per top-level call: composite
+                // glyphs can reference the same component glyph many
+                // times (directly, or transitively through several
+                // levels of nested composites), and without memoizing
+                // resolved outlines by glyph id, that repeated reference
+                // pattern makes total work exponential in nesting depth
+                // instead of linear in the number of distinct glyphs
+                // touched.
+                let mut cache = BTreeMap::new();
+                self.glyph_outline_at_depth(glyph_id, 0, &mut cache)
+                    .map(|outline| (*outline).clone())
+            }
         }
     }
 
-    fn glyph_outline_at_depth(&self, glyph_id: u16, depth: u32) -> Option<GlyphOutline> {
+    fn glyph_outline_at_depth(
+        &self,
+        glyph_id: u16,
+        depth: u32,
+        cache: &mut BTreeMap<u16, Rc<GlyphOutline>>,
+    ) -> Option<Rc<GlyphOutline>> {
+        if let Some(cached) = cache.get(&glyph_id) {
+            return Some(Rc::clone(cached));
+        }
+
+        #[cfg(test)]
+        RESOLVE_CALLS.with(|c| c.set(c.get() + 1));
+
         let (start, end) = self.loca_entry(glyph_id)?;
         if start >= end {
-            return Some(GlyphOutline::default());
+            let outline = Rc::new(GlyphOutline::default());
+            cache.insert(glyph_id, Rc::clone(&outline));
+            return Some(outline);
         }
         let OutlineSource::TrueType { glyf_range, .. } = &self.outline_source else {
             return None;
@@ -394,36 +433,47 @@ impl Font {
         let max_y = i16_at(glyph_data, 8)?;
 
         if number_of_contours < 0 {
-            let bbox_only = || {
-                Some(GlyphOutline {
-                    min_x,
-                    min_y,
-                    max_x,
-                    max_y,
-                    ..GlyphOutline::default()
-                })
+            let bbox_only = || GlyphOutline {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                ..GlyphOutline::default()
             };
             if depth >= Self::MAX_COMPOSITE_DEPTH {
-                return bbox_only();
+                // Depth-limited, not a real resolution of this glyph's
+                // outline -- the same glyph id could still resolve fully
+                // if reached at a shallower depth elsewhere in the tree,
+                // so this result is context-dependent and must not enter
+                // the memoization cache.
+                return Some(Rc::new(bbox_only()));
             }
             // Fall back to the bounding-box-only placeholder if the
             // component records themselves are malformed -- the glyph
             // still exists (unlike an out-of-range id, which is a real
             // `None`), so degrading gracefully is more honest than
-            // failing the whole lookup.
-            return self
-                .parse_composite_glyph(glyph_data, min_x, min_y, max_x, max_y, depth)
-                .or_else(bbox_only);
+            // failing the whole lookup. Unlike the depth-limited
+            // fallback above, this one doesn't depend on `depth`, so
+            // it's safe to memoize.
+            let outline = self
+                .parse_composite_glyph(glyph_data, min_x, min_y, max_x, max_y, depth, cache)
+                .unwrap_or_else(bbox_only);
+            let outline = Rc::new(outline);
+            cache.insert(glyph_id, Rc::clone(&outline));
+            return Some(outline);
         }
 
-        parse_simple_glyph(
+        let outline = parse_simple_glyph(
             glyph_data,
             number_of_contours as usize,
             min_x,
             min_y,
             max_x,
             max_y,
-        )
+        )?;
+        let outline = Rc::new(outline);
+        cache.insert(glyph_id, Rc::clone(&outline));
+        Some(outline)
     }
 
     /// Parses a composite glyph's component records (per the `glyf` spec:
@@ -431,7 +481,14 @@ impl Font {
     /// indices, and an optional scale/2x2 transform) and concatenates each
     /// referenced glyph's transformed outline. `contour_ends` is offset by
     /// the running point count as components are appended, same as any
-    /// outline concatenation.
+    /// outline concatenation. `cache` is the same memoization map the
+    /// top-level [`Font::glyph_outline`] call created, threaded through so
+    /// a component glyph referenced by more than one composite (directly
+    /// or transitively) is only ever resolved once. (`min_x`/`min_y`/
+    /// `max_x`/`max_y` are a bbox accumulator threaded alongside the
+    /// recursion, not independent parameters a params struct would
+    /// meaningfully consolidate.)
+    #[allow(clippy::too_many_arguments)]
     fn parse_composite_glyph(
         &self,
         glyph_data: &[u8],
@@ -440,6 +497,7 @@ impl Font {
         max_x: i16,
         max_y: i16,
         depth: u32,
+        cache: &mut BTreeMap<u16, Rc<GlyphOutline>>,
     ) -> Option<GlyphOutline> {
         const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
         const ARGS_ARE_XY_VALUES: u16 = 0x0002;
@@ -494,7 +552,7 @@ impl Font {
             // a wrong position. The cursor has already advanced past its
             // record either way, so later components still parse.
             if flags & ARGS_ARE_XY_VALUES != 0 {
-                let child = self.glyph_outline_at_depth(component_glyph_id, depth + 1)?;
+                let child = self.glyph_outline_at_depth(component_glyph_id, depth + 1, cache)?;
                 let point_offset = points.len();
                 for p in &child.points {
                     points.push(Point::new(
@@ -571,6 +629,14 @@ fn parse_cmap_format12(cmap: &[u8], offset: usize) -> Option<CmapFormat12> {
         return None;
     }
     let num_groups = u32_at(subtable, 12)? as usize;
+    // Validate the untrusted 32-bit group count against the subtable's
+    // actual remaining length before sizing an allocation from it -- a
+    // malformed/adversarial font can claim billions of groups in a
+    // subtable that's actually only a few bytes long.
+    let max_groups = subtable.len().saturating_sub(16) / 12;
+    if num_groups > max_groups {
+        return None;
+    }
     let mut groups = Vec::with_capacity(num_groups);
     for i in 0..num_groups {
         let rec = 16 + i * 12;
@@ -632,6 +698,15 @@ fn parse_simple_glyph(
     for _ in 0..number_of_contours {
         contour_ends.push(u16_at(data, cursor)? as usize);
         cursor += 2;
+    }
+    // `endPtsOfContours` must be strictly increasing -- each contour has
+    // at least one point, so a later contour's end index can never be at
+    // or before an earlier one's. A malformed font violating this would
+    // otherwise leave a later contour's start index past its end index,
+    // panicking the rasterizer's slice indexing (`build_edges`) instead
+    // of failing to parse.
+    if contour_ends.windows(2).any(|w| w[1] <= w[0]) {
+        return None;
     }
     let num_points = contour_ends.last().map(|&e| e + 1).unwrap_or(0);
 
@@ -972,6 +1047,67 @@ mod tests {
             "only component 1's 3 points should be present; component 2 is skipped"
         );
         assert_eq!(outline.contour_ends, alloc::vec![2]);
+    }
+
+    #[test]
+    fn composite_glyph_resolution_is_memoized_by_glyph_id() {
+        // A chain of composites: glyph 1 is a simple leaf; each glyph
+        // 2..=6 is a composite referencing the *same* previous glyph 4
+        // times. Without memoizing resolved outlines by glyph id,
+        // resolving the top glyph would re-resolve the whole chain below
+        // it once per reference -- work exponential in chain length
+        // (roughly FANOUT^CHAIN_LEN), not linear in the number of
+        // distinct glyphs actually referenced.
+        const FANOUT: u16 = 4;
+        const CHAIN_LEN: u16 = 6;
+
+        let leaf = build_simple_glyph(&[(0, 0), (10, 0), (5, 10)]);
+        let mut glyphs = alloc::vec![leaf];
+        for id in 2..=CHAIN_LEN {
+            let components: Vec<(u16, i16, i16)> = (0..FANOUT).map(|_| (id - 1, 0, 0)).collect();
+            glyphs.push(build_composite_glyph(&components, (0, 0, 100, 100)));
+        }
+
+        let bytes = build_test_font(&glyphs);
+        let font = Font::parse(&bytes).expect("synthetic font should parse");
+
+        RESOLVE_CALLS.with(|c| c.set(0));
+        let outline = font
+            .glyph_outline(CHAIN_LEN)
+            .expect("chained composite glyph should assemble");
+        let calls = RESOLVE_CALLS.with(|c| c.get());
+
+        assert!(
+            !outline.points.is_empty(),
+            "the assembled outline should still have real points"
+        );
+        // With memoization, each of the CHAIN_LEN distinct glyph ids is
+        // resolved exactly once. Without it, resolving just the leaf
+        // would alone require FANOUT^(CHAIN_LEN-1) = 4^5 = 1024 calls --
+        // so any bound comfortably above CHAIN_LEN but far below that
+        // proves the fix.
+        assert!(
+            calls <= (CHAIN_LEN as usize) * 2,
+            "expected roughly one resolution per distinct glyph id, got {calls} \
+             (unmemoized resolution would be exponential in chain length)"
+        );
+    }
+
+    #[test]
+    fn simple_glyph_rejects_non_monotonic_contour_ends() {
+        // endPtsOfContours = [10, 2]: contour 0 supposedly ends at point
+        // 10, but contour 1 ends at point 2 -- before contour 0 even
+        // started. Left unvalidated, this makes `build_edges`'s second
+        // contour slice start (11) exceed its end (2) and panic on
+        // rasterization instead of failing to parse.
+        let mut data = alloc::vec![0u8; 10]; // glyph header, unused by this function
+        data.extend_from_slice(&10u16.to_be_bytes()); // endPtsOfContours[0]
+        data.extend_from_slice(&2u16.to_be_bytes()); // endPtsOfContours[1]
+
+        assert!(
+            parse_simple_glyph(&data, 2, 0, 0, 0, 0).is_none(),
+            "non-monotonic endPtsOfContours should be rejected, not passed through to the rasterizer"
+        );
     }
 
     /// Builds a CFF INDEX using a fixed 1-byte offset size -- only valid
@@ -1453,6 +1589,27 @@ mod tests {
             t.lookup(0x41),
             None,
             "a BMP codepoint outside any group should not resolve"
+        );
+    }
+
+    #[test]
+    fn cmap_format_12_rejects_a_group_count_that_does_not_fit_the_subtable() {
+        // numGroups claims ~4 billion groups (0xFFFFFFFE) while the
+        // subtable itself is only the 16-byte header plus a few stray
+        // bytes -- nowhere near enough room for even one real 12-byte
+        // group. Trusting the claimed count for `Vec::with_capacity`
+        // would attempt a multi-terabyte allocation.
+        let mut subtable = Vec::new();
+        subtable.extend_from_slice(&12u16.to_be_bytes()); // format
+        subtable.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        subtable.extend_from_slice(&20u32.to_be_bytes()); // length (unused by the parser)
+        subtable.extend_from_slice(&0u32.to_be_bytes()); // language
+        subtable.extend_from_slice(&0xFFFF_FFFEu32.to_be_bytes()); // numGroups
+        subtable.extend_from_slice(&[0u8; 4]); // a few stray trailing bytes
+
+        assert!(
+            parse_cmap_format12(&subtable, 0).is_none(),
+            "an unfittable numGroups should be rejected, not trusted for an allocation"
         );
     }
 

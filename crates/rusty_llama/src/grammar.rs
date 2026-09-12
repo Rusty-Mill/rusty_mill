@@ -282,11 +282,21 @@ fn dedup(stacks: &mut Vec<Stack>) {
 // Parser.
 // ---------------------------------------------------------------------------
 
+/// Cap on nested `(...)` group depth in a GBNF grammar. Each nested group
+/// adds one level of native recursion (`parse_sequence` -> `parse_alternates`
+/// -> `parse_sequence` -> ...); an externally-sourced grammar (e.g. the
+/// `grammar` field of an untrusted completion request) with tens of
+/// thousands of nested groups would otherwise overflow the stack and abort
+/// the process. 64 mirrors `rusty_jinja`'s `Parser::MAX_NESTING_DEPTH` for
+/// the identical class of concern.
+const MAX_NESTING_DEPTH: u32 = 64;
+
 struct Parser<'a> {
     src: &'a [u8],
     pos: usize,
     rules: Vec<Vec<Vec<Elem>>>,
     names: HashMap<String, usize>,
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -296,6 +306,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             rules: Vec::new(),
             names: HashMap::new(),
+            depth: 0,
         }
     }
 
@@ -437,7 +448,12 @@ impl<'a> Parser<'a> {
                 }
                 Some(b'(') => {
                     self.pos += 1;
+                    self.depth += 1;
+                    if self.depth > MAX_NESTING_DEPTH {
+                        return Err("grammar group nesting exceeds the maximum depth".into());
+                    }
                     let alts = self.parse_alternates()?;
+                    self.depth -= 1;
                     self.skip_ws();
                     if !self.eat(")") {
                         return Err("expected ')'".into());
@@ -821,5 +837,19 @@ mod tests {
         assert!(!accepts(&g, "{"));
         assert!(!accepts(&g, "[1,2]")); // root is an object
         assert!(!accepts(&g, r#"{"a":}"#));
+    }
+
+    #[test]
+    fn deeply_nested_groups_error_instead_of_overflowing_stack() {
+        // A GBNF grammar with thousands of nested `(...)` groups previously
+        // recursed `parse_sequence` -> `parse_alternates` -> `parse_sequence`
+        // once per level with no depth guard, overflowing the native stack
+        // and aborting the process. With the guard this must return a clean
+        // `Err` instead. This grammar text is reachable from an untrusted
+        // HTTP request body's `grammar` field, so a malicious grammar must
+        // not be able to crash the process.
+        let src = format!("root ::= {}\"a\"{}", "(".repeat(10_000), ")".repeat(10_000));
+        let result = Grammar::parse(&src);
+        assert!(result.is_err());
     }
 }

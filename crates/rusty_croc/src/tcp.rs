@@ -19,11 +19,19 @@ use crate::pake::Pake;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_ROOM_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 pub const DEFAULT_ROOM_TTL: Duration = Duration::from_secs(3 * 60 * 60);
+
+/// Default cap on concurrently accepted (but not yet closed) connections.
+/// Bounds the accept loop's `std::thread::spawn` fan-out — without it, a
+/// flood of connections that never complete the (pre-auth) handshake could
+/// spawn an unbounded number of threads, each idling for up to
+/// `IDLE_READ_TIMEOUT` before timing out.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 
 /// Matches the fixed weak PAKE key in Go's `tcp.clientCommunication`.
 const WEAK_KEY: &[u8] = &[1, 2, 3];
@@ -82,6 +90,7 @@ pub struct RelayServer {
     banner: String,
     rooms: Rooms,
     sever: Option<Arc<SeverState>>,
+    max_connections: usize,
 }
 
 impl RelayServer {
@@ -93,12 +102,21 @@ impl RelayServer {
             banner: banner.to_string(),
             rooms: Arc::new(Mutex::new(HashMap::new())),
             sever: None,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
 
     /// Attach the test-sever hook (shared across all of a relay's ports).
     pub fn with_test_sever(mut self, sever: Arc<SeverState>) -> Self {
         self.sever = Some(sever);
+        self
+    }
+
+    /// Cap the number of concurrently accepted connections. Once the cap is
+    /// reached, new connections are shed (closed immediately) rather than
+    /// accepted and left to idle for up to `IDLE_READ_TIMEOUT`.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
         self
     }
 
@@ -131,6 +149,7 @@ impl RelayServer {
             });
         }
 
+        let active = Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming() {
             let stream = match stream {
                 Ok(s) => s,
@@ -139,22 +158,35 @@ impl RelayServer {
                     continue;
                 }
             };
+            if active.fetch_add(1, Ordering::SeqCst) >= self.max_connections {
+                active.fetch_sub(1, Ordering::SeqCst);
+                log::debug!(
+                    "relay at max connections ({}); shedding {:?}",
+                    self.max_connections,
+                    stream.peer_addr()
+                );
+                let _ = stream.shutdown(Shutdown::Both);
+                continue;
+            }
             log::debug!("client {:?} connected", stream.peer_addr());
             let rooms = Arc::clone(&self.rooms);
             let password = self.password.clone();
             let banner = self.banner.clone();
             let sever = self.sever.clone();
+            let active = Arc::clone(&active);
             std::thread::spawn(move || {
                 let comm = match Comm::new(stream) {
                     Ok(c) => c,
                     Err(e) => {
                         log::debug!("comm setup failed: {e}");
+                        active.fetch_sub(1, Ordering::SeqCst);
                         return;
                     }
                 };
                 if let Err(e) = client_communication(comm, &rooms, &password, &banner, sever) {
                     log::debug!("relay client error: {e}");
                 }
+                active.fetch_sub(1, Ordering::SeqCst);
             });
         }
         Ok(())
@@ -451,5 +483,53 @@ mod tests {
             connect_to_tcp_server("127.0.0.1:28784", "pass123", "fullroom", None).unwrap();
         let third = connect_to_tcp_server("127.0.0.1:28784", "pass123", "fullroom", None);
         assert!(third.is_err());
+    }
+
+    // Regression: the accept loop used to spawn an unbounded
+    // `std::thread::spawn` per connection with no cap, each then applying
+    // the 3-hour pre-auth `IDLE_READ_TIMEOUT`. `with_max_connections` bounds
+    // total concurrently accepted connections; once the cap is reached,
+    // further connections must be shed (closed) instead of accepted.
+    #[test]
+    fn max_connections_sheds_excess() {
+        use std::net::TcpStream;
+
+        let port = 28785u16;
+        std::thread::spawn(move || {
+            RelayServer::new("127.0.0.1", &port.to_string(), "pass123", "")
+                .with_max_connections(2)
+                .run()
+                .unwrap();
+        });
+        for _ in 0..50 {
+            if ping_server(&format!("127.0.0.1:{port}")).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Occupy the cap with connections that never complete the
+        // handshake, mirroring stalled pre-auth clients.
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            held.push(TcpStream::connect(("127.0.0.1", port)).unwrap());
+        }
+        // Give the accept loop time to count these connections in.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let mut excess = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        excess
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0u8; 1];
+        match excess.read(&mut buf) {
+            Ok(0) => {} // closed, as expected
+            Ok(n) => panic!("expected the excess connection to be closed, got {n} byte(s)"),
+            Err(e) => panic!(
+                "excess connection beyond the cap should be closed, not left open (read errored/timed out instead: {e})"
+            ),
+        }
+
+        drop(held);
     }
 }

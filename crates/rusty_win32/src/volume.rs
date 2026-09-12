@@ -119,7 +119,14 @@ pub fn logical_drives() -> Vec<char> {
 /// rather than a `Win32Error`, matching `GetDriveTypeW`'s own documented
 /// contract (it has no `GetLastError` failure mode at all).
 pub fn drive_type(root_path: &str) -> DriveType {
-    let wide = to_wide(root_path);
+    // `drive_type` never fails (matches `GetDriveTypeW`'s own contract),
+    // so an embedded NUL — which can never name a real drive root — is
+    // reported the same way any other unrecognized root is, rather than
+    // this function propagating a `Result` its whole contract says it
+    // never needs.
+    let Ok(wide) = to_wide(root_path) else {
+        return DriveType::NoRootDir;
+    };
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let raw = unsafe { GetDriveTypeW(wide.as_ptr()) };
     match raw {
@@ -161,7 +168,7 @@ pub struct VolumeInformation {
 /// Identify the file system mounted at `root_path` (e.g. `"C:\\"`) —
 /// `GetVolumeInformationW`.
 pub fn volume_information(root_path: &str) -> Result<VolumeInformation, Win32Error> {
-    let wide = to_wide(root_path);
+    let wide = to_wide(root_path)?;
     let mut volume_name_buf = alloc::vec![0u16; NAME_BUFFER_LEN];
     let mut file_system_name_buf = alloc::vec![0u16; NAME_BUFFER_LEN];
     let mut serial_number: u32 = 0;
@@ -216,7 +223,7 @@ pub struct DiskFreeSpace {
 /// `root_path` can be a drive root (`"C:\\"`), a UNC share, or any directory
 /// on the volume (the API resolves it to the containing volume itself).
 pub fn disk_free_space(root_path: &str) -> Result<DiskFreeSpace, Win32Error> {
-    let wide = to_wide(root_path);
+    let wide = to_wide(root_path)?;
     let mut free_bytes_available_to_caller: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut total_free_bytes: u64 = 0;
@@ -316,7 +323,7 @@ pub fn find_volumes() -> Result<FindVolumes, Win32Error> {
 /// direction of [`volume_information`]/[`disk_free_space`]'s own root-path
 /// parameter.
 pub fn volume_path_name(path: &str) -> Result<String, Win32Error> {
-    let wide = to_wide(path);
+    let wide = to_wide(path)?;
     let mut buf = alloc::vec![0u16; NAME_BUFFER_LEN];
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `buf` is a
     // valid, `NAME_BUFFER_LEN`-element writable buffer matched by the

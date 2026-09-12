@@ -25,7 +25,8 @@
 //! `EventFilter::CustomPrefix("com.nexus.ai.runtime.session.")` to receive
 //! all session lifecycle events regardless of kind.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use nexus_plugin_api::{token::CapabilityToken, CapabilitySet};
 
@@ -94,6 +95,67 @@ impl AdmissionConfig {
     }
 }
 
+/// Live per-[`SessionKind`] running-session counts, checked against
+/// [`AdmissionConfig::limit_for`] at submission time. Previously
+/// `AdmissionConfig` was computed but never consulted — `handle_submit`
+/// spawned every submission unconditionally. Arc-backed so a clone can be
+/// moved into the spawned worker future and released when the session
+/// reaches a terminal state (or is cancelled before it starts).
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionTracker {
+    counts: Arc<[AtomicUsize; 4]>,
+}
+
+impl AdmissionTracker {
+    fn new() -> Self {
+        Self {
+            counts: Arc::new([
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ]),
+        }
+    }
+
+    fn index(kind: SessionKind) -> usize {
+        match kind {
+            SessionKind::UserDriven => 0,
+            SessionKind::Ambient => 1,
+            SessionKind::SignalTriggered => 2,
+            SessionKind::SubAgent => 3,
+        }
+    }
+
+    /// Attempt to admit one session of `kind` under `limit`. Returns
+    /// `true` (and increments the live count) if under the limit;
+    /// `false` (no state change) if the cap is already reached.
+    pub(crate) fn try_acquire(&self, kind: SessionKind, limit: usize) -> bool {
+        let counter = &self.counts[Self::index(kind)];
+        let mut current = counter.load(Ordering::Acquire);
+        loop {
+            if current >= limit {
+                return false;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Release a slot previously admitted for `kind`. Must be paired
+    /// 1:1 with a `true` return from `try_acquire`.
+    pub(crate) fn release(&self, kind: SessionKind) {
+        self.counts[Self::index(kind)].fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 // ─── Supervisor ──────────────────────────────────────────────────────────────
 
 /// The AI runtime supervisor: owns the task store, the worker pool,
@@ -124,6 +186,9 @@ pub struct Supervisor {
     /// the actual enforcement; stored here so the configuration is
     /// co-located with the pool that will enforce it).
     pub admission: AdmissionConfig,
+    /// Live per-kind running-session counts, checked against `admission`
+    /// at submission time by `core_plugin::handle_submit`.
+    pub(crate) admission_state: AdmissionTracker,
 }
 
 impl std::fmt::Debug for Supervisor {
@@ -134,6 +199,15 @@ impl std::fmt::Debug for Supervisor {
             .field("proposals_pending", &self.proposals.pending_count())
             .field("triggers_registered", &self.triggers.len())
             .field("admission", &self.admission)
+            .field(
+                "admission_state",
+                &self
+                    .admission_state
+                    .counts
+                    .iter()
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -155,6 +229,7 @@ impl Supervisor {
             proposals: ProposalStore::new(),
             triggers: TriggerRegistry::new(),
             admission: AdmissionConfig::default(),
+            admission_state: AdmissionTracker::new(),
         }
     }
 
@@ -228,6 +303,13 @@ impl Supervisor {
     /// Pool utilisation metrics, if started.
     pub(crate) fn pool_metrics(&self) -> Option<crate::pool::PoolMetrics> {
         self.pool.get().map(WorkerPool::metrics)
+    }
+
+    /// Clone of the live admission tracker. Cheap (Arc-backed) — callers
+    /// hold the clone for the lifetime of a spawned session so they can
+    /// release the slot when the session terminates.
+    pub(crate) fn admission_tracker(&self) -> AdmissionTracker {
+        self.admission_state.clone()
     }
 }
 

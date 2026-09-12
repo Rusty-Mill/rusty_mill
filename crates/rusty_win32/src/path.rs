@@ -68,9 +68,9 @@ pub fn search_path(
     file_name: &str,
     extension: Option<&str>,
 ) -> Result<Option<String>, Win32Error> {
-    let dirs_wide = search_dirs.map(to_wide);
-    let name_wide = to_wide(file_name);
-    let ext_wide = extension.map(to_wide);
+    let dirs_wide = search_dirs.map(to_wide).transpose()?;
+    let name_wide = to_wide(file_name)?;
+    let ext_wide = extension.map(to_wide).transpose()?;
 
     let dirs_ptr = dirs_wide.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
     let ext_ptr = ext_wide.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
@@ -154,7 +154,7 @@ pub fn resolve_command(command: &str, pathext: &str) -> Result<Option<String>, W
 /// 8.3-name generation reports the long name unchanged rather than
 /// failing).
 pub fn short_path(path: &str) -> Result<String, Win32Error> {
-    let wide = to_wide(path);
+    let wide = to_wide(path)?;
     let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
     // Same two-attempt growth pattern as `search_path`: an initial
     // `MAX_PATH`-sized try, then one retry sized exactly to whatever
@@ -184,7 +184,7 @@ pub fn short_path(path: &str) -> Result<String, Win32Error> {
 /// `GetLongPathNameW`, the reverse of [`short_path`]. Like `short_path`,
 /// `path` must name an existing file or directory.
 pub fn long_path(path: &str) -> Result<String, Win32Error> {
-    let wide = to_wide(path);
+    let wide = to_wide(path)?;
     let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
     // Same two-attempt growth pattern as `search_path`/`short_path`.
     for _ in 0..2 {
@@ -211,7 +211,7 @@ pub fn long_path(path: &str) -> Result<String, Win32Error> {
 /// directory-relative resolution, the same way `GetFullPathNameW` itself
 /// never touches the filesystem to check existence.
 pub fn full_path(path: &str) -> Result<String, Win32Error> {
-    let wide = to_wide(path);
+    let wide = to_wide(path)?;
     let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
     // Same two-attempt growth pattern as `search_path`/`short_path`/`long_path`.
     for _ in 0..2 {
@@ -268,7 +268,7 @@ pub fn current_dir() -> Result<String, Win32Error> {
 
 /// Set the calling process's current working directory — `SetCurrentDirectoryW`.
 pub fn set_current_dir(path: &str) -> Result<(), Win32Error> {
-    let wide = to_wide(path);
+    let wide = to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { SetCurrentDirectoryW(wide.as_ptr()) };
     if ok == 0 {
@@ -356,8 +356,8 @@ pub fn windows_directory() -> Result<String, Win32Error> {
 /// `mktemp`-style name generator, which only reserves a name. `dir` must
 /// already exist (commonly [`temp_path`]'s own return value).
 pub fn temp_file_name(dir: &str, prefix: &str) -> Result<String, Win32Error> {
-    let dir_wide = to_wide(dir);
-    let prefix_wide = to_wide(prefix);
+    let dir_wide = to_wide(dir)?;
+    let prefix_wide = to_wide(prefix)?;
     // `GetTempFileNameW`'s own documented fixed buffer requirement: the
     // caller must supply a buffer of at least `MAX_PATH` characters, unlike
     // this module's other calls, which report a required size on failure.

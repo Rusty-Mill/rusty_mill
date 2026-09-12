@@ -176,7 +176,7 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
         match p.value(t)? {
             Value::I64(v) => {
                 if key == "general.alignment" {
-                    alignment = v as usize;
+                    alignment = (v as usize).max(1);
                 }
                 ints.insert(key, v);
             }
@@ -225,10 +225,13 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
     for _ in 0..n_tensors {
         let name = String::from_utf8_lossy(&p.string()?).into_owned();
         let n_dims = p.u32()? as usize;
-        let mut ne = Vec::with_capacity(n_dims);
+        let mut ne = Vec::with_capacity(n_dims.min(1 << 16));
         for _ in 0..n_dims {
             ne.push(p.u64()? as usize);
         }
+        ne.iter()
+            .try_fold(1usize, |a, &d| a.checked_mul(d))
+            .ok_or_else(|| err(format!("gguf: tensor '{name}' dims overflow")))?;
         let dtype = p.u32()? as i32;
         let offset = p.u64()? as usize;
         // GGUF dims are fastest-varying first; flip to our row-major shape.
@@ -254,9 +257,10 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
     let mut tensors = HashMap::new();
     for info in infos {
         let n_elems: usize = info.shape.iter().product();
-        let n_bytes = match info.dtype {
-            0 => n_elems * 4,
-            1 => n_elems * 2,
+        let overflow = || err(format!("gguf: tensor '{}': size overflow", info.name));
+        let n_bytes: usize = match info.dtype {
+            0 => n_elems.checked_mul(4).ok_or_else(overflow)?,
+            1 => n_elems.checked_mul(2).ok_or_else(overflow)?,
             t => {
                 let bb = block_bytes(t).ok_or_else(|| {
                     err(format!(
@@ -264,14 +268,15 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
                         info.name
                     ))
                 })?;
-                n_elems / QK * bb
+                (n_elems / QK).checked_mul(bb).ok_or_else(overflow)?
             }
         };
-        let start = data_start + info.offset;
-        if start + n_bytes > buf.len() {
+        let start = data_start.checked_add(info.offset).ok_or_else(overflow)?;
+        let end = start.checked_add(n_bytes).ok_or_else(overflow)?;
+        if end > buf.len() {
             return Err(err(format!("gguf: tensor '{}' out of bounds", info.name)));
         }
-        let raw = &buf[start..start + n_bytes];
+        let raw = &buf[start..end];
         let weight = match info.dtype {
             0 => Weight::Dense(Tensor::from_vec(
                 &info.shape,
@@ -558,5 +563,55 @@ mod tests {
         let pos = bytes.windows(7).position(|w| w == b"whisper").unwrap();
         bytes[pos..pos + 7].copy_from_slice(b"whooper");
         assert!(load_model(&mut Cursor::new(bytes)).is_err());
+    }
+
+    #[test]
+    fn zero_alignment_does_not_panic() {
+        let m = sample_model();
+        let mut bytes = Vec::new();
+        write(&m, &mut bytes).unwrap();
+        // Patch general.alignment's u32 value (written right after its
+        // 4-byte T_U32 type tag) from 32 to 0.
+        let key = b"general.alignment";
+        let pos = bytes
+            .windows(key.len())
+            .position(|w| w == key)
+            .expect("general.alignment key present");
+        let value_pos = pos + key.len() + 4; // skip the type tag
+        bytes[value_pos..value_pos + 4].copy_from_slice(&0u32.to_le_bytes());
+        // Must not panic (division by zero); an error or a successful load
+        // (alignment clamped to 1) are both acceptable outcomes.
+        let _ = load_model(&mut Cursor::new(bytes));
+    }
+
+    #[test]
+    fn tensor_dims_overflow_is_rejected() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer { w: &mut buf };
+            w.u32(VERSION).unwrap();
+            w.u64(1).unwrap(); // n_tensors
+            w.u64(13).unwrap(); // n_kv: architecture + alignment + 11 hparams
+            w.string(b"general.architecture").unwrap();
+            w.u32(T_STRING).unwrap();
+            w.string(b"whisper").unwrap();
+            w.string(b"general.alignment").unwrap();
+            w.u32(T_U32).unwrap();
+            w.u32(ALIGNMENT as u32).unwrap();
+            for key in HPARAM_KEYS.iter() {
+                w.kv_i32(key, 1).unwrap();
+            }
+            // Tensor descriptor whose dims multiply past usize/u64::MAX.
+            w.string(b"bad").unwrap();
+            w.u32(2).unwrap(); // n_dims
+            w.u64(u64::MAX).unwrap();
+            w.u64(2).unwrap();
+            w.u32(0).unwrap(); // dtype f32
+            w.u64(0).unwrap(); // offset
+        }
+        match load(&mut Cursor::new(buf)) {
+            Ok(_) => panic!("overflowing tensor dims should be rejected"),
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+        }
     }
 }

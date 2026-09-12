@@ -166,7 +166,7 @@ impl Drop for Store {
 /// root CAs, `"CA"` for intermediates, `"MY"` for the personal store.
 #[cfg(windows)]
 pub fn open(name: &str) -> Result<Store, Win32Error> {
-    let wide = to_wide(name);
+    let wide = to_wide(name)?;
     // SAFETY: `wide` is a valid NUL-terminated UTF-16 string alive across
     // the call; `0` is the documented default-provider value for the
     // integer `HCRYPTPROV_LEGACY` parameter.

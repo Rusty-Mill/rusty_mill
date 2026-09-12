@@ -202,20 +202,30 @@ impl<'a> Reader<'a> {
     }
 
     fn read_table(&mut self) -> Result<Table> {
+        // `column_count`/`row_count`/`value_count` below come straight
+        // from the untrusted byte stream, with no bound against how much
+        // data is actually left in `self.bytes` — preallocating a `Vec`
+        // from one of those raw counts (`Vec::with_capacity`) would let a
+        // crafted/corrupt blob with e.g. a `0xFFFFFFFF` count force a huge
+        // allocation before a single byte of the (nonexistent) elements
+        // is ever validated. Grow incrementally via `push` instead, so
+        // the amount actually allocated is bounded by how many elements
+        // really are present in `self.bytes` (each `read_*` call fails
+        // fast via `take` once the bytes run out).
         let column_count = self.read_u32()?;
-        let mut columns = Vec::with_capacity(column_count as usize);
+        let mut columns = Vec::new();
         for _ in 0..column_count {
             columns.push(self.read_column_def()?);
         }
         let column_names = columns.iter().map(|c| c.name.clone()).collect();
 
         let row_count = self.read_u32()?;
-        let mut rows = Vec::with_capacity(row_count as usize);
-        let mut row_ids = Vec::with_capacity(row_count as usize);
+        let mut rows = Vec::new();
+        let mut row_ids = Vec::new();
         for _ in 0..row_count {
             row_ids.push(self.read_i64()?);
             let value_count = self.read_u32()?;
-            let mut row = Vec::with_capacity(value_count as usize);
+            let mut row = Vec::new();
             for _ in 0..value_count {
                 row.push(self.read_value()?);
             }
@@ -297,5 +307,27 @@ mod tests {
         let mut bytes = serialize(&db);
         bytes.truncate(bytes.len() - 3);
         assert_eq!(deserialize(&bytes).unwrap_err(), Error::Deserialize);
+    }
+
+    #[test]
+    fn deserialize_rejects_a_huge_untrusted_count_without_preallocating() {
+        // `column_count` is set to `0xFFFFFFFF` with no column bytes
+        // following it at all. Preallocating a `Vec<ColumnDef>` straight
+        // from that count (pre-fix behavior) would attempt a multi-GB
+        // allocation; this should instead fail fast once the (nonexistent)
+        // first column's bytes run out.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        write_u32(&mut bytes, 1); // table_count
+        write_string(&mut bytes, "t"); // table name
+        write_u32(&mut bytes, 0xFFFF_FFFF); // column_count: huge, no columns follow
+
+        let start = std::time::Instant::now();
+        let result = deserialize(&bytes);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "deserialize should fail fast instead of attempting a huge allocation"
+        );
+        assert_eq!(result.unwrap_err(), Error::Deserialize);
     }
 }
