@@ -1,6 +1,7 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s schema).
+Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s embedding-queue
+query layer).
 
 ## Where this is
 
@@ -26,19 +27,28 @@ licensing policy) are settled. Three crates now have real implementation:
   `#[table(soft_delete)]` where Go used `CommonFields`' nullable
   `DeletedAt`, and a fresh-install migration
   (`SQLITE_MIGRATIONS`/`POSTGRES_MIGRATIONS`) that creates all nine tables
-  and their indexes via `rusty_db::Migrator`. **Schema only** — the
-  domain/query-layer helpers each Go model file builds on top of its table
-  (`EnqueueEmbeddingJob`, the `history.go` search/pin/timeline queries,
-  `user.go`'s auth helpers, ...) are a separate, not-yet-started increment.
-  Hister's own `Database` singleton-row schema-version tracker has no
-  Rust equivalent — `rusty_db`'s `Migrator` already solves the same
-  problem via its own bookkeeping table, so this is a documented
-  substitution, not a dropped capability.
+  and their indexes via `rusty_db::Migrator`. Hister's own `Database`
+  singleton-row schema-version tracker has no Rust equivalent —
+  `rusty_db`'s `Migrator` already solves the same problem via its own
+  bookkeeping table, so this is a documented substitution, not a dropped
+  capability. **The embedding-queue query layer is also ported**:
+  `EmbeddingJob::{enqueue, claim_next, complete, retry, fail, release,
+  in_progress_exists, delete, reset_in_progress}`, matching
+  `embedding.go`'s state machine exactly (the dedup-on-conflict upsert,
+  the claim-loop's optimistic-concurrency retry, the dirty-job-retries-
+  immediately semantics). Three of the nine (`enqueue`, `retry`,
+  `release`) need a `CASE`-based `SET` clause the portable query builder
+  can't express (`Update::set` only takes a `Value`, never an `Expr`), so
+  those three use raw SQL built dialect-portably via
+  `Engine::dialect().placeholder(..)` rather than the builder. The other
+  six domain files' query-layer helpers (`history.go`'s search/pin/
+  timeline queries, `user.go`'s auth helpers, ...) are still a separate,
+  not-yet-started increment.
 
 All three have unit tests, `clippy`, and `fmt` clean. Still not started:
-the concrete extractors, the model crate's query-layer helpers, and
-`rusty-hister-crawler`'s `http` backend (the rest of Phase 1 per
-`docs/roadmap/ROADMAP.md`).
+the concrete extractors, the rest of the model crate's query-layer
+helpers, and `rusty-hister-crawler`'s `http` backend (the rest of Phase 1
+per `docs/roadmap/ROADMAP.md`).
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -119,19 +129,29 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
   `rusty-hister-indexer` design (and `rusty-hister-model`'s follow-up
   query-helpers increment, for the diff format specifically) can fully
   account for them; not yet done.
-- `rusty-hister-model`'s query-layer helpers (the domain operations each Go
-  model file builds on top of its table — embedding-queue state machine,
-  history search/pin/timeline queries, user auth helpers, crawl-job
-  lifecycle, document-version diff retrieval) — deliberately deferred past
-  the schema increment, the same split `rusty-hister-extractor` used
+- `rusty-hister-model`'s remaining query-layer helpers (the domain
+  operations each Go model file builds on top of its table — the
+  embedding-queue state machine is now done, see the crate status table
+  below — leaving `history.go` search/pin/timeline queries, `user.go`
+  auth helpers, crawl-job lifecycle, `WebSession` lookup/expiry,
+  document-version diff retrieval) — deliberately deferred past the
+  schema increment, the same split `rusty-hister-extractor` used
   (mechanism before concrete extractors); not yet started.
+- Postgres path for `rusty-hister-model`'s raw-SQL query-layer functions
+  (`EmbeddingJob::enqueue`/`retry`/`release`) is untested — only SQLite is
+  exercised in unit tests (no Postgres available in this environment). The
+  SQL is written to be dialect-portable (ANSI-standard `ON CONFLICT ...
+  DO UPDATE SET`/`CASE WHEN`, placeholders rendered per-dialect via
+  `Engine::dialect().placeholder(..)`) but has not been run against a real
+  Postgres instance — same risk profile as the untested `POSTGRES_MIGRATIONS`
+  array from the schema increment.
 
 ## Crate status
 
 | Crate | Status |
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
-| `rusty-hister-model` | **In progress** — schema only: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. 25 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status), clippy/fmt clean. Query-layer helpers not yet started. |
+| `rusty-hister-model` | **In progress** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 associated functions) done; the other six domain files' query helpers not yet started. 43 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics), clippy/fmt clean. |
 | `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging). 18 unit tests, clippy/fmt clean. No concrete extractors yet. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |

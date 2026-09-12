@@ -13,6 +13,46 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's embedding-queue query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-embedding-queue`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-embedding-queue)
+
+Fourth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, and `rusty-hister-model`'s schema, previous entries below). Scoped
+to `EmbeddingJob`'s query-layer alone — the first of the six model files'
+domain operations flagged as a follow-up when the schema increment landed
+— since it's fully self-contained (no dependency on any other table) and
+exercises the two genuinely hard parts of this crate's remaining work
+(a dialect-portable upsert, and an optimistic-concurrency claim loop) in
+isolation before touching anything else.
+
+- **Added:** `EmbeddingJob::enqueue`/`claim_next`/`complete`/`retry`/
+  `fail`/`release`/`in_progress_exists`/`delete`/`reset_in_progress` — a
+  field-for-field port of `embedding.go`'s durable, deduplicated embedding
+  work queue: enqueuing a pending job is a no-op, enqueuing an active job
+  marks it dirty instead of resetting it, `claim_next` atomically claims
+  the oldest available job (retrying its select-then-claim pair when
+  another worker races ahead), and `complete`/`fail` return a dirty job to
+  pending instead of deleting/failing it.
+- **Added:** a small dialect-portable raw-SQL path for the three
+  operations (`enqueue`'s `ON CONFLICT ... DO UPDATE SET` upsert,
+  `retry`'s and `release`'s `CASE WHEN ... THEN ... ELSE ... END` SET
+  clauses) that `rusty_db`'s query builder can't express — `Update::set`
+  only ever takes a `Value`, never an `Expr`. Placeholders are rendered
+  per-dialect via `Engine::dialect().placeholder(..)` rather than
+  hardcoding `?`/`$N`, so the same SQL text works against both SQLite and
+  Postgres; the other six functions use the ordinary `Select`/`Update`/
+  `Delete` builder.
+- **Known limitation:** the Postgres path is untested — only SQLite is
+  exercised (no Postgres instance available in this environment). Flagged
+  in `crates/rusty_hister/docs/PROJECT-STATUS.md`'s open items, same risk
+  profile as the schema increment's untested `POSTGRES_MIGRATIONS`.
+- **Added:** 18 new unit tests (43 total in the crate) — enqueue's
+  three outcomes (fresh/idempotent/dirty-marking/failed-job-reset),
+  claim_next's ordering and availability filtering, complete/fail's
+  dirty-job-returns-to-pending branch, retry's immediate-vs-scheduled
+  branch, release's never-negative attempt count, and
+  in_progress_exists/delete/reset_in_progress. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's schema
 **2026-09-12** · branch [`claude/hister-phase1-model`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model)
 

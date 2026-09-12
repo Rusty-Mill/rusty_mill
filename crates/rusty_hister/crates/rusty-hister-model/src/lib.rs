@@ -10,16 +10,20 @@
 //! migrations have applied) via its own bookkeeping table, so this is a
 //! substitution, not a dropped capability.
 //!
-//! Two things below are query-layer behavior, not schema, and are **not
-//! yet ported** — a deliberate, explicitly-flagged follow-up increment,
-//! the same split `rusty-hister-extractor` used (chain-of-responsibility
-//! mechanism landed before any concrete extractor):
+//! `EmbeddingJob`'s query layer (§5.9's embedding queue) is ported too —
+//! `enqueue`/`claim_next`/`complete`/`retry`/`fail`/`release`/
+//! `in_progress_exists`/`delete`/`reset_in_progress`, as `EmbeddingJob`
+//! associated functions in `embedding.rs`. Everything else below is still
+//! query-layer behavior, not schema, and is **not yet ported** — a
+//! deliberate, explicitly-flagged follow-up increment, the same split
+//! `rusty-hister-extractor` used (chain-of-responsibility mechanism landed
+//! before any concrete extractor):
 //!
-//! - The domain operations each model file's Go source builds on top of its
-//!   table (`EnqueueEmbeddingJob`/`ClaimNextEmbeddingJob`/..., the
-//!   `history.go` search/pin/timeline queries, `user.go`'s auth/token
-//!   helpers, `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`, `WebSession`'s
-//!   lookup/expiry helpers, `SaveDocumentVersion`/`GetDocumentVersionsUntil`).
+//! - The domain operations the other model files' Go source builds on top
+//!   of their tables (the `history.go` search/pin/timeline queries,
+//!   `user.go`'s auth/token helpers, `CreateCrawlJob`/
+//!   `CreateNamedCrawlJobWithURLs`, `WebSession`'s lookup/expiry helpers,
+//!   `SaveDocumentVersion`/`GetDocumentVersionsUntil`).
 //! - The legacy pre-GORM `indexer_versions` read path (capability inventory
 //!   §7.3) and whether `rusty_hister` needs to *open* a pre-existing
 //!   Hister-Go-created database file at all — both still-open items, see
