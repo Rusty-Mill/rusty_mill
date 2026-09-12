@@ -85,7 +85,13 @@ impl Aggregate {
             }
             Ok(match (acc, value) {
                 (Value::Null, v) => v.clone(),
-                (Value::Integer(a), Value::Integer(b)) => Value::Integer(a + b),
+                (Value::Integer(a), Value::Integer(b)) => match a.checked_add(*b) {
+                    Some(sum) => Value::Integer(sum),
+                    // Real SQLite's `SUM` promotes to floating point on
+                    // integer overflow rather than silently wrapping
+                    // around to a nonsense negative total.
+                    None => Value::Real(*a as f64 + *b as f64),
+                },
                 (Value::Integer(a), Value::Real(b)) => Value::Real(*a as f64 + b),
                 (Value::Real(a), Value::Integer(b)) => Value::Real(a + *b as f64),
                 (Value::Real(a), Value::Real(b)) => Value::Real(a + b),
@@ -209,5 +215,21 @@ mod tests {
         acc = (avg_like.step)(&acc, &[Value::Integer(4)]).unwrap();
         acc = (avg_like.step)(&acc, &[Value::Integer(6)]).unwrap();
         assert_eq!((avg_like.finalize)(acc).unwrap(), Value::Real(5.0));
+    }
+
+    #[test]
+    fn sum_promotes_to_real_on_integer_overflow_instead_of_wrapping() {
+        let sum = Aggregate::sum();
+        let mut acc = sum.init.clone();
+        for args in [vec![Value::Integer(i64::MAX)], vec![Value::Integer(1)]] {
+            acc = (sum.step)(&acc, &args).unwrap();
+        }
+        match acc {
+            Value::Real(r) => assert!(
+                r > 0.0,
+                "SUM should not silently wrap to a negative total on overflow, got {r}"
+            ),
+            other => panic!("expected integer overflow to promote to Value::Real, got {other:?}"),
+        }
     }
 }

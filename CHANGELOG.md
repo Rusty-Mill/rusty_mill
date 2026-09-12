@@ -50,6 +50,41 @@ Removed / Fixed / Security, newest first.
   warning and passes instead of failing CI outright. A full sweep is
   unaffected (thousands of tests always exist there).
 ### Fixed
+- 40 correctness/security/reliability findings from a third `/codex-build`
+  review (`CODEX-MONOREPO-REVIEW-2026-09-12-round3.md`), across 14 crate
+  families neither prior review round touched: `nexus-ai`/`nexus-ai-runtime`/
+  `nexus-agent`, `rusty_provider`'s `cli`/`core`/`server`, `rusty_tailscale`'s
+  `ts-derp`/`ts-stun`/`ts-disco`/`ts-filter`/`ts-key`, `nexus-kernel`/
+  `nexus-collab`/`nexus-mcp`, standalone `rusty_mcp`/`rusty_croc`/
+  `rusty_wiremock`/`rusty_homelab_mcp`, `rusty_fedora`(`_agent`),
+  `rusty_codec`/`rusty_ansder`, the graphics stack, `rusty_whisper`/
+  `rusty_llama`, `rusty_rusqlite`/`rusty_multimodal_db`, `rusty_inventrory`/
+  `rusty_skillopt`, terminal/text utils, and low-level platform crates — each
+  with a regression test that fails pre-fix and passes post-fix (see the
+  review's own **Disposition** section for the one-line outcome of every
+  finding). Also fixed round 2's own disclosed-but-unfixed `nexus-storage`
+  Windows path-separator bugs (ground-truthed by actually running the suite
+  on Windows: only 2 of the claimed 4 were real, both now fixed). Highlights:
+  `nexus-mcp`'s dynamic-tool registry no longer lets any plugin route
+  internal-only (Core-trust-gated) IPC handlers through the MCP server's own
+  privileged context (confused deputy); `rusty_croc`'s receive path no
+  longer follows a symlink planted earlier in the same transfer batch to
+  write outside the destination root (zip-slip shape, previously defeated
+  its own `.ssh` blocklist); `rp-server`'s JWKS verifier no longer amplifies
+  an unauthenticated request into a fresh outbound fetch on every distinct
+  unrecognized `kid`; `ts-derp`'s connect/handshake now times out instead of
+  hanging forever against a non-responsive relay; five separate crash-on-
+  untrusted-input bugs closed across `rusty_whisper`'s legacy `.bin`/GGUF/WAV
+  loaders; three `rusty_font` TrueType-parser bugs closed, including an
+  exponential composite-glyph blowup DoS; `rusty_win32`'s `to_wide()` no
+  longer silently truncates at an embedded NUL (a validation-bypass shape)
+  across roughly 40 call sites; `rusty_lines`' default Ctrl-W keybinding no
+  longer panics on ordinary multi-byte Unicode whitespace; and four separate
+  unbounded-recursion stack-overflow bugs closed in hand-rolled parsers
+  (`rusty_codec::toml`, `rusty_llama::grammar`, `rusty_text::awk`), the same
+  bug class round 2 already fixed elsewhere in this workspace.
+
+### Fixed
 - 63 correctness/security/reliability findings from a second `/codex-build`
   review (`CODEX-MONOREPO-REVIEW-2026-09-12.md`), across ~45 crates spanning
   the `nexus` microkernel, `rusty_adk`, `rusty_agent_gateway`,

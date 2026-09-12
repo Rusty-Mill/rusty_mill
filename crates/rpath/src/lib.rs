@@ -121,15 +121,20 @@ pub fn convert_path_list(path_list: &str, target_style: PathStyle) -> String {
 
 /// Normalizes a path string, resolving `.` and `..` components cleanly without hit to file system.
 pub fn normalize_path(path: &str) -> String {
-    let is_abs_posix = path.starts_with('/');
     let is_win_drive = is_win32_path(path);
+    let (prefix, rest): (&str, &str) = if is_win_drive {
+        (&path[..2], &path[2..])
+    } else {
+        ("", path)
+    };
+    let is_root = rest.starts_with('/') || rest.starts_with('\\');
     let sep = if is_win_drive || path.contains('\\') {
         '\\'
     } else {
         '/'
     };
 
-    let parts = path.split(&['/', '\\'][..]);
+    let parts = rest.split(&['/', '\\'][..]);
     let mut stack: Vec<&str> = Vec::new();
 
     for part in parts {
@@ -139,7 +144,7 @@ pub fn normalize_path(path: &str) -> String {
         if part == ".." {
             if !stack.is_empty() && stack.last() != Some(&"..") {
                 stack.pop();
-            } else if !is_abs_posix && !is_win_drive {
+            } else if !is_root {
                 stack.push("..");
             }
         } else {
@@ -148,10 +153,10 @@ pub fn normalize_path(path: &str) -> String {
     }
 
     let joined = stack.join(&sep.to_string());
-    if is_abs_posix && !joined.starts_with('/') {
-        format!("/{}", joined)
+    if is_root {
+        format!("{}{}{}", prefix, sep, joined)
     } else {
-        joined
+        format!("{}{}", prefix, joined)
     }
 }
 
@@ -195,5 +200,16 @@ mod tests {
     fn test_normalize_path() {
         assert_eq!(normalize_path("/c/dev/./Rusty_Mill/../foo"), "/c/dev/foo");
         assert_eq!(normalize_path(r"C:\dev\.\Rusty_Mill\..\foo"), r"C:\dev\foo");
+    }
+
+    #[test]
+    fn test_normalize_path_clamps_excess_dotdot_at_root() {
+        // Drive letter must survive excess `..` segments, not be popped off.
+        assert_eq!(
+            normalize_path(r"C:\Users\baile\..\..\..\Windows"),
+            r"C:\Windows"
+        );
+        // A bare backslash root (no drive letter) must also clamp at root.
+        assert_eq!(normalize_path(r"\Users\..\..\foo"), r"\foo");
     }
 }

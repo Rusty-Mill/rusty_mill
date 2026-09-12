@@ -156,7 +156,15 @@ unsafe extern "system" {
 /// thread-affinity Win32 itself documents for all windowing calls.
 pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND {
     let class_name: Vec<u16> = "RustyMillWindowClass\0".encode_utf16().collect();
-    let title_utf16: Vec<u16> = crate::wide::to_wide(title);
+    // `create_native_window` has no `Result` in its signature (mirroring
+    // `CreateWindowExW`'s own failure convention — a null `HWND` return,
+    // never checked separately here either, per this function's existing
+    // no-error-checking style below); an embedded NUL in `title` is
+    // likewise reported by falling straight through to a null `HWND`
+    // instead of ever calling into `CreateWindowExW`.
+    let Ok(title_utf16) = crate::wide::to_wide(title) else {
+        return core::ptr::null_mut();
+    };
 
     unsafe {
         let h_instance = GetModuleHandleW(core::ptr::null());

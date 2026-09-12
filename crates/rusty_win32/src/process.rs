@@ -501,7 +501,7 @@ pub unsafe fn spawn_suspended(
     // `lpCommandLine`'s first token exceeds `MAX_PATH`), so a `&str`'s
     // read-only pointer isn't sufficient — this must be an owned, mutable
     // buffer.
-    let mut wide: Vec<u16> = crate::wide::to_wide(command_line);
+    let mut wide: Vec<u16> = crate::wide::to_wide(command_line)?;
 
     let mut startup_info = StartupInfoW {
         cb: core::mem::size_of::<StartupInfoW>() as u32,
@@ -613,7 +613,7 @@ pub unsafe fn spawn_suspended_with_pseudoconsole(
     command_line: &str,
     hpc: crate::conpty::Hpcon,
 ) -> Result<SpawnedProcess, Win32Error> {
-    let mut wide: Vec<u16> = crate::wide::to_wide(command_line);
+    let mut wide: Vec<u16> = crate::wide::to_wide(command_line)?;
 
     let mut attribute_list = crate::conpty::AttributeList::init(1)?;
     // SAFETY: `hpc` is caller-supplied per this function's own safety
@@ -786,7 +786,7 @@ fn parse_environment_entry(
 /// `search_path`-style "not found is not an error" convention rather than
 /// folding it into the `Err` case.
 pub fn get_env_var(name: &str) -> Result<Option<alloc::string::String>, Win32Error> {
-    let wide_name = to_wide(name);
+    let wide_name = to_wide(name)?;
     let mut buf: Vec<u16> = alloc::vec![0u16; 256];
     // At most two attempts: an initial try, then one retry sized exactly to
     // whatever `GetEnvironmentVariableW` reports as actually required —
@@ -827,8 +827,8 @@ pub fn get_env_var(name: &str) -> Result<Option<alloc::string::String>, Win32Err
 /// environment a `spawn_suspended` child sees if that call's own
 /// `environment` argument overrides the block entirely.
 pub fn set_env_var(name: &str, value: Option<&str>) -> Result<(), Win32Error> {
-    let wide_name = to_wide(name);
-    let wide_value = value.map(to_wide);
+    let wide_name = to_wide(name)?;
+    let wide_value = value.map(to_wide).transpose()?;
     let value_ptr = wide_value
         .as_ref()
         .map_or(core::ptr::null(), |v| v.as_ptr());

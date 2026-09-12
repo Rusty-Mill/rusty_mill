@@ -1,31 +1,26 @@
-use std::path::PathBuf;
+use std::io::Write;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use skillopt_core::{ChatBackend, Message, Role};
 use tokio::io::AsyncWriteExt;
 
-/// Deletes its file on drop. Best-effort, mirroring `aisf_stage::ScratchDir`
-/// -- a leftover temp file is clutter, not a correctness problem.
-struct ScratchFile(PathBuf);
-
-impl Drop for ScratchFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn new_scratch_system_prompt_file(content: &str) -> std::io::Result<ScratchFile> {
-    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "skillopt-claude-cli-system-{}-{n}.txt",
-        std::process::id()
-    ));
-    std::fs::write(&path, content)?;
-    Ok(ScratchFile(path))
+/// Creates a fresh, randomly-named scratch file under the OS temp dir and
+/// writes `content` to it. Backed by `tempfile`'s atomic, exclusive-create
+/// path generation rather than a name built from `std::process::id()` plus
+/// a counter: a predictable path in a shared temp dir can be pre-planted
+/// as a symlink by another local user before this call ever runs, and a
+/// plain `std::fs::write` would happily follow it. The returned
+/// `NamedTempFile` deletes itself on drop, mirroring `aisf_stage`'s
+/// `TempDir` usage -- a leftover temp file is clutter, not a correctness
+/// problem.
+fn new_scratch_system_prompt_file(content: &str) -> std::io::Result<tempfile::NamedTempFile> {
+    let mut file = tempfile::Builder::new()
+        .prefix("skillopt-claude-cli-system-")
+        .suffix(".txt")
+        .tempfile()?;
+    file.write_all(content.as_bytes())?;
+    Ok(file)
 }
 
 /// Splits a `ChatBackend::chat` call's messages into (system_prompt,
@@ -112,7 +107,7 @@ impl ChatBackend for ClaudeCliBackend {
             None
         } else {
             let f = new_scratch_system_prompt_file(&system_prompt)?;
-            cmd.arg("--system-prompt-file").arg(&f.0);
+            cmd.arg("--system-prompt-file").arg(f.path());
             Some(f)
         };
 
@@ -139,6 +134,26 @@ impl ChatBackend for ClaudeCliBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_system_prompt_file_path_is_not_predictable_from_pid_and_counter() {
+        let f1 = new_scratch_system_prompt_file("one").unwrap();
+        let f2 = new_scratch_system_prompt_file("two").unwrap();
+        assert_ne!(f1.path(), f2.path());
+
+        // The pre-fix implementation built the whole path from just
+        // `std::process::id()` plus an incrementing counter, so any local
+        // user could pre-plant a symlink at that exact path before this
+        // call ever ran. None of the paths that scheme could have produced
+        // may match the real, randomized path.
+        let pid = std::process::id();
+        let tmp = std::env::temp_dir();
+        for n in 0..1000u64 {
+            let guessed = tmp.join(format!("skillopt-claude-cli-system-{pid}-{n}.txt"));
+            assert_ne!(f1.path(), guessed);
+            assert_ne!(f2.path(), guessed);
+        }
+    }
 
     #[test]
     fn partitions_system_and_user_messages() {

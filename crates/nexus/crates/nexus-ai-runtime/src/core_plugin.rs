@@ -29,7 +29,8 @@ use crate::events::{topic_for, AiEvent};
 use crate::pool::WorkerPool;
 use crate::scheduler::Store;
 use crate::supervisor::{
-    Supervisor, TOPIC_SESSION_CANCELLED, TOPIC_SESSION_COMPLETED, TOPIC_SESSION_STARTED,
+    AdmissionConfig, AdmissionTracker, Supervisor, TOPIC_SESSION_CANCELLED,
+    TOPIC_SESSION_COMPLETED, TOPIC_SESSION_STARTED,
 };
 use crate::{
     AgentTaskKind, AiRuntimeEventsArgs, AiRuntimeGetArgs, AiRuntimeListArgs, AiRuntimeSubmitArgs,
@@ -178,6 +179,8 @@ impl CorePlugin for AiRuntimeCorePlugin {
         let pool_handle = self.supervisor.pool_handle();
         let pool_metrics = self.supervisor.pool_metrics();
         let triggers = self.supervisor.trigger_registry().clone();
+        let admission_config = self.supervisor.admission.clone();
+        let admission_tracker = self.supervisor.admission_tracker();
         let args = args.clone();
 
         Some(Box::pin(async move {
@@ -185,7 +188,14 @@ impl CorePlugin for AiRuntimeCorePlugin {
                 HANDLER_SUBMIT => {
                     let ctx = ctx.ok_or_else(ctx_unwired)?;
                     let pool_handle = pool_handle.ok_or_else(pool_unwired)?;
-                    handle_submit(&store, &ctx, &pool_handle, &args)
+                    handle_submit(
+                        &store,
+                        &ctx,
+                        &pool_handle,
+                        &args,
+                        &admission_config,
+                        &admission_tracker,
+                    )
                 }
                 HANDLER_GET => handle_get(&store, &args),
                 HANDLER_LIST => handle_list(&store, &args),
@@ -277,12 +287,16 @@ impl CorePlugin for AiRuntimeCorePlugin {
             let ctx_for_watcher = Arc::clone(&ctx);
             let pool_handle_for_watcher = pool.handle();
             let watcher_pool_handle = pool.handle();
+            let admission_config_for_watcher = self.supervisor.admission.clone();
+            let admission_tracker_for_watcher = self.supervisor.admission_tracker();
             watcher_pool_handle.spawn(async move {
                 trigger_watcher_loop(
                     triggers,
                     store_for_watcher,
                     ctx_for_watcher,
                     pool_handle_for_watcher,
+                    admission_config_for_watcher,
+                    admission_tracker_for_watcher,
                 )
                 .await;
             });
@@ -326,6 +340,8 @@ fn handle_submit(
     ctx: &Arc<KernelPluginContext>,
     pool_handle: &tokio::runtime::Handle,
     args: &serde_json::Value,
+    admission_config: &AdmissionConfig,
+    admission: &AdmissionTracker,
 ) -> Result<serde_json::Value, PluginError> {
     let parsed: AiRuntimeSubmitArgs = serde_json::from_value(args.clone())
         .map_err(|e| exec_err(format!("submit: invalid args: {e}")))?;
@@ -334,6 +350,19 @@ fn handle_submit(
     let kind_label = parsed.task.label().to_string();
     let priority = parsed.priority;
     let session_kind = parsed.kind;
+
+    // Admission control — previously `AdmissionConfig` was computed but
+    // never consulted, so every submission spawned unconditionally
+    // regardless of kind. Reject once the per-kind concurrency cap is
+    // reached; checked before any store mutation so a rejected
+    // submission leaves no trace in `list` / `get`.
+    if !admission.try_acquire(session_kind, admission_config.limit_for(session_kind)) {
+        return Err(exec_err(format!(
+            "submit: admission limit reached for session kind {session_kind:?} (max {} \
+             concurrent); retry once a running session of this kind completes",
+            admission_config.limit_for(session_kind)
+        )));
+    }
     let parent = parsed.parent;
     let requested_caps = parsed.capabilities;
     let caller = caller_plugin_id(ctx);
@@ -397,6 +426,7 @@ fn handle_submit(
     let store_for_worker = store.clone();
     let ctx_for_worker = Arc::clone(ctx);
     let goal_for_worker = goal.clone();
+    let admission_for_worker = admission.clone();
     let cancel = store
         .cancel_gate(task_id)
         .expect("cancel gate present after insert");
@@ -431,6 +461,7 @@ fn handle_submit(
                 // before it ever ran.
                 store_for_worker.forget_session(sid);
             }
+            admission_for_worker.release(session_kind);
             return;
         }
 
@@ -491,6 +522,13 @@ fn handle_submit(
                 Err(error) => AiEvent::Failed { task_id, error, retriable: false },
             }
         };
+
+        // Release the admission slot as soon as the session actually
+        // stops running (cancelled/finished/failed) rather than waiting
+        // for the lifecycle-event publish or the correlation grace
+        // period below, so a queued submission of the same kind can be
+        // admitted immediately.
+        admission_for_worker.release(session_kind);
 
         // Emit session-lifecycle bus event before the terminal AiEvent
         // so subscribers see the semantic outcome (completed/cancelled)
@@ -926,6 +964,8 @@ async fn trigger_watcher_loop(
     store: Store,
     ctx: Arc<KernelPluginContext>,
     pool_handle: tokio::runtime::Handle,
+    admission_config: AdmissionConfig,
+    admission: AdmissionTracker,
 ) {
     use crate::event_input::EventInput;
     use nexus_kernel::{EventFilter, Events as _};
@@ -979,7 +1019,14 @@ async fn trigger_watcher_loop(
                         continue;
                     }
                 };
-                if let Err(e) = handle_submit(&store, &ctx, &pool_handle, &args_value) {
+                if let Err(e) = handle_submit(
+                    &store,
+                    &ctx,
+                    &pool_handle,
+                    &args_value,
+                    &admission_config,
+                    &admission,
+                ) {
                     tracing::warn!(
                         plugin_id = PLUGIN_ID,
                         trigger_name = %trigger.name,
@@ -1552,6 +1599,72 @@ mod tests {
             msg.contains("invalid args") || msg.contains("context not wired"),
             "actual: {msg}"
         );
+    }
+
+    /// Regression test — `AdmissionConfig` was previously computed but
+    /// never consulted by `handle_submit`, so every submission spawned
+    /// unconditionally regardless of `SessionKind`. With the cap for
+    /// `SignalTriggered` set to 1, a second concurrent submission of
+    /// that kind must be rejected before it is ever spawned; a
+    /// different kind must be unaffected.
+    #[tokio::test]
+    async fn submit_rejects_once_admission_limit_for_kind_is_reached() {
+        let mut plugin = AiRuntimeCorePlugin::new();
+        plugin.supervisor.admission.max_concurrent_signal_triggered = 1;
+        let admission_config = plugin.supervisor.admission.clone();
+        let admission_tracker = plugin.supervisor.admission_tracker();
+        let store = plugin.supervisor.store().clone();
+        let ctx = Arc::new(test_ctx());
+        let pool_handle = tokio::runtime::Handle::current();
+
+        let args_for = |kind: &str| {
+            serde_json::json!({
+                "task": { "kind": "session", "args": { "goal": "x" } },
+                "kind": kind,
+            })
+        };
+
+        // First SignalTriggered submission is under the cap. Neither
+        // call below is ever polled (no `.await` between them on this
+        // single-threaded test runtime), so the live count reflects
+        // exactly what `handle_submit` itself admitted.
+        let first = handle_submit(
+            &store,
+            &ctx,
+            &pool_handle,
+            &args_for("signal_triggered"),
+            &admission_config,
+            &admission_tracker,
+        );
+        assert!(first.is_ok(), "first submission under the cap must be admitted");
+
+        // The cap is 1 — a second concurrent SignalTriggered submission
+        // must be rejected rather than spawned unconditionally.
+        let second = handle_submit(
+            &store,
+            &ctx,
+            &pool_handle,
+            &args_for("signal_triggered"),
+            &admission_config,
+            &admission_tracker,
+        );
+        let err = second.unwrap_err();
+        assert!(
+            format!("{err}").contains("admission limit reached"),
+            "actual: {err}"
+        );
+
+        // A different session kind (Ambient, default cap 2) is
+        // unaffected by the exhausted SignalTriggered cap.
+        let ambient = handle_submit(
+            &store,
+            &ctx,
+            &pool_handle,
+            &args_for("ambient"),
+            &admission_config,
+            &admission_tracker,
+        );
+        assert!(ambient.is_ok(), "a different session kind must not be blocked");
     }
 
     #[test]

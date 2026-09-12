@@ -80,6 +80,16 @@ pub struct DelegateArgs {
     /// its branch back into the parent.
     #[serde(default)]
     pub isolation: Isolation,
+    /// Nesting depth of this delegation (RFC 0007 follow-up). Never
+    /// trusted from the model — the tool's model-facing JSON schema
+    /// (`tool_registry.rs`) doesn't expose this field at all.
+    /// `KernelToolBridge::dispatch` stamps the calling session's own
+    /// depth onto every outgoing `delegate` call before it reaches
+    /// here, overriding whatever the model itself may have set.
+    /// Defaults to `0` for a top-level call issued outside any session
+    /// (e.g. a CLI or IPC caller invoking `delegate` directly).
+    #[serde(default)]
+    pub delegation_depth: u32,
 }
 
 /// Workspace isolation model for a delegated sub-session (RFC 0007).
@@ -129,6 +139,16 @@ const SUBMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// the binding constraint under normal operation.
 const WAIT_FOR_TIMEOUT: std::time::Duration = std::time::Duration::from_hours(3);
 
+/// Maximum nesting depth for `delegate_to_agent` on the shared-forge
+/// (`isolation = "none"`) path. A delegated sub-session's own tool loop
+/// can itself call `delegate_to_agent`; without a cap that recursion is
+/// unbounded. `KernelToolBridge::dispatch` stamps the calling session's
+/// own depth onto every outgoing `delegate` call — never trusted from
+/// the model, since the tool's model-facing schema doesn't expose this
+/// field at all — so `delegate_shared` always sees the true nesting
+/// depth regardless of what the model's tool-call args contain.
+const MAX_DELEGATION_DEPTH: u32 = 5;
+
 pub(crate) async fn handle_delegate(
     ctx: Arc<KernelPluginContext>,
     args: &serde_json::Value,
@@ -157,6 +177,23 @@ async fn delegate_shared(
     ctx: Arc<KernelPluginContext>,
     a: DelegateArgs,
 ) -> Result<serde_json::Value, PluginError> {
+    // RFC 0007 follow-up — cap nested delegation. Checked before any IPC
+    // call so a call past the cap fails fast with a clear error instead
+    // of recursing unboundedly.
+    if a.delegation_depth >= MAX_DELEGATION_DEPTH {
+        return Err(exec_err(format!(
+            "delegate: nesting depth limit ({MAX_DELEGATION_DEPTH}) reached; \
+             delegate_to_agent calls cannot recurse further"
+        )));
+    }
+
+    // RFC 0007 PR 4 concurrency guard — previously only `delegate_isolated`
+    // acquired this slot, so an unbounded number of shared-forge
+    // delegations (each its own in-process sub-session) could pile up
+    // concurrently with no limit. Held for the duration of the submit +
+    // wait below.
+    let _slot = acquire_subagent_slot().await;
+
     let session_args = serde_json::json!({
         "goal": a.goal,
         "archetype": a.archetype,
@@ -164,6 +201,7 @@ async fn delegate_shared(
         "auto_approve": a.auto_approve,
         "approval_timeout_secs": a.approval_timeout_secs,
         "strict_approval": a.strict_approval,
+        "delegation_depth": a.delegation_depth + 1,
     });
 
     // ── Submit ──────────────────────────────────────────────────
@@ -674,6 +712,84 @@ mod tests {
         );
         let err = extract_session_outcome("abc", &reply).unwrap_err();
         assert!(format!("{err}").contains("cancelled by deadline"));
+    }
+
+    #[test]
+    fn delegate_args_default_delegation_depth_is_zero() {
+        let a: DelegateArgs =
+            serde_json::from_value(serde_json::json!({ "archetype": "coder", "goal": "x" }))
+                .unwrap();
+        assert_eq!(a.delegation_depth, 0);
+    }
+
+    /// Build a minimal `KernelPluginContext` — `delegate_shared` must reject
+    /// a call past the depth cap before it ever touches `ctx` (no IPC call),
+    /// so this context is never actually exercised.
+    fn test_ctx() -> Arc<KernelPluginContext> {
+        let dir = tempfile::tempdir().unwrap();
+        let kv: Arc<dyn nexus_kernel::KvStore> = Arc::new(nexus_kernel::InMemoryKvStore::new());
+        let bus = Arc::new(nexus_kernel::EventBus::new(8));
+        Arc::new(
+            KernelPluginContext::new(
+                "com.nexus.agent",
+                "0.0.1",
+                nexus_kernel::CapabilitySet::default(),
+                kv,
+                bus,
+                dir.path(),
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Regression test — `delegate_shared` previously had no recursion
+    /// limit at all: a sub-session that itself called `delegate_to_agent`
+    /// could recurse unboundedly. A call already at the depth cap must be
+    /// rejected with a clear error before any submission is attempted.
+    #[tokio::test]
+    async fn delegate_shared_rejects_past_max_depth() {
+        let ctx = test_ctx();
+        let a = DelegateArgs {
+            archetype: "coder".into(),
+            goal: "x".into(),
+            system: None,
+            auto_approve: true,
+            approval_timeout_secs: None,
+            strict_approval: false,
+            isolation: Isolation::None,
+            delegation_depth: MAX_DELEGATION_DEPTH,
+        };
+        let err = delegate_shared(ctx, a).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("nesting depth limit"), "actual: {msg}");
+        assert!(msg.contains(&MAX_DELEGATION_DEPTH.to_string()), "actual: {msg}");
+    }
+
+    /// A depth one below the cap is still admitted (the check is `>=`, not
+    /// `>`) — asserted by confirming it does NOT hit the depth-limit error
+    /// (it instead fails on the stubbed-out `com.nexus.ai.runtime::submit`
+    /// call, proving the depth gate let it through).
+    #[tokio::test]
+    async fn delegate_shared_admits_one_below_max_depth() {
+        let ctx = test_ctx();
+        let a = DelegateArgs {
+            archetype: "coder".into(),
+            goal: "x".into(),
+            system: None,
+            auto_approve: true,
+            approval_timeout_secs: None,
+            strict_approval: false,
+            isolation: Isolation::None,
+            delegation_depth: MAX_DELEGATION_DEPTH - 1,
+        };
+        let err = delegate_shared(ctx, a).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("nesting depth limit"),
+            "one below the cap must not be depth-rejected: {msg}"
+        );
+        assert!(msg.contains("runtime submit"), "actual: {msg}");
     }
 
     // ── RFC 0007 — isolation arg + isolated-result shaping ───────

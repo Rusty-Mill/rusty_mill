@@ -665,6 +665,18 @@ fn normalize_receive_file_path(folder: &str, name: &str) -> Result<(String, Path
     Ok((clean_folder, dest))
 }
 
+/// Reject a symlink target that could resolve outside the receive root —
+/// mirrors `normalizeReceiveFilePath`'s guard, applied to `FileInfo.symlink`
+/// instead of `folder_remote`/`name`. An absolute target or one containing a
+/// `..` component could otherwise plant a symlink pointing anywhere on the
+/// filesystem, which a later entry's `folder_remote` could then walk through.
+fn validate_symlink_target(target: &str) -> Result<()> {
+    if !is_local_receive_path(target) {
+        return Err(format!("refusing unsafe symlink target: '{target}'").into());
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Shared receive state for the data-connection reader threads.
 // ---------------------------------------------------------------------------
@@ -1875,6 +1887,17 @@ impl Client {
 
             // Zero-byte files and symlinks are created directly.
             if fi.size == 0 || !fi.symlink.is_empty() {
+                if !fi.symlink.is_empty() {
+                    validate_symlink_target(&fi.symlink)?;
+                }
+                let root = std::env::current_dir()?;
+                if ancestor_escapes_root(&dest, &root)? {
+                    return Err(format!(
+                        "refusing to write '{}': an ancestor directory escapes the receive root via a symlink",
+                        dest.display()
+                    )
+                    .into());
+                }
                 if folder != "." {
                     std::fs::create_dir_all(&folder)?;
                 }
@@ -2036,6 +2059,31 @@ impl Client {
     }
 }
 
+/// True if any existing ancestor of `dest` resolves (through a symlink)
+/// outside `root` once canonicalized — catches a symlink planted by an
+/// earlier entry in the same receive batch, or already present on disk,
+/// that would otherwise let a later entry's `folder_remote` walk outside
+/// the receive root even though `dest` itself was never a symlink.
+fn ancestor_escapes_root(dest: &Path, root: &Path) -> Result<bool> {
+    let root = root.canonicalize()?;
+    let mut check = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => return Ok(false),
+    };
+    loop {
+        match check.canonicalize() {
+            Ok(canon) => return Ok(!canon.starts_with(&root)),
+            Err(_) => {
+                // This ancestor doesn't exist yet; walk up to the nearest
+                // one that does.
+                if !check.pop() || check.as_os_str().is_empty() {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(
     not(unix),
     allow(
@@ -2063,6 +2111,16 @@ fn open_receive_file(dest: &Path, fi: &FileInfo) -> Result<File> {
                 format!("refusing to open symlink destination: '{}'", dest.display()).into(),
             );
         }
+    }
+    // Refuse to write if a prior entry in this batch — or a pre-existing
+    // symlink — redirected an ancestor of `dest` outside the receive root.
+    let root = std::env::current_dir()?;
+    if ancestor_escapes_root(dest, &root)? {
+        return Err(format!(
+            "refusing to write '{}': an ancestor directory escapes the receive root via a symlink",
+            dest.display()
+        )
+        .into());
     }
     let file = match std::fs::OpenOptions::new().write(true).open(dest) {
         Ok(f) => {
@@ -2275,5 +2333,56 @@ mod tests {
         assert!(normalize_receive_file_path("/abs", "x").is_err());
         assert!(normalize_receive_file_path("./", "../x").is_err());
         assert!(normalize_receive_file_path(".ssh/", "authorized_keys").is_err());
+    }
+
+    // Regression: `fi.symlink` used to be handed straight to `make_symlink`
+    // with zero validation, so a malicious sender could plant a symlink
+    // pointing anywhere on the filesystem via an absolute path or a `..`
+    // component. `validate_symlink_target` is the gate `recipient_next_file`
+    // now calls before ever creating the symlink.
+    #[test]
+    fn symlink_target_validation_rejects_escape() {
+        assert!(validate_symlink_target("safe_name").is_ok());
+        assert!(validate_symlink_target("sub/dir/target").is_ok());
+        assert!(validate_symlink_target("../evil").is_err());
+        assert!(validate_symlink_target("../../etc/passwd").is_err());
+        assert!(validate_symlink_target("/etc/passwd").is_err());
+        assert!(validate_symlink_target("sub/../../escape").is_err());
+    }
+
+    // Regression: `open_receive_file` used to check only whether `dest`
+    // itself was a symlink, not whether any ancestor directory component had
+    // been redirected outside the receive root by a symlink planted earlier
+    // in the same batch (or already present on disk). `ancestor_escapes_root`
+    // is the check that now runs before any write.
+    #[test]
+    fn ancestor_escape_detects_symlinked_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "rusty-croc-ancestor-test-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // A normal nested directory under root does not escape.
+        let nested = root.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(!ancestor_escapes_root(&nested.join("file.txt"), &root).unwrap());
+
+        // A symlinked directory inside root pointing outside root — as the
+        // first entry of a malicious batch would plant before this fix, or
+        // as a symlink already present on disk — must be detected when a
+        // second entry's path walks through it.
+        #[cfg(unix)]
+        {
+            let link = root.join("evil_link");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(ancestor_escapes_root(&link.join("payload.txt"), &root).unwrap());
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

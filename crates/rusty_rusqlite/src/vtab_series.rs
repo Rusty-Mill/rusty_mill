@@ -42,6 +42,7 @@ impl VTab for SeriesTab {
             current: self.start,
             stop: self.stop,
             step: self.step,
+            done: false,
         })
     }
 }
@@ -88,6 +89,10 @@ pub struct SeriesCursor {
     current: i64,
     stop: i64,
     step: i64,
+    /// Set once `current + step` would overflow `i64` — treated as
+    /// reaching the end of the sequence rather than panicking (a debug
+    /// build) or silently wrapping (a release build).
+    done: bool,
 }
 
 impl VTabCursor for SeriesCursor {
@@ -96,11 +101,17 @@ impl VTabCursor for SeriesCursor {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.current += self.step;
+        match self.current.checked_add(self.step) {
+            Some(next) => self.current = next,
+            None => self.done = true,
+        }
         Ok(())
     }
 
     fn eof(&self) -> bool {
+        if self.done {
+            return true;
+        }
         if self.step > 0 {
             self.current > self.stop
         } else {
@@ -191,5 +202,20 @@ mod tests {
         assert!(conn
             .execute("CREATE VIRTUAL TABLE s USING series(abc, 5)")
             .is_err());
+    }
+
+    #[test]
+    fn series_next_overflow_terminates_instead_of_panicking() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.register_module::<SeriesTab>("series").unwrap();
+        conn.execute(&format!(
+            "CREATE VIRTUAL TABLE s USING series({}, {}, 2)",
+            i64::MAX - 3,
+            i64::MAX
+        ))
+        .unwrap();
+
+        let values: Vec<i64> = conn.query_map("SELECT * FROM s", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![i64::MAX - 3, i64::MAX - 1]);
     }
 }

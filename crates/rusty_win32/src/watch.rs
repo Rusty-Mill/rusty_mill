@@ -145,7 +145,7 @@ unsafe extern "system" {
 /// every other handle, so watching a directory doesn't block ordinary
 /// access to it.
 pub fn open_directory(path: &str) -> Result<RawHandle, Win32Error> {
-    let wide = to_wide(path);
+    let wide = to_wide(path)?;
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
     // `security_attributes = NULL` (default, non-inheritable) and
     // `template_file = NULL` (ignored by `OPEN_EXISTING`) are

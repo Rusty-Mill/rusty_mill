@@ -34,14 +34,28 @@ impl ResumeCommand {
         let mut out = self.program.clone();
         for a in &self.args {
             out.push(' ');
-            if a.contains(' ') {
-                out.push_str(&format!("\"{a}\""));
-            } else {
-                out.push_str(a);
-            }
+            out.push_str(&shell_quote(a));
         }
         out
     }
+}
+
+/// POSIX shell quoting, applied unconditionally so an argument can never
+/// break out of quoting no matter what untrusted data it carries — this
+/// string is only ever displayed for copy/paste, never passed to a shell
+/// by this program itself.
+fn shell_quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('\'');
+    for ch in text.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 impl Inventory {
@@ -224,4 +238,112 @@ fn quote(text: &str) -> String {
         .map(|l| format!("> {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small simulation of POSIX shell word splitting/quote removal,
+    /// covering single quotes, double quotes (with backslash escapes for
+    /// `"`, `\`, `$`, `` ` ``), backslash escapes outside quotes, and
+    /// whitespace as a word separator. Used to prove that a displayed
+    /// command round-trips into exactly the original argv when pasted into
+    /// a shell, rather than letting embedded metacharacters spill into
+    /// extra words.
+    fn posix_split(input: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut in_word = false;
+        let mut chars = input.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                ' ' | '\t' | '\n' => {
+                    if in_word {
+                        words.push(std::mem::take(&mut current));
+                        in_word = false;
+                    }
+                }
+                '\'' => {
+                    in_word = true;
+                    for nc in chars.by_ref() {
+                        if nc == '\'' {
+                            break;
+                        }
+                        current.push(nc);
+                    }
+                }
+                '"' => {
+                    in_word = true;
+                    while let Some(nc) = chars.next() {
+                        if nc == '"' {
+                            break;
+                        }
+                        if nc == '\\' {
+                            if let Some(&esc) = chars.peek() {
+                                if matches!(esc, '"' | '\\' | '$' | '`') {
+                                    chars.next();
+                                    current.push(esc);
+                                    continue;
+                                }
+                            }
+                        }
+                        current.push(nc);
+                    }
+                }
+                '\\' => {
+                    in_word = true;
+                    if let Some(nc) = chars.next() {
+                        current.push(nc);
+                    }
+                }
+                _ => {
+                    in_word = true;
+                    current.push(c);
+                }
+            }
+        }
+        if in_word {
+            words.push(current);
+        }
+        words
+    }
+
+    #[test]
+    fn display_round_trips_through_posix_shell_word_splitting() {
+        let cmd = ResumeCommand {
+            program: "claude".to_string(),
+            args: vec![
+                "--resume".to_string(),
+                "x\" && echo pwned && echo \"".to_string(),
+            ],
+            cwd: PathBuf::from("/tmp"),
+            project_moved: false,
+            transcript: String::new(),
+        };
+
+        let displayed = cmd.display();
+        let words = posix_split(&displayed);
+
+        let mut expected = vec![cmd.program.clone()];
+        expected.extend(cmd.args.iter().cloned());
+        assert_eq!(
+            words, expected,
+            "displayed command did not round-trip to the original argv: {displayed}"
+        );
+    }
+
+    #[test]
+    fn display_escapes_embedded_single_quotes() {
+        let cmd = ResumeCommand {
+            program: "claude".to_string(),
+            args: vec!["it's \"tricky\"".to_string()],
+            cwd: PathBuf::from("/tmp"),
+            project_moved: false,
+            transcript: String::new(),
+        };
+
+        let displayed = cmd.display();
+        assert_eq!(displayed, "claude 'it'\\''s \"tricky\"'");
+    }
 }

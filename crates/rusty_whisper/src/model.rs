@@ -75,7 +75,24 @@ fn read_i32(r: &mut impl Read) -> io::Result<i32> {
     Ok(i32::from_le_bytes(b))
 }
 
+/// Sane ceiling for any single length/count field read from a legacy .bin
+/// header. whisper.cpp's largest real models are well under this; anything
+/// past it is a corrupt or hostile file (e.g. a sign-extended -1 length),
+/// not a legitimate model.
+const MAX_LEN: usize = 1 << 28;
+
+fn check_len(n: usize, what: &str) -> io::Result<usize> {
+    if n > MAX_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{what} length {n} exceeds sane maximum ({MAX_LEN})"),
+        ));
+    }
+    Ok(n)
+}
+
 fn read_f32_vec(r: &mut impl Read, n: usize) -> io::Result<Vec<f32>> {
+    let n = check_len(n, "f32 vector")?;
     let mut bytes = vec![0u8; n * 4];
     r.read_exact(&mut bytes)?;
     Ok(bytes
@@ -134,21 +151,22 @@ pub fn load_model(r: &mut impl Read) -> io::Result<Model> {
     };
 
     // Embedded mel filterbank.
-    let n_mel = read_i32(r)? as usize;
-    let n_fft_bins = read_i32(r)? as usize;
+    let n_mel = check_len(read_i32(r)? as usize, "n_mel")?;
+    let n_fft_bins = check_len(read_i32(r)? as usize, "n_fft_bins")?;
     let mel_filters = read_f32_vec(r, n_mel * n_fft_bins)?;
 
     // Vocab. The file may hold fewer tokens than hparams.n_vocab; whisper.cpp
     // synthesizes placeholder names for the rest — ids are what matter.
-    let n_tokens = read_i32(r)? as usize;
-    let mut vocab = Vec::with_capacity(hp.n_vocab as usize);
+    let n_tokens = check_len(read_i32(r)? as usize, "n_tokens")?;
+    let n_vocab = check_len(hp.n_vocab as usize, "n_vocab")?;
+    let mut vocab = Vec::with_capacity(n_vocab);
     for _ in 0..n_tokens {
-        let len = read_i32(r)? as usize;
+        let len = check_len(read_i32(r)? as usize, "vocab token")?;
         let mut word = vec![0u8; len];
         r.read_exact(&mut word)?;
         vocab.push(word);
     }
-    for i in n_tokens..hp.n_vocab as usize {
+    for i in n_tokens..n_vocab {
         vocab.push(format!("[_extra_token_{i}]").into_bytes());
     }
 
@@ -160,17 +178,32 @@ pub fn load_model(r: &mut impl Read) -> io::Result<Model> {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         };
-        let name_len = read_i32(r)? as usize;
+        if n_dims > 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("tensor has {n_dims} dims, expected at most 3"),
+            ));
+        }
+        let name_len = check_len(read_i32(r)? as usize, "tensor name")?;
         let dtype = read_i32(r)?;
         let mut dims = [1usize; 3];
         for d in dims.iter_mut().take(n_dims) {
-            *d = read_i32(r)? as usize;
+            *d = check_len(read_i32(r)? as usize, "tensor dim")?;
         }
         let mut name = vec![0u8; name_len];
         r.read_exact(&mut name)?;
         let name = String::from_utf8_lossy(&name).into_owned();
 
-        let n_elems: usize = dims.iter().product();
+        let n_elems: usize = dims
+            .iter()
+            .try_fold(1usize, |a, &d| a.checked_mul(d))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("tensor '{name}': dims overflow"),
+                )
+            })?;
+        let n_elems = check_len(n_elems, "tensor elements")?;
         // ggml stores dims innermost-first (ne[0] = fastest-varying); flip to
         // our row-major convention where the last dim is fastest.
         let shape: Vec<usize> = dims[..n_dims.max(1)].iter().rev().cloned().collect();
@@ -382,6 +415,47 @@ mod tests {
     #[test]
     fn rejects_bad_magic() {
         let buf = 0xdeadbeefu32.to_le_bytes().to_vec();
+        assert!(load_model(&mut Cursor::new(buf)).is_err());
+    }
+
+    #[test]
+    fn rejects_tensor_with_too_many_dims() {
+        let mut buf: Vec<u8> = Vec::new();
+        let w32 = |b: &mut Vec<u8>, v: i32| b.extend_from_slice(&v.to_le_bytes());
+        w32(&mut buf, GGML_MAGIC as i32);
+        for v in [3, 1500, 8, 2, 4, 448, 8, 2, 4, 2, 1] {
+            w32(&mut buf, v);
+        }
+        w32(&mut buf, 0); // n_mel
+        w32(&mut buf, 0); // n_fft_bins
+        w32(&mut buf, 0); // n_tokens
+        // Tensor descriptor declaring 4 dims — the fixed `dims` array only
+        // holds 3, so this used to panic on an out-of-bounds slice.
+        w32(&mut buf, 4); // n_dims
+        w32(&mut buf, 1); // name_len
+        w32(&mut buf, 0); // dtype f32
+        for _ in 0..4 {
+            w32(&mut buf, 1); // dims
+        }
+        buf.push(b'w');
+        assert!(load_model(&mut Cursor::new(buf)).is_err());
+    }
+
+    #[test]
+    fn rejects_sign_extended_negative_tensor_name_len() {
+        let mut buf: Vec<u8> = Vec::new();
+        let w32 = |b: &mut Vec<u8>, v: i32| b.extend_from_slice(&v.to_le_bytes());
+        w32(&mut buf, GGML_MAGIC as i32);
+        for v in [3, 1500, 8, 2, 4, 448, 8, 2, 4, 2, 1] {
+            w32(&mut buf, v);
+        }
+        w32(&mut buf, 0); // n_mel
+        w32(&mut buf, 0); // n_fft_bins
+        w32(&mut buf, 0); // n_tokens
+        w32(&mut buf, 1); // n_dims
+        w32(&mut buf, -1); // name_len = -1, sign-extends to usize::MAX
+        w32(&mut buf, 0); // dtype f32
+        w32(&mut buf, 1); // dims[0]
         assert!(load_model(&mut Cursor::new(buf)).is_err());
     }
 }

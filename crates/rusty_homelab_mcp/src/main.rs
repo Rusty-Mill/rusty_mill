@@ -15,10 +15,12 @@
 //!     --proxmox-insecure
 //! ```
 //!
-//! or over Streamable HTTP with `--transport http --bind 127.0.0.1:8080`.
+//! or over Streamable HTTP with `--transport http --bind 127.0.0.1:8080
+//! --auth-token <token>` (the HTTP transport is open to any caller
+//! unless `--auth-token`/`HOMELAB_MCP_AUTH_TOKEN` is set).
 //! Every flag has an environment fallback (`PROXMOX_URL`, `OPNSENSE_URL`,
-//! `FEDORA_AGENT_URL`, `FEDORA_HOSTS_FILE`, ...); see `--help` for the
-//! full list.
+//! `FEDORA_AGENT_URL`, `FEDORA_HOSTS_FILE`, `HOMELAB_MCP_AUTH_TOKEN`,
+//! ...); see `--help` for the full list.
 
 mod config;
 mod hosts;
@@ -52,8 +54,21 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
         eprintln!("error: {msg}");
         std::process::exit(2);
     });
+    let auth_config = cli.auth_config().unwrap_or_else(|msg| {
+        eprintln!("error: {msg}");
+        std::process::exit(2);
+    });
 
-    let server_config: rusty_mcp::ServerConfig = cli.mcp.into();
+    let mut server_config: rusty_mcp::ServerConfig = cli.mcp.into();
+    if let Some(auth) = auth_config {
+        match &mut server_config.transport {
+            rusty_mcp::Transport::Http(http_config) => http_config.auth = Some(auth),
+            rusty_mcp::Transport::Stdio => {
+                eprintln!("error: --auth-token/HOMELAB_MCP_AUTH_TOKEN requires --transport http");
+                std::process::exit(2);
+            }
+        }
+    }
     rusty_mcp::telemetry::init(&server_config.log_filter);
 
     if proxmox_config.is_none() && opnsense_config.is_none() && fedora_hosts.is_empty() {

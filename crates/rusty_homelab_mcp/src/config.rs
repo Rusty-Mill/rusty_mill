@@ -1,9 +1,12 @@
-//! Extra CLI flags: where to find Proxmox and/or OPNsense, on top of the
-//! scaffold's standard transport/logging flags.
+//! Extra CLI flags: where to find Proxmox and/or OPNsense, and how to
+//! require bearer-token authorization on the HTTP transport, on top of
+//! the scaffold's standard transport/logging flags.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
+use rusty_mcp::auth::{AuthConfig, StaticTokenValidator, VerifiedToken};
 use rusty_opnsense::OpnsenseConfig;
 use rusty_proxmox::ProxmoxConfig;
 
@@ -77,6 +80,29 @@ pub struct HomelabCli {
     /// `deploy/hosts.toml.example`.
     #[arg(long, env = "FEDORA_HOSTS_FILE")]
     pub fedora_hosts_file: Option<PathBuf>,
+
+    /// Shared-secret bearer token required on every request to the HTTP
+    /// endpoint (HTTP transport only; stdio has no use for it). Unset
+    /// leaves the endpoint open, which is only safe behind a gateway that
+    /// already authenticates callers -- given this server can power off
+    /// Proxmox VMs, delete OPNsense firewall rules, and write Fedora
+    /// config files, set this for any deployment reachable beyond
+    /// localhost.
+    ///
+    /// This is a static shared secret, not an OAuth token issued by a
+    /// real authorization server -- adequate for a homelab's own
+    /// clients, not a substitute for real token issuance at larger
+    /// scale.
+    #[arg(long, env = "HOMELAB_MCP_AUTH_TOKEN")]
+    pub auth_token: Option<String>,
+
+    /// Canonical resource URL bound into the required token's audience,
+    /// e.g. `https://homelab-mcp.example.com/mcp`. Only used when
+    /// `--auth-token` is set. Defaults to `http://<bind><path>` (this
+    /// server's own `--bind`/`--path`) -- override it when the server
+    /// sits behind a reverse proxy under a different public URL.
+    #[arg(long, env = "HOMELAB_MCP_AUTH_RESOURCE_URL")]
+    pub auth_resource_url: Option<String>,
 }
 
 impl HomelabCli {
@@ -142,6 +168,34 @@ impl HomelabCli {
             self.fedora_hosts_file.as_deref(),
             self.fedora_agent_url.clone(),
         )
+    }
+
+    /// Builds OAuth 2.1 resource-server authorization from `--auth-token`,
+    /// or `Ok(None)` if it's unset -- an HTTP endpoint with no
+    /// `--auth-token` is left open, same as every other optional backend
+    /// here.
+    ///
+    /// The audience bound into the required token defaults to
+    /// `http://<bind><path>` (this server's own `--bind`/`--path`) unless
+    /// `--auth-resource-url` overrides it.
+    pub fn auth_config(&self) -> Result<Option<Arc<AuthConfig>>, String> {
+        let Some(token) = &self.auth_token else {
+            return Ok(None);
+        };
+
+        let resource = self
+            .auth_resource_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}{}", self.mcp.bind, self.mcp.path));
+
+        let validator = StaticTokenValidator::new()
+            .with_token(token.clone(), VerifiedToken::new([resource.clone()]));
+
+        let auth = AuthConfig::new(&resource, Arc::new(validator)).map_err(|err| {
+            format!("--auth-resource-url `{resource}` is not usable as a resource URI: {err}")
+        })?;
+
+        Ok(Some(Arc::new(auth)))
     }
 }
 
@@ -216,5 +270,58 @@ mod tests {
             .expect("parses");
 
         assert!(cli.proxmox_config().is_err());
+    }
+
+    #[test]
+    fn no_auth_token_flag_leaves_the_http_endpoint_open() {
+        let cli = HomelabCli::try_parse_from(["homelab", "--transport", "http"]).expect("parses");
+        assert!(cli.auth_config().expect("no error").is_none());
+    }
+
+    #[test]
+    fn an_auth_token_flag_enables_bearer_authorization_on_http_config() {
+        let cli = HomelabCli::try_parse_from([
+            "homelab",
+            "--transport",
+            "http",
+            "--auth-token",
+            "s3cr3t",
+        ])
+        .expect("parses");
+
+        let auth = cli
+            .auth_config()
+            .expect("no error")
+            .expect("auth is configured");
+        assert_eq!(auth.resource(), "http://127.0.0.1:8080/mcp");
+
+        let mut server_config: rusty_mcp::ServerConfig = cli.mcp.into();
+        match &mut server_config.transport {
+            rusty_mcp::Transport::Http(http_config) => http_config.auth = Some(auth),
+            rusty_mcp::Transport::Stdio => panic!("expected http transport"),
+        }
+
+        match server_config.transport {
+            rusty_mcp::Transport::Http(http_config) => assert!(http_config.auth.is_some()),
+            rusty_mcp::Transport::Stdio => panic!("expected http transport"),
+        }
+    }
+
+    #[test]
+    fn an_auth_resource_url_override_is_used_as_the_audience() {
+        let cli = HomelabCli::try_parse_from([
+            "homelab",
+            "--auth-token",
+            "s3cr3t",
+            "--auth-resource-url",
+            "https://homelab-mcp.example.com/mcp",
+        ])
+        .expect("parses");
+
+        let auth = cli
+            .auth_config()
+            .expect("no error")
+            .expect("auth is configured");
+        assert_eq!(auth.resource(), "https://homelab-mcp.example.com/mcp");
     }
 }

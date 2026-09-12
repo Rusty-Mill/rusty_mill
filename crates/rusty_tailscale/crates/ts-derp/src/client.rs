@@ -12,6 +12,8 @@
 //! `rusty_http`'s job, not hand-rolled here anymore -- see `DESIGN.md`'s
 //! dependency table.
 
+use std::time::Duration;
+
 use crypto_box::{
     PublicKey, SalsaBox, SecretKey,
     aead::{Aead, AeadCore, OsRng},
@@ -34,6 +36,12 @@ const KEY_LEN: usize = 32;
 const MAX_INFO_LEN: usize = 4 << 10;
 /// Cap on the HTTP/1.1 upgrade response head we'll buffer before giving up.
 const MAX_HEAD_LEN: usize = 64 * 1024;
+/// Bound on TCP connect + the full handshake sequence; a relay that never
+/// responds must not hang the caller forever.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap on frames read while waiting for ServerInfo during the handshake,
+/// so a relay that never sends it can't hang us reading frames forever.
+const MAX_HANDSHAKE_FRAMES: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DerpError {
@@ -55,6 +63,8 @@ pub enum DerpError {
     PacketTooBig(usize),
     #[error("DERP connection closed")]
     Closed,
+    #[error("DERP connect/handshake timed out")]
+    Timeout,
 }
 
 /// A relayed packet: the peer node key and opaque payload.
@@ -108,10 +118,29 @@ impl DerpClient {
     /// the upgrade and NaCl-box handshake using `node_key` as this client's
     /// identity.
     pub async fn connect(url: &str, node_key: &NodePrivate) -> Result<Self, DerpError> {
-        let (host_port, host_header) = parse_http_url(url)?;
-        let stream = TcpStream::connect(&host_port).await?;
-        stream.set_nodelay(true).ok();
-        Self::handshake_over(stream, &host_header, node_key).await
+        Self::connect_with_timeout(url, node_key, HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Connects with an explicit bound on TCP connect + the full handshake
+    /// sequence, rather than the [`HANDSHAKE_TIMEOUT`] default `connect`
+    /// uses. Exists so tests can exercise the hang/timeout path without
+    /// waiting out the production timeout.
+    async fn connect_with_timeout(
+        url: &str,
+        node_key: &NodePrivate,
+        timeout: Duration,
+    ) -> Result<Self, DerpError> {
+        match tokio::time::timeout(timeout, async {
+            let (host_port, host_header) = parse_http_url(url)?;
+            let stream = TcpStream::connect(&host_port).await?;
+            stream.set_nodelay(true).ok();
+            Self::handshake_over(stream, &host_header, node_key).await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(DerpError::Timeout),
+        }
     }
 
     /// The relay server's node public key.
@@ -181,10 +210,18 @@ impl DerpClient {
         client_info.extend_from_slice(&boxed);
         frame::write_frame(&mut write_half, FrameType::ClientInfo, &client_info).await?;
 
-        // 3. Read ServerInfo (naclbox), validate it opens with our key.
-        let (t, payload) =
-            frame::read_frame(&mut read_half, (NONCE_LEN + MAX_INFO_LEN) as u32).await?;
-        if t == FrameType::ServerInfo {
+        // 3. Read frames until ServerInfo (naclbox) arrives, validating it
+        // opens with our key. Some servers send other frames (KeepAlive,
+        // etc.) first, but ServerInfo is mandatory and must authenticate --
+        // silently proceeding without ever seeing one would let an attacker
+        // skip authentication entirely.
+        let mut server_info_seen = false;
+        for _ in 0..MAX_HANDSHAKE_FRAMES {
+            let (t, payload) =
+                frame::read_frame(&mut read_half, (NONCE_LEN + MAX_INFO_LEN) as u32).await?;
+            if t != FrameType::ServerInfo {
+                continue;
+            }
             if payload.len() < NONCE_LEN {
                 return Err(DerpError::BadServerInfo);
             }
@@ -192,9 +229,12 @@ impl DerpClient {
             salsa
                 .decrypt(nonce_bytes.into(), ct)
                 .map_err(|_| DerpError::BadServerInfo)?;
+            server_info_seen = true;
+            break;
         }
-        // Some servers may send other frames first; we don't require
-        // ServerInfo to proceed, but a present one must authenticate.
+        if !server_info_seen {
+            return Err(DerpError::BadServerInfo);
+        }
 
         // Spawn reader + writer tasks.
         let (outbound_tx, outbound_rx) = mpsc::channel::<Outbound>(256);
@@ -357,6 +397,11 @@ fn parse_http_url(url: &str) -> Result<(String, String), DerpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
 
     #[test]
     fn url_parsing() {
@@ -366,5 +411,110 @@ mod tests {
         );
         assert!(parse_http_url("https://x:1").is_err());
         assert!(parse_http_url("http://nohost").is_err());
+    }
+
+    /// A relay that accepts the TCP connection but never sends a byte back
+    /// must not hang `connect` forever -- it should give up within the
+    /// caller-supplied bound.
+    #[tokio::test]
+    async fn connect_times_out_on_unresponsive_relay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Deliberately never `accept`/write anything back: the kernel
+        // completes the TCP handshake from its listen backlog, so `connect`
+        // succeeds at the socket level but every subsequent read hangs.
+
+        let key = NodePrivate::generate();
+        let url = format!("http://{addr}");
+        let start = Instant::now();
+        let result = DerpClient::connect_with_timeout(&url, &key, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(DerpError::Timeout) => {}
+            Err(other) => panic!("expected Timeout, got: {other}"),
+            Ok(_) => panic!("expected a timeout error, got Ok"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "connect_with_timeout should give up quickly, took {elapsed:?}"
+        );
+
+        drop(listener);
+    }
+
+    /// A relay that sends a legitimate frame (KeepAlive) before ServerInfo
+    /// must not cause the handshake to proceed unvalidated: a ServerInfo
+    /// box that fails to authenticate must fail the handshake loudly, even
+    /// when it isn't the very first frame after ClientInfo.
+    #[tokio::test]
+    async fn handshake_rejects_unvalidated_serverinfo_after_other_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_key = NodePrivate::generate();
+
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Consume the HTTP upgrade request, then answer with 101.
+            let mut buf = vec![0u8; 4096];
+            let mut head_len = 0;
+            loop {
+                let n = stream.read(&mut buf[head_len..]).await.unwrap();
+                head_len += n;
+                if buf[..head_len].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: DERP\r\n\r\n",
+                )
+                .await
+                .unwrap();
+
+            // ServerKey greeting: magic + a server node key (irrelevant here).
+            let server_key = NodePrivate::generate();
+            let mut greeting = Vec::new();
+            greeting.extend_from_slice(MAGIC);
+            greeting.extend_from_slice(&server_key.public().0);
+            frame::write_frame(&mut stream, FrameType::ServerKey, &greeting)
+                .await
+                .unwrap();
+
+            // Drain the ClientInfo frame the client sends in response.
+            let _ = frame::read_frame(&mut stream, 4096).await.unwrap();
+
+            // Send a KeepAlive first -- a legitimate frame type a relay may
+            // send before ServerInfo.
+            frame::write_frame(&mut stream, FrameType::KeepAlive, &[])
+                .await
+                .unwrap();
+
+            // Then a ServerInfo frame whose box does NOT open with the
+            // client's key (garbage ciphertext). A correct handshake must
+            // validate this and fail rather than silently accepting it.
+            let mut bogus = vec![0u8; NONCE_LEN + 16];
+            bogus[NONCE_LEN..].fill(0xAA);
+            frame::write_frame(&mut stream, FrameType::ServerInfo, &bogus)
+                .await
+                .unwrap();
+
+            // Keep the connection open briefly so the client's read doesn't
+            // race a reset.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let url = format!("http://{addr}");
+        let result = DerpClient::connect_with_timeout(&url, &client_key, Duration::from_secs(5)).await;
+
+        match result {
+            Err(DerpError::BadServerInfo) => {}
+            Err(other) => panic!("expected BadServerInfo, got: {other}"),
+            Ok(_) => panic!("handshake accepted an unvalidated ServerInfo frame sent after a KeepAlive"),
+        }
+
+        server_task.await.unwrap();
     }
 }

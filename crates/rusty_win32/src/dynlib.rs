@@ -24,7 +24,7 @@ unsafe extern "system" {
 /// Loads `name` (e.g. `"vulkan-1.dll"`) via `LoadLibraryW`, searching the
 /// standard DLL search order.
 pub fn load_library(name: &str) -> Result<RawHandle, Win32Error> {
-    let wide = to_wide(name);
+    let wide = to_wide(name)?;
     // SAFETY: `wide` is a valid null-terminated UTF-16 string for the
     // duration of this call.
     let handle = unsafe { LoadLibraryW(wide.as_ptr()) };

@@ -755,6 +755,12 @@ pub(crate) struct KernelToolBridge {
     /// (`.forge/agent/snapshots/<id>.json`) for `session_changes` /
     /// `session_revert`.
     pub(crate) session_id: Option<String>,
+    /// Nesting depth of the session driving this bridge (RFC 0007
+    /// follow-up). Stamped onto every outgoing `delegate` tool call so
+    /// `handlers::delegate::delegate_shared` can enforce a recursion
+    /// cap — never trusted from the model, since `delegate_to_agent`'s
+    /// model-facing schema doesn't expose this field at all.
+    pub(crate) delegation_depth: u32,
 }
 
 #[async_trait]
@@ -775,12 +781,26 @@ impl ToolDispatcher for KernelToolBridge {
             }
             _ => Vec::new(),
         };
+        // RFC 0007 follow-up — stamp this session's own delegation depth
+        // onto every outgoing `delegate` call so `delegate_shared` can
+        // enforce a recursion cap. Overrides (rather than trusts)
+        // whatever the model itself may have set, since the tool's
+        // model-facing schema doesn't expose this field at all.
+        let mut dispatch_args = call.args.clone();
+        if call.target_plugin_id == "com.nexus.agent" && call.command_id == "delegate" {
+            if let Some(obj) = dispatch_args.as_object_mut() {
+                obj.insert(
+                    "delegation_depth".to_string(),
+                    serde_json::Value::from(self.delegation_depth),
+                );
+            }
+        }
         let result = self
             .ctx
             .ipc_call(
                 &call.target_plugin_id,
                 &call.command_id,
-                call.args.clone(),
+                dispatch_args,
                 timeout,
             )
             .await

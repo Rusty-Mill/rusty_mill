@@ -45,6 +45,12 @@ impl<R: Read> WavStream<R> {
             let size = u32::from_le_bytes(chunk_hdr[4..8].try_into().unwrap()) as usize;
             match &chunk_hdr[0..4] {
                 b"fmt " => {
+                    if size < 16 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("fmt chunk too small ({size} bytes, need >= 16)"),
+                        ));
+                    }
                     let mut fmt = vec![0u8; size];
                     r.read_exact(&mut fmt)?;
                     format = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
@@ -132,6 +138,12 @@ pub fn read_wav(r: &mut impl Read) -> io::Result<WavData> {
         let size = u32::from_le_bytes(chunk_hdr[4..8].try_into().unwrap()) as usize;
         match id {
             b"fmt " => {
+                if size < 16 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("fmt chunk too small ({size} bytes, need >= 16)"),
+                    ));
+                }
                 let mut fmt = vec![0u8; size];
                 r.read_exact(&mut fmt)?;
                 format = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
@@ -346,6 +358,24 @@ mod tests {
     fn rejects_non_wav() {
         let out = read_wav(&mut Cursor::new(b"OggS but not really a wav".to_vec()));
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn rejects_undersized_fmt_chunk() {
+        // `fmt ` chunk declares only 2 bytes of payload — far short of the
+        // 16 needed to hold format/channels/rate/bits, which used to panic
+        // on an out-of-bounds slice when read.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&24u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&2u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&0u32.to_le_bytes());
+
+        assert!(read_wav(&mut Cursor::new(wav.clone())).is_err());
+        assert!(WavStream::new(Cursor::new(wav)).is_err());
     }
 
     #[test]

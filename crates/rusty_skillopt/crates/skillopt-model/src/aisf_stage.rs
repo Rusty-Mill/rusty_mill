@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use skillopt_core::{ChatBackend, Message};
@@ -35,29 +34,17 @@ fn extract_skill_text(wrapped: &str) -> anyhow::Result<&str> {
     Ok(&wrapped[start..start + end])
 }
 
-/// Deletes its directory on drop. Best-effort: a failed cleanup leaves a
-/// few small `.md` files under the OS temp dir, not a correctness problem,
-/// so the error is swallowed rather than propagated from a `Drop` impl.
-struct ScratchDir(PathBuf);
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A directory name unique per call within this process. The engine runs
-/// rollouts sequentially today (see `docs/USAGE.md`), so two calls never
-/// race in practice -- but naming it off a counter rather than assuming
-/// that invariant holds forever costs nothing.
-fn new_scratch_dir(stage: &str) -> std::io::Result<ScratchDir> {
-    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("skillopt-aisf-{stage}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(ScratchDir(dir))
+/// Creates a fresh, randomly-named scratch directory under the OS temp
+/// dir. Backed by `tempfile`'s atomic, exclusive-create path generation
+/// rather than a name built from `std::process::id()` plus a counter: a
+/// predictable path in a shared temp dir can be pre-planted as a symlink
+/// by another local user before this call ever runs, and a plain
+/// `std::fs::create_dir_all` would happily follow it. The returned
+/// `TempDir` deletes its directory on drop -- a leftover temp directory is
+/// clutter, not a correctness problem.
+fn new_scratch_dir(stage: &str) -> std::io::Result<tempfile::TempDir> {
+    let prefix = format!("skillopt-aisf-{stage}-");
+    tempfile::Builder::new().prefix(&prefix).tempdir()
 }
 
 /// A `ChatBackend` that runs one AISF factory stage's agent to completion
@@ -99,12 +86,12 @@ impl ChatBackend for AisfStageBackend {
         let skill_text = extract_skill_text(&messages[0].content)?;
 
         let scratch = new_scratch_dir(&self.stage)?;
-        std::fs::write(scratch.0.join(format!("{}.md", self.stage)), skill_text)?;
+        std::fs::write(scratch.path().join(format!("{}.md", self.stage)), skill_text)?;
 
         let mut child = tokio::process::Command::new(&self.binary_path)
             .arg("eval-stage")
             .arg(&self.stage)
-            .env("FACTORY_PROMPTS_DIR", &scratch.0)
+            .env("FACTORY_PROMPTS_DIR", scratch.path())
             // Harmless when a real ANTHROPIC_API_KEY is set in this
             // process's own environment -- AISF's eval-stage checks for
             // a key first and only consults this as a fallback -- but it
@@ -141,6 +128,26 @@ impl ChatBackend for AisfStageBackend {
 mod tests {
     use super::*;
     use skillopt_core::{prompts::executor_system_prompt, Skill};
+
+    #[test]
+    fn scratch_dir_path_is_not_predictable_from_pid_and_counter() {
+        let d1 = new_scratch_dir("triage").unwrap();
+        let d2 = new_scratch_dir("triage").unwrap();
+        assert_ne!(d1.path(), d2.path());
+
+        // The pre-fix implementation built the whole path from just
+        // `std::process::id()` plus an incrementing counter, so any local
+        // user could pre-plant a symlink at that exact path before this
+        // call ever ran. None of the paths that scheme could have produced
+        // may match the real, randomized path.
+        let pid = std::process::id();
+        let tmp = std::env::temp_dir();
+        for n in 0..1000u64 {
+            let guessed = tmp.join(format!("skillopt-aisf-triage-{pid}-{n}"));
+            assert_ne!(d1.path(), guessed);
+            assert_ne!(d2.path(), guessed);
+        }
+    }
 
     #[test]
     fn unwraps_skillopt_cores_executor_system_prompt() {

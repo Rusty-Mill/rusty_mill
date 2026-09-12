@@ -13927,6 +13927,7 @@ dependencies = [
  "serde",
  "serde_json",
  "skillopt-core",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

@@ -15,7 +15,7 @@
 //! `rusty_proxmox` already use against *their* upstream APIs.
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -35,6 +35,15 @@ pub struct AgentState<S, P> {
     pub dnf: P,
     pub config: ConfigStore,
 }
+
+/// Hard cap on a request body this agent will read into memory. Every
+/// mutating route here takes a handful of package/unit names or one
+/// config file's contents -- nothing close to this -- so an oversized
+/// (or lying) `Content-Length`, or a body that just keeps streaming, is
+/// rejected long before it can be read into memory, rather than handing
+/// an unbounded `Read::read_to_string` a socket controlled by whoever
+/// can reach this agent's bind address.
+const MAX_BODY_BYTES: u64 = 1024 * 1024;
 
 /// Binds `addr` (a private/Tailscale address, never `0.0.0.0` -- see this
 /// crate's README) and serves requests until the process exits.
@@ -70,17 +79,13 @@ where
     let params = parse_query(query);
     let method = request.method().clone();
 
-    let mut body = String::new();
-    if matches!(method, Method::Post | Method::Put)
-        && request.as_reader().read_to_string(&mut body).is_err()
-    {
-        respond(
-            request,
-            400,
-            &error_body("request body was not valid utf-8"),
-        );
-        return;
-    }
+    let body = match read_body(&method, &mut request) {
+        Ok(body) => body,
+        Err((status, body)) => {
+            respond(request, status, &body);
+            return;
+        }
+    };
 
     let result = route(state, &method, seg_refs.as_slice(), &params, &body);
     match result {
@@ -90,6 +95,46 @@ where
             respond(request, status, &error_body(&err.to_string()));
         }
     }
+}
+
+/// Reads `request`'s body for a mutating method, capped at
+/// [`MAX_BODY_BYTES`]. Every other method in this API is bodyless, so
+/// this returns an empty body for them without touching the reader.
+/// Returns the `(status, error body)` `handle` should respond with
+/// instead on a body that's not valid UTF-8 or exceeds the cap, whether
+/// that's caught up front from a declared `Content-Length` or only once
+/// actually streaming past it.
+fn read_body(method: &Method, request: &mut Request) -> Result<String, (u16, Value)> {
+    if !matches!(method, Method::Post | Method::Put) {
+        return Ok(String::new());
+    }
+
+    // A `Content-Length` that already announces more than the cap is
+    // rejected without reading a single byte of the body.
+    if request
+        .body_length()
+        .is_some_and(|len| len as u64 > MAX_BODY_BYTES)
+    {
+        return Err((413, error_body(&body_too_large_message())));
+    }
+
+    // A missing/understated `Content-Length` (chunked transfer, or a
+    // lying client) still can't grow `body` past the cap: `take` stops
+    // the reader dead at `MAX_BODY_BYTES + 1` bytes read, so the length
+    // check below always fires before anything unbounded is buffered.
+    let mut body = String::new();
+    let mut limited = request.as_reader().take(MAX_BODY_BYTES + 1);
+    if limited.read_to_string(&mut body).is_err() {
+        return Err((400, error_body("request body was not valid utf-8")));
+    }
+    if body.len() as u64 > MAX_BODY_BYTES {
+        return Err((413, error_body(&body_too_large_message())));
+    }
+    Ok(body)
+}
+
+fn body_too_large_message() -> String {
+    format!("request body exceeds {MAX_BODY_BYTES} byte limit")
 }
 
 fn route<S, P>(
@@ -310,6 +355,7 @@ fn respond(request: Request, status: u16, body: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiny_http::{Header, TestRequest};
 
     #[test]
     fn percent_decode_handles_escapes_and_plus() {
@@ -355,5 +401,37 @@ mod tests {
         );
         assert_eq!(parse_unit_type("timer").expect("valid"), UnitType::Timer);
         assert_eq!(parse_unit_type("socket").expect("valid"), UnitType::Socket);
+    }
+
+    #[test]
+    fn read_body_accepts_a_small_body_under_the_cap() {
+        let mut request: Request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_body("{\"action\":\"restart\"}")
+            .into();
+
+        let body = read_body(&Method::Post, &mut request).expect("small body is accepted");
+        assert_eq!(body, "{\"action\":\"restart\"}");
+    }
+
+    #[test]
+    fn read_body_rejects_a_content_length_over_the_cap_without_reading_it() {
+        // The declared length is well past the cap; the body itself is
+        // tiny. If `read_body` ever fell back to reading it all, this
+        // would still pass -- the point is that it must reject on the
+        // header alone, which `body_length()` reports before a single
+        // body byte is read.
+        let lying_length = (MAX_BODY_BYTES + 1).to_string();
+        let content_length: Header = format!("Content-Length: {lying_length}")
+            .parse()
+            .expect("valid header");
+        let mut request: Request = TestRequest::new()
+            .with_method(Method::Post)
+            .with_header(content_length)
+            .into();
+
+        let err = read_body(&Method::Post, &mut request)
+            .expect_err("a body over the cap must be rejected");
+        assert_eq!(err.0, 413);
     }
 }
