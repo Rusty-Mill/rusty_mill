@@ -9,6 +9,13 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-core` (`rusty_hister`'s Phase 1): the `Document` working
+  type, the `Extractor` trait and its supporting types (`Capabilities`,
+  `ExtractorConfig`, `ExtractOutcome`/`PreviewOutcome`, `PreviewResponse` —
+  capability inventory §4.1), and the shared `HisterError` type, on
+  `rusty_json` (for `Metadata`) and `rusty_err` (for the error type). 16
+  unit tests, clippy/fmt clean. First real implementation in the cluster;
+  every other `rusty-hister-*` crate is still a skeleton.
 - Bootstrapped `rusty_hister` — a native (not `git subtree`-imported) crate
   cluster under `crates/rusty_hister/` for a Rust port of
   [asciimoo/hister](https://github.com/asciimoo/hister). Eight new

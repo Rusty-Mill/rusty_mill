@@ -13,6 +13,53 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Start rusty_hister Phase 1: implement rusty-hister-core
+**2026-09-12** · branch [`claude/hister-phase1-core`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-core)
+
+First real implementation in the `rusty_hister` cluster (previously all
+eight crates were empty skeletons). Scoped to `rusty-hister-core` alone —
+the shared contract every other `rusty-hister-*` crate depends on — rather
+than all of Phase 1 (`rusty-hister-model`, `-extractor`, `-crawler`'s `http`
+backend) in one PR, matching this project's established pattern of
+PR-sized increments.
+
+- **Added:** `Document` — the extractor pipeline's working document type
+  (url, title, text, html, favicon, label, document type, language,
+  metadata), distinct from `rusty-hister-model`'s persisted `History`/`Link`
+  rows. `DocumentType` (`Web`/`Local`/`RemoteFile`) deliberately leaves its
+  wire-format integer encoding unassigned — capability inventory review
+  only confirmed one value ("2 = remote-file snapshot"), and v1's
+  byte-compatibility requirement means guessing the rest would risk a wire
+  mismatch against real Hister clients; assign it when `rusty-hister-server`
+  needs it and the exact values can be confirmed.
+- **Added:** the `Extractor` trait (capability inventory §4.1) — `name`,
+  `description`, `capabilities`, `matches`, `extract`, `preview`, `config`,
+  `set_config` — plus `Capabilities` (independent enrich/extract/preview
+  booleans), `ExtractorConfig` (enabled + options bag, enabled by default),
+  `PreviewResponse`, and the tri-state `ExtractOutcome`/`PreviewOutcome`
+  enums reproducing Hister's `ExtractorSuccess`/`ExtractorFallback`/
+  `ExtractorAbort` chain-of-responsibility pattern as a closed Rust enum
+  (no opaque-type/factory-function indirection needed — the enum itself
+  makes a fourth state unrepresentable). Synchronous by design: every
+  extractor operates on an already-fetched `Document`, no I/O to make
+  async worth it. The chain-of-responsibility *registry* (§4.2) is left to
+  `rusty-hister-extractor`, which will depend on this trait.
+- **Added:** `HisterError`, on `rusty_err` (this workspace's own
+  `thiserror`+`anyhow` analog) — `InvalidConfig`, `Extraction`, and a
+  `BoxError`-backed catch-all, kept deliberately small pending concrete
+  failure modes from later phases rather than speculative variants.
+- **Verified:** `cargo test -p rusty-hister-core --all-features` (16/16),
+  `clippy --all-targets --all-features -- -D warnings`, and `fmt --check`
+  all clean; the other seven `rusty-hister-*` skeleton crates still build
+  against the new `rusty-hister-core` API; `check_workspace_deps.py`
+  (dependency-sovereignty policy) passes.
+- **Not done here:** `rusty-hister-model`, `rusty-hister-extractor`'s
+  registry and concrete extractors, and `rusty-hister-crawler`'s `http`
+  backend — the rest of Phase 1, tracked in `docs/roadmap/ROADMAP.md` as
+  separate follow-up increments.
+
+---
+
 ## Confirm rusty_hister's AGPL test-fixture licensing policy
 **2026-09-12** · branch [`claude/confirm-hister-licensing`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/confirm-hister-licensing)
 

@@ -9,3 +9,5 @@ authors = ["rusty_hister contributors"]
 publish = false
 
 [dependencies]
+rusty_json = { path = "../../../rusty_json" }
+rusty_err = { path = "../../../rusty_err" }
