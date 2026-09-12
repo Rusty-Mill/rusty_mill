@@ -1,19 +1,28 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1 started: `rusty-hister-core`).
+Last updated: 2026-09-12 (Phase 1: `rusty-hister-extractor`'s registry).
 
 ## Where this is
 
 **Phase 1 in progress.** Bootstrap, capability inventory, and all three
 ADRs (crate split/scope, search engine, JS-rendering crawler, and the
-licensing policy) are settled. `rusty-hister-core` now has real
-implementation — the `Document` working type, the `Extractor` trait and
-its supporting types (capability inventory §4.1), and the shared
-`HisterError` type — with unit tests, `clippy`, and `fmt` all clean. Every
-other `rusty-hister-*` crate is still an empty skeleton; `rusty-hister-model`,
-`rusty-hister-extractor`'s registry and concrete extractors, and
-`rusty-hister-crawler`'s `http` backend (the rest of Phase 1 per
-`docs/roadmap/ROADMAP.md`) have not started yet.
+licensing policy) are settled. Two crates now have real implementation:
+
+- `rusty-hister-core` — the `Document` working type, the `Extractor` trait
+  and its supporting types (capability inventory §4.1), and the shared
+  `HisterError` type.
+- `rusty-hister-extractor` — `Registry`, the chain-of-responsibility
+  mechanism (capability inventory §4.2): ordered registration
+  (`register`/`register_before`), two-phase enrich-then-extract execution,
+  a separate preview chain with case-insensitive starting-point selection,
+  and config merging (`apply_configs`). **No concrete extractors yet** —
+  the registry mechanism is generic over any `Extractor` impl; the 20
+  built-in extractors (capability inventory §4.3-§4.5) are a separate,
+  not-yet-started increment.
+
+Both have unit tests, `clippy`, and `fmt` clean. Still not started:
+`rusty-hister-model`, the concrete extractors, and `rusty-hister-crawler`'s
+`http` backend (the rest of Phase 1 per `docs/roadmap/ROADMAP.md`).
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -81,7 +90,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | Skeleton only |
-| `rusty-hister-extractor` | Skeleton only — will depend on `rusty-hister-core`'s `Extractor` trait for its registry and concrete extractors |
+| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging). 18 unit tests, clippy/fmt clean. No concrete extractors yet. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |

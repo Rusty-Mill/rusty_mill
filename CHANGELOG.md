@@ -9,6 +9,17 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `Registry` (`rusty_hister`'s Phase 1,
+  continued): the chain-of-responsibility mechanism (capability inventory
+  §4.2) — case-insensitive `register`/`register_before` with duplicate
+  rejection, the two-phase enrich-then-extract execution (enricher
+  fallback never stops the chain, only abort does; enrichment carries
+  forward into the extract phase), a separate preview chain with
+  case-insensitive starting-point selection (unregistered/disabled/
+  non-preview/non-matching starting points are hard errors), and
+  `apply_configs` for merging pre-parsed per-extractor config. 18 unit
+  tests, clippy/fmt clean. No concrete extractors yet — this is the
+  generic mechanism they'll register into.
 - `rusty-hister-core` (`rusty_hister`'s Phase 1): the `Document` working
   type, the `Extractor` trait and its supporting types (`Capabilities`,
   `ExtractorConfig`, `ExtractOutcome`/`PreviewOutcome`, `PreviewResponse` —

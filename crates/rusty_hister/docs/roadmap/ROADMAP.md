@@ -42,8 +42,13 @@ independent of ADR-0002/0003)
   (§7.3) including the three concrete migrations, UTC-everywhere timestamp
   discipline (§7.1), and the legacy `indexer_versions` read path (pending
   the open sign-off in PROJECT-STATUS.md).
-- `rusty-hister-extractor`: the SDK contract and chain-of-responsibility
-  registry (§4.1-§4.2), then the extractors in default-chain order (§4.3),
+- [x] `rusty-hister-extractor`: the chain-of-responsibility registry
+      (§4.2) — `Registry::register`/`register_before` (case-insensitive
+      duplicate rejection), the two-phase enrich-then-extract chain,
+      the separate preview chain with starting-point selection, and
+      `apply_configs`. Done — 18 unit tests, clippy/fmt clean. (The SDK
+      contract itself, §4.1, landed with `rusty-hister-core`.)
+- `rusty-hister-extractor`: the extractors in default-chain order (§4.3),
   starting with the ones that have existing Go test coverage (11 of 20) and
   budgeting fresh test authorship for the other 9.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
