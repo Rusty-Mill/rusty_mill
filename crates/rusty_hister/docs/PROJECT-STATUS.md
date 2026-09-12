@@ -1,7 +1,7 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s `history.go`
-query layer).
+Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s `user.go` query
+layer — this completes `rusty-hister-model`'s query layer).
 
 ## Where this is
 
@@ -109,13 +109,38 @@ licensing policy) are settled. Three crates now have real implementation:
   have broken re-recording history for the same URL, since
   `history_links`' unique index isn't scoped to active rows) — see this
   update's new open item below for what this means for the rest of the
-  schema's `#[table(soft_delete)]` columns. Only `user.go`'s auth/token
-  helpers remain unstarted in this crate's query layer.
+  schema's `#[table(soft_delete)]` columns. **`user.go`'s query layer is
+  ported too — the last of `rusty-hister-model`'s six Go model files,
+  completing this crate's query layer**: `User::{create, create_oauth,
+  delete_by_username, authenticate, get_by_token, regenerate_token,
+  get_by_username, get_by_id, regenerate_token_by_username, rename,
+  set_password, get_by_oauth_id, toggle_admin, rules_json,
+  set_rules_json}` (Go: `CreateUser`/`CreateOAuthUser`/`DeleteUser`/
+  `AuthenticateUser`/`GetUserByToken`/`RegenerateToken`/`GetUser`/
+  `GetUserByID`/`RegenerateTokenByUsername`/`UpdateUsername`/
+  `UpdatePassword`/`GetUserByOAuthID`/`ToggleAdmin`/`GetUserRules`/
+  `SaveUserRules`). A sovereignty-loop pass found no first-party `rusty_*`
+  crate for password hashing, so `create`/`set_password` hash with
+  **Argon2id, not Go's bcrypt** — `argon2` is already a workspace
+  dependency (`rusty_croc`'s PAKE handshake), so this reuses it rather
+  than adding a second password-hashing crate; salt bytes come from
+  `rusty_rand`, not argon2's own optional `rand` feature. This is a
+  deliberate algorithm change flagged for explicit sign-off (see the new
+  open item below), not a capability drop: every password this crate ever
+  hashes is freshly created here, under the current fresh-install-only
+  working assumption. `authenticate` collapses Go's
+  `ErrUserNotFound`/`ErrInvalidPassword` into one `None` case — verified
+  against the only real caller (`server/endpoints.go`'s `serveLogin`),
+  which already treats both identically. `Go`'s `ParseRules`/
+  `config.Rules` (a compiled-regex config-rules engine) isn't ported;
+  `rules_json`/`set_rules_json` read/write the stored JSON blob as-is,
+  the same scope boundary `CrawlJob::validator_rules: Json` already
+  draws.
 
-All three have unit tests, `clippy`, and `fmt` clean. Still not started:
-the concrete extractors, `rusty-hister-model`'s `user.go` query-layer
-helpers, and `rusty-hister-crawler`'s `http` backend (the rest of Phase 1
-per `docs/roadmap/ROADMAP.md`).
+All three have unit tests, `clippy`, and `fmt` clean. `rusty-hister-model`'s
+query layer is now fully ported — the concrete extractors and
+`rusty-hister-crawler`'s `http` backend are the rest of Phase 1 per
+`docs/roadmap/ROADMAP.md`.
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -196,13 +221,27 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
   `DocumentVersion`'s query layer (now ported, see below) only stores and
   retrieves whatever diff text the caller already computed — it does not
   decide the format, so this item is unaffected by that increment landing.
-- `rusty-hister-model`'s remaining query-layer helpers (the domain
-  operations each Go model file builds on top of its table — the
-  embedding-queue state machine, `WebSession`, `DocumentVersion`,
-  `crawl.go`, and now `history.go` are all done, see the crate status
-  table below — leaving only `user.go` auth helpers) — deliberately
-  deferred past the schema increment, the same split `rusty-hister-extractor`
-  used (mechanism before concrete extractors); not yet started.
+- **`rusty-hister-model`'s query layer is now fully ported** (all six Go
+  model files' domain operations — the embedding-queue state machine,
+  `WebSession`, `DocumentVersion`, `crawl.go`, `history.go`, and now
+  `user.go` — see the crate status table below). Nothing left open here;
+  kept as a resolved-item record of the split `rusty-hister-extractor`
+  used (mechanism before concrete extractors), now finished on this
+  side.
+- **Password hashing: Argon2id, not Go's bcrypt** — a sovereignty-loop
+  pass while porting `user.go` (2026-09-12) found no first-party
+  `rusty_*` crate for password hashing, so `User::create`/`set_password`
+  use `argon2` (already a workspace dependency via `rusty_croc`) instead
+  of adding a second password-hashing crate or reimplementing bcrypt.
+  Every password this crate ever hashes is freshly created here (the
+  fresh-install-only working assumption above), so there's no existing
+  bcrypt hash to stay compatible with today — but if the "open a
+  pre-existing Hister-Go-created database" question above is ever
+  resolved toward "yes," a bcrypt-hashed row from a real Hister install
+  would fail to verify against this crate's Argon2id-only `verify_password`,
+  since the two hash formats aren't interchangeable. Flagged for explicit
+  sign-off rather than decided unilaterally, same reasoning as the
+  soft-delete item below.
 - **Hister's `CommonFields.DeletedAt` is not GORM's `gorm.DeletedAt`
   sentinel type** — it's a plain, GORM-invisible `*time.Time` — discovered
   while porting `history.go`'s `DeleteHistoryURL`/`DeleteHistoryItem`
@@ -215,17 +254,19 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
   Go's own equivalent operations never actually set — `history.go`'s
   query layer only relies on it for read-side filtering
   (`Mapped::not_deleted_filter()`, a no-op today since nothing sets it),
-  and its two delete functions use a real `DELETE` instead. Whether the
-  soft-delete columns on the other four affected models should be
-  removed entirely (closer to Go's real behavior) or kept as a
-  deliberate, documented Rust-side improvement is not yet decided —
-  flagged for explicit sign-off rather than resolved unilaterally, since
-  it's a schema change on already-merged tables.
+  and its two delete functions use a real `DELETE` instead.
+  `User::delete_by_username` (`user.go` increment, same day) follows the
+  same pattern for the same reason. Whether the soft-delete columns on
+  the other four affected models should be removed entirely (closer to
+  Go's real behavior) or kept as a deliberate, documented Rust-side
+  improvement is not yet decided — flagged for explicit sign-off rather
+  than resolved unilaterally, since it's a schema change on already-merged
+  tables.
 - Postgres path for `rusty-hister-model`'s raw-SQL query-layer functions
   (`EmbeddingJob::enqueue`/`retry`/`release`, `WebSession::create`,
   `DocumentVersion::save`, `CrawlJob::create_with_urls`,
-  `CrawlURL::{bulk_insert, mark_done_and_enqueue_links, insert_done}`) is
-  untested —
+  `CrawlURL::{bulk_insert, mark_done_and_enqueue_links, insert_done}`,
+  `User::{create, create_oauth}`) is untested —
   only SQLite is exercised in unit tests (no Postgres available in this
   environment). The SQL is written to be dialect-portable (ANSI-standard
   `ON CONFLICT ... DO UPDATE SET`/`ON CONFLICT ... DO NOTHING`/
@@ -241,7 +282,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 | Crate | Status |
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
-| `rusty-hister-model` | **In progress** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), and all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions) — done; only `user.go`'s query helpers remain unstarted. 106 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, and `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior), clippy/fmt clean. |
+| `rusty-hister-model` | **Query layer complete** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions), and all of `user.go` (15 functions: account CRUD, Argon2id password hashing/verification, token issuance, admin toggling, raw rules-JSON get/set) — **all six Go model files' query layers are now ported**. 131 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior, and `user.go`'s create/authenticate/delete/token/rename/password/oauth/admin/rules behavior), clippy/fmt clean. |
 | `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging). 18 unit tests, clippy/fmt clean. No concrete extractors yet. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |

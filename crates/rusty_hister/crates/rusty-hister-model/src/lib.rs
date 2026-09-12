@@ -63,7 +63,7 @@ pub use embedding::{EmbeddingJob, EmbeddingJobStatus};
 pub use history::{History, HistoryItem, HistoryItemsFilter, HistoryLink, Link, UrlCount};
 pub use migrations::{POSTGRES_MIGRATIONS, SQLITE_MIGRATIONS};
 pub use session::WebSession;
-pub use user::User;
+pub use user::{RenameOutcome, User};
 pub use version::DocumentVersion;
 
 /// Renders `count` placeholders in `dialect`'s own syntax (`?`, `$1`, ...),
