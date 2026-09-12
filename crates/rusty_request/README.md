@@ -122,9 +122,9 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   surfaced as an error, the same convention curl and `reqwest` use.
   `ClientBuilder::no_pool()` reverts to a fresh connection with
   `Connection: close` on every request.
-- **JSON**: a small hand-rolled `Value` enum with a parser/serializer
-  (`rusty_request::Json`) -- no `serde`. No derive-based mapping to
-  arbitrary Rust structs; build/read `Value`s directly.
+- **JSON**: `rusty_json::Value` (re-exported as `rusty_request::Json`), used
+  with its `serde`-free feature set -- no `serde`. No derive-based mapping
+  to arbitrary Rust structs; build/read `Value`s directly.
 - **Retries**: opt-in via `.retry(RetryPolicy::new(max_retries))` on
   either `RequestBuilder` or `ClientBuilder` -- disabled by default.
   Retries connection errors and a configurable set of response statuses
@@ -195,8 +195,8 @@ async fn main() -> rusty_request::Result<()> {
         .default_header("X-Api-Key", "secret")?
         .build();
 
-    let mut body = Json::object();
-    body.insert("name", "Ada");
+    let mut body = Json::default();
+    body["name"] = "Ada".into();
 
     let resp = client
         .post("http://example.com/users")?

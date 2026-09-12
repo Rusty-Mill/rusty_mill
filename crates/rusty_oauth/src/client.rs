@@ -183,19 +183,19 @@ impl Client {
                 let jti = crate::encoding::base64::encode_url_safe_no_pad(
                     &crate::rand::random_bytes(16)?,
                 );
-                let claims = crate::json::Value::object([
+                let claims = rusty_json::Value::from_iter([
                     (
                         "iss".to_string(),
-                        crate::json::Value::from(self.client_id.as_str()),
+                        rusty_json::Value::from(self.client_id.as_str()),
                     ),
                     (
                         "sub".to_string(),
-                        crate::json::Value::from(self.client_id.as_str()),
+                        rusty_json::Value::from(self.client_id.as_str()),
                     ),
-                    ("aud".to_string(), crate::json::Value::from(token_endpoint)),
-                    ("exp".to_string(), crate::json::Value::from(now + 60)),
-                    ("iat".to_string(), crate::json::Value::from(now)),
-                    ("jti".to_string(), crate::json::Value::from(jti)),
+                    ("aud".to_string(), rusty_json::Value::from(token_endpoint)),
+                    ("exp".to_string(), rusty_json::Value::from(now + 60)),
+                    ("iat".to_string(), rusty_json::Value::from(now)),
+                    ("jti".to_string(), rusty_json::Value::from(jti)),
                 ]);
                 let assertion = crate::jwt::encode_hs256(&claims, secret.as_str().as_bytes(), &[]);
                 Ok(Some((JWT_BEARER_CLIENT_ASSERTION_TYPE, assertion)))

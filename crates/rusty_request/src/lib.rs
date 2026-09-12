@@ -104,7 +104,6 @@
 mod body;
 mod client;
 mod error;
-mod json;
 mod multipart;
 mod pool;
 mod proxy;
@@ -122,7 +121,7 @@ mod tokio_compat;
 pub use body::Body;
 pub use client::{Client, ClientBuilder, RequestBuilder};
 pub use error::{Error, Result};
-pub use json::Value as Json;
+pub use rusty_json::Value as Json;
 pub use multipart::Multipart;
 pub use proxy::Proxy;
 pub use request::Request;

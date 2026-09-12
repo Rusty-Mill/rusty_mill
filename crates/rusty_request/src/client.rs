@@ -1,6 +1,5 @@
 use crate::body::Body;
 use crate::error::{Error, Result};
-use crate::json;
 use crate::multipart::Multipart;
 use crate::pool::{ConnectionPool, PoolKey};
 use crate::proxy::{NoProxyRules, Proxy};
@@ -465,7 +464,7 @@ impl RequestBuilder {
 
     /// Serializes `value` as the request body and sets
     /// `Content-Type: application/json`.
-    pub fn json(mut self, value: &json::Value) -> Result<Self> {
+    pub fn json(mut self, value: &rusty_json::Value) -> Result<Self> {
         self.headers.insert("Content-Type", "application/json")?;
         self.body = Body::from(value.to_json_string());
         Ok(self)

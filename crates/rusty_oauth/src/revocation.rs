@@ -3,8 +3,8 @@
 use crate::client::Client;
 use crate::encoding::percent::form_urlencode;
 use crate::error::{Error, OAuthErrorResponse, Result};
-use crate::json;
 use crate::request::HttpRequest;
+use rusty_json::Value;
 
 /// Builds an RFC 7009 §2.1 revocation request.
 pub fn revocation_request(
@@ -52,7 +52,7 @@ pub fn parse_revocation_response(status: u16, body: &str) -> Result<()> {
         return Ok(());
     }
     if !body.trim().is_empty() {
-        if let Ok(value) = json::parse(body) {
+        if let Ok(value) = Value::from_json_str(body) {
             if let Some(err) = OAuthErrorResponse::from_json(&value) {
                 return Err(err.into());
             }

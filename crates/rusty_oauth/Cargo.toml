@@ -13,5 +13,12 @@ categories = ["authentication", "web-programming"]
 rusty_base64 = { path = "../rusty_base64" }
 rusty_rand = { path = "../rusty_rand" }
 rusty_rsa = { path = "../rusty_rsa" }
+# `Value` + JSON parser/writer for token/metadata/JWK responses and JWT
+# header/claims. This crate carried its own hand-rolled copy (deliberately
+# no `serde`) until `rusty_json` grew a serde-free `Value` surface of its
+# own; `default-features = false` keeps that same no-`serde` stance.
+rusty_json = { path = "../rusty_json", default-features = false, features = [
+    "std",
+] }
 
 [dev-dependencies]
