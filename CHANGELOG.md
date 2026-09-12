@@ -9,6 +9,32 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s `user.go` query layer (`rusty_hister`'s Phase 1,
+  continued — this completes the crate's query layer): `User::{create,
+  create_oauth, delete_by_username, authenticate, get_by_token,
+  regenerate_token, get_by_username, get_by_id,
+  regenerate_token_by_username, rename, set_password, get_by_oauth_id,
+  toggle_admin, rules_json, set_rules_json}`, a Rust port of `user.go`'s
+  auth/token/account helpers (`CreateUser`/`CreateOAuthUser`/`DeleteUser`/
+  `AuthenticateUser`/`GetUserByToken`/`RegenerateToken`/`GetUser`/
+  `GetUserByID`/`RegenerateTokenByUsername`/`UpdateUsername`/
+  `UpdatePassword`/`GetUserByOAuthID`/`ToggleAdmin`/`GetUserRules`/
+  `SaveUserRules`). A sovereignty-loop pass found no first-party
+  `rusty_*` crate for password hashing, so `create`/`set_password` hash
+  with Argon2id via `argon2` (already a workspace dependency through
+  `rusty_croc`'s PAKE handshake) rather than Go's bcrypt or a new
+  dependency; salt bytes come from `rusty_rand`. `authenticate` collapses
+  Go's two distinct not-found/wrong-password sentinel errors into one
+  `None` case, verified against the only real caller
+  (`server/endpoints.go`'s `serveLogin`) treating both identically.
+  `rename` returns a three-way `RenameOutcome` enum (renamed/username
+  taken/not found) instead of a Go-style sentinel error, matching Go's
+  three actual outcomes exhaustively. `GetUserRules`/`SaveUserRules`'s
+  `config.Rules` parsing (a compiled-regex config-rules engine) isn't
+  ported — no such engine exists in this Rust codebase yet, the same
+  scope boundary `CrawlJob::validator_rules: Json` already draws;
+  `rules_json`/`set_rules_json` read/write the stored JSON blob as-is. 25
+  new unit tests (131 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s `history.go` query layer (`rusty_hister`'s Phase 1,
   continued): `Link::get_or_create`/`History::get_or_create` and
   `HistoryLink::{delete_by_user_and_url, delete_by_user_query_and_url,

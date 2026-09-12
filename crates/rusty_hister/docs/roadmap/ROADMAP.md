@@ -136,11 +136,30 @@ independent of ADR-0002/0003)
       matching Go and avoiding breaking `history_links`' non-partial
       unique index — see PROJECT-STATUS.md's new open item on what this
       means for the schema's other soft-delete columns.
-- `rusty-hister-model` (remaining query layer): `user.go`'s auth/token
-  helpers — the last of the six Go model files' domain operations, same
-  split `rusty-hister-extractor` used (mechanism before concrete
-  extractors). Will need its own sovereignty-loop pass for a password-
-  hashing approach before implementation starts.
+- [x] `rusty-hister-model` (`user.go` query layer): `user.go`'s auth/token
+      helpers as `User` associated functions — `create`/`create_oauth`/
+      `delete_by_username`/`authenticate`/`get_by_token`/
+      `regenerate_token`/`get_by_username`/`get_by_id`/
+      `regenerate_token_by_username`/`rename`/`set_password`/
+      `get_by_oauth_id`/`toggle_admin`/`rules_json`/`set_rules_json` (Go:
+      `CreateUser`/`CreateOAuthUser`/`DeleteUser`/`AuthenticateUser`/
+      `GetUserByToken`/`RegenerateToken`/`GetUser`/`GetUserByID`/
+      `RegenerateTokenByUsername`/`UpdateUsername`/`UpdatePassword`/
+      `GetUserByOAuthID`/`ToggleAdmin`/`GetUserRules`/`SaveUserRules`).
+      Done — 25 new unit tests (131 total in the crate), clippy/fmt
+      clean. This is the last of the six Go model files —
+      `rusty-hister-model`'s query layer is now fully ported. A
+      sovereignty-loop pass found no first-party `rusty_*` crate for
+      password hashing, so `create`/`set_password` use Argon2id (`argon2`,
+      already a workspace dependency via `rusty_croc`) rather than Go's
+      bcrypt or a new dependency — flagged in PROJECT-STATUS.md for
+      explicit sign-off. `authenticate` collapses Go's two distinct
+      not-found/wrong-password errors into one `None` case, verified
+      against the only real caller treating them identically.
+      `GetUserRules`/`SaveUserRules`'s `config.Rules` parsing isn't
+      ported (no such engine exists in this codebase yet); `rules_json`/
+      `set_rules_json` stay at the raw-JSON level, same scope boundary
+      `CrawlJob::validator_rules: Json` already draws.
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive
       duplicate rejection), the two-phase enrich-then-extract chain,

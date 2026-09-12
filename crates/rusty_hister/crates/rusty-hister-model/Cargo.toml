@@ -16,7 +16,17 @@ rusty-db = { path = "../../../rusty_db/rusty_db", features = [
     "sqlite",
     "postgres",
 ] }
+# Password hashing for `User::create`/`authenticate` (`user.go`'s bcrypt
+# usage). No first-party `rusty_*` crate covers this; `argon2` is already a
+# workspace dependency (`rusty_croc`), so this reuses it rather than adding
+# a second password-hashing crate — `rand`/`rand_core` stay off since salt
+# generation goes through `rusty_rand` instead (this crate's own CSPRNG
+# entry point, per `CrawlJob::generate_id`'s precedent).
+argon2 = { version = "0.5", default-features = false, features = [
+    "alloc",
+    "password-hash",
+] }
+serde_json.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-serde_json.workspace = true

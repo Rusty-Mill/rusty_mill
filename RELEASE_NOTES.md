@@ -13,6 +13,65 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's user.go query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-user`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-user)
+
+Tenth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, `rusty-hister-model`'s schema, and its embedding-queue,
+`WebSession`, `DocumentVersion`, `crawl.go`, and `history.go` query
+layers, previous entries below). Completes `user.go`'s query layer — the
+last of `rusty-hister-model`'s six Go model files, so this crate's query
+layer is now fully ported.
+
+- **Added:** `User::{create, create_oauth, delete_by_username,
+  authenticate, get_by_token, regenerate_token, get_by_username,
+  get_by_id, regenerate_token_by_username, rename, set_password,
+  get_by_oauth_id, toggle_admin, rules_json, set_rules_json}` — a port
+  of `CreateUser`/`CreateOAuthUser`/`DeleteUser`/`AuthenticateUser`/
+  `GetUserByToken`/`RegenerateToken`/`GetUser`/`GetUserByID`/
+  `RegenerateTokenByUsername`/`UpdateUsername`/`UpdatePassword`/
+  `GetUserByOAuthID`/`ToggleAdmin`/`GetUserRules`/`SaveUserRules`.
+- **Added (dependency):** `argon2` — a sovereignty-loop pass found no
+  first-party `rusty_*` crate for password hashing, so `create`/
+  `set_password` hash with Argon2id via `argon2`, already a workspace
+  dependency through `rusty_croc`'s PAKE handshake, rather than
+  reimplementing Go's bcrypt or adding a second password-hashing crate.
+  Salt bytes come from `rusty_rand` (this crate's established CSPRNG
+  entry point), not argon2's own optional `rand` feature, which stays
+  disabled. This is a deliberate algorithm change, not a capability
+  drop — every password this crate ever hashes is freshly created here
+  under the current fresh-install-only working assumption — flagged in
+  `docs/PROJECT-STATUS.md` for explicit sign-off.
+- **Changed (deliberate simplification, not a dropped capability):**
+  `authenticate` collapses Go's two distinct sentinel errors
+  (`ErrUserNotFound`/`ErrInvalidPassword`) into one `None` case, verified
+  against the only real caller (`server/endpoints.go`'s `serveLogin`),
+  which already treats both identically (a bare `err != nil` check → one
+  401 response) — avoids a footgun where a future caller could
+  accidentally build a username-enumeration oracle from the distinction.
+- **Added:** a `RenameOutcome` enum (`Renamed`/`UsernameTaken`/`NotFound`)
+  for `rename`'s three possible results, instead of a Go-style sentinel
+  error — makes the exhaustive three-way branch checkable by the
+  compiler at every call site.
+- **Unchanged scope:** Go's `ParseRules`/`config.Rules` (a compiled-regex
+  config-rules engine for skip/priority/versioning rules and alias
+  expansion) isn't ported — no such engine exists in this Rust codebase
+  yet, the same scope boundary `CrawlJob::validator_rules: Json` already
+  draws. `rules_json`/`set_rules_json` read/write the stored JSON blob
+  as-is; they don't parse or compile it.
+- **Unchanged scope:** `regenerate_token`'s no-such-user quirk is
+  preserved as-is — Go's version updates zero rows and returns no error
+  when `user_id` doesn't exist, always handing back the freshly
+  generated token regardless (unlike `regenerate_token_by_username`,
+  which does check first, matching Go's own asymmetry between the two).
+- **Added:** 25 new unit tests (131 total in the crate) — account
+  creation (password and OAuth) including duplicate-username rejection;
+  authentication success/wrong-password/unknown-user cases; hard delete
+  by username; token issuance/lookup by username and by id (including
+  the no-such-user quirk); rename's three outcomes; password change and
+  its effect on authentication; OAuth lookup; admin toggling both ways;
+  and rules-JSON get/set round-tripping. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's history.go query layer
 **2026-09-12** · branch [`claude/hister-phase1-model-history`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-history)
 
