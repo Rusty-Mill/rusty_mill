@@ -88,6 +88,7 @@ extern "C" fn ignore_job_signal(_sig: c_int) {}
 /// `exec::run_foreground`), which keeps children in the shell's group sharing the
 /// terminal.
 pub fn init() {
+    // SAFETY: isatty/getpid take no pointer arguments and have no preconditions.
     let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
     let enable = interactive && !crate::vars::embedded();
     let pid = unsafe { libc::getpid() };

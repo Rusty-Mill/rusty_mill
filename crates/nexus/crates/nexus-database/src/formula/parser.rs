@@ -20,7 +20,11 @@ use crate::formula::token::{Spanned, Token};
 ///
 /// Returns `DatabaseError::FormulaError` on syntax errors.
 pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = parser.parse_or()?;
     if !parser.at_eof() {
         return Err(parser.error("unexpected token after expression"));
@@ -31,11 +35,35 @@ pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
 struct Parser<'a> {
     tokens: &'a [Spanned],
     pos: usize,
+    depth: usize,
 }
+
+/// Maximum recursion depth for the parser's mutually-recursive descent
+/// chain, matching [`crate::formula::eval::MAX_RECURSION_DEPTH`] so a
+/// pathologically nested formula fails to parse with a clean error instead
+/// of overflowing the stack.
+const MAX_RECURSION_DEPTH: usize = crate::formula::eval::MAX_RECURSION_DEPTH;
 
 impl Parser<'_> {
     fn current(&self) -> &Token {
         &self.tokens[self.pos.min(self.tokens.len() - 1)].token
+    }
+
+    /// Enters a recursive-descent call, bumping the depth counter and
+    /// failing cleanly once [`MAX_RECURSION_DEPTH`] is exceeded instead of
+    /// letting deeply nested input (e.g. thousands of nested parentheses)
+    /// overflow the stack. Callers MUST pair a successful call with a
+    /// matching `self.depth -= 1` once their recursive body returns.
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_RECURSION_DEPTH {
+            self.depth -= 1;
+            return Err(DatabaseError::FormulaError {
+                position: self.current_pos(),
+                message: format!("formula recursion depth exceeded {MAX_RECURSION_DEPTH}"),
+            });
+        }
+        Ok(())
     }
 
     fn current_pos(&self) -> usize {
@@ -73,130 +101,165 @@ impl Parser<'_> {
     // ── Precedence levels ───────────────────────────────────────────────────
 
     fn parse_or(&mut self) -> Result<Expr> {
-        let mut left = self.parse_and()?;
-        while matches!(self.current(), Token::Ident(s) if s == "or") {
-            self.advance();
-            let right = self.parse_and()?;
-            left = Expr::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            };
-        }
-        Ok(left)
+        self.enter()?;
+        let result = (|| {
+            let mut left = self.parse_and()?;
+            while matches!(self.current(), Token::Ident(s) if s == "or") {
+                self.advance();
+                let right = self.parse_and()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op: BinaryOp::Or,
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_and(&mut self) -> Result<Expr> {
-        let mut left = self.parse_equality()?;
-        while matches!(self.current(), Token::Ident(s) if s == "and") {
-            self.advance();
-            let right = self.parse_equality()?;
-            left = Expr::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            };
-        }
-        Ok(left)
+        self.enter()?;
+        let result = (|| {
+            let mut left = self.parse_equality()?;
+            while matches!(self.current(), Token::Ident(s) if s == "and") {
+                self.advance();
+                let right = self.parse_equality()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op: BinaryOp::And,
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_equality(&mut self) -> Result<Expr> {
-        let mut left = self.parse_comparison()?;
-        loop {
-            let op = match self.current() {
-                Token::Eq => BinaryOp::Eq,
-                Token::Neq => BinaryOp::Neq,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_comparison()?;
-            left = Expr::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
-        }
-        Ok(left)
+        self.enter()?;
+        let result = (|| {
+            let mut left = self.parse_comparison()?;
+            loop {
+                let op = match self.current() {
+                    Token::Eq => BinaryOp::Eq,
+                    Token::Neq => BinaryOp::Neq,
+                    _ => break,
+                };
+                self.advance();
+                let right = self.parse_comparison()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_comparison(&mut self) -> Result<Expr> {
-        let mut left = self.parse_addition()?;
-        loop {
-            let op = match self.current() {
-                Token::Lt => BinaryOp::Lt,
-                Token::Gt => BinaryOp::Gt,
-                Token::LtEq => BinaryOp::LtEq,
-                Token::GtEq => BinaryOp::GtEq,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_addition()?;
-            left = Expr::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
-        }
-        Ok(left)
+        self.enter()?;
+        let result = (|| {
+            let mut left = self.parse_addition()?;
+            loop {
+                let op = match self.current() {
+                    Token::Lt => BinaryOp::Lt,
+                    Token::Gt => BinaryOp::Gt,
+                    Token::LtEq => BinaryOp::LtEq,
+                    Token::GtEq => BinaryOp::GtEq,
+                    _ => break,
+                };
+                self.advance();
+                let right = self.parse_addition()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_addition(&mut self) -> Result<Expr> {
-        let mut left = self.parse_multiplication()?;
-        loop {
-            let op = match self.current() {
-                Token::Plus => BinaryOp::Add,
-                Token::Minus => BinaryOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_multiplication()?;
-            left = Expr::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
-        }
-        Ok(left)
+        self.enter()?;
+        let result = (|| {
+            let mut left = self.parse_multiplication()?;
+            loop {
+                let op = match self.current() {
+                    Token::Plus => BinaryOp::Add,
+                    Token::Minus => BinaryOp::Sub,
+                    _ => break,
+                };
+                self.advance();
+                let right = self.parse_multiplication()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_multiplication(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary()?;
-        loop {
-            let op = match self.current() {
-                Token::Star => BinaryOp::Mul,
-                Token::Slash => BinaryOp::Div,
-                Token::Percent => BinaryOp::Mod,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_unary()?;
-            left = Expr::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
-        }
-        Ok(left)
+        self.enter()?;
+        let result = (|| {
+            let mut left = self.parse_unary()?;
+            loop {
+                let op = match self.current() {
+                    Token::Star => BinaryOp::Mul,
+                    Token::Slash => BinaryOp::Div,
+                    Token::Percent => BinaryOp::Mod,
+                    _ => break,
+                };
+                self.advance();
+                let right = self.parse_unary()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
-        if matches!(self.current(), Token::Minus) {
-            self.advance();
-            let operand = self.parse_unary()?;
-            return Ok(Expr::UnaryOp {
-                op: UnaryOp::Neg,
-                operand: Box::new(operand),
-            });
-        }
-        if matches!(self.current(), Token::Ident(s) if s == "not") {
-            self.advance();
-            let operand = self.parse_unary()?;
-            return Ok(Expr::UnaryOp {
-                op: UnaryOp::Not,
-                operand: Box::new(operand),
-            });
-        }
-        self.parse_primary()
+        self.enter()?;
+        let result = (|| {
+            if matches!(self.current(), Token::Minus) {
+                self.advance();
+                let operand = self.parse_unary()?;
+                return Ok(Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    operand: Box::new(operand),
+                });
+            }
+            if matches!(self.current(), Token::Ident(s) if s == "not") {
+                self.advance();
+                let operand = self.parse_unary()?;
+                return Ok(Expr::UnaryOp {
+                    op: UnaryOp::Not,
+                    operand: Box::new(operand),
+                });
+            }
+            self.parse_primary()
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
@@ -468,5 +531,24 @@ mod tests {
     fn error_on_unexpected_token() {
         let tokens = tokenize(") bad").unwrap();
         assert!(parse(&tokens).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_parens_return_error_instead_of_overflowing_stack() {
+        // Tens of thousands of nested parentheses used to recurse straight
+        // through the parser's mutually-recursive descent chain with no
+        // depth guard, risking a stack overflow. The parser must now reject
+        // this cleanly with a `DatabaseError::FormulaError` instead.
+        let nesting = 50_000;
+        let formula = format!("{}1{}", "(".repeat(nesting), ")".repeat(nesting));
+        let tokens = tokenize(&formula).unwrap();
+        let result = parse(&tokens);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DatabaseError::FormulaError { message, .. } => {
+                assert!(message.contains("recursion depth"));
+            }
+            other => panic!("expected FormulaError, got {other:?}"),
+        }
     }
 }

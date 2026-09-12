@@ -462,7 +462,13 @@ body B
         let stray = tmp.path().join("b.skill.md");
         std::fs::write(&stray, SKILL_B).unwrap();
         let old_mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60);
-        std::fs::File::open(&stray)
+        // `set_modified` needs a handle with write access -- on Windows,
+        // `File::open`'s read-only handle can't change file attributes
+        // (PermissionDenied/"Access is denied"), even though Unix accepts
+        // it. `OpenOptions::write(true)` works on both.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stray)
             .unwrap()
             .set_modified(old_mtime)
             .unwrap();

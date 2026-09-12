@@ -21,6 +21,48 @@ impl From<PathValidationError> for SecurityError {
     }
 }
 
+/// Lexically normalize `path`: resolve `.` and `..` components without
+/// touching the filesystem. Unlike [`std::fs::canonicalize`], this does not
+/// require the path (or any of its ancestors) to exist, which is essential
+/// for download destinations that name a file that does not exist yet.
+///
+/// A `..` component pops the preceding `Normal` component if present;
+/// otherwise (at a filesystem root, or a relative path with no preceding
+/// `Normal` component to pop) it is retained verbatim, matching the
+/// behaviour of `path.Clean` in other ecosystems. Callers that need the
+/// writable-root check in [`nexus_types::WritableRoot::is_path_writable`]
+/// (documented as lexical-only, requiring the caller to normalize first)
+/// should run untrusted destination paths through this before checking.
+#[must_use]
+pub(crate) fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => match result.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    result.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) | None => {
+                    // Can't go above a root, and nothing to pop on an empty
+                    // relative path — retain the `..` verbatim.
+                    result.push("..");
+                }
+                Some(Component::CurDir | Component::ParentDir) => {
+                    result.push("..");
+                }
+            },
+            Component::CurDir => {}
+            other => result.push(other.as_os_str()),
+        }
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

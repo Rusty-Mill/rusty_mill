@@ -92,6 +92,9 @@ impl InstanceInner {
         let get_instance_proc_addr: PfnGetInstanceProcAddr =
             unsafe { transmute(get_instance_proc_addr_raw) };
 
+        // SAFETY: PfnCreateInstance matches vkCreateInstance's documented
+        // ABI; get_instance_proc_addr was resolved from the freshly-loaded
+        // driver above.
         let create_instance_result: Result<PfnCreateInstance, VulkanError> =
             unsafe { resolve(get_instance_proc_addr, null_mut(), c"vkCreateInstance") };
         let create_instance = match create_instance_result {

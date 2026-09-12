@@ -636,8 +636,13 @@ impl MemoryDb {
             "SELECT {COLS} FROM memories m JOIN memories_fts f ON f.rowid = m.rowid \
              WHERE memories_fts MATCH ?1 AND m.status != 'deleted' ORDER BY rank LIMIT ?2"
         ))?;
+        // Wrap the caller-supplied text in FTS5 phrase-quote syntax (doubling
+        // any embedded `"`) so it always matches as a literal phrase rather
+        // than being parsed as FTS5 boolean/column query syntax (`OR`,
+        // `col:`, `NEAR(...)`, leading `-`/`^`, unbalanced `"`, ...).
+        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
         let out = stmt
-            .query_map(params![query, clamp_limit(limit)], |row| {
+            .query_map(params![phrase, clamp_limit(limit)], |row| {
                 row_to_memory(row).map_err(|e| into_rusqlite(&e))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1200,6 +1205,33 @@ mod tests {
         let hits = db.search("kubernetes", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].content.contains("Kubernetes"));
+    }
+
+    #[test]
+    fn fts_search_treats_operator_tokens_as_literal_text() {
+        let db = MemoryDb::open_in_memory().unwrap();
+        db.insert(&Memory::new("a note that mentions foo somewhere"))
+            .unwrap();
+        db.insert(&Memory::new("a separate note that mentions bar somewhere"))
+            .unwrap();
+        // If `OR` were interpreted as the FTS5 boolean operator this would
+        // match both rows above (one has "foo", the other "bar"). Phrase
+        // quoting keeps the whole query literal, so neither row satisfies
+        // the three-token adjacent phrase "foo or bar".
+        let hits = db.search("foo OR bar", 10).unwrap();
+        assert_eq!(hits.len(), 0);
+    }
+
+    #[test]
+    fn fts_search_handles_embedded_double_quote_without_syntax_error() {
+        let db = MemoryDb::open_in_memory().unwrap();
+        db.insert(&Memory::new("she said \"hello\" to everyone"))
+            .unwrap();
+        // An embedded `"` must be doubled rather than left to break out of
+        // the phrase quoting; a literal phrase match is expected instead of
+        // an FTS5 query syntax error.
+        let hits = db.search("said \"hello\"", 10).unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! query only still-active rows.
 
 use rusty_db::prelude::*;
+use rusty_db::Error;
 
 #[derive(Debug, Clone, PartialEq, Mapped)]
 #[table(name = "users")]
@@ -23,6 +24,18 @@ struct Note {
     #[table(primary_key)]
     id: i64,
     body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Mapped)]
+#[table(name = "articles")]
+struct Article {
+    #[table(primary_key)]
+    id: i64,
+    #[table(version)]
+    version: i64,
+    #[table(soft_delete)]
+    deleted: bool,
+    title: String,
 }
 
 async fn file_engine(name: &str) -> rusty_db::Result<Engine> {
@@ -46,6 +59,15 @@ async fn file_engine(name: &str) -> rusty_db::Result<Engine> {
         .await?
         .execute(
             "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+            &[],
+        )
+        .await?;
+    engine
+        .connect()
+        .await?
+        .execute(
+            "CREATE TABLE articles (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, \
+             deleted BOOLEAN NOT NULL, title TEXT NOT NULL)",
             &[],
         )
         .await?;
@@ -195,6 +217,60 @@ async fn a_type_without_a_soft_delete_column_deletes_normally() -> rusty_db::Res
     assert!(
         rows.is_empty(),
         "a plain delete should really remove the row"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn soft_deleting_a_stale_versioned_row_fails_with_conflict() -> rusty_db::Result<()> {
+    // A type with both #[table(soft_delete)] and #[table(version)]: the
+    // soft-delete UPDATE branch must still honor optimistic locking, the
+    // same as a real hard delete or an update would.
+    let engine = file_engine("soft_delete_version_conflict").await?;
+    let mut session = engine.session();
+    session.add(&Article {
+        id: 1,
+        version: 1,
+        deleted: false,
+        title: "draft".to_string(),
+    });
+    session.commit().await?;
+
+    // Someone else edits it first, bumping the version to 2.
+    session.update(&Article {
+        id: 1,
+        version: 1,
+        deleted: false,
+        title: "edited by someone else".to_string(),
+    });
+    session.commit().await?;
+
+    // This session still has the stale version=1 copy from before that
+    // edit, and tries to soft-delete based on it.
+    session.delete(&Article {
+        id: 1,
+        version: 1,
+        deleted: false,
+        title: "edited by someone else".to_string(),
+    });
+    let outcome = session.commit().await;
+    assert!(
+        matches!(outcome, Err(Error::Conflict(_))),
+        "expected a conflict, got {outcome:?}"
+    );
+
+    // The stale soft-delete never took effect: the row is still active
+    // (not marked deleted) and still at the version the other edit left
+    // it at.
+    let table = Article::table();
+    let stored: Article = engine
+        .fetch_one_as(&Select::from(&table).filter(table.col("id").eq(1_i64)))
+        .await?;
+    assert_eq!(stored.version, 2);
+    assert!(
+        !stored.deleted,
+        "a version-conflicted soft-delete must not mark the row deleted"
     );
 
     Ok(())

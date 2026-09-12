@@ -458,6 +458,9 @@ impl Route {
         for m in &self.matches {
             m.validate()?;
         }
+        if let Some(policies) = &self.policies {
+            policies.validate()?;
+        }
         if self.backends.len() > 1 && self.backends.iter().any(|b| b.target.is_mcp()) {
             return Err(ConfigError::Invalid(
                 "an MCP backend cannot be weighted against other backends on the same route; \

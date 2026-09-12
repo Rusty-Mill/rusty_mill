@@ -12,6 +12,7 @@ use sqlx::{
 };
 
 use rusty_db_core::dialect::MySqlDialect;
+use rusty_db_core::error::ColumnRef;
 use rusty_db_core::value::array_to_json;
 use rusty_db_core::{
     CheckConstraint, ColumnInfo, Connection, Dialect, Driver, Engine, Error, Executor, ForeignKey,
@@ -389,11 +390,17 @@ fn row_from_mysql(row: &MySqlRow) -> Result<Row> {
             // YEAR is unsigned-only in MySQL's wire protocol, same as the
             // "* UNSIGNED" integer variants below.
             "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
-            | "BIGINT UNSIGNED" | "YEAR" => row
-                .try_get::<Option<u64>, _>(i)
-                .map_err(to_core_err)?
-                .map(|v| Value::I64(v as i64))
-                .unwrap_or(Value::Null),
+            | "BIGINT UNSIGNED" | "YEAR" => {
+                match row.try_get::<Option<u64>, _>(i).map_err(to_core_err)? {
+                    Some(v) => Value::I64(i64::try_from(v).map_err(|_| {
+                        Error::TypeConversion(
+                            ColumnRef::Name(col.name().to_string()),
+                            format!("unsigned value {v} exceeds i64::MAX"),
+                        )
+                    })?),
+                    None => Value::Null,
+                }
+            }
             "FLOAT" => row
                 .try_get::<Option<f32>, _>(i)
                 .map_err(to_core_err)?

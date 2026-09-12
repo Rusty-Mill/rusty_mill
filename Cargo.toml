@@ -441,14 +441,22 @@ skillopt-model = { path = "crates/rusty_skillopt/crates/skillopt-model" }
 skillopt-envs = { path = "crates/rusty_skillopt/crates/skillopt-envs" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "stream",
-    "rustls-tls-native-roots",
-    # nexus asks for the webpki-roots flavour and HTTP/2 for its AI
-    # provider calls; both unify into the same rustls graph regardless.
-    "rustls-tls",
+    # reqwest 0.13 renamed the 0.12-era "rustls-tls"/"rustls-tls-native-roots"
+    # features to a single "rustls" feature (native-cert loading is no
+    # longer a separate opt-in); the workspace's other direct 0.13
+    # consumers (agentgateway*, rusty_acp, rusty-mcp) already use this name.
+    "rustls",
     "http2",
+    # 0.13 also split RequestBuilder::query()/form() out from the
+    # always-on core into their own opt-in features; rp-providers' Gemini
+    # client needs "query" for the `?key=` API-key parameter and
+    # nexus-mcp's OAuth client-credentials exchange needs "form" for its
+    # `application/x-www-form-urlencoded` token request body.
+    "query",
+    "form",
 ] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 rand = "0.8"
@@ -458,7 +466,12 @@ rand = "0.8"
 # `license` ("MIT"), so its eight crates carry literal `[package]` fields --
 # rusty_db treatment. `async-trait`/`serde`/`serde_json`/`tokio` above cover
 # the rest; `thiserror` is the recurring "2"-vs-"1" split, kept literal on
-# the seven rk-* crates that use it.
+# the seven rk-* crates that use it. `rmcp` is a third split alongside the
+# nexus/root one documented below (nexus "1.3" vs. this root's "3.1"):
+# rk-mcp and rk-app pin `rmcp = "0.9"` (two majors behind both), kept
+# literal rather than bumped -- the 0.9-to-3.1 API surface changed enough
+# (client/transport construction in particular) that a same-PR bump isn't a
+# mechanical version-number edit; tracked as a real migration, not drift.
 rk-config = { path = "crates/rusty_key/crates/config" }
 rk-observe = { path = "crates/rusty_key/crates/observe" }
 rk-constrain = { path = "crates/rusty_key/crates/constrain" }
@@ -519,7 +532,14 @@ boringtun = "0.7"
 # (Apache-2.0) and `repository`, so its fourteen crates carry literal
 # `[package]` fields -- rusty_db treatment. `thiserror` ("2") and `schemars`
 # ("0.8", against rusty_key's "1.0.4") both stay literal on the crates that
-# use them rather than displacing this root's existing entries.
+# use them rather than displacing this root's existing entries. `axum` is a
+# fourth split: `adk-a2a` (dev-dependency only) and the `a2a-agent-server`
+# example pin the older "0.7" line against this root's "0.8" -- a real
+# `Router`/`axum::serve` API break between the two (confirmed by attempting
+# the bump: `axum::serve` gained an `IntoFuture` bound that a 0.7-built
+# `Router` doesn't satisfy when both versions land in the same dependency
+# graph), so kept literal and tracked as a migration rather than bumped
+# blind.
 adk-core = { path = "crates/rusty_adk/crates/adk-core", version = "0.1.0" }
 adk-macros = { path = "crates/rusty_adk/crates/adk-macros", version = "0.1.0" }
 adk-tools = { path = "crates/rusty_adk/crates/adk-tools", version = "0.1.0" }

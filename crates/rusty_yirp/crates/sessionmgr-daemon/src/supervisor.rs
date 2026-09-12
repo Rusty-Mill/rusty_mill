@@ -16,9 +16,10 @@
 //!   `Child` handle, because after a restart there are no owned handles
 //!   to consult.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusty_tokio::sync::{Mutex, Notify};
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,19 @@ const GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// status becoming visible in `sessionmgr list` and a dependent session
 /// noticing it should be tuned any tighter than that.
 const DEPENDENT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long [`Supervisor::stop_worker`] polls a just-terminated pid for
+/// actual exit before giving up and returning anyway.
+///
+/// Bounded rather than indefinite: a pid stuck in uninterruptible I/O
+/// must not hang `session_close` forever. Finding 24's whole point is
+/// that `dispose_workspace` should only run once nothing is running --
+/// this is what makes that true in the ordinary case, not a guarantee
+/// for every case.
+const TERMINATE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often [`Supervisor::stop_worker`] re-checks a terminated pid.
+const TERMINATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The daemon's own pointer file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,23 +104,32 @@ struct Supervisor {
     /// the background poller ([`poll_parent_then_start`]) promoting it to
     /// `Running`, and a user closing it before that happens.
     ///
-    /// Coarse-grained -- one lock for every waiting session in the
-    /// daemon, not one per session -- deliberately: promoting a session
-    /// out of `Waiting` is rare (it happens once, ever, per dependent
-    /// session) and already involves spawning a worker and waiting for it
-    /// to report in, which is a slower operation than acquiring this lock
-    /// could ever meaningfully contend with. A per-session lock registry
-    /// would be real complexity bought for a case that does not need it.
+    /// Per-session rather than one lock for the whole daemon: promoting
+    /// session A out of `Waiting` involves spawning a worker and waiting
+    /// for it to report in, up to [`WORKER_READY_TIMEOUT`] (20s). A
+    /// single global lock held for that long would stall a `close`/poll
+    /// on a completely unrelated session B for the same duration, even
+    /// though closing a still-`Waiting` B never touches A's state at
+    /// all. [`Supervisor::dependent_lock_for`] hands out one lock per
+    /// session id instead, so contention only ever happens between the
+    /// two writers that actually race over the *same* session.
     ///
-    /// Without this, [`Supervisor::session_close`] could read a `Waiting`
-    /// session (no worker recorded), the poller could win a race and
-    /// spawn a real worker for it, and `session_close`'s own stale
-    /// in-memory copy would then overwrite `state.json` with `Closed` and
-    /// no worker/child pids -- leaking the freshly spawned process with
-    /// nothing left tracking it. Both sides take this lock before acting
-    /// on a `Waiting` session, so "is it still Waiting?" and "act on it"
-    /// happen atomically with respect to each other.
-    dependent_lock: Mutex<()>,
+    /// Without a lock here at all, [`Supervisor::session_close`] could
+    /// read a `Waiting` session (no worker recorded), the poller could
+    /// win a race and spawn a real worker for it, and `session_close`'s
+    /// own stale in-memory copy would then overwrite `state.json` with
+    /// `Closed` and no worker/child pids -- leaking the freshly spawned
+    /// process with nothing left tracking it. Both sides take the same
+    /// per-session lock before acting on a `Waiting` session, so "is it
+    /// still Waiting?" and "act on it" happen atomically with respect to
+    /// each other.
+    ///
+    /// Entries are never removed: the map's size is bounded by the
+    /// number of dependent sessions this daemon instance has ever seen
+    /// go through `Waiting`, which is small and finite, so leaving a
+    /// spent lock behind costs nothing worth the complexity of pruning
+    /// it out from under a concurrent locker.
+    dependent_locks: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
 }
 
 /// Runs the daemon in the foreground. Returns when a `DaemonShutdown`
@@ -127,7 +150,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
         root: root.clone(),
         exe,
         shutdown: Notify::new(),
-        dependent_lock: Mutex::new(()),
+        dependent_locks: Mutex::new(HashMap::new()),
     });
 
     // Recovery runs **before** the socket exists, and the ordering is
@@ -778,6 +801,22 @@ impl Supervisor {
         Ok(Response::SessionCreated { id })
     }
 
+    /// The per-session lock guarding a `Waiting` session's two competing
+    /// writers -- see [`Supervisor::dependent_locks`]'s own docs.
+    ///
+    /// The registry lock itself is held only long enough to look up or
+    /// insert the per-session entry, never across the caller's actual
+    /// work: that is exactly the "hold a lock across something slow"
+    /// mistake this whole mechanism exists to avoid, just one level up.
+    async fn dependent_lock_for(&self, id: &SessionId) -> Arc<Mutex<()>> {
+        let mut locks = self.dependent_locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
     /// The core of the wait-for-parent mechanism: if `id` is currently
     /// `Waiting`, decides whether it can start yet and, if so, starts (or
     /// fails) it. Returns whether `id` was `Waiting` at all -- the
@@ -792,10 +831,12 @@ impl Supervisor {
     /// clear error to whatever `git`/the shell reports for a missing
     /// directory instead.
     ///
-    /// Takes [`Supervisor::dependent_lock`] for its entire body: see that
-    /// field's own docs for the race this closes.
+    /// Takes [`Supervisor::dependent_lock_for`]'s per-`id` lock for its
+    /// entire body: see [`Supervisor::dependent_locks`]'s own docs for
+    /// the race this closes and why the lock is scoped per session.
     async fn try_advance_waiting_session(&self, id: &SessionId, force: bool) -> Result<bool> {
-        let _guard = self.dependent_lock.lock().await;
+        let lock = self.dependent_lock_for(id).await;
+        let _guard = lock.lock().await;
         let session = catalog::read_session(&self.root, id)?;
         if session.status != SessionStatus::Waiting {
             return Ok(false);
@@ -1094,13 +1135,22 @@ impl Supervisor {
     }
 
     /// Stops `session`'s live processes -- graceful `WorkerShutdown`
-    /// first, then a forced terminate of whatever pids are left -- and
-    /// nothing else. Factored out of [`Self::session_close`] so
-    /// [`Self::session_switch_agent`] can stop a session's worker the
-    /// same way without also disposing of its workspace, which (unlike
-    /// an ordinary close) the switched-away session does not own
-    /// afterward but must still leave intact for the new session that
-    /// does.
+    /// first, then a forced terminate of whatever pids are left, then
+    /// **confirmed** dead -- and nothing else. Factored out of
+    /// [`Self::session_close`] so [`Self::session_switch_agent`] can stop
+    /// a session's worker the same way without also disposing of its
+    /// workspace, which (unlike an ordinary close) the switched-away
+    /// session does not own afterward but must still leave intact for
+    /// the new session that does.
+    ///
+    /// Does not return until every relevant pid has actually exited, or
+    /// [`TERMINATE_CONFIRM_TIMEOUT`] elapses -- `terminate` only *sends*
+    /// SIGTERM/`TerminateProcess`, which is fire-and-forget on both
+    /// platforms (Windows documents `TerminateProcess` as asynchronous),
+    /// so a caller that returned right after sending it would let
+    /// [`Self::session_close`]'s subsequent `dispose_workspace` race a
+    /// process that is still holding a file open in the worktree it is
+    /// about to remove.
     async fn stop_worker(&self, id: &SessionId, session: &Session) {
         // 1. Ask nicely. A worker that acks shuts its own child down and
         //    exits, which is cleaner than anything done from outside.
@@ -1123,11 +1173,17 @@ impl Supervisor {
         //    only the worker would leave its child running as an orphan
         //    with nothing tracking it and no way for the user to reach
         //    it. This is why both pids are recorded.
-        for pid in sessionmgr_core::recovery::teardown_pids(session) {
+        let pids = sessionmgr_core::recovery::teardown_pids(session);
+        for &pid in &pids {
             if let Err(e) = sessionmgr_proc::terminate(pid) {
                 eprintln!("sessionmgr daemon: could not terminate pid {pid}: {e}");
             }
         }
+
+        // 3. Confirm death. Only once this returns does the caller know
+        //    "nothing is running" is actually true, not merely
+        //    requested.
+        wait_for_pids_dead(&pids, TERMINATE_CONFIRM_TIMEOUT).await;
     }
 
     /// Graceful first, then force, then record.
@@ -1149,13 +1205,14 @@ impl Supervisor {
         // A `Waiting` dependent session has no worker at all yet -- see
         // `SessionStatus::Waiting`'s own docs -- so closing it is a pure
         // record update, not the graceful-then-forced teardown below.
-        // Guarded by `dependent_lock` and re-read under it, because the
-        // background poller (`poll_parent_then_start`) is racing to
-        // promote this exact session concurrently: see
-        // `Supervisor::dependent_lock`'s own docs for what goes wrong
-        // without this.
+        // Guarded by the per-`id` lock from `dependent_lock_for` and
+        // re-read under it, because the background poller
+        // (`poll_parent_then_start`) is racing to promote this exact
+        // session concurrently: see `Supervisor::dependent_locks`'s own
+        // docs for what goes wrong without this.
         if session.status == SessionStatus::Waiting {
-            let _guard = self.dependent_lock.lock().await;
+            let lock = self.dependent_lock_for(&id).await;
+            let _guard = lock.lock().await;
             session = catalog::read_session(&self.root, &id)?;
             if session.status == SessionStatus::Waiting {
                 // Nothing was ever spawned: nothing to terminate, and
@@ -1240,6 +1297,48 @@ impl Supervisor {
         .await
         .map_err(|e| Error::conflict(format!("the git-diff task did not complete: {e}")))??;
         Ok(Response::GitDiff { diff })
+    }
+}
+
+/// Polls `pids` until every one has exited or `timeout` elapses,
+/// escalating to a second termination attempt at the halfway point for
+/// whatever is still alive. [`Supervisor::stop_worker`]'s own docs cover
+/// why returning before this is confirmed is unsafe for a caller about
+/// to remove the worktree those pids might still hold open.
+///
+/// Best-effort past `timeout`: a pid that is still alive at that point
+/// gets logged and this simply returns, rather than blocking
+/// `session_close` forever over one stuck process.
+async fn wait_for_pids_dead(pids: &[u32], timeout: Duration) {
+    if pids.is_empty() {
+        return;
+    }
+    let start = Instant::now();
+    let mut escalated = false;
+    loop {
+        let still_alive: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|&pid| sessionmgr_proc::is_alive(pid).unwrap_or(false))
+            .collect();
+        if still_alive.is_empty() {
+            return;
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            eprintln!(
+                "sessionmgr daemon: pid(s) {still_alive:?} still running {timeout:?} after \
+                 termination; giving up waiting for confirmed exit"
+            );
+            return;
+        }
+        if !escalated && elapsed >= timeout / 2 {
+            escalated = true;
+            for &pid in &still_alive {
+                let _ = sessionmgr_proc::terminate(pid);
+            }
+        }
+        rusty_tokio::time::sleep(TERMINATE_POLL_INTERVAL).await;
     }
 }
 
@@ -1467,5 +1566,91 @@ mod tests {
         .expect("write");
         assert!(running_daemon(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_for_pids_dead_blocks_until_the_process_actually_exits() {
+        // Finding 24's trigger: `sessionmgr_proc::terminate` only
+        // *sends* SIGTERM/`TerminateProcess` and returns immediately --
+        // a caller that trusted that alone would let `session_close`
+        // proceed to `dispose_workspace` while the process is still
+        // alive and possibly still holding a file open in the worktree
+        // being removed. This proves `wait_for_pids_dead` actually
+        // blocks until the pid is confirmed gone, not merely asked to
+        // go.
+        let rt = rusty_tokio::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut cmd = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.args(["/C", "ping -n 2 127.0.0.1 > NUL"]);
+                c
+            } else {
+                let mut c = std::process::Command::new("sh");
+                c.args(["-c", "sleep 0.5"]);
+                c
+            };
+            let mut child = cmd
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn a short-lived child");
+            let pid = child.id();
+
+            // Genuinely still running the moment the wait starts -- the
+            // "slow to terminate" case, not an already-dead pid.
+            assert!(sessionmgr_proc::is_alive(pid).unwrap_or(false));
+
+            wait_for_pids_dead(&[pid], TERMINATE_CONFIRM_TIMEOUT).await;
+
+            // Only returns once the pid is confirmed gone.
+            assert!(!sessionmgr_proc::is_alive(pid).unwrap_or(true));
+
+            let _ = child.wait();
+        });
+    }
+
+    #[test]
+    fn dependent_locks_are_per_session_not_a_single_global_lock() {
+        // Finding 26's trigger: promoting session A out of `Waiting`
+        // used to hold one lock for its entire body, including up to
+        // `WORKER_READY_TIMEOUT` (20s) of spawning -- so a `close`/poll
+        // on completely unrelated session B took the same lock and
+        // stalled for the same duration. Per-session locks mean B's own
+        // lock stays obtainable the whole time A's is held.
+        let rt = rusty_tokio::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let supervisor = Supervisor {
+                root: std::env::temp_dir(),
+                exe: PathBuf::from("sessionmgr"),
+                shutdown: Notify::new(),
+                dependent_locks: Mutex::new(HashMap::new()),
+            };
+            let a = SessionId::new(1_700_000_000_000, 1);
+            let b = SessionId::new(1_700_000_000_001, 2);
+
+            let lock_a = supervisor.dependent_lock_for(&a).await;
+            let lock_b = supervisor.dependent_lock_for(&b).await;
+            assert!(
+                !Arc::ptr_eq(&lock_a, &lock_b),
+                "each session must get its own lock, not one shared instance"
+            );
+
+            // Hold A's lock for the duration of a simulated slow
+            // promotion.
+            let guard_a = lock_a.lock().await;
+
+            // B's own close/poll must not wait on A's lock at all.
+            let acquired_b = rusty_tokio::time::timeout(Duration::from_millis(200), lock_b.lock())
+                .await
+                .is_ok();
+            assert!(
+                acquired_b,
+                "an unrelated session's lock must be obtainable while another \
+                 session's promotion is in progress"
+            );
+
+            drop(guard_a);
+        });
     }
 }

@@ -199,19 +199,23 @@ mod tests {
 
     #[test]
     fn swap_replaces_inclusive_range() {
-        let out = apply_ops("a\nb\nc\nd\n", &ops("[f#ABCD]\nSWAP 2.=3:\n+B\n+C\n+C2\n")).unwrap();
+        let out = apply_ops(
+            "a\nb\nc\nd\n",
+            &ops("[f#ABCDABCDABCDABCD]\nSWAP 2.=3:\n+B\n+C\n+C2\n"),
+        )
+        .unwrap();
         assert_eq!(out, "a\nB\nC\nC2\nd\n");
     }
 
     #[test]
     fn del_removes_range_and_preserves_trailing_newline() {
-        let out = apply_ops("a\nb\nc\n", &ops("[f#ABCD]\nDEL 2.=2\n")).unwrap();
+        let out = apply_ops("a\nb\nc\n", &ops("[f#ABCDABCDABCDABCD]\nDEL 2.=2\n")).unwrap();
         assert_eq!(out, "a\nc\n");
     }
 
     #[test]
     fn no_trailing_newline_is_preserved() {
-        let out = apply_ops("a\nb", &ops("[f#ABCD]\nSWAP 1.=1:\n+A\n")).unwrap();
+        let out = apply_ops("a\nb", &ops("[f#ABCDABCDABCDABCD]\nSWAP 1.=1:\n+A\n")).unwrap();
         assert_eq!(out, "A\nb");
     }
 
@@ -219,7 +223,7 @@ mod tests {
     fn inserts_pre_post_head_tail() {
         let out = apply_ops(
             "x\ny\n",
-            &ops("[f#ABCD]\nINS.HEAD:\n+top\nINS.PRE 2:\n+beforeY\nINS.POST 2:\n+afterY\nINS.TAIL:\n+bottom\n"),
+            &ops("[f#ABCDABCDABCDABCD]\nINS.HEAD:\n+top\nINS.PRE 2:\n+beforeY\nINS.POST 2:\n+afterY\nINS.TAIL:\n+bottom\n"),
         )
         .unwrap();
         assert_eq!(out, "top\nx\nbeforeY\ny\nafterY\nbottom\n");
@@ -227,7 +231,11 @@ mod tests {
 
     #[test]
     fn insert_into_empty_file() {
-        let out = apply_ops("", &ops("[f#ABCD]\nINS.HEAD:\n+hello\nINS.TAIL:\n+world\n")).unwrap();
+        let out = apply_ops(
+            "",
+            &ops("[f#ABCDABCDABCDABCD]\nINS.HEAD:\n+hello\nINS.TAIL:\n+world\n"),
+        )
+        .unwrap();
         assert_eq!(out, "hello\nworld");
     }
 
@@ -235,7 +243,7 @@ mod tests {
     fn multiple_disjoint_ops_compose() {
         let out = apply_ops(
             "1\n2\n3\n4\n5\n",
-            &ops("[f#ABCD]\nSWAP 1.=1:\n+ONE\nDEL 3.=3\nINS.POST 5:\n+SIX\n"),
+            &ops("[f#ABCDABCDABCDABCD]\nSWAP 1.=1:\n+ONE\nDEL 3.=3\nINS.POST 5:\n+SIX\n"),
         )
         .unwrap();
         assert_eq!(out, "ONE\n2\n4\n5\nSIX\n");
@@ -243,18 +251,22 @@ mod tests {
 
     #[test]
     fn overlapping_ops_error() {
-        let err = apply_ops("a\nb\nc\n", &ops("[f#ABCD]\nSWAP 1.=2:\n+X\nDEL 2.=2\n")).unwrap_err();
+        let err = apply_ops(
+            "a\nb\nc\n",
+            &ops("[f#ABCDABCDABCDABCD]\nSWAP 1.=2:\n+X\nDEL 2.=2\n"),
+        )
+        .unwrap_err();
         assert_eq!(err, HashlineError::OverlappingOps { line: 2 });
     }
 
     #[test]
     fn out_of_bounds_and_bad_range_error() {
         assert_eq!(
-            apply_ops("a\n", &ops("[f#ABCD]\nDEL 5.=5\n")).unwrap_err(),
+            apply_ops("a\n", &ops("[f#ABCDABCDABCDABCD]\nDEL 5.=5\n")).unwrap_err(),
             HashlineError::LineOutOfBounds { line: 5, len: 1 }
         );
         assert_eq!(
-            apply_ops("a\nb\n", &ops("[f#ABCD]\nSWAP 2.=1:\n+x\n")).unwrap_err(),
+            apply_ops("a\nb\n", &ops("[f#ABCDABCDABCDABCD]\nSWAP 2.=1:\n+x\n")).unwrap_err(),
             HashlineError::BadRange { start: 2, end: 1 }
         );
     }
@@ -316,7 +328,7 @@ mod tests {
 
     #[test]
     fn apply_section_stale_without_snapshot_errors() {
-        let section = parse("[f#0000]\nSWAP 1.=1:\n+x\n")
+        let section = parse("[f#0000000000000000]\nSWAP 1.=1:\n+x\n")
             .unwrap()
             .sections
             .remove(0);

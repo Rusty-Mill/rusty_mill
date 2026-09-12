@@ -31,19 +31,38 @@ use wasmtime::{Engine, Instance, Linker, Module, Store};
 
 const PROBE_WAT: &str = include_str!("fixtures/denial_probe.wat");
 
+/// Review finding #9 regression fixture — requests a path that climbs
+/// above the forge root via `../`.
+const TRAVERSAL_PROBE_WAT: &str = include_str!("fixtures/read_traversal_probe.wat");
+
 const TEST_PLUGIN_ID: &str = "com.nexus.test.denial-probe";
 
-/// Build an instantiated probe sandbox. `caps` controls the granted
-/// capabilities; `forge_root` is whatever the FS gate should treat as
-/// the root (for the positive test we point at a tempdir we own).
-fn build_probe(caps: CapabilitySet, forge_root: PathBuf) -> (Store<PluginData>, Instance) {
-    let wasm_bytes = wat::parse_str(PROBE_WAT).expect("parse denial_probe.wat");
+/// Build an instantiated probe sandbox from `wat_src`. `caps` controls the
+/// granted capabilities; `forge_root` is whatever the FS gate should treat
+/// as the root (for the positive test we point at a tempdir we own).
+fn build_probe_from(
+    wat_src: &str,
+    caps: CapabilitySet,
+    forge_root: PathBuf,
+) -> (Store<PluginData>, Instance) {
+    let wasm_bytes = wat::parse_str(wat_src).expect("parse probe wat");
     let engine = Engine::default();
     let module = Module::new(&engine, &wasm_bytes).expect("compile probe module");
+    // Mirrors `PluginLoader`'s wiring (loader.rs) — a non-empty forge
+    // root gets a real `ForgePathValidator` so `host::read_file`'s
+    // finding-#9 fix (route through `validate`, not raw
+    // `canonicalize`) exercises the same codepath the positive test
+    // expects to succeed through.
+    let path_validator = if forge_root.as_os_str().is_empty() {
+        None
+    } else {
+        Some(nexus_types::ForgePathValidator::new(&forge_root).expect("build path validator"))
+    };
 
     let mut data = PluginData {
         plugin_id: TEST_PLUGIN_ID.to_string(),
         forge_root,
+        path_validator,
         ..Default::default()
     };
     data.capabilities = caps;
@@ -55,6 +74,12 @@ fn build_probe(caps: CapabilitySet, forge_root: PathBuf) -> (Store<PluginData>, 
         .instantiate(&mut store, &module)
         .expect("instantiate probe");
     (store, instance)
+}
+
+/// Convenience wrapper over [`build_probe_from`] using the default
+/// `test.md`-reading denial probe.
+fn build_probe(caps: CapabilitySet, forge_root: PathBuf) -> (Store<PluginData>, Instance) {
+    build_probe_from(PROBE_WAT, caps, forge_root)
 }
 
 fn call_probe(store: &mut Store<PluginData>, instance: &Instance) -> i32 {
@@ -175,5 +200,33 @@ fn read_file_succeeds_with_fs_read_capability() {
     assert_eq!(
         result, 5,
         "expected 5 bytes (\"hello\") read; got result code {result}"
+    );
+}
+
+#[test]
+fn read_file_denies_path_traversal_via_validator() {
+    // Review finding #9: `host::read_file` previously did a raw
+    // `canonicalize()`-then-`read()` with no `ForgePathValidator`,
+    // leaving a TOCTOU window a symlink swap could exploit between the
+    // two calls. It must now route through the same validator
+    // primitive `host::write_file` uses (`validate`/`validate_for_write`
+    // both live on `ForgePathValidator`), so a path that climbs above
+    // the forge root is rejected up front — identically to how
+    // `host::write_file` rejects the same shape of traversal via
+    // `deny_path_traversal`, which returns `HOST_CAPABILITY_DENIED` for
+    // both host functions.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let forge_root = std::fs::canonicalize(tmp.path()).expect("canonicalize tempdir");
+
+    let mut caps = CapabilitySet::empty();
+    caps.insert(Capability::FsRead);
+
+    let (mut store, instance) = build_probe_from(TRAVERSAL_PROBE_WAT, caps, forge_root);
+    let result = call_probe(&mut store, &instance);
+
+    assert_eq!(
+        result, HOST_CAPABILITY_DENIED,
+        "host::read_file must deny a '../' path that escapes the forge root via the \
+         validator, the same code host::write_file's traversal denial returns; got {result}"
     );
 }

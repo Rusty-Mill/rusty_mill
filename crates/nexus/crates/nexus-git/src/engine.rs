@@ -473,26 +473,65 @@ impl GitEngine {
 
     /// Create a commit from the current index with the given message.
     ///
+    /// If the repository is mid-merge (`RepositoryState::Merge`, i.e.
+    /// `MERGE_HEAD` is set), the merge head(s) are included as additional
+    /// parents and the merge state is cleared afterward — this is how a
+    /// manually-resolved conflict is finished via the normal commit path,
+    /// mirroring `merge()`'s own no-conflict success path.
+    ///
     /// Returns the short hex hash of the new commit.
     ///
     /// # Errors
     ///
     /// Returns [`GitError`] on any libgit2 failure.
-    pub fn commit(&self, message: &str) -> Result<String, GitError> {
+    pub fn commit(&mut self, message: &str) -> Result<String, GitError> {
+        let head_oid: Option<git2::Oid> = match self.repo.head() {
+            Ok(head) => Some(head.peel_to_commit()?.id()),
+            Err(_) => None,
+        };
+
+        // If we're finishing a manually-resolved merge, `MERGE_HEAD` holds the
+        // other branch tip(s) that must become additional parents of this
+        // commit — otherwise the merged history is silently dropped and
+        // `MERGE_HEAD`/`MERGE_MSG` are left stale. Mirrors the 2-parent
+        // commit + `cleanup_state()` pattern in `merge()`'s no-conflict path.
+        // Resolved as plain `Oid`s (not `git2::Commit`s, which borrow
+        // `self.repo` immutably) up front: `mergehead_foreach` needs
+        // `&mut self.repo`, and that borrow can't coexist with an
+        // already-live `Commit<'_>` borrowed from the same repo.
+        let in_merge = self.repo.state() == git2::RepositoryState::Merge;
+        let mut parent_oids: Vec<git2::Oid> = head_oid.into_iter().collect();
+        if in_merge {
+            let mut merge_head_oids: Vec<git2::Oid> = Vec::new();
+            self.repo.mergehead_foreach(|oid| {
+                merge_head_oids.push(*oid);
+                true
+            })?;
+            parent_oids.extend(merge_head_oids);
+        }
+
+        // Only now — after the mutable `mergehead_foreach` borrow has fully
+        // ended — resolve the parent `Oid`s into `Commit`s, which borrow
+        // `self.repo` immutably for the rest of this function.
+        let parents: Vec<git2::Commit<'_>> = parent_oids
+            .into_iter()
+            .map(|oid| self.repo.find_commit(oid))
+            .collect::<Result<_, _>>()?;
+
         let mut index = self.repo.index()?;
         let tree_id = index.write_tree()?;
         let tree = self.repo.find_tree(tree_id)?;
         let sig = self.repo.signature()?;
 
-        let parents: Vec<git2::Commit<'_>> = match self.repo.head() {
-            Ok(head) => vec![head.peel_to_commit()?],
-            Err(_) => vec![],
-        };
         let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
 
         let oid = self
             .repo
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)?;
+
+        if in_merge {
+            self.repo.cleanup_state()?;
+        }
 
         Ok(oid.to_string()[..7].to_string())
     }
@@ -1829,7 +1868,7 @@ mod tests {
 
     #[test]
     fn commit_creates_log_entry() {
-        let (dir, engine) = init_repo();
+        let (dir, mut engine) = init_repo();
         fs::write(dir.path().join("file.txt"), "content").unwrap();
         engine.stage_all().unwrap();
         let hash = engine.commit("test commit").unwrap();
@@ -1843,7 +1882,7 @@ mod tests {
 
     #[test]
     fn commit_initial_and_followup() {
-        let (dir, engine) = init_repo();
+        let (dir, mut engine) = init_repo();
         fs::write(dir.path().join("a.txt"), "a").unwrap();
         engine.stage_all().unwrap();
         engine.commit("first").unwrap();
@@ -1854,6 +1893,62 @@ mod tests {
 
         let log = engine.log(10).unwrap();
         assert_eq!(log.len(), 2);
+    }
+
+    #[test]
+    fn commit_during_conflicted_merge_adds_merge_parent_and_clears_state() {
+        let (dir, mut engine) = init_repo();
+        fs::write(dir.path().join("file.txt"), "base\n").unwrap();
+        engine.stage_all().unwrap();
+        engine.commit("initial").unwrap();
+
+        let base_branch = engine.state().unwrap().branch.unwrap();
+
+        // Diverge onto `feature` with a change to the same line.
+        engine.create_branch("feature").unwrap();
+        engine.switch_branch("feature").unwrap();
+        fs::write(dir.path().join("file.txt"), "feature change\n").unwrap();
+        engine.stage_all().unwrap();
+        engine.commit("feature commit").unwrap();
+        let feature_tip = engine.repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        // Diverge the base branch too, so the merge conflicts instead of
+        // fast-forwarding.
+        engine.switch_branch(&base_branch).unwrap();
+        fs::write(dir.path().join("file.txt"), "base change\n").unwrap();
+        engine.stage_all().unwrap();
+        engine.commit("base commit").unwrap();
+        let base_tip = engine.repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        // Start the merge — expect a conflict, leaving `RepositoryState::Merge`
+        // and `MERGE_HEAD` set for the caller to resolve.
+        let result = engine.merge("feature").unwrap();
+        assert!(!result.conflicts.is_empty(), "expected a merge conflict");
+        assert_eq!(engine.repo.state(), git2::RepositoryState::Merge);
+
+        // Manually resolve the conflict and stage it, then finish the merge
+        // through the normal commit path (not a merge-specific API).
+        fs::write(dir.path().join("file.txt"), "resolved\n").unwrap();
+        engine.stage_all().unwrap();
+        let hash = engine.commit("merge feature into base").unwrap();
+        assert_eq!(hash.len(), 7);
+
+        // The resulting commit must carry both branch tips as parents, and
+        // the repository must no longer be mid-merge.
+        let merge_commit = engine.repo.head().unwrap().peel_to_commit().unwrap();
+        let parent_ids: Vec<git2::Oid> = merge_commit.parent_ids().collect();
+        assert_eq!(
+            parent_ids.len(),
+            2,
+            "commit finishing a resolved merge should have two parents"
+        );
+        assert!(parent_ids.contains(&base_tip));
+        assert!(parent_ids.contains(&feature_tip));
+        assert_ne!(
+            engine.repo.state(),
+            git2::RepositoryState::Merge,
+            "MERGE_HEAD/MERGE_MSG should be cleared after finishing the merge"
+        );
     }
 
     #[test]

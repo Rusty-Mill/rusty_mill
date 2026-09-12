@@ -53,7 +53,9 @@ rusty_fedora_agent \
 `--bind` **must** be a private/Tailscale address, never `0.0.0.0` -- this
 agent has no authentication of its own; network reachability is the only
 access control it has, so it must never be exposed beyond the private
-network `rusty_homelab_mcp` runs on.
+network `rusty_homelab_mcp` runs on. Enforced at startup: an unspecified
+(`0.0.0.0`/`::`) or non-private/non-loopback `--bind` address refuses to
+start unless `--i-know-what-im-doing` is also passed.
 
 ## HTTP API
 

@@ -208,6 +208,15 @@ impl RgaText {
         self.id_at_visible_index(Some(pos))
     }
 
+    /// True if a character with this [`OpId`] has been observed by
+    /// this RGA — either as a live node or a tombstone. Used by the
+    /// doc layer to check causal readiness before applying an
+    /// [`RgaTextOp::Insert`] whose `parent` references it.
+    #[must_use]
+    pub fn contains(&self, id: OpId) -> bool {
+        self.nodes.contains_key(&id)
+    }
+
     /// Apply a wire op. Idempotent. Returns `true` iff the state
     /// changed.
     pub fn apply(&mut self, op: &RgaTextOp) -> bool {

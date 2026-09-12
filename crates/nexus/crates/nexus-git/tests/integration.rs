@@ -168,7 +168,7 @@ fn log_limit_respected() {
 
 #[test]
 fn staging_and_commit_workflow() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
 
     // Create and stage files.
     fs::write(dir.path().join("a.txt"), "alpha").unwrap();
@@ -217,7 +217,7 @@ fn staging_and_commit_workflow() {
 
 #[test]
 fn branch_create_switch_delete() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("init.txt"), "init").unwrap();
     commit(dir.path(), "initial");
 
@@ -298,7 +298,7 @@ fn unstage_all_reverts_index() {
 
 #[test]
 fn merge_fast_forward() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("init.txt"), "init").unwrap();
     commit(dir.path(), "initial");
 
@@ -326,7 +326,7 @@ fn merge_fast_forward() {
 
 #[test]
 fn merge_with_commit() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("init.txt"), "init").unwrap();
     commit(dir.path(), "initial");
 
@@ -358,7 +358,7 @@ fn merge_with_commit() {
 
 #[test]
 fn merge_with_conflicts() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("shared.txt"), "original").unwrap();
     commit(dir.path(), "initial");
 
@@ -397,7 +397,7 @@ fn merge_with_conflicts() {
 
 #[test]
 fn merge_abort_restores_state() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("shared.txt"), "original").unwrap();
     commit(dir.path(), "initial");
 
@@ -437,7 +437,7 @@ fn push_pull_local_bare_repo() {
     git2::Repository::init_bare(bare_dir.path()).unwrap();
 
     // Set up a working repo and add the bare as a remote.
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     {
         let repo = git2::Repository::open(dir.path()).unwrap();
         repo.remote("origin", &file_url(bare_dir.path())).unwrap();
@@ -640,7 +640,7 @@ fn conflict_versions_returns_three_sides_after_merge_conflict() {
     // BL-084 — three-way diff primitive. Use the merge path to
     // produce a genuine three-way conflict (base + ours + theirs)
     // so all three slots are populated.
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("conflict.txt"), "base line\n").unwrap();
     engine.stage_all().unwrap();
     engine.commit("initial").unwrap();
@@ -671,7 +671,7 @@ fn conflict_versions_returns_three_sides_after_merge_conflict() {
 
 #[test]
 fn conflict_versions_errors_on_clean_file() {
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("clean.txt"), "x").unwrap();
     engine.stage_all().unwrap();
     engine.commit("initial").unwrap();
@@ -695,7 +695,7 @@ fn cherry_pick_pauses_on_conflict_and_aborts_cleanly() {
     // `force()`) leaves a clean tree but libgit2's working-tree
     // index occasionally lags. Use the engine's own stage_all +
     // commit so the index agrees with HEAD before the cherry-pick.
-    let (dir, engine) = setup();
+    let (dir, mut engine) = setup();
     fs::write(dir.path().join("conflict.txt"), "base\n").unwrap();
     engine.stage_all().unwrap();
     engine.commit("initial").unwrap();

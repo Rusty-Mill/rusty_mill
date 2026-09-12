@@ -312,7 +312,19 @@ fn fallback_sort(
     fields: &HashMap<String, FieldMeta>,
     request: &SearchRequest,
 ) -> Result<Vec<(f32, Document)>> {
-    let cap = FALLBACK_SORT_CAP.max(request.offset + request.limit);
+    // `request.offset`/`request.limit` are caller-controlled and
+    // unvalidated. `saturating_add` avoids the overflow panic/silent
+    // wraparound an adversarial `offset` (e.g. `usize::MAX`) would
+    // otherwise trigger here; clamping the result to the searcher's actual
+    // document count keeps the candidate-set size - and Tantivy's internal
+    // top-N buffer, which it sizes proportionally to this cap regardless of
+    // how many documents actually exist - bounded by what could possibly
+    // match, rather than by an attacker-chosen number.
+    let requested = request.offset.saturating_add(request.limit);
+    let cap = FALLBACK_SORT_CAP
+        .max(requested)
+        .min(searcher.num_docs() as usize)
+        .max(1);
     let top_docs = TopDocs::with_limit(cap).order_by_score();
     let ranked = searcher.search(query, &top_docs).map_err(backend_err)?;
 
@@ -648,5 +660,83 @@ mod tests {
             .unwrap();
         assert_eq!(exact.total, 1);
         assert_eq!(exact.hits[0].id, "1");
+    }
+
+    #[tokio::test]
+    async fn match_query_is_literal_and_field_scoped() {
+        // A `Query::Match` value containing Lucene-style query syntax that
+        // names a *different* field must never be interpreted as a
+        // cross-field query - it is tokenized as plain text and scoped to
+        // the field the caller asked to match against, exactly like
+        // `Query::Term` already is.
+        let backend = TantivyBackend::in_memory();
+        backend
+            .create_index(
+                "docs",
+                Schema::builder().text("public").text("private").build(),
+            )
+            .await
+            .unwrap();
+        backend
+            .index_batch(
+                "docs",
+                vec![
+                    Document::new()
+                        .with_id("1")
+                        .set("public", "hello world")
+                        .set("private", "topsecret leak"),
+                    Document::new()
+                        .with_id("2")
+                        .set("public", "private topsecret leak")
+                        .set("private", "whatever"),
+                ],
+            )
+            .await
+            .unwrap();
+        backend.commit("docs").await.unwrap();
+
+        let results = backend
+            .search(
+                "docs",
+                Query::match_query("public", "private:topsecret").into(),
+            )
+            .await
+            .unwrap();
+        let ids: std::collections::HashSet<_> = results.hits.iter().map(|h| h.id.clone()).collect();
+        assert!(
+            !ids.contains("1"),
+            "matching `public` must not match doc 1 via `private` field content: {ids:?}"
+        );
+        assert!(
+            ids.contains("2"),
+            "matching `public` must match doc 2, whose `public` field literally contains those words: {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_sort_with_adversarial_offset_does_not_panic() {
+        // `Sort::field("status", ..)` forces the `fallback_sort` path
+        // (`status` is a non-fast `Keyword` field). An `offset` of
+        // `usize::MAX` must not panic (overflow trap on the unchecked
+        // `offset + limit`, or an allocator "capacity overflow" downstream
+        // in Tantivy's top-N collector) - it must return a sane, capped
+        // result.
+        let backend = seeded_backend().await;
+        let results = backend
+            .search(
+                "articles",
+                SearchRequest::new(Query::match_all())
+                    .sort(Sort::field("status", SortOrder::Asc))
+                    .offset(usize::MAX)
+                    .limit(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.total, 3);
+        assert!(
+            results.hits.is_empty(),
+            "an offset far beyond the result set must yield no hits, not a panic: {:?}",
+            results.hits
+        );
     }
 }

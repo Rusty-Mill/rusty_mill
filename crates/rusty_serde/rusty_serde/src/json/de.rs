@@ -146,6 +146,9 @@ impl<'de> Deserializer<'de> {
                     self.parse_string_tail(&mut out)?;
                     return Ok(ParsedStr::Owned(out));
                 }
+                b if b < 0x20 => {
+                    return Err(self.error("unescaped control character in string"));
+                }
                 _ => {
                     self.pos += 1;
                 }
@@ -239,6 +242,9 @@ impl<'de> Deserializer<'de> {
                             )
                         }
                     }
+                }
+                b if b < 0x20 => {
+                    return Err(self.error("unescaped control character in string"));
                 }
                 _ => {
                     // Copy one UTF-8 encoded scalar value at a time.

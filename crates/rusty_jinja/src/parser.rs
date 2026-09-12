@@ -12,13 +12,30 @@ use crate::lexer::Token;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: u32,
 }
 
 type PResult<T> = Result<T, &'static str>;
 
+/// Cap on nested parenthesized groups, chained `not`s, and nested call/
+/// filter argument lists. Each level of paren nesting re-enters the full
+/// eight-function precedence chain (`parse_or` through `parse_primary`),
+/// not just one frame, so this is deliberately much lower than
+/// `rusty_regx`'s `MAX_NESTING_DEPTH` (250) — 64 mirrors the same
+/// per-level-is-actually-several-frames budget `nexus-database`'s formula
+/// parser uses for the identical class of concern, and leaves ample
+/// margin against a small (e.g. 1-2 MiB) thread stack in an unoptimized
+/// build before an externally-sourced expression with tens of thousands
+/// of nested levels can overflow it.
+const MAX_NESTING_DEPTH: u32 = 64;
+
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -77,7 +94,13 @@ impl Parser {
     fn parse_not(&mut self) -> PResult<Expr> {
         if self.peek() == &Token::Not {
             self.advance();
-            Ok(Expr::Not(Box::new(self.parse_not()?)))
+            self.depth += 1;
+            if self.depth > MAX_NESTING_DEPTH {
+                return Err("expression nesting exceeds the maximum depth");
+            }
+            let inner = self.parse_not()?;
+            self.depth -= 1;
+            Ok(Expr::Not(Box::new(inner)))
         } else {
             self.parse_comparison()
         }
@@ -240,6 +263,10 @@ impl Parser {
 
     fn parse_call_args(&mut self) -> PResult<Vec<Expr>> {
         self.expect(&Token::LParen)?;
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err("expression nesting exceeds the maximum depth");
+        }
         let mut args = Vec::new();
         if self.peek() != &Token::RParen {
             args.push(self.parse_expr()?);
@@ -248,6 +275,7 @@ impl Parser {
                 args.push(self.parse_expr()?);
             }
         }
+        self.depth -= 1;
         self.expect(&Token::RParen)?;
         Ok(args)
     }
@@ -268,7 +296,12 @@ impl Parser {
                 Box::new(self.parse_postfix()?),
             )),
             Token::LParen => {
+                self.depth += 1;
+                if self.depth > MAX_NESTING_DEPTH {
+                    return Err("expression nesting exceeds the maximum depth");
+                }
                 let inner = self.parse_expr()?;
+                self.depth -= 1;
                 self.expect(&Token::RParen)?;
                 Ok(inner)
             }
@@ -366,5 +399,24 @@ mod tests {
                 true
             )
         );
+    }
+
+    #[test]
+    fn deeply_nested_parens_error_instead_of_overflowing_the_stack() {
+        // Tens of thousands of nested parens would recurse
+        // `parse_primary` -> `parse_expr` -> ... -> `parse_primary` once
+        // per level with no depth guard, overflowing the native stack and
+        // aborting the process. With the guard this must return a clean
+        // `Err` instead.
+        let src = alloc::format!("{}1{}", "(".repeat(50_000), ")".repeat(50_000));
+        let result = Parser::new(tokenize(&src).unwrap()).parse_expr_to_eof();
+        assert_eq!(result, Err("expression nesting exceeds the maximum depth"));
+    }
+
+    #[test]
+    fn deeply_chained_nots_error_instead_of_overflowing_the_stack() {
+        let src = alloc::format!("{}true", "not ".repeat(50_000));
+        let result = Parser::new(tokenize(&src).unwrap()).parse_expr_to_eof();
+        assert_eq!(result, Err("expression nesting exceeds the maximum depth"));
     }
 }

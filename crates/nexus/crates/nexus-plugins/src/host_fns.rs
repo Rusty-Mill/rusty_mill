@@ -868,25 +868,54 @@ fn register_host_read_file(linker: &mut Linker<PluginData>) -> Result<(), Plugin
                     return HOST_ERROR;
                 };
 
-                // Confine path to forge root.
+                // Confine path to forge root via `ForgePathValidator::
+                // validate`. Mirrors `host::write_file`'s use of
+                // `validate_for_write` — the validator canonicalizes the
+                // resolved path and checks forge-root containment in one
+                // step, closing the separate-canonicalize-then-separate-
+                // read TOCTOU race the prior inline pattern was
+                // vulnerable to (review finding #9, mirrors MK audit
+                // finding F-5.3.1 already closed for writes). Test
+                // sandboxes with an empty `forge_root` and no validator
+                // skip the check — they operate on an out-of-tree
+                // scratch path chosen by the test.
                 let requested = Path::new(&path_str);
-                let absolute = if requested.is_absolute() {
-                    requested.to_path_buf()
+                let canonical = if forge_root.as_os_str().is_empty() {
+                    let absolute = if requested.is_absolute() {
+                        requested.to_path_buf()
+                    } else {
+                        forge_root.join(requested)
+                    };
+                    match absolute.canonicalize() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(plugin_id = %plugin_id, "host::read_file: canonicalize failed: {e}");
+                            return HOST_ERROR;
+                        }
+                    }
                 } else {
-                    forge_root.join(requested)
-                };
-                let canonical = match absolute.canonicalize() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(plugin_id = %plugin_id, "host::read_file: canonicalize failed: {e}");
+                    let Some(validator) = caller.data().path_validator.as_ref() else {
+                        tracing::warn!(
+                            plugin_id = %plugin_id,
+                            "host::read_file: no path validator configured for plugin — denying"
+                        );
                         return HOST_ERROR;
+                    };
+                    match validator.validate(requested) {
+                        Ok(canonical_target) => canonical_target,
+                        Err(PathValidationError::PathTraversal(_)) => {
+                            return deny_path_traversal(&plugin_id, requested, &forge_root);
+                        }
+                        Err(PathValidationError::InvalidPath(msg)) => {
+                            tracing::warn!(
+                                plugin_id = %plugin_id,
+                                "host::read_file: invalid path '{}': {msg}",
+                                requested.display()
+                            );
+                            return HOST_ERROR;
+                        }
                     }
                 };
-                // Forge root confinement: forge_root may be empty (test/stub mode),
-                // so only enforce the check when forge_root is non-empty.
-                if !forge_root.as_os_str().is_empty() && !canonical.starts_with(&forge_root) {
-                    return deny_path_traversal(&plugin_id, &canonical, &forge_root);
-                }
 
                 let contents = match std::fs::read(&canonical) {
                     Ok(c) => c,

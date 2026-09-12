@@ -64,6 +64,12 @@ pub fn substitute(value: &toml::Value, vars: &VariableMap) -> toml::Value {
 ///   and `-`. On unknown variable, the entire `${NAME}` is preserved
 ///   verbatim. On unterminated `${` (no closing `}`), the `${` is
 ///   preserved verbatim and parsing continues after it.
+///
+/// # Panics
+///
+/// Never in practice: every branch only ever advances `i` past whole
+/// ASCII marker bytes (`$`, `{`, `}`), so `i` is always a UTF-8 char
+/// boundary when the fallback byte-copy path reads the next `char`.
 #[must_use]
 pub fn substitute_string(input: &str, vars: &VariableMap) -> String {
     let bytes = input.as_bytes();
@@ -96,10 +102,16 @@ pub fn substitute_string(input: &str, vars: &VariableMap) -> String {
                 }
                 // Invalid name — fall through to literal $ handling.
             }
-            // Unterminated / invalid — emit the $ verbatim and keep scanning.
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Unterminated / invalid — emit the $ verbatim and keep scanning.
+        // `i` is always a char boundary here (every branch above only
+        // advances `i` past whole ASCII markers or a `}` byte, none of
+        // which can appear as a UTF-8 continuation byte), so decode the
+        // next full `char` instead of casting a single raw byte, which
+        // would corrupt any multi-byte UTF-8 content.
+        let ch = input[i..].chars().next().expect("i < bytes.len()");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -186,6 +198,18 @@ mod tests {
         assert_eq!(
             substitute_string("${count}/${ratio}/${enabled}", &v),
             "42/3.5/true"
+        );
+    }
+
+    #[test]
+    fn preserves_multibyte_utf8_alongside_substitution() {
+        let v = vars(&[("trigger.name", toml::Value::String("café".into()))]);
+        // "caf\u{e9} \u{1F600}" mixes an accented letter and an emoji
+        // with a substitution; a byte-wise `as char` cast would mangle
+        // both the literal text and the substituted value into mojibake.
+        assert_eq!(
+            substitute_string("naïve ${trigger.name} 😀", &v),
+            "naïve café 😀"
         );
     }
 

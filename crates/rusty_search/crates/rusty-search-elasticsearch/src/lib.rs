@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
@@ -154,6 +155,45 @@ fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
         .map(|b| b.body(bytes))
 }
 
+/// Characters that must be percent-encoded when a caller-supplied string is
+/// spliced into a single path segment of an Elasticsearch request URL:
+/// ASCII controls/space plus every character with structural meaning in a
+/// URL (`/` a path separator, `?`/`#` starting the query/fragment, `%` the
+/// escape character itself, and the remaining `gen-delims`/backslash). This
+/// keeps a caller-supplied `index`/`id` confined to exactly one path
+/// segment, so it can't introduce an extra segment, escape into the query
+/// string, or address a different index than the one already validated by
+/// `require_known`.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'{')
+    .add(b'}');
+
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
+
+/// Builds the request path for [`SearchBackend::delete`], percent-encoding
+/// both `index` and `id` so neither can splice extra path segments (or a
+/// query string/fragment) into the request - see finding 31 of
+/// `CODEX-MONOREPO-REVIEW-2026-09-12.md`.
+fn delete_path(index: &str, id: &str) -> String {
+    format!(
+        "{}/_doc/{}",
+        encode_path_segment(index),
+        encode_path_segment(id)
+    )
+}
+
 #[async_trait]
 impl SearchBackend for ElasticsearchBackend {
     async fn create_index(&self, name: &str, schema: CoreSchema) -> Result<()> {
@@ -249,7 +289,7 @@ impl SearchBackend for ElasticsearchBackend {
         self.require_known(index).await?;
 
         let resp = self
-            .request(Method::Delete, &format!("{index}/_doc/{id}"))?
+            .request(Method::Delete, &delete_path(index, id))?
             .send()
             .await
             .map_err(backend_err)?;
@@ -552,6 +592,21 @@ mod tests {
             .await;
 
         backend.delete("articles", "missing-id").await.unwrap();
+    }
+
+    #[test]
+    fn delete_path_percent_encodes_a_slash_in_the_id() {
+        // Finding 31: an id containing '/' must not be allowed to splice an
+        // extra path segment (and thereby address a different index) into
+        // the DELETE request path.
+        let path = delete_path("public_articles", "../private_index/_doc/42");
+        assert_eq!(path, "public_articles/_doc/..%2Fprivate_index%2F_doc%2F42");
+        // The id is confined to the segment after the second `/_doc/` -
+        // splitting on '/' must yield exactly the three expected segments.
+        assert_eq!(
+            path.split('/').collect::<Vec<_>>(),
+            vec!["public_articles", "_doc", "..%2Fprivate_index%2F_doc%2F42"]
+        );
     }
 
     #[tokio::test]

@@ -244,7 +244,7 @@ pub fn unstage_hunk(app: &App, path: &str, hunk_indices: &[usize]) -> Result<()>
 
 /// Create a commit from staged changes.
 pub fn commit(app: &App, message: &str) -> Result<()> {
-    let engine = open_engine(app)?;
+    let mut engine = open_engine(app)?;
     let hash = engine.commit(message).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("[{hash}] {message}");
     Ok(())

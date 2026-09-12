@@ -10,7 +10,8 @@ use std::collections::HashSet;
 use crate::dialect::Dialect;
 use crate::engine::{Engine, Transaction};
 use crate::error::{Error, Result};
-use crate::query::{Delete, Insert, Select, Table};
+use crate::query::{Delete, Insert, Select, Table, ToSql};
+use crate::value::Value;
 
 /// One schema change: a monotonically increasing `version`, a
 /// human-readable `name`, the SQL statements that apply it (`up`), and the
@@ -119,12 +120,13 @@ impl<'a> Migrator<'a> {
 
             let mut txn = self.engine.begin().await?;
             for statement in migration.up {
-                txn.execute(statement, &[]).await?;
+                txn = execute_or_rollback(txn, statement, &[]).await?;
             }
             let record = Insert::into_table(&table)
                 .value("version", migration.version)
                 .value("name", migration.name);
-            txn.execute_query(&record, self.engine.dialect()).await?;
+            let (record_sql, record_params) = record.to_sql(self.engine.dialect());
+            txn = execute_or_rollback(txn, &record_sql, &record_params).await?;
             txn.commit().await?;
 
             newly_applied.push(migration.version);
@@ -165,10 +167,11 @@ impl<'a> Migrator<'a> {
         let table = Table::new(self.table);
         let mut txn = self.engine.begin().await?;
         for statement in migration.down {
-            txn.execute(statement, &[]).await?;
+            txn = execute_or_rollback(txn, statement, &[]).await?;
         }
         let unrecord = Delete::from(&table).filter(table.col("version").eq(migration.version));
-        txn.execute_query(&unrecord, self.engine.dialect()).await?;
+        let (unrecord_sql, unrecord_params) = unrecord.to_sql(self.engine.dialect());
+        txn = execute_or_rollback(txn, &unrecord_sql, &unrecord_params).await?;
         txn.commit().await?;
 
         Ok(Some(migration.version))
@@ -200,6 +203,28 @@ fn check_unique_versions(sorted: &[&Migration]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs one statement through `txn` (mutably, since it doesn't need to
+/// take ownership to do that), rolling `txn` back and returning the error
+/// if it fails — the same explicit rollback-then-propagate pattern
+/// `Session::execute_or_rollback` uses, adapted for `Migrator::up`/`down`'s
+/// plain owned `Transaction` (not wrapped in an `Option` field the way
+/// `Session`'s is). Without this, a mid-migration statement failure used
+/// to return via `?` with `txn` still open, leaking it back into the
+/// connection pool for the next unrelated caller to inherit.
+async fn execute_or_rollback(
+    mut txn: Transaction,
+    sql: &str,
+    params: &[Value],
+) -> Result<Transaction> {
+    match txn.execute(sql, params).await {
+        Ok(_) => Ok(txn),
+        Err(err) => {
+            let _ = txn.rollback().await;
+            Err(err)
+        }
+    }
 }
 
 fn create_table_ddl(quoted_table: &str) -> String {

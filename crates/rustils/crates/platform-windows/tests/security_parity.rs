@@ -7,6 +7,7 @@
 
 #![cfg(windows)]
 
+use platform::security::CredentialStore;
 use platform_parity::security::{
     assert_credential_store_behavior, assert_csprng_behavior, assert_trust_anchors_behavior,
 };
@@ -23,6 +24,21 @@ fn windows_csprng_conforms() {
 #[test]
 fn windows_credential_store_conforms() {
     assert_credential_store_behavior(&platform_windows::WindowsCredentialStore);
+}
+
+/// Regression test (finding 48, CODEX-MONOREPO-REVIEW-2026-09-12): an
+/// empty stored secret produces `CredentialBlob == NULL` with
+/// `CredentialBlobSize == 0` per `CREDENTIALW`'s own docs, which
+/// `std::slice::from_raw_parts` cannot accept even for a zero-length
+/// slice. `credential_get`'s non-`track-w` arm must special-case that
+/// shape instead of handing the null pointer straight to
+/// `from_raw_parts`.
+#[test]
+fn windows_credential_store_round_trips_an_empty_secret() {
+    let svc = format!("rustils-test-empty-svc-{}", std::process::id());
+    let store = platform_windows::WindowsCredentialStore;
+    store.set(&svc, "alice", &[]).unwrap();
+    assert_eq!(store.get(&svc, "alice").unwrap(), Some(Vec::new()));
 }
 
 /// Live-verified against the real ROOT certificate store

@@ -19,6 +19,10 @@ serde_json = { workspace = true }
 rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
 tokio = { workspace = true, features = ["sync"] }
 rusty_uuid = { path = "../../../rusty_uuid" }
+# Used to percent-encode caller-supplied index/id path segments before they
+# are spliced into an HTTP request path (see `delete_path` in lib.rs) -
+# same crate/version `rusty_mcp` already uses for the same purpose.
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio = { workspace = true }

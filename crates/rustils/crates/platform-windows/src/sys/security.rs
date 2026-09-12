@@ -182,11 +182,25 @@ pub fn credential_get(target_name: &OsStr) -> Result<Option<Vec<u8>>> {
     // SAFETY: `ok != 0` guarantees `CredReadW` populated `pcred` with a
     // valid, non-null allocation whose `CredentialBlob`/
     // `CredentialBlobSize` describe a valid region for at least as long
-    // as `pcred` itself is valid — this copy happens strictly before the
-    // `CredFree` call below releases that allocation.
-    let secret = unsafe {
-        let cred = &*pcred;
-        std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize).to_vec()
+    // as `pcred` itself is valid — this dereference happens strictly
+    // before the `CredFree` call below releases that allocation.
+    let cred = unsafe { &*pcred };
+    // `CREDENTIALW::CredentialBlob` is documented as possibly `NULL`
+    // when `CredentialBlobSize` is 0 — exactly the shape produced by
+    // storing an empty secret via `credential_set`. `from_raw_parts`
+    // requires a non-null pointer even for a zero-length slice, so that
+    // case is handled here before ever calling it, instead of being
+    // passed straight through as UB.
+    let secret = if cred.CredentialBlob.is_null() || cred.CredentialBlobSize == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: guarded above — `cred.CredentialBlob` is non-null and
+        // `cred.CredentialBlobSize` is nonzero, so `CredReadW`'s
+        // guarantee that they describe a valid, initialized region
+        // applies; this copy happens strictly before the `CredFree`
+        // call below releases that allocation.
+        unsafe { std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize) }
+            .to_vec()
     };
     // SAFETY: `pcred` is the exact allocation `CredReadW` returned above,
     // freed exactly once, only after the copy above is done reading

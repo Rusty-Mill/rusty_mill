@@ -32,6 +32,11 @@ const PATH_STALE_AFTER: Duration = Duration::from_secs(15);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// How often to re-send call-me-maybe to a peer that has no direct path yet.
 const CALL_ME_MAYBE_RESEND: Duration = Duration::from_secs(2);
+/// Disco pings that haven't been answered with a pong within this window are
+/// pruned from `pending` on each `tick()`, so a peer that never responds
+/// (unreachable, NAT/DERP-only for its whole session) doesn't accumulate an
+/// entry every `HEARTBEAT_INTERVAL` forever.
+const PENDING_PING_EXPIRY: Duration = Duration::from_secs(15);
 
 /// Which path a peer's traffic currently takes (for status/metrics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,8 +90,9 @@ pub struct MagicSock {
     disco_to_node: HashMap<DiscoPublic, NodePublic>,
     /// Verified/candidate endpoint → peer, for classifying inbound WG.
     endpoint_to_node: HashMap<SocketAddr, NodePublic>,
-    /// In-flight disco pings: tx id → (peer, endpoint pinged).
-    pending: HashMap<TxId, (NodePublic, SocketAddr)>,
+    /// In-flight disco pings: tx id → (peer, endpoint pinged, sent-at
+    /// timestamp for `tick()`'s pruning of never-answered pings).
+    pending: HashMap<TxId, (NodePublic, SocketAddr, Instant)>,
     /// Our own candidate endpoints (local + reflexive) advertised to peers.
     local_endpoints: Vec<SocketAddr>,
 }
@@ -244,6 +250,11 @@ impl MagicSock {
     /// that don't yet have a direct path (the first one can be dropped if it
     /// races the peer's DERP registration).
     pub async fn tick(&mut self) {
+        // Drop disco pings that have gone unanswered past the expiry, so
+        // `pending` doesn't grow without bound for a peer that never pongs
+        // back for its whole session.
+        prune_stale_pings(&mut self.pending);
+
         // Re-send call-me-maybe to undiscovered peers, throttled.
         let need_cmm: Vec<NodePublic> = self
             .peers
@@ -340,7 +351,7 @@ impl MagicSock {
         let DiscoVia::Udp(src) = via else {
             return;
         };
-        let Some((expected_node, endpoint)) = self.pending.remove(&tx) else {
+        let Some((expected_node, endpoint, _)) = self.pending.remove(&tx) else {
             return;
         };
         if expected_node != node {
@@ -392,11 +403,19 @@ impl MagicSock {
             node_key: NodePublic([0u8; 32]), // our node key is optional for disco
         };
         let pkt = ts_disco::seal(&self.disco, &paths.disco_key, &ping);
-        self.pending.insert(tx, (node, endpoint));
+        self.pending.insert(tx, (node, endpoint, Instant::now()));
         if let Err(e) = self.udp.send_to(&pkt, endpoint).await {
             tracing::trace!(%endpoint, "magicsock: ping send failed: {e}");
         }
     }
+}
+
+/// Drops disco-ping entries that have been outstanding longer than
+/// [`PENDING_PING_EXPIRY`] without a matching pong, so `pending` doesn't
+/// grow without bound for a peer that is unreachable (or NAT/DERP-only) for
+/// its whole session. Mirrors `ts-engine`'s own ICMP ping-table pruning.
+fn prune_stale_pings(pending: &mut HashMap<TxId, (NodePublic, SocketAddr, Instant)>) {
+    pending.retain(|_, (_, _, started)| started.elapsed() < PENDING_PING_EXPIRY);
 }
 
 /// How a disco message reached us.
@@ -562,6 +581,42 @@ mod tests {
         // A stale direct path falls back to relay.
         p.direct = Some((ep, Instant::now() - Duration::from_secs(60)));
         assert_eq!(p.path(), PathKind::Relay);
+    }
+
+    /// A disco ping nobody ever pongs back accumulates a `pending` entry on
+    /// every `send_ping` (once per `HEARTBEAT_INTERVAL` per candidate
+    /// endpoint) with nothing removing it but `on_pong` — unbounded growth
+    /// for a peer that's unreachable or NAT/DERP-only for its whole session.
+    /// `tick()`'s pruning (mirroring `ts-engine`'s ICMP ping-table prune)
+    /// must drop entries older than `PENDING_PING_EXPIRY` while leaving
+    /// fresh ones alone.
+    #[test]
+    fn prune_stale_pings_drops_expired_and_keeps_fresh() {
+        let node = NodePublic([7; 32]);
+        let ep = SocketAddr::from(([10, 0, 0, 9], 41641));
+        let stale_tx: TxId = [1; 12];
+        let fresh_tx: TxId = [2; 12];
+        let mut pending = HashMap::new();
+        pending.insert(
+            stale_tx,
+            (
+                node,
+                ep,
+                Instant::now() - PENDING_PING_EXPIRY - Duration::from_secs(1),
+            ),
+        );
+        pending.insert(fresh_tx, (node, ep, Instant::now()));
+
+        prune_stale_pings(&mut pending);
+
+        assert!(
+            !pending.contains_key(&stale_tx),
+            "expired ping must be pruned"
+        );
+        assert!(
+            pending.contains_key(&fresh_tx),
+            "fresh ping must survive pruning"
+        );
     }
 
     /// End-to-end check that `MagicUdp` (the `LinuxUdpSocket` + `AsyncFd`

@@ -54,7 +54,7 @@ struct WorkItem {
 pub struct Graph {
     nodes: HashMap<String, SharedNode>,
     edges: Vec<Edge>,
-    /// Number of incoming edges per node, used to know when a join is ready.
+    /// Number of distinct predecessors per node, used to know when a join is ready.
     in_degree: HashMap<String, usize>,
     join_nodes: HashSet<String>,
 }
@@ -79,7 +79,7 @@ impl Graph {
             }
         }
 
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
+        let mut predecessors: HashMap<String, HashSet<String>> = HashMap::new();
         for edge in &edges {
             if edge.from != START && !map.contains_key(&edge.from) {
                 return Err(AdkError::Graph(format!(
@@ -93,8 +93,19 @@ impl Graph {
                     edge.to
                 )));
             }
-            *in_degree.entry(edge.to.clone()).or_insert(0) += 1;
+            predecessors
+                .entry(edge.to.clone())
+                .or_default()
+                .insert(edge.from.clone());
         }
+        // Join readiness is measured in distinct predecessors, matching the
+        // arrivals map built during execution below — a join with two edges
+        // from the same source must not need two arrivals from that source
+        // to become ready.
+        let in_degree: HashMap<String, usize> = predecessors
+            .into_iter()
+            .map(|(node, preds)| (node, preds.len()))
+            .collect();
 
         if !edges.iter().any(|e| e.from == START) {
             return Err(AdkError::Graph(
@@ -167,17 +178,42 @@ impl Graph {
     }
 
     /// Runs one node, applying its retry policy.
-    async fn run_node(&self, node: &SharedNode, ctx: &NodeContext) -> Result<NodeOutcome> {
+    ///
+    /// Builds a fresh [`NodeContext`] — with its own event channel and its
+    /// own scoped state-delta buffer (see
+    /// [`InvocationContext::scoped_for_state`]) — for every attempt, so a
+    /// failed attempt's emitted events and state writes never leak into the
+    /// attempt that eventually succeeds, or into the final failure's own
+    /// output. Returns the context and receiver for whichever attempt
+    /// produced the returned outcome, for the caller to drain.
+    async fn run_node(
+        &self,
+        node: &SharedNode,
+        invocation: &InvocationContext,
+        item: &WorkItem,
+        step: u64,
+        resume_payload: Option<Value>,
+    ) -> (
+        Result<NodeOutcome>,
+        NodeContext,
+        mpsc::UnboundedReceiver<Event>,
+    ) {
         let max_retries = node.config().max_retries;
         let mut attempt = 0;
         loop {
-            match node.run(ctx).await {
-                Ok(outcome) => return Ok(outcome),
+            let (tx, rx) = mpsc::unbounded_channel();
+            let ctx = NodeContext::new(invocation.scoped_for_state(), &item.node, tx)
+                .with_input(item.input.clone())
+                .with_predecessor(item.predecessor.clone())
+                .with_step(step)
+                .with_resume_payload(resume_payload.clone());
+            match node.run(&ctx).await {
+                Ok(outcome) => return (Ok(outcome), ctx, rx),
                 Err(err) => {
                     // A suspension or confirmation request is control flow, not
                     // a failure; retrying it would re-ask the user forever.
                     if err.is_control_flow() || !err.is_retryable() || attempt >= max_retries {
-                        return Err(err);
+                        return (Err(err), ctx, rx);
                     }
                     attempt += 1;
                     tracing::warn!(
@@ -186,6 +222,10 @@ impl Graph {
                         error = %err,
                         "retrying node after failure"
                     );
+                    // `ctx`/`rx` for the failed attempt are dropped here
+                    // rather than reused, so its emitted events and state
+                    // writes never reach the next attempt or the final
+                    // output.
                 }
             }
         }
@@ -248,32 +288,31 @@ impl Graph {
                     )))?;
                 }
 
-                // Run the whole frontier concurrently. Each node gets its own
-                // channel so its progress events stay attributable to it.
+                // Run the whole frontier concurrently. `run_node` builds a
+                // fresh context and channel per attempt, so progress events
+                // and state writes stay attributable to the node (and
+                // attempt) that produced them even while siblings run at the
+                // same time.
                 let mut running = Vec::new();
                 for item in &frontier {
                     let node = self.nodes.get(&item.node).ok_or_else(|| {
                         AdkError::Graph(format!("node '{}' is not in this graph", item.node))
                     })?;
-                    let (tx, rx) = mpsc::unbounded_channel();
-                    let ctx = NodeContext::new(invocation.clone(), &item.node, tx)
-                        .with_input(item.input.clone())
-                        .with_predecessor(item.predecessor.clone())
-                        .with_step(step)
-                        .with_resume_payload(resume_payload.take());
-                    running.push((item.clone(), Arc::clone(node), ctx, rx));
+                    running.push((item.clone(), Arc::clone(node), resume_payload.take()));
                 }
 
-                let outcomes = futures::future::join_all(
-                    running
-                        .iter()
-                        .map(|(_, node, ctx, _)| self.run_node(node, ctx)),
-                )
+                let attempts = futures::future::join_all(running.iter().map(
+                    |(item, node, payload)| {
+                        self.run_node(node, &invocation, item, step, payload.clone())
+                    },
+                ))
                 .await;
 
                 let mut next_frontier: Vec<WorkItem> = Vec::new();
+                let mut frontier_error: Option<AdkError> = None;
+                let mut interrupted = false;
 
-                for ((item, node, ctx, mut rx), outcome) in running.into_iter().zip(outcomes) {
+                for ((item, node, _), (outcome, ctx, mut rx)) in running.into_iter().zip(attempts) {
                     // Collect whatever the node emitted while it ran. These are
                     // held rather than yielded immediately so that a suspension
                     // can attach its resume record to the outgoing event.
@@ -308,8 +347,12 @@ impl Graph {
                             // Carry the record out on the event so a session
                             // service persists it, and apply it locally too so
                             // a graph driven without a runner can still be
-                            // resumed from the same context.
-                            let delta = invocation.take_state_delta();
+                            // resumed from the same context. The node's own
+                            // state writes live in its scoped context, not
+                            // `invocation`, so both deltas are merged before
+                            // committing.
+                            let mut delta = invocation.take_state_delta();
+                            delta.extend(ctx.invocation.take_state_delta());
                             invocation.with_state_mut(|state| state.commit(delta.clone()));
                             match emitted.pop() {
                                 Some(mut last) => {
@@ -327,7 +370,11 @@ impl Graph {
                                     yield carrier;
                                 }
                             }
-                            return;
+                            // Defer ending the run until every already-resolved
+                            // sibling in this frontier has had its own outcome
+                            // reconciled, rather than discarding their work.
+                            interrupted = true;
+                            continue;
                         }
                         Err(err) => {
                             for event in emitted {
@@ -336,8 +383,14 @@ impl Graph {
                             yield Event::new(&invocation.invocation_id, &item.node)
                                 .with_node_info(ctx.node_info(node.node_type()))
                                 .with_error(err.code(), err.to_string());
-                            Err(err)?;
-                            return;
+                            // Defer propagating the error until every
+                            // already-resolved sibling in this frontier has
+                            // had its own outcome reconciled, rather than
+                            // discarding their already-completed work.
+                            if frontier_error.is_none() {
+                                frontier_error = Some(err);
+                            }
+                            continue;
                         }
                     };
 
@@ -349,7 +402,7 @@ impl Graph {
                     if let Some(output) = &outcome.output {
                         event.output = Some(output.clone());
                     }
-                    event.actions.state_delta = invocation.take_state_delta();
+                    event.actions.state_delta = ctx.invocation.take_state_delta();
                     yield event;
 
                     for edge in self.successors(&item.node, &outcome.routes)? {
@@ -379,6 +432,14 @@ impl Graph {
                             });
                         }
                     }
+                }
+
+                if interrupted {
+                    return;
+                }
+                if let Some(err) = frontier_error {
+                    Err(err)?;
+                    return;
                 }
 
                 frontier = next_frontier;

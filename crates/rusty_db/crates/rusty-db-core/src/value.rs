@@ -216,7 +216,8 @@ impl FromValue for i64 {
 
 impl FromValue for i32 {
     fn from_value(value: &Value) -> Result<Self, String> {
-        i64::from_value(value).map(|v| v as i32)
+        let v = i64::from_value(value)?;
+        i32::try_from(v).map_err(|_| format!("expected i32, got out-of-range i64 {v}"))
     }
 }
 
@@ -493,5 +494,26 @@ impl<T: FromValue> FromValue for Option<T> {
             Value::Null => Ok(None),
             other => T::from_value(other).map(Some),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn i32_from_value_rejects_i64_outside_i32_range() {
+        let too_big = Value::I64(i64::from(i32::MAX) + 1);
+        let err = i32::from_value(&too_big).expect_err("value is outside i32's range");
+        assert!(
+            err.contains("i32"),
+            "expected the error to mention i32, got {err:?}"
+        );
+
+        let too_small = Value::I64(i64::from(i32::MIN) - 1);
+        assert!(i32::from_value(&too_small).is_err());
+
+        // Still decodes fine within range.
+        assert_eq!(i32::from_value(&Value::I64(42)).unwrap(), 42);
     }
 }

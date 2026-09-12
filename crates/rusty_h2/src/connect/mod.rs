@@ -194,6 +194,60 @@ impl Connection {
             })
     }
 
+    /// Number of streams currently in the "open" or "half-closed" states
+    /// (RFC 9113 §5.1.2). Together with `prune_if_closed`, this is what
+    /// keeps `self.streams` bounded by
+    /// `local_settings.max_concurrent_streams` instead of growing
+    /// forever as new stream ids arrive.
+    fn open_stream_count(&self) -> usize {
+        self.streams
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.stream.state,
+                    crate::stream::StreamState::Open
+                        | crate::stream::StreamState::HalfClosedLocal
+                        | crate::stream::StreamState::HalfClosedRemote
+                )
+            })
+            .count()
+    }
+
+    /// Refuses `stream_id` with `REFUSED_STREAM` (RFC 9113 §5.1.2) if it
+    /// isn't already tracked and accepting it would exceed the
+    /// peer-advertised `SETTINGS_MAX_CONCURRENT_STREAMS` -- otherwise an
+    /// unbounded sequence of increasing stream ids (e.g. HEADERS
+    /// immediately followed by RST_STREAM, the HTTP/2 "Rapid Reset"
+    /// pattern, CVE-2023-44487-class) grows `self.streams` without
+    /// bound regardless of the advertised limit.
+    fn reject_if_over_max_concurrent_streams(&self, stream_id: u32) -> Result<()> {
+        if self.streams.contains_key(&stream_id) {
+            return Ok(());
+        }
+        if let Some(max) = self.local_settings.max_concurrent_streams {
+            if self.open_stream_count() >= max as usize {
+                return Err(H2Error::Stream(
+                    stream_id,
+                    ErrorCode::RefusedStream,
+                    "SETTINGS_MAX_CONCURRENT_STREAMS exceeded",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Evicts `stream_id`'s entry once it has reached the terminal
+    /// `Closed` state, so closed streams don't linger in `self.streams`
+    /// forever (RFC 9113 §5.1's "Closed" is terminal; nothing further
+    /// needs its state kept around).
+    fn prune_if_closed(&mut self, stream_id: u32) {
+        if let Some(entry) = self.streams.get(&stream_id) {
+            if entry.stream.is_closed() {
+                self.streams.remove(&stream_id);
+            }
+        }
+    }
+
     /// Encodes `headers` via this connection's HPACK encoder — the bridge
     /// a caller building a HEADERS frame needs (this module doesn't build
     /// the frame itself; see `client`/`server` for that).
@@ -294,11 +348,14 @@ impl Connection {
         // stream-state bookkeeping.
         let _fields = self.decoder.decode(&headers.header_block_fragment)?;
 
+        self.reject_if_over_max_concurrent_streams(headers.stream_id)?;
+
         let entry = self.stream_entry(headers.stream_id);
         entry.stream.apply(Event::RecvHeaders)?;
         if headers.end_stream {
             entry.stream.apply(Event::RecvEndStream)?;
         }
+        self.prune_if_closed(headers.stream_id);
         Ok(vec![])
     }
 
@@ -310,12 +367,14 @@ impl Connection {
         if data.end_stream {
             entry.stream.apply(Event::RecvEndStream)?;
         }
+        self.prune_if_closed(data.stream_id);
         Ok(vec![])
     }
 
     fn handle_rst_stream(&mut self, rst: RstStreamFrame) -> Result<Vec<Frame>> {
         let entry = self.stream_entry(rst.stream_id);
         entry.stream.apply(Event::RecvRstStream)?;
+        self.prune_if_closed(rst.stream_id);
         Ok(vec![])
     }
 
@@ -340,6 +399,7 @@ impl Connection {
         // itself isn't implemented -- a documented gap, not a silent
         // no-op: the stream is genuinely reserved, just never fulfilled.
         let _fields = self.decoder.decode(&pp.header_block_fragment)?;
+        self.reject_if_over_max_concurrent_streams(pp.promised_stream_id)?;
         let entry = self.stream_entry(pp.promised_stream_id);
         entry.stream.apply(Event::RecvPushPromise)?;
         Ok(vec![])
@@ -488,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn rst_stream_closes_the_stream() {
+    fn rst_stream_prunes_the_stream_entry() {
         let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
         // RST_STREAM on a still-idle stream is a connection error (RFC 9113
         // §5.1): open it first via HEADERS, matching a real request.
@@ -503,13 +563,62 @@ mod tests {
             header_block_fragment: header_block,
         }))
         .unwrap();
+        assert!(conn.streams.contains_key(&1));
 
         conn.apply_frame(Frame::RstStream(RstStreamFrame {
             stream_id: 1,
             error_code: ErrorCode::Cancel,
         }))
         .unwrap();
-        assert_eq!(conn.streams[&1].stream.state, StreamState::Closed);
+
+        // The stream reached the terminal `Closed` state; its entry must
+        // be pruned from `self.streams` rather than lingering forever
+        // (otherwise a flood of increasing stream ids each immediately
+        // RST_STREAM'd -- HTTP/2 "Rapid Reset", CVE-2023-44487-class --
+        // grows memory without bound).
+        assert!(!conn.streams.contains_key(&1));
+    }
+
+    #[test]
+    fn headers_beyond_max_concurrent_streams_is_refused() {
+        let settings = ServerSettings {
+            max_concurrent_streams: Some(1),
+            ..ServerSettings::default()
+        };
+        let mut conn = Connection::new(settings, PeerType::Server);
+        let mut encoder = Encoder::new(4096);
+
+        let mut first_block = Vec::new();
+        encoder.encode(&[HeaderField::new(":method", "GET")], &mut first_block);
+        conn.apply_frame(Frame::Headers(HeadersFrame {
+            stream_id: 1,
+            end_stream: false,
+            end_headers: true,
+            priority: None,
+            header_block_fragment: first_block,
+        }))
+        .unwrap();
+
+        let mut second_block = Vec::new();
+        encoder.encode(&[HeaderField::new(":method", "GET")], &mut second_block);
+        let err = conn
+            .apply_frame(Frame::Headers(HeadersFrame {
+                stream_id: 3,
+                end_stream: false,
+                end_headers: true,
+                priority: None,
+                header_block_fragment: second_block,
+            }))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            H2Error::Stream(3, ErrorCode::RefusedStream, _)
+        ));
+        // The refused stream must not have been inserted, and the
+        // already-open stream must remain the only tracked entry.
+        assert!(!conn.streams.contains_key(&3));
+        assert_eq!(conn.streams.len(), 1);
     }
 
     #[test]

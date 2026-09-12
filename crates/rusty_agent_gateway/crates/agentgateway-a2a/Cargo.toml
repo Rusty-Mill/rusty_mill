@@ -25,8 +25,8 @@ unwrap_used = "warn"
 agentgateway-config = { workspace = true }
 # Types only. `default-features = false` leaves the agent harness, the
 # JSON-RPC client and the gRPC binding out of the graph -- which is what keeps
-# this crate's `axum` 0.7, `tonic` and `reqwest` 0.12 from colliding with the
-# workspace's own versions. The gateway fronts agents; it does not become one.
+# this crate's `axum` 0.7 and `tonic` from colliding with the workspace's
+# own versions. The gateway fronts agents; it does not become one.
 rusty_a2a = { workspace = true, default-features = false }
 http = { workspace = true }
 regex = { workspace = true }

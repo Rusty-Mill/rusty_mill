@@ -75,6 +75,7 @@ const JOB_SIGNALS: [c_int; 5] = [
 /// Set up job control: only when stdin is a terminal. Idempotent enough to call
 /// once at startup.
 pub fn init() {
+    // SAFETY: isatty/getpid take no pointer arguments and have no preconditions.
     let interactive = unsafe { crate::sys::isatty(crate::sys::STDIN_FILENO) } == 1;
     let pid = unsafe { crate::sys::getpid() };
 
