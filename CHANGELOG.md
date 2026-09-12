@@ -8,6 +8,19 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- Bootstrapped `rusty_hister` — a native (not `git subtree`-imported) crate
+  cluster under `crates/rusty_hister/` for a Rust port of
+  [asciimoo/hister](https://github.com/asciimoo/hister). Eight new
+  workspace members
+  (`rusty-hister-{core,model,extractor,indexer,vectorstore,crawler,server,mcp}`),
+  each an empty skeleton crate (no port logic yet). Full
+  `rust-migration`-style capability inventory
+  (`crates/rusty_hister/docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`),
+  a sovereignty audit of candidate `rusty_*` crates, and three ADRs
+  (bootstrap/scope/split; two open decision-requests for the
+  search/indexing engine and the JS-rendering crawler approach) — see
+  `crates/rusty_hister/docs/PROJECT-STATUS.md`.
 ### Changed
 - CI's `plan` job no longer treats every root `Cargo.toml` edit as an
   automatic full workspace sweep. A new classifier
