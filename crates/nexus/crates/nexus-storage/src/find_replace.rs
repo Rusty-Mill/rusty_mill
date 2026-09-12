@@ -501,7 +501,10 @@ pub fn find_in_files(
         }
         if !hits.is_empty() {
             out.push(FileMatches {
-                relpath: relpath.to_string_lossy().into_owned(),
+                // Forge-relative paths use forward slashes throughout this
+                // crate; normalise Windows' native `\` the same way
+                // reconcile.rs does.
+                relpath: relpath.to_string_lossy().replace('\\', "/"),
                 hits,
             });
         }
@@ -543,9 +546,12 @@ pub fn replace_in_files(
     let candidates = collect_text_files(forge_root)?;
     let mut report = ReplaceReport::default();
     for relpath in candidates {
-        let relstr = relpath.to_string_lossy();
+        // Forge-relative paths use forward slashes throughout this crate;
+        // normalise Windows' native `\` the same way reconcile.rs does --
+        // `args.files` scoping compares against this string.
+        let relstr = relpath.to_string_lossy().replace('\\', "/");
         if let Some(set) = &restrict {
-            if !set.contains(relstr.as_ref()) {
+            if !set.contains(relstr.as_str()) {
                 continue;
             }
         }
@@ -554,7 +560,7 @@ pub fn replace_in_files(
             Ok(b) => b,
             Err(e) => {
                 report.errors.push(ReplaceError {
-                    relpath: relstr.into_owned(),
+                    relpath: relstr.clone(),
                     message: format!("read failed: {e}"),
                 });
                 continue;
@@ -571,7 +577,7 @@ pub fn replace_in_files(
         }
         if let Err(e) = std::fs::write(&abs, new_content.as_bytes()) {
             report.errors.push(ReplaceError {
-                relpath: relstr.into_owned(),
+                relpath: relstr.clone(),
                 message: format!("write failed: {e}"),
             });
             continue;

@@ -80,7 +80,10 @@ pub fn ast_query(
     let mut truncated = false;
 
     'files: for rel in files {
-        let rel_str = rel.to_string_lossy();
+        // Forge-relative paths use forward slashes throughout this crate
+        // (e.g. StorageListDirEntry::relpath, TreeEntry::relpath) -- normalise
+        // Windows' native `\` separators the same way reconcile.rs does.
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
         if detect_language(&rel_str) != Some(language) {
             continue;
         }
@@ -108,7 +111,7 @@ pub fn ast_query(
                 let name = capture_names.get(cap.index as usize).copied().unwrap_or("");
                 let text = node.utf8_text(src).unwrap_or("");
                 matches.push(StorageAstQueryMatch {
-                    path: rel_str.to_string(),
+                    path: rel_str.clone(),
                     line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
                     capture: name.to_string(),
                     text: snippet(text),
