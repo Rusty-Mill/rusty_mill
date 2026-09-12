@@ -37,11 +37,24 @@ independent of ADR-0002/0003)
       `PreviewResponse`), shared `HisterError` type. Done — 16 unit tests,
       clippy/fmt clean. The extractor *registry* (chain-of-responsibility,
       §4.2) is `rusty-hister-extractor`'s job, not this crate's.
-- `rusty-hister-model`: the ten GORM-equivalent models on `rusty_db`
-  (capability inventory §7.2), the two-phase pre/post migration mechanism
-  (§7.3) including the three concrete migrations, UTC-everywhere timestamp
-  discipline (§7.1), and the legacy `indexer_versions` read path (pending
-  the open sign-off in PROJECT-STATUS.md).
+- [x] `rusty-hister-model` (schema): the nine `#[derive(Mapped)]` models on
+      `rusty_db` (capability inventory §7.2 — `Database`'s singleton-row
+      version tracker is replaced by `rusty_db::Migrator`'s own bookkeeping,
+      not ported separately), soft-delete via `#[table(soft_delete)]`, and
+      a fresh-install migration (SQLite + Postgres) via `rusty_db::Migrator`.
+      Done — 25 unit tests, clippy/fmt clean. Deliberately **schema only**:
+      Hister's three historical migrations (§7.3) and the legacy
+      `indexer_versions` read path are not reproduced, since they only
+      matter for opening a pre-existing Hister-Go-created database file —
+      a still-open, broader question, see PROJECT-STATUS.md's open items.
+- `rusty-hister-model` (query layer): the domain operations each Go model
+  file builds on top of its table — the embedding-queue state machine
+  (`EnqueueEmbeddingJob`/`ClaimNextEmbeddingJob`/...), `history.go`'s
+  search/pin/timeline queries, `user.go`'s auth/token helpers,
+  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`, `WebSession`'s
+  lookup/expiry helpers, and `SaveDocumentVersion`/`GetDocumentVersionsUntil`
+  — a separate increment from the schema above, the same split
+  `rusty-hister-extractor` used (mechanism before concrete extractors).
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive
       duplicate rejection), the two-phase enrich-then-extract chain,

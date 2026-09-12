@@ -1,12 +1,12 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1: `rusty-hister-extractor`'s registry).
+Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s schema).
 
 ## Where this is
 
 **Phase 1 in progress.** Bootstrap, capability inventory, and all three
 ADRs (crate split/scope, search engine, JS-rendering crawler, and the
-licensing policy) are settled. Two crates now have real implementation:
+licensing policy) are settled. Three crates now have real implementation:
 
 - `rusty-hister-core` — the `Document` working type, the `Extractor` trait
   and its supporting types (capability inventory §4.1), and the shared
@@ -19,10 +19,26 @@ licensing policy) are settled. Two crates now have real implementation:
   the registry mechanism is generic over any `Extractor` impl; the 20
   built-in extractors (capability inventory §4.3-§4.5) are a separate,
   not-yet-started increment.
+- `rusty-hister-model` — the nine `#[derive(Mapped)]` types from
+  `automigrate()`'s list (capability inventory §7.2: `User`, `Link`,
+  `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`,
+  `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s
+  `#[table(soft_delete)]` where Go used `CommonFields`' nullable
+  `DeletedAt`, and a fresh-install migration
+  (`SQLITE_MIGRATIONS`/`POSTGRES_MIGRATIONS`) that creates all nine tables
+  and their indexes via `rusty_db::Migrator`. **Schema only** — the
+  domain/query-layer helpers each Go model file builds on top of its table
+  (`EnqueueEmbeddingJob`, the `history.go` search/pin/timeline queries,
+  `user.go`'s auth helpers, ...) are a separate, not-yet-started increment.
+  Hister's own `Database` singleton-row schema-version tracker has no
+  Rust equivalent — `rusty_db`'s `Migrator` already solves the same
+  problem via its own bookkeeping table, so this is a documented
+  substitution, not a dropped capability.
 
-Both have unit tests, `clippy`, and `fmt` clean. Still not started:
-`rusty-hister-model`, the concrete extractors, and `rusty-hister-crawler`'s
-`http` backend (the rest of Phase 1 per `docs/roadmap/ROADMAP.md`).
+All three have unit tests, `clippy`, and `fmt` clean. Still not started:
+the concrete extractors, the model crate's query-layer helpers, and
+`rusty-hister-crawler`'s `http` backend (the rest of Phase 1 per
+`docs/roadmap/ROADMAP.md`).
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -76,20 +92,46 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 - `sqlite-vec` C-extension story for the SQLite vectorstore backend — folded
   into ADR-0002 rather than decided separately, since it's downstream of the
   storage-engine choice.
+- **Whether `rusty_hister` needs to open a pre-existing Hister-Go-created
+  database file at all**, versus targeting fresh installs only. This is a
+  broader question than the two items below — it decides whether either of
+  them needs any Rust-side handling in the first place. Discovered while
+  designing `rusty-hister-model`'s schema (2026-09-12): that crate's
+  migration currently targets the fresh-install (post-all-historical-
+  migrations) schema shape only, on the working assumption that this
+  question resolves toward "no" or toward a separate, explicit import/
+  upgrade tool rather than `rusty_hister` opening a Go-created file
+  in-place. Not yet ratified either way.
 - Legacy pre-GORM `indexer_versions` table read path (capability inventory
   §7.3) — flagged for explicit scope sign-off, not yet resolved either way.
+  Subsumed by the item above: only relevant if opening a pre-existing
+  Hister database is in scope at all.
+- Hister's three historical Go migrations (`history_links.pinned` backfill,
+  `web_sessions.last_seen_at` column drop, mixed-offset-to-UTC timestamp
+  rewrite — capability inventory §7.3) — not reproduced in
+  `rusty-hister-model`'s migration, since they are one-time data-shape
+  transitions for a database that predates them, not part of the current
+  schema's shape. Same subsumption as the item above: only relevant if
+  opening a pre-existing Hister database is in scope.
 - Document-versioning diff format/algorithm (capability inventory §11) and
   query-alias expansion site (capability inventory §11) — flagged in the
   inventory as needing a follow-up read of the Go source before the
-  `rusty-hister-model`/`rusty-hister-indexer` design can fully account for
-  them; not yet done.
+  `rusty-hister-indexer` design (and `rusty-hister-model`'s follow-up
+  query-helpers increment, for the diff format specifically) can fully
+  account for them; not yet done.
+- `rusty-hister-model`'s query-layer helpers (the domain operations each Go
+  model file builds on top of its table — embedding-queue state machine,
+  history search/pin/timeline queries, user auth helpers, crawl-job
+  lifecycle, document-version diff retrieval) — deliberately deferred past
+  the schema increment, the same split `rusty-hister-extractor` used
+  (mechanism before concrete extractors); not yet started.
 
 ## Crate status
 
 | Crate | Status |
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
-| `rusty-hister-model` | Skeleton only |
+| `rusty-hister-model` | **In progress** — schema only: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. 25 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status), clippy/fmt clean. Query-layer helpers not yet started. |
 | `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging). 18 unit tests, clippy/fmt clean. No concrete extractors yet. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
