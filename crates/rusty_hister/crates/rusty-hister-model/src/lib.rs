@@ -10,7 +10,7 @@
 //! migrations have applied) via its own bookkeeping table, so this is a
 //! substitution, not a dropped capability.
 //!
-//! Five of the nine model files' query layers are ported too:
+//! Six of the nine model files' query layers are ported too:
 //!
 //! - `EmbeddingJob::{enqueue, claim_next, complete, retry, fail, release,
 //!   in_progress_exists, delete, reset_in_progress}` (§5.9's embedding
@@ -26,6 +26,10 @@
 //!   update_status, mark_failed, reset_in_progress, count_by_status,
 //!   count, list_failed, list, job_stats}` — together, all of
 //!   `crawl.go`.
+//! - `Link::get_or_create`/`History::get_or_create` and
+//!   `HistoryLink::{delete_by_user_and_url, delete_by_user_query_and_url,
+//!   set_pinned, record_selection, urls_by_query, latest_items,
+//!   timestamps, suggest_query}` — together, all of `history.go`.
 //!
 //! Everything else below is still query-layer behavior, not schema, and
 //! is **not yet ported** — a deliberate, explicitly-flagged follow-up
@@ -33,9 +37,8 @@
 //! (chain-of-responsibility mechanism landed before any concrete
 //! extractor):
 //!
-//! - The domain operations the other two model files' Go source builds on
-//!   top of their tables (the `history.go` search/pin/timeline queries and
-//!   `user.go`'s auth/token helpers).
+//! - `user.go`'s auth/token helpers (password hashing, token regen, admin
+//!   flag).
 //! - The legacy pre-GORM `indexer_versions` read path (capability inventory
 //!   §7.3) and whether `rusty_hister` needs to *open* a pre-existing
 //!   Hister-Go-created database file at all — both still-open items, see
@@ -57,7 +60,7 @@ mod version;
 
 pub use crawl::{CrawlJob, CrawlJobStats, CrawlJobStatus, CrawlURL, CrawlUrlStatus};
 pub use embedding::{EmbeddingJob, EmbeddingJobStatus};
-pub use history::{History, HistoryLink, Link};
+pub use history::{History, HistoryItem, HistoryItemsFilter, HistoryLink, Link, UrlCount};
 pub use migrations::{POSTGRES_MIGRATIONS, SQLITE_MIGRATIONS};
 pub use session::WebSession;
 pub use user::User;
