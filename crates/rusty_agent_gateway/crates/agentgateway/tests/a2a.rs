@@ -309,6 +309,34 @@ async fn a_non_json_rpc_body_is_passed_through() {
 }
 
 #[tokio::test]
+async fn an_oversized_body_is_refused_before_it_is_buffered() {
+    // Gating a JSON-RPC method needs the whole body read into memory, so it
+    // is capped the same way `extAuthz.includeBody` is: refused past the
+    // bound rather than buffered without limit.
+    let a = agent("Alpha", &["echo"], true, true).await;
+    let (base, shutdown) = start("                denyMethods: [\"^tasks/\"]", &[a.port]).await;
+
+    // One byte past `agentgateway_llm::MAX_REQUEST_BYTES` (4 MiB).
+    let oversized = vec![b'a'; 4 * 1024 * 1024 + 1];
+    let response = reqwest::Client::new()
+        .post(&base)
+        .header("content-type", "application/json")
+        .body(oversized)
+        .send()
+        .await
+        .expect("request should reach the gateway");
+
+    assert_eq!(response.status(), 413, "got: {}", response.status());
+    assert_eq!(
+        a.hits.load(Ordering::Relaxed),
+        0,
+        "an oversized body should never reach the agent"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
 async fn the_served_card_names_the_gateway_not_the_agent() {
     // The whole point of proxying a card: a client that reads the agent's own
     // URL goes around the gateway, past its auth and its audit trail.

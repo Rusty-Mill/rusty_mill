@@ -34,6 +34,7 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use nexus_types::paths::resolve_within;
 
 /// Summary of an import run.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -102,7 +103,8 @@ pub fn import_notion_archive<R: Read + Seek>(reader: R, dest: &Path) -> Result<I
         zf.read_to_end(&mut buf)?;
 
         let target_rel = index.target_for(&name);
-        let target_abs = dest.join(&target_rel);
+        let target_abs = resolve_within(dest, &target_rel.to_string_lossy())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         if let Some(parent) = target_abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -324,6 +326,16 @@ fn build_link_index<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<
             continue;
         }
         let cleaned = filename::clean_path(&name);
+
+        // Zip Slip guard: `clean_path` only strips the per-segment Notion
+        // UUID suffix — it is not a security boundary. Route the cleaned
+        // relative path through the same confinement check the rest of
+        // the workspace uses (see `nexus-git`'s `validate_path`) before
+        // trusting it, and drop any entry that tries to escape via `..`,
+        // an absolute path, or a Windows drive prefix.
+        if resolve_within(Path::new(""), &cleaned.to_string_lossy()).is_err() {
+            continue;
+        }
         entries.insert(name.clone(), cleaned.clone());
 
         // Encoded forms users may have in Notion mention links.
@@ -481,6 +493,47 @@ mod tests {
         assert!(bases.contains("[[fields]]"), "{bases}");
         assert!(bases.contains("Name"), "{bases}");
         assert!(dest.path().join("My DB.csv").exists());
+    }
+
+    #[test]
+    fn import_rejects_zip_slip_entries() {
+        // A crafted export where one entry tries to escape `dest` via a
+        // `..`-laden relative path (Zip Slip). The legitimate page must
+        // still import; the traversal entry must never land outside
+        // `dest`, and never inside it either.
+        let zip = make_zip(&[
+            ("../../../evil.md", "pwned"),
+            (
+                "Export/Page Title abc123def456abc123def456abc12345.md",
+                "# Page Title\n\nHello, world.\n",
+            ),
+        ]);
+        let dest = tempfile::tempdir().unwrap();
+        let report = import_notion_archive(Cursor::new(zip), dest.path()).expect("import ok");
+
+        // Legitimate content still imports.
+        assert_eq!(report.pages_written, 1);
+        assert!(dest.path().join("Page Title.md").exists());
+
+        // The traversal entry must not have escaped `dest`.
+        let mut probe = dest.path().to_path_buf();
+        for _ in 0..5 {
+            probe.pop();
+            assert!(
+                !probe.join("evil.md").exists(),
+                "zip slip entry escaped dest: {}",
+                probe.join("evil.md").display()
+            );
+        }
+        // Nor did it land under `dest` itself.
+        assert!(!dest.path().join("evil.md").exists());
+        for w in &report.written {
+            assert!(
+                !w.to_string_lossy().contains("evil"),
+                "unexpected written entry: {}",
+                w.display()
+            );
+        }
     }
 
     #[test]

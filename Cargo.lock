@@ -7772,6 +7772,7 @@ dependencies = [
  "comrak",
  "csv",
  "nexus-plugins",
+ "nexus-types",
  "regex-lite",
  "schemars 1.2.2",
  "serde",
@@ -13589,6 +13590,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sessionmgr-core",
+ "toml 0.8.2",
  "vt100",
 ]
 

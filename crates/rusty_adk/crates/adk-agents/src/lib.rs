@@ -383,6 +383,86 @@ mod tests {
         );
     }
 
+    // ---- delegation ----
+
+    #[tokio::test]
+    async fn a_transfer_to_agent_call_actually_runs_the_target_sub_agent() {
+        let transfer_tool = FunctionTool::new(
+            "transfer",
+            "Hands off the conversation to another agent.",
+            Schema::object(),
+            |_args, ctx| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    ctx.transfer_to_agent("second");
+                    Ok(adk_tools::success(json!({"transferred": true})))
+                })
+            },
+        );
+
+        let first_model = MockModel::new()
+            .push_call_json("transfer", json!({}))
+            .push_text("first should never get to answer after a transfer");
+
+        let first = LlmAgent::builder("first")
+            .model(Arc::new(first_model))
+            .tool(ToolSource::Tool(transfer_tool.shared()))
+            .sub_agent(scripted("second", "handled by second"))
+            .build()
+            .unwrap();
+
+        let events = drain(&first, &context_with("go")).await;
+
+        // Without dispatch, the run would end at the tool result event and
+        // "first"'s scripted follow-up text would never appear either. The
+        // only way "second"'s own event can be on this stream is if its
+        // `.run()` was actually invoked as a continuation of this one.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.author == "second" && e.text() == "handled by second"),
+            "expected the target sub-agent to have actually run, got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.text().contains("never get to answer")),
+            "the transferring agent's own model should not have been asked again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transfer_to_an_unknown_agent_yields_an_error_instead_of_ending_silently() {
+        let transfer_tool = FunctionTool::new(
+            "transfer",
+            "Hands off the conversation to another agent.",
+            Schema::object(),
+            |_args, ctx| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    ctx.transfer_to_agent("nonexistent");
+                    Ok(adk_tools::success(json!({"transferred": true})))
+                })
+            },
+        );
+
+        let model = MockModel::new().push_call_json("transfer", json!({}));
+        let agent = LlmAgent::builder("first")
+            .model(Arc::new(model))
+            .tool(ToolSource::Tool(transfer_tool.shared()))
+            .build()
+            .unwrap();
+
+        let events = drain(&agent, &context_with("go")).await;
+        let last = events.last().unwrap();
+        assert_eq!(last.error_code.as_deref(), Some("AGENT_NOT_FOUND"));
+        assert!(last
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("nonexistent"));
+    }
+
     // ---- schemas ----
 
     #[test]

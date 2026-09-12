@@ -1,11 +1,20 @@
 use crate::{Error, Number, Value};
 use alloc::string::String;
 
+/// Maximum recursion depth for nested arrays/objects, matching this
+/// workspace's `rusty_regx::parser::MAX_NESTING_DEPTH` guard pattern --
+/// shared by both the serde-free `Value` parser (`crate::value_io`) and the
+/// generic `serde::Deserializer` parser (`crate::de`), which take turns
+/// driving the same `Parser` but never recurse into each other, so a single
+/// counter field suffices for both call paths.
+pub(crate) const MAX_NESTING_DEPTH: u32 = 128;
+
 pub(crate) struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
     line: usize,
     column: usize,
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -15,7 +24,25 @@ impl<'a> Parser<'a> {
             pos: 0,
             line: 1,
             column: 1,
+            depth: 0,
         }
+    }
+
+    /// Enters one level of array/object nesting, erroring past
+    /// [`MAX_NESTING_DEPTH`] instead of letting the caller recurse further
+    /// and risk a stack overflow.
+    pub(crate) fn enter_nesting(&mut self) -> Result<(), Error> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(self.error("array/object nesting exceeds the maximum depth"));
+        }
+        Ok(())
+    }
+
+    /// Leaves one level of array/object nesting entered via
+    /// [`Parser::enter_nesting`].
+    pub(crate) fn exit_nesting(&mut self) {
+        self.depth -= 1;
     }
 
     pub(crate) fn peek(&self) -> Option<u8> {

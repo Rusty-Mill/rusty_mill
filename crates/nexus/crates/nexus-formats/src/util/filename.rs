@@ -61,8 +61,11 @@ pub fn validate_filename(name: &str) -> Result<(), UtilError> {
     }
 
     if name.len() > MAX_FILENAME_BYTES {
+        // Truncate by character count, not raw byte offset — `name` may
+        // contain multi-byte UTF-8 characters, and slicing at a fixed
+        // byte offset can land mid-character and panic.
         return Err(UtilError::InvalidFilename {
-            name: name[..32].to_string(),
+            name: name.chars().take(32).collect(),
             reason: format!("exceeds maximum filename length ({MAX_FILENAME_BYTES} bytes)"),
         });
     }
@@ -77,8 +80,10 @@ pub fn validate_filename(name: &str) -> Result<(), UtilError> {
 /// Returns [`UtilError::PathTooLong`] if the path exceeds [`MAX_PATH_BYTES`].
 pub fn validate_path(path: &str) -> Result<(), UtilError> {
     if path.len() > MAX_PATH_BYTES {
+        // Truncate by character count, not raw byte offset — see
+        // `validate_filename` above for why.
         return Err(UtilError::PathTooLong {
-            path: path[..64].to_string(),
+            path: path.chars().take(64).collect(),
             max: MAX_PATH_BYTES,
         });
     }
@@ -140,9 +145,33 @@ mod tests {
     }
 
     #[test]
+    fn too_long_multibyte_filename_does_not_panic() {
+        // 120 3-byte-UTF-8 characters (360 bytes) — well past
+        // `MAX_FILENAME_BYTES` (255), and the byte cap (32) used for the
+        // error message falls mid-character if sliced by raw byte offset.
+        let long = "\u{6587}".repeat(120);
+        match validate_filename(&long) {
+            Err(UtilError::InvalidFilename { .. }) => {}
+            other => panic!("expected InvalidFilename, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn path_too_long_rejected() {
         let long = "a".repeat(261);
         assert!(validate_path(&long).is_err());
+    }
+
+    #[test]
+    fn too_long_multibyte_path_does_not_panic() {
+        // 200 3-byte-UTF-8 characters (600 bytes) — well past
+        // `MAX_PATH_BYTES` (260), and the byte cap (64) used for the
+        // error message falls mid-character if sliced by raw byte offset.
+        let long = "\u{6587}".repeat(200);
+        match validate_path(&long) {
+            Err(UtilError::PathTooLong { .. }) => {}
+            other => panic!("expected PathTooLong, got {other:?}"),
+        }
     }
 
     #[test]

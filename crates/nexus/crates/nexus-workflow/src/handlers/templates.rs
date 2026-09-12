@@ -75,14 +75,24 @@ pub(crate) fn handle_init(
 
 /// Defensive filename check for `templates_init`. Rejects path
 /// separators and parent-dir hops so a malicious caller can't write
-/// outside `<forge>/.workflows/`. Empty / whitespace-only names also
-/// fail. Allowed: `<basename>` or `<basename>.workflow.toml`.
+/// outside `<forge>/.workflows/`. Also rejects `:` — on Windows,
+/// `PathBuf::join` treats a drive-prefixed component like
+/// `C:evil.toml` as a full path replacement rather than an append
+/// (it has no root, so it doesn't even need a leading separator),
+/// which would otherwise let a bare basename with no `/`, `\`, or
+/// `..` still escape the intended directory. Empty / whitespace-only
+/// names also fail. Allowed: `<basename>` or
+/// `<basename>.workflow.toml`.
 fn sanitize_filename(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("templates_init: filename cannot be empty".into());
     }
-    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..") {
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains(':')
+    {
         return Err(format!(
             "templates_init: filename '{trimmed}' must be a bare basename (no path separators)"
         ));

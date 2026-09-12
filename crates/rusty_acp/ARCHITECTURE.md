@@ -26,7 +26,7 @@ above is exactly the statement that everything durable goes through a single int
 | `trace::TraceContext` | W3C `traceparent` header | Correlation across replicas, behind the `trace` feature. |
 
 `Store` is a published contract, not an internal convenience: `server::store::testkit` ships a
-16-check conformance suite behind the `store-testkit` feature so a third-party backend can be
+17-check conformance suite behind the `store-testkit` feature so a third-party backend can be
 held to the same invariants the built-in three are. `tests/store_conformance.rs` runs it against
 all three.
 

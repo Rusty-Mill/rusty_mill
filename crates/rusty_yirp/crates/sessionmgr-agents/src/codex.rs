@@ -98,15 +98,23 @@ impl AgentAdapterPort for Codex {
         hook_fire_exe: &std::path::Path,
         session_id: &sessionmgr_core::SessionId,
     ) -> (std::path::PathBuf, String) {
-        // TOML *literal* strings (single-quoted): no escaping at all,
-        // deliberately, which is what makes a Windows path safe to embed
-        // here without hand-rolled quoting logic. The official inline
-        // examples use exactly this form for the same reason.
+        // A TOML *basic* (double-quoted) string, not a *literal*
+        // (single-quoted) one: a literal string has no escape mechanism
+        // at all, so a `'` in the running binary's own path -- entirely
+        // possible in a Windows username directory
+        // (`C:\Users\O'Brien\...`) -- would leave the string
+        // unterminated and the whole file unparseable. A basic string
+        // only requires `\` and `"` escaped; nothing else that can
+        // appear in a Windows or POSIX path needs it.
+        let exe = hook_fire_exe
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
         let mut content = String::from("[features]\nhooks = true\n");
         for event in HOOK_EVENTS {
             content.push_str(&format!(
-                "\n[[hooks.{event}]]\n\n[[hooks.{event}.hooks]]\ntype = \"command\"\ncommand = '{} __hook-fire --session-id {session_id} --event {event}'\n",
-                hook_fire_exe.display()
+                "\n[[hooks.{event}]]\n\n[[hooks.{event}.hooks]]\ntype = \"command\"\ncommand = \"{exe} __hook-fire --session-id {session_id} --event {event}\"\n"
             ));
         }
         (
@@ -491,9 +499,31 @@ mod tests {
                 "missing table for {event}:\n{content}"
             );
             assert!(content.contains(&format!(
-                "'C:/x/sessionmgr.exe __hook-fire --session-id {id} --event {event}'"
+                "\"C:/x/sessionmgr.exe __hook-fire --session-id {id} --event {event}\""
             )));
         }
+    }
+
+    #[test]
+    fn hook_config_survives_an_apostrophe_in_the_executable_path() {
+        // The exact defect this test exists to catch: a TOML *literal*
+        // (single-quoted) string has no escape mechanism at all, so a
+        // `'` in the running binary's own path -- real on Windows,
+        // where a username directory can contain one -- would leave the
+        // command's own quoted string unterminated and the whole file
+        // unparseable.
+        let id = sessionmgr_core::SessionId::new(1_700_000_000_000, 1);
+        let exe = std::path::Path::new("C:/Users/O'Brien/sessionmgr.exe");
+        let (_path, content) = Codex.hook_config(exe, &id);
+        let parsed: toml::Value = toml::from_str(&content)
+            .expect("the generated config must be valid TOML even with an apostrophe in the path");
+        let command = parsed["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command must be a string");
+        assert_eq!(
+            command,
+            format!("C:/Users/O'Brien/sessionmgr.exe __hook-fire --session-id {id} --event SessionStart")
+        );
     }
 
     #[test]

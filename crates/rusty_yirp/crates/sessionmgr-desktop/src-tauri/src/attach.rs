@@ -16,7 +16,7 @@ use std::path::Path;
 use sessionmgr_protocol::{Request, SessionEvent, SessionId};
 use tauri::{AppHandle, Emitter};
 
-use crate::client::write_framed;
+use crate::client::{read_line_capped, write_framed, MAX_LINE_LEN};
 use crate::unix_stream::UnixStream;
 
 pub struct AttachHandle {
@@ -45,8 +45,7 @@ pub fn start(socket: &Path, id: SessionId, app: AppHandle) -> Result<AttachHandl
     let thread_id = id.clone();
     std::thread::spawn(move || loop {
         let mut line = String::new();
-        use std::io::BufRead;
-        let read = match reader.read_line(&mut line) {
+        let read = match read_line_capped(&mut reader, &mut line, MAX_LINE_LEN) {
             Ok(n) => n,
             Err(_) => break,
         };
@@ -82,8 +81,9 @@ impl AttachHandle {
     }
 
     /// Shuts the socket down in both directions, which unblocks the
-    /// reader thread's own blocking `read_line` with a clean EOF rather
-    /// than leaving it parked forever on a pane that no longer exists.
+    /// reader thread's own blocking `read_line_capped` with a clean EOF
+    /// rather than leaving it parked forever on a pane that no longer
+    /// exists.
     pub fn close(&self) {
         let _ = self.writer.shutdown(Shutdown::Both);
     }

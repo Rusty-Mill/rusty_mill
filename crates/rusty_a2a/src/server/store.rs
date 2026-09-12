@@ -14,6 +14,23 @@ use tokio::sync::RwLock;
 
 use crate::types::{ListTasksRequest, Task, TaskPushNotificationConfig};
 
+/// Caps how many push-notification configs one task can have registered
+/// at once. `CreateTaskPushNotificationConfig` (spec Section 3.1.7) has
+/// no spec-mandated bound, but without one a client could register an
+/// unbounded number of webhooks against a single task - and every
+/// status/artifact update on it fans out into one concurrent delivery
+/// attempt per registered config (see `notify_push_configs`), turning
+/// one task update into an unbounded webhook-delivery amplifier against
+/// whatever URLs got registered.
+pub const MAX_PUSH_CONFIGS_PER_TASK: usize = 10;
+
+/// Returned by [`TaskStore::put_push_config`] when the task named by
+/// `config.task_id` already has [`MAX_PUSH_CONFIGS_PER_TASK`] configs
+/// registered and `config` would add a new one rather than update one of
+/// them in place.
+#[derive(Debug, Clone, Copy)]
+pub struct PushConfigLimitExceeded;
+
 /// Storage for [`Task`] records and their push notification
 /// configurations.
 ///
@@ -38,11 +55,15 @@ pub trait TaskStore: Send + Sync {
     /// the filter across all pages.
     async fn list(&self, tenant: Option<&str>, filter: &ListTasksRequest) -> (Vec<Task>, String, i64);
 
+    /// Fails with [`PushConfigLimitExceeded`] if `config`'s task has
+    /// already reached [`MAX_PUSH_CONFIGS_PER_TASK`] registered configs
+    /// and `config`'s `id` doesn't match one of the existing ones (i.e.
+    /// this would add a new config rather than update one in place).
     async fn put_push_config(
         &self,
         tenant: Option<&str>,
         config: TaskPushNotificationConfig,
-    ) -> TaskPushNotificationConfig;
+    ) -> std::result::Result<TaskPushNotificationConfig, PushConfigLimitExceeded>;
     async fn get_push_config(
         &self,
         tenant: Option<&str>,
@@ -167,16 +188,20 @@ impl TaskStore for InMemoryTaskStore {
         &self,
         tenant: Option<&str>,
         mut config: TaskPushNotificationConfig,
-    ) -> TaskPushNotificationConfig {
+    ) -> std::result::Result<TaskPushNotificationConfig, PushConfigLimitExceeded> {
         if config.id.is_none() {
             config.id = Some(Uuid::new_v4().to_string());
         }
         let task_id = config.task_id.clone().unwrap_or_default();
         let mut configs = self.push_configs.write().await;
         let entry = configs.entry((tenant_key(tenant), task_id)).or_default();
+        let is_update = entry.iter().any(|c| c.id == config.id);
+        if !is_update && entry.len() >= MAX_PUSH_CONFIGS_PER_TASK {
+            return Err(PushConfigLimitExceeded);
+        }
         entry.retain(|c| c.id != config.id);
         entry.push(config.clone());
-        config
+        Ok(config)
     }
 
     async fn get_push_config(

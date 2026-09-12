@@ -117,74 +117,104 @@ pub fn match_component(pattern: &str, name: &str) -> bool {
     matches(&p, 0, &s, 0)
 }
 
-fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
-    loop {
-        if pi == p.len() {
-            return si == s.len();
+/// One indivisible piece of a compiled pattern: a run of `*` (matches any
+/// number of characters, including zero), `?` (exactly one character), a
+/// `[...]` class, or one literal character. Compiling the pattern up front
+/// lets `matches` walk it with plain indices instead of re-parsing bracket
+/// classes and backslash escapes on every backtrack.
+enum Atom {
+    Star,
+    Any,
+    Class(Class),
+    Literal(char),
+}
+
+impl Atom {
+    fn matches(&self, ch: char) -> bool {
+        match self {
+            Atom::Star => unreachable!("Star is matched as a run, not per-char"),
+            Atom::Any => true,
+            Atom::Class(class) => class.matches(ch),
+            Atom::Literal(c) => *c == ch,
         }
-        match p[pi] {
+    }
+}
+
+/// Compile `p` into a flat sequence of atoms.
+fn compile(p: &[char]) -> Vec<Atom> {
+    let mut atoms = Vec::new();
+    let mut i = 0;
+    while i < p.len() {
+        match p[i] {
             '*' => {
-                // Collapse a run of `*`, then try to match the tail at every
-                // remaining position.
-                let mut npi = pi + 1;
-                while npi < p.len() && p[npi] == '*' {
-                    npi += 1;
-                }
-                if npi == p.len() {
-                    return true; // trailing `*` swallows the rest
-                }
-                let mut k = si;
-                loop {
-                    if matches(p, npi, s, k) {
-                        return true;
-                    }
-                    if k == s.len() {
-                        return false;
-                    }
-                    k += 1;
-                }
+                atoms.push(Atom::Star);
+                i += 1;
             }
             '?' => {
-                if si == s.len() {
-                    return false;
-                }
-                pi += 1;
-                si += 1;
+                atoms.push(Atom::Any);
+                i += 1;
             }
-            '[' => match parse_class(p, pi) {
+            '[' => match parse_class(p, i) {
                 Some((class, npi)) => {
-                    if si == s.len() || !class.matches(s[si]) {
-                        return false;
-                    }
-                    pi = npi;
-                    si += 1;
+                    atoms.push(Atom::Class(class));
+                    i = npi;
                 }
                 // Unterminated `[` is a literal bracket.
                 None => {
-                    if si == s.len() || s[si] != '[' {
-                        return false;
-                    }
-                    pi += 1;
-                    si += 1;
+                    atoms.push(Atom::Literal('['));
+                    i += 1;
                 }
             },
             '\\' => {
-                let lit = if pi + 1 < p.len() { p[pi + 1] } else { '\\' };
-                if si == s.len() || s[si] != lit {
-                    return false;
-                }
-                pi += if pi + 1 < p.len() { 2 } else { 1 };
-                si += 1;
+                let lit = if i + 1 < p.len() { p[i + 1] } else { '\\' };
+                atoms.push(Atom::Literal(lit));
+                i += if i + 1 < p.len() { 2 } else { 1 };
             }
             c => {
-                if si == s.len() || s[si] != c {
-                    return false;
-                }
-                pi += 1;
-                si += 1;
+                atoms.push(Atom::Literal(c));
+                i += 1;
             }
         }
     }
+    atoms
+}
+
+/// Iterative two-pointer wildcard match (the standard `*`-glob algorithm):
+/// track the most recently seen `*` (`star_at`) and how far into the string
+/// it has been allowed to consume so far (`star_from`). On a mismatch,
+/// backtrack by re-trying the `*` against one more character instead of
+/// recursing — this keeps the whole match `O(atoms.len() * s.len())` even on
+/// adversarial patterns with many `*` segments, unlike naive backtracking
+/// recursion which is exponential in the number of `*`s.
+fn matches(p: &[char], pi: usize, s: &[char], si: usize) -> bool {
+    let atoms = compile(&p[pi..]);
+    let s = &s[si..];
+    let (m, n) = (s.len(), atoms.len());
+    let mut i = 0; // position in s
+    let mut j = 0; // position in atoms
+    let mut star_at: Option<usize> = None;
+    let mut star_from = 0usize;
+
+    while i < m {
+        if j < n && !matches!(atoms[j], Atom::Star) && atoms[j].matches(s[i]) {
+            i += 1;
+            j += 1;
+        } else if j < n && matches!(atoms[j], Atom::Star) {
+            star_at = Some(j);
+            star_from = i;
+            j += 1;
+        } else if let Some(sj) = star_at {
+            j = sj + 1;
+            star_from += 1;
+            i = star_from;
+        } else {
+            return false;
+        }
+    }
+    while j < n && matches!(atoms[j], Atom::Star) {
+        j += 1;
+    }
+    j == n
 }
 
 struct Class {
@@ -278,5 +308,30 @@ mod tests {
         assert_eq!(glob("src/lexer.rs"), vec!["src/lexer.rs"]);
         assert!(glob("src/*.rs").contains(&"src/glob.rs".to_string()));
         assert!(glob("no-such-file-*.zzz").is_empty());
+    }
+
+    #[test]
+    fn adversarial_star_pattern_matches_in_bounded_time() {
+        // ~30 `a*` segments against a non-matching string of similar length
+        // is the classic catastrophic-backtracking trigger for naive
+        // recursive `*` matching (exponential in the number of `*`s). The
+        // iterative two-pointer algorithm is O(pattern * string), so this
+        // must return well under a second even though it never matches.
+        use std::time::{Duration, Instant};
+
+        let pattern = "a*".repeat(30);
+        let subject = "a".repeat(29) + "b"; // one char short of matching, and
+        // ends in a character the pattern can never place, forcing every
+        // `*` to exhaust its backtracking budget.
+
+        let start = Instant::now();
+        let result = match_component(&pattern, &subject);
+        let elapsed = start.elapsed();
+
+        assert!(!result);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "matching took {elapsed:?}, exponential backtracking regressed"
+        );
     }
 }

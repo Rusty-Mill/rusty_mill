@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::engine::GitEngine;
 use crate::error::GitError;
+use crate::types::RepoState;
 
 /// Automatic committer that stages and commits dirty working trees.
 ///
@@ -31,6 +32,11 @@ pub struct AutoCommitResult {
     pub files_changed: usize,
     /// Whether the commit was skipped due to debounce.
     pub debounced: bool,
+    /// Whether the commit was skipped because the repository is mid-operation
+    /// (merge, rebase, cherry-pick, revert, or bisect) with unresolved state.
+    /// Auto-committing here would silently finalize an unresolved conflict
+    /// with conflict-marker garbage baked into history.
+    pub skipped_mid_operation: bool,
 }
 
 impl AutoCommitter {
@@ -61,6 +67,7 @@ impl AutoCommitter {
                     message: None,
                     files_changed: 0,
                     debounced: true,
+                    skipped_mid_operation: false,
                 });
             }
         }
@@ -68,12 +75,27 @@ impl AutoCommitter {
         let mut engine = GitEngine::open(&self.repo_root)?;
         let state = engine.state()?;
 
+        // Never auto-commit while a merge/rebase/cherry-pick/revert/bisect is
+        // in progress — `GitEngine::commit()` folds `MERGE_HEAD` (etc.) as a
+        // second parent and finalizes the operation, which would silently
+        // bake unresolved conflict-marker text into history.
+        if state.repo_state != RepoState::Clean {
+            return Ok(AutoCommitResult {
+                commit_hash: None,
+                message: None,
+                files_changed: 0,
+                debounced: false,
+                skipped_mid_operation: true,
+            });
+        }
+
         if !state.is_dirty {
             return Ok(AutoCommitResult {
                 commit_hash: None,
                 message: None,
                 files_changed: 0,
                 debounced: false,
+                skipped_mid_operation: false,
             });
         }
 
@@ -93,6 +115,7 @@ impl AutoCommitter {
             message: Some(message),
             files_changed: file_count,
             debounced: false,
+            skipped_mid_operation: false,
         })
     }
 
@@ -191,6 +214,61 @@ mod tests {
         assert!(result.commit_hash.is_none());
         assert_eq!(result.files_changed, 0);
         assert!(!result.debounced);
+    }
+
+    #[test]
+    fn auto_commit_skips_during_unresolved_merge_conflict() {
+        let (dir, mut committer) = init_repo();
+        fs::write(dir.path().join("file.txt"), "base\n").unwrap();
+        manual_commit(dir.path(), "initial");
+
+        // Diverge onto `feature` with a change to the same line.
+        let mut engine = GitEngine::open(dir.path()).unwrap();
+        let base_branch = engine.state().unwrap().branch.unwrap();
+        engine.create_branch("feature").unwrap();
+        engine.switch_branch("feature").unwrap();
+        fs::write(dir.path().join("file.txt"), "feature change\n").unwrap();
+        engine.stage_all().unwrap();
+        engine.commit("feature commit").unwrap();
+
+        // Diverge the base branch too, so the merge conflicts instead of
+        // fast-forwarding.
+        engine.switch_branch(&base_branch).unwrap();
+        fs::write(dir.path().join("file.txt"), "base change\n").unwrap();
+        engine.stage_all().unwrap();
+        engine.commit("base commit").unwrap();
+
+        // Start the merge — leaves `RepoState::Merge` and conflict markers
+        // in the working tree for the caller to resolve.
+        let merge_result = engine.merge("feature").unwrap();
+        assert!(
+            !merge_result.conflicts.is_empty(),
+            "expected a merge conflict"
+        );
+        drop(engine);
+
+        let commits_before = GitEngine::open(dir.path()).unwrap().log(10).unwrap().len();
+        let conflicted_content = fs::read_to_string(dir.path().join("file.txt")).unwrap();
+        assert!(conflicted_content.contains("<<<<<<<"));
+
+        // The auto-committer must refuse to finalize the unresolved merge.
+        let result = committer.check_and_commit().unwrap();
+        assert!(result.commit_hash.is_none());
+        assert!(result.skipped_mid_operation);
+        assert!(!result.debounced);
+
+        // Repository must still be mid-merge and the conflicted file must
+        // still carry raw conflict markers — nothing was staged/committed.
+        let engine = GitEngine::open(dir.path()).unwrap();
+        assert_eq!(engine.state().unwrap().repo_state, RepoState::Merge);
+        let content_after = fs::read_to_string(dir.path().join("file.txt")).unwrap();
+        assert_eq!(content_after, conflicted_content);
+        assert!(content_after.contains("<<<<<<<"));
+        let commits_after = engine.log(10).unwrap().len();
+        assert_eq!(
+            commits_before, commits_after,
+            "no new commit should be created while the merge is unresolved"
+        );
     }
 
     #[test]

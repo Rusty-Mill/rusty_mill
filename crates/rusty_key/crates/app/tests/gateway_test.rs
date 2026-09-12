@@ -222,3 +222,58 @@ async fn multi_mode_requires_session_id_and_isolates() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_refuses_to_start_without_gateway_secret() {
+    // `RUSTYKEYS_GATEWAY_SECRET` is not set anywhere in this test suite's
+    // process environment — startup must refuse to bind a network-exposed,
+    // unauthenticated gateway rather than silently disabling auth (round-4
+    // finding 1b).
+    let dir = tmp("no-secret");
+    let model = FakeLanguageModel::new(vec![]);
+    let err = rk_app::gateway::serve(config_at(&dir), model, "127.0.0.1:0")
+        .await
+        .expect_err("gateway must refuse to start without a configured secret");
+    assert!(
+        err.to_string().contains("RUSTYKEYS_GATEWAY_SECRET"),
+        "unexpected error: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_session_gates_new_file_writes_behind_an_approval_gate() {
+    let dir = tmp("approval-gate");
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "write_file".into(),
+            args: serde_json::json!({"path": "unapproved.txt", "content": "hi"}),
+        }],
+        vec![Scripted::Text("done".into())],
+    ]);
+    let gw = Arc::new(Gateway::new(config_at(&dir), model));
+    let app = gw.router();
+
+    let resp = app
+        .oneshot(
+            Request::post("/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"write a file"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The gateway has no interactive adapter to answer an approval prompt, so
+    // `Gateway::build_session` must wire the same `ApprovalGate` ACP/desktop
+    // use — it fails closed, blocking the first new-file write rather than
+    // executing it (round-4 finding 1d). Pre-fix, `build_session` called the
+    // ungated `Session::new`, and this file would exist.
+    assert!(
+        !dir.join("unapproved.txt").exists(),
+        "write_file must be blocked by the gateway's ApprovalGate, not executed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

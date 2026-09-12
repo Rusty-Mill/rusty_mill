@@ -981,7 +981,13 @@ impl Grid {
         // Fit to the available width (shrink only), preserving aspect.
         let tw = width.min(avail);
         let th = (height * tw / width).max(1);
-        let cell_rows = th.div_ceil(2);
+        // Cap the render loop to a small bounded multiple of the terminal's
+        // rows regardless of source height: only the width is shrunk to fit
+        // above, so a narrow, extremely tall image (e.g. a crafted 1xN inline
+        // image) would otherwise leave `cell_rows` tracking the full source
+        // height and spin this synchronous loop under the held grid lock.
+        let max_cell_rows = self.rows.saturating_mul(4).max(1);
+        let cell_rows = th.div_ceil(2).min(max_cell_rows);
         #[cfg(any(test, feature = "gui"))]
         self.store_image(width, height, pixels, origin, tw, cell_rows);
 

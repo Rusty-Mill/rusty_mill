@@ -62,13 +62,25 @@ impl From<&McpConfig> for ReconnectPolicy {
 /// name-prefixed tool namespace (`"{upstream}/{tool}"`).
 pub struct McpGateway {
     peers: Arc<RwLock<Peers>>,
+    /// Per-call timeout for `tools/list`/`tools/call` requests forwarded to
+    /// an upstream -- see `McpConfig::timeout_secs`. Without this, a
+    /// misbehaving or hung upstream could stall a client-facing request
+    /// forever, unlike every other outbound integration in this router
+    /// family (`ProviderConfig`/`ModerationConfig`/`WebSearchConfig`/
+    /// webhook `timeout_secs`).
+    timeout: Duration,
 }
+
+/// Mirrors `McpConfig::timeout_secs`'s default, for [`McpGateway::empty`]
+/// (which has no `McpConfig` to read one from since it connects nothing).
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 impl McpGateway {
     /// A gateway with no upstreams configured.
     pub fn empty() -> Self {
         Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
@@ -79,6 +91,7 @@ impl McpGateway {
     pub async fn connect(upstreams: &[McpUpstreamConfig], config: &McpConfig) -> Self {
         let peers = Arc::new(RwLock::new(HashMap::new()));
         let policy = ReconnectPolicy::from(config);
+        let timeout = Duration::from_secs(config.timeout_secs);
         for upstream in upstreams {
             match connect_one(upstream).await {
                 Ok(service) => {
@@ -98,35 +111,45 @@ impl McpGateway {
                 }
             }
         }
-        Self { peers }
+        Self { peers, timeout }
     }
 
     /// Every proxied tool across every connected upstream, each renamed to
-    /// `"{upstream}/{tool}"`. An upstream whose `tools/list` call fails is
-    /// logged and skipped for this call, rather than failing the whole
-    /// listing. An upstream mid-reconnect simply has no entry here at all
-    /// (the supervisor removes it the moment its connection drops), so this
-    /// never attempts a call it already knows will fail.
+    /// `"{upstream}/{tool}"`. An upstream whose `tools/list` call fails or
+    /// exceeds `timeout` is logged and skipped for this call, rather than
+    /// failing the whole listing. An upstream mid-reconnect simply has no
+    /// entry here at all (the supervisor removes it the moment its
+    /// connection drops), so this never attempts a call it already knows
+    /// will fail.
     pub async fn list_tools(&self) -> Vec<Tool> {
         let peers = self.peers.read().await;
         let mut tools = Vec::new();
         for (name, peer) in peers.iter() {
-            match peer.list_tools(None).await {
-                Ok(result) => {
+            match tokio::time::timeout(self.timeout, peer.list_tools(None)).await {
+                Ok(Ok(result)) => {
                     for mut tool in result.tools {
                         tool.name = format!("{name}/{}", tool.name).into();
                         tools.push(tool);
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(upstream = %name, %error, "failed to list tools from MCP upstream");
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        upstream = %name,
+                        timeout_secs = self.timeout.as_secs(),
+                        "MCP upstream tools/list call timed out"
+                    );
                 }
             }
         }
         tools
     }
 
-    /// Forward a `tools/call` to `upstream`'s `tool`, verbatim.
+    /// Forward a `tools/call` to `upstream`'s `tool`, verbatim. Bounded by
+    /// `timeout`, returning [`GatewayError::Timeout`] rather than hanging
+    /// forever if the upstream never responds.
     pub async fn call_tool(
         &self,
         upstream: &str,
@@ -145,8 +168,9 @@ impl McpGateway {
         if let Some(arguments) = arguments {
             params = params.with_arguments(arguments);
         }
-        peer.call_tool_once(params)
+        tokio::time::timeout(self.timeout, peer.call_tool_once(params))
             .await
+            .map_err(|_elapsed| GatewayError::Timeout(upstream.to_string()))?
             .map_err(GatewayError::Service)
     }
 }
@@ -157,6 +181,8 @@ pub enum GatewayError {
     UnknownUpstream(String),
     #[error(transparent)]
     Service(#[from] rmcp::ServiceError),
+    #[error("call to MCP upstream '{0}' timed out")]
+    Timeout(String),
 }
 
 async fn connect_one(
@@ -311,5 +337,62 @@ mod tests {
         assert!(!should_give_up(2, Some(3)));
         assert!(should_give_up(3, Some(3)));
         assert!(should_give_up(4, Some(3)));
+    }
+
+    // --- call_tool timeout -----------------------------------------------------
+
+    /// An MCP server whose `tools/call` handler never resolves, standing in
+    /// for a hung/misbehaving upstream.
+    struct HangingHandler;
+
+    impl rmcp::ServerHandler for HangingHandler {
+        async fn call_tool(
+            &self,
+            _request: rmcp::model::CallToolRequestParams,
+            _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        ) -> Result<CallToolResponse, rmcp::model::ErrorData> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn call_tool_returns_a_timeout_error_instead_of_hanging_forever() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            if let Ok(service) = HangingHandler.serve(server_io).await {
+                let _ = service.waiting().await;
+            }
+        });
+
+        let client = tokio::time::timeout(Duration::from_secs(5), ().serve(client_io))
+            .await
+            .expect("handshake timed out")
+            .expect("client handshake failed");
+
+        let gateway = McpGateway {
+            peers: Arc::new(RwLock::new(HashMap::from([(
+                "slow".to_string(),
+                client.peer().clone(),
+            )]))),
+            // Short enough that a passing test proves the internal timeout
+            // fired, not that it happened to finish before the outer
+            // `tokio::time::timeout` below.
+            timeout: Duration::from_millis(200),
+        };
+
+        // The outer timeout is only a test-hang guard, generous enough that
+        // it would never fire on its own -- if `call_tool` didn't enforce
+        // its own timeout, this would hang until it did (or forever, absent
+        // this belt-and-braces bound).
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            gateway.call_tool("slow", "hangs_forever", None),
+        )
+        .await
+        .expect("call_tool hung past the outer test-hang guard");
+
+        assert!(matches!(&result, Err(GatewayError::Timeout(name)) if name == "slow"));
+
+        let _ = client.cancel().await;
     }
 }

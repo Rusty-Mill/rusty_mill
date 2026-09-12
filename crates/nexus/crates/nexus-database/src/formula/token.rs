@@ -144,22 +144,22 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned>> {
         if b == b'"' || b == b'\'' {
             let quote = b;
             i += 1;
-            let mut s = String::new();
+            let mut buf: Vec<u8> = Vec::new();
             while i < len && bytes[i] != quote {
                 if bytes[i] == b'\\' && i + 1 < len {
                     i += 1;
                     match bytes[i] {
-                        b'n' => s.push('\n'),
-                        b't' => s.push('\t'),
-                        b'\\' => s.push('\\'),
-                        c if c == quote => s.push(char::from(quote)),
+                        b'n' => buf.push(b'\n'),
+                        b't' => buf.push(b'\t'),
+                        b'\\' => buf.push(b'\\'),
+                        c if c == quote => buf.push(quote),
                         other => {
-                            s.push('\\');
-                            s.push(char::from(other));
+                            buf.push(b'\\');
+                            buf.push(other);
                         }
                     }
                 } else {
-                    s.push(char::from(bytes[i]));
+                    buf.push(bytes[i]);
                 }
                 i += 1;
             }
@@ -170,6 +170,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Spanned>> {
                 });
             }
             i += 1; // skip closing quote
+            let s = String::from_utf8(buf).map_err(|_| DatabaseError::FormulaError {
+                position: start,
+                message: "invalid UTF-8 in string literal".to_string(),
+            })?;
             tokens.push(Spanned {
                 token: Token::StringLit(s),
                 start,
@@ -270,6 +274,21 @@ mod tests {
         assert_eq!(
             tokens,
             vec![Token::StringLit("say \"hi\"".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn string_literal_non_ascii() {
+        let tokens = tok_types(r#"upper("café")"#);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("upper".to_string()),
+                Token::LParen,
+                Token::StringLit("café".to_string()),
+                Token::RParen,
+                Token::Eof,
+            ]
         );
     }
 
