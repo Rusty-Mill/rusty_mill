@@ -60,11 +60,22 @@ impl Retry {
     /// How long to wait before attempt `attempt` (1-based for the first retry).
     ///
     /// Doubles each time, matching the config docs, and is capped so a large
-    /// `attempts` cannot produce a wait nobody will sit through.
+    /// `attempts` cannot produce a wait nobody will sit through. Delegates
+    /// to [`rusty_retry::Backoff`], shared with `rusty_request`'s and
+    /// `rusty-acp`'s own retry policies -- `jitter: 0.0` reproduces this
+    /// exact plain-doubling formula, since the retry config this compiles
+    /// is a wire-compatible mirror of an upstream schema that specifies no
+    /// jitter.
     pub fn backoff(&self, attempt: u32) -> Option<Duration> {
         let base = self.backoff?;
-        let shift = attempt.saturating_sub(1).min(16);
-        Some(base.saturating_mul(1u32 << shift).min(MAX_BACKOFF))
+        Some(
+            rusty_retry::Backoff::Exponential {
+                base,
+                max: MAX_BACKOFF,
+                jitter: 0.0,
+            }
+            .delay_for(attempt.saturating_sub(1)),
+        )
     }
 }
 

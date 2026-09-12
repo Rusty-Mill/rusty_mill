@@ -16,6 +16,10 @@ tracing.workspace = true
 futures.workspace = true
 prometheus.workspace = true
 rusty_sqlite = { path = "../../../rusty_sqlite" }
+# Shared exponential-backoff delay math, also used by rusty_request's and
+# rusty_acp's own retry policies -- `jitter: 0.0` reproduces the plain
+# doubling-capped-at-max formula webhook.rs's retry loop used to hand-roll.
+rusty_retry = { path = "../../../rusty_retry" }
 tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true

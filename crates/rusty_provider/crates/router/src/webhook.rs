@@ -86,13 +86,6 @@ impl RetryPolicy {
     }
 }
 
-/// Doubles `current`, capped at `max` -- no jitter, same as MCP's own
-/// reconnect backoff (a handful of webhook retries isn't a
-/// thundering-herd concern at this scale).
-fn next_backoff(current: Duration, max: Duration) -> Duration {
-    (current * 2).min(max)
-}
-
 /// Hex-encoded HMAC-SHA256 over `body`, keyed by `secret`.
 fn sign_hex(secret: &str, body: &[u8]) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
@@ -173,9 +166,16 @@ impl WebhookNotifier {
             .as_deref()
             .map(|secret| format!("sha256={}", sign_hex(secret, &body)));
         let policy = self.retry_policy;
+        // No jitter -- a handful of webhook retries isn't a thundering-herd
+        // concern at this scale. Delegates to rusty_retry::Backoff, shared
+        // with rusty_request's and rusty_acp's own retry policies.
+        let backoff = rusty_retry::Backoff::Exponential {
+            base: policy.initial_backoff,
+            max: policy.max_backoff,
+            jitter: 0.0,
+        };
 
         tokio::spawn(async move {
-            let mut backoff = policy.initial_backoff;
             let mut attempt = 0u32;
             loop {
                 let mut req = client
@@ -207,8 +207,7 @@ impl WebhookNotifier {
                 if !retryable || attempt >= policy.max_retries {
                     return;
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = next_backoff(backoff, policy.max_backoff);
+                tokio::time::sleep(backoff.delay_for(attempt)).await;
                 attempt += 1;
             }
         });
@@ -275,20 +274,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn next_backoff_doubles_each_time() {
-        let max = Duration::from_secs(60);
-        let a = Duration::from_secs(1);
-        let b = next_backoff(a, max);
-        let c = next_backoff(b, max);
-        assert_eq!(b, Duration::from_secs(2));
-        assert_eq!(c, Duration::from_secs(4));
-    }
-
-    #[test]
-    fn next_backoff_caps_at_max() {
-        let max = Duration::from_secs(60);
-        assert_eq!(next_backoff(Duration::from_secs(50), max), max);
-        assert_eq!(next_backoff(max, max), max);
+    fn retry_policy_backoff_doubles_each_attempt_and_caps_at_max() {
+        let policy = RetryPolicy::for_test(10, 5);
+        let backoff = rusty_retry::Backoff::Exponential {
+            base: policy.initial_backoff,
+            max: policy.max_backoff,
+            jitter: 0.0,
+        };
+        assert_eq!(backoff.delay_for(0), Duration::from_millis(10));
+        assert_eq!(backoff.delay_for(1), Duration::from_millis(20));
+        assert_eq!(backoff.delay_for(2), Duration::from_millis(40));
+        // for_test's max_backoff is 10x initial_backoff (100ms here).
+        assert_eq!(backoff.delay_for(10), policy.max_backoff);
     }
 
     #[test]

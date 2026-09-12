@@ -34,12 +34,22 @@ and [PR #166](https://github.com/Rusty-Mill/rusty_mill/pull/166), merged
 2026-09-11/12) once that blocking premise was resolved; its disposition
 cell below reflects that later work, not the 2026-09-05 pass.
 
+Row 2 (retry policy) was a considered `no action` from that 2026-09-05
+pass on the assumption that adopting `rusty_retry::Backoff` for
+`agentgateway-core`'s and `rp-router`'s remaining hand-rolled backoff
+math would add jitter neither wanted. A later re-examination found that
+assumption was wrong -- `rusty_retry::Backoff::Exponential{jitter: 0.0}`
+reproduces both crates' existing plain-doubling-capped formula exactly,
+with no behavior change -- and both were switched over accordingly
+(merged 2026-09-12); its disposition cell below reflects that later
+work too.
+
 ### Section 1 — duplication clusters
 
 | # | Cluster | Disposition | What changed / why not |
 | --- | --- | --- | --- |
 | 1 | `RsaPublicKey` | **no action** (as recommended) | Endianness split is documented in-source as deliberate; the shared `BigUint` already covers the arithmetic. Re-open on a third consumer. |
-| 2 | Retry policy | **no action, and narrower than reported** | `rusty_request::retry::Backoff::delay_for` and `rusty_acp::client::RetryPolicy::backoff_for` *already* delegate the backoff math to `rusty_retry` (PR #116) — the report's "none of the four diff the actual backoff algorithm" was stale for those two. What remains is `agentgateway-core::retry` (plain doubling, capped, no jitter, driven by a serde-shaped config) and `rp-router`'s `pub(crate)` webhook policy. Moving either onto `rusty_retry::Backoff` would change behaviour (add jitter) with no bug to fix; that is the human call the report said it was, and it is left as one. |
+| 2 | Retry policy | **done** | `rusty_request::retry::Backoff::delay_for` and `rusty_acp::client::RetryPolicy::backoff_for` already delegated the backoff math to `rusty_retry` (PR #116). The remaining two (`agentgateway-core::retry::Retry::backoff`, `rp-router`'s `pub(crate)` webhook `RetryPolicy`) turned out not to need the behavior change the original disposition assumed: both are plain doubling capped at a max, no jitter, and `rusty_retry::Backoff::Exponential{jitter: 0.0}` reproduces that exact formula bit-for-bit (verified against both crates' own existing tests, all of which still pass unchanged). Both now delegate their delay computation to `rusty_retry` the same way; each crate's retry-*eligibility* policy (which statuses/errors retry, attempt counts, webhook- vs. gateway-route-specific reasoning) stays local, unchanged — that part remains genuinely different domain logic, not duplication. |
 | 3 | `f16_to_f32` | **done** | `rusty_llama::quant` re-exports `rusty_simd::f16_to_f32`; its own copy is deleted. |
 | 4 | `f32_to_f16` | **done** | Added `rusty_simd::f32_to_f16` (round-to-nearest-even, NaN preserved as quiet NaN, overflow → ∞, with an exhaustive every-f16-round-trips test); `rusty_llama` and `rusty_whisper` re-export it. Worth knowing: the two deleted copies disagreed — `rusty_whisper`'s rounded half-up, `rusty_llama`'s turned NaN into infinity. Both call sites are test-fixture-only, so neither difference reached a real code path. |
 | 5 | Hand-rolled base64 ×3 | **done** | `rusty_request`, `ts-control`, and `sessionmgr-protocol` all use `rusty_base64` now; the three `src/base64.rs` files are deleted. `sessionmgr-protocol`'s strictness ("reject, never guess") was kept by hardening `rusty_base64`'s decoder rather than lowering the bar: it now rejects misplaced or excess `=` and reports the offending index/byte in `DecodeError`, and `sessionmgr-protocol::base64::decode` keeps its own one-line "padded wire, so length must be 4-aligned" guard on top. `ts-control`'s DESIGN.md dependency table gained the required justification row. |
