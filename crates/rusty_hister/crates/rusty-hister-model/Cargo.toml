@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
+rusty_rand = { path = "../../../rusty_rand" }
 rusty-db = { path = "../../../rusty_db/rusty_db", features = [
     "derive",
     "sqlite",

@@ -13,6 +13,45 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's CrawlJob lifecycle query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-crawl-job`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-crawl-job)
+
+Seventh Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, `rusty-hister-model`'s schema, and its embedding-queue,
+`WebSession`, and `DocumentVersion` query layers, previous entries below).
+Scoped to `CrawlJob`'s own lifecycle — `crawl.go`'s job-level helpers,
+not `CrawlURL`'s queue mechanics, which stay a separate follow-up (that
+file has 20 functions total; this increment covers the 7 that operate on
+`CrawlJob` itself).
+
+- **Added:** `CrawlJob::generate_id`/`create`/`create_with_urls`/`get`/
+  `update_status`/`list`/`delete` — a port of `GenerateCrawlJobID`/
+  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`/`GetCrawlJob`/
+  `UpdateCrawlJobStatus`/`ListCrawlJobs`/`DeleteCrawlJob`.
+- **Added:** a new first-party dependency, `rusty_rand` (already existed
+  in this workspace as the shared OS-backed-CSPRNG crate extracted from
+  three near-identical copies elsewhere) — `generate_id` uses it for
+  cryptographically secure random bytes rather than adding the external
+  `rand` crate, per this project's sovereignty-loop discipline.
+- **Added:** `create_with_urls`'s atomic job-plus-initial-queue creation:
+  a `Transaction` that retries the job insert with a `-2`/`-3`/... id
+  suffix on collision, then bulk-inserts the initial URLs, deduping
+  against any already queued. Both the collision retry and the per-URL
+  dedup need `ON CONFLICT DO NOTHING`, which the query builder doesn't
+  support, so this drops to raw SQL — the same pattern
+  `EmbeddingJob::enqueue` established, extended here to a genuine
+  multi-statement transaction via `Engine::begin()`/`Transaction::execute`/
+  `commit` rather than a single raw statement.
+- **Unchanged scope:** `CrawlURL`'s own queue mechanics (bulk insert,
+  per-URL status transitions, the `ForEach*` streaming iterators,
+  `GetCrawlJobStats`) are not part of this increment — a separate,
+  not-yet-started follow-up.
+- **Added:** 9 new unit tests (65 total in the crate) — `generate_id`
+  produces distinct 8-character hex strings; `create`/`get`/
+  `update_status`/`list`/`delete` round-trip correctly; `create_with_urls`
+  rejects an empty URL list, inserts the job and its initial queue, and
+  retries with a `-2` suffix when the base id collides. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's DocumentVersion query layer
 **2026-09-12** · branch [`claude/hister-phase1-model-document-version`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-document-version)
 

@@ -9,6 +9,24 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s `CrawlJob` lifecycle query layer (`rusty_hister`'s
+  Phase 1, continued): `CrawlJob::{generate_id, create, create_with_urls,
+  get, update_status, list, delete}`, a Rust port of `crawl.go`'s
+  job-level helpers (`GenerateCrawlJobID`/`CreateCrawlJob`/
+  `CreateNamedCrawlJobWithURLs`/`GetCrawlJob`/`UpdateCrawlJobStatus`/
+  `ListCrawlJobs`/`DeleteCrawlJob`). `generate_id` uses the existing
+  first-party `rusty_rand` crate for its OS-backed CSPRNG bytes rather
+  than adding the external `rand` crate — a sovereignty-loop pass found
+  `rusty_rand` already exists in this workspace precisely to avoid that.
+  `create_with_urls` atomically creates a job and its initial URL queue
+  inside a `Transaction`, retrying with a `-2`/`-3`/... suffix on id
+  collision; both that retry and the per-URL dedup need
+  `ON CONFLICT DO NOTHING`, so it drops to raw SQL, the same pattern
+  `EmbeddingJob::enqueue` uses, extended to a multi-statement transaction
+  via `Engine::begin()`/`Transaction::execute`/`commit`. `CrawlURL`'s own
+  queue mechanics (bulk insert, per-URL status updates, the streaming
+  iterators, job stats) remain a separate, not-yet-started increment. 9
+  new unit tests (65 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s `DocumentVersion` query layer (`rusty_hister`'s
   Phase 1, continued): `DocumentVersion::{save, move_versions, count,
   list, list_until}`, a Rust port of `version.go`'s
