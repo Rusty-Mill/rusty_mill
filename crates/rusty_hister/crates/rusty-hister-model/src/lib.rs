@@ -10,20 +10,20 @@
 //! migrations have applied) via its own bookkeeping table, so this is a
 //! substitution, not a dropped capability.
 //!
-//! `EmbeddingJob`'s query layer (§5.9's embedding queue) is ported too —
-//! `enqueue`/`claim_next`/`complete`/`retry`/`fail`/`release`/
-//! `in_progress_exists`/`delete`/`reset_in_progress`, as `EmbeddingJob`
-//! associated functions in `embedding.rs`. Everything else below is still
-//! query-layer behavior, not schema, and is **not yet ported** — a
-//! deliberate, explicitly-flagged follow-up increment, the same split
-//! `rusty-hister-extractor` used (chain-of-responsibility mechanism landed
-//! before any concrete extractor):
+//! `EmbeddingJob`'s and `WebSession`'s query layers are ported too —
+//! `EmbeddingJob::{enqueue, claim_next, complete, retry, fail, release,
+//! in_progress_exists, delete, reset_in_progress}` (§5.9's embedding
+//! queue) and `WebSession::{create, get, update, delete}`. Everything else
+//! below is still query-layer behavior, not schema, and is **not yet
+//! ported** — a deliberate, explicitly-flagged follow-up increment, the
+//! same split `rusty-hister-extractor` used (chain-of-responsibility
+//! mechanism landed before any concrete extractor):
 //!
-//! - The domain operations the other model files' Go source builds on top
-//!   of their tables (the `history.go` search/pin/timeline queries,
+//! - The domain operations the other four model files' Go source builds on
+//!   top of their tables (the `history.go` search/pin/timeline queries,
 //!   `user.go`'s auth/token helpers, `CreateCrawlJob`/
-//!   `CreateNamedCrawlJobWithURLs`, `WebSession`'s lookup/expiry helpers,
-//!   `SaveDocumentVersion`/`GetDocumentVersionsUntil`).
+//!   `CreateNamedCrawlJobWithURLs`, `SaveDocumentVersion`/
+//!   `GetDocumentVersionsUntil`).
 //! - The legacy pre-GORM `indexer_versions` read path (capability inventory
 //!   §7.3) and whether `rusty_hister` needs to *open* a pre-existing
 //!   Hister-Go-created database file at all — both still-open items, see
@@ -50,3 +50,12 @@ pub use migrations::{POSTGRES_MIGRATIONS, SQLITE_MIGRATIONS};
 pub use session::WebSession;
 pub use user::User;
 pub use version::DocumentVersion;
+
+/// Renders `count` placeholders in `dialect`'s own syntax (`?`, `$1`, ...),
+/// 1-indexed. Shared by the query-layer functions that need raw SQL for a
+/// `CASE`-based `SET` clause or a database-assigned surrogate key —
+/// anything `rusty_db`'s query builder doesn't cover — so the same SQL
+/// text still works against every supported backend.
+pub(crate) fn placeholders(dialect: &dyn rusty_db::Dialect, count: usize) -> Vec<String> {
+    (1..=count).map(|i| dialect.placeholder(i)).collect()
+}

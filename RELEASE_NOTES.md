@@ -13,6 +13,49 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's WebSession query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-websession`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-websession)
+
+Fifth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, `rusty-hister-model`'s schema, and its embedding-queue query
+layer, previous entries below). Scoped to `WebSession`'s query layer
+alone — small and fully self-contained, and the first place this crate
+needs a database-assigned surrogate key, worth solving and documenting in
+isolation before the remaining five model files (which mostly share the
+same autoincrementing-`i64`-primary-key shape) need the same recipe.
+
+- **Added:** `WebSession::create`/`get`/`refresh`/`delete` — a port of
+  `session.go`'s `CreateWebSession`/`GetWebSession`/`UpdateWebSession`/
+  `DeleteWebSession`. `get` returns `Option<WebSession>` rather than a
+  `HisterError`/sentinel-error pair for the not-found case — the
+  idiomatic Rust equivalent of Go's dedicated `ErrWebSessionNotFound`.
+  Named `refresh`, not `update`, since `#[derive(Mapped)]` already
+  generates an `update()` instance method (turns a whole struct value
+  into an `UPDATE` statement) that a same-named associated function would
+  collide with.
+- **Added:** `create`'s database-assigned-primary-key recipe —
+  `rusty_db::Mapped::insert()` always includes the primary key field's
+  current value (there's no "leave this to the database" marker), so it
+  can't populate an autoincrementing `i64` column on its own. `create`
+  instead issues a raw `INSERT` that omits the `id` column, then recovers
+  the generated value dialect-appropriately: `RETURNING id` where
+  `Dialect::supports_returning()` is true (Postgres), `SELECT
+  last_insert_rowid()` otherwise (SQLite — this crate's dialect model
+  reports `false` here even though modern SQLite itself supports
+  `RETURNING`). Documented in `session.rs` as the pattern
+  `User`/`Link`/`History`/`HistoryLink`/`DocumentVersion` will reuse for
+  their own `create`s.
+- **Changed:** the dialect-placeholder helper (`Engine::dialect().placeholder(..)`
+  rendering) introduced for the embedding queue's raw-SQL functions is
+  now a shared `crate::placeholders` in `lib.rs`, since `WebSession::create`
+  is a second real call site.
+- **Added:** 7 new unit tests (50 total in the crate) — create assigns a
+  positive, distinct id per session and the row is retrievable by token
+  hash; get returns `None` for an unknown hash; refresh changes
+  data/expiry for a known session and reports `false` for an unknown one;
+  delete removes a session and no-ops for an unknown one. clippy/fmt
+  clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's embedding-queue query layer
 **2026-09-12** · branch [`claude/hister-phase1-model-embedding-queue`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-embedding-queue)
 

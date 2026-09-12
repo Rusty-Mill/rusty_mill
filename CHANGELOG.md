@@ -9,6 +9,22 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s `WebSession` query layer (`rusty_hister`'s Phase
+  1, continued): `WebSession::{create, get, refresh, delete}`, a Rust
+  port of `session.go`'s lookup/expiry helpers (`refresh`, not `update`,
+  to avoid colliding with `#[derive(Mapped)]`'s own generated `update()`
+  instance method). `create` is this crate's first database-assigned
+  surrogate key — `rusty_db::Mapped::insert()` always supplies the
+  primary key's current value, so a placeholder like `0` would either
+  become the literal row id (SQLite) or be rejected outright (Postgres's
+  `GENERATED ALWAYS AS IDENTITY`) — so `create` drops to a raw `INSERT`
+  that omits the `id` column and recovers the generated value
+  dialect-appropriately (`RETURNING id` where `Dialect::supports_returning()`
+  is true, `SELECT last_insert_rowid()` otherwise), the same recipe every
+  other autoincrementing model in this crate will need for its own
+  `create`. The dialect-placeholder helper introduced for the embedding
+  queue is now shared (hoisted to `lib.rs` on this second real call
+  site). 7 new unit tests (50 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s embedding-queue query layer (`rusty_hister`'s
   Phase 1, continued): `EmbeddingJob::{enqueue, claim_next, complete,
   retry, fail, release, in_progress_exists, delete, reset_in_progress}`,
