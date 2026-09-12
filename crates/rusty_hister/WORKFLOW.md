@@ -32,9 +32,9 @@ every other crate in the monorepo.
   to out-of-scope only via an explicit ADR recording the user's sign-off.
 - Ask before anything hard to reverse: the crate-cluster split once
   non-bootstrap code depends on it, the licensing approach for ported test
-  fixtures (ADR-0001), the search-engine choice (ADR-0002) and the
-  JS-rendering-crawler approach (ADR-0003) while either is still open, or
-  any dependency/toolchain change.
+  fixtures (still open — ADR-0001), reopening a question ADR-0002/ADR-0003
+  already decided (the search engine, the CDP crate pick, or BiDi's
+  descope), or any dependency/toolchain change.
 
 ## ADRs
 
@@ -47,11 +47,11 @@ cluster's own `0001` per the root workspace's ADR-0001 remit (root
 ## Next steps after this bootstrap commit
 
 `ADR-0002` (search/indexing engine) and `ADR-0003` (JS-rendering crawler
-approach) are open, awaiting the user's sign-off. Implementation work on
-`rusty-hister-indexer`, `rusty-hister-vectorstore`'s storage side, and
-`rusty-hister-crawler`'s JS-rendering backends should not start until those
-land. Work that isn't blocked on either (capability inventory review,
-`rusty-hister-core`'s `Document`/error types, `rusty-hister-model`'s schema,
-`rusty-hister-extractor`'s SDK and non-JS-dependent extractors,
-`rusty-hister-server`'s route table, `rusty-hister-mcp`'s tool surface) can
-proceed in parallel.
+approach) are both **Accepted** — see `docs/PROJECT-STATUS.md`'s "Decided"
+table. Implementation work on `rusty-hister-indexer`,
+`rusty-hister-vectorstore`'s storage side, and `rusty-hister-crawler`'s CDP
+backend is unblocked; the `bidi`-equivalent backend is out of v1 scope
+entirely, not merely unblocked. None of Phase 1-4's implementation has
+started yet as of this bootstrap-adjacent update — deciding the ADRs
+unblocks that work without performing it. See `docs/roadmap/ROADMAP.md` for
+phase sequencing.

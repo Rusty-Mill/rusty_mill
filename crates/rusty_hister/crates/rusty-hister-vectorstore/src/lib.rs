@@ -7,10 +7,8 @@
 //! inventory §6.3) can build on `rusty_llama`/`rusty_provider`, both of
 //! which already produce embedding vectors (confirmed by the sovereignty
 //! audit — see `docs/decisions/ADR-0001-bootstrap-scope-and-crate-split.md`).
-//! The storage side is a genuine, separately-tracked gap: Hister's SQLite
-//! backend vendors the `sqlite-vec` C extension via cgo (§6.2), which has no
-//! settled Rust-side answer yet (a vendored-C build via the `cc` crate, a
-//! pure-Rust vector index, or `rusty_search`'s designed-for-but-unimplemented
-//! `VectorQuery` path). This is folded into the search-engine
-//! decision-request (`ADR-0002`) rather than decided here, since
-//! `rusty_search`'s own roadmap already anticipates hybrid search.
+//! The storage side is decided in `docs/decisions/
+//! ADR-0002-search-indexing-engine-approach-proposal.md` (Accepted, folded
+//! in as a sub-decision rather than its own ADR): a vendored-C build of
+//! `sqlite-vec` (via the `cc` crate) for the SQLite deployment path,
+//! `pgvector` for the Postgres path.

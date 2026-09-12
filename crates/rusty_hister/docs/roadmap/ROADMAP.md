@@ -15,7 +15,12 @@ because they're scheduled.
 - [x] ADR-0001 (bootstrap scope and crate split) written.
 - [x] ADR-0002 (search engine) and ADR-0003 (JS-rendering crawler) written
       as open decision-requests.
-- [ ] User sign-off on ADR-0002 and ADR-0003.
+- [x] User decision on ADR-0002 (`rusty_search` + `rusty-search-sqlite-fts5`,
+      federation/`url_re:`/highlighting as hister-layer composition,
+      `sqlite-vec`/`pgvector` for semantic search) and ADR-0003
+      (`chromiumoxide` for CDP, WebDriver BiDi descoped for v1) — decided
+      2026-09-12, ahead of ADR-0002's recommended scoping spike (see each
+      ADR's "Accepted risk" note).
 - [ ] User confirmation on ADR-0001's licensing recommendation (Go test
       fixtures: rewrite from independent reading, don't copy verbatim).
 
@@ -46,28 +51,34 @@ independent of ADR-0002/0003)
   and `mcpNormalizeUntrusted` ported byte-for-byte (§2) — this is the
   highest-priority-to-get-right unit in the whole port.
 - Both depend on `rusty-hister-indexer` existing enough to serve `search`,
-  so cannot fully land until ADR-0002 resolves and at least a
-  non-semantic-search path through the indexer works — the route
-  table/tool schemas themselves, however, can be scaffolded against a stub
-  indexer in the meantime.
+  so cannot fully land until Phase 3 delivers at least a non-semantic-search
+  path through the indexer — the route table/tool schemas themselves,
+  however, can be scaffolded against a stub indexer in the meantime.
 
-## Phase 3 — Indexer + vectorstore (blocked on ADR-0002)
+## Phase 3 — Indexer + vectorstore (unblocked by ADR-0002, not yet started)
 
-- Query grammar/lexer (§5.2-§5.4) — can start immediately once ADR-0002
-  names a target `Query`-tree shape to compile into, since the grammar
-  itself is backend-independent.
-- Multi-language federation, `url_re:` custom-filter equivalent, and the
-  three highlight styles (§5.1, flagged as the hard part of ADR-0002).
-- `rusty-hister-vectorstore`'s embedding pipeline (not blocked — build on
-  `rusty_llama`/`rusty_provider` per ADR-0001) and storage side (blocked on
-  ADR-0002's `sqlite-vec` sub-decision).
+- Query grammar/lexer (§5.2-§5.4) against `rusty-search-core`'s `Query`
+  tree (ADR-0002's decision) — backend-independent, so this can start
+  immediately.
+- `rusty-search-sqlite-fts5` integration (ADR-0002's chosen backend);
+  multi-language federation, `url_re:` custom-filter equivalent, and the
+  three highlight styles all built as `rusty-hister-indexer`-layer
+  composition per ADR-0002's decision, not `rusty-search-core` changes.
+- `rusty-hister-vectorstore`'s embedding pipeline (build on
+  `rusty_llama`/`rusty_provider` per ADR-0001) and storage side: `sqlite-vec`
+  (vendored C extension) for the SQLite path, `pgvector` for Postgres, per
+  ADR-0002's decision.
 
-## Phase 4 — JS-rendering crawler backends (blocked on ADR-0003)
+## Phase 4 — JS-rendering crawler backend (unblocked by ADR-0003, not yet
+started)
 
-- `chromedp`-equivalent backend.
-- `bidi`-equivalent backend, or an explicit descope sign-off per ADR-0003.
-- Re-enable the Notion extractor, which hard-depends on one of these
-  (§4.5.16).
+- `chromedp`-equivalent backend on `chromiumoxide` (ADR-0003's decision).
+- `bidi`-equivalent backend: **out of v1 scope** — ADR-0003 explicitly
+  descoped it, not merely deferred it pending a sign-off. Revisit only if a
+  concrete driver-free-deployment need arises later.
+- Re-enable the Notion extractor, which hard-depends on JS rendering
+  existing at all (§4.5.16) — satisfied by the CDP backend above; not
+  affected by BiDi's descope.
 
 ## Later phases (out of v1, tracked for visibility only)
 
