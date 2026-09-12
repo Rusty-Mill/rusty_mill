@@ -13,6 +13,90 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Decide rusty_hister's ADR-0002 and ADR-0003
+**2026-09-12** · branch [`claude/decide-hister-adr-0002-0003`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/decide-hister-adr-0002-0003)
+
+Decides the two open decision-requests from `rusty_hister`'s bootstrap
+(previous entry below), on the user's (baileyrd/Nano's) direct instruction
+("Decide ADR-0002 and ADR-0003 now"), ahead of ADR-0002's own recommended
+scoping spike — each ADR records that as an accepted risk, not a silently
+skipped step. No implementation code changes; docs only.
+
+- **Changed:** `crates/rusty_hister/docs/decisions/ADR-0002-…md` → Accepted.
+  Engine: `rusty_search` + `rusty-search-sqlite-fts5`, chosen over Tantivy
+  for single-SQLite-file cohesion with the model DB and with `sqlite-vec`
+  (below). Multi-language `IndexAlias` federation, `url_re:` custom
+  filtering, and the three highlight styles are decided as
+  `rusty-hister-indexer`-layer composition over `rusty-search-core`'s
+  `Query` tree, not changes to the shared `rusty_search` crate. BM25 parity
+  accepted as result-set, not byte-exact. Semantic-search storage:
+  vendored `sqlite-vec` C extension (SQLite path), `pgvector` (Postgres
+  path) — no pure-Rust reimplementation for v1.
+- **Changed:** `crates/rusty_hister/docs/decisions/ADR-0003-…md` → Accepted.
+  CDP crawler backend: `chromiumoxide` as a Tier A adapter dependency (root
+  ADR-0002's tiers), since Hister's own `chromedp` backend already wraps an
+  external library rather than hand-rolling CDP. WebDriver BiDi: **explicitly
+  descoped for v1** (not deferred) — its only advantage over CDP (no
+  driver-binary/library dependency) is moot once `chromiumoxide` is already
+  accepted; the Notion extractor's JS-rendering requirement is unaffected,
+  satisfied by the CDP backend.
+- **Changed:** `docs/PROJECT-STATUS.md` and `docs/roadmap/ROADMAP.md`
+  updated: Phase 3 (indexer + vectorstore) and Phase 4 (CDP crawler
+  backend) are unblocked; Phase 4's BiDi-equivalent line item is marked out
+  of v1 scope rather than merely blocked. Crate module doc comments in
+  `rusty-hister-{indexer,vectorstore,crawler}` updated to match.
+- **Not done here:** no implementation of either decision — the indexer,
+  vectorstore storage, or CDP crawler backend. That's Phase 3/4 work,
+  tracked but not started.
+
+---
+
+## Bootstrap rusty_hister: a Rust port of asciimoo/hister
+**2026-09-12** · branch [`claude/hister-rust-port-quq3ho`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-rust-port-quq3ho)
+
+Bootstraps a Rust port of [asciimoo/hister](https://github.com/asciimoo/hister)
+(AGPL-3.0-or-later) as a native crate cluster under `crates/rusty_hister/` —
+fresh work written directly in this workspace, not a `git subtree` import of
+a pre-existing standalone repo. No port implementation logic lands in this
+PR; it establishes the scaffold everything else depends on.
+
+- **Added:** eight new workspace members —
+  `rusty-hister-{core,model,extractor,indexer,vectorstore,crawler,server,mcp}`
+  — each an empty skeleton crate with a module doc comment pointing back to
+  the capability inventory and relevant ADR. All compile clean
+  (`cargo check` across the set).
+- **Added:** a full `rust-migration`-style capability inventory built from
+  reading Hister's actual Go source at commit `49b727f4` (not the kickoff
+  brief's own rough orientation notes, which were explicitly unverified) —
+  `crates/rusty_hister/docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`.
+  Covers 39 HTTP routes, 3 MCP tools (with verbatim prompt-injection-defense
+  text), ~35 CLI subcommands, 20 extractors, the full query-language
+  grammar, the vectorstore/embedding pipeline, 10 DB models, 3 crawler
+  backends, and the TUI, each flagged `[TESTED]`/`[UNTESTED]` against
+  Hister's own Go test suite.
+- **Added:** a sovereignty audit confirming most of what this port needs is
+  already covered by existing first-party crates — `rusty_tokio`,
+  `rusty_http`/`rusty_request`, `rusty_tls`, `rusty_json`, `rusty_db`,
+  `rusty_url`, `rusty_llama`/`rusty_provider`, and notably `rusty_mcp`
+  (already a mature MCP server framework this port's tool surface builds on
+  directly instead of a fresh JSON-RPC layer). `rusty_search` covers real
+  BM25 today but only a structured query-builder DSL, not a text grammar,
+  and no vector search yet. Nothing in the workspace touches the Chrome
+  DevTools Protocol or WebDriver BiDi.
+- **Added:** three ADRs under `crates/rusty_hister/docs/decisions/` —
+  ADR-0001 (accepted: native workspace crates, v1 scope is backend-only per
+  the kickoff brief, the crate split and its two revisions from the brief's
+  starting suggestion, and an open licensing recommendation for Go test
+  fixtures), ADR-0002 and ADR-0003 (both **Proposed**, open
+  decision-requests per the kickoff brief's explicit instruction — search/
+  indexing engine approach and JS-rendering crawler approach, respectively
+  — neither decided in this PR).
+- **Not done here:** no indexing, crawling, extraction, or server logic.
+  `rusty-hister-indexer`, `rusty-hister-vectorstore`'s storage side, and
+  `rusty-hister-crawler`'s JS-rendering backends are explicitly blocked on
+  ADR-0002/ADR-0003 sign-off; see `crates/rusty_hister/docs/roadmap/
+  ROADMAP.md` for what can proceed in parallel.
+
 ## Make rusty_json's serde dependency optional
 **2026-09-11** · branch [`claude/clever-wright-y6qkyq`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/clever-wright-y6qkyq)
 

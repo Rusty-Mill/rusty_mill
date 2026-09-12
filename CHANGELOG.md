@@ -8,6 +8,47 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- Bootstrapped `rusty_hister` — a native (not `git subtree`-imported) crate
+  cluster under `crates/rusty_hister/` for a Rust port of
+  [asciimoo/hister](https://github.com/asciimoo/hister). Eight new
+  workspace members
+  (`rusty-hister-{core,model,extractor,indexer,vectorstore,crawler,server,mcp}`),
+  each an empty skeleton crate (no port logic yet). Full
+  `rust-migration`-style capability inventory
+  (`crates/rusty_hister/docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`),
+  a sovereignty audit of candidate `rusty_*` crates, and three ADRs
+  (bootstrap/scope/split; two decision-requests for the search/indexing
+  engine and the JS-rendering crawler approach, both since **decided** —
+  see below) — see `crates/rusty_hister/docs/PROJECT-STATUS.md`.
+### Changed
+- `rusty_hister`'s ADR-0002 (search/indexing engine) and ADR-0003
+  (JS-rendering crawler) decided by the user, ahead of ADR-0002's own
+  recommended scoping spike: `rusty_search` + `rusty-search-sqlite-fts5`
+  for full-text search (multi-language federation, `url_re:` filtering, and
+  highlight rendering built as `rusty-hister-indexer`-layer composition,
+  not backend changes), `sqlite-vec`/`pgvector` for semantic search
+  storage, `chromiumoxide` for the CDP crawler backend, and WebDriver BiDi
+  explicitly **descoped** for v1 (not merely deferred). Unblocks
+  `rusty-hister-indexer`, `rusty-hister-vectorstore`'s storage side, and
+  `rusty-hister-crawler`'s CDP backend for implementation — none of which
+  has started yet.
+- CI's `plan` job no longer treats every root `Cargo.toml` edit as an
+  automatic full workspace sweep. A new classifier
+  (`.github/scripts/cargo_toml_diff.py`) distinguishes a pure
+  `[workspace.members]` addition (new, independent crates; nothing else in
+  the file touched — the common case when bootstrapping a new crate
+  cluster, e.g. PR #170) from anything with broader blast radius (a
+  `[workspace.dependencies]` version bump, a removed/renamed member, a
+  `[profile]` edit); only the latter still forces `full=true`. A pure
+  addition now goes through the normal affected-crates path instead,
+  scoping CI to just the new crates.
+- CI's scoped `cargo nextest run` step now passes `--no-tests=warn`
+  instead of nextest's default `--no-tests=fail`: a scoped PR run whose
+  affected packages collectively have zero tests (e.g. a PR that only adds
+  brand-new skeleton crates, as `rusty_hister`'s bootstrap did) now logs a
+  warning and passes instead of failing CI outright. A full sweep is
+  unaffected (thousands of tests always exist there).
 ### Fixed
 - 63 correctness/security/reliability findings from a second `/codex-build`
   review (`CODEX-MONOREPO-REVIEW-2026-09-12.md`), across ~45 crates spanning
