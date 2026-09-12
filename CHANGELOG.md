@@ -9,6 +9,26 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s `CrawlURL` queue-mechanics query layer
+  (`rusty_hister`'s Phase 1, continued): `CrawlURL::{insert_if_not_exists,
+  bulk_insert, mark_done_and_enqueue_links, insert_done, next_pending,
+  update_status, mark_failed, reset_in_progress, count_by_status, count,
+  list_failed, list, job_stats}`, a Rust port of `crawl.go`'s remaining
+  URL-level helpers (`InsertCrawlURLIfNotExists`/`BulkInsertCrawlURLs`/
+  `MarkCrawlURLDoneAndEnqueueLinks`/`InsertDoneCrawlURL`/
+  `GetNextPendingCrawlURL`/`UpdateCrawlURLStatus`/`MarkCrawlURLFailed`/
+  `ResetInProgressCrawlURLs`/`CountCrawlURLsByStatus`/`CountCrawlURLs`/
+  `ForEachFailedCrawlURL(WithMessage)`/`ForEachCrawlURL(ByStatus)`/
+  `GetCrawlJobStats`). Go's private `insertCrawlURLs` helper — shared by
+  `CreateNamedCrawlJobWithURLs` and `BulkInsertCrawlURLs` — becomes this
+  file's own private `insert_crawl_urls`, reused the same way by
+  `CrawlJob::create_with_urls` and `CrawlURL::bulk_insert`. The two
+  `ForEach*` streaming iterators become `list_failed`/`list` returning a
+  `Vec<Self>` instead of taking a row-streaming callback — a deliberate
+  simplification, not a dropped capability: every row Go's callback would
+  see is still reachable, just batched. `crawl.go`'s query layer is now
+  fully ported. 16 new unit tests (81 total in the crate), clippy/fmt
+  clean.
 - `rusty-hister-model`'s `CrawlJob` lifecycle query layer (`rusty_hister`'s
   Phase 1, continued): `CrawlJob::{generate_id, create, create_with_urls,
   get, update_status, list, delete}`, a Rust port of `crawl.go`'s

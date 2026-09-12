@@ -10,20 +10,32 @@
 //! migrations have applied) via its own bookkeeping table, so this is a
 //! substitution, not a dropped capability.
 //!
-//! `EmbeddingJob`'s and `WebSession`'s query layers are ported too —
-//! `EmbeddingJob::{enqueue, claim_next, complete, retry, fail, release,
-//! in_progress_exists, delete, reset_in_progress}` (§5.9's embedding
-//! queue) and `WebSession::{create, get, update, delete}`. Everything else
-//! below is still query-layer behavior, not schema, and is **not yet
-//! ported** — a deliberate, explicitly-flagged follow-up increment, the
-//! same split `rusty-hister-extractor` used (chain-of-responsibility
-//! mechanism landed before any concrete extractor):
+//! Five of the nine model files' query layers are ported too:
 //!
-//! - The domain operations the other four model files' Go source builds on
-//!   top of their tables (the `history.go` search/pin/timeline queries,
-//!   `user.go`'s auth/token helpers, `CreateCrawlJob`/
-//!   `CreateNamedCrawlJobWithURLs`, `SaveDocumentVersion`/
-//!   `GetDocumentVersionsUntil`).
+//! - `EmbeddingJob::{enqueue, claim_next, complete, retry, fail, release,
+//!   in_progress_exists, delete, reset_in_progress}` (§5.9's embedding
+//!   queue).
+//! - `WebSession::{create, get, refresh, delete}` (`refresh`, not
+//!   `update`, since `#[derive(Mapped)]` already generates an `update()`
+//!   instance method a same-named associated function would collide
+//!   with).
+//! - `DocumentVersion::{save, move_versions, count, list, list_until}`.
+//! - `CrawlJob::{generate_id, create, create_with_urls, get,
+//!   update_status, list, delete}` and `CrawlURL::{insert_if_not_exists,
+//!   bulk_insert, mark_done_and_enqueue_links, insert_done, next_pending,
+//!   update_status, mark_failed, reset_in_progress, count_by_status,
+//!   count, list_failed, list, job_stats}` — together, all of
+//!   `crawl.go`.
+//!
+//! Everything else below is still query-layer behavior, not schema, and
+//! is **not yet ported** — a deliberate, explicitly-flagged follow-up
+//! increment, the same split `rusty-hister-extractor` used
+//! (chain-of-responsibility mechanism landed before any concrete
+//! extractor):
+//!
+//! - The domain operations the other two model files' Go source builds on
+//!   top of their tables (the `history.go` search/pin/timeline queries and
+//!   `user.go`'s auth/token helpers).
 //! - The legacy pre-GORM `indexer_versions` read path (capability inventory
 //!   §7.3) and whether `rusty_hister` needs to *open* a pre-existing
 //!   Hister-Go-created database file at all — both still-open items, see
@@ -43,7 +55,7 @@ mod session;
 mod user;
 mod version;
 
-pub use crawl::{CrawlJob, CrawlJobStatus, CrawlURL, CrawlUrlStatus};
+pub use crawl::{CrawlJob, CrawlJobStats, CrawlJobStatus, CrawlURL, CrawlUrlStatus};
 pub use embedding::{EmbeddingJob, EmbeddingJobStatus};
 pub use history::{History, HistoryLink, Link};
 pub use migrations::{POSTGRES_MIGRATIONS, SQLITE_MIGRATIONS};

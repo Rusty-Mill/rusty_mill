@@ -15,15 +15,23 @@
 //! its `CASE`-based updates, extended here to a multi-statement
 //! transaction via `Engine::begin()`/`Transaction::execute`/`commit`.
 //!
-//! `CrawlURL`'s own queue mechanics (`BulkInsertCrawlURLs`,
-//! `MarkDoneAndEnqueueLinks`, `NextPendingCrawlURL`, per-URL status
-//! updates, the `ForEach*` streaming iterators, `GetCrawlJobStats`) are a
-//! separate, not-yet-started increment — this file's schema-only comment
-//! already covers `CrawlURL`, but its query layer doesn't ride along with
-//! `CrawlJob`'s.
+//! `CrawlURL`'s own queue mechanics are ported too:
+//! `insert_if_not_exists`/`bulk_insert`/`mark_done_and_enqueue_links`/
+//! `insert_done`/`next_pending`/`update_status`/`mark_failed`/
+//! `reset_in_progress`/`count_by_status`/`count`/`list_failed`/`list`/
+//! `job_stats`. Go's `insertCrawlURLs` private helper (shared by
+//! `CreateNamedCrawlJobWithURLs` and `BulkInsertCrawlURLs`) becomes this
+//! file's own private `insert_crawl_urls`, used by `CrawlJob::create_with_urls`
+//! and `CrawlURL::bulk_insert` alike. `ForEachFailedCrawlURL(WithMessage)`/
+//! `ForEachCrawlURL(ByStatus)` become `list_failed`/`list` returning a
+//! `Vec<Self>` rather than taking a row-streaming callback — a deliberate
+//! simplification (this crate has no other streaming-query precedent, and
+//! nothing yet calls these at a scale where collecting matters), not a
+//! silently dropped capability: every row Go's callback saw is still
+//! reachable, just batched instead of streamed.
 
 use crate::placeholders;
-use rusty_db::prelude::*;
+use rusty_db::{prelude::*, Dialect};
 
 /// `CrawlJob.status` values (Go: untyped string constants
 /// `CrawlJobRunning`/`CrawlJobCompleted`/`CrawlJobInterrupted`). A closed
@@ -151,23 +159,7 @@ impl CrawlJob {
             }
         };
 
-        for url in urls {
-            let p = placeholders(dialect, 4);
-            let sql = format!(
-                "INSERT INTO crawl_urls \
-                    (job_id, url, depth, status, error, error_code, created_at, updated_at) \
-                 VALUES ({}, {}, 0, 'pending', '', 0, {}, {}) \
-                 ON CONFLICT (job_id, url) DO NOTHING",
-                p[0], p[1], p[2], p[3]
-            );
-            let params: Vec<Value> = vec![
-                job_id.clone().into(),
-                url.clone().into(),
-                now.into(),
-                now.into(),
-            ];
-            tx.execute(&sql, &params).await?;
-        }
+        insert_crawl_urls(&mut tx, dialect, &job_id, urls, 0, now).await?;
 
         tx.commit().await?;
         Ok(job_id)
@@ -236,6 +228,330 @@ pub struct CrawlURL {
     pub error_code: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Inserts all `urls` for `job_id` at `depth`, silently skipping any
+/// already present (the unique index on `(job_id, url)` is what "already
+/// present" means). Shared by `CrawlJob::create_with_urls` and
+/// `CrawlURL::bulk_insert` — Go's `insertCrawlURLs` private helper, shared
+/// the same way by `CreateNamedCrawlJobWithURLs` and `BulkInsertCrawlURLs`.
+async fn insert_crawl_urls(
+    tx: &mut Transaction,
+    dialect: &dyn Dialect,
+    job_id: &str,
+    urls: &[String],
+    depth: i64,
+    now: DateTime<Utc>,
+) -> rusty_db::Result<()> {
+    for url in urls {
+        let p = placeholders(dialect, 5);
+        let sql = format!(
+            "INSERT INTO crawl_urls \
+                (job_id, url, depth, status, error, error_code, created_at, updated_at) \
+             VALUES ({}, {}, {}, 'pending', '', 0, {}, {}) \
+             ON CONFLICT (job_id, url) DO NOTHING",
+            p[0], p[1], p[2], p[3], p[4]
+        );
+        let params: Vec<Value> = vec![
+            job_id.to_string().into(),
+            url.clone().into(),
+            depth.into(),
+            now.into(),
+            now.into(),
+        ];
+        tx.execute(&sql, &params).await?;
+    }
+    Ok(())
+}
+
+/// Aggregate URL counts per status for a crawl job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CrawlJobStats {
+    pub pending: i64,
+    pub in_progress: i64,
+    pub done: i64,
+    pub failed: i64,
+    pub skipped: i64,
+}
+
+impl CrawlURL {
+    /// Adds a URL to the job's queue only when it has not been seen
+    /// before.
+    pub async fn insert_if_not_exists(
+        engine: &Engine,
+        job_id: &str,
+        url: &str,
+        depth: i64,
+    ) -> rusty_db::Result<()> {
+        Self::bulk_insert(
+            engine,
+            job_id,
+            std::slice::from_ref(&url.to_string()),
+            depth,
+        )
+        .await
+    }
+
+    /// Inserts all `urls` for the given job in a single transaction,
+    /// silently skipping any that are already present.
+    pub async fn bulk_insert(
+        engine: &Engine,
+        job_id: &str,
+        urls: &[String],
+        depth: i64,
+    ) -> rusty_db::Result<()> {
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        let dialect = engine.dialect();
+        let mut tx = engine.begin().await?;
+        insert_crawl_urls(&mut tx, dialect, job_id, urls, depth, now).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Marks a crawl URL as done and inserts all discovered child URLs in
+    /// a single transaction.
+    pub async fn mark_done_and_enqueue_links(
+        engine: &Engine,
+        id: i64,
+        job_id: &str,
+        links: &[String],
+        depth: i64,
+    ) -> rusty_db::Result<()> {
+        let now = Utc::now();
+        let dialect = engine.dialect();
+        let mut tx = engine.begin().await?;
+
+        let table = Self::table();
+        tx.execute_query(
+            &Update::table(&table)
+                .set("status", CrawlUrlStatus::Done)
+                .set("error", "")
+                .set("error_code", 0_i64)
+                .set("updated_at", now)
+                .filter(table.col("id").eq(id)),
+            dialect,
+        )
+        .await?;
+
+        if !links.is_empty() {
+            insert_crawl_urls(&mut tx, dialect, job_id, links, depth, now).await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Marks a URL done if already present (e.g. a redirect target
+    /// fetched indirectly), otherwise inserts it directly in the done
+    /// state.
+    pub async fn insert_done(
+        engine: &Engine,
+        job_id: &str,
+        url: &str,
+        depth: i64,
+    ) -> rusty_db::Result<()> {
+        let now = Utc::now();
+        let table = Self::table();
+        let updated = engine
+            .execute(
+                &Update::table(&table)
+                    .set("status", CrawlUrlStatus::Done)
+                    .set("error", "")
+                    .set("error_code", 0_i64)
+                    .set("updated_at", now)
+                    .filter(table.col("job_id").eq(job_id))
+                    .filter(table.col("url").eq(url)),
+            )
+            .await?;
+        if updated == 0 {
+            let dialect = engine.dialect();
+            let mut conn = engine.connect().await?;
+            let p = placeholders(dialect, 5);
+            let sql = format!(
+                "INSERT INTO crawl_urls \
+                    (job_id, url, depth, status, error, error_code, created_at, updated_at) \
+                 VALUES ({}, {}, {}, 'done', '', 0, {}, {})",
+                p[0], p[1], p[2], p[3], p[4]
+            );
+            let params: Vec<Value> = vec![
+                job_id.to_string().into(),
+                url.to_string().into(),
+                depth.into(),
+                now.into(),
+                now.into(),
+            ];
+            conn.execute(&sql, &params).await?;
+        }
+        Ok(())
+    }
+
+    /// The oldest pending URL for the job, or `None` when none remain.
+    pub async fn next_pending(engine: &Engine, job_id: &str) -> rusty_db::Result<Option<Self>> {
+        let table = Self::table();
+        engine
+            .fetch_optional_as(
+                &Select::from(&table)
+                    .filter(table.col("job_id").eq(job_id))
+                    .filter(table.col("status").eq("pending"))
+                    .order_by(table.col("id").asc())
+                    .limit(1),
+            )
+            .await
+    }
+
+    /// Sets the status and optional error message on a URL row.
+    pub async fn update_status(
+        engine: &Engine,
+        id: i64,
+        status: CrawlUrlStatus,
+        err_msg: &str,
+    ) -> rusty_db::Result<()> {
+        let table = Self::table();
+        engine
+            .execute(
+                &Update::table(&table)
+                    .set("status", status)
+                    .set("error", err_msg)
+                    .set("error_code", 0_i64)
+                    .set("updated_at", Utc::now())
+                    .filter(table.col("id").eq(id)),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Marks the URL for a job as failed with an error code and message.
+    pub async fn mark_failed(
+        engine: &Engine,
+        job_id: &str,
+        url: &str,
+        err_code: i64,
+        err_msg: &str,
+    ) -> rusty_db::Result<()> {
+        let table = Self::table();
+        engine
+            .execute(
+                &Update::table(&table)
+                    .set("status", CrawlUrlStatus::Failed)
+                    .set("error", err_msg)
+                    .set("error_code", err_code)
+                    .set("updated_at", Utc::now())
+                    .filter(table.col("job_id").eq(job_id))
+                    .filter(table.col("url").eq(url)),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Moves all `in_progress` URLs for a job back to `pending` so they
+    /// are retried after a crash or interruption.
+    pub async fn reset_in_progress(engine: &Engine, job_id: &str) -> rusty_db::Result<()> {
+        let table = Self::table();
+        engine
+            .execute(
+                &Update::table(&table)
+                    .set("status", CrawlUrlStatus::Pending)
+                    .set("updated_at", Utc::now())
+                    .filter(table.col("job_id").eq(job_id))
+                    .filter(table.col("status").eq("in_progress")),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Number of URLs with the given status for a job.
+    pub async fn count_by_status(
+        engine: &Engine,
+        job_id: &str,
+        status: CrawlUrlStatus,
+    ) -> rusty_db::Result<i64> {
+        let table = Self::table();
+        let row = engine
+            .fetch_one(
+                &Select::from(&table)
+                    .columns([SelectExpr::from(Expr::count_all()).alias("count")])
+                    .filter(table.col("job_id").eq(job_id))
+                    .filter(table.col("status").eq(status)),
+            )
+            .await?;
+        row.get_by_name("count")
+    }
+
+    /// Number of URL rows tracked for a job.
+    pub async fn count(engine: &Engine, job_id: &str) -> rusty_db::Result<i64> {
+        let table = Self::table();
+        let row = engine
+            .fetch_one(
+                &Select::from(&table)
+                    .columns([SelectExpr::from(Expr::count_all()).alias("count")])
+                    .filter(table.col("job_id").eq(job_id)),
+            )
+            .await?;
+        row.get_by_name("count")
+    }
+
+    /// Every failed URL for a job, oldest first.
+    pub async fn list_failed(engine: &Engine, job_id: &str) -> rusty_db::Result<Vec<Self>> {
+        let table = Self::table();
+        engine
+            .fetch_all_as(
+                &Select::from(&table)
+                    .filter(table.col("job_id").eq(job_id))
+                    .filter(table.col("status").eq("failed"))
+                    .order_by(table.col("id").asc()),
+            )
+            .await
+    }
+
+    /// Every URL tracked for a job, oldest first, optionally filtered to
+    /// one status.
+    pub async fn list(
+        engine: &Engine,
+        job_id: &str,
+        status: Option<CrawlUrlStatus>,
+    ) -> rusty_db::Result<Vec<Self>> {
+        let table = Self::table();
+        let mut query = Select::from(&table).filter(table.col("job_id").eq(job_id));
+        if let Some(status) = status {
+            query = query.filter(table.col("status").eq(status));
+        }
+        engine
+            .fetch_all_as(&query.order_by(table.col("id").asc()))
+            .await
+    }
+
+    /// URL counts per status for a job.
+    pub async fn job_stats(engine: &Engine, job_id: &str) -> rusty_db::Result<CrawlJobStats> {
+        let table = Self::table();
+        let rows = engine
+            .fetch_all(
+                &Select::from(&table)
+                    .columns([
+                        SelectExpr::from(table.col("status")),
+                        SelectExpr::from(Expr::count_all()).alias("count"),
+                    ])
+                    .filter(table.col("job_id").eq(job_id))
+                    .group_by([table.col("status")]),
+            )
+            .await?;
+
+        let mut stats = CrawlJobStats::default();
+        for row in rows {
+            let status: CrawlUrlStatus = row.get_by_name("status")?;
+            let count: i64 = row.get_by_name("count")?;
+            match status {
+                CrawlUrlStatus::Pending => stats.pending = count,
+                CrawlUrlStatus::InProgress => stats.in_progress = count,
+                CrawlUrlStatus::Done => stats.done = count,
+                CrawlUrlStatus::Failed => stats.failed = count,
+                CrawlUrlStatus::Skipped => stats.skipped = count,
+            }
+        }
+        Ok(stats)
+    }
 }
 
 #[cfg(test)]
@@ -538,5 +854,427 @@ mod tests {
         assert_eq!(original.start_url, "https://example.com");
         let renamed = CrawlJob::get(&engine, "job1-2").await.unwrap().unwrap();
         assert_eq!(renamed.start_url, "https://other.com");
+    }
+
+    #[tokio::test]
+    async fn insert_if_not_exists_dedups_against_an_existing_url() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+
+        CrawlURL::insert_if_not_exists(&engine, "job1", "https://example.com/a", 0)
+            .await
+            .unwrap();
+        CrawlURL::insert_if_not_exists(&engine, "job1", "https://example.com/a", 0)
+            .await
+            .unwrap();
+
+        assert_eq!(CrawlURL::count(&engine, "job1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_insert_skips_urls_already_present() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+        CrawlURL::insert_if_not_exists(&engine, "job1", "https://example.com/a", 0)
+            .await
+            .unwrap();
+
+        CrawlURL::bulk_insert(
+            &engine,
+            "job1",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(CrawlURL::count(&engine, "job1").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn bulk_insert_is_a_no_op_for_an_empty_list() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+        CrawlURL::bulk_insert(&engine, "job1", &[], 0)
+            .await
+            .unwrap();
+        assert_eq!(CrawlURL::count(&engine, "job1").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn mark_done_and_enqueue_links_updates_the_url_and_queues_children() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &["https://example.com".to_string()],
+        )
+        .await
+        .unwrap();
+        let parent = CrawlURL::next_pending(&engine, &job_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        CrawlURL::mark_done_and_enqueue_links(
+            &engine,
+            parent.id,
+            &job_id,
+            &["https://example.com/child".to_string()],
+            1,
+        )
+        .await
+        .unwrap();
+
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let done = all.iter().find(|u| u.id == parent.id).unwrap();
+        assert_eq!(done.status, CrawlUrlStatus::Done);
+        let child = all.iter().find(|u| u.url.ends_with("/child")).unwrap();
+        assert_eq!(child.status, CrawlUrlStatus::Pending);
+        assert_eq!(child.depth, 1);
+    }
+
+    #[tokio::test]
+    async fn insert_done_updates_an_existing_row() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+        CrawlURL::insert_if_not_exists(&engine, "job1", "https://example.com/a", 0)
+            .await
+            .unwrap();
+
+        CrawlURL::insert_done(&engine, "job1", "https://example.com/a", 0)
+            .await
+            .unwrap();
+
+        assert_eq!(CrawlURL::count(&engine, "job1").await.unwrap(), 1);
+        let all = CrawlURL::list(&engine, "job1", None).await.unwrap();
+        assert_eq!(all[0].status, CrawlUrlStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn insert_done_inserts_when_no_row_exists() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+
+        CrawlURL::insert_done(&engine, "job1", "https://example.com/a", 2)
+            .await
+            .unwrap();
+
+        let all = CrawlURL::list(&engine, "job1", None).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, CrawlUrlStatus::Done);
+        assert_eq!(all[0].depth, 2);
+    }
+
+    #[tokio::test]
+    async fn next_pending_returns_the_oldest_pending_url() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let next = CrawlURL::next_pending(&engine, &job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.url, "https://example.com/a");
+    }
+
+    #[tokio::test]
+    async fn next_pending_returns_none_when_queue_is_empty() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+        assert_eq!(CrawlURL::next_pending(&engine, "job1").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn update_status_sets_status_and_error() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &["https://example.com/a".to_string()],
+        )
+        .await
+        .unwrap();
+        let url = CrawlURL::next_pending(&engine, &job_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        CrawlURL::update_status(&engine, url.id, CrawlUrlStatus::Failed, "boom")
+            .await
+            .unwrap();
+
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        assert_eq!(all[0].status, CrawlUrlStatus::Failed);
+        assert_eq!(all[0].error, "boom");
+    }
+
+    #[tokio::test]
+    async fn mark_failed_sets_status_error_code_and_message() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+        CrawlURL::insert_if_not_exists(&engine, "job1", "https://example.com/a", 0)
+            .await
+            .unwrap();
+
+        CrawlURL::mark_failed(&engine, "job1", "https://example.com/a", 404, "not found")
+            .await
+            .unwrap();
+
+        let all = CrawlURL::list(&engine, "job1", None).await.unwrap();
+        assert_eq!(all[0].status, CrawlUrlStatus::Failed);
+        assert_eq!(all[0].error_code, 404);
+        assert_eq!(all[0].error, "not found");
+    }
+
+    #[tokio::test]
+    async fn reset_in_progress_moves_only_in_progress_urls_back_to_pending() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        CrawlURL::update_status(&engine, all[0].id, CrawlUrlStatus::InProgress, "")
+            .await
+            .unwrap();
+        CrawlURL::update_status(&engine, all[1].id, CrawlUrlStatus::Done, "")
+            .await
+            .unwrap();
+
+        CrawlURL::reset_in_progress(&engine, &job_id).await.unwrap();
+
+        let after = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        let reset = after.iter().find(|u| u.id == all[0].id).unwrap();
+        assert_eq!(reset.status, CrawlUrlStatus::Pending);
+        let untouched = after.iter().find(|u| u.id == all[1].id).unwrap();
+        assert_eq!(untouched.status, CrawlUrlStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn count_by_status_and_count_reflect_the_queue() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        CrawlURL::update_status(&engine, all[0].id, CrawlUrlStatus::Done, "")
+            .await
+            .unwrap();
+
+        assert_eq!(CrawlURL::count(&engine, &job_id).await.unwrap(), 2);
+        assert_eq!(
+            CrawlURL::count_by_status(&engine, &job_id, CrawlUrlStatus::Done)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            CrawlURL::count_by_status(&engine, &job_id, CrawlUrlStatus::Pending)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn list_failed_returns_only_failed_urls() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        CrawlURL::mark_failed(&engine, &job_id, &all[0].url, 500, "boom")
+            .await
+            .unwrap();
+
+        let failed = CrawlURL::list_failed(&engine, &job_id).await.unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].url, all[0].url);
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_status_when_given() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        CrawlURL::update_status(&engine, all[0].id, CrawlUrlStatus::Done, "")
+            .await
+            .unwrap();
+
+        let pending_only = CrawlURL::list(&engine, &job_id, Some(CrawlUrlStatus::Pending))
+            .await
+            .unwrap();
+        assert_eq!(pending_only.len(), 1);
+        assert_eq!(pending_only[0].id, all[1].id);
+    }
+
+    #[tokio::test]
+    async fn job_stats_aggregates_counts_per_status() {
+        let engine = migrated_engine().await;
+        let job_id = CrawlJob::create_with_urls(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+            &[
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+                "https://example.com/c".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let all = CrawlURL::list(&engine, &job_id, None).await.unwrap();
+        CrawlURL::update_status(&engine, all[0].id, CrawlUrlStatus::Done, "")
+            .await
+            .unwrap();
+        CrawlURL::mark_failed(&engine, &job_id, &all[1].url, 500, "boom")
+            .await
+            .unwrap();
+
+        let stats = CrawlURL::job_stats(&engine, &job_id).await.unwrap();
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.done, 1);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.in_progress, 0);
+        assert_eq!(stats.skipped, 0);
+    }
+
+    #[tokio::test]
+    async fn job_stats_is_all_zero_for_a_job_with_no_urls() {
+        let engine = migrated_engine().await;
+        CrawlJob::create(
+            &engine,
+            "job1",
+            "https://example.com",
+            serde_json::json!({}),
+            "",
+        )
+        .await
+        .unwrap();
+
+        let stats = CrawlURL::job_stats(&engine, "job1").await.unwrap();
+        assert_eq!(stats, CrawlJobStats::default());
     }
 }
