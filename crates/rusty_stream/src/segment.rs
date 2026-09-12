@@ -60,8 +60,15 @@ impl Segment {
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&epoch.0.to_le_bytes());
         header.extend_from_slice(&base_offset.0.to_le_bytes());
+        let expected = header.len();
         let BufResult(result, _buf) = file.write_at(header, 0).await;
-        result?;
+        let written = result?;
+        if written != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write while writing segment header",
+            ));
+        }
         Ok(Segment {
             file,
             epoch,
@@ -85,10 +92,26 @@ impl Segment {
     ) -> std::io::Result<Segment> {
         let file = UringFile::open_on(driver, path).await?;
 
-        let header_buf = vec![0u8; HEADER_LEN as usize];
-        let BufResult(result, header_buf) = file.read_at(header_buf, 0).await;
-        let n = result?;
-        if n < HEADER_LEN as usize || &header_buf[0..4] != MAGIC {
+        // Same short-read gap as everywhere else in this function (see
+        // the recovery loop's own doc comment below): a single `read_at`
+        // isn't guaranteed to return the full header even though it's
+        // only HEADER_LEN bytes.
+        let mut header_buf = vec![0u8; HEADER_LEN as usize];
+        let mut header_have = 0usize;
+        while header_have < HEADER_LEN as usize {
+            let chunk = vec![0u8; HEADER_LEN as usize - header_have];
+            let BufResult(result, chunk) = file.read_at(chunk, header_have as u64).await;
+            let n = result?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "not a rusty_stream segment file (bad magic or truncated header)",
+                ));
+            }
+            header_buf[header_have..header_have + n].copy_from_slice(&chunk[..n]);
+            header_have += n;
+        }
+        if &header_buf[0..4] != MAGIC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "not a rusty_stream segment file (bad magic or truncated header)",
@@ -98,37 +121,69 @@ impl Segment {
         let base_offset = Offset(u64::from_le_bytes(header_buf[12..20].try_into().unwrap()));
 
         // Read the rest of the file and replay records to rebuild the
-        // index, stopping at (and truncating away) the first bad one.
+        // index, stopping at (and truncating away) the first bad one. A
+        // record's on-disk length is not bounded by any fixed read size,
+        // and a single `read_at` isn't guaranteed to return everything
+        // asked for even when more is available -- so a decode that comes
+        // back merely truncated (header or payload short of the declared
+        // length) issues more reads for exactly what's missing before
+        // concluding "torn write"; only a read that genuinely returns
+        // zero new bytes at that position means end-of-file.
         let mut pos = HEADER_LEN;
         let mut index = vec![HEADER_LEN];
-        loop {
-            // A generously-sized read per record attempt is simpler than a
-            // second syscall to stat the file first; real record sizes in a
-            // segment log are small relative to this.
-            let chunk = vec![0u8; 64 * 1024];
-            let BufResult(result, chunk) = file.read_at(chunk, pos).await;
+        'recovery: loop {
+            let initial = vec![0u8; 64 * 1024];
+            let BufResult(result, initial) = file.read_at(initial, pos).await;
             let read = result?;
             if read == 0 {
                 break; // clean end of file, nothing more to recover
             }
-            match record::decode(&chunk[..read]) {
-                Ok((_payload, len)) => {
-                    pos += len as u64;
-                    index.push(pos);
-                }
-                Err(DecodeError::HeaderTruncated) | Err(DecodeError::PayloadTruncated { .. }) => {
-                    // A torn write at the tail -- truncate it away and stop.
-                    file.set_len(pos).await?;
-                    break;
-                }
-                Err(DecodeError::ChecksumMismatch) => {
-                    // Corruption, not necessarily at the true tail -- still
-                    // the correct recovery action is the same: don't serve
-                    // anything from this point on. See this module's docs
-                    // for why a scaffold doesn't try to distinguish the two
-                    // cases further.
-                    file.set_len(pos).await?;
-                    break;
+            let mut buf = initial;
+            buf.truncate(read);
+            let mut have = read;
+            loop {
+                match record::decode(&buf[..have]) {
+                    Ok((_payload, len)) => {
+                        pos += len as u64;
+                        index.push(pos);
+                        continue 'recovery;
+                    }
+                    Err(DecodeError::HeaderTruncated) => {
+                        let missing = record::HEADER_LEN - have;
+                        let more = vec![0u8; missing];
+                        let BufResult(result, more) = file.read_at(more, pos + have as u64).await;
+                        let n = result?;
+                        if n == 0 {
+                            // Genuinely nothing more on disk -- a real
+                            // torn write at the tail.
+                            file.set_len(pos).await?;
+                            break 'recovery;
+                        }
+                        buf.extend_from_slice(&more[..n]);
+                        have += n;
+                    }
+                    Err(DecodeError::PayloadTruncated { declared, .. }) => {
+                        let total_needed = record::HEADER_LEN + declared as usize;
+                        let missing = total_needed - have;
+                        let more = vec![0u8; missing];
+                        let BufResult(result, more) = file.read_at(more, pos + have as u64).await;
+                        let n = result?;
+                        if n == 0 {
+                            file.set_len(pos).await?;
+                            break 'recovery;
+                        }
+                        buf.extend_from_slice(&more[..n]);
+                        have += n;
+                    }
+                    Err(DecodeError::ChecksumMismatch) => {
+                        // Corruption, not necessarily at the true tail -- still
+                        // the correct recovery action is the same: don't serve
+                        // anything from this point on. See this module's docs
+                        // for why a scaffold doesn't try to distinguish the two
+                        // cases further.
+                        file.set_len(pos).await?;
+                        break 'recovery;
+                    }
                 }
             }
         }
@@ -180,9 +235,16 @@ impl Segment {
     /// of this scaffold). Returns the offset the new record landed at.
     pub async fn append(&mut self, payload: &[u8]) -> std::io::Result<Offset> {
         let encoded = record::encode(payload);
+        let expected = encoded.len();
         let pos = self.write_pos;
         let BufResult(result, _buf) = self.file.write_at(encoded, pos).await;
         let written = result?;
+        if written != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write while appending a record -- not indexed as valid",
+            ));
+        }
         self.write_pos = pos + written as u64;
         self.index.push(self.write_pos);
         Ok(Offset(self.base_offset.0 + self.len() - 1))
@@ -204,10 +266,34 @@ impl Segment {
         }
         let start = self.index[idx];
         let end = self.index[idx + 1];
-        let buf = vec![0u8; (end - start) as usize];
-        let BufResult(result, buf) = self.file.read_at(buf, start).await;
-        let n = result?;
-        let (payload, _len) = record::decode(&buf[..n])
+        let want = (end - start) as usize;
+        // A single `read_at` isn't guaranteed to return the full record
+        // even though the index promises it's all durably on disk --
+        // exactly the short-read gap `open_on`'s recovery loop already
+        // guards against (see its own doc comment), just not previously
+        // applied here. A read returning zero new bytes before `have`
+        // reaches `want` means the file is shorter than the index
+        // claims, a real corruption the caller must see as an error, not
+        // silently decode a truncated buffer against.
+        let mut buf = vec![0u8; want];
+        let mut have = 0usize;
+        while have < want {
+            let chunk = vec![0u8; want - have];
+            let BufResult(result, chunk) = self.file.read_at(chunk, start + have as u64).await;
+            let n = result?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "record at offset {} is shorter on disk ({have} bytes) than its index entry promises ({want} bytes)",
+                        offset.0
+                    ),
+                ));
+            }
+            buf[have..have + n].copy_from_slice(&chunk[..n]);
+            have += n;
+        }
+        let (payload, _len) = record::decode(&buf[..have])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
         Ok(payload.to_vec())
     }
@@ -244,7 +330,9 @@ impl Segment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_tokio::io::SimDriver;
+    use rusty_tokio::io::{SimDriver, UringBoxFuture};
+    use std::any::Any;
+    use std::path::PathBuf;
 
     #[rusty_tokio::test]
     async fn append_then_read_round_trips() {
@@ -388,5 +476,374 @@ mod tests {
 
         seg.sync().await.unwrap();
         assert_eq!(seg.committed_offset(), Some(CommittedOffset(Offset(1))));
+    }
+
+    /// Regression test for the bug where recovery read at most 64 KiB per
+    /// iteration and treated a `PayloadTruncated` decode as "torn write,
+    /// truncate here" -- a complete, fully-synced record whose *encoded*
+    /// size exceeds that one-shot read size was misclassified as torn and
+    /// deleted along with everything after it. Recovery must instead
+    /// issue more reads for exactly what's missing before concluding a
+    /// record is torn.
+    #[rusty_tokio::test]
+    async fn recovery_does_not_lose_a_complete_record_larger_than_one_read_chunk() {
+        let driver = SimDriver::new();
+        let path = "/segments/big.log";
+        let mut seg = Segment::create_on(driver.clone(), path, Offset(0), Epoch::INITIAL)
+            .await
+            .unwrap();
+
+        // Encoded size (payload + 8-byte record header) comfortably
+        // exceeds the recovery loop's 64 KiB per-read chunk size.
+        let big_payload = vec![0xABu8; 100_000];
+        seg.append(&big_payload).await.unwrap();
+        seg.append(b"a small record right after the big one")
+            .await
+            .unwrap();
+        seg.sync().await.unwrap();
+
+        let recovered = driver.crash_and_reopen();
+        let seg = Segment::open_on(recovered, path).await.unwrap();
+
+        assert_eq!(seg.len(), 2);
+        assert_eq!(seg.read(Offset(0)).await.unwrap(), big_payload);
+        assert_eq!(
+            seg.read(Offset(1)).await.unwrap(),
+            b"a small record right after the big one"
+        );
+    }
+
+    /// An [`OpDriver`] wrapper that genuinely returns fewer bytes than
+    /// requested from every `read_at` call, however much is actually
+    /// available -- a legitimate short read (matching `read(2)`'s own
+    /// documented contract), independent of any crash or torn write.
+    /// Every other operation is delegated to `inner` unchanged.
+    struct ShortReadDriver {
+        inner: Arc<dyn OpDriver>,
+        cap: u32,
+    }
+
+    impl OpDriver for ShortReadDriver {
+        fn open(
+            &self,
+            path: PathBuf,
+            flags: i32,
+            mode: u32,
+        ) -> UringBoxFuture<'static, std::io::Result<u64>> {
+            self.inner.open(path, flags, mode)
+        }
+        fn read_at(
+            &self,
+            handle: u64,
+            buf_ptr: usize,
+            buf_len: u32,
+            pos: u64,
+            keepalive: Box<dyn Any + Send>,
+        ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
+            let capped = buf_len.min(self.cap);
+            self.inner.read_at(handle, buf_ptr, capped, pos, keepalive)
+        }
+        fn write_at(
+            &self,
+            handle: u64,
+            buf_ptr: usize,
+            buf_len: u32,
+            pos: u64,
+            keepalive: Box<dyn Any + Send>,
+        ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
+            self.inner
+                .write_at(handle, buf_ptr, buf_len, pos, keepalive)
+        }
+        fn fsync(
+            &self,
+            handle: u64,
+            datasync: bool,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.fsync(handle, datasync)
+        }
+        fn fallocate(
+            &self,
+            handle: u64,
+            offset: u64,
+            len: u64,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.fallocate(handle, offset, len)
+        }
+        fn set_len(&self, handle: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.set_len(handle, len)
+        }
+        fn close(&self, handle: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.close(handle)
+        }
+        fn close_sync(&self, handle: u64) {
+            self.inner.close_sync(handle)
+        }
+        fn rename(
+            &self,
+            from: PathBuf,
+            to: PathBuf,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.rename(from, to)
+        }
+        fn remove_file(&self, path: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.remove_file(path)
+        }
+    }
+
+    /// Regression test: a driver that only ever returns a handful of
+    /// bytes per `read_at` call (well short of both the 64 KiB chunk
+    /// requested and, for the second record, of that record's own
+    /// length) must not have any of its records misclassified as torn --
+    /// every record here is complete and durable on disk, just fetched
+    /// via many small reads instead of one big one.
+    #[rusty_tokio::test]
+    async fn recovery_reassembles_records_across_genuinely_short_reads() {
+        let driver = SimDriver::new();
+        let path = "/segments/short-reads.log";
+        let mut seg = Segment::create_on(driver.clone(), path, Offset(0), Epoch::INITIAL)
+            .await
+            .unwrap();
+        seg.append(b"first").await.unwrap();
+        seg.append(b"second record definitely exceeds the short-read cap")
+            .await
+            .unwrap();
+        seg.sync().await.unwrap();
+
+        // Cap set to exactly the segment file header's length: the
+        // header read happens to still succeed in one call at this cap,
+        // but every 64 KiB recovery-loop read is capped far below both
+        // records' actual encoded sizes. A header read short enough to
+        // need its own reassembly is covered separately below.
+        let short_reads: Arc<dyn OpDriver> = Arc::new(ShortReadDriver {
+            inner: driver,
+            cap: HEADER_LEN as u32,
+        });
+        let seg = Segment::open_on(short_reads, path).await.unwrap();
+
+        assert_eq!(seg.len(), 2);
+        assert_eq!(seg.read(Offset(0)).await.unwrap(), b"first");
+        assert_eq!(
+            seg.read(Offset(1)).await.unwrap(),
+            b"second record definitely exceeds the short-read cap"
+        );
+    }
+
+    /// Regression test: same short-read gap as the payload-recovery loop
+    /// above, but for the fixed-size segment header itself -- a driver
+    /// capped well below `HEADER_LEN` must not fail to open a segment
+    /// whose header is completely present and valid on disk.
+    #[rusty_tokio::test]
+    async fn open_on_reassembles_a_header_read_via_genuinely_short_reads() {
+        let driver = SimDriver::new();
+        let path = "/segments/short-header.log";
+        let seg = Segment::create_on(driver.clone(), path, Offset(0), Epoch::INITIAL)
+            .await
+            .unwrap();
+        drop(seg);
+
+        let short_reads: Arc<dyn OpDriver> = Arc::new(ShortReadDriver {
+            inner: driver,
+            cap: 5,
+        });
+        let seg = Segment::open_on(short_reads, path).await.unwrap();
+        assert_eq!(seg.epoch(), Epoch::INITIAL);
+        assert_eq!(seg.base_offset(), Offset(0));
+        assert_eq!(seg.len(), 0);
+    }
+
+    /// An [`OpDriver`] wrapper whose `write_at` genuinely writes and
+    /// reports only up to `cap` bytes per call -- unlike
+    /// [`SimDriver::inject_torn_write`] (reports full success while
+    /// silently dropping the rest), this is an honest short write:
+    /// exactly `cap` bytes are actually written and that's exactly what's
+    /// reported, matching `write(2)`'s own documented contract.
+    struct ShortWriteDriver {
+        inner: Arc<dyn OpDriver>,
+        cap: u32,
+    }
+
+    impl OpDriver for ShortWriteDriver {
+        fn open(
+            &self,
+            path: PathBuf,
+            flags: i32,
+            mode: u32,
+        ) -> UringBoxFuture<'static, std::io::Result<u64>> {
+            self.inner.open(path, flags, mode)
+        }
+        fn read_at(
+            &self,
+            handle: u64,
+            buf_ptr: usize,
+            buf_len: u32,
+            pos: u64,
+            keepalive: Box<dyn Any + Send>,
+        ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
+            self.inner.read_at(handle, buf_ptr, buf_len, pos, keepalive)
+        }
+        fn write_at(
+            &self,
+            handle: u64,
+            buf_ptr: usize,
+            buf_len: u32,
+            pos: u64,
+            keepalive: Box<dyn Any + Send>,
+        ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
+            let capped = buf_len.min(self.cap);
+            self.inner.write_at(handle, buf_ptr, capped, pos, keepalive)
+        }
+        fn fsync(
+            &self,
+            handle: u64,
+            datasync: bool,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.fsync(handle, datasync)
+        }
+        fn fallocate(
+            &self,
+            handle: u64,
+            offset: u64,
+            len: u64,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.fallocate(handle, offset, len)
+        }
+        fn set_len(&self, handle: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.set_len(handle, len)
+        }
+        fn close(&self, handle: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.close(handle)
+        }
+        fn close_sync(&self, handle: u64) {
+            self.inner.close_sync(handle)
+        }
+        fn rename(
+            &self,
+            from: PathBuf,
+            to: PathBuf,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.rename(from, to)
+        }
+        fn remove_file(&self, path: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.remove_file(path)
+        }
+    }
+
+    /// Regression test: `create_on`'s header write and `append`'s record
+    /// write must fully land even against a driver that only writes a
+    /// handful of bytes per call -- `UringFile::write_at`'s internal
+    /// write-all loop must keep issuing calls until the whole buffer is
+    /// written, never index/publish a short-written record as valid.
+    #[rusty_tokio::test]
+    async fn append_completes_a_full_write_despite_a_driver_that_writes_a_few_bytes_per_call() {
+        let sim = SimDriver::new();
+        let path = "/segments/short-write.log";
+        let short_writes: Arc<dyn OpDriver> = Arc::new(ShortWriteDriver {
+            inner: sim.clone(),
+            cap: 5,
+        });
+        let mut seg = Segment::create_on(short_writes, path, Offset(0), Epoch::INITIAL)
+            .await
+            .unwrap();
+
+        let payload = b"a payload longer than five bytes per write call".to_vec();
+        let offset = seg.append(&payload).await.unwrap();
+        assert_eq!(offset, Offset(0));
+        seg.sync().await.unwrap();
+
+        // Reopen against the plain, uncapped driver: the record must be
+        // whole, not a short-written fragment silently indexed as valid.
+        let recovered = sim.crash_and_reopen();
+        let seg = Segment::open_on(recovered, path).await.unwrap();
+        assert_eq!(seg.len(), 1);
+        assert_eq!(seg.read(Offset(0)).await.unwrap(), payload);
+    }
+
+    /// An [`OpDriver`] wrapper whose `write_at` always reports zero bytes
+    /// written with no error -- a real driver pathology the write-all
+    /// loop must surface as a clean error instead of spinning forever.
+    struct ZeroProgressWriteDriver {
+        inner: Arc<dyn OpDriver>,
+    }
+
+    impl OpDriver for ZeroProgressWriteDriver {
+        fn open(
+            &self,
+            path: PathBuf,
+            flags: i32,
+            mode: u32,
+        ) -> UringBoxFuture<'static, std::io::Result<u64>> {
+            self.inner.open(path, flags, mode)
+        }
+        fn read_at(
+            &self,
+            handle: u64,
+            buf_ptr: usize,
+            buf_len: u32,
+            pos: u64,
+            keepalive: Box<dyn Any + Send>,
+        ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
+            self.inner.read_at(handle, buf_ptr, buf_len, pos, keepalive)
+        }
+        fn write_at(
+            &self,
+            _handle: u64,
+            _buf_ptr: usize,
+            _buf_len: u32,
+            _pos: u64,
+            keepalive: Box<dyn Any + Send>,
+        ) -> UringBoxFuture<'static, (i32, Box<dyn Any + Send>)> {
+            Box::pin(std::future::ready((0, keepalive)))
+        }
+        fn fsync(
+            &self,
+            handle: u64,
+            datasync: bool,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.fsync(handle, datasync)
+        }
+        fn fallocate(
+            &self,
+            handle: u64,
+            offset: u64,
+            len: u64,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.fallocate(handle, offset, len)
+        }
+        fn set_len(&self, handle: u64, len: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.set_len(handle, len)
+        }
+        fn close(&self, handle: u64) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.close(handle)
+        }
+        fn close_sync(&self, handle: u64) {
+            self.inner.close_sync(handle)
+        }
+        fn rename(
+            &self,
+            from: PathBuf,
+            to: PathBuf,
+        ) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.rename(from, to)
+        }
+        fn remove_file(&self, path: PathBuf) -> UringBoxFuture<'static, std::io::Result<()>> {
+            self.inner.remove_file(path)
+        }
+    }
+
+    /// Regression test: zero forward progress on a write must propagate
+    /// as a clean error, not hang forever or silently index a
+    /// zero-length write as a complete record.
+    #[rusty_tokio::test]
+    async fn a_write_driver_reporting_zero_progress_errors_cleanly() {
+        let sim = SimDriver::new();
+        let zero_progress: Arc<dyn OpDriver> = Arc::new(ZeroProgressWriteDriver { inner: sim });
+        let result = Segment::create_on(
+            zero_progress,
+            "/segments/zero.log",
+            Offset(0),
+            Epoch::INITIAL,
+        )
+        .await;
+        assert!(result.is_err());
     }
 }

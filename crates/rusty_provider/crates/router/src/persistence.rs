@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusty_sqlite::rusqlite::{self, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::config::PostgresTlsMode;

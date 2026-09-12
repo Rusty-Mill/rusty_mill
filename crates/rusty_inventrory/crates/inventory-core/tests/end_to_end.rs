@@ -4,6 +4,7 @@
 use inventory_core::keychain::StaticKey;
 use inventory_core::model::SourceState;
 use inventory_core::{Inventory, SearchQuery, SourceId};
+use rusty_sqlite::rusqlite;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 

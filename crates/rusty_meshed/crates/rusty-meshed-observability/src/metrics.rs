@@ -346,7 +346,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         writer.into_vec()
     }
 
@@ -363,7 +363,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         writer.into_vec()
     }
 

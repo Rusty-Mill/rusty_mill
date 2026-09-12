@@ -87,7 +87,7 @@ pub use memory::SqliteMemoryService;
 pub use sessions::SqliteSessionService;
 
 use adk_core::{AdkError, Result, Services};
-use rusqlite::{Connection, ErrorCode};
+use rusty_sqlite::rusqlite::{self, Connection, ErrorCode};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

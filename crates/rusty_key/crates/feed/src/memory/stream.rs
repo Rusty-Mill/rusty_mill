@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
+use rusty_sqlite::rusqlite::{self, Connection};
 
 use super::{Observation, Stream};
 use crate::error::ToolError;

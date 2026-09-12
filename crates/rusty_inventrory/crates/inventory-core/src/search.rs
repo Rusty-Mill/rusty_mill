@@ -14,7 +14,7 @@ use crate::embed::Embedder;
 use crate::model::{Conversation, SourceId};
 use crate::vectors::VectorCache;
 use crate::Result;
-use rusqlite::Connection;
+use rusty_sqlite::rusqlite::{self, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 

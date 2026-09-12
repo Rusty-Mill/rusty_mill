@@ -18,7 +18,7 @@ pub mod rsa;
 use crate::crypto::hmac::{constant_time_eq, hmac_sha256};
 use crate::encoding::base64::{decode_url_safe, encode_url_safe_no_pad};
 use crate::error::{Error, Result};
-use crate::json::{self, Value};
+use rusty_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A decoded, three-part JWT: header, claims (payload), and the raw
@@ -56,10 +56,10 @@ pub fn decode_unverified(token: &str) -> Result<DecodedJwt> {
     let payload_json = decode_url_safe(payload_b64)?;
     let signature = decode_url_safe(signature_b64)?;
 
-    let header = json::parse(
+    let header = Value::from_json_str(
         std::str::from_utf8(&header_json).map_err(|_| malformed("header is not valid UTF-8"))?,
     )?;
-    let claims = json::parse(
+    let claims = Value::from_json_str(
         std::str::from_utf8(&payload_json).map_err(|_| malformed("payload is not valid UTF-8"))?,
     )?;
 
@@ -86,10 +86,10 @@ pub fn encode_hs256(claims: &Value, secret: &[u8], extra_header: &[(&str, &str)]
     for (k, v) in extra_header {
         header_fields.push((k.to_string(), Value::from(*v)));
     }
-    let header = Value::Object(header_fields);
+    let header = Value::Object(header_fields.into_iter().collect());
 
-    let header_b64 = encode_url_safe_no_pad(header.to_json().as_bytes());
-    let payload_b64 = encode_url_safe_no_pad(claims.to_json().as_bytes());
+    let header_b64 = encode_url_safe_no_pad(header.to_json_string().as_bytes());
+    let payload_b64 = encode_url_safe_no_pad(claims.to_json_string().as_bytes());
     let signing_input = format!("{header_b64}.{payload_b64}");
 
     let signature = hmac_sha256(secret, signing_input.as_bytes());
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn round_trip_sign_and_verify() {
-        let claims = Value::object([
+        let claims = Value::from_iter([
             ("sub".to_string(), Value::from("user-123")),
             ("iss".to_string(), Value::from("https://issuer.example.com")),
         ]);
@@ -223,24 +223,24 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_secret() {
-        let claims = Value::object([("sub".to_string(), Value::from("user"))]);
+        let claims = Value::from_iter([("sub".to_string(), Value::from("user"))]);
         let token = encode_hs256(&claims, b"secret-a", &[]);
         assert!(verify_hs256(&token, b"secret-b").is_err());
     }
 
     #[test]
     fn verify_rejects_tampered_payload() {
-        let claims = Value::object([
+        let claims = Value::from_iter([
             ("sub".to_string(), Value::from("user")),
             ("admin".to_string(), Value::from(false)),
         ]);
         let token = encode_hs256(&claims, b"secret", &[]);
         let mut parts: Vec<&str> = token.split('.').collect();
-        let forged_claims = Value::object([
+        let forged_claims = Value::from_iter([
             ("sub".to_string(), Value::from("user")),
             ("admin".to_string(), Value::from(true)),
         ]);
-        let forged_payload = encode_url_safe_no_pad(forged_claims.to_json().as_bytes());
+        let forged_payload = encode_url_safe_no_pad(forged_claims.to_json_string().as_bytes());
         parts[1] = &forged_payload;
         let forged_token = parts.join(".");
         assert!(verify_hs256(&forged_token, b"secret").is_err());
@@ -250,20 +250,20 @@ mod tests {
     fn rejects_alg_none() {
         // Hand-craft a token claiming alg "none" with an empty signature,
         // the classic JWT forgery. It must never verify successfully.
-        let header = Value::object([
+        let header = Value::from_iter([
             ("alg".to_string(), Value::from("none")),
             ("typ".to_string(), Value::from("JWT")),
         ]);
-        let claims = Value::object([("sub".to_string(), Value::from("attacker"))]);
-        let header_b64 = encode_url_safe_no_pad(header.to_json().as_bytes());
-        let payload_b64 = encode_url_safe_no_pad(claims.to_json().as_bytes());
+        let claims = Value::from_iter([("sub".to_string(), Value::from("attacker"))]);
+        let header_b64 = encode_url_safe_no_pad(header.to_json_string().as_bytes());
+        let payload_b64 = encode_url_safe_no_pad(claims.to_json_string().as_bytes());
         let token = format!("{header_b64}.{payload_b64}.");
         assert!(verify_hs256(&token, b"any-secret").is_err());
     }
 
     #[test]
     fn validate_claims_expired() {
-        let claims = Value::object([("exp".to_string(), Value::from(now_unix() - 3600))]);
+        let claims = Value::from_iter([("exp".to_string(), Value::from(now_unix() - 3600))]);
         let opts = Validation {
             leeway_seconds: 0,
             ..Default::default()
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn validate_claims_within_leeway() {
-        let claims = Value::object([("exp".to_string(), Value::from(now_unix() - 5))]);
+        let claims = Value::from_iter([("exp".to_string(), Value::from(now_unix() - 5))]);
         let opts = Validation {
             leeway_seconds: 60,
             ..Default::default()
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn validate_claims_issuer_and_audience() {
-        let claims = Value::object([
+        let claims = Value::from_iter([
             ("exp".to_string(), Value::from(now_unix() + 3600)),
             ("iss".to_string(), Value::from("https://issuer.example.com")),
             (
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn missing_exp_rejected_by_default() {
-        let claims = Value::object([("sub".to_string(), Value::from("user"))]);
+        let claims = Value::from_iter([("sub".to_string(), Value::from("user"))]);
         assert!(validate_claims(&claims, &Validation::default()).is_err());
     }
 }

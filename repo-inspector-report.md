@@ -27,18 +27,47 @@ moved in between and are folded in here rather than restated as findings:
 extraction happens" had happened), and `rusty_fedora` landed with a fourth
 copy of Section 1 row 8's `MockResponse`.
 
+Row 7 (hand-rolled JSON `Value` ×2) was the one row left `not done` from
+that 2026-09-05 pass, blocked on `rusty_json` not actually being
+dependency-free. It was completed in a later follow-up ([PR #165](https://github.com/Rusty-Mill/rusty_mill/pull/165)
+and [PR #166](https://github.com/Rusty-Mill/rusty_mill/pull/166), merged
+2026-09-11/12) once that blocking premise was resolved; its disposition
+cell below reflects that later work, not the 2026-09-05 pass.
+
+Row 2 (retry policy) was a considered `no action` from that 2026-09-05
+pass on the assumption that adopting `rusty_retry::Backoff` for
+`agentgateway-core`'s and `rp-router`'s remaining hand-rolled backoff
+math would add jitter neither wanted. A later re-examination found that
+assumption was wrong -- `rusty_retry::Backoff::Exponential{jitter: 0.0}`
+reproduces both crates' existing plain-doubling-capped formula exactly,
+with no behavior change -- and both were switched over accordingly
+([PR #168](https://github.com/Rusty-Mill/rusty_mill/pull/168), merged
+2026-09-12); its disposition cell below reflects that later work too.
+That follow-up also checked past this report's `rusty_mill`-workspace
+scope for the same duplication: the other active (non-archived)
+`Rusty-Mill` repos with real Rust code (`rusty_data_os`,
+`rusty_multimodal_db`, `rusty_knowledge`, `rusty_recall`, `rusty_owl`)
+were cloned and grepped directly (GitHub's code-search index was
+returning unreliable `incomplete_results` at the time, including
+against `rusty_mill` itself, so it wasn't trusted alone) -- none carry
+a hand-rolled backoff/retry implementation, only incidental
+retry-safety comments. `rusty_foundation_akb`'s many "backoff" hits are
+standards-document prose, not code. The archived `baileyrd/rusty_*`
+originals (`rusty_request`, `rusty_acp`, etc.) are superseded by their
+`rusty_mill` crate equivalents and were not re-checked.
+
 ### Section 1 — duplication clusters
 
 | # | Cluster | Disposition | What changed / why not |
 | --- | --- | --- | --- |
 | 1 | `RsaPublicKey` | **no action** (as recommended) | Endianness split is documented in-source as deliberate; the shared `BigUint` already covers the arithmetic. Re-open on a third consumer. |
-| 2 | Retry policy | **no action, and narrower than reported** | `rusty_request::retry::Backoff::delay_for` and `rusty_acp::client::RetryPolicy::backoff_for` *already* delegate the backoff math to `rusty_retry` (PR #116) — the report's "none of the four diff the actual backoff algorithm" was stale for those two. What remains is `agentgateway-core::retry` (plain doubling, capped, no jitter, driven by a serde-shaped config) and `rp-router`'s `pub(crate)` webhook policy. Moving either onto `rusty_retry::Backoff` would change behaviour (add jitter) with no bug to fix; that is the human call the report said it was, and it is left as one. |
+| 2 | Retry policy | **done** | `rusty_request::retry::Backoff::delay_for` and `rusty_acp::client::RetryPolicy::backoff_for` already delegated the backoff math to `rusty_retry` (PR #116). The remaining two (`agentgateway-core::retry::Retry::backoff`, `rp-router`'s `pub(crate)` webhook `RetryPolicy`) turned out not to need the behavior change the original disposition assumed: both are plain doubling capped at a max, no jitter, and `rusty_retry::Backoff::Exponential{jitter: 0.0}` reproduces that exact formula bit-for-bit (verified against both crates' own existing tests, all of which still pass unchanged). Both now delegate their delay computation to `rusty_retry` the same way; each crate's retry-*eligibility* policy (which statuses/errors retry, attempt counts, webhook- vs. gateway-route-specific reasoning) stays local, unchanged — that part remains genuinely different domain logic, not duplication. |
 | 3 | `f16_to_f32` | **done** | `rusty_llama::quant` re-exports `rusty_simd::f16_to_f32`; its own copy is deleted. |
 | 4 | `f32_to_f16` | **done** | Added `rusty_simd::f32_to_f16` (round-to-nearest-even, NaN preserved as quiet NaN, overflow → ∞, with an exhaustive every-f16-round-trips test); `rusty_llama` and `rusty_whisper` re-export it. Worth knowing: the two deleted copies disagreed — `rusty_whisper`'s rounded half-up, `rusty_llama`'s turned NaN into infinity. Both call sites are test-fixture-only, so neither difference reached a real code path. |
 | 5 | Hand-rolled base64 ×3 | **done** | `rusty_request`, `ts-control`, and `sessionmgr-protocol` all use `rusty_base64` now; the three `src/base64.rs` files are deleted. `sessionmgr-protocol`'s strictness ("reject, never guess") was kept by hardening `rusty_base64`'s decoder rather than lowering the bar: it now rejects misplaced or excess `=` and reports the offending index/byte in `DecodeError`, and `sessionmgr-protocol::base64::decode` keeps its own one-line "padded wire, so length must be 4-aligned" guard on top. `ts-control`'s DESIGN.md dependency table gained the required justification row. |
 | 6 | OS CSPRNG | **done** | New `crates/rusty_rand` (`fill`/`bytes`, `Result`-returning; cached `/dev/urandom` handle on Unix, hand-declared `BCryptGenRandom` on Windows). `rusty_oauth::rand` and `rusty_uuid`'s private `rand` are thin wrappers over it, public APIs unchanged. A **third** copy the report did not see (`sessionmgr-proc::os_random`, indexed under a different name) is swapped too, which also drops `windows-sys`'s `Win32_Security_Cryptography` feature from that crate. |
 | 6a | `platform`/`rusty_libc` `getrandom(2)` | **no action** (as recommended) | `rusty_rand` deliberately stays file/CNG-based so it serves macOS/BSD through the same path; not a `platform` consumer. |
-| 7 | Hand-rolled JSON `Value` ×2 | **not done — blocked on a premise error** | `rusty_json` is not dependency-free: it has a non-optional `serde` dependency, and its `de`/`ser` modules *are* serde trait implementations (it is a from-scratch `serde_json`, not a serde-free JSON library). `rusty_oauth`'s and `rusty_request`'s own doc comments give "no `serde`" as the exact reason they hand-roll. Adopting `rusty_json` as-is would put `serde` into two crates whose stated contract is its absence. Prerequisite before this row can move: a serde-free `Value` + parser/writer surface in `rusty_json` (feature-gate `serde`), which is a `rusty_json` design change to make first, not a mechanical swap. |
+| 7 | Hand-rolled JSON `Value` ×2 | **done, in two steps** | [PR #165](https://github.com/Rusty-Mill/rusty_mill/pull/165) resolved the blocking premise: `serde` is now an optional `rusty_json` feature (on by default, so the 16 pre-existing dependents saw zero behavior change), with a genuinely serde-free `Value` parse/write path (`src/value_io.rs`) reusing the existing hand-rolled tokenizer instead of going through `serde::Deserializer`/`Serializer`. [PR #166](https://github.com/Rusty-Mill/rusty_mill/pull/166) then did the actual migration: both `rusty_oauth` and `rusty_request` depend on `rusty_json` (`default-features = false, features = ["std"]`, preserving each crate's no-`serde` stance) instead of their own hand-rolled `src/json.rs`, both now deleted. `rusty_request`'s migration surfaced a larger-than-expected blast radius — its `Json` type is re-exported and consumed publicly across ~18 files in the `rusty_meshed` family — resolved by extending `rusty_json::Value` itself with `object()`/`array()`/`insert()`/`push()`/`parse()` convenience methods (matching the ergonomics the hand-rolled types had) rather than rewriting every call site, plus two small `rusty_meshed` fixes for `rusty_json::Value`'s actual return types (`as_array()` returns `Option<&Vec<Value>>`, not `Option<&[Value]>`). |
 | 8 | `MockResponse` ×3 (actually ×4) | **done** | `rusty_wiremock` — whose own stated purpose is "sovereign HTTP mock server for Rusty Mill test suites", and which each copy's doc comment named as the intended home while calling it a stub — gained a `std` feature and a working `canned` module (`MockResponse`, `spawn`, with its own tests). `rusty_proxmox`, `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp` now take it as a dev-dependency; their four identical `tests/support/mod.rs` are deleted. The pre-existing matcher/template scaffold in `rusty_wiremock` is untouched. |
 | 9 | HMAC | **no action** (logged) | Confirmed again: `grep -c 'fn hmac_sha256' crates/rusty_rdp/src/crypto/hmac.rs` → 0. |
 | 10–13 | `AnsiParser`, SQL DDL names, `SystemClock`, `ServerConfig` | **no action** (logged) | Coincidental or too small to be worth a dependency edge, as the report says. |

@@ -39,6 +39,13 @@ rusty_retry = { path = "../rusty_retry" }
 # RFC 7617 Basic auth's `base64(username:password)`. This crate carried its
 # own encode-only copy until the workspace's shared implementation existed.
 rusty_base64 = { path = "../rusty_base64" }
+# `Value` + JSON parser/writer for `.json()`/`Response::json()`. This crate
+# carried its own hand-rolled copy (deliberately no `serde`) until
+# `rusty_json` grew a serde-free `Value` surface of its own;
+# `default-features = false` keeps that same no-`serde` stance.
+rusty_json = { path = "../rusty_json", default-features = false, features = [
+    "std",
+] }
 # Optional (see the `tokio` feature below): adds a real crates.io
 # `tokio` backend for the connector alongside the always-present
 # `rusty_tokio` one, for a consumer (e.g. `rusty_search`) already running

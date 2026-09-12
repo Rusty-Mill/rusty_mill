@@ -13,6 +13,130 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Bootstrap rusty_hister: a Rust port of asciimoo/hister
+**2026-09-12** · branch [`claude/hister-rust-port-quq3ho`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-rust-port-quq3ho)
+
+Bootstraps a Rust port of [asciimoo/hister](https://github.com/asciimoo/hister)
+(AGPL-3.0-or-later) as a native crate cluster under `crates/rusty_hister/` —
+fresh work written directly in this workspace, not a `git subtree` import of
+a pre-existing standalone repo. No port implementation logic lands in this
+PR; it establishes the scaffold everything else depends on.
+
+- **Added:** eight new workspace members —
+  `rusty-hister-{core,model,extractor,indexer,vectorstore,crawler,server,mcp}`
+  — each an empty skeleton crate with a module doc comment pointing back to
+  the capability inventory and relevant ADR. All compile clean
+  (`cargo check` across the set).
+- **Added:** a full `rust-migration`-style capability inventory built from
+  reading Hister's actual Go source at commit `49b727f4` (not the kickoff
+  brief's own rough orientation notes, which were explicitly unverified) —
+  `crates/rusty_hister/docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`.
+  Covers 39 HTTP routes, 3 MCP tools (with verbatim prompt-injection-defense
+  text), ~35 CLI subcommands, 20 extractors, the full query-language
+  grammar, the vectorstore/embedding pipeline, 10 DB models, 3 crawler
+  backends, and the TUI, each flagged `[TESTED]`/`[UNTESTED]` against
+  Hister's own Go test suite.
+- **Added:** a sovereignty audit confirming most of what this port needs is
+  already covered by existing first-party crates — `rusty_tokio`,
+  `rusty_http`/`rusty_request`, `rusty_tls`, `rusty_json`, `rusty_db`,
+  `rusty_url`, `rusty_llama`/`rusty_provider`, and notably `rusty_mcp`
+  (already a mature MCP server framework this port's tool surface builds on
+  directly instead of a fresh JSON-RPC layer). `rusty_search` covers real
+  BM25 today but only a structured query-builder DSL, not a text grammar,
+  and no vector search yet. Nothing in the workspace touches the Chrome
+  DevTools Protocol or WebDriver BiDi.
+- **Added:** three ADRs under `crates/rusty_hister/docs/decisions/` —
+  ADR-0001 (accepted: native workspace crates, v1 scope is backend-only per
+  the kickoff brief, the crate split and its two revisions from the brief's
+  starting suggestion, and an open licensing recommendation for Go test
+  fixtures), ADR-0002 and ADR-0003 (both **Proposed**, open
+  decision-requests per the kickoff brief's explicit instruction — search/
+  indexing engine approach and JS-rendering crawler approach, respectively
+  — neither decided in this PR).
+- **Not done here:** no indexing, crawling, extraction, or server logic.
+  `rusty-hister-indexer`, `rusty-hister-vectorstore`'s storage side, and
+  `rusty-hister-crawler`'s JS-rendering backends are explicitly blocked on
+  ADR-0002/ADR-0003 sign-off; see `crates/rusty_hister/docs/roadmap/
+  ROADMAP.md` for what can proceed in parallel.
+
+## Make rusty_json's serde dependency optional
+**2026-09-11** · branch [`claude/clever-wright-y6qkyq`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/clever-wright-y6qkyq)
+
+Resumes `repo-inspector-report.md` Section 1 row 7 (hand-rolled JSON
+`Value` in `rusty_oauth`/`rusty_request`), left blocked in an earlier pass
+on `rusty_json` having a non-optional `serde` dependency — contradicting
+the exact "no `serde`" rationale both hand-rolled crates state in their own
+doc comments.
+
+- **Added:** a `serde` Cargo feature on `rusty_json`, on by default (zero
+  behavior change for its 16 existing workspace dependents — none needed
+  any change, spot-checked). With `default-features = false`, the crate
+  pulls in no `serde` dependency at all: `Value` parsing
+  (`s.parse::<Value>()` / `Value::from_json_str`) and writing
+  (`Value::to_json_string`/`Value::to_json_string_pretty`) go through a new
+  direct recursive-descent path (`src/value_io.rs`) that reuses the
+  existing hand-rolled tokenizer (`src/parser.rs`) and `Formatter` trait
+  instead of `serde::Deserializer`/`Serializer`. String-escaping logic
+  moved to a shared `src/escape.rs` so the serde-based and serde-free
+  writers can't drift apart. Verified standalone: full test suite green in
+  both feature configurations (`cargo test -p rusty_json` and
+  `--no-default-features --features std`), plus clippy clean in both.
+- **Not done here:** `rusty_oauth` and `rusty_request` still hand-roll
+  their own `Value` — this PR only removes the prerequisite blocking their
+  migration to `rusty_json`, which touches 14 and 4 call sites
+  respectively and is left as a separate, deliberately-scoped follow-up.
+
+---
+
+## Migrate rusty_multimodal_db into the monorepo
+**2026-09-10** · branch [`claude/loving-bell-kntf9l`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/loving-bell-kntf9l)
+
+`baileyrd/rusty_multimodal_db` — a benchmark harness comparing AoS, SoA,
+and UUID-canonical-store record backends, plus the production store,
+network server, and schema-driven client built on the winning design —
+merged into `crates/rusty_multimodal_db/` via `git subtree`, full history
+preserved. A sixth merge outside the `baileyrd/rusty_*` wave numbering
+(ADR-0001), same treatment as the `nexus` merge above.
+
+- **Added:** `crates/rusty_multimodal_db` joins this root's member list
+  directly (it was already a single, non-nested `Cargo.toml`, unlike
+  `nexus`/`rusty_agent_gateway`/`rusty_yirp` — nothing to de-nest).
+- **Changed:** its one pinned git dependency on `rusty_tls`
+  (`Rusty-Mill/rusty_mill` at a specific commit) retired to a plain path
+  dependency on this workspace's own `crates/rusty_tls` — the
+  same-workspace-source rule ADR-0002 requires, and the same swap
+  `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made on their own
+  merges.
+- **Changed:** its `rusqlite` pin (used only by the optional
+  `external-db-bench` benchmark feature) bumped `0.32` → `0.39` to match
+  `crates/rusty_inventrory`'s `inventory-core` — `rusqlite` declares
+  `links = "sqlite3"`, and Cargo allows only one version of a
+  `links`-declaring crate in the whole dependency graph; unifying on the
+  higher version is the same fix the `nexus` merge's `sqlx`/`rusqlite`
+  collision needed, not a behavior choice of this crate's own.
+- **Fixed:** two `clippy::chunks_exact_to_as_chunks` failures
+  (`src/durability/mmap_store.rs`, `src/server/pem.rs`) — this workspace's
+  clippy version flags `chunks_exact(N)` with a constant `N` in favor of
+  `as_chunks::<N>().0`; behavior unchanged, same trailing-partial-chunk
+  drop either way. The upstream repo hit the identical failure on its own
+  `main` (unrelated to this merge — its clippy toolchain updated
+  independently) and carries the same fix.
+- **Changed:** `rusty_multimodal_db` added to the `windows-latest`
+  `windows-exclude` list alongside `rusty_stream`/`rusty_fedora_agent` —
+  its optional `external-db-bench` feature's `duckdb` dependency vendors
+  DuckDB's own C++ amalgamation, and this workspace's `--all-features` is
+  what first compiles it on `windows-latest`; that native build fails
+  under the runner's current MSVC toolchain (a third-party build issue,
+  no Rust-side fix available here). The upstream repo's own CI never ran
+  a Windows job at all, so this wasn't a regression, just first exposure.
+- **Verified:** `cargo tree -p rusty_multimodal_db --all-features`
+  resolves to one `rusqlite v0.39.0`; `cargo check -p rusty_multimodal_db
+  --features research,server,perf-events` compiles clean, and separately
+  `--features research,external-db-bench` compiles clean too (DuckDB's
+  bundled from-source build, already a documented one-time cost — see
+  this crate's own `docs/decisions/ADR-0015-external-database-benchmark.md`
+  — checked on its own given how long that build takes, ~10.5 minutes).
+
 ## Migrate nexus into the monorepo
 **2026-09-08** · branch [`claude/nexus-rusty-mill-migration-ic3fqa`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/nexus-rusty-mill-migration-ic3fqa)
 

@@ -1,3 +1,4 @@
+use rusty_sqlite::rusqlite;
 use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;

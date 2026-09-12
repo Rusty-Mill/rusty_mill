@@ -35,7 +35,7 @@
 use crate::embed::{decode_vector, linalg::l2_normalize};
 use crate::Result;
 use rand::{Rng, SeedableRng};
-use rusqlite::Connection;
+use rusty_sqlite::rusqlite::Connection;
 use std::collections::HashSet;
 
 /// Below this, the exact scan over in-memory vectors is already fast enough

@@ -64,6 +64,13 @@ impl ResponseCache {
         let (inserted_at, resp) = self.entries.get(&key)?;
         if inserted_at.elapsed() > self.ttl {
             self.entries.remove(&key);
+            // Keep `order` in sync with `entries` on expiry -- otherwise
+            // a stale queue reference for `key` survives, and a later
+            // `insert` of the same key pushes a *second* `order` entry.
+            // The next eviction then pops the stale duplicate instead of
+            // the true oldest key, corrupting bookkeeping and evicting a
+            // live, freshly-reinserted entry instead.
+            self.order.retain(|&k| k != key);
             return None;
         }
         Some(resp.clone())
@@ -314,6 +321,61 @@ mod tests {
 
         assert_eq!(cache.get(key_a).unwrap().id, "resp-a-2");
         assert!(cache.get(key_b).is_some());
+    }
+
+    #[test]
+    fn get_expiring_an_entry_does_not_leave_a_stale_order_reference() {
+        // ttl=0 means every entry is "expired" the instant `elapsed()`
+        // is checked (same trick `get_expires_an_entry_past_its_ttl`
+        // uses) -- this deterministically forces `get(key_b)` to hit the
+        // expiry path below without a fake clock.
+        let mut cache = ResponseCache::new(&config(0, 2));
+        let key_a = ResponseCache::key_for(&request("a/m1", "a"));
+        let key_b = ResponseCache::key_for(&request("a/m1", "b"));
+        let key_c = ResponseCache::key_for(&request("a/m1", "c"));
+
+        cache.insert(key_a, response("resp-a"));
+        cache.insert(key_b, response("resp-b"));
+
+        // Expires B via `get`'s expiry path: removes it from `entries`.
+        // The bug being tested is that this left a stale `order` entry
+        // for `key_b` behind.
+        assert!(cache.get(key_b).is_none());
+
+        // Re-inserting B pushes a *second* `order` entry for it unless
+        // the stale one was cleaned up on expiry above.
+        cache.insert(key_b, response("resp-b-2"));
+        cache.insert(key_c, response("resp-c"));
+
+        // Capacity 2: A (the true oldest survivor) should be evicted,
+        // and B + C -- the two live entries -- should both remain. The
+        // old bug instead evicted the stale duplicate B reference on
+        // this insert, corrupting bookkeeping so the just-reinserted B
+        // was evicted too, leaving only C behind.
+        assert!(
+            !cache.entries.contains_key(&key_a),
+            "A should have been evicted"
+        );
+        assert!(
+            cache.entries.contains_key(&key_b),
+            "B should still be present after being reinserted"
+        );
+        assert_eq!(
+            cache.entries.get(&key_b).unwrap().1.id,
+            "resp-b-2",
+            "B's reinserted value should be the one retained"
+        );
+        assert!(cache.entries.contains_key(&key_c), "C should be present");
+        assert_eq!(
+            cache.entries.len(),
+            2,
+            "capacity 2 should be fully utilized"
+        );
+        assert_eq!(
+            cache.order.len(),
+            2,
+            "order queue should stay in sync with entries, no stale duplicates"
+        );
     }
 
     // --- SemanticCache -------------------------------------------------------------

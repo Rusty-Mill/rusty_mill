@@ -10,7 +10,7 @@
 //! only ever read.
 
 use crate::Result;
-use rusqlite::{Connection, OpenFlags};
+use rusty_sqlite::rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 pub struct Snapshot {

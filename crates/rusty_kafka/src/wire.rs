@@ -70,19 +70,25 @@ pub(crate) fn read_string(reader: &mut Reader) -> Result<String, CodecError> {
 }
 
 /// Writes a Kafka `NULLABLE_STRING`.
-pub(crate) fn write_nullable_string(writer: &mut Writer, value: Option<&str>) {
+pub(crate) fn write_nullable_string(
+    writer: &mut Writer,
+    value: Option<&str>,
+) -> Result<(), CodecError> {
     match value {
         None => write_i16(writer, -1),
         Some(text) => {
-            write_i16(writer, text.len() as i16);
+            let len =
+                i16::try_from(text.len()).map_err(|_| CodecError::StringTooLong(text.len()))?;
+            write_i16(writer, len);
             writer.write_bytes(text.as_bytes());
         }
     }
+    Ok(())
 }
 
 /// Writes a Kafka `STRING`.
-pub(crate) fn write_string(writer: &mut Writer, value: &str) {
-    write_nullable_string(writer, Some(value));
+pub(crate) fn write_string(writer: &mut Writer, value: &str) -> Result<(), CodecError> {
+    write_nullable_string(writer, Some(value))
 }
 
 /// Reads an `INT32` array-length prefix, rejecting anything below `-1`.
@@ -96,6 +102,28 @@ pub(crate) fn read_array_len(reader: &mut Reader) -> Result<i32, CodecError> {
         return Err(CodecError::InvalidArrayLength(len));
     }
     Ok(len)
+}
+
+/// Reads an `INT32` array-length prefix via [`read_array_len`], then
+/// checks it against `reader`'s remaining bytes given `min_element_len`
+/// -- the fewest bytes a single element of that array could possibly
+/// encode as -- so a corrupt or hostile length prefix can't force a
+/// `Vec::with_capacity` allocation the buffer could never actually back.
+/// Floors a `-1` (null) length to `0`, the same convention every caller
+/// of [`read_array_len`] already applies.
+pub(crate) fn read_checked_array_len(
+    reader: &mut Reader,
+    min_element_len: usize,
+) -> Result<usize, CodecError> {
+    let len = read_array_len(reader)?.max(0);
+    let count = len as usize;
+    if count.saturating_mul(min_element_len) > reader.remaining() {
+        return Err(CodecError::ArrayLengthExceedsBuffer(
+            len,
+            reader.remaining(),
+        ));
+    }
+    Ok(count)
 }
 
 /// Reads a Kafka `NULLABLE_BYTES` field: an `INT32` byte length (`-1`
@@ -117,14 +145,20 @@ pub(crate) fn read_nullable_bytes<'a>(
 }
 
 /// Writes a Kafka `NULLABLE_BYTES` field.
-pub(crate) fn write_nullable_bytes(writer: &mut Writer, value: Option<&[u8]>) {
+pub(crate) fn write_nullable_bytes(
+    writer: &mut Writer,
+    value: Option<&[u8]>,
+) -> Result<(), CodecError> {
     match value {
         None => write_i32(writer, -1),
         Some(bytes) => {
-            write_i32(writer, bytes.len() as i32);
+            let len =
+                i32::try_from(bytes.len()).map_err(|_| CodecError::BytesTooLong(bytes.len()))?;
+            write_i32(writer, len);
             writer.write_bytes(bytes);
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -134,7 +168,7 @@ mod tests {
     #[test]
     fn nullable_string_round_trips_some() {
         let mut writer = Writer::new();
-        write_nullable_string(&mut writer, Some("hello"));
+        write_nullable_string(&mut writer, Some("hello")).unwrap();
         let bytes = writer.into_vec();
         assert_eq!(bytes, [0x00, 0x05, b'h', b'e', b'l', b'l', b'o']);
 
@@ -148,7 +182,7 @@ mod tests {
     #[test]
     fn nullable_string_round_trips_none() {
         let mut writer = Writer::new();
-        write_nullable_string(&mut writer, None);
+        write_nullable_string(&mut writer, None).unwrap();
         let bytes = writer.into_vec();
         assert_eq!(bytes, [0xFF, 0xFF]);
 
@@ -159,7 +193,7 @@ mod tests {
     #[test]
     fn read_string_rejects_null() {
         let mut writer = Writer::new();
-        write_nullable_string(&mut writer, None);
+        write_nullable_string(&mut writer, None).unwrap();
         let bytes = writer.into_vec();
         let mut reader = Reader::new(&bytes);
         assert!(matches!(
@@ -212,7 +246,7 @@ mod tests {
     #[test]
     fn nullable_bytes_round_trips_some() {
         let mut writer = Writer::new();
-        write_nullable_bytes(&mut writer, Some(&[1, 2, 3]));
+        write_nullable_bytes(&mut writer, Some(&[1, 2, 3])).unwrap();
         let bytes = writer.into_vec();
         assert_eq!(bytes, [0x00, 0x00, 0x00, 0x03, 1, 2, 3]);
 
@@ -226,7 +260,7 @@ mod tests {
     #[test]
     fn nullable_bytes_round_trips_none() {
         let mut writer = Writer::new();
-        write_nullable_bytes(&mut writer, None);
+        write_nullable_bytes(&mut writer, None).unwrap();
         let bytes = writer.into_vec();
         assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF]);
 
@@ -254,5 +288,59 @@ mod tests {
         assert_eq!(bytes, [0xFF]);
         let mut reader = Reader::new(&bytes);
         assert_eq!(read_i8(&mut reader).unwrap(), -1);
+    }
+
+    #[test]
+    fn write_nullable_string_accepts_the_maximum_i16_length() {
+        let text = "a".repeat(32_767);
+        let mut writer = Writer::new();
+        write_nullable_string(&mut writer, Some(&text)).unwrap();
+        let bytes = writer.into_vec();
+        assert_eq!(&bytes[0..2], [0x7F, 0xFF]);
+        assert_eq!(bytes.len(), 2 + 32_767);
+    }
+
+    #[test]
+    fn write_nullable_string_rejects_a_length_over_i16_max() {
+        let text = "a".repeat(32_768);
+        let mut writer = Writer::new();
+        let err = write_nullable_string(&mut writer, Some(&text)).unwrap_err();
+        assert!(matches!(err, CodecError::StringTooLong(32_768)));
+        // No malformed (wrapped-negative-length-then-payload) bytes were
+        // written at all.
+        assert!(writer.into_vec().is_empty());
+    }
+
+    #[test]
+    fn write_nullable_bytes_rejects_a_length_over_i32_max() {
+        // Building an actual 2GiB+ buffer isn't practical in a test;
+        // exercise the checked conversion directly the same way
+        // `write_nullable_bytes` does.
+        assert!(i32::try_from(u32::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    fn checked_array_len_rejects_a_tiny_payload_claiming_i32_max_elements() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, i32::MAX);
+        writer.write_bytes(&[0, 1, 2, 3]); // a few trailing bytes, nowhere near enough
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = read_checked_array_len(&mut reader, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)
+        ));
+    }
+
+    #[test]
+    fn checked_array_len_accepts_a_count_the_buffer_can_back() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, 2);
+        write_i32(&mut writer, 10);
+        write_i32(&mut writer, 20);
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(read_checked_array_len(&mut reader, 4).unwrap(), 2);
     }
 }

@@ -27,8 +27,9 @@ pub struct FindCoordinatorRequest {
 
 impl FindCoordinatorRequest {
     /// Encodes the v0 body.
-    pub fn encode(&self, writer: &mut Writer) {
-        write_string(writer, &self.group_id);
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
+        write_string(writer, &self.group_id)?;
+        Ok(())
     }
 
     /// Decodes a v0 body -- symmetric with [`encode`](Self::encode),
@@ -69,11 +70,12 @@ impl FindCoordinatorResponse {
     /// Encodes the response body -- symmetric with
     /// [`decode`](Self::decode), for a fake broker standing in for
     /// tests.
-    pub fn encode(&self, writer: &mut Writer) {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
         write_i16(writer, self.error_code);
         write_i32(writer, self.node_id);
-        write_string(writer, &self.host);
+        write_string(writer, &self.host)?;
         write_i32(writer, self.port);
+        Ok(())
     }
 }
 
@@ -87,7 +89,7 @@ mod tests {
             group_id: "readiness-reporting-personnel-consumer".to_string(),
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -106,7 +108,7 @@ mod tests {
             port: 9092,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);
@@ -123,7 +125,7 @@ mod tests {
             port: -1,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

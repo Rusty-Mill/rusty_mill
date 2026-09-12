@@ -28,6 +28,25 @@ Tauri desktop shell, `shell/src-tauri`) is `exclude`d the same way as
 `rusty_key`'s `desktop/src-tauri` — it's a separate pnpm-driven Tauri
 workspace, not a `cargo test` target.
 
+A sixth merge, also outside the wave numbering, brought in
+`baileyrd/rusty_multimodal_db` — a single-crate benchmark harness for
+record-store backend design — under `crates/rusty_multimodal_db/`, the
+same `git subtree` process. Its one pinned git dependency on `rusty_tls`
+(`Rusty-Mill/rusty_mill`, a specific commit) retired to a plain path
+dependency on this workspace's own `crates/rusty_tls` (ADR-0002), and its
+`rusqlite` pin bumped `0.32` → `0.39` to match `crates/rusty_inventrory`'s
+`inventory-core` — `rusqlite`'s `links = "sqlite3"` key allows only one
+version in the whole dependency graph, the same constraint the `nexus`
+merge hit.
+
+A seventh addition, `rusty_hister` under `crates/rusty_hister/`, is fresh
+work rather than a merge: a Rust port of
+[asciimoo/hister](https://github.com/asciimoo/hister) (AGPL-3.0-or-later),
+bootstrapped as eight native crates (`rusty-hister-core` through
+`rusty-hister-mcp`, see `crates/rusty_hister/README.md`) with a full
+capability inventory and two open decision-requests (search engine, JS-
+rendering crawler) — no port implementation lands until those are decided.
+
 ## Crates
 
 | Crate | Path | Purpose |
@@ -245,6 +264,15 @@ workspace, not a `cargo test` target.
 | [`nexus-memory-hub`](crates/nexus/crates/nexus-memory-hub) | `crates/nexus/crates/nexus-memory-hub` | Nexus: standalone `axum` HTTP sync server for `nexus-memory` — a deployable binary, not a bootstrap plugin |
 | [`nexus-context`](crates/nexus/crates/nexus-context) | `crates/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`nexus-protocol`](crates/nexus/crates/nexus-protocol) | `crates/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
+| [`rusty_multimodal_db`](crates/rusty_multimodal_db) | `crates/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
+| [`rusty-hister-core`](crates/rusty_hister/crates/rusty-hister-core) | `crates/rusty_hister/crates/rusty-hister-core` | rusty_hister: shared types, IDs, error types, and the `Document`/extractor-SDK data model (skeleton) |
+| [`rusty-hister-model`](crates/rusty_hister/crates/rusty-hister-model) | `crates/rusty_hister/crates/rusty-hister-model` | rusty_hister: persisted schema on `rusty_db`, dual SQLite/Postgres (skeleton) |
+| [`rusty-hister-extractor`](crates/rusty_hister/crates/rusty-hister-extractor) | `crates/rusty_hister/crates/rusty-hister-extractor` | rusty_hister: extractor SDK and the 20 built-in per-site/format content extractors (skeleton) |
+| [`rusty-hister-indexer`](crates/rusty_hister/crates/rusty-hister-indexer) | `crates/rusty_hister/crates/rusty-hister-indexer` | rusty_hister: query language + full-text indexing on `rusty_search` (skeleton, blocked on ADR-0002) |
+| [`rusty-hister-vectorstore`](crates/rusty_hister/crates/rusty-hister-vectorstore) | `crates/rusty_hister/crates/rusty-hister-vectorstore` | rusty_hister: embedding pipeline and vector storage for semantic search (skeleton) |
+| [`rusty-hister-crawler`](crates/rusty_hister/crates/rusty-hister-crawler) | `crates/rusty_hister/crates/rusty-hister-crawler` | rusty_hister: HTTP and JS-rendering crawler backends (skeleton, JS-rendering blocked on ADR-0003) |
+| [`rusty-hister-server`](crates/rusty_hister/crates/rusty-hister-server) | `crates/rusty_hister/crates/rusty-hister-server` | rusty_hister: HTTP/JSON API + WebSocket search protocol, the v1 backend surface (skeleton) |
+| [`rusty-hister-mcp`](crates/rusty_hister/crates/rusty-hister-mcp) | `crates/rusty_hister/crates/rusty-hister-mcp` | rusty_hister: MCP JSON-RPC tool surface (search, get_preview, get_history) on `rusty_mcp` (skeleton) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,

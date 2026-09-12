@@ -17,9 +17,10 @@ pub struct LeaveGroupRequest {
 
 impl LeaveGroupRequest {
     /// Encodes the v0 body.
-    pub fn encode(&self, writer: &mut Writer) {
-        write_string(writer, &self.group_id);
-        write_string(writer, &self.member_id);
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), CodecError> {
+        write_string(writer, &self.group_id)?;
+        write_string(writer, &self.member_id)?;
+        Ok(())
     }
 
     /// Decodes a v0 body -- symmetric with [`encode`](Self::encode),
@@ -67,7 +68,7 @@ mod tests {
             member_id: "consumer-1-abc".to_string(),
         };
         let mut writer = Writer::new();
-        request.encode(&mut writer);
+        request.encode(&mut writer).unwrap();
         let bytes = writer.into_vec();
 
         let mut reader = Reader::new(&bytes);

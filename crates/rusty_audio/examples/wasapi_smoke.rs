@@ -10,7 +10,13 @@ fn main() {
             let mut total = 0usize;
             for _ in 0..10 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                total += capture.read_samples().len();
+                match capture.read_samples() {
+                    Ok(samples) => total += samples.len(),
+                    Err(e) => {
+                        println!("read_samples failed: {e:?}");
+                        break;
+                    }
+                }
             }
             println!(
                 "Captured {total} samples (~{:.2}s at 16kHz)",

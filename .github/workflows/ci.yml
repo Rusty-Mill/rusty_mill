@@ -10,9 +10,21 @@ name: CI
 # touches (plus everything that transitively depends on them) and every
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
-# Pushes to main, and PRs that touch a workspace-wide file (root
-# Cargo.toml/Cargo.lock, or this CI config itself), still get the full
-# sweep.
+# Pushes to main, and PRs that touch this CI config itself or workspace-wide
+# tooling config under .config/ (e.g. nextest's), still get the full sweep --
+# those can change how every crate builds or tests. A root Cargo.toml edit
+# used to force the same full sweep unconditionally, but the single most
+# common edit to that file is adding a handful of brand-new, independent
+# workspace members with nothing else in the file touched (e.g. #170's
+# rusty_hister bootstrap, eight new crates, zero existing lines changed) --
+# that has no blast radius on any existing crate, so `.github/scripts/
+# cargo_toml_diff.py` classifies the change first and only forces the full
+# sweep when it's more than a pure `[workspace.members]` addition (a
+# dependency version bump, a removed/renamed member, a `[profile]` edit,
+# ...). A Cargo.lock-only change (no Cargo.toml edit -- a plain `cargo
+# update`) is narrower still: only the workspace crates whose dependency
+# graph actually includes whatever package moved, per `.github/scripts/
+# lockfile_diff.py`.
 on:
   push:
     branches: [main]
@@ -91,6 +103,7 @@ jobs:
       full: ${{ steps.plan.outputs.full }}
       packages: ${{ steps.plan.outputs.packages }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
+      shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -110,6 +123,7 @@ jobs:
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
+            echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -119,12 +133,27 @@ jobs:
           echo "Changed files:"
           echo "$changed"
 
-          if echo "$changed" | grep -Eq '^(Cargo\.toml|Cargo\.lock|\.github/(workflows|actions|scripts)/)'; then
-            echo "A workspace-wide file changed -- running the full workspace sweep."
+          if echo "$changed" | grep -Eq '^(\.config/|\.github/(workflows|actions|scripts)/)'; then
+            echo "Workspace-wide CI/tooling config changed -- running the full workspace sweep."
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
+            echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          if echo "$changed" | grep -Eq '^Cargo\.toml$'; then
+            git show "$base:Cargo.toml" > /tmp/old-Cargo.toml
+            classification="$(python3 .github/scripts/cargo_toml_diff.py /tmp/old-Cargo.toml Cargo.toml)"
+            if [ "$classification" != "safe" ]; then
+              echo "Root Cargo.toml changed beyond a pure [workspace.members] addition -- running the full workspace sweep."
+              echo "full=true" >> "$GITHUB_OUTPUT"
+              echo "packages=" >> "$GITHUB_OUTPUT"
+              echo "dashboard=true" >> "$GITHUB_OUTPUT"
+              echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Root Cargo.toml changed, but only added new [workspace.members] entries -- narrowing normally instead of a full sweep."
           fi
 
           # rusty_meshed's vendored data-mesh-monitor (Vite/React) isn't a
@@ -139,6 +168,27 @@ jobs:
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
           packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
 
+          # Cargo.lock isn't owned by any single crate, so affected_crates.py
+          # can't attribute it -- but unlike Cargo.toml/CI-config changes
+          # above, a lockfile-only change (a plain `cargo update` bumping one
+          # transitive dependency, no Cargo.toml edit at all) has a real,
+          # narrower blast radius: exactly the workspace crates whose
+          # dependency graph actually includes the package(s) that moved.
+          # lockfile_diff.py computes that from the full resolve graph
+          # (including external packages, which affected_crates.py's own
+          # graph deliberately excludes) and falls back to every workspace
+          # crate itself if a changed lockfile entry can't be placed in the
+          # current metadata snapshot -- this step never forces `full=true`
+          # past that, it just folds the (possibly full) result into
+          # `packages`.
+          if echo "$changed" | grep -Eq '^Cargo\.lock$'; then
+            echo "Cargo.lock changed -- narrowing to crates whose dependency graph actually moved."
+            git show "$base:Cargo.lock" > /tmp/old-Cargo.lock
+            lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock)"
+            echo "Lockfile-narrowed crates: ${lockfile_packages:-<none>}"
+            packages="$(printf '%s\n' $packages $lockfile_packages | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+          fi
+
           if [ -z "$packages" ]; then
             echo "No workspace crate touched by this PR -- build/test/clippy will be skipped."
           else
@@ -147,6 +197,7 @@ jobs:
           {
             echo "full=false"
             echo "packages=$packages"
+            echo "shards=[1]"
           } >> "$GITHUB_OUTPUT"
 
       - name: Summary
@@ -184,25 +235,38 @@ jobs:
       # cfg-gated portable shims like rusty_win32 does the other way.
       # rusty_fedora_agent gets the same treatment: it shells out to
       # systemctl/journalctl/dnf, none of which exist on Windows either.
+      # rusty_multimodal_db is a different case -- its own library and every
+      # feature but one are portable, and its standalone repo's own CI never
+      # ran a Windows job at all (single-OS, so this was simply untested,
+      # not previously green). --all-features here is what first exercises
+      # `external-db-bench`, whose optional `duckdb` dependency vendors
+      # DuckDB's own C++ amalgamation ("bundled") -- that native build fails
+      # under windows-latest's current MSVC toolchain (cc-rs exit code 2
+      # compiling ub_src_storage_compression_chimp.cpp), a third-party
+      # native-build issue with no Rust-side fix available here. Whole-crate
+      # exclusion is coarser than the actual problem (one optional feature),
+      # matching this mechanism's existing granularity rather than adding a
+      # new one for a single crate.
       - uses: ./.github/actions/select-packages
         id: scope
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent
+          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
 
       - name: Clippy
         if: steps.scope.outputs.args != ''
         run: cargo clippy ${{ steps.scope.outputs.args }} --all-targets --all-features -- -D warnings
 
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, shard ${{ matrix.shard }})
     needs: plan
     if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -215,19 +279,29 @@ jobs:
         with:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
-          windows-exclude: rusty_stream rusty_fedora_agent
+          windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
 
-      # mill-term's own tests locate sibling binaries (rgit/rsed/rawk) by
-      # walking target/{debug,release} at runtime rather than through a
+      # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
+      # by walking target/{debug,release} at runtime rather than through a
       # Cargo dependency (see the root README's "How the crates relate") --
-      # mill-term only has a *library* dependency on rusty_git, so nothing
-      # in the dependency graph forces cargo to finish building rusty_git's
-      # own `rgit` binary before mill-term's test binary starts running. A
-      # separate, blocking build step first guarantees every selected
-      # workspace binary exists on disk before any test executes (see #12).
-      - name: Build
-        if: steps.scope.outputs.args != ''
-        run: cargo build ${{ steps.scope.outputs.args }} --all-features
+      # mill-term only has a *library* dependency on rusty_git, and none at
+      # all on rush/rusty_text, so nothing in the dependency graph forces
+      # cargo to finish building those binaries before mill-term's test
+      # binary starts running. A separate, blocking build step first
+      # guarantees those specific binaries exist on disk before any test
+      # executes (see #12).
+      #
+      # Scoped to just the three crates that own those binaries, not the
+      # job's full package selection (`--workspace` on a full sweep) --
+      # this used to build the entire selected scope a second time before
+      # `cargo nextest run` built it all again for test-cfg, roughly
+      # doubling compile time on every full-sweep run for a requirement
+      # that only ever concerns three small CLI-tool crates. Only runs
+      # when mill-term is actually in scope; every other PR skips this
+      # step entirely.
+      - name: Build (mill-term's sibling-binary prerequisites)
+        if: steps.scope.outputs.args != '' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'mill-term'))
+        run: cargo build -p rush -p rusty_git -p rusty_text --all-features
 
       - name: Install cargo-nextest
         if: steps.scope.outputs.args != ''
@@ -262,12 +336,30 @@ jobs:
       # windows-latest is a mitigation for the suspected trigger (less
       # contention among concurrently-running nextest processes), not a
       # confirmed fix for the underlying rusty_tokio behavior.
+      # Only actually partitioned on a full sweep (3 shards, ~16800 tests);
+      # a scoped PR run has exactly one shard (see plan's `shards` output)
+      # and must run every selected test, so no `--partition` flag is
+      # added there -- passing one unconditionally would silently run only
+      # a third of a scoped PR's own tests.
+      #
+      # `--no-tests=warn`: nextest's default (`fail`) treats "the selected
+      # packages collectively have zero tests" as a CI failure (exit 4, "no
+      # tests to run") -- correct for a full sweep, where that can only mean
+      # something broke test collection, but wrong for a scoped PR run that
+      # only touches brand-new skeleton crates with no tests yet (PR #170's
+      # rusty_hister bootstrap hit exactly this: 8 crates, 0 tests, CI red
+      # for having nothing to test). `warn` still logs it -- so a crate that
+      # silently loses all its tests some other way isn't swept under the
+      # rug -- without failing a PR whose whole point is scaffolding.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
 
+      # Runs once per OS, not once per shard -- it's cheap and not worth
+      # partitioning, and nextest's own partitioning above doesn't cover a
+      # suite excluded from that run entirely.
       - name: Test rusty_lines' Windows raw-mode suite (cargo test)
-        if: runner.os == 'Windows' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_lines'))
+        if: matrix.shard == 1 && runner.os == 'Windows' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_lines'))
         run: cargo test --test windows_raw_mode -p rusty_lines --all-features
 
       # nextest doesn't execute doctests -- run those separately so this
@@ -286,8 +378,11 @@ jobs:
       # exactly how rusty_stream -- Linux-only, and correctly excluded on
       # windows-latest by every other step in this job -- was still getting
       # compiled by this one step and failing the whole job on Windows.
+      # Runs once per OS, not once per shard -- doctests are cheap and
+      # nextest doesn't run them at all, so there's nothing shard 2/3
+      # would otherwise be covering.
       - name: Test (doctests)
-        if: steps.scope.outputs.args != ''
+        if: matrix.shard == 1 && steps.scope.outputs.args != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -358,3 +453,28 @@ jobs:
         run: cargo check -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std
       - name: cargo clippy --target x86_64-pc-windows-gnu
         run: cargo clippy -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std -- -D warnings
+
+  # Every other Rust job above passes --all-features, and rusty_config's
+  # own `default = ["std"]` (see crates/rusty_config/Cargo.toml) means
+  # --all-features never disables it -- so CI has never actually compiled
+  # the crate's documented `#![no_std]` + alloc-only code path (see the
+  # `#![cfg_attr(not(feature = "std"), no_std)]` line in its src/lib.rs).
+  # This is a small, additive check dedicated to that one crate's
+  # non-default configuration, not a general no_std feature-matrix
+  # mechanism for every no_std crate in the workspace. rusty_config is
+  # `alloc`-only (no hardware/platform-specific code), so the host triple
+  # is sufficient -- no `--target` cross-compile is needed the way
+  # rusty_win32's check above needs one.
+  rusty-config-no-std-check:
+    name: rusty_config no_std (--no-default-features)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_config')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-config-no-std
+      - name: cargo check -p rusty_config --no-default-features
+        run: cargo check -p rusty_config --no-default-features --all-targets

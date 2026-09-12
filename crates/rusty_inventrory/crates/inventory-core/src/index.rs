@@ -8,7 +8,7 @@ use crate::search::{self, SearchQuery, SearchResponse};
 use crate::sources::{self, ScanContext};
 use crate::vectors::{IvfIndex, VectorCache, VectorSet};
 use crate::{Error, Result};
-use rusqlite::Connection;
+use rusty_sqlite::rusqlite::{self, Connection};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 

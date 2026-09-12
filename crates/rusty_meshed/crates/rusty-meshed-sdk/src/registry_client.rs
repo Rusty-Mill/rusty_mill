@@ -160,7 +160,7 @@ impl RegistryClient {
             )));
         }
         let products = response.json().map_err(http_err)?;
-        let products = products.as_array().unwrap_or(&[]);
+        let products = products.as_array().map(Vec::as_slice).unwrap_or(&[]);
         let product_id = products
             .iter()
             .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(product_name))
@@ -184,7 +184,7 @@ impl RegistryClient {
             )));
         }
         let ports = response.json().map_err(http_err)?;
-        let ports = ports.as_array().unwrap_or(&[]);
+        let ports = ports.as_array().map(Vec::as_slice).unwrap_or(&[]);
         ports
             .iter()
             .find(|p| p.get("description").and_then(|v| v.as_str()) == Some(port_name))

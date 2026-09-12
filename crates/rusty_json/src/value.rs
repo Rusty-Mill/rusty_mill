@@ -28,6 +28,43 @@ impl Default for Value {
 }
 
 impl Value {
+    /// Parses a JSON value from a string slice, with **no dependency on
+    /// `serde`** -- works identically whether or not the `serde` feature is
+    /// enabled. Errors if any non-whitespace trailing content follows the
+    /// value. Equivalent to `s.parse::<Value>()`.
+    pub fn from_json_str(s: &str) -> Result<Value, crate::Error> {
+        crate::value_io::parse_str(s)
+    }
+
+    /// Alias for [`Value::from_json_str`], matching the name several
+    /// hand-rolled `Value` types this crate consolidates used for the same
+    /// operation.
+    pub fn parse(s: &str) -> Result<Value, crate::Error> {
+        Self::from_json_str(s)
+    }
+
+    /// An empty object (`{}`). Shorthand for `Value::Object(Map::new())`.
+    pub fn object() -> Value {
+        Value::Object(Map::new())
+    }
+
+    /// An empty array (`[]`). Shorthand for `Value::Array(Vec::new())`.
+    pub fn array() -> Value {
+        Value::Array(Vec::new())
+    }
+
+    /// Writes this value as compact JSON text, with **no dependency on
+    /// `serde`**.
+    pub fn to_json_string(&self) -> alloc::string::String {
+        crate::value_io::to_json_string(self)
+    }
+
+    /// Writes this value as pretty-printed JSON text (two-space indent,
+    /// empty arrays/objects inline), with **no dependency on `serde`**.
+    pub fn to_json_string_pretty(&self) -> alloc::string::String {
+        crate::value_io::to_json_string_pretty(self)
+    }
+
     /// Looks up a key if this is an object, returning `None` otherwise
     /// (including when the key is absent).
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -53,6 +90,36 @@ impl Value {
             Value::Object(map) => map.get_mut(key),
             _ => None,
         }
+    }
+
+    /// Inserts `key: value` into an object, replacing any existing entry
+    /// with the same key, and returns `self` for chaining. Panics if `self`
+    /// isn't `Value::Object` -- a programmer error (building a JSON body),
+    /// not a runtime one. See [`Value::index_mut`](core::ops::IndexMut) for
+    /// a non-panicking alternative that also promotes `Value::Null` to an
+    /// empty object.
+    pub fn insert(
+        &mut self,
+        key: impl Into<alloc::string::String>,
+        value: impl Into<Value>,
+    ) -> &mut Value {
+        match self {
+            Value::Object(map) => {
+                map.insert(key.into(), value.into());
+            }
+            _ => panic!("Value::insert called on a non-object Value"),
+        }
+        self
+    }
+
+    /// Appends `value` to an array and returns `self` for chaining. Panics
+    /// if `self` isn't `Value::Array`.
+    pub fn push(&mut self, value: impl Into<Value>) -> &mut Value {
+        match self {
+            Value::Array(items) => items.push(value.into()),
+            _ => panic!("Value::push called on a non-array Value"),
+        }
+        self
     }
 
     /// True if this is `Value::Null`.
@@ -332,9 +399,10 @@ impl core::str::FromStr for Value {
     type Err = crate::Error;
 
     /// Parses a JSON value from a string slice; delegates to
-    /// [`crate::from_str`].
+    /// [`Value::from_json_str`]. Available with the `serde` feature
+    /// disabled, unlike the generic [`crate::from_str`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::from_str(s)
+        Value::from_json_str(s)
     }
 }
 
@@ -796,5 +864,60 @@ mod tests {
         assert_eq!(Value::from_str("null").unwrap(), Value::Null);
         assert_eq!("true".parse::<Value>().unwrap(), Value::Bool(true));
         assert!("not json".parse::<Value>().is_err());
+    }
+
+    #[test]
+    fn parse_is_an_alias_for_from_json_str() {
+        assert_eq!(Value::parse("null").unwrap(), Value::Null);
+        assert!(Value::parse("not json").is_err());
+    }
+
+    #[test]
+    fn object_and_array_builders() {
+        assert_eq!(Value::object(), Value::Object(Map::new()));
+        assert_eq!(Value::array(), Value::Array(Vec::new()));
+    }
+
+    #[test]
+    fn insert_builds_an_object_and_chains() {
+        let mut v = Value::object();
+        v.insert("a", 1u64).insert("b", true);
+        assert_eq!(v.get("a"), Some(&Value::Number(Number::from(1u64))));
+        assert_eq!(v.get("b"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn insert_replaces_existing_key() {
+        let mut v = Value::object();
+        v.insert("a", 1u64);
+        v.insert("a", 2u64);
+        assert_eq!(v.get("a"), Some(&Value::Number(Number::from(2u64))));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-object")]
+    fn insert_panics_on_non_object() {
+        let mut v = Value::Bool(true);
+        v.insert("a", 1u64);
+    }
+
+    #[test]
+    fn push_builds_an_array_and_chains() {
+        let mut v = Value::array();
+        v.push(1u64).push(2u64);
+        assert_eq!(
+            v,
+            Value::Array(alloc::vec![
+                Value::Number(Number::from(1u64)),
+                Value::Number(Number::from(2u64))
+            ])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-array")]
+    fn push_panics_on_non_array() {
+        let mut v = Value::Bool(true);
+        v.push(1u64);
     }
 }

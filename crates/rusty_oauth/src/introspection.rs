@@ -3,8 +3,8 @@
 use crate::client::Client;
 use crate::encoding::percent::form_urlencode;
 use crate::error::{Error, Result};
-use crate::json::{self, Value};
 use crate::request::HttpRequest;
+use rusty_json::Value;
 
 /// Builds an RFC 7662 §2.1 introspection request. `token_type_hint`
 /// (`"access_token"` or `"refresh_token"`) is optional but helps the
@@ -81,7 +81,7 @@ pub fn parse_introspection_response(status: u16, body: &str) -> Result<Introspec
             "introspection endpoint returned HTTP {status}"
         )));
     }
-    let value = json::parse(body)?;
+    let value = Value::from_json_str(body)?;
     let active = value
         .get("active")
         .and_then(Value::as_bool)

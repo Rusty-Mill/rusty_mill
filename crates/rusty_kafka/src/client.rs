@@ -74,7 +74,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         &mut self,
         api_key: i16,
         api_version: i16,
-        encode_body: impl FnOnce(&mut Writer),
+        encode_body: impl FnOnce(&mut Writer) -> Result<(), crate::error::CodecError>,
     ) -> Result<Vec<u8>, ClientError> {
         let correlation_id = self.next_correlation_id();
         let header = RequestHeader {
@@ -85,8 +85,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         };
 
         let mut writer = Writer::new();
-        header.encode(&mut writer);
-        encode_body(&mut writer);
+        header.encode(&mut writer)?;
+        encode_body(&mut writer)?;
         crate::frame::write_frame(&mut self.io, writer.as_slice()).await?;
 
         let response_bytes = crate::frame::read_frame(&mut self.io, self.max_frame_len).await?;
@@ -106,7 +106,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
     pub async fn api_versions(&mut self) -> Result<ApiVersionsResponse, ClientError> {
         let request = ApiVersionsRequest;
         let body = self
-            .call(api_key::API_VERSIONS, 0, |writer| request.encode(writer))
+            .call(api_key::API_VERSIONS, 0, |writer| {
+                request.encode(writer);
+                Ok(())
+            })
             .await?;
         let mut reader = Reader::new(&body);
         Ok(ApiVersionsResponse::decode(&mut reader)?)
@@ -117,8 +120,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         &mut self,
         request: &MetadataRequest,
     ) -> Result<MetadataResponse, ClientError> {
+        let mut encoded = Writer::new();
+        request.encode(&mut encoded)?;
+        let encoded = encoded.into_vec();
         let body = self
-            .call(api_key::METADATA, 0, |writer| request.encode(writer))
+            .call(api_key::METADATA, 0, |writer| {
+                writer.write_bytes(&encoded);
+                Ok(())
+            })
             .await?;
         let mut reader = Reader::new(&body);
         Ok(MetadataResponse::decode(&mut reader)?)
@@ -350,7 +359,8 @@ mod tests {
             write_string(
                 &mut response_body,
                 "manpower.readiness-reporting.assessments",
-            );
+            )
+            .unwrap();
             write_i16(&mut response_body, 0);
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
@@ -397,7 +407,8 @@ mod tests {
             write_string(
                 &mut response_body,
                 "manpower.readiness-reporting.assessments",
-            );
+            )
+            .unwrap();
             write_i32(&mut response_body, 1); // partitions
             write_i32(&mut response_body, 0); // partition_index
             write_i16(&mut response_body, 0); // error_code
@@ -444,11 +455,12 @@ mod tests {
             write_string(
                 &mut response_body,
                 "manpower.readiness-reporting.assessments",
-            );
+            )
+            .unwrap();
             write_i32(&mut response_body, 1); // partitions
             write_i32(&mut response_body, 0); // partition_index
             write_i64(&mut response_body, 17); // committed_offset
-            crate::wire::write_nullable_string(&mut response_body, None); // metadata
+            crate::wire::write_nullable_string(&mut response_body, None).unwrap(); // metadata
             write_i16(&mut response_body, 0); // error_code
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
@@ -489,7 +501,7 @@ mod tests {
 
             let mut response_body = Writer::new();
             write_i32(&mut response_body, 1); // topics
-            write_string(&mut response_body, "mesh.governance.slo-violations");
+            write_string(&mut response_body, "mesh.governance.slo-violations").unwrap();
             write_i32(&mut response_body, 1); // partitions
             write_i32(&mut response_body, 0); // partition_index
             write_i16(&mut response_body, 0); // error_code
@@ -558,7 +570,9 @@ mod tests {
                 }],
             };
             let mut response_body = Writer::new();
-            response.encode(&mut response_body, 1_735_689_600_000);
+            response
+                .encode(&mut response_body, 1_735_689_600_000)
+                .unwrap();
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
 
@@ -602,7 +616,7 @@ mod tests {
                 port: 9092,
             };
             let mut response_body = Writer::new();
-            response.encode(&mut response_body);
+            response.encode(&mut response_body).unwrap();
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
 
@@ -636,7 +650,7 @@ mod tests {
                 members: vec![],
             };
             let mut response_body = Writer::new();
-            response.encode(&mut response_body);
+            response.encode(&mut response_body).unwrap();
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
 
@@ -649,7 +663,8 @@ mod tests {
                 name: "range".to_string(),
                 metadata: crate::protocol::consumer_protocol::encode_subscription(&[
                     "manpower.personnel-lifecycle.assignments".to_string(),
-                ]),
+                ])
+                .unwrap(),
             }],
         };
         let response = client.join_group(&request).await.unwrap();
@@ -675,10 +690,11 @@ mod tests {
                 assignment: crate::protocol::consumer_protocol::encode_assignment(&[(
                     "manpower.personnel-lifecycle.assignments".to_string(),
                     vec![0, 1, 2],
-                )]),
+                )])
+                .unwrap(),
             };
             let mut response_body = Writer::new();
-            response.encode(&mut response_body);
+            response.encode(&mut response_body).unwrap();
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
 
@@ -787,7 +803,7 @@ mod tests {
                 }],
             };
             let mut response_body = Writer::new();
-            response.encode(&mut response_body);
+            response.encode(&mut response_body).unwrap();
             send_response(&mut peer, header.correlation_id, response_body.as_slice()).await;
         });
 

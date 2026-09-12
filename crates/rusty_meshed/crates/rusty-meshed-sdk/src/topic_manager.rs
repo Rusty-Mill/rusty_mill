@@ -234,7 +234,7 @@ mod tests {
                 .collect(),
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, correlation_id, writer.as_slice())
             .await
             .unwrap();

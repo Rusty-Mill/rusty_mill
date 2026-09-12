@@ -3,6 +3,7 @@
 //! downhill only: `feed` may wrap `constrain` and `observe` errors via `#[from]`.
 
 use rk_observe::{ToolOutcome, ToolStatus};
+use rusty_sqlite::rusqlite;
 
 /// Errors raised by a tool body or its dispatch.
 #[derive(Debug, thiserror::Error)]

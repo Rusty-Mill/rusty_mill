@@ -9,6 +9,78 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Bootstrapped `rusty_hister` — a native (not `git subtree`-imported) crate
+  cluster under `crates/rusty_hister/` for a Rust port of
+  [asciimoo/hister](https://github.com/asciimoo/hister). Eight new
+  workspace members
+  (`rusty-hister-{core,model,extractor,indexer,vectorstore,crawler,server,mcp}`),
+  each an empty skeleton crate (no port logic yet). Full
+  `rust-migration`-style capability inventory
+  (`crates/rusty_hister/docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`),
+  a sovereignty audit of candidate `rusty_*` crates, and three ADRs
+  (bootstrap/scope/split; two open decision-requests for the
+  search/indexing engine and the JS-rendering crawler approach) — see
+  `crates/rusty_hister/docs/PROJECT-STATUS.md`.
+### Changed
+- CI's `plan` job no longer treats every root `Cargo.toml` edit as an
+  automatic full workspace sweep. A new classifier
+  (`.github/scripts/cargo_toml_diff.py`) distinguishes a pure
+  `[workspace.members]` addition (new, independent crates; nothing else in
+  the file touched — the common case when bootstrapping a new crate
+  cluster, e.g. PR #170) from anything with broader blast radius (a
+  `[workspace.dependencies]` version bump, a removed/renamed member, a
+  `[profile]` edit); only the latter still forces `full=true`. A pure
+  addition now goes through the normal affected-crates path instead,
+  scoping CI to just the new crates.
+### Fixed
+- CI's full-workspace-sweep trigger pattern now includes `.config/`
+  (`.config/nextest.toml` lives outside every crate directory, so a
+  nextest-config-only PR previously produced an empty affected-package
+  list and skipped build/test/clippy for a change that governs every
+  crate's test execution).
+### Added
+- `rusty-config-no-std-check` CI job: `cargo check -p rusty_config
+  --no-default-features --all-targets`, exercising `rusty_config`'s
+  `no_std`+`alloc` code path for the first time — `--all-features` alone
+  can never reach it, since the crate's own default is `default =
+  ["std"]` (`CODEX-MONOREPO-REVIEW.md` finding #33).
+- `rusty_uuid` gained `.simple()` formatting (32 lowercase hex digits, no
+  hyphens) and an optional `rusty_serde`-backed `Serialize`/`Deserialize`
+  (canonical hyphenated string) behind a new `rusty_serde` feature —
+  deliberately built on this workspace's own dependency-free `rusty_serde`
+  rather than external `serde` (repo-inspector Section 2 "uuid" row).
+  Does **not** yet unblock `rusty-acp`/`rusty-db-core` dropping external
+  `uuid`: both use external `serde` (a different trait than
+  `rusty_serde`'s) for their own derives, and both also need `sqlx`
+  wire-format support this pass deliberately left untouched — no live
+  Postgres/MySQL was available to verify a hand-rolled UUID column
+  encoding, and a wrong one would silently corrupt data. Same open
+  prerequisite the report named, now documented more precisely.
+### Changed
+- `adk-sessions`, `rp-router`, `rk-feed`, and `inventory-core` now depend
+  on `rusty_sqlite::rusqlite` instead of external `rusqlite` directly
+  (repo-inspector Section 2 "rusqlite" row — a pure re-export, so this is
+  an import-path change only, zero behavior change).
+- `rusty_json`'s `serde` dependency is now optional, behind a `serde`
+  feature that stays on by default (zero behavior change for existing
+  dependents). With `default-features = false`, the crate has no `serde`
+  dependency at all: `Value` parsing (`s.parse::<Value>()` /
+  `Value::from_json_str`) and writing (`Value::to_json_string`/
+  `Value::to_json_string_pretty`) work via a new direct recursive-descent
+  path (`src/value_io.rs`) that reuses the existing hand-rolled tokenizer
+  (`src/parser.rs`) and `Formatter` trait instead of going through
+  `serde::Deserializer`/`Serializer`. Unblocks repo-inspector Section 1 row
+  7 (`rusty_oauth`/`rusty_request`'s hand-rolled `Value` types, hand-rolled
+  specifically to avoid a `serde` dependency) from adopting `rusty_json` —
+  those two crates' own migration is a separate follow-up, not done here.
+
+### Added
+- `crates/rusty_multimodal_db` — new workspace member: `baileyrd/rusty_multimodal_db`,
+  a benchmark harness comparing AoS, SoA, and UUID-canonical-store record
+  backends, plus the production store, network server, and schema-driven
+  client built on the winning design, merged via `git subtree` with full
+  history. Already a single, non-nested `Cargo.toml`, so nothing to
+  de-nest on merge (unlike `nexus`/`rusty_agent_gateway`/`rusty_yirp`).
 - `crates/nexus` — new workspace members: `baileyrd/nexus`, a 42-crate
   microkernel note-taking/AI-agent workspace, merged via `git subtree`
   with full history (separate from the `baileyrd/rusty_*` wave numbering).
@@ -32,6 +104,35 @@ Removed / Fixed / Security, newest first.
   `rusty_opnsense`, `rusty_fedora`, and `rusty_homelab_mcp` (row 8).
 - `repo-inspector-report.md` gained a **Disposition** section recording
   what was done, or deliberately not, for every row of both sections.
+### Changed
+- `rusty_multimodal_db` added to the `windows-latest` `windows-exclude`
+  list (alongside `rusty_stream`/`rusty_fedora_agent`) — its optional
+  `external-db-bench` feature's `duckdb` dependency vendors DuckDB's own
+  C++ amalgamation, and this workspace's `--all-features` is what first
+  compiles it on `windows-latest`; that native build fails under the
+  runner's current MSVC toolchain, a third-party build issue with no
+  Rust-side fix available here. The crate's own standalone repo never ran
+  a Windows CI job at all, so this wasn't a regression, just first
+  exposure.
+- `rusty_multimodal_db`'s pinned git dependency on `rusty_tls`
+  (`Rusty-Mill/rusty_mill` at a specific commit) retired to a plain path
+  dependency on this workspace's own `crates/rusty_tls`, now that both
+  live in the same workspace (ADR-0002's same-workspace-source rule) —
+  the same swap `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made.
+- `rusty_multimodal_db`'s `rusqlite` pin (its optional
+  `external-db-bench` benchmark feature) bumped `0.32` → `0.39` to match
+  `inventory-core`'s existing pin — `rusqlite` declares
+  `links = "sqlite3"`, and Cargo allows only one version of a
+  `links`-declaring crate in the whole graph; the same fix the
+  `sqlx`/`rusqlite` collision below needed.
+### Fixed
+- `rusty_multimodal_db`'s two `clippy::chunks_exact_to_as_chunks`
+  failures (`src/durability/mmap_store.rs`, `src/server/pem.rs`) — this
+  workspace's clippy version flags `chunks_exact(N)` with a constant `N`
+  in favor of `as_chunks::<N>().0`; behavior unchanged, same
+  trailing-partial-chunk drop either way. The upstream repo hit the
+  identical failure on its own `main` independently of this merge (its
+  clippy toolchain updated on its own) and carries the same fix.
 ### Changed
 - `sqlx` bumped `0.8` → `0.9`, workspace-wide: `sqlx-sqlite` 0.8.x pins
   `libsqlite3-sys ^0.30.1`, which collided (Cargo's `links = "sqlite3"`

@@ -175,6 +175,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_sessions_with_many_events_returns_empty_summary() {
+        let svc = InMemorySessionService::new();
+        let mut session = svc.create_session("app", "u1", None, None).await.unwrap();
+
+        for i in 0..5_000 {
+            let mut event = Event::new("inv", "agent").with_text(format!("event-{i}"));
+            if i == 0 {
+                event.actions.set_state("greeting", "hi");
+            }
+            svc.append_event(&mut session, event).await.unwrap();
+        }
+        assert_eq!(session.events.len(), 5_000);
+
+        let listed = svc.list_sessions("app", "u1").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let summary = &listed[0];
+        assert_eq!(summary.id, session.id);
+        assert_eq!(summary.app_name, "app");
+        assert_eq!(summary.user_id, "u1");
+        assert!(summary.events.is_empty());
+        assert_eq!(summary.state.get("greeting").unwrap(), &json!("hi"));
+        assert_eq!(summary.last_update_time, session.last_update_time);
+    }
+
+    #[tokio::test]
     async fn delete_session_reports_a_missing_thread() {
         let svc = InMemorySessionService::new();
         let session = svc.create_session("app", "u1", None, None).await.unwrap();

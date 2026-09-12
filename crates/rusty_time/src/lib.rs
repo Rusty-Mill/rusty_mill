@@ -103,7 +103,7 @@ impl Time {
         second: u8,
         nano: u32,
     ) -> Result<Self, &'static str> {
-        if hour > 23 || minute > 59 || second > 59 {
+        if hour > 23 || minute > 59 || second > 59 || nano >= 1_000_000_000 {
             return Err("Invalid time parameters");
         }
         Ok(Self {
@@ -179,14 +179,40 @@ impl DateTime {
 
     /// Formats as ISO-8601 string representation.
     pub fn to_iso8601(&self) -> String {
+        let nano = self.time.nanosecond();
+        let mut fraction = String::new();
+        if nano != 0 {
+            let mut digits = format!("{:09}", nano);
+            while digits.ends_with('0') {
+                digits.pop();
+            }
+            fraction = format!(".{}", digits);
+        }
+
+        let offset = self.offset_secs;
+        let offset_str = if offset == 0 {
+            String::from("Z")
+        } else {
+            let sign = if offset < 0 { '-' } else { '+' };
+            let magnitude = offset.unsigned_abs();
+            format!(
+                "{}{:02}:{:02}",
+                sign,
+                magnitude / 3600,
+                (magnitude % 3600) / 60
+            )
+        };
+
         format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{}",
             self.date.year(),
             self.date.month(),
             self.date.day(),
             self.time.hour(),
             self.time.minute(),
-            self.time.second()
+            self.time.second(),
+            fraction,
+            offset_str
         )
     }
 
@@ -254,6 +280,9 @@ impl DateTime {
                 let offset_hour = parse_digits(s, idx, idx + 2)? as i32;
                 expect_byte(bytes, idx + 2, b':')?;
                 let offset_minute = parse_digits(s, idx + 3, idx + 5)? as i32;
+                if offset_hour > 23 || offset_minute > 59 {
+                    return Err("Invalid timezone offset");
+                }
                 idx += 5;
                 let magnitude = offset_hour * 3600 + offset_minute * 60;
                 if sign == b'-' { -magnitude } else { magnitude }
@@ -389,5 +418,29 @@ mod tests {
         let a = DateTime::parse("2026-08-12T01:18:55Z").unwrap();
         let b = DateTime::from_str("2026-08-12T01:18:55Z").unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn from_hms_nano_rejects_out_of_range_nanosecond() {
+        assert!(Time::from_hms_nano(0, 0, 0, 999_999_999).is_ok());
+        assert!(Time::from_hms_nano(0, 0, 0, 1_000_000_000).is_err());
+    }
+
+    #[test]
+    fn to_iso8601_preserves_offset_and_fraction() {
+        let dt = DateTime::parse("2026-08-12T01:18:55.5+02:00").unwrap();
+        let formatted = dt.to_iso8601();
+        let round_tripped = DateTime::parse(&formatted).unwrap();
+        assert_eq!(round_tripped.timestamp(), dt.timestamp());
+        assert_eq!(round_tripped.offset_secs(), dt.offset_secs());
+        assert_eq!(round_tripped.time().nanosecond(), dt.time().nanosecond());
+        assert_eq!(dt.time().nanosecond(), 500_000_000);
+        assert_ne!(formatted, "2026-08-12T01:18:55Z");
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_offset_components() {
+        assert!(DateTime::parse("2026-08-12T01:18:55+00:99").is_err());
+        assert!(DateTime::parse("2026-08-12T01:18:55+99:00").is_err());
     }
 }

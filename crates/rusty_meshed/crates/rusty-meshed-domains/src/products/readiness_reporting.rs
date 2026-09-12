@@ -603,7 +603,7 @@ mod tests {
                 }],
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
             send_response(&mut admin_peer, header.correlation_id, writer.as_slice())
                 .await
                 .unwrap();
@@ -633,7 +633,7 @@ mod tests {
             throttle_time_ms: 0,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, &writer.into_vec())
             .await
             .unwrap();
@@ -791,7 +791,7 @@ mod tests {
             port: 9092,
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, writer.as_slice())
             .await
             .unwrap();
@@ -806,11 +806,11 @@ mod tests {
             member_id: "consumer-1".to_string(),
             members: vec![JoinGroupMember {
                 member_id: "consumer-1".to_string(),
-                metadata: encode_subscription(&[topic.to_string()]),
+                metadata: encode_subscription(&[topic.to_string()]).unwrap(),
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, writer.as_slice())
             .await
             .unwrap();
@@ -841,10 +841,10 @@ mod tests {
         assert_eq!(header.api_key, api_key::SYNC_GROUP);
         let response = SyncGroupResponse {
             error_code: 0,
-            assignment: encode_assignment(&[(topic.to_string(), vec![0])]),
+            assignment: encode_assignment(&[(topic.to_string(), vec![0])]).unwrap(),
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, writer.as_slice())
             .await
             .unwrap();
@@ -863,7 +863,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, writer.as_slice())
             .await
             .unwrap();
@@ -882,7 +882,7 @@ mod tests {
             }],
         };
         let mut writer = Writer::new();
-        response.encode(&mut writer);
+        response.encode(&mut writer).unwrap();
         send_response(peer, header.correlation_id, writer.as_slice())
             .await
             .unwrap();
@@ -993,7 +993,7 @@ mod tests {
                 }],
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer, 1_735_689_600_000);
+            response.encode(&mut writer, 1_735_689_600_000).unwrap();
             send_response(&mut consumer_peer, header.correlation_id, writer.as_slice())
                 .await
                 .unwrap();
@@ -1010,7 +1010,7 @@ mod tests {
                 }],
             };
             let mut writer = Writer::new();
-            response.encode(&mut writer);
+            response.encode(&mut writer).unwrap();
 
             // Stop before sending, not after -- this is a
             // multi-threaded runtime, so calling `stop()` once the
@@ -1147,7 +1147,7 @@ mod tests {
 
             let response = empty_fetch_response(personnel_topic);
             let mut writer = Writer::new();
-            response.encode(&mut writer, 1_735_689_600_000);
+            response.encode(&mut writer, 1_735_689_600_000).unwrap();
 
             // Stop before sending -- see
             // `personnel_assignment_consumer_run_derives_publishes_and_commits_for_one_event`'s
@@ -1191,7 +1191,7 @@ mod tests {
             assert_eq!(header.api_key, api_key::FETCH);
             let response = empty_fetch_response(position_topic);
             let mut writer = Writer::new();
-            response.encode(&mut writer, 1_735_689_600_000);
+            response.encode(&mut writer, 1_735_689_600_000).unwrap();
 
             // Stop before sending, same reasoning as personnel's own
             // task above.

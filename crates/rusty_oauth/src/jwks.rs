@@ -9,8 +9,8 @@
 //! alone only knows how to use a single already-selected key.
 
 use crate::error::{Error, Result};
-use crate::json::{self, Value};
 use crate::jwt::rsa::RsaPublicKey;
+use rusty_json::Value;
 
 /// A single JSON Web Key (RFC 7517 §4). Only the fields needed to select
 /// and use a key are parsed into typed accessors; the full JSON object is
@@ -134,7 +134,7 @@ pub struct JwkSet {
 impl JwkSet {
     /// Parses a JWKS document body (`{"keys": [...]}`).
     pub fn parse(body: &str) -> Result<Self> {
-        let value = json::parse(body)?;
+        let value = Value::from_json_str(body)?;
         let keys_value = value
             .get("keys")
             .and_then(Value::as_array)

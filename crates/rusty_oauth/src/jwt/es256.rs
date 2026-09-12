@@ -21,7 +21,7 @@ use crate::crypto::hmac::hmac_sha256;
 use crate::crypto::sha256::sha256;
 use crate::encoding::base64::{decode_url_safe, encode_url_safe_no_pad};
 use crate::error::{Error, Result};
-use crate::json::Value;
+use rusty_json::Value;
 use std::cmp::Ordering;
 
 /// An ECDSA P-256 public key, as used to verify `ES256`-signed tokens.
@@ -258,10 +258,10 @@ pub fn encode_es256(claims: &Value, key: &EcPrivateKey, extra_header: &[(&str, &
     for (k, v) in extra_header {
         header_fields.push((k.to_string(), Value::from(*v)));
     }
-    let header = Value::Object(header_fields);
+    let header = Value::Object(header_fields.into_iter().collect());
 
-    let header_b64 = encode_url_safe_no_pad(header.to_json().as_bytes());
-    let payload_b64 = encode_url_safe_no_pad(claims.to_json().as_bytes());
+    let header_b64 = encode_url_safe_no_pad(header.to_json_string().as_bytes());
+    let payload_b64 = encode_url_safe_no_pad(claims.to_json_string().as_bytes());
     let signing_input = format!("{header_b64}.{payload_b64}");
 
     let signature = sign_p256_sha256(signing_input.as_bytes(), key);
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn round_trip_sign_and_verify() {
-        let claims = Value::object([
+        let claims = Value::from_iter([
             ("sub".to_string(), Value::from("user-123")),
             ("iss".to_string(), Value::from("https://issuer.example.com")),
         ]);
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn signing_is_deterministic() {
-        let claims = Value::object([("sub".to_string(), Value::from("user"))]);
+        let claims = Value::from_iter([("sub".to_string(), Value::from("user"))]);
         let a = encode_es256(&claims, &private_key(), &[]);
         let b = encode_es256(&claims, &private_key(), &[]);
         assert_eq!(a, b, "RFC 6979 nonce derivation must be deterministic");
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_key() {
-        let claims = Value::object([("sub".to_string(), Value::from("user"))]);
+        let claims = Value::from_iter([("sub".to_string(), Value::from("user"))]);
         let token = encode_es256(&claims, &private_key(), &[]);
         let other_key = EcPrivateKey::from_bytes(&[0x02; 32]).unwrap().public_key();
         assert!(verify_es256(&token, &other_key).is_err());
@@ -384,17 +384,17 @@ mod tests {
 
     #[test]
     fn verify_rejects_tampered_claims() {
-        let claims = Value::object([
+        let claims = Value::from_iter([
             ("sub".to_string(), Value::from("user")),
             ("admin".to_string(), Value::from(false)),
         ]);
         let token = encode_es256(&claims, &private_key(), &[]);
         let mut parts: Vec<&str> = token.split('.').collect();
-        let forged = Value::object([
+        let forged = Value::from_iter([
             ("sub".to_string(), Value::from("user")),
             ("admin".to_string(), Value::from(true)),
         ]);
-        let forged_payload = encode_url_safe_no_pad(forged.to_json().as_bytes());
+        let forged_payload = encode_url_safe_no_pad(forged.to_json_string().as_bytes());
         parts[1] = &forged_payload;
         let forged_token = parts.join(".");
         assert!(verify_es256(&forged_token, &public_key()).is_err());
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn rejects_alg_confusion() {
-        let claims = Value::object([("sub".to_string(), Value::from("x"))]);
+        let claims = Value::from_iter([("sub".to_string(), Value::from("x"))]);
         let hs256_token = crate::jwt::encode_hs256(&claims, b"whatever", &[]);
         assert!(verify_es256(&hs256_token, &public_key()).is_err());
     }

@@ -11,9 +11,9 @@
 use crate::crypto::sha256::sha256;
 use crate::encoding::base64::encode_url_safe_no_pad;
 use crate::error::{Error, ErrorCode, Result};
-use crate::json::Value;
 use crate::jwt::es256::{sign_p256_sha256, EcPrivateKey};
 use crate::rand::random_bytes;
+use rusty_json::Value;
 
 /// Builds an RFC 9449 §4.2 DPoP proof JWT for one HTTP request.
 ///
@@ -36,13 +36,13 @@ pub fn build_proof(
 ) -> Result<String> {
     let public_key = private_key.public_key();
     let (x, y) = public_key.to_affine_coordinates();
-    let jwk = Value::object([
+    let jwk = Value::from_iter([
         ("kty".to_string(), Value::from("EC")),
         ("crv".to_string(), Value::from("P-256")),
         ("x".to_string(), Value::from(encode_url_safe_no_pad(&x))),
         ("y".to_string(), Value::from(encode_url_safe_no_pad(&y))),
     ]);
-    let header = Value::object([
+    let header = Value::from_iter([
         ("typ".to_string(), Value::from("dpop+jwt")),
         ("alg".to_string(), Value::from("ES256")),
         ("jwk".to_string(), jwk),
@@ -64,10 +64,10 @@ pub fn build_proof(
     if let Some(nonce) = nonce {
         claims_fields.push(("nonce".to_string(), Value::from(nonce)));
     }
-    let claims = Value::Object(claims_fields);
+    let claims = Value::Object(claims_fields.into_iter().collect());
 
-    let header_b64 = encode_url_safe_no_pad(header.to_json().as_bytes());
-    let payload_b64 = encode_url_safe_no_pad(claims.to_json().as_bytes());
+    let header_b64 = encode_url_safe_no_pad(header.to_json_string().as_bytes());
+    let payload_b64 = encode_url_safe_no_pad(claims.to_json_string().as_bytes());
     let signing_input = format!("{header_b64}.{payload_b64}");
 
     let signature = sign_p256_sha256(signing_input.as_bytes(), private_key);

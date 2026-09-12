@@ -5,9 +5,9 @@
 use crate::client::Client;
 use crate::encoding::percent::form_urlencode;
 use crate::error::{Error, Result};
-use crate::json::{self, Value};
 use crate::request::HttpRequest;
 use crate::token::{parse_token_response, TokenResponse};
+use rusty_json::Value;
 
 /// Builds the RFC 8628 §3.1 device authorization request.
 pub fn device_authorization_request(
@@ -48,7 +48,7 @@ pub fn parse_device_authorization_response(
             "device authorization endpoint returned HTTP {status}"
         )));
     }
-    let value = json::parse(body)?;
+    let value = Value::from_json_str(body)?;
     let field = |key: &str| -> Result<String> {
         value
             .get(key)

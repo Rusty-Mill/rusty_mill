@@ -382,14 +382,19 @@ pub fn main() {
         // never grew beyond whatever had already queued up by that instant.
         if state == AppState::Recording {
             if let Some(cap) = audio_capture.as_mut() {
-                let new_samples = cap.read_samples();
-                if !new_samples.is_empty() {
-                    recorded_samples.extend_from_slice(&new_samples);
-                    transcription_text = format!(
-                        "RECORDING AUDIO: {} SAMPLES (~{:.1}s)",
-                        recorded_samples.len(),
-                        recorded_samples.len() as f32 / spec.sample_rate as f32
-                    );
+                match cap.read_samples() {
+                    Ok(new_samples) if !new_samples.is_empty() => {
+                        recorded_samples.extend_from_slice(&new_samples);
+                        transcription_text = format!(
+                            "RECORDING AUDIO: {} SAMPLES (~{:.1}s)",
+                            recorded_samples.len(),
+                            recorded_samples.len() as f32 / spec.sample_rate as f32
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("rusty_voice: read_samples failed: {e:?}");
+                    }
                 }
             }
         }

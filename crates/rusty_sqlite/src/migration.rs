@@ -48,13 +48,22 @@ impl Migrations {
     }
 
     fn validate_order(&self) -> Result<()> {
-        for pair in self.steps.windows(2) {
-            if pair[1].version <= pair[0].version {
-                return Err(Error::OutOfOrderMigration {
-                    version: pair[1].version,
-                    previous: pair[0].version,
+        let mut previous: Option<i64> = None;
+        for step in &self.steps {
+            if step.version <= 0 {
+                return Err(Error::InvalidMigrationVersion {
+                    version: step.version,
                 });
             }
+            if let Some(previous) = previous {
+                if step.version <= previous {
+                    return Err(Error::OutOfOrderMigration {
+                        version: step.version,
+                        previous,
+                    });
+                }
+            }
+            previous = Some(step.version);
         }
         Ok(())
     }

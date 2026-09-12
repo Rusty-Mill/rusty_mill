@@ -10,8 +10,8 @@ use crate::authorization::AuthorizationRequest;
 use crate::client::Client;
 use crate::encoding::percent::{encode as percent_encode, form_urlencode};
 use crate::error::{Error, OAuthErrorResponse, Result};
-use crate::json::{self, Value};
 use crate::request::HttpRequest;
+use rusty_json::Value;
 
 /// A pushed authorization request, ready to send, plus the `state` it
 /// carries -- save `state` exactly as you would with a normal
@@ -80,7 +80,7 @@ pub fn parse_pushed_authorization_response(
     status: u16,
     body: &str,
 ) -> Result<PushedAuthorizationResponse> {
-    let value = json::parse(body)?;
+    let value = Value::from_json_str(body)?;
 
     if !(200..300).contains(&status) {
         if let Some(err) = OAuthErrorResponse::from_json(&value) {

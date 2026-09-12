@@ -1,0 +1,51 @@
+# Future Growth
+
+This document captures directions this project could grow in beyond its current scope, and what each would actually require. Nothing here is planned or scheduled — it exists so a future decision to pursue any of it starts from an honest accounting instead of a guess.
+
+## Nothing here is architecturally blocked
+
+Every current boundary in this project is a deliberate scope line from a specific round, not a structural limitation:
+
+* The multi-process append fix targets local filesystems only (`O_APPEND`'s atomicity guarantee excludes NFS) — a real, identifiable piece of work if that assumption ever needs to change, not a rewrite.
+* The multi-process fix covers slot creation specifically. Broader multi-writer coordination wasn't needed yet, not ruled out.
+* The `research` feature flag means every benchmarked alternative — 4 storage backends, 8 durability variants, 4 concurrency strategies — is still in the codebase, just not compiled into a default build. Nothing was deleted at any point in this project's history.
+* The generic schema layer (`crate::generic`) was validated against a toy domain (`Order`/`Customer`) and a real one (requirements traceability). Nothing schema-specific is baked into the storage engine itself.
+* Staying off crates.io is a current decision (a `Cargo.toml`/publishing choice), not a technical constraint.
+
+## Path to a server / query layer — since built
+
+**Status (2026-09):** this path was taken. The `server` feature (`ADR-0010`, `SERVER-001`) is the binary described below, and every "genuinely new" item was built in its own round: authentication/authorization (`ADR-0012`), transport encryption (`ADR-0014`, mutual TLS `ADR-0023`), transaction sessions (`ADR-0024`, journal `ADR-0025`/`0026`, read-your-writes `ADR-0027`, snapshot isolation `ADR-0033`), a versioned protocol (`ADR-0022`), a client-side SQL subset (`ADR-0034`/`0035`/`0044`), and — for the owner's `rusty_remind_me` service — runtime insertion, linking, replacement, deletion, tables on one connection, and compaction (`ADR-0046`–`ADR-0052`), then — after an integration spike measured the remaining gaps — a durable data directory, an atomic guarded replace, ordered keyset pages, the consumer's sync fields, a global edge count, and its directed open-label edges as a record table (`ADR-0053`–`ADR-0058`). Every gap the spike named is closed. The original accounting is kept below as written, because it was right about the shape: the engine did not change to accommodate any of it.
+
+The storage engine's public API (`get`/`scan`/`filter`/`update`/relationship traversal) is already a clean boundary a network layer could sit on top of without changing the engine itself.
+
+Genuinely additive — no rework of the storage layer required:
+
+* A binary that owns the store and listens on a socket, translating requests into calls against the existing API and serializing results back out.
+* Concurrency across client connections is actually simpler than the cross-process case already solved: if one server process owns the file, client requests never touch it directly — this collapses back to the already-solved in-process concurrency problem (`RwLock`), not the harder cross-process one.
+* A query language would compile down to primitives that already exist (filter-by-field, scan, relationship traversal) — real design work, but the storage layer wouldn't need to change to accommodate it.
+
+Genuinely new — not incremental extensions of existing work:
+
+* Authentication/authorization. Doesn't exist in any form today; a network-exposed store needs it from the start, not as an add-on.
+* Session/transaction semantics across multiple requests. Every operation today is single-shot; a protocol has to define what a "connection" guarantees across several of them.
+* The query language itself — real parser and language design, not a small extension.
+
+## Path to SQLite/DuckDB parity
+
+This is a different tier of project, not a natural extension of the current one — each of the three items below is roughly a multi-year effort on its own, and SQLite and DuckDB aren't even the same target to aim at (SQLite: row-store, transactional; DuckDB: column-store, analytical). "Parity with both" isn't one destination.
+
+The big three:
+
+1. SQL. A parser, a query planner, a cost-based optimizer, and an execution engine. Every query today is a hand-written Rust method call against a specific schema's traits — there's no declarative language layer at all. *Partly built since this was written:* a client-side `SELECT`/`GROUP BY`/`JOIN` subset (`ADR-0034`/`0035`/`0044`) compiled to fixed request shapes, and one ordered keyset page on the wire (`ADR-0055`) — the first result on this wire with an order. Still absent: `ORDER BY` in the SQL text, and any planner or optimizer.
+2. Transactions. *Partly built since this was written:* a batch of field updates applies all-or-nothing (`ADR-0013`), a per-connection session stages writes and commits them as one batch with read-your-writes and snapshot isolation (`ADR-0024`/`0027`/`0033`), and an opt-in redo journal makes a batch crash-atomic (`ADR-0025`). Still absent: a general transaction manager — MVCC, multi-table atomicity, and transactions over inserts, links, replacements, and deletes (each of those is a single durable operation, never staged).
+3. Arbitrary joins. *Partly built since this was written:* a `JOIN … ON <relation>` over a declared relation, within a table or across two tables on one connection (`ADR-0044`/`ADR-0050`), evaluated as an index nested loop. Still absent: a join on an arbitrary predicate at query time — every relation is still declared ahead of time, and relation labels created at runtime (`ADR-0047`) are labels on a declared relation kind, not new predicates.
+
+Smaller, but still real:
+
+* Dynamic/runtime schema (`ALTER TABLE`-style changes). Schema here is a compile-time Rust concept, and a record layout is unversioned: adding a field is a schema-tag bump that refuses old directories distinctly (`ADR-0056`), with an in-place upgrade named as the round for the first directory that cannot be re-pushed.
+* Null. The wire has no null; two domains carry documented per-field sentinels instead (`ADR-0056`: `0` for a timestamp, `""` for a node id — lossless for those columns). A nullable `ScanValue` at a protocol bump is the general answer, deferred until a column arrives with no lossless sentinel; the scoring floats the consumer keeps also need a float kind first.
+* A query optimizer for aggregation (`GROUP BY`, `AVG`, multi-table joins) — DuckDB's core identity is vectorized execution over exactly this. A bounded `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` exists (`ADR-0035`) as a full scan then a bucket, with no optimizer of any kind.
+* Client ecosystem — drivers for other languages, a CLI, general tooling. A byte-level wire specification and a stdlib-only Python client exist (`ADR-0043`); everything else on this list does not.
+* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison.
+
+What's already solid and wouldn't need to be redone: the storage engine itself, real measured durability, real measured concurrency (single- and multi-process), and a working generic schema layer proven against more than one domain. SQL, transactions, and arbitrary joins would be built on top of that foundation, not require rebuilding it — but each is a serious, standalone effort, not a small extension of this project.

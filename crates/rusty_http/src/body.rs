@@ -51,8 +51,8 @@ pub fn request_framing(headers: &HeaderMap) -> Result<Framing> {
     if is_chunked(headers) {
         return Ok(Framing::Chunked);
     }
-    if let Some(len) = headers.get("content-length") {
-        return Ok(Framing::ContentLength(parse_content_length(len)?));
+    if let Some(len) = content_length(headers)? {
+        return Ok(Framing::ContentLength(len));
     }
     Ok(Framing::None)
 }
@@ -76,8 +76,8 @@ pub fn response_framing(
     if is_chunked(headers) {
         return Ok(Framing::Chunked);
     }
-    if let Some(len) = headers.get("content-length") {
-        return Ok(Framing::ContentLength(parse_content_length(len)?));
+    if let Some(len) = content_length(headers)? {
+        return Ok(Framing::ContentLength(len));
     }
     Ok(Framing::Close)
 }
@@ -96,6 +96,27 @@ fn is_chunked(headers: &HeaderMap) -> bool {
                 .eq_ignore_ascii_case("chunked")
         })
         .unwrap_or(false)
+}
+
+/// The message's `Content-Length` framing, per RFC 7230 §3.3.3: multiple
+/// `Content-Length` headers are only legal when every occurrence carries
+/// the same value (a proxy or cache having coalesced duplicates); any
+/// other combination of values is a request-smuggling-adjacent framing
+/// ambiguity and must be rejected outright rather than silently framing
+/// on whichever occurrence [`HeaderMap::get_all`] happens to yield first.
+fn content_length(headers: &HeaderMap) -> Result<Option<u64>> {
+    let mut values = headers.get_all("content-length");
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    for other in values {
+        if other != first {
+            return Err(Error::InvalidContentLength(format!(
+                "conflicting Content-Length headers: `{first}` and `{other}`"
+            )));
+        }
+    }
+    parse_content_length(first).map(Some)
 }
 
 fn parse_content_length(raw: &str) -> Result<u64> {
@@ -211,6 +232,7 @@ impl ChunkedDecoder {
                 let Some((line, consumed)) = next_line(buf) else {
                     return incomplete_or_too_large(buf.len(), max_line_len);
                 };
+                check_line_len(consumed, max_line_len)?;
                 let line_str = std::str::from_utf8(line)
                     .map_err(|_| Error::InvalidChunkSize("non-UTF-8 chunk-size line".into()))?;
                 let size_str = line_str.split(';').next().unwrap_or("").trim();
@@ -240,6 +262,7 @@ impl ChunkedDecoder {
                 let Some((line, consumed)) = next_line(buf) else {
                     return incomplete_or_too_large(buf.len(), max_line_len);
                 };
+                check_line_len(consumed, max_line_len)?;
                 if !line.is_empty() {
                     return Err(Error::InvalidChunkSize(
                         "malformed chunk terminator".to_string(),
@@ -252,6 +275,7 @@ impl ChunkedDecoder {
                 let Some((line, consumed)) = next_line(buf) else {
                     return incomplete_or_too_large(buf.len(), max_line_len);
                 };
+                check_line_len(consumed, max_line_len)?;
                 if line.is_empty() {
                     self.state = State::Done;
                     Ok(Progress::Done { consumed })
@@ -269,6 +293,19 @@ fn incomplete_or_too_large(buf_len: usize, max_line_len: usize) -> Result<Progre
         Err(Error::ChunkFramingTooLarge)
     } else {
         Ok(Progress::Incomplete)
+    }
+}
+
+/// Rejects a successfully parsed framing line (chunk-size line, chunk
+/// terminator, or trailer line) that's already at or past `max_line_len`
+/// -- otherwise a line delivered whole in one buffer would escape the
+/// same cap [`incomplete_or_too_large`] enforces when the same bytes
+/// arrive split across reads before their terminator.
+fn check_line_len(consumed: usize, max_line_len: usize) -> Result<()> {
+    if consumed > max_line_len {
+        Err(Error::ChunkFramingTooLarge)
+    } else {
+        Ok(())
     }
 }
 
@@ -358,6 +395,28 @@ mod tests {
     fn invalid_content_length_is_an_error() {
         let h = headers(&[("Content-Length", "not-a-number")]);
         assert!(request_framing(&h).is_err());
+    }
+
+    #[test]
+    fn conflicting_content_length_headers_are_a_framing_error_on_a_request() {
+        let h = headers(&[("Content-Length", "1"), ("Content-Length", "100")]);
+        assert!(request_framing(&h).is_err());
+    }
+
+    #[test]
+    fn conflicting_content_length_headers_are_a_framing_error_on_a_response() {
+        let h = headers(&[("Content-Length", "1"), ("Content-Length", "100")]);
+        assert!(response_framing(&h, &Method::Get, StatusCode::from_u16(200)).is_err());
+    }
+
+    #[test]
+    fn identical_repeated_content_length_headers_are_accepted() {
+        let h = headers(&[("Content-Length", "42"), ("Content-Length", "42")]);
+        assert_eq!(request_framing(&h).unwrap(), Framing::ContentLength(42));
+        assert_eq!(
+            response_framing(&h, &Method::Get, StatusCode::from_u16(200)).unwrap(),
+            Framing::ContentLength(42)
+        );
     }
 
     fn decode_all(wire: &[u8]) -> Vec<u8> {
@@ -456,6 +515,20 @@ mod tests {
         let mut decoder = ChunkedDecoder::new();
         assert_eq!(
             decoder.advance(b"12345678", 4).unwrap_err(),
+            Error::ChunkFramingTooLarge
+        );
+    }
+
+    #[test]
+    fn chunk_size_line_over_max_len_delivered_whole_is_an_error() {
+        // Same oversized line as
+        // `chunk_size_line_over_max_len_without_terminator_is_an_error`, but
+        // delivered complete (with its terminator) in a single buffer
+        // instead of split across reads before the terminator arrives --
+        // the limit must reject both the same way.
+        let mut decoder = ChunkedDecoder::new();
+        assert_eq!(
+            decoder.advance(b"12345678\r\n", 4).unwrap_err(),
             Error::ChunkFramingTooLarge
         );
     }
