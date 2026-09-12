@@ -41,8 +41,20 @@ math would add jitter neither wanted. A later re-examination found that
 assumption was wrong -- `rusty_retry::Backoff::Exponential{jitter: 0.0}`
 reproduces both crates' existing plain-doubling-capped formula exactly,
 with no behavior change -- and both were switched over accordingly
-(merged 2026-09-12); its disposition cell below reflects that later
-work too.
+([PR #168](https://github.com/Rusty-Mill/rusty_mill/pull/168), merged
+2026-09-12); its disposition cell below reflects that later work too.
+That follow-up also checked past this report's `rusty_mill`-workspace
+scope for the same duplication: the other active (non-archived)
+`Rusty-Mill` repos with real Rust code (`rusty_data_os`,
+`rusty_multimodal_db`, `rusty_knowledge`, `rusty_recall`, `rusty_owl`)
+were cloned and grepped directly (GitHub's code-search index was
+returning unreliable `incomplete_results` at the time, including
+against `rusty_mill` itself, so it wasn't trusted alone) -- none carry
+a hand-rolled backoff/retry implementation, only incidental
+retry-safety comments. `rusty_foundation_akb`'s many "backoff" hits are
+standards-document prose, not code. The archived `baileyrd/rusty_*`
+originals (`rusty_request`, `rusty_acp`, etc.) are superseded by their
+`rusty_mill` crate equivalents and were not re-checked.
 
 ### Section 1 — duplication clusters
 
