@@ -31,8 +31,12 @@ resolved; nothing here has started that implementation yet.
 ## Phase 1 — Unblocked foundations (can start once Phase 0's docs land,
 independent of ADR-0002/0003)
 
-- `rusty-hister-core`: `Document` type, extractor-SDK contract types
-  (capability inventory §4.1), shared error type.
+- [x] `rusty-hister-core`: `Document` type, extractor-SDK contract types
+      (capability inventory §4.1: `Extractor` trait, `Capabilities`,
+      `ExtractorConfig`, `ExtractOutcome`/`PreviewOutcome`,
+      `PreviewResponse`), shared `HisterError` type. Done — 16 unit tests,
+      clippy/fmt clean. The extractor *registry* (chain-of-responsibility,
+      §4.2) is `rusty-hister-extractor`'s job, not this crate's.
 - `rusty-hister-model`: the ten GORM-equivalent models on `rusty_db`
   (capability inventory §7.2), the two-phase pre/post migration mechanism
   (§7.3) including the three concrete migrations, UTC-everywhere timestamp

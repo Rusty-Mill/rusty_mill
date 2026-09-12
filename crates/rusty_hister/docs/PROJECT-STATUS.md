@@ -1,17 +1,19 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (ADR-0001 §7 licensing confirmed).
+Last updated: 2026-09-12 (Phase 1 started: `rusty-hister-core`).
 
 ## Where this is
 
-**Bootstrap stage, architecture decided.** The crate cluster, capability
-inventory, and both engine/crawler decision-requests (ADR-0002, ADR-0003)
-are done — the user decided both directly rather than waiting on the
-recommended scoping spike. **Still no port implementation logic** in any
-`rusty-hister-*` crate; every one still compiles as an empty skeleton with
-a module doc comment pointing back to the capability inventory and the
-relevant ADR. Nothing in this update starts Phase 1-4 implementation —
-deciding the ADRs unblocks that work, it doesn't perform it.
+**Phase 1 in progress.** Bootstrap, capability inventory, and all three
+ADRs (crate split/scope, search engine, JS-rendering crawler, and the
+licensing policy) are settled. `rusty-hister-core` now has real
+implementation — the `Document` working type, the `Extractor` trait and
+its supporting types (capability inventory §4.1), and the shared
+`HisterError` type — with unit tests, `clippy`, and `fmt` all clean. Every
+other `rusty-hister-*` crate is still an empty skeleton; `rusty-hister-model`,
+`rusty-hister-extractor`'s registry and concrete extractors, and
+`rusty-hister-crawler`'s `http` backend (the rest of Phase 1 per
+`docs/roadmap/ROADMAP.md`) have not started yet.
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -77,9 +79,9 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 
 | Crate | Status |
 |---|---|
-| `rusty-hister-core` | Skeleton only |
+| `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | Skeleton only |
-| `rusty-hister-extractor` | Skeleton only |
+| `rusty-hister-extractor` | Skeleton only — will depend on `rusty-hister-core`'s `Extractor` trait for its registry and concrete extractors |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |
