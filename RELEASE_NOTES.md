@@ -13,6 +13,56 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's schema
+**2026-09-12** · branch [`claude/hister-phase1-model`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model)
+
+Third Phase 1 increment (after `rusty-hister-core` and
+`rusty-hister-extractor`'s registry, previous entries below). Scoped to
+`rusty-hister-model`'s **schema** — the nine `#[derive(Mapped)]` types and
+the migration that creates them — not the domain/query-layer behavior each
+Go model file builds on top of its table, which is a separate follow-up
+increment (same schema-mechanism-first split `rusty-hister-extractor`'s
+registry used).
+
+- **Added:** `User`, `Link`, `History`, `HistoryLink`, `CrawlJob`,
+  `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob` — Hister's
+  nine `automigrate()`-list models (capability inventory §7.2), ported
+  field-for-field from `server/model/*.go`. `CrawlJobStatus`/
+  `CrawlUrlStatus`/`EmbeddingJobStatus` are `#[derive(MappedEnum)]` closed
+  enums rather than Go's untyped string constants, making each field's
+  "only these values are valid" invariant checkable by the type system.
+- **Added:** soft-delete on the four models that embedded Go's
+  `CommonFields` (`User`, `Link`, `History`, `HistoryLink`) via `rusty_db`'s
+  first-party `#[table(soft_delete)]`, rather than hand-rolling
+  `CommonFields`' nullable `DeletedAt` convention — an equivalent
+  capability via a different, already-available mechanism, not a
+  simplification.
+- **Added:** `SQLITE_MIGRATIONS`/`POSTGRES_MIGRATIONS` — a fresh-install
+  migration (one per backend, since `rusty_db` migrations are plain,
+  non-portable SQL) that creates all nine tables and their unique/lookup
+  indexes, run through `rusty_db::Migrator`. Hister's own `Database`
+  singleton-row schema-version tracker has no Rust equivalent: `Migrator`'s
+  own bookkeeping table already solves the same problem, so this is a
+  documented substitution, not a dropped capability.
+- **Known limitation (by design, flagged for explicit follow-up):** this
+  is a fresh-install-only schema. Hister's three historical Go migrations
+  (the `history_links.pinned` backfill, the `web_sessions.last_seen_at`
+  column drop, the mixed-offset-to-UTC timestamp rewrite) and the legacy
+  `indexer_versions` read path are **not** reproduced, since they only
+  matter for opening a pre-existing Hister-Go-created database file — a
+  new, still-unresolved question (does `rusty_hister` ever need to do
+  that at all?) recorded in `crates/rusty_hister/docs/PROJECT-STATUS.md`'s
+  open items, alongside the already-flagged `indexer_versions` item it
+  subsumes.
+- **Added:** 25 unit tests — real round-trips through an in-memory SQLite
+  engine (`sqlite::memory:`) for every model, unique-constraint/duplicate-
+  rejection checks for every `uniqueIndex` in the Go source
+  (`username`, `url`, `(user_id, query)`, `(history_id, link_id)`,
+  `(job_id, url)`, `token_hash`), a soft-delete round-trip
+  (`Session::delete`/`get`/`load_active`), and migration up/down/status
+  checks (including that the schema is actually created and is
+  reversible). clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's registry
 **2026-09-12** · branch [`claude/hister-phase1-extractor-registry`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-registry)
 

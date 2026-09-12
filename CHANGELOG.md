@@ -9,6 +9,25 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s schema (`rusty_hister`'s Phase 1, continued): the
+  nine `#[derive(Mapped)]` types from Hister's `automigrate()` list
+  (capability inventory §7.2 — `User`, `Link`, `History`, `HistoryLink`,
+  `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`)
+  on `rusty_db`, soft-delete via `rusty_db`'s `#[table(soft_delete)]`
+  (replacing Go's nullable `DeletedAt` convention), and a fresh-install
+  migration (`SQLITE_MIGRATIONS`/`POSTGRES_MIGRATIONS`) that creates all
+  nine tables plus indexes via `rusty_db::Migrator` — whose own bookkeeping
+  table substitutes for Hister's `Database` singleton-row version tracker.
+  Deliberately schema-only: each Go model file's domain/query helpers
+  (the embedding-queue state machine, history search/pin/timeline
+  queries, user auth helpers, ...) are a separate, not-yet-started
+  increment, and Hister's three historical migrations plus the legacy
+  `indexer_versions` read path are not reproduced (they only matter for
+  opening a pre-existing Hister-Go-created database file — a still-open
+  question, see `crates/rusty_hister/docs/PROJECT-STATUS.md`). 25 unit
+  tests (real SQLite round-trips via an in-memory engine, unique-
+  constraint/duplicate-rejection checks, migration up/down/status),
+  clippy/fmt clean.
 - `rusty-hister-extractor`'s `Registry` (`rusty_hister`'s Phase 1,
   continued): the chain-of-responsibility mechanism (capability inventory
   §4.2) — case-insensitive `register`/`register_before` with duplicate
