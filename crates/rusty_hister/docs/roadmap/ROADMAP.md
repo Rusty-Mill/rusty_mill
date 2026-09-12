@@ -21,8 +21,12 @@ because they're scheduled.
       (`chromiumoxide` for CDP, WebDriver BiDi descoped for v1) — decided
       2026-09-12, ahead of ADR-0002's recommended scoping spike (see each
       ADR's "Accepted risk" note).
-- [ ] User confirmation on ADR-0001's licensing recommendation (Go test
-      fixtures: rewrite from independent reading, don't copy verbatim).
+- [x] User confirmation on ADR-0001's licensing recommendation (Go test
+      fixtures: rewrite from independent reading, don't copy verbatim) —
+      confirmed 2026-09-12.
+
+**Phase 0 is complete.** Everything blocking Phase 1-4 implementation is
+resolved; nothing here has started that implementation yet.
 
 ## Phase 1 — Unblocked foundations (can start once Phase 0's docs land,
 independent of ADR-0002/0003)

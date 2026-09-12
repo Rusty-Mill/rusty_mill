@@ -13,6 +13,29 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Confirm rusty_hister's AGPL test-fixture licensing policy
+**2026-09-12** · branch [`claude/confirm-hister-licensing`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/confirm-hister-licensing)
+
+Confirms the last open item from `rusty_hister`'s bootstrap (ADR-0001 §7),
+on the user's (baileyrd/Nano's) direct instruction. Docs only.
+
+- **Changed:** `crates/rusty_hister/docs/decisions/ADR-0001-…md` §7 →
+  confirmed. `rusty_hister` ships under this workspace's standard `MIT OR
+  Apache-2.0`; no Hister source file — test files included — is copied
+  verbatim into this cluster. Fresh Rust tests are written from
+  independently reading and understanding each Go test's behavior instead,
+  traceable via the capability inventory's per-extractor test-file
+  citations. Binds every future PR touching extractor or query-grammar
+  tests, not just this bootstrap.
+- **Changed:** `docs/PROJECT-STATUS.md`, `docs/roadmap/ROADMAP.md`, and
+  `WORKFLOW.md` updated: Phase 0 is now fully complete (all three
+  decision items resolved — crate split/scope, search/crawler approach,
+  and now licensing); no items block Phase 1-4 implementation start.
+- **Not done here:** no implementation of any kind — this is a licensing
+  policy confirmation, not code.
+
+---
+
 ## Decide rusty_hister's ADR-0002 and ADR-0003
 **2026-09-12** · branch [`claude/decide-hister-adr-0002-0003`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/decide-hister-adr-0002-0003)
 
