@@ -1,6 +1,6 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (ADR-0002/ADR-0003 decided).
+Last updated: 2026-09-12 (ADR-0001 §7 licensing confirmed).
 
 ## Where this is
 
@@ -49,12 +49,19 @@ Phases 3-4); none of that implementation has started yet as of this update.
 The `bidi`-equivalent backend is not merely unblocked-but-pending — it is
 now **out of v1 scope**, per ADR-0003's decision.
 
+## Resolved
+
+- **Licensing approach for Go test fixtures** (ADR-0001 §7) — confirmed by
+  the user 2026-09-12: `rusty_hister` ships under this workspace's standard
+  `MIT OR Apache-2.0`; no Hister source file, test files included, is
+  copied verbatim into this cluster. Fresh Rust tests are derived from
+  independently reading and understanding each Go test's behavior instead.
+  This binds every extractor and query-grammar test written from here on.
+
 ## Open items carried from the capability inventory (not blocking, but
 unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 §13 and inline flags)
 
-- Licensing approach for Go test fixtures (ADR-0001) — recommendation
-  stated, not yet confirmed by the user.
 - `sqlite-vec` C-extension story for the SQLite vectorstore backend — folded
   into ADR-0002 rather than decided separately, since it's downstream of the
   storage-engine choice.

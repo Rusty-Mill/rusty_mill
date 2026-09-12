@@ -22,6 +22,12 @@ Removed / Fixed / Security, newest first.
   engine and the JS-rendering crawler approach, both since **decided** —
   see below) — see `crates/rusty_hister/docs/PROJECT-STATUS.md`.
 ### Changed
+- `rusty_hister`'s ADR-0001 §7 licensing recommendation confirmed by the
+  user: the cluster ships under this workspace's standard `MIT OR
+  Apache-2.0`, and no Hister source file — test files included — is copied
+  verbatim into it; extractor and query-grammar tests are written fresh
+  from independently reading the Go behavior instead. Binds every future
+  PR touching those tests.
 - `rusty_hister`'s ADR-0002 (search/indexing engine) and ADR-0003
   (JS-rendering crawler) decided by the user, ahead of ADR-0002's own
   recommended scoping spike: `rusty_search` + `rusty-search-sqlite-fts5`

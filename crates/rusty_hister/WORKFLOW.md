@@ -31,10 +31,10 @@ every other crate in the monorepo.
 - Don't silently expand or narrow scope — a capability-inventory row moves
   to out-of-scope only via an explicit ADR recording the user's sign-off.
 - Ask before anything hard to reverse: the crate-cluster split once
-  non-bootstrap code depends on it, the licensing approach for ported test
-  fixtures (still open — ADR-0001), reopening a question ADR-0002/ADR-0003
-  already decided (the search engine, the CDP crate pick, or BiDi's
-  descope), or any dependency/toolchain change.
+  non-bootstrap code depends on it, reopening a question ADR-0001/ADR-0002/
+  ADR-0003 already decided (the test-fixture licensing policy, the search
+  engine, the CDP crate pick, or BiDi's descope), or any dependency/
+  toolchain change.
 
 ## ADRs
 

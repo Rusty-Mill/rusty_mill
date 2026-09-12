@@ -138,8 +138,17 @@ as a sub-decision, since `rusty_search`'s own roadmap already anticipates a
 hybrid/vector search path and the answer likely depends on which backend
 ADR-0002 picks.
 
-### 7. Licensing — open question, recommendation stated but not yet
-confirmed
+### 7. Licensing — confirmed 2026-09-12
+
+**Confirmed by the user (baileyrd/Nano), 2026-09-12** — "Confirm the AGPL
+test-fixture licensing recommendation from ADR-0001." The recommendation
+below is now settled policy for this cluster, not a proposal: `rusty_hister`
+ships under this workspace's standard `MIT OR Apache-2.0`, and no Hister
+source file — test files included — is copied verbatim into it. This binds
+every extractor and query-grammar test written from here on; a PR that
+copies Go test file content (rather than independently deriving a Rust test
+from reading it) is a licensing regression, not a style nit, and should be
+corrected before merge.
 
 Hister is AGPL-3.0-or-later; this workspace's default license is `MIT OR
 Apache-2.0` (root `Cargo.toml`'s `[workspace.package]`). An independent,
@@ -158,20 +167,18 @@ treat existing `_test.go` files as parity-test fixtures "don't discard
 them" — but a `_test.go` file is itself AGPL-licensed Go source code, and
 copying its actual assertions/table-driven test data verbatim into an
 MIT/Apache-2.0-licensed crate would be incorporating AGPL-covered
-expression, not just using it as a behavioral reference. **Recommendation**
-(not yet confirmed — flagging per the standing working agreement to ask
-before hard-to-reverse decisions, and licensing mistakes are exactly that):
-do not copy any Hister source file, test files included, into this cluster.
-Instead, write fresh Rust tests derived from independently reading and
-understanding what each Go test verifies (the capability inventory's
-per-extractor test-file citations exist to make this traceable — "this
-behavior is covered by `reddit/reddit_test.go`," not "here is a transliterated
-copy of it"). Where a Go test embeds third-party sample content (a real
-Reddit page's HTML, a real GitHub issue page) that content itself isn't
-Hister's own creative expression and using an independently-fetched or
-freshly-authored equivalent sample avoids the question entirely. This
-recommendation governs every extractor and query-grammar test going forward
-unless the user says otherwise.
+expression, not just using it as a behavioral reference. **Decision**
+(confirmed 2026-09-12, per the note above): do not copy any Hister source
+file, test files included, into this cluster. Instead, write fresh Rust
+tests derived from independently reading and understanding what each Go
+test verifies (the capability inventory's per-extractor test-file
+citations exist to make this traceable — "this behavior is covered by
+`reddit/reddit_test.go`," not "here is a transliterated copy of it").
+Where a Go test embeds third-party sample content (a real Reddit page's
+HTML, a real GitHub issue page) that content itself isn't Hister's own
+creative expression and using an independently-fetched or freshly-authored
+equivalent sample avoids the question entirely. This governs every
+extractor and query-grammar test written from here on.
 
 ## Alternatives considered
 
@@ -192,12 +199,13 @@ a default baked into the bootstrap ADR.
 
 ## Consequences
 
-- Two decision-requests (ADR-0002, ADR-0003) block `rusty-hister-indexer`,
-  `rusty-hister-vectorstore`'s storage side, and
-  `rusty-hister-crawler`'s JS-rendering backends. Everything else in
-  `docs/roadmap/ROADMAP.md`'s Phase 1 can proceed without waiting on them.
-- The licensing recommendation in §7, if confirmed, means every future PR
-  touching extractor or query-grammar tests must be checked for
+- ADR-0002 and ADR-0003 (both since **Accepted**, 2026-09-12) unblocked
+  `rusty-hister-indexer`, `rusty-hister-vectorstore`'s storage side, and
+  `rusty-hister-crawler`'s CDP backend; see those ADRs for what they
+  decided. Everything else in `docs/roadmap/ROADMAP.md`'s Phase 1 was never
+  blocked on them.
+- The licensing decision in §7 (**confirmed** 2026-09-12) means every
+  future PR touching extractor or query-grammar tests must be checked for
   "independently written" vs. "copied from Go source" — this is a real
   ongoing review cost, not a one-time decision.
 - The crate split adds `rusty-hister-model` and `rusty-hister-server`
