@@ -85,7 +85,6 @@ pub mod dpop;
 pub mod encoding;
 pub mod error;
 pub mod introspection;
-pub mod json;
 pub mod jwks;
 pub mod jwt;
 pub mod metadata;

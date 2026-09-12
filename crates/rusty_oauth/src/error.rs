@@ -1,7 +1,7 @@
 //! Crate-wide error types, including the standard OAuth error responses
 //! defined by RFC 6749 §4.1.2.1 / §5.2, RFC 8628 §3.5, and RFC 7009 §2.2.1.
 
-use crate::json::{self, Value};
+use rusty_json::Value;
 use std::fmt;
 
 /// The standard `error` codes used across the OAuth authorization and
@@ -152,7 +152,7 @@ pub enum Error {
     /// The server returned malformed or unexpected data.
     Protocol(String),
     /// A JSON document could not be parsed.
-    Json(json::ParseError),
+    Json(rusty_json::Error),
     /// Base64 decoding failed.
     Base64(crate::encoding::base64::DecodeError),
     /// Percent-decoding failed.
@@ -197,8 +197,8 @@ impl From<OAuthErrorResponse> for Error {
     }
 }
 
-impl From<json::ParseError> for Error {
-    fn from(e: json::ParseError) -> Self {
+impl From<rusty_json::Error> for Error {
+    fn from(e: rusty_json::Error) -> Self {
         Error::Json(e)
     }
 }
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn parses_json_error_response() {
-        let json = json::parse(
+        let json = Value::from_json_str(
             r#"{"error":"invalid_grant","error_description":"The authorization code has expired"}"#,
         )
         .unwrap();

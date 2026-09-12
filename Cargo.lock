@@ -12716,6 +12716,7 @@ name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
  "rusty_base64",
+ "rusty_json",
  "rusty_rand",
  "rusty_rsa",
 ]
@@ -12784,6 +12785,7 @@ dependencies = [
  "rustls-pki-types",
  "rusty_base64",
  "rusty_http",
+ "rusty_json",
  "rusty_retry",
  "rusty_tls",
  "rusty_tokio",

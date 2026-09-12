@@ -1,5 +1,4 @@
 use crate::error::{Error, Result};
-use crate::json;
 use rusty_http::{HeaderMap, StatusCode, Url};
 
 #[derive(Debug, Clone)]
@@ -49,9 +48,9 @@ impl Response {
             .map_err(|e| Error::InvalidResponse(format!("response body is not valid UTF-8: {e}")))
     }
 
-    pub fn json(&self) -> Result<json::Value> {
+    pub fn json(&self) -> Result<rusty_json::Value> {
         let text = self.text().map_err(|e| Error::Json(e.to_string()))?;
-        json::Value::parse(&text).map_err(Error::Json)
+        rusty_json::Value::from_json_str(&text).map_err(|e| Error::Json(e.to_string()))
     }
 
     /// Requests-style ergonomic error check: turns a 4xx/5xx status into

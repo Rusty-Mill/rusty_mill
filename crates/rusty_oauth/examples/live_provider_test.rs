@@ -205,8 +205,8 @@ fn main() {
 
     section("Duende demo: verify the access token is a real RS256 JWT we can decode");
     if let Ok(decoded) = jwt::decode_unverified(&access_token) {
-        println!("header: {}", decoded.header.to_json());
-        println!("claims: {}", decoded.claims.to_json());
+        println!("header: {}", decoded.header.to_json_string());
+        println!("claims: {}", decoded.claims.to_json_string());
     } else {
         println!("(access token is opaque, not a JWT -- also valid per spec)");
     }

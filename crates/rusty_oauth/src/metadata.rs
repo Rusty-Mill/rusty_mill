@@ -1,8 +1,8 @@
 //! Authorization Server Metadata discovery (RFC 8414).
 
 use crate::error::{Error, Result};
-use crate::json::{self, Value};
 use crate::request::{HttpRequest, Method};
+use rusty_json::Value;
 
 /// Builds the well-known metadata document request for `issuer`
 /// (RFC 8414 §3): `GET {issuer}/.well-known/oauth-authorization-server`,
@@ -75,7 +75,7 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 
 /// Parses a metadata document body (RFC 8414 §3.2).
 pub fn parse_metadata(body: &str) -> Result<AuthorizationServerMetadata> {
-    let value = json::parse(body)?;
+    let value = Value::from_json_str(body)?;
     let issuer = string_field(&value, "issuer")
         .ok_or_else(|| Error::Protocol("metadata document missing `issuer`".to_string()))?;
 

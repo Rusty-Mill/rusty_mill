@@ -36,9 +36,9 @@ fn post_json_body_round_trips() {
         let server = start_test_server(|req| {
             assert_eq!(req.method, "POST");
             assert_eq!(req.header("content-type"), Some("application/json"));
-            let received = Json::parse(std::str::from_utf8(&req.body).unwrap()).unwrap();
-            let mut echoed = Json::object();
-            echoed.insert("you_sent", received);
+            let received = Json::from_json_str(std::str::from_utf8(&req.body).unwrap()).unwrap();
+            let mut echoed = Json::default();
+            echoed["you_sent"] = received;
             http_response(
                 201,
                 "Created",
@@ -47,9 +47,9 @@ fn post_json_body_round_trips() {
             )
         });
 
-        let mut body = Json::object();
-        body.insert("name", "Ada");
-        body.insert("age", 36);
+        let mut body = Json::default();
+        body["name"] = "Ada".into();
+        body["age"] = 36.into();
 
         let resp = Client::new()
             .post(&server.url("/things"))

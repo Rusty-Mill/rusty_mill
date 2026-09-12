@@ -56,7 +56,7 @@ impl Request {
     /// handler's own concern here, not an implicit middleware layer.
     pub fn json(&self) -> Result<rusty_request::Json, String> {
         let text = std::str::from_utf8(&self.body).map_err(|err| err.to_string())?;
-        rusty_request::Json::parse(text)
+        rusty_request::Json::parse(text).map_err(|err| err.to_string())
     }
 }
 

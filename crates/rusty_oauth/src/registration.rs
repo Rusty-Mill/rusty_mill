@@ -12,8 +12,8 @@
 //! request/response.
 
 use crate::error::{Error, OAuthErrorResponse, Result};
-use crate::json::{self, Value};
 use crate::request::{HttpRequest, Method};
+use rusty_json::Value;
 
 /// The RFC 7591 §2 client metadata sent in a registration request. Every
 /// field is optional at the wire level (the server applies its own
@@ -105,7 +105,7 @@ impl ClientMetadata {
         }
         fields.extend(self.extra.iter().cloned());
 
-        Value::Object(fields)
+        Value::Object(fields.into_iter().collect())
     }
 }
 
@@ -125,7 +125,7 @@ pub fn registration_request(
         method: Method::Post,
         url: registration_endpoint.to_string(),
         headers,
-        body: metadata.to_json().to_json().into_bytes(),
+        body: metadata.to_json().to_json_string().into_bytes(),
     }
 }
 
@@ -153,7 +153,7 @@ pub struct ClientRegistrationResponse {
 /// has the same `error`/`error_description` shape as RFC 6749 §5.2, just
 /// with a different set of `error` codes).
 pub fn parse_registration_response(status: u16, body: &str) -> Result<ClientRegistrationResponse> {
-    let value = json::parse(body)?;
+    let value = Value::from_json_str(body)?;
 
     if !(200..300).contains(&status) {
         if let Some(err) = OAuthErrorResponse::from_json(&value) {
@@ -225,7 +225,7 @@ mod tests {
             .any(|(k, v)| k == "Content-Type" && v == "application/json"));
         assert!(req.headers.iter().all(|(k, _)| k != "Authorization"));
 
-        let body = json::parse(&String::from_utf8(req.body).unwrap()).unwrap();
+        let body = Value::from_json_str(&String::from_utf8(req.body).unwrap()).unwrap();
         assert_eq!(
             body.get("client_name").unwrap().as_str(),
             Some("My Example Client")
@@ -260,7 +260,7 @@ mod tests {
             .extra
             .push(("custom_vendor_field".to_string(), Value::from("hello")));
         let req = registration_request("https://server.example.com/register", &metadata, None);
-        let body = json::parse(&String::from_utf8(req.body).unwrap()).unwrap();
+        let body = Value::from_json_str(&String::from_utf8(req.body).unwrap()).unwrap();
         assert_eq!(
             body.get("custom_vendor_field").unwrap().as_str(),
             Some("hello")

@@ -14,7 +14,7 @@ use crate::crypto::bigint::BigUint;
 use crate::crypto::sha256::sha256;
 use crate::encoding::base64::decode_url_safe;
 use crate::error::{Error, Result};
-use crate::json::Value;
+use rusty_json::Value;
 use std::cmp::Ordering;
 
 /// The DER encoding of the `DigestInfo` `AlgorithmIdentifier` for SHA-256,
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn rejects_alg_confusion() {
         let claims =
-            crate::json::Value::object([("sub".to_string(), crate::json::Value::from("x"))]);
+            rusty_json::Value::from_iter([("sub".to_string(), rusty_json::Value::from("x"))]);
         let hs256_token = crate::jwt::encode_hs256(&claims, b"whatever", &[]);
         assert!(verify_rs256(&hs256_token, &key()).is_err());
     }

@@ -11,8 +11,8 @@
 use crate::client::Client;
 use crate::encoding::percent::form_urlencode;
 use crate::error::{Error, OAuthErrorResponse, Result};
-use crate::json::{self, Value};
 use crate::request::HttpRequest;
+use rusty_json::Value;
 
 /// Builds the RFC 6749 §4.1.3 token request for the authorization code
 /// grant. `code_verifier` should be `Some(&pkce.code_verifier)` whenever
@@ -305,7 +305,7 @@ pub struct TokenResponse {
 /// response is a [`TokenResponse`]; anything else is treated as an error
 /// body and returned as `Err(Error::OAuth(..))` when it parses as one.
 pub fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse> {
-    let value = json::parse(body)?;
+    let value = Value::from_json_str(body)?;
 
     if status != 200 {
         if let Some(err) = OAuthErrorResponse::from_json(&value) {
