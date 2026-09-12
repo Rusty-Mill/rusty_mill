@@ -9,6 +9,16 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s `DocumentVersion` query layer (`rusty_hister`'s
+  Phase 1, continued): `DocumentVersion::{save, move_versions, count,
+  list, list_until}`, a Rust port of `version.go`'s
+  `SaveDocumentVersion`/`MoveDocumentVersions`/`CountDocumentVersions`/
+  `GetDocumentVersions`/`GetDocumentVersionsUntil`. `save` reuses
+  `WebSession::create`'s database-assigned-surrogate-key recipe. The
+  document-versioning diff format/algorithm (capability inventory §11)
+  stays a separate, undecided concern — this layer only stores and
+  retrieves whatever diff text the caller already computed. 6 new unit
+  tests (56 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s `WebSession` query layer (`rusty_hister`'s Phase
   1, continued): `WebSession::{create, get, refresh, delete}`, a Rust
   port of `session.go`'s lookup/expiry helpers (`refresh`, not `update`,

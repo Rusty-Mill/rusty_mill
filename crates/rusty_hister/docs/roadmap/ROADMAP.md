@@ -70,13 +70,23 @@ independent of ADR-0002/0003)
       need for their own `create`s. The dialect-placeholder helper
       introduced for the embedding queue is now shared (`crate::placeholders`,
       hoisted to `lib.rs` on this second real call site).
+- [x] `rusty-hister-model` (`DocumentVersion` query layer): `version.go`'s
+      helpers as `DocumentVersion` associated functions —
+      `save`/`move_versions`/`count`/`list`/`list_until` (Go:
+      `SaveDocumentVersion`/`MoveDocumentVersions`/`CountDocumentVersions`/
+      `GetDocumentVersions`/`GetDocumentVersionsUntil`). Done — 6 new unit
+      tests (56 total in the crate), clippy/fmt clean. `save` reuses
+      `WebSession::create`'s database-assigned-surrogate-key recipe. The
+      document-versioning diff format/algorithm (capability inventory
+      §11) stays a separate, undecided concern — this layer only stores
+      and retrieves whatever diff text the caller already computed.
 - `rusty-hister-model` (remaining query layer): the domain operations the
-  other five Go model files build on top of their tables — `history.go`'s
-  search/pin/timeline queries, `user.go`'s auth/token helpers,
-  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`, and
-  `SaveDocumentVersion`/`GetDocumentVersionsUntil` — separate increments
-  from the embedding queue and `WebSession` above, same split
-  `rusty-hister-extractor` used (mechanism before concrete extractors).
+  other three Go model files build on top of their tables — `history.go`'s
+  search/pin/timeline queries, `user.go`'s auth/token helpers, and
+  `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs` — separate increments
+  from the embedding queue, `WebSession`, and `DocumentVersion` above,
+  same split `rusty-hister-extractor` used (mechanism before concrete
+  extractors).
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive
       duplicate rejection), the two-phase enrich-then-extract chain,

@@ -13,6 +13,34 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's DocumentVersion query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-document-version`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-document-version)
+
+Sixth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, `rusty-hister-model`'s schema, and its embedding-queue and
+`WebSession` query layers, previous entries below). Scoped to
+`DocumentVersion`'s query layer alone — small, self-contained, and no
+`CASE`-based SQL needed (unlike the embedding queue), so it's a
+straightforward second application of the database-assigned-surrogate-key
+recipe `WebSession::create` introduced.
+
+- **Added:** `DocumentVersion::save`/`move_versions`/`count`/`list`/
+  `list_until` — a port of `version.go`'s `SaveDocumentVersion`/
+  `MoveDocumentVersions`/`CountDocumentVersions`/`GetDocumentVersions`/
+  `GetDocumentVersionsUntil`. `save` reuses `WebSession::create`'s raw-
+  `INSERT`-plus-`RETURNING`/`last_insert_rowid()` pattern for its
+  autoincrementing `id`. `count` is the crate's first aggregate query
+  (`Expr::count_all()` via `SelectExpr`).
+- **Unchanged scope:** the document-versioning diff format/algorithm
+  itself (capability inventory §11) is a separate, still-undecided
+  concern — this layer only stores and retrieves whatever `html_diff`/
+  `text_diff` text the caller already computed; it doesn't compute diffs.
+- **Added:** 6 new unit tests (56 total in the crate) — save assigns an id
+  and the row is listed; list filters by both url and user; count reflects
+  the stored row count; move_versions reassigns ownership and no-ops for
+  the same user; list_until returns only versions at or after the given
+  id, newest first. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's WebSession query layer
 **2026-09-12** · branch [`claude/hister-phase1-model-websession`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-websession)
 
