@@ -13,6 +13,47 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's registry
+**2026-09-12** · branch [`claude/hister-phase1-extractor-registry`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-registry)
+
+Second Phase 1 increment (after `rusty-hister-core`, previous entry below).
+Scoped to `rusty-hister-extractor`'s `Registry` alone — the
+chain-of-responsibility mechanism, not any concrete extractor — since it
+only depends on `rusty-hister-core` (already merged) and is a
+self-contained, well-specified unit on its own.
+
+- **Added:** `Registry` (capability inventory §4.2): `register`/
+  `register_before` with case-insensitive duplicate-name rejection;
+  `apply_configs` to merge a pre-parsed name→config map into matching
+  extractors (unknown names ignored, matching Hister's own "config for an
+  unregistered extractor is a no-op" behavior — parsing an actual config
+  *file* into that map is a separate, not-yet-decided concern); `list`/
+  `list_enabled`/`list_matching`/`list_matching_preview` introspection.
+- **Added:** the two-phase extraction chain — every matching enabled
+  enricher runs in chain order first (a `Fallback` is skipped over, only
+  `Abort` halts everything), with its enrichment carried forward into the
+  next stage; then matching enabled content extractors run in chain order
+  until one succeeds or aborts. Verified with a test that actually checks
+  the second-phase extractor receives the first phase's enrichment (not
+  just that the chain doesn't crash).
+- **Added:** the separate preview chain — an optional case-insensitive
+  starting-point name skips ahead in chain order without disabling the
+  fallback chain after it; a starting point that's unregistered, disabled,
+  non-preview-capable, or non-matching is a hard `Abort`, never silently
+  ignored.
+- **Verified:** 18 unit tests (including every hard-error path and the
+  enrichment hand-off), clippy/fmt clean, whole-cluster `cargo check`
+  clean, dependency-sovereignty policy clean. `Registry` is deliberately
+  not internally synchronized (no mutex) — Hister's Go version guards its
+  list because it's shared across concurrent HTTP handlers; that's a
+  caller-side concern (e.g. `rusty-hister-server` wrapping it in a
+  `Mutex`/`RwLock`), not something to build in speculatively here.
+- **Not done here:** no concrete extractors — `rusty-hister-extractor` has
+  a working chain mechanism and nothing registered into it yet. That's the
+  next increment (capability inventory §4.3-§4.5, in default-chain order).
+
+---
+
 ## Start rusty_hister Phase 1: implement rusty-hister-core
 **2026-09-12** · branch [`claude/hister-phase1-core`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-core)
 
