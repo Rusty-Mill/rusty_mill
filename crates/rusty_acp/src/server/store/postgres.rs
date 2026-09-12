@@ -218,7 +218,6 @@ impl PostgresStore {
                      session_id      uuid PRIMARY KEY,
                      state_url       text,
                      prefix_history  jsonb NOT NULL DEFAULT '[]'::jsonb,
-                     base_url        text,
                      next_message    bigint NOT NULL DEFAULT 0,
                      updated_at      timestamptz NOT NULL DEFAULT now()
                  )",
@@ -229,6 +228,7 @@ impl PostgresStore {
                      session_id  uuid NOT NULL,
                      idx         bigint NOT NULL,
                      message     jsonb NOT NULL,
+                     base_url    text,
                      PRIMARY KEY (session_id, idx)
                  )",
                 self.table("session_messages")
@@ -288,6 +288,14 @@ impl PostgresStore {
             format!(
                 "ALTER TABLE {} ADD COLUMN IF NOT EXISTS bytes bigint NOT NULL DEFAULT 0",
                 self.table("events")
+            ),
+            // Added so each message's history URL can be rebuilt from the
+            // base URL in effect when *it* was written, rather than from a
+            // session-wide value a later append could overwrite — see
+            // `append_session_messages` and `get_session`.
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS base_url text",
+                self.table("session_messages")
             ),
         ];
         for statement in columns {
@@ -741,7 +749,7 @@ impl Store for PostgresStore {
 
     async fn get_session(&self, session_id: SessionId) -> StoreResult<Option<SessionRecord>> {
         let row = sqlx::query(AssertSqlSafe(format!(
-            "SELECT state_url, prefix_history, base_url FROM {} WHERE session_id = $1",
+            "SELECT state_url, prefix_history FROM {} WHERE session_id = $1",
             self.table("sessions")
         )))
         .bind(*session_id.as_uuid())
@@ -756,18 +764,22 @@ impl Store for PostgresStore {
             row.try_get("state_url").map_err(|err| pg_error("read session state", err))?;
         let prefix_history: serde_json::Value =
             row.try_get("prefix_history").map_err(|err| pg_error("read session history", err))?;
-        let base_url: Option<String> =
-            row.try_get("base_url").map_err(|err| pg_error("read session base url", err))?;
 
-        let messages = self.session_messages(session_id).await?;
+        let stored = self.session_messages(session_id).await?;
 
         // History is rebuilt rather than stored: entries hosted elsewhere
-        // first, then one URL per message this deployment holds. The URL for
-        // message `i` is a pure function of `i`, which is what lets an append
-        // be a plain insert.
-        let base_url = base_url.unwrap_or_default();
+        // first, then one URL per message this deployment holds. Each URL uses
+        // *that message's own* stored base URL — the one in effect when it was
+        // appended — so a later append with a different base URL cannot
+        // retroactively rewrite an earlier message's link.
         let mut history: Vec<String> = decode(prefix_history)?;
-        history.extend((0..messages.len()).map(|index| message_url(&base_url, session_id, index)));
+        history.extend(
+            stored
+                .iter()
+                .enumerate()
+                .map(|(index, (_, base_url))| message_url(base_url, session_id, index)),
+        );
+        let messages: Vec<Message> = stored.into_iter().map(|(message, _)| message).collect();
 
         Ok(Some(SessionRecord { session: Session { id: session_id, history, state }, messages }))
     }
@@ -819,18 +831,16 @@ impl Store for PostgresStore {
         // row lock, so two replicas appending at once cannot interleave or land
         // on the same index — the invariant the trait requires.
         let row = sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {} (session_id, base_url, next_message, updated_at)
-             VALUES ($1, $2, $3, now())
+            "INSERT INTO {} (session_id, next_message, updated_at)
+             VALUES ($1, $2, now())
              ON CONFLICT (session_id) DO UPDATE
-               SET next_message = {sessions}.next_message + $3,
-                   base_url = EXCLUDED.base_url,
+               SET next_message = {sessions}.next_message + $2,
                    updated_at = now()
-             RETURNING next_message - $3 AS first_index",
+             RETURNING next_message - $2 AS first_index",
             self.table("sessions"),
             sessions = self.table("sessions"),
         )))
         .bind(*session_id.as_uuid())
-        .bind(base_url)
         .bind(messages.len() as i64)
         .fetch_one(&mut *transaction)
         .await
@@ -839,14 +849,18 @@ impl Store for PostgresStore {
         let first: i64 =
             row.try_get("first_index").map_err(|err| pg_error("read message index", err))?;
 
+        // Each row carries the base URL in effect when it was appended, so a
+        // later append using a different base URL — e.g. a different `Host`
+        // header — cannot retroactively change an already-issued message URL.
         for (offset, message) in messages.iter().enumerate() {
             sqlx::query(AssertSqlSafe(format!(
-                "INSERT INTO {} (session_id, idx, message) VALUES ($1, $2, $3)",
+                "INSERT INTO {} (session_id, idx, message, base_url) VALUES ($1, $2, $3, $4)",
                 self.table("session_messages")
             )))
             .bind(*session_id.as_uuid())
             .bind(first + offset as i64)
             .bind(encode(message)?)
+            .bind(base_url)
             .execute(&mut *transaction)
             .await
             .map_err(|err| pg_error("append session message", err))?;
@@ -1126,9 +1140,11 @@ impl PostgresStore {
         }
     }
 
-    async fn session_messages(&self, session_id: SessionId) -> StoreResult<Vec<Message>> {
+    /// A session's stored messages, each paired with the base URL in effect
+    /// when it was appended — see `append_session_messages` and `get_session`.
+    async fn session_messages(&self, session_id: SessionId) -> StoreResult<Vec<(Message, String)>> {
         let rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT message FROM {} WHERE session_id = $1 ORDER BY idx",
+            "SELECT message, base_url FROM {} WHERE session_id = $1 ORDER BY idx",
             self.table("session_messages")
         )))
         .bind(*session_id.as_uuid())
@@ -1140,7 +1156,10 @@ impl PostgresStore {
             .map(|row| {
                 let raw: serde_json::Value =
                     row.try_get("message").map_err(|err| pg_error("read message column", err))?;
-                decode(raw)
+                let base_url: Option<String> = row
+                    .try_get("base_url")
+                    .map_err(|err| pg_error("read message base url column", err))?;
+                Ok((decode(raw)?, base_url.unwrap_or_default()))
             })
             .collect()
     }

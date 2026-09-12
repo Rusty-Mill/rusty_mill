@@ -278,7 +278,16 @@ fn sanitize(s: &str) -> String {
 fn one_line(s: &str) -> String {
     let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.len() > 120 {
-        format!("{}…", &flat[..120])
+        // Snap to the nearest char boundary at-or-past byte 120: `flat` may
+        // contain multi-byte UTF-8 characters, and a raw `&flat[..120]` panics
+        // when byte 120 falls mid-character.
+        let end = flat
+            .char_indices()
+            .take_while(|&(i, _)| i <= 120)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}…", &flat[..end])
     } else {
         flat
     }
@@ -421,5 +430,18 @@ mod tests {
         let out = render_ratchet(&aggs, &proposals);
         assert!(out.contains("no checks proposed"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_line_truncates_without_panicking_on_multibyte_boundary() {
+        // 119 ASCII bytes then a 4-byte emoji: the emoji starts at byte 119
+        // and ends at byte 123, straddling the byte-120 truncation point, so
+        // a raw `&flat[..120]` slice (pre-fix) panics mid-character.
+        let mut s = "a".repeat(119);
+        s.push('😀');
+        assert!(s.len() > 120);
+        let out = one_line(&s);
+        assert!(out.ends_with('…'));
+        assert!(out.starts_with(&"a".repeat(119)));
     }
 }

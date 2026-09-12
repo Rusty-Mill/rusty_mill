@@ -190,9 +190,19 @@ impl GitPort for SystemGit {
             // `--untracked-files=all` so a new directory of files shows
             // as its files rather than as one directory entry -- a
             // session that created ten files should show ten.
-            &["status", "--porcelain", "--untracked-files=all"],
+            //
+            // `-z`: NUL-terminated records with paths emitted raw
+            // rather than the default quoted-and-C-escaped form. The
+            // unadorned `--porcelain` format quotes a path containing
+            // an unusual character (a literal `"`, a `\`, non-ASCII
+            // bytes under `core.quotepath`) using git's own C-style
+            // escaping, which `parse_status_records` would otherwise
+            // have to re-implement byte-for-byte to undo correctly --
+            // `-z` sidesteps that entirely by never escaping in the
+            // first place.
+            &["status", "--porcelain", "--untracked-files=all", "-z"],
         )?;
-        Ok(out.lines().filter_map(parse_status_line).collect())
+        Ok(parse_status_records(&out))
     }
 
     fn diff(&self, workspace: &Path, path: Option<&str>) -> Result<String, GitError> {
@@ -211,32 +221,43 @@ impl GitPort for SystemGit {
     }
 }
 
-/// Parses one `git status --porcelain` line.
+/// Parses the NUL-terminated records produced by `git status --porcelain
+/// --untracked-files=all -z`.
 ///
-/// The format is two status characters, a space, then the path. Paths
-/// with unusual characters are quoted by git, and renames appear as
-/// `old -> new`; both are handled here rather than left to produce
-/// nonsense paths.
-fn parse_status_line(line: &str) -> Option<ChangedFile> {
-    if line.len() < 4 {
-        return None;
+/// Each record is `XY PATH\0`, except a rename or copy (a status
+/// containing `R` or `C`), which is two consecutive records: the new
+/// path, then the path it came from. `-z` reverses the usual `old ->
+/// new` arrow direction and drops the ` -> ` separator entirely in
+/// favor of the second NUL-terminated field (see `git-status(1)`'s own
+/// docs on `-z`) -- that second field is not needed here (the new path
+/// is what a reviewer wants to open, same as before), so it is consumed
+/// and dropped rather than left to be misread as its own record.
+///
+/// Paths are never quoted or C-escaped in this format, which is the
+/// whole reason `changed_files` asks for it over plain `--porcelain`:
+/// nothing here has to re-implement git's own quoting rules to undo
+/// them.
+fn parse_status_records(output: &str) -> Vec<ChangedFile> {
+    let mut fields = output.split('\0').filter(|f| !f.is_empty());
+    let mut changed = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.len() < 4 {
+            continue;
+        }
+        let (status, rest) = field.split_at(2);
+        let path = rest.trim_start();
+        if path.is_empty() {
+            continue;
+        }
+        if status.contains('R') || status.contains('C') {
+            fields.next();
+        }
+        changed.push(ChangedFile {
+            status: status.to_owned(),
+            path: path.to_owned(),
+        });
     }
-    let (status, rest) = line.split_at(2);
-    let path = rest.trim_start();
-    // A rename reports both names; the new one is what a reviewer wants
-    // to open.
-    let path = match path.split_once(" -> ") {
-        Some((_old, new)) => new,
-        None => path,
-    };
-    let path = path.trim_matches('"');
-    if path.is_empty() {
-        return None;
-    }
-    Some(ChangedFile {
-        status: status.to_owned(),
-        path: path.to_owned(),
-    })
+    changed
 }
 
 #[cfg(test)]
@@ -246,42 +267,63 @@ mod tests {
     #[test]
     fn a_modified_file_parses() {
         assert_eq!(
-            parse_status_line(" M src/lib.rs"),
-            Some(ChangedFile {
+            parse_status_records(" M src/lib.rs\0"),
+            vec![ChangedFile {
                 status: " M".to_owned(),
                 path: "src/lib.rs".to_owned()
-            })
+            }]
         );
     }
 
     #[test]
     fn an_untracked_file_parses() {
         assert_eq!(
-            parse_status_line("?? new.txt").map(|c| c.path),
-            Some("new.txt".to_owned())
+            parse_status_records("?? new.txt\0")
+                .into_iter()
+                .map(|c| c.path)
+                .collect::<Vec<_>>(),
+            vec!["new.txt".to_owned()]
         );
     }
 
     #[test]
     fn a_rename_reports_the_new_path() {
+        // `-z` reverses the arrow: the *new* path comes first, the old
+        // path second, as its own NUL-terminated field rather than
+        // joined by " -> ".
         assert_eq!(
-            parse_status_line("R  old.rs -> new.rs").map(|c| c.path),
-            Some("new.rs".to_owned())
+            parse_status_records("R  new.rs\0old.rs\0")
+                .into_iter()
+                .map(|c| c.path)
+                .collect::<Vec<_>>(),
+            vec!["new.rs".to_owned()]
         );
     }
 
     #[test]
-    fn a_quoted_path_is_unquoted() {
+    fn a_path_containing_a_literal_quote_is_not_mangled() {
+        // The exact defect `-z` exists to avoid: plain `--porcelain`
+        // would render this file's name as the C-escaped
+        // `"say \"hi\".txt"`, and trimming a leading/trailing `"` off
+        // that (the old approach) leaves the literal backslashes in the
+        // path instead of the real `"` character. `-z` never escapes at
+        // all, so the raw quote comes straight through.
         assert_eq!(
-            parse_status_line("?? \"file with spaces.txt\"").map(|c| c.path),
-            Some("file with spaces.txt".to_owned())
+            parse_status_records("?? say \"hi\".txt\0")
+                .into_iter()
+                .map(|c| c.path)
+                .collect::<Vec<_>>(),
+            vec!["say \"hi\".txt".to_owned()]
         );
     }
 
     #[test]
-    fn junk_lines_are_skipped_rather_than_producing_empty_paths() {
-        for line in ["", "M", "   "] {
-            assert_eq!(parse_status_line(line), None, "`{line}` should not parse");
+    fn junk_records_are_skipped_rather_than_producing_empty_paths() {
+        for record in ["", "M", "   "] {
+            assert!(
+                parse_status_records(record).is_empty(),
+                "`{record}` should not parse"
+            );
         }
     }
 
@@ -290,16 +332,36 @@ mod tests {
         // The two columns mean different things; collapsing them would
         // lose information the diff view uses.
         assert_eq!(
-            parse_status_line("M  a.rs").map(|c| c.status),
-            Some("M ".to_owned())
+            parse_status_records("M  a.rs\0")
+                .into_iter()
+                .map(|c| c.status)
+                .collect::<Vec<_>>(),
+            vec!["M ".to_owned()]
         );
         assert_eq!(
-            parse_status_line(" M a.rs").map(|c| c.status),
-            Some(" M".to_owned())
+            parse_status_records(" M a.rs\0")
+                .into_iter()
+                .map(|c| c.status)
+                .collect::<Vec<_>>(),
+            vec![" M".to_owned()]
         );
         assert_eq!(
-            parse_status_line("MM a.rs").map(|c| c.status),
-            Some("MM".to_owned())
+            parse_status_records("MM a.rs\0")
+                .into_iter()
+                .map(|c| c.status)
+                .collect::<Vec<_>>(),
+            vec!["MM".to_owned()]
+        );
+    }
+
+    #[test]
+    fn multiple_records_in_one_stream_all_parse() {
+        assert_eq!(
+            parse_status_records("M  a.rs\0?? b.txt\0")
+                .into_iter()
+                .map(|c| c.path)
+                .collect::<Vec<_>>(),
+            vec!["a.rs".to_owned(), "b.txt".to_owned()]
         );
     }
 

@@ -146,6 +146,10 @@ where
         "ensure_session is idempotent",
         ensure_session_is_idempotent(new_store().await).await,
     );
+    report.record(
+        "a session message's URL is pinned to the base URL it was appended with",
+        session_message_urls_pin_to_write_time_base_url(new_store().await).await,
+    );
     report.record("session state round-trips", session_state_round_trips(new_store().await).await);
     report.record(
         "a recovery record round-trips and clears",
@@ -456,6 +460,44 @@ async fn ensure_session_is_idempotent(store: Arc<dyn Store>) -> Check {
         record.messages.len() == 1,
         "ensure_session discarded history: {} messages left",
         record.messages.len()
+    );
+    Ok(())
+}
+
+/// A later append using a different base URL — simulating a second request
+/// on a shared session arriving with a different `Host` header — must not
+/// retroactively rewrite the URL of a message an earlier append already
+/// issued under a different base URL.
+async fn session_message_urls_pin_to_write_time_base_url(store: Arc<dyn Store>) -> Check {
+    let session_id = SessionId::new();
+    store
+        .append_session_messages(session_id, "http://first.example", vec![Message::user("one")])
+        .await
+        .map_err(|e| e.to_string())?;
+    store
+        .append_session_messages(session_id, "http://second.example", vec![Message::user("two")])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let record = store
+        .get_session(session_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("the session vanished after being appended to")?;
+    ensure!(
+        record.session.history.len() == 2,
+        "expected 2 history entries, found {}",
+        record.session.history.len()
+    );
+    ensure!(
+        record.session.history[0].starts_with("http://first.example/"),
+        "the first message's URL was retroactively rewritten to a later base URL: {}",
+        record.session.history[0]
+    );
+    ensure!(
+        record.session.history[1].starts_with("http://second.example/"),
+        "the second message's URL did not use the base URL it was appended with: {}",
+        record.session.history[1]
     );
     Ok(())
 }

@@ -61,12 +61,22 @@ pub fn call(name: &str, args: &[FormulaValue]) -> Result<FormulaValue> {
         "slice" => {
             check_args_range(name, args, 2, 3)?;
             let s = args[0].to_display_string();
-            let start = args[1].as_number().map_or(0, |n| n as usize).min(s.len());
+            let chars: Vec<char> = s.chars().collect();
+            let start = args[1]
+                .as_number()
+                .map_or(0, |n| n as usize)
+                .min(chars.len());
             let end = args
                 .get(2)
                 .and_then(FormulaValue::as_number)
-                .map_or(s.len(), |n| (n as usize).min(s.len()));
-            Ok(FormulaValue::String(s[start..end].to_string()))
+                .map_or(chars.len(), |n| (n as usize).min(chars.len()));
+            if start > end {
+                return Err(formula_err(
+                    name,
+                    &format!("slice start ({start}) must be <= end ({end})"),
+                ));
+            }
+            Ok(FormulaValue::String(chars[start..end].iter().collect()))
         }
         "contains" => {
             check_args(name, args, 2)?;
@@ -410,6 +420,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fn_slice_basic() {
+        assert_eq!(
+            call_ok(
+                "slice",
+                vec![
+                    FormulaValue::String("hello world".to_string()),
+                    FormulaValue::Number(0.0),
+                    FormulaValue::Number(5.0),
+                ]
+            ),
+            FormulaValue::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_slice_multibyte_char_boundary() {
+        // "héllo": h=0, é=1, l=2, l=3, o=4 in char positions, but 'é' is a
+        // two-byte UTF-8 sequence, so byte index 2 falls mid-character.
+        // A byte-based slice would panic; a char-based slice must not.
+        let result = call_ok(
+            "slice",
+            vec![
+                FormulaValue::String("héllo".to_string()),
+                FormulaValue::Number(1.0),
+                FormulaValue::Number(2.0),
+            ],
+        );
+        assert_eq!(result, FormulaValue::String("é".to_string()));
+    }
+
     // ── Numeric functions ───────────────────────────────────────────────
 
     #[test]
@@ -567,5 +608,20 @@ mod tests {
     #[test]
     fn type_mismatch() {
         assert!(call("abs", &[FormulaValue::String("not a number".to_string())]).is_err());
+    }
+
+    #[test]
+    fn fn_slice_reversed_range_errors() {
+        // Length-11 string; start > end must return an error instead of
+        // panicking on a reversed/invalid range.
+        let result = call(
+            "slice",
+            &[
+                FormulaValue::String("hello world".to_string()),
+                FormulaValue::Number(5.0),
+                FormulaValue::Number(1.0),
+            ],
+        );
+        assert!(result.is_err());
     }
 }

@@ -118,9 +118,30 @@ fn rusty_sqlite_err(e: rusty_sqlite::Error) -> SearchError {
     SearchError::Backend(BoxError::new(e))
 }
 
+/// Validates an index name against an allow-list charset before it's ever
+/// spliced into a filesystem path (`create_index`/`delete_index` both join
+/// it into `<dir>/<name>.sqlite3`). Without this, a name like `../../etc`
+/// would let a caller escape the configured data directory entirely - so
+/// ASCII alphanumerics, `_`, and `-` are the only characters allowed, same
+/// restriction as a typical filesystem-safe slug.
+fn validate_index_name(name: &str) -> Result<()> {
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Ok(())
+    } else {
+        Err(SearchError::InvalidSchema(format!(
+            "index name `{name}` must be non-empty and contain only ASCII letters, digits, `_`, or `-`"
+        )))
+    }
+}
+
 #[async_trait]
 impl SearchBackend for SqliteFts5Backend {
     async fn create_index(&self, name: &str, schema: CoreSchema) -> Result<()> {
+        validate_index_name(name)?;
         let mut indices = self.indices.write().await;
         if indices.contains_key(name) {
             return Err(SearchError::IndexAlreadyExists(name.to_string()));
@@ -161,6 +182,7 @@ impl SearchBackend for SqliteFts5Backend {
     }
 
     async fn delete_index(&self, name: &str) -> Result<()> {
+        validate_index_name(name)?;
         let mut indices = self.indices.write().await;
         indices
             .remove(name)
@@ -420,6 +442,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "a"));
+    }
+
+    #[tokio::test]
+    async fn create_index_rejects_path_traversal_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SqliteFts5Backend::on_disk(dir.path());
+        let escape_path = dir.path().join("../evil.sqlite3");
+
+        let err = backend
+            .create_index("../evil", articles_schema())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SearchError::InvalidSchema(_)));
+        assert!(
+            !escape_path.exists(),
+            "create_index must not write outside the configured data directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_index_rejects_path_traversal_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SqliteFts5Backend::on_disk(dir.path());
+
+        let err = backend.delete_index("../evil").await.unwrap_err();
+        assert!(matches!(err, SearchError::InvalidSchema(_)));
     }
 
     #[tokio::test]

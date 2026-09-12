@@ -15,6 +15,14 @@
 //! it here is the same "interpret, don't print" rule applied to the
 //! daemon's own pattern matching, not a new dependency.
 
+/// A sane ceiling on either terminal dimension. `vt100::Screen` is a
+/// dense 2D grid of cells, so an unclamped, client-supplied `u16`
+/// (`SessionResize` carries the value straight from the wire) would
+/// drive an allocation of up to 65535 x 65535 cells -- gigabytes for one
+/// resize. No real terminal is anywhere near this large; it is
+/// generous headroom, not a realistic size.
+const MAX_TERMINAL_DIM: u16 = 500;
+
 /// Feeds a session's raw output through a `vt100` screen and renders the
 /// current screen as plain text on demand.
 pub struct ScreenWatcher {
@@ -34,8 +42,13 @@ impl ScreenWatcher {
         self.parser.process(bytes);
     }
 
+    /// Clamped to [`MAX_TERMINAL_DIM`] in each dimension: a `vt100`
+    /// screen is a dense 2D cell grid, so an unclamped client-supplied
+    /// size drives an uncapped allocation.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(rows, cols);
+        self.parser
+            .screen_mut()
+            .set_size(rows.min(MAX_TERMINAL_DIM), cols.min(MAX_TERMINAL_DIM));
     }
 
     /// The current screen, rendered as plain text -- ANSI already
@@ -61,5 +74,17 @@ mod tests {
         // wrong; vt100 places each write at its real screen position.
         assert!(watcher.text().contains("back"));
         assert!(watcher.text().contains("Nano"));
+    }
+
+    #[test]
+    fn resize_clamps_an_out_of_range_size_instead_of_allocating_it() {
+        // A `SessionResize` request carries client-supplied `u16`s
+        // straight off the wire; feeding 65535x65535 through unclamped
+        // would drive a multi-gigabyte `vt100` grid allocation.
+        let mut watcher = ScreenWatcher::new(5, 40);
+        watcher.resize(65535, 65535);
+        let (rows, cols) = watcher.parser.screen().size();
+        assert_eq!(rows, MAX_TERMINAL_DIM);
+        assert_eq!(cols, MAX_TERMINAL_DIM);
     }
 }

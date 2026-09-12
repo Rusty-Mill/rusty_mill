@@ -14,15 +14,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use nexus_remote::{ForgeUri, RemoteClient, SshForgeUri};
+use nexus_remote::{ForgeUri, RemoteClient, RemoteClientError, SshForgeUri};
+use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 
 use crate::invoker::{IpcInvoker, IpcInvokerError};
 
-/// Hard ceiling on the spawn-and-handshake handshake. SSH's own
-/// connection setup adds latency; this bound is generous to tolerate
-/// slow networks while still failing fast on a hung child.
+/// Hard ceiling on the spawn-and-handshake round trip: enforced by
+/// [`connect_and_handshake`], which every [`build_remote_runtime_ssh`]
+/// call races against this bound. SSH's own connection setup adds
+/// latency; this bound is generous to tolerate slow networks while
+/// still failing fast on a hung child.
 pub const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors raised by the remote-runtime factories.
@@ -40,6 +44,18 @@ pub enum RemoteRuntimeError {
     /// e.g. the OS denied piped stdio.
     #[error("ssh child stdio handles missing after spawn")]
     MissingStdio,
+    /// The connect handshake didn't complete within the bound.
+    /// Most commonly: `ssh` is stuck on an interactive prompt (e.g. an
+    /// unknown host-key confirmation) it will never receive input for
+    /// on the piped stdio, or the network path is black-holing
+    /// packets after the process spawned successfully.
+    #[error("ssh connect handshake exceeded {0:?}")]
+    ConnectTimeout(Duration),
+    /// The handshake round trip completed but the remote side
+    /// reported an error (JSON-RPC error / transport failure) rather
+    /// than hanging.
+    #[error("ssh connect handshake failed: {0}")]
+    Handshake(#[source] RemoteClientError),
 }
 
 /// A handle that keeps the underlying transport alive for the lifetime
@@ -163,6 +179,46 @@ where
     RemoteRuntime { client, transport }
 }
 
+/// Round-trip a throwaway `event_subscribe` + `event_unsubscribe`
+/// against `client`, bounded by `timeout`.
+///
+/// A spawned `ssh` process (or an opened socket) tells us nothing
+/// about whether the remote side is actually answering — `ssh` can
+/// sit forever on an interactive host-key prompt it'll never receive
+/// input for, or a network path can black-hole every packet after the
+/// TCP handshake. `event_subscribe`/`event_unsubscribe` are
+/// protocol-level methods every `nexus-remote` server answers
+/// unconditionally (no plugin required), so a successful round trip
+/// is proof the transport is live end-to-end.
+///
+/// # Errors
+/// - [`RemoteRuntimeError::ConnectTimeout`] if `timeout` elapses
+///   before the round trip completes.
+/// - [`RemoteRuntimeError::Handshake`] if the round trip completes
+///   but the server (or transport) reports an error.
+async fn connect_and_handshake(
+    client: &RemoteClient,
+    timeout: Duration,
+) -> Result<(), RemoteRuntimeError> {
+    let probe = async {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let id = client
+            .subscribe(
+                "__nexus_bootstrap_connect_probe__",
+                json!({"kind": "custom_exact", "type_id": "__nexus_bootstrap_connect_probe__"}),
+                tx,
+            )
+            .await?;
+        client.unsubscribe(&id).await?;
+        Ok::<(), RemoteClientError>(())
+    };
+    match tokio::time::timeout(timeout, probe).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(RemoteRuntimeError::Handshake(e)),
+        Err(_elapsed) => Err(RemoteRuntimeError::ConnectTimeout(timeout)),
+    }
+}
+
 /// Build a remote runtime by spawning `ssh user@host -- nexus serve
 /// --forge-path /path --stdio` and wiring its stdio into a
 /// [`RemoteClient`].
@@ -171,13 +227,21 @@ where
 /// authentication prompts / banner / error messages reach the user's
 /// terminal directly.
 ///
+/// The connect + handshake round trip (see [`connect_and_handshake`])
+/// is bounded by [`SSH_CONNECT_TIMEOUT`]; a hung `ssh` is killed and
+/// reaped rather than left running past the deadline.
+///
 /// # Errors
 /// - [`RemoteRuntimeError::NotSshUri`] if the URI isn't `ssh://`.
 /// - [`RemoteRuntimeError::Spawn`] if `ssh` couldn't be exec'd
 ///   (usually because the binary isn't on `$PATH`).
 /// - [`RemoteRuntimeError::MissingStdio`] if the OS refused to give
 ///   us piped stdio.
-pub fn build_remote_runtime_ssh(uri: &ForgeUri) -> Result<RemoteRuntime> {
+/// - [`RemoteRuntimeError::ConnectTimeout`] if the handshake didn't
+///   complete within [`SSH_CONNECT_TIMEOUT`].
+/// - [`RemoteRuntimeError::Handshake`] if the handshake round trip
+///   failed outright (rather than hanging).
+pub async fn build_remote_runtime_ssh(uri: &ForgeUri) -> Result<RemoteRuntime> {
     let ForgeUri::Ssh(ssh) = uri;
     let mut cmd = build_ssh_command(ssh);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -200,13 +264,22 @@ pub fn build_remote_runtime_ssh(uri: &ForgeUri) -> Result<RemoteRuntime> {
         .ok_or(RemoteRuntimeError::MissingStdio)
         .context("ssh stdout handle")?;
 
-    let guard = SshTransportGuard { child: Some(child) };
     let writer_boxed: Box<dyn AsyncWrite + Unpin + Send> = Box::new(stdin);
-    Ok(build_remote_runtime_over_pipes(
-        stdout,
-        writer_boxed,
-        Box::new(guard),
-    ))
+    let client = Arc::new(RemoteClient::new(stdout, writer_boxed));
+
+    if let Err(e) = connect_and_handshake(&client, SSH_CONNECT_TIMEOUT).await {
+        // Handshake failed or timed out — kill + reap the child so a
+        // wedged `ssh` doesn't leak past this call.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(e).context("ssh connect handshake");
+    }
+
+    let guard = SshTransportGuard { child: Some(child) };
+    Ok(RemoteRuntime {
+        client,
+        transport: Box::new(guard),
+    })
 }
 
 /// Build the `tokio::process::Command` that spawns `ssh` against the
@@ -319,5 +392,38 @@ mod tests {
         let c = build_ssh_command(&ssh(None, "host", None, "/srv/forge"));
         let a = argv(&c);
         assert!(a.contains(&"-T".to_string()), "argv: {a:?}");
+    }
+
+    /// Regression for the round-4 review finding: `SSH_CONNECT_TIMEOUT`
+    /// was declared but never referenced anywhere in the crate, so a
+    /// peer that spawns fine but never answers the connect handshake
+    /// (host-key prompt, black-holed network, …) hung the caller
+    /// forever instead of failing fast at the documented ceiling.
+    ///
+    /// Wires `connect_and_handshake` to one half of a duplex pair
+    /// whose peer never reads or responds, with a short
+    /// test-configured timeout override, and asserts the attempt
+    /// fails fast with `ConnectTimeout` instead of hanging.
+    #[tokio::test]
+    async fn connect_handshake_times_out_on_a_silent_peer() {
+        let (client_writer, _server_reader) = tokio::io::duplex(1024);
+        let (_server_writer, client_reader) = tokio::io::duplex(1024);
+        let writer_boxed: Box<dyn AsyncWrite + Unpin + Send> = Box::new(client_writer);
+        let client = RemoteClient::new(client_reader, writer_boxed);
+
+        let short_timeout = Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let result = connect_and_handshake(&client, short_timeout).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect handshake did not fail fast: waited {elapsed:?}"
+        );
+        match result {
+            Err(RemoteRuntimeError::ConnectTimeout(d)) => assert_eq!(d, short_timeout),
+            Ok(()) => panic!("expected a timeout error, got Ok"),
+            Err(other) => panic!("expected ConnectTimeout, got: {other}"),
+        }
     }
 }

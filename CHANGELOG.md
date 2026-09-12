@@ -152,6 +152,36 @@ Removed / Fixed / Security, newest first.
   warning and passes instead of failing CI outright. A full sweep is
   unaffected (thousands of tests always exist there).
 ### Fixed
+- 36 correctness/security/reliability findings from a fourth `/codex-build`
+  review (`CODEX-MONOREPO-REVIEW-2026-09-12-round4.md`), covering the
+  remaining, previously-untouched sub-crates of eight large product
+  families (`rusty_search`, `rusty_meshed`, `rusty_yirp`, `rusty_adk`,
+  `rusty_agent_gateway`, `rusty_key`, `rusty_provider`, and the `nexus`
+  microkernel's remaining subsystems) plus six standalone families no
+  prior round touched at all (`rusty_hister`'s real implementation,
+  `rusty_a2a`/`rusty_acp`, `rusty_json`/`rusty_serde`, `nexus-rush`/
+  `nexus-bootstrap`/`nexus-vt`/`nexus-editor`) — each with a regression
+  test that fails pre-fix and passes post-fix (see the review's own
+  **Disposition** section for the one-line outcome of every finding).
+  Highlights: `rusty_key`'s `--gateway` mode no longer binds `0.0.0.0`,
+  runs unauthenticated by default, or skips the ApprovalGate other
+  front-ends require — closing a path where any LAN webpage could drive
+  the agent's bash/file tools with zero human-in-the-loop approval;
+  `rusty_a2a`'s webhook SSRF protection no longer has a TOCTOU
+  DNS-rebinding gap (delivery now pins to the exact validated address);
+  `nexus-formats`' Notion zip importer no longer vulnerable to Zip Slip;
+  `nexus-git`'s `AutoCommitter` no longer silently finalizes an unresolved
+  merge conflict with conflict-marker text baked into history;
+  `rusty_adk`'s advertised `transfer_to_agent` multi-agent delegation —
+  previously fully wired-looking but completely dead — now actually
+  invokes the target sub-agent; `rp-providers`' Gemini adapter no longer
+  leaks its API key into client-facing error responses on ordinary
+  network flakiness; and three more unbounded-recursion/allocation
+  hostile-input DoS bugs closed (`nexus-rush`'s glob matcher and shell
+  parser, `rusty_json`'s hand-rolled parser), the same bug classes prior
+  rounds already fixed elsewhere in this workspace.
+
+### Fixed
 - 40 correctness/security/reliability findings from a third `/codex-build`
   review (`CODEX-MONOREPO-REVIEW-2026-09-12-round3.md`), across 14 crate
   families neither prior review round touched: `nexus-ai`/`nexus-ai-runtime`/

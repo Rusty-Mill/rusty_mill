@@ -47,6 +47,15 @@ use platform::process::{Child, Command, Stdio};
 use platform::pty::{Pty, PtyMaster};
 use platform::term::WinSize;
 
+/// A sane ceiling on either terminal dimension in [`PtySession::resize`].
+/// A `SessionResize` request can carry a client-supplied `u16` straight
+/// off the wire, and both PTY backends allocate a screen buffer
+/// proportional to it, so an unclamped value is an easy way to demand a
+/// gigabyte-scale allocation for one resize. No real terminal is
+/// anywhere near this large; it is generous headroom, not a realistic
+/// size.
+const MAX_TERMINAL_DIM: u16 = 500;
+
 /// A terminal size. Mirrors `platform::term::WinSize` so callers do not
 /// need to depend on the platform crate directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,9 +200,16 @@ impl PtySession {
         Ok(())
     }
 
-    /// Tells the terminal it has been resized.
+    /// Tells the terminal it has been resized. Each dimension is
+    /// clamped to [`MAX_TERMINAL_DIM`]: `size` may carry a client-
+    /// supplied value straight off the wire, and the PTY backends
+    /// allocate a screen buffer proportional to it.
     pub fn resize(&self, size: TerminalSize) -> io::Result<()> {
-        self.inner.master.resize(size.into()).map_err(to_io)
+        let clamped = TerminalSize {
+            rows: size.rows.min(MAX_TERMINAL_DIM),
+            cols: size.cols.min(MAX_TERMINAL_DIM),
+        };
+        self.inner.master.resize(clamped.into()).map_err(to_io)
     }
 
     /// Waits for the process to exit and returns its exit code.
@@ -413,6 +429,26 @@ mod tests {
         assert!(
             output.contains("50 200"),
             "a resize must reach the hosted process, got: {output:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resize_clamps_an_out_of_range_size_instead_of_allocating_it() {
+        // A `SessionResize` request carries client-supplied `u16`s
+        // straight off the wire; an unclamped 65535x65535 would ask the
+        // PTY backend to allocate a screen buffer that large.
+        let session = PtySession::spawn(sh("sleep 0.2; stty size")).expect("spawn");
+        session
+            .resize(TerminalSize {
+                rows: 65535,
+                cols: 65535,
+            })
+            .expect("resize");
+        let output = String::from_utf8_lossy(&read_to_end(&session, 4096)).into_owned();
+        assert!(
+            output.contains(&format!("{MAX_TERMINAL_DIM} {MAX_TERMINAL_DIM}")),
+            "an out-of-range resize must be clamped to {MAX_TERMINAL_DIM}, got: {output:?}"
         );
     }
 

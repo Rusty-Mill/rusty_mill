@@ -44,7 +44,8 @@ async fn main() -> Result<()> {
         #[cfg(feature = "gateway")]
         {
             let port = std::env::var("RUSTYKEYS_GATEWAY_PORT").unwrap_or_else(|_| "3000".into());
-            let addr = format!("0.0.0.0:{port}");
+            let host_override = std::env::var("RUSTYKEYS_GATEWAY_HOST").ok();
+            let addr = gateway_bind_addr(host_override.as_deref(), &port);
             eprintln!("rusty-keys gateway listening on {addr}");
             return rk_app::gateway::serve(config, model, &addr).await;
         }
@@ -522,5 +523,31 @@ fn print_git(config: &Config, args: &[&str]) {
             }
         }
         Err(e) => eprintln!("git failed: {e}"),
+    }
+}
+
+/// Resolve the gateway's bind address. `host_override` (from
+/// `RUSTYKEYS_GATEWAY_HOST`) wins when present; otherwise the gateway binds
+/// to loopback only, so `--gateway` is never network-exposed by accident
+/// (round-4 finding 1a) — an operator who wants it reachable from the
+/// network must opt in explicitly.
+#[cfg(feature = "gateway")]
+fn gateway_bind_addr(host_override: Option<&str>, port: &str) -> String {
+    let host = host_override.unwrap_or("127.0.0.1");
+    format!("{host}:{port}")
+}
+
+#[cfg(all(test, feature = "gateway"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_bind_addr_defaults_to_loopback() {
+        assert_eq!(gateway_bind_addr(None, "3000"), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn gateway_bind_addr_honors_explicit_host_override() {
+        assert_eq!(gateway_bind_addr(Some("0.0.0.0"), "3000"), "0.0.0.0:3000");
     }
 }

@@ -16,6 +16,10 @@ use super::{base64, inflate, png};
 const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
 /// Cap on decompressed/raw pixel bytes.
 const MAX_DECODED: usize = 16 * 1024 * 1024;
+/// Per-axis dimension cap mirroring `sixel.rs`'s `MAX_DIM`, bounding the
+/// half-block render loop against a narrow-but-extremely-long (or the
+/// reverse) image regardless of total pixel or byte count.
+const MAX_DIM: usize = 2000;
 
 /// An in-flight (possibly chunked) Kitty transmission. Control keys come from
 /// the first chunk; later chunks carry only `m` plus more payload.
@@ -132,6 +136,13 @@ fn render(t: &Transmission, g: &mut Grid) -> bool {
         },
         _ => return false,
     };
+    // Per-axis dimension cap (mirrors `sixel.rs`'s `MAX_DIM`), covering both
+    // raw and PNG-relayed images: bounds the half-block render loop against a
+    // narrow-but-extremely-long (or the reverse) image regardless of raw byte
+    // or total pixel count.
+    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
+        return false;
+    }
     g.render_image(w, h, &pixels);
     true
 }
@@ -144,7 +155,7 @@ fn raw_pixels(
     h: usize,
     ch: usize,
 ) -> Option<(usize, usize, Vec<Option<u32>>)> {
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
         return None;
     }
     let count = w.checked_mul(h)?;

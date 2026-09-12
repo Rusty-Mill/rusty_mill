@@ -161,12 +161,14 @@ fn parse_seq<'de, V>(parser: &mut Parser<'de>, visitor: V) -> Result<V::Value, E
 where
     V: Visitor<'de>,
 {
+    parser.enter_nesting()?;
     parser.bump(); // opening `[`
     let value = visitor.visit_seq(CollAccess {
         parser,
         first: true,
     })?;
     parser.skip_whitespace();
+    parser.exit_nesting();
     match parser.bump() {
         Some(b']') => Ok(value),
         None => Err(parser.error_eof("unexpected end of input in array")),
@@ -178,12 +180,14 @@ fn parse_map<'de, V>(parser: &mut Parser<'de>, visitor: V) -> Result<V::Value, E
 where
     V: Visitor<'de>,
 {
+    parser.enter_nesting()?;
     parser.bump(); // opening `{`
     let value = visitor.visit_map(CollAccess {
         parser,
         first: true,
     })?;
     parser.skip_whitespace();
+    parser.exit_nesting();
     match parser.bump() {
         Some(b'}') => Ok(value),
         None => Err(parser.error_eof("unexpected end of input in object")),
@@ -810,5 +814,14 @@ mod tests {
             values,
             alloc::vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
         );
+    }
+
+    #[test]
+    fn rejects_deeply_nested_arrays_instead_of_overflowing_the_stack() {
+        // 200_000 levels of nesting is far past MAX_NESTING_DEPTH but far
+        // below anything that would itself overflow the test harness's
+        // stack -- the parser must bail with an `Err` well before that.
+        let json = alloc::format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
+        assert!(from_str::<Value>(&json).is_err());
     }
 }

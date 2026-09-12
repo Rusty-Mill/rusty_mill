@@ -67,6 +67,7 @@ fn consume_literal(parser: &mut Parser, literal: &str) -> Result<(), Error> {
 }
 
 fn parse_array(parser: &mut Parser) -> Result<Value, Error> {
+    parser.enter_nesting()?;
     parser.bump(); // opening `[`
     let mut items = Vec::new();
     let mut first = true;
@@ -90,6 +91,7 @@ fn parse_array(parser: &mut Parser) -> Result<Value, Error> {
         items.push(parse_value(parser)?);
     }
     parser.skip_whitespace();
+    parser.exit_nesting();
     match parser.bump() {
         Some(b']') => Ok(Value::Array(items)),
         None => Err(parser.error_eof("unexpected end of input in array")),
@@ -98,6 +100,7 @@ fn parse_array(parser: &mut Parser) -> Result<Value, Error> {
 }
 
 fn parse_object(parser: &mut Parser) -> Result<Value, Error> {
+    parser.enter_nesting()?;
     parser.bump(); // opening `{`
     let mut map = Map::new();
     let mut first = true;
@@ -133,6 +136,7 @@ fn parse_object(parser: &mut Parser) -> Result<Value, Error> {
         map.insert(key, value);
     }
     parser.skip_whitespace();
+    parser.exit_nesting();
     match parser.bump() {
         Some(b'}') => Ok(Value::Object(map)),
         None => Err(parser.error_eof("unexpected end of input in object")),
@@ -364,5 +368,14 @@ mod tests {
         let json = to_json_string(&original);
         let back = parse_str(&json).unwrap();
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn rejects_deeply_nested_arrays_instead_of_overflowing_the_stack() {
+        // 200_000 levels of nesting is far past MAX_NESTING_DEPTH but far
+        // below anything that would itself overflow the test harness's
+        // stack -- the parser must bail with an `Err` well before that.
+        let json = alloc::format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
+        assert!(parse_str(&json).is_err());
     }
 }

@@ -1695,3 +1695,26 @@ fn crate_attribute_retargets_generated_enum_code() {
         r#"{"Rectangle":{"w":1.0,"h":2.0}}"#,
     );
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Cfg {
+    limit: u8,
+}
+
+#[test]
+fn out_of_range_integer_errors_instead_of_truncating() {
+    let err = json::from_str::<Cfg>(r#"{"limit":300}"#).unwrap_err();
+    assert!(err.to_string().contains("out of range"));
+}
+
+#[test]
+fn negative_value_into_an_unsigned_field_is_an_error() {
+    let err = json::from_str::<u32>("-1").unwrap_err();
+    assert!(err.to_string().contains("out of range"));
+}
+
+#[test]
+fn over_i32_max_value_into_an_i32_field_is_an_error() {
+    let err = json::from_str::<i32>("2147483648").unwrap_err();
+    assert!(err.to_string().contains("out of range"));
+}

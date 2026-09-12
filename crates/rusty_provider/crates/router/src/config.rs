@@ -467,6 +467,13 @@ pub struct McpConfig {
     /// forever.
     #[serde(default)]
     pub max_reconnect_attempts: Option<u32>,
+    /// Per-call timeout, in seconds, for `tools/list` and `tools/call`
+    /// requests forwarded to an upstream -- same convention as
+    /// `ProviderConfig::timeout_secs`/`ModerationConfig::timeout_secs`/
+    /// `WebSearchConfig::timeout_secs`, so a stuck upstream can't hang a
+    /// client-facing request forever.
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 fn default_mcp_path() -> String {
@@ -479,6 +486,10 @@ fn default_mcp_reconnect_backoff_secs() -> u64 {
 
 fn default_mcp_reconnect_backoff_max_secs() -> u64 {
     60
+}
+
+fn default_mcp_timeout_secs() -> u64 {
+    30
 }
 
 /// One upstream MCP server to proxy. Its tools appear in this router's own
@@ -1995,6 +2006,35 @@ mod tests {
         assert_eq!(mcp.reconnect_backoff_secs, 2);
         assert_eq!(mcp.reconnect_backoff_max_secs, 120);
         assert_eq!(mcp.max_reconnect_attempts, Some(5));
+    }
+
+    #[test]
+    fn mcp_timeout_secs_defaults_to_30_when_unset() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [mcp]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.mcp.unwrap().timeout_secs, 30);
+    }
+
+    #[test]
+    fn mcp_timeout_secs_is_honored_when_set() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [mcp]
+            enabled = true
+            timeout_secs = 5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.mcp.unwrap().timeout_secs, 5);
     }
 
     // --- persistence backend -----------------------------------------------------

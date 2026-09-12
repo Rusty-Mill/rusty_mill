@@ -394,7 +394,7 @@ fn apply_insert_text(
     let block = tree
         .get_mut(block_id)
         .ok_or(EditorError::BlockNotFound(block_id))?;
-    if pos > block.content.len() {
+    if pos > block.content.len() || !block.content.is_char_boundary(pos) {
         return Err(EditorError::InvalidRange {
             block_id,
             start: pos,
@@ -420,7 +420,10 @@ fn apply_delete_text(
         .get_mut(block_id)
         .ok_or(EditorError::BlockNotFound(block_id))?;
     let end = pos.saturating_add(deleted_text.len());
-    if end > block.content.len() {
+    if end > block.content.len()
+        || !block.content.is_char_boundary(pos)
+        || !block.content.is_char_boundary(end)
+    {
         return Err(EditorError::InvalidRange {
             block_id,
             start: pos,
@@ -750,6 +753,42 @@ mod tests {
             block_id: id,
             pos: 100,
             text: "x".into(),
+            pre_annotations: vec![],
+        };
+        assert!(matches!(
+            op.apply(&mut tree),
+            Err(EditorError::InvalidRange { .. })
+        ));
+    }
+
+    #[test]
+    fn insert_text_char_boundary_misaligned_pos_errors() {
+        // "héllo": h=byte 0, é=bytes 1..3 (2-byte UTF-8), l=byte 3, ...
+        // pos 2 falls inside the 'é' sequence and is not a char boundary.
+        let mut tree = BlockTree::new(DocumentMetadata::empty());
+        let id = tree.insert(para("héllo"), None, 0).unwrap();
+        let op = Operation::InsertText {
+            block_id: id,
+            pos: 2,
+            text: "x".into(),
+            pre_annotations: vec![],
+        };
+        assert!(matches!(
+            op.apply(&mut tree),
+            Err(EditorError::InvalidRange { .. })
+        ));
+    }
+
+    #[test]
+    fn delete_text_char_boundary_misaligned_pos_errors() {
+        // Same misaligned byte offset used as both `pos` and `end` via a
+        // zero-length deleted_text so only the boundary check can reject it.
+        let mut tree = BlockTree::new(DocumentMetadata::empty());
+        let id = tree.insert(para("héllo"), None, 0).unwrap();
+        let op = Operation::DeleteText {
+            block_id: id,
+            pos: 2,
+            deleted_text: String::new(),
             pre_annotations: vec![],
         };
         assert!(matches!(

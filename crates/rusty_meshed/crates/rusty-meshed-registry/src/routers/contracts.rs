@@ -13,7 +13,9 @@ use crate::models::schemas::DataContractCreate;
 use crate::models::DataContract;
 use rusty_http::StatusCode;
 use rusty_request::Json;
-use rusty_sqlite::rusqlite::{params, Connection, OptionalExtension};
+use rusty_sqlite::rusqlite::{
+    params, Connection, Error as SqliteError, ErrorCode, OptionalExtension,
+};
 use std::sync::Arc;
 
 fn parse_id(req: &Request, name: &str) -> Option<i64> {
@@ -100,6 +102,45 @@ fn fetch_contract(
         },
     )
     .optional()
+}
+
+/// Whether `err` is a SQLite `UNIQUE` constraint violation -- the
+/// signature a duplicate `output_port_id` INSERT produces once it
+/// races past the `fetch_contract` pre-check above (two requests
+/// whose own pre-checks both passed before either inserted).
+fn is_unique_violation(err: &SqliteError) -> bool {
+    err.sqlite_error_code() == Some(ErrorCode::ConstraintViolation)
+}
+
+/// Inserts a new contract row, converting a `UNIQUE`-constraint
+/// violation on `output_port_id` into the documented 409 (REG-079)
+/// instead of a generic 500 -- the DB-level backstop for the race the
+/// `fetch_contract` pre-check alone can't close.
+fn insert_contract_or_conflict(
+    conn: &Connection,
+    port_id: i64,
+    create: &DataContractCreate,
+    quality_json: &str,
+) -> Result<(), Response> {
+    match conn.execute(
+        "INSERT INTO data_contracts (output_port_id, schema_ref, owner, slo_freshness_seconds, slo_completeness_pct, quality_assertions) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            port_id,
+            create.schema_ref,
+            create.owner,
+            create.slo_freshness_seconds,
+            create.slo_completeness_pct,
+            quality_json,
+        ],
+    ) {
+        Ok(_) => Ok(()),
+        Err(err) if is_unique_violation(&err) => Err(detail_error(
+            StatusCode::CONFLICT,
+            format!("Output port {port_id} already has a registered data contract."),
+        )),
+        Err(_) => Err(internal_error()),
+    }
 }
 
 /// Decodes `quality_assertions` from its JSON-encoded storage form back
@@ -226,20 +267,8 @@ async fn create(state: Arc<AppState>, req: Request) -> Response {
     // REG-080: stored as a JSON-encoded string.
     let quality_json =
         rusty_json::to_string(&create.quality_assertions).unwrap_or_else(|_| "[]".to_string());
-    let inserted = conn.execute(
-        "INSERT INTO data_contracts (output_port_id, schema_ref, owner, slo_freshness_seconds, slo_completeness_pct, quality_assertions) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            port_id,
-            create.schema_ref,
-            create.owner,
-            create.slo_freshness_seconds,
-            create.slo_completeness_pct,
-            quality_json,
-        ],
-    );
-    if inserted.is_err() {
-        return internal_error();
+    if let Err(response) = insert_contract_or_conflict(&conn, port_id, &create, &quality_json) {
+        return response;
     }
 
     let contract = DataContract {
@@ -497,6 +526,55 @@ mod tests {
         assert_eq!(
             json.get("detail").unwrap().as_str(),
             Some(format!("Output port {port_id} already has a registered data contract.").as_str())
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn create_race_window_only_one_contract_persists_and_conflict_is_returned() {
+        // Simulates the race the finding describes: two requests whose
+        // own `fetch_contract` pre-checks both observe `None` before
+        // either inserts (REG-079's documented Trigger). `create()`
+        // can't be driven through that exact interleaving
+        // deterministically, so this exercises the same
+        // `insert_contract_or_conflict` call `create()` makes once its
+        // pre-check passes -- the DB-level `UNIQUE` index is what
+        // actually closes the race, not the pre-check alone.
+        let state = temp_state();
+        let (_product_id, port_id) = create_product_and_port(&state);
+        let conn = state.get_session().unwrap();
+        let create = DataContractCreate::new(
+            "orders.created-value:1",
+            "team-a",
+            60,
+            99.5,
+            vec!["no nulls in order_id".to_string()],
+        )
+        .unwrap();
+        let quality_json =
+            rusty_json::to_string(&create.quality_assertions).unwrap_or_else(|_| "[]".to_string());
+
+        let first = insert_contract_or_conflict(&conn, port_id, &create, &quality_json);
+        assert!(
+            first.is_ok(),
+            "the first insert for a novel output port must succeed"
+        );
+
+        let second = insert_contract_or_conflict(&conn, port_id, &create, &quality_json);
+        let Err(response) = second else {
+            panic!("a second insert for the identical output port must be rejected");
+        };
+        assert_eq!(response.status, StatusCode::CONFLICT);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM data_contracts WHERE output_port_id = ?1",
+                params![port_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the rejected duplicate insert must not have persisted a second row"
         );
     }
 

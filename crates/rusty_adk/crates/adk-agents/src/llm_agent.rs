@@ -475,6 +475,8 @@ impl Agent for LlmAgent {
                     || !tool_event.long_running_tool_ids.is_empty()
                     || !tool_event.actions.requested_tool_confirmations.is_empty();
 
+                let transfer_target = tool_event.actions.transfer_to_agent.clone();
+
                 // Record the exchange so the next model request sees it.
                 ctx.with_session_mut(|session| {
                     session.events.push(
@@ -488,6 +490,34 @@ impl Agent for LlmAgent {
                 });
 
                 yield Self::stamp(&ctx, tool_event);
+
+                // A transfer request hands the rest of this invocation to
+                // the named sub-agent instead of ending the stream here: its
+                // events become a continuation of this run.
+                if let Some(target_name) = transfer_target {
+                    match self.find_agent(&target_name) {
+                        Some(target) => {
+                            let mut stream = target.run(&ctx);
+                            while let Some(event) = stream.next().await {
+                                let event = event?;
+                                yield event;
+                            }
+                        }
+                        None => {
+                            let mut error_event = Event::new(&ctx.invocation_id, &self.name)
+                                .with_error(
+                                    "AGENT_NOT_FOUND",
+                                    format!(
+                                        "agent '{}' requested transfer to unknown sub-agent '{}'",
+                                        self.name, target_name
+                                    ),
+                                );
+                            error_event.turn_complete = Some(true);
+                            yield Self::stamp(&ctx, error_event);
+                        }
+                    }
+                    return;
+                }
 
                 if stop_here || ctx.should_end_invocation() {
                     break;
