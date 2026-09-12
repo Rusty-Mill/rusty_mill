@@ -21,6 +21,17 @@ Removed / Fixed / Security, newest first.
   (bootstrap/scope/split; two open decision-requests for the
   search/indexing engine and the JS-rendering crawler approach) — see
   `crates/rusty_hister/docs/PROJECT-STATUS.md`.
+### Changed
+- CI's `plan` job no longer treats every root `Cargo.toml` edit as an
+  automatic full workspace sweep. A new classifier
+  (`.github/scripts/cargo_toml_diff.py`) distinguishes a pure
+  `[workspace.members]` addition (new, independent crates; nothing else in
+  the file touched — the common case when bootstrapping a new crate
+  cluster, e.g. PR #170) from anything with broader blast radius (a
+  `[workspace.dependencies]` version bump, a removed/renamed member, a
+  `[profile]` edit); only the latter still forces `full=true`. A pure
+  addition now goes through the normal affected-crates path instead,
+  scoping CI to just the new crates.
 ### Fixed
 - CI's full-workspace-sweep trigger pattern now includes `.config/`
   (`.config/nextest.toml` lives outside every crate directory, so a
