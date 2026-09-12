@@ -332,9 +332,19 @@ jobs:
       # and must run every selected test, so no `--partition` flag is
       # added there -- passing one unconditionally would silently run only
       # a third of a scoped PR's own tests.
+      #
+      # `--no-tests=warn`: nextest's default (`fail`) treats "the selected
+      # packages collectively have zero tests" as a CI failure (exit 4, "no
+      # tests to run") -- correct for a full sweep, where that can only mean
+      # something broke test collection, but wrong for a scoped PR run that
+      # only touches brand-new skeleton crates with no tests yet (PR #170's
+      # rusty_hister bootstrap hit exactly this: 8 crates, 0 tests, CI red
+      # for having nothing to test). `warn` still logs it -- so a crate that
+      # silently loses all its tests some other way isn't swept under the
+      # rug -- without failing a PR whose whole point is scaffolding.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
 
       # Runs once per OS, not once per shard -- it's cheap and not worth
       # partitioning, and nextest's own partitioning above doesn't cover a
