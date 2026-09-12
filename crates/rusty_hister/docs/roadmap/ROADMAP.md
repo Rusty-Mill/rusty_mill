@@ -96,11 +96,30 @@ independent of ADR-0002/0003)
       `CrawlURL`'s own queue mechanics (bulk insert, per-URL status
       updates, the `ForEach*` streaming iterators, job stats) are a
       separate, not-yet-started increment.
+- [x] `rusty-hister-model` (`CrawlURL` queue-mechanics query layer):
+      `crawl.go`'s remaining URL-level helpers as `CrawlURL` associated
+      functions — `insert_if_not_exists`/`bulk_insert`/
+      `mark_done_and_enqueue_links`/`insert_done`/`next_pending`/
+      `update_status`/`mark_failed`/`reset_in_progress`/`count_by_status`/
+      `count`/`list_failed`/`list`/`job_stats` (Go:
+      `InsertCrawlURLIfNotExists`/`BulkInsertCrawlURLs`/
+      `MarkCrawlURLDoneAndEnqueueLinks`/`InsertDoneCrawlURL`/
+      `GetNextPendingCrawlURL`/`UpdateCrawlURLStatus`/`MarkCrawlURLFailed`/
+      `ResetInProgressCrawlURLs`/`CountCrawlURLsByStatus`/`CountCrawlURLs`/
+      `ForEachFailedCrawlURL(WithMessage)`/`ForEachCrawlURL(ByStatus)`/
+      `GetCrawlJobStats`). Done — 16 new unit tests (81 total in the
+      crate), clippy/fmt clean. Go's private `insertCrawlURLs` helper
+      becomes this file's own private `insert_crawl_urls`, shared by
+      `CrawlJob::create_with_urls` and `CrawlURL::bulk_insert`. The two
+      `ForEach*` streaming iterators become `list_failed`/`list` returning
+      a `Vec<Self>` instead of taking a row-streaming callback — a
+      deliberate simplification, not a dropped capability. `crawl.go`'s
+      query layer is now fully ported.
 - `rusty-hister-model` (remaining query layer): the domain operations the
   other two Go model files build on top of their tables — `history.go`'s
   search/pin/timeline queries and `user.go`'s auth/token helpers —
   separate increments from the embedding queue, `WebSession`,
-  `DocumentVersion`, and `CrawlJob` above, same split
+  `DocumentVersion`, and `crawl.go` above, same split
   `rusty-hister-extractor` used (mechanism before concrete extractors).
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive

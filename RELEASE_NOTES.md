@@ -13,6 +13,59 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's CrawlURL queue mechanics
+**2026-09-12** · branch [`claude/hister-phase1-model-crawl-url`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-crawl-url)
+
+Eighth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, `rusty-hister-model`'s schema, and its embedding-queue,
+`WebSession`, `DocumentVersion`, and `CrawlJob`-lifecycle query layers,
+previous entries below). Completes `crawl.go`'s query layer: this covers
+the 13 `CrawlURL` functions the previous increment deliberately left out
+(that file has 20 functions total; 7 operate on `CrawlJob` itself, 13 on
+`CrawlURL`).
+
+- **Added:** `CrawlURL::insert_if_not_exists`/`bulk_insert`/
+  `mark_done_and_enqueue_links`/`insert_done`/`next_pending`/
+  `update_status`/`mark_failed`/`reset_in_progress`/`count_by_status`/
+  `count`/`list_failed`/`list`/`job_stats` — a port of
+  `InsertCrawlURLIfNotExists`/`BulkInsertCrawlURLs`/
+  `MarkCrawlURLDoneAndEnqueueLinks`/`InsertDoneCrawlURL`/
+  `GetNextPendingCrawlURL`/`UpdateCrawlURLStatus`/`MarkCrawlURLFailed`/
+  `ResetInProgressCrawlURLs`/`CountCrawlURLsByStatus`/`CountCrawlURLs`/
+  `ForEachFailedCrawlURL(WithMessage)`/`ForEachCrawlURL(ByStatus)`/
+  `GetCrawlJobStats`.
+- **Changed:** Go's private `insertCrawlURLs` helper (shared by
+  `CreateNamedCrawlJobWithURLs` and `BulkInsertCrawlURLs`) becomes this
+  file's own private `insert_crawl_urls`, now reused by
+  `CrawlJob::create_with_urls` (refactored to call it) and the new
+  `CrawlURL::bulk_insert` alike — a second real call site, same "no
+  abstraction before two call sites" discipline as `crate::placeholders`.
+- **Added:** a new `CrawlJobStats` plain struct (pending/in_progress/
+  done/failed/skipped counts), returned by `job_stats`, which aggregates
+  via `SELECT status, COUNT(*) ... GROUP BY status` and decodes each row's
+  `status` straight into `CrawlUrlStatus` through `Row::get_by_name`.
+- **Changed (deliberate simplification, not a dropped capability):** Go's
+  two `ForEach*` streaming-callback iterators (`ForEachFailedCrawlURL(WithMessage)`/
+  `ForEachCrawlURL(ByStatus)`) become `list_failed`/`list`, returning a
+  `Vec<Self>` instead of taking a callback — this crate has no other
+  streaming-query precedent, and nothing yet calls these at a scale where
+  collecting matters. Every row Go's callback would see is still
+  reachable, just batched.
+- **Unchanged scope:** `history.go`'s search/pin/timeline queries and
+  `user.go`'s auth/token helpers remain separate, not-yet-started
+  increments — `rusty-hister-model`'s query layer now covers four of its
+  six domain files (`embedding.go`, `session.go`, `version.go`, `crawl.go`).
+- **Added:** 16 new unit tests (81 total in the crate) — dedup on
+  `insert_if_not_exists`/`bulk_insert` against already-queued URLs, a
+  no-op empty-list `bulk_insert`, `mark_done_and_enqueue_links` updating
+  the source row and queuing its child links, `insert_done`'s
+  update-or-insert branches, `next_pending`'s oldest-first FIFO order and
+  empty-queue `None`, `update_status`/`mark_failed`'s status/error/
+  error_code writes, `reset_in_progress` moving only in-progress rows back
+  to pending, `count_by_status`/`count`/`list_failed`/`list` reflecting
+  the queue accurately, and `job_stats` aggregating correctly including
+  the all-zero case for a job with no URLs. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's CrawlJob lifecycle query layer
 **2026-09-12** · branch [`claude/hister-phase1-model-crawl-job`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-crawl-job)
 
