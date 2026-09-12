@@ -47,13 +47,21 @@ independent of ADR-0002/0003)
       `indexer_versions` read path are not reproduced, since they only
       matter for opening a pre-existing Hister-Go-created database file —
       a still-open, broader question, see PROJECT-STATUS.md's open items.
-- `rusty-hister-model` (query layer): the domain operations each Go model
-  file builds on top of its table — the embedding-queue state machine
-  (`EnqueueEmbeddingJob`/`ClaimNextEmbeddingJob`/...), `history.go`'s
+- [x] `rusty-hister-model` (embedding-queue query layer): `embedding.go`'s
+      state machine as `EmbeddingJob` associated functions —
+      `enqueue`/`claim_next`/`complete`/`retry`/`fail`/`release`/
+      `in_progress_exists`/`delete`/`reset_in_progress`. Done — 18 new unit
+      tests (43 total in the crate), clippy/fmt clean. `enqueue`/`retry`/
+      `release` need a `CASE`-based `SET` the portable query builder can't
+      express, so those three use raw SQL rendered dialect-portably via
+      `Engine::dialect().placeholder(..)`; untested against real Postgres
+      (no instance available), see PROJECT-STATUS.md's open items.
+- `rusty-hister-model` (remaining query layer): the domain operations the
+  other six Go model files build on top of their tables — `history.go`'s
   search/pin/timeline queries, `user.go`'s auth/token helpers,
   `CreateCrawlJob`/`CreateNamedCrawlJobWithURLs`, `WebSession`'s
   lookup/expiry helpers, and `SaveDocumentVersion`/`GetDocumentVersionsUntil`
-  — a separate increment from the schema above, the same split
+  — separate increments from the embedding queue above, same split
   `rusty-hister-extractor` used (mechanism before concrete extractors).
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive

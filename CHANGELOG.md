@@ -9,6 +9,21 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s embedding-queue query layer (`rusty_hister`'s
+  Phase 1, continued): `EmbeddingJob::{enqueue, claim_next, complete,
+  retry, fail, release, in_progress_exists, delete, reset_in_progress}`,
+  a Rust port of `embedding.go`'s dedup/claim/retry state machine
+  (capability inventory §5.9). `enqueue`'s `ON CONFLICT` upsert and
+  `retry`/`release`'s `CASE`-based `SET` clauses need SQL the portable
+  query builder can't express (`rusty_db::Update::set` only ever assigns
+  a plain `Value`, never an `Expr`), so those three drop to
+  `Engine::connect()`/raw `Connection::execute`, built dialect-portably
+  by rendering placeholders through `Engine::dialect().placeholder(..)`
+  rather than hardcoding `?`/`$N` — untested against real Postgres (no
+  instance available in this environment), same risk profile as the
+  schema increment's untested `POSTGRES_MIGRATIONS`. The other six model
+  files' query-layer helpers remain a separate, not-yet-started
+  increment. 18 new unit tests (43 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s schema (`rusty_hister`'s Phase 1, continued): the
   nine `#[derive(Mapped)]` types from Hister's `automigrate()` list
   (capability inventory §7.2 — `User`, `Link`, `History`, `HistoryLink`,
