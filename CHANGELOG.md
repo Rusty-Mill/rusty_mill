@@ -9,6 +9,26 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-model`'s `history.go` query layer (`rusty_hister`'s Phase 1,
+  continued): `Link::get_or_create`/`History::get_or_create` and
+  `HistoryLink::{delete_by_user_and_url, delete_by_user_query_and_url,
+  set_pinned, record_selection, urls_by_query, latest_items, timestamps,
+  suggest_query}`, a Rust port of `history.go`'s search/pin/timeline
+  helpers (`GetOrCreateLink`/`GetOrCreateHistory`/`DeleteHistoryURL`/
+  `DeleteHistoryItem`/`SetHistoryPinned`/`UpdateHistory`/
+  `GetURLsByQuery`/`GetLatestHistoryItems(Filtered(ByDate))`/
+  `GetHistoryItemTimestampsFilteredByDate`/`GetQuerySuggestion`).
+  `latest_items` collapses Go's three `GetLatestHistoryItems*`
+  argument-forwarding wrappers (different defaults, not different
+  behaviors) into one function taking a `HistoryItemsFilter`. Discovered
+  while porting: Hister's `CommonFields.DeletedAt` is a plain
+  `*time.Time`, not GORM's own `gorm.DeletedAt` sentinel type, so GORM
+  never actually soft-deletes `History`/`Link`/`HistoryLink` rows in Go —
+  `delete_by_user_and_url`/`delete_by_user_query_and_url` accordingly use
+  a real `DELETE` rather than this crate's `#[table(soft_delete)]`
+  column, matching Go's actual behavior and avoiding breaking
+  `history_links`' non-partial unique index on re-recorded history. 22
+  new unit tests (106 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s `CrawlURL` queue-mechanics query layer
   (`rusty_hister`'s Phase 1, continued): `CrawlURL::{insert_if_not_exists,
   bulk_insert, mark_done_and_enqueue_links, insert_done, next_pending,

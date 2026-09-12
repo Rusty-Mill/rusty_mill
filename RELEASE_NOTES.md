@@ -13,6 +13,73 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-model's history.go query layer
+**2026-09-12** · branch [`claude/hister-phase1-model-history`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-history)
+
+Ninth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, `rusty-hister-model`'s schema, and its embedding-queue,
+`WebSession`, `DocumentVersion`, and `crawl.go` query layers, previous
+entries below). Completes `history.go`'s query layer — the tables backing
+Hister's search-history tracking (query <-> URL associations) and rows
+1.16-1.18's history/pin features.
+
+- **Added:** `Link::get_or_create`/`History::get_or_create` — a port of
+  `GetOrCreateLink`/`GetOrCreateHistory`, reusing the database-assigned-
+  surrogate-key recipe `WebSession::create` introduced.
+- **Added:** `HistoryLink::{delete_by_user_and_url,
+  delete_by_user_query_and_url, set_pinned, record_selection,
+  urls_by_query, latest_items, timestamps, suggest_query}` — a port of
+  `DeleteHistoryURL`/`DeleteHistoryItem`/`SetHistoryPinned`/
+  `UpdateHistory`/`GetURLsByQuery`/
+  `GetLatestHistoryItems(Filtered(ByDate))`/
+  `GetHistoryItemTimestampsFilteredByDate`/`GetQuerySuggestion`.
+  `record_selection`, not `update`, avoids colliding with
+  `#[derive(Mapped)]`'s own generated `update()` instance method (the
+  same reasoning behind `WebSession::refresh`).
+- **Changed (deliberate simplification, not a dropped capability):**
+  `latest_items` collapses Go's three `GetLatestHistoryItems`/
+  `GetLatestHistoryItemsFiltered`/`GetLatestHistoryItemsFilteredByDate`
+  wrappers into one function taking a `HistoryItemsFilter` struct — those
+  three Go functions are pure argument-forwarding wrappers around the
+  same query with different defaults (Go has no default parameters), not
+  three different behaviors; every Go call site's arguments map onto a
+  field, with `Default` covering what the simpler wrappers omitted.
+- **Discovered while porting:** Hister's `CommonFields.DeletedAt` is a
+  plain `*time.Time`, not GORM's own `gorm.DeletedAt` sentinel type, so
+  GORM never actually recognizes any Hister model as soft-delete-enabled
+  — every `DB.Delete(...)` call in `history.go` is a genuine hard delete,
+  and the `deleted_at` column is otherwise inert. `delete_by_user_and_url`/
+  `delete_by_user_query_and_url` accordingly issue a real `DELETE`
+  instead of this crate's `#[table(soft_delete)]` column (which would
+  also have broken re-recording history for the same URL afterward,
+  since `history_links`' unique index on `(history_id, link_id)` isn't
+  scoped to active rows). `get_or_create`'s lookups and the existing-row
+  checks in `record_selection`/`set_pinned`'s pin branch still use
+  `Mapped::not_deleted_filter()` where Go's own queries are `.Model(&T{})`-
+  based — a no-op today since nothing ever sets the column, but correct
+  if a real soft-delete path is added later. Flagged in
+  `docs/PROJECT-STATUS.md` as an open item: whether the soft-delete
+  columns on this schema's other four affected models should be removed
+  (closer to Go's actual behavior) or kept as a deliberate Rust-side
+  improvement isn't decided yet.
+- **Unchanged scope:** `user.go`'s auth/token helpers remain the one
+  not-yet-started increment in `rusty-hister-model`'s query layer —
+  it'll need its own sovereignty-loop pass for a password-hashing
+  approach before implementation starts.
+- **Added:** 22 new unit tests (106 total in the crate) — `get_or_create`
+  create/reuse/title-update/empty-title-noop behavior for both `Link` and
+  `History`; `record_selection`'s count-increment and missing-data
+  rejection; `set_pinned`'s create/pin-existing/unpin/missing-data
+  behavior; `delete_by_user_and_url`/`delete_by_user_query_and_url`'s
+  cross-query vs. single-query scope; `urls_by_query`'s pinned-then-count
+  ranking; `latest_items`' newest-first ordering, case-insensitive
+  title/URL filtering (with literal SQL-wildcard handling, mirroring
+  Hister's own `TestGetLatestHistoryItemsFiltered`), stable
+  `(updated_at, id)` keyset pagination (mirroring
+  `TestGetLatestHistoryItemsFilteredByDateUsesStableCursor`), and date-range
+  filtering; `timestamps`' matching-row count; `suggest_query`'s
+  prefix-match ranking and no-match `None`. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's CrawlURL queue mechanics
 **2026-09-12** · branch [`claude/hister-phase1-model-crawl-url`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-crawl-url)
 

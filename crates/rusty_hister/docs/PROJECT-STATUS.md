@@ -1,7 +1,7 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s `CrawlURL`
-queue-mechanics query layer).
+Last updated: 2026-09-12 (Phase 1: `rusty-hister-model`'s `history.go`
+query layer).
 
 ## Where this is
 
@@ -89,14 +89,33 @@ licensing policy) are settled. Three crates now have real implementation:
   `Vec<Self>` instead of taking a row-streaming callback — a deliberate
   simplification, not a dropped capability: every row Go's callback would
   see is still reachable, just batched. `crawl.go`'s full query layer is
-  now ported; the remaining two domain files' query-layer helpers
-  (`history.go`'s search/pin/timeline queries, `user.go`'s auth helpers)
-  are still a separate, not-yet-started increment.
+  now ported. **`history.go`'s query layer is ported too**:
+  `Link::get_or_create`/`History::get_or_create` (Go: `GetOrCreateLink`/
+  `GetOrCreateHistory`) and `HistoryLink::{delete_by_user_and_url,
+  delete_by_user_query_and_url, set_pinned, record_selection,
+  urls_by_query, latest_items, timestamps, suggest_query}` (Go:
+  `DeleteHistoryURL`/`DeleteHistoryItem`/`SetHistoryPinned`/
+  `UpdateHistory`/`GetURLsByQuery`/`GetLatestHistoryItems(Filtered(ByDate))`/
+  `GetHistoryItemTimestampsFilteredByDate`/`GetQuerySuggestion`).
+  `latest_items` collapses Go's three `GetLatestHistoryItems*` wrappers
+  (pure argument-forwarding with different defaults, not different
+  behaviors) into one function taking a `HistoryItemsFilter`. A notable
+  discovery while porting this file: Hister's `CommonFields.DeletedAt` is
+  a plain `*time.Time`, not GORM's own `gorm.DeletedAt` sentinel type, so
+  GORM never actually soft-deletes `History`/`Link`/`HistoryLink` rows —
+  `DeleteHistoryURL`/`DeleteHistoryItem` are genuine hard deletes in Go,
+  so `delete_by_user_and_url`/`delete_by_user_query_and_url` reproduce
+  that with a real `DELETE`, not a soft-delete `UPDATE` (which would also
+  have broken re-recording history for the same URL, since
+  `history_links`' unique index isn't scoped to active rows) — see this
+  update's new open item below for what this means for the rest of the
+  schema's `#[table(soft_delete)]` columns. Only `user.go`'s auth/token
+  helpers remain unstarted in this crate's query layer.
 
 All three have unit tests, `clippy`, and `fmt` clean. Still not started:
-the concrete extractors, `rusty-hister-model`'s `history.go`/`user.go`
-query-layer helpers, and `rusty-hister-crawler`'s `http` backend (the rest
-of Phase 1 per `docs/roadmap/ROADMAP.md`).
+the concrete extractors, `rusty-hister-model`'s `user.go` query-layer
+helpers, and `rusty-hister-crawler`'s `http` backend (the rest of Phase 1
+per `docs/roadmap/ROADMAP.md`).
 
 ## v1 scope (per the kickoff brief, recorded here as the sign-off of record
 for this scope reduction — see `docs/decisions/
@@ -179,12 +198,29 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
   decide the format, so this item is unaffected by that increment landing.
 - `rusty-hister-model`'s remaining query-layer helpers (the domain
   operations each Go model file builds on top of its table — the
-  embedding-queue state machine, `WebSession`, `DocumentVersion`, and all
-  of `crawl.go` (`CrawlJob`'s lifecycle and `CrawlURL`'s queue mechanics)
-  are now done, see the crate status table below — leaving `history.go`
-  search/pin/timeline queries and `user.go` auth helpers) — deliberately
+  embedding-queue state machine, `WebSession`, `DocumentVersion`,
+  `crawl.go`, and now `history.go` are all done, see the crate status
+  table below — leaving only `user.go` auth helpers) — deliberately
   deferred past the schema increment, the same split `rusty-hister-extractor`
   used (mechanism before concrete extractors); not yet started.
+- **Hister's `CommonFields.DeletedAt` is not GORM's `gorm.DeletedAt`
+  sentinel type** — it's a plain, GORM-invisible `*time.Time` — discovered
+  while porting `history.go`'s `DeleteHistoryURL`/`DeleteHistoryItem`
+  (2026-09-12): GORM never treats any Hister model as soft-delete-enabled,
+  so every `DB.Delete(...)` call in the Go codebase is a genuine hard
+  delete, and the `deleted_at` column is otherwise inert. This crate's
+  schema increment gave `History`/`Link`/`HistoryLink`/`User`/
+  `DocumentVersion` a `#[table(soft_delete)] deleted: bool` column
+  (mirroring `CommonFields`' *shape*, before this nuance was known) that
+  Go's own equivalent operations never actually set — `history.go`'s
+  query layer only relies on it for read-side filtering
+  (`Mapped::not_deleted_filter()`, a no-op today since nothing sets it),
+  and its two delete functions use a real `DELETE` instead. Whether the
+  soft-delete columns on the other four affected models should be
+  removed entirely (closer to Go's real behavior) or kept as a
+  deliberate, documented Rust-side improvement is not yet decided —
+  flagged for explicit sign-off rather than resolved unilaterally, since
+  it's a schema change on already-merged tables.
 - Postgres path for `rusty-hister-model`'s raw-SQL query-layer functions
   (`EmbeddingJob::enqueue`/`retry`/`release`, `WebSession::create`,
   `DocumentVersion::save`, `CrawlJob::create_with_urls`,
@@ -205,7 +241,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 | Crate | Status |
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
-| `rusty-hister-model` | **In progress** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), and all of `crawl.go` — `CrawlJob`'s own lifecycle (7 functions, including the atomic job-plus-initial-queue creation with id-collision retry) plus `CrawlURL`'s queue mechanics (12 functions: bulk insert/dedup, per-URL status transitions, `list`/`list_failed` in place of Go's streaming iterators, and `job_stats`) — done; only `history.go`/`user.go`'s query helpers remain unstarted. 81 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`'s create/get/update_status/list/delete and `create_with_urls`'s id-collision-retry/empty-URL-list-rejection behavior, and `CrawlURL`'s insert/dedup/mark-done-and-enqueue-links/status-transition/count/list/job-stats behavior), clippy/fmt clean. |
+| `rusty-hister-model` | **In progress** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), and all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions) — done; only `user.go`'s query helpers remain unstarted. 106 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, and `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior), clippy/fmt clean. |
 | `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging). 18 unit tests, clippy/fmt clean. No concrete extractors yet. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |

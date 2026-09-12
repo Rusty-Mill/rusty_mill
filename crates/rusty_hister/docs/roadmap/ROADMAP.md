@@ -115,12 +115,32 @@ independent of ADR-0002/0003)
       a `Vec<Self>` instead of taking a row-streaming callback — a
       deliberate simplification, not a dropped capability. `crawl.go`'s
       query layer is now fully ported.
-- `rusty-hister-model` (remaining query layer): the domain operations the
-  other two Go model files build on top of their tables — `history.go`'s
-  search/pin/timeline queries and `user.go`'s auth/token helpers —
-  separate increments from the embedding queue, `WebSession`,
-  `DocumentVersion`, and `crawl.go` above, same split
-  `rusty-hister-extractor` used (mechanism before concrete extractors).
+- [x] `rusty-hister-model` (`history.go` query layer): `history.go`'s
+      search/pin/timeline helpers as `Link`/`History`/`HistoryLink`
+      associated functions — `Link::get_or_create`/`History::get_or_create`
+      and `HistoryLink::{delete_by_user_and_url,
+      delete_by_user_query_and_url, set_pinned, record_selection,
+      urls_by_query, latest_items, timestamps, suggest_query}` (Go:
+      `GetOrCreateLink`/`GetOrCreateHistory`/`DeleteHistoryURL`/
+      `DeleteHistoryItem`/`SetHistoryPinned`/`UpdateHistory`/
+      `GetURLsByQuery`/`GetLatestHistoryItems(Filtered(ByDate))`/
+      `GetHistoryItemTimestampsFilteredByDate`/`GetQuerySuggestion`). Done
+      — 22 new unit tests (106 total in the crate), clippy/fmt clean.
+      `latest_items` collapses Go's three `GetLatestHistoryItems*`
+      argument-forwarding wrappers into one function taking a
+      `HistoryItemsFilter`. Discovered while porting: Hister's
+      `CommonFields.DeletedAt` is a plain `*time.Time`, not GORM's
+      `gorm.DeletedAt`, so GORM never soft-deletes these tables in Go —
+      `delete_by_user_and_url`/`delete_by_user_query_and_url` use a real
+      `DELETE` rather than this crate's `#[table(soft_delete)]` column,
+      matching Go and avoiding breaking `history_links`' non-partial
+      unique index — see PROJECT-STATUS.md's new open item on what this
+      means for the schema's other soft-delete columns.
+- `rusty-hister-model` (remaining query layer): `user.go`'s auth/token
+  helpers — the last of the six Go model files' domain operations, same
+  split `rusty-hister-extractor` used (mechanism before concrete
+  extractors). Will need its own sovereignty-loop pass for a password-
+  hashing approach before implementation starts.
 - [x] `rusty-hister-extractor`: the chain-of-responsibility registry
       (§4.2) — `Registry::register`/`register_before` (case-insensitive
       duplicate rejection), the two-phase enrich-then-extract chain,
