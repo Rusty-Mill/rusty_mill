@@ -166,9 +166,25 @@ independent of ADR-0002/0003)
       the separate preview chain with starting-point selection, and
       `apply_configs`. Done — 18 unit tests, clippy/fmt clean. (The SDK
       contract itself, §4.1, landed with `rusty-hister-core`.)
-- `rusty-hister-extractor`: the extractors in default-chain order (§4.3),
-  starting with the ones that have existing Go test coverage (11 of 20) and
-  budgeting fresh test authorship for the other 9.
+- [x] `rusty-hister-extractor` (`JsonLdExtractor`, §4.5.5): the first of
+      the 20 built-in extractors — enrich-only, parses
+      `application/ld+json` script tags into normalized schema.org
+      metadata (`type`/`headline`), flattening `@graph`/array wrappers
+      and deep-sanitizing every non-`@`-prefixed string field. Done — 11
+      new unit tests (29 total in the crate), clippy/fmt clean. Chosen
+      first specifically because it could reuse this cluster's existing
+      `rusty_json` dependency and needed only a small, purpose-built
+      HTML-scanning/text-sanitizing helper (not a general HTML-parsing or
+      sanitizer library) — see PROJECT-STATUS.md's new open item on the
+      bigger, cross-cutting dependency decision most of the remaining 19
+      extractors will need.
+- `rusty-hister-extractor`: the remaining 19 built-in extractors in
+  default-chain order (§4.3), starting with the ones that have existing Go
+  test coverage (10 of the remaining 19) and budgeting fresh test
+  authorship for the other 9. Most need the HTML-parsing/sanitizer
+  dependency decision flagged in PROJECT-STATUS.md's open items —
+  Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a
+  separate dependency choice of their own.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of

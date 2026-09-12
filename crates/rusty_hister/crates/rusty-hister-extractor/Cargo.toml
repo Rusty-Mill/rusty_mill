@@ -10,3 +10,4 @@ publish = false
 
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
+rusty_json = { path = "../../../rusty_json" }

@@ -9,6 +9,23 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s first concrete extractor, `JsonLdExtractor`
+  (`rusty_hister`'s Phase 1, continued — capability inventory §4.5.5): a
+  Rust port of `server/extractor/extractors/jsonld/jsonld.go`,
+  enrich-only, parsing every `<script type="application/ld+json">` block
+  on a page, flattening `@graph`/array wrappers, and storing normalized
+  schema.org classification fields (`type`/`headline`) plus a deep-
+  sanitized raw node dump on the document's metadata — the two fields
+  Readability (not yet ported) doesn't already harvest from the same
+  data. Chosen as the first of the 20 built-in extractors because it
+  could reuse this cluster's existing `rusty_json` dependency for JSON
+  parsing and needed only a small, purpose-built `<script>`-block scanner
+  and tag-strip/entity-decode text sanitizer, rather than a general
+  HTML-parsing or HTML-sanitizer library — most of the remaining 19
+  extractors will need one or both, a bigger cross-cutting dependency
+  decision deliberately deferred rather than made unilaterally here
+  (flagged in `crates/rusty_hister/docs/PROJECT-STATUS.md`). 11 new unit
+  tests (29 total in the crate), clippy/fmt clean.
 - `rusty-hister-model`'s `user.go` query layer (`rusty_hister`'s Phase 1,
   continued — this completes the crate's query layer): `User::{create,
   create_oauth, delete_by_username, authenticate, get_by_token,

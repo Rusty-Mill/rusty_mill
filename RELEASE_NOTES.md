@@ -13,6 +13,54 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's first concrete extractor (JSON-LD)
+**2026-09-12** · branch [`claude/hister-phase1-extractor-jsonld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-jsonld)
+
+Eleventh Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry, and `rusty-hister-model`'s complete query layer, previous
+entries below). The first of the 20 built-in extractors (capability
+inventory §4.3-§4.5), which have been the crate's only unstarted piece
+since the registry itself landed.
+
+- **Added:** `JsonLdExtractor` (capability inventory §4.5.5) — a port of
+  `server/extractor/extractors/jsonld/jsonld.go`. Enrich-only: matches
+  any document whose HTML contains the `application/ld+json` substring,
+  parses every `<script type="application/ld+json">` block, flattens
+  `@graph`/array wrappers into a flat node list, deep-sanitizes every
+  non-`@`-prefixed string field, stores the sanitized node list as a
+  JSON string at `Metadata["jsonld"]`, and writes two classification
+  fields — `type` and `headline` — picked from whichever node's `@type`
+  best matches a priority list (`Article`, `NewsArticle`, ...,
+  `Organization`), falling back to the first node.
+- **Unchanged scope:** deliberately doesn't write `author`/`description`/
+  `image`/`published`/`modified` — Readability (not yet ported) already
+  harvests those from the same JSON-LD data plus OpenGraph/meta tags and
+  runs later in the default chain, so writing them here would just be
+  overwritten, matching Go's own comment on this.
+- **Why JSON-LD first:** chosen specifically because it could reuse this
+  cluster's existing `rusty_json` dependency for JSON parsing and needed
+  only two small, purpose-built helpers — a `<script>`-block scanner
+  (`find_json_ld_blobs`, a tiny state machine, not a DOM parser) and a
+  text sanitizer (`sanitize_text`: strip HTML tags, decode a practical
+  subset of HTML entities, trim — approximating Go's
+  `bluemonday`-backed `sanitizer.SanitizeText` without depending on it)
+  — rather than a general HTML-parsing or HTML-sanitizer library. Most
+  of the remaining 19 built-in extractors (Discourse, Reddit,
+  StackExchange, GitHub, Wikipedia, and others that parse or render real
+  page HTML) will need general HTML parsing and/or Go's HTML-vs-text
+  sanitizer-policy split for real — a cross-cutting, architecturally
+  significant dependency choice flagged in `docs/PROJECT-STATUS.md` for
+  explicit sign-off before the next extractor that actually needs it,
+  rather than picked unilaterally on this first one.
+- **Added:** 11 new unit tests (29 total in the crate) — single-node and
+  `@graph`-flattened extraction, multiple `<script>` tags with preferred-
+  type ranking, top-level array form, a malformed blob skipped while a
+  valid one survives, the `matches` substring pre-check, tag-stripping/
+  entity-decoding on the classification fields, and deep sanitization of
+  the raw node dump while preserving `@`-prefixed structural keys —
+  independently derived from reading `jsonld_test.go`'s behavior, not
+  copied, per ADR-0001's licensing policy. clippy/fmt clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-model's user.go query layer
 **2026-09-12** · branch [`claude/hister-phase1-model-user`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-model-user)
 
