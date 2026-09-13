@@ -14,6 +14,16 @@ struct User {
     name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Mapped)]
+#[table(name = "accounts")]
+struct Account {
+    #[table(primary_key)]
+    id: i64,
+    name: String,
+    #[table(redacted)]
+    password_hash: String,
+}
+
 async fn file_engine(name: &str) -> rusty_db::Result<Engine> {
     let path = std::env::temp_dir().join(format!(
         "rusty_db_audit_log_{name}_{}.sqlite3",
@@ -27,6 +37,25 @@ async fn file_engine(name: &str) -> rusty_db::Result<Engine> {
         .await?
         .execute(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            &[],
+        )
+        .await?;
+    Ok(engine)
+}
+
+async fn accounts_engine(name: &str) -> rusty_db::Result<Engine> {
+    let path = std::env::temp_dir().join(format!(
+        "rusty_db_audit_log_{name}_{}.sqlite3",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let engine = SqliteDriver::engine(&url).await?;
+    engine
+        .connect()
+        .await?
+        .execute(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, password_hash TEXT NOT NULL)",
             &[],
         )
         .await?;
@@ -169,6 +198,46 @@ async fn a_custom_audit_table_name_is_honored() -> rusty_db::Result<()> {
         .await?
         .contains(&"change_history".to_string()));
     assert_eq!(session.audit_log().await?.len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_table_redacted_column_renders_as_a_placeholder_while_others_render_verbatim(
+) -> rusty_db::Result<()> {
+    let engine = accounts_engine("redacted_column").await?;
+    let mut session = engine.session().with_audit_log();
+
+    session.add(&Account {
+        id: 1,
+        name: "ada".to_string(),
+        password_hash: "hunter2".to_string(),
+    });
+    session.commit().await?;
+
+    session.update(&Account {
+        id: 1,
+        name: "ada lovelace".to_string(),
+        password_hash: "correct horse battery staple".to_string(),
+    });
+    session.commit().await?;
+
+    let log = session.audit_log().await?;
+    assert_eq!(log.len(), 2);
+
+    // The insert: `name` (unmarked) renders in plaintext, `password_hash`
+    // (`#[table(redacted)]`) renders as the fixed placeholder instead of
+    // the real bound value.
+    assert_eq!(log[0].operation, AuditOperation::Insert);
+    assert!(log[0].params_text.contains("ada"));
+    assert!(log[0].params_text.contains("[REDACTED]"));
+    assert!(!log[0].params_text.contains("hunter2"));
+
+    // Same split holds for the update.
+    assert_eq!(log[1].operation, AuditOperation::Update);
+    assert!(log[1].params_text.contains("ada lovelace"));
+    assert!(log[1].params_text.contains("[REDACTED]"));
+    assert!(!log[1].params_text.contains("correct horse battery staple"));
 
     Ok(())
 }

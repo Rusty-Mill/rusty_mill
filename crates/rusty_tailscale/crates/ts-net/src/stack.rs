@@ -11,9 +11,12 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::time::Instant as StdInstant;
 
+use parking_lot::Mutex;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
@@ -33,6 +36,12 @@ const BACKLOG: usize = 4;
 const TAILNET_PREFIX_LEN: u8 = 10;
 /// Bound on the net→app queue depth (chunks) before we exert TCP backpressure.
 const APP_QUEUE_DEPTH: usize = 16;
+/// Cap on bytes buffered in `Conn::out` (app writes not yet accepted by
+/// smoltcp's send buffer) before `TcpStream::poll_write` applies
+/// backpressure by returning `Poll::Pending` instead of unconditionally
+/// accepting more data. Matches `SOCKET_BUFFER`: buffering more than
+/// smoltcp's own send buffer could ever drain in one go serves no purpose.
+const CONN_OUT_CAP: usize = SOCKET_BUFFER;
 
 /// A message to the stack task.
 pub(crate) enum Request {
@@ -51,7 +60,7 @@ pub(crate) enum Request {
 
 /// Spawns the stack task and returns the request sender.
 pub(crate) fn spawn(
-    inbound_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::UnboundedSender<Vec<u8>>,
 ) -> mpsc::UnboundedSender<Request> {
     let (req_tx, req_rx) = mpsc::unbounded_channel();
@@ -68,6 +77,14 @@ struct Conn {
     out: Vec<u8>,
     /// Application closed its write half; close once `out` drains.
     closing: bool,
+    /// Bytes queued for the app→net direction (mirrors `out.len()`, plus
+    /// anything already accepted from `TcpStream::poll_write` but not yet
+    /// appended to `out`). Read by `poll_write` to apply backpressure once
+    /// it reaches `CONN_OUT_CAP`.
+    out_len: Arc<AtomicUsize>,
+    /// Woken once `out_len` drops back under `CONN_OUT_CAP`, so a writer
+    /// parked in `poll_write` gets polled again.
+    write_waker: Arc<Mutex<Option<Waker>>>,
 }
 
 struct Listener {
@@ -89,14 +106,14 @@ struct Stack {
     start: StdInstant,
     /// Cloned into each `TcpStream` so the app can send `Data`/`Close`.
     req_tx: mpsc::UnboundedSender<Request>,
-    inbound_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    inbound_rx: mpsc::Receiver<Vec<u8>>,
     req_rx: mpsc::UnboundedReceiver<Request>,
 }
 
 impl Stack {
     fn new(
         req_tx: mpsc::UnboundedSender<Request>,
-        inbound_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        inbound_rx: mpsc::Receiver<Vec<u8>>,
         req_rx: mpsc::UnboundedReceiver<Request>,
         outbound_tx: mpsc::UnboundedSender<Vec<u8>>,
     ) -> Self {
@@ -252,6 +269,8 @@ impl Stack {
                 let id = self.next_id;
                 self.next_id += 1;
                 let (to_app, from_net) = mpsc::channel(APP_QUEUE_DEPTH);
+                let out_len = Arc::new(AtomicUsize::new(0));
+                let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
                 self.conns.insert(
                     id,
                     Conn {
@@ -259,6 +278,8 @@ impl Stack {
                         to_app,
                         out: Vec::new(),
                         closing: false,
+                        out_len: out_len.clone(),
+                        write_waker: write_waker.clone(),
                     },
                 );
                 self.handle_to_id.insert(handle, id);
@@ -271,6 +292,8 @@ impl Stack {
                     pos: 0,
                     peer,
                     write_closed: false,
+                    out_len,
+                    write_waker,
                 };
                 // Replace the claimed listen socket with a fresh one.
                 let replacement = self.open_listen_socket(port);
@@ -301,9 +324,17 @@ impl Stack {
                 Ok(0) => break,
                 Ok(n) => {
                     conn.out.drain(..n);
+                    conn.out_len.fetch_sub(n, Ordering::AcqRel);
                 }
                 Err(_) => break,
             }
+        }
+        // Backpressure release: wake a writer parked in `poll_write` now
+        // that there's room in `out` again.
+        if conn.out_len.load(Ordering::Acquire) < CONN_OUT_CAP
+            && let Some(waker) = conn.write_waker.lock().take()
+        {
+            waker.wake();
         }
         // Graceful close once the app has closed and everything is flushed.
         if conn.closing && conn.out.is_empty() && sock.send_queue() == 0 {
@@ -388,6 +419,13 @@ pub struct TcpStream {
     pos: usize,
     peer: SocketAddr,
     write_closed: bool,
+    /// Mirrors the stack's `Conn::out_len`; read by `poll_write` to apply
+    /// backpressure once `CONN_OUT_CAP` is reached.
+    out_len: Arc<AtomicUsize>,
+    /// Mirrors the stack's `Conn::write_waker`; registered with the current
+    /// task when `poll_write` parks so the stack can wake it once `out`
+    /// drains.
+    write_waker: Arc<Mutex<Option<Waker>>>,
 }
 
 impl TcpStream {
@@ -430,17 +468,30 @@ impl AsyncRead for TcpStream {
 impl AsyncWrite for TcpStream {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.write_closed {
             return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
         }
+        if self.out_len.load(Ordering::Acquire) >= CONN_OUT_CAP {
+            *self.write_waker.lock() = Some(cx.waker().clone());
+            // Re-check after registering the waker: the stack task may have
+            // drained `out` between the check above and registering, which
+            // would otherwise lose the wakeup.
+            if self.out_len.load(Ordering::Acquire) >= CONN_OUT_CAP {
+                return Poll::Pending;
+            }
+        }
+        let n = buf.len();
         match self.net.send(Request::Data {
             id: self.id,
             bytes: buf.to_vec(),
         }) {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Ok(()) => {
+                self.out_len.fetch_add(n, Ordering::AcqRel);
+                Poll::Ready(Ok(n))
+            }
             Err(_) => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
         }
     }
@@ -547,7 +598,7 @@ mod tests {
     /// bytes the peer sent — the whole userspace stack, exercised hermetically.
     #[tokio::test]
     async fn accepts_a_handshake_and_reads_payload() {
-        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (req_tx, req_rx) = mpsc::unbounded_channel();
         let stack = Stack::new(req_tx.clone(), inbound_rx, req_rx, outbound_tx);
@@ -562,7 +613,7 @@ mod tests {
 
         // Client SYN → expect SYN-ACK.
         inbound_tx
-            .send(tcp_segment(peer, our, 40000, 8080, 100, 0, SYN, &[]))
+            .try_send(tcp_segment(peer, our, 40000, 8080, 100, 0, SYN, &[]))
             .unwrap();
         let synack = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
             .await
@@ -574,7 +625,7 @@ mod tests {
 
         // Complete the handshake (ACK) and send a data segment.
         inbound_tx
-            .send(tcp_segment(
+            .try_send(tcp_segment(
                 peer,
                 our,
                 40000,
@@ -586,7 +637,7 @@ mod tests {
             ))
             .unwrap();
         inbound_tx
-            .send(tcp_segment(
+            .try_send(tcp_segment(
                 peer,
                 our,
                 40000,
@@ -614,5 +665,56 @@ mod tests {
         // Keep the outbound receiver alive to the end so the stack's device
         // never sees a closed channel mid-handshake.
         drop(outbound_rx);
+    }
+
+    /// Round 5: `TcpStream::poll_write` used to unconditionally accept every
+    /// write into `Conn::out` regardless of how much was already queued
+    /// there, so a fast writer against a slow/never-reading peer could grow
+    /// `out` without bound. `poll_write` now checks `out_len` against
+    /// `CONN_OUT_CAP` and applies backpressure (`Poll::Pending`, with a
+    /// registered waker) once the cap is reached, instead of always
+    /// reporting success.
+    #[test]
+    fn poll_write_backpressures_once_conn_out_cap_is_reached() {
+        let (req_tx, _req_rx) = mpsc::unbounded_channel::<Request>();
+        let (_to_app_tx, from_net) = mpsc::channel(1);
+        let out_len = Arc::new(AtomicUsize::new(0));
+        let write_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let mut stream = TcpStream {
+            id: 1,
+            net: req_tx,
+            from_net,
+            leftover: Vec::new(),
+            pos: 0,
+            peer: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            write_closed: false,
+            out_len: out_len.clone(),
+            write_waker: write_waker.clone(),
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // Filling exactly to the cap in one write is still accepted.
+        let filler = vec![0u8; CONN_OUT_CAP];
+        let poll = Pin::new(&mut stream).poll_write(&mut cx, &filler);
+        assert!(matches!(poll, Poll::Ready(Ok(n)) if n == CONN_OUT_CAP));
+        assert_eq!(out_len.load(Ordering::Acquire), CONN_OUT_CAP);
+
+        // At the cap: further writes must apply backpressure instead of
+        // unconditionally accepting more data.
+        let poll = Pin::new(&mut stream).poll_write(&mut cx, b"more");
+        assert!(
+            matches!(poll, Poll::Pending),
+            "poll_write should block once conn.out's cap is reached, not keep accepting writes"
+        );
+        assert!(
+            write_waker.lock().is_some(),
+            "a pending poll_write must register a waker so the stack can retry it"
+        );
+
+        // Once the stack task drains `out` below the cap (mirrored here by
+        // resetting `out_len`), the next write succeeds again.
+        out_len.store(0, Ordering::Release);
+        let poll = Pin::new(&mut stream).poll_write(&mut cx, b"more");
+        assert!(matches!(poll, Poll::Ready(Ok(4))));
     }
 }

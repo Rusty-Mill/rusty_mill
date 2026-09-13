@@ -126,11 +126,34 @@ fn decode_with(data: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, DecodeError> 
 
     match rem.len() {
         2 => {
-            let n = val(rem[0]) << 18 | val(rem[1]) << 12;
+            // The last of a 2-character trailing quantum only ever
+            // contributes 2 bits to the single recovered byte; RFC 4648
+            // §3.5 requires its other (unused) 4 low-order bits to be
+            // zero. A decoder that ignored them would map every value of
+            // those 4 bits to the same output byte, so multiple distinct
+            // strings would decode identically -- unacceptable for a
+            // caller that treats the base64 string itself as canonical
+            // (e.g. a content hash).
+            let last = val(rem[1]);
+            if last & 0b1111 != 0 {
+                return Err(DecodeError::NonCanonicalPadding {
+                    index: payload.len() - 1,
+                });
+            }
+            let n = val(rem[0]) << 18 | last << 12;
             out.push((n >> 16) as u8);
         }
         3 => {
-            let n = val(rem[0]) << 18 | val(rem[1]) << 12 | val(rem[2]) << 6;
+            // Same reasoning for a 3-character trailing quantum: the
+            // last character's low 2 bits never feed either recovered
+            // byte and must be zero.
+            let last = val(rem[2]);
+            if last & 0b11 != 0 {
+                return Err(DecodeError::NonCanonicalPadding {
+                    index: payload.len() - 1,
+                });
+            }
+            let n = val(rem[0]) << 18 | val(rem[1]) << 12 | last << 6;
             out.push((n >> 16) as u8);
             out.push((n >> 8) as u8);
         }
@@ -155,6 +178,13 @@ pub enum DecodeError {
     /// A `=` somewhere other than the last one or two characters, or more
     /// than two of them; `index` is the first offending position.
     MisplacedPadding { index: usize },
+    /// The final partial quantum's unused low-order bits are not zero
+    /// (RFC 4648 §3.5's canonical-encoding requirement). `index` is the
+    /// last character of the input. Accepting this silently would let
+    /// multiple distinct strings decode to the same bytes, which is
+    /// wrong for anything treating the base64 string itself as a
+    /// canonical identifier (e.g. a content hash).
+    NonCanonicalPadding { index: usize },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -170,6 +200,9 @@ impl std::fmt::Display for DecodeError {
             }
             DecodeError::MisplacedPadding { index } => {
                 write!(f, "misplaced base64 padding at index {index}")
+            }
+            DecodeError::NonCanonicalPadding { index } => {
+                write!(f, "non-canonical base64 padding bits at index {index}")
             }
         }
     }
@@ -325,6 +358,54 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_non_canonical_trailing_bits() {
+        // "AB" is a 2-character trailing quantum ('A' = 0, 'B' = 1). Only
+        // the top 2 of 'B's 6 bits feed the single recovered byte; the
+        // low 4 bits are unused padding that RFC 4648 §3.5 requires to
+        // be zero. Pre-fix, this silently decoded to `[0]` -- the same
+        // output as the canonical "AA", so two distinct strings mapped
+        // to one value.
+        assert_eq!(
+            decode_standard("AB"),
+            Err(DecodeError::NonCanonicalPadding { index: 1 })
+        );
+        assert_eq!(
+            decode_standard("AB=="),
+            Err(DecodeError::NonCanonicalPadding { index: 1 })
+        );
+        // "AAB" is a 3-character trailing quantum: the last char's low 2
+        // bits are unused and must be zero. Pre-fix this silently
+        // decoded to `[0, 0]`, identical to canonical "AAA".
+        assert_eq!(
+            decode_standard("AAB"),
+            Err(DecodeError::NonCanonicalPadding { index: 2 })
+        );
+        assert_eq!(
+            decode_standard("AAB="),
+            Err(DecodeError::NonCanonicalPadding { index: 2 })
+        );
+    }
+
+    #[test]
+    fn decode_accepts_canonical_trailing_quanta() {
+        // Same lengths as above, but with the unused low-order bits
+        // already zero -- these must keep decoding successfully.
+        assert_eq!(decode_standard("AA").unwrap(), b"\0");
+        assert_eq!(decode_standard("AA==").unwrap(), b"\0");
+        assert_eq!(decode_standard("AAA").unwrap(), b"\0\0");
+        assert_eq!(decode_standard("AAA=").unwrap(), b"\0\0");
+        // Ordinary canonical base64 continues to round-trip for every
+        // remainder length (0, 1, 2 leftover bytes).
+        for input in [&b"f"[..], &b"fo"[..], &b"foo"[..], &b"foobar"[..]] {
+            assert_eq!(decode_standard(&encode_standard(input)).unwrap(), input);
+            assert_eq!(
+                decode_url_safe(&encode_url_safe_no_pad(input)).unwrap(),
+                input
+            );
+        }
+    }
+
+    #[test]
     fn decode_round_trips_every_length_remainder_and_every_byte() {
         for input in [
             &b""[..],
@@ -369,6 +450,10 @@ mod tests {
         assert_eq!(
             DecodeError::MisplacedPadding { index: 1 }.to_string(),
             "misplaced base64 padding at index 1"
+        );
+        assert_eq!(
+            DecodeError::NonCanonicalPadding { index: 1 }.to_string(),
+            "non-canonical base64 padding bits at index 1"
         );
     }
 }

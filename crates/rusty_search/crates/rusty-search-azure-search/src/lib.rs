@@ -52,6 +52,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -126,6 +127,33 @@ impl AzureSearchBackend {
     }
 }
 
+/// Characters that must not be allowed to pass through unescaped when
+/// spliced into a single path segment of an Azure AI Search request URL:
+/// ASCII controls/space plus every character with structural meaning in a
+/// URL (`/` a path separator, `?`/`#` starting the query/fragment, `%` the
+/// escape character itself, and the remaining `gen-delims`/backslash). This
+/// keeps a caller-supplied `name`/`index` confined to exactly one path
+/// segment, so it can't introduce an extra segment, escape into the query
+/// string, or address a different index than the one already validated by
+/// `require_known`.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'{')
+    .add(b'}');
+
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
+
 fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError {
     SearchError::Backend(BoxError::new(e))
 }
@@ -186,7 +214,10 @@ impl SearchBackend for AzureSearchBackend {
         body["name"] = json!(name);
 
         let resp = json_body(
-            self.request(Method::Put, &format!("indexes/{name}"))?,
+            self.request(
+                Method::Put,
+                &format!("indexes/{}", encode_path_segment(name)),
+            )?,
             &body,
         )?
         .send()
@@ -214,7 +245,10 @@ impl SearchBackend for AzureSearchBackend {
         self.require_known(name).await?;
 
         let resp = self
-            .request(Method::Delete, &format!("indexes/{name}"))?
+            .request(
+                Method::Delete,
+                &format!("indexes/{}", encode_path_segment(name)),
+            )?
             .send()
             .await
             .map_err(backend_err)?;
@@ -246,7 +280,10 @@ impl SearchBackend for AzureSearchBackend {
             .collect();
 
         let resp = json_body(
-            self.request(Method::Post, &format!("indexes/{index}/docs/index"))?,
+            self.request(
+                Method::Post,
+                &format!("indexes/{}/docs/index", encode_path_segment(index)),
+            )?,
             &json!({ "value": value }),
         )?
         .send()
@@ -265,7 +302,10 @@ impl SearchBackend for AzureSearchBackend {
             "value": [{ "@search.action": "delete", KEY_FIELD: id }]
         });
         let resp = json_body(
-            self.request(Method::Post, &format!("indexes/{index}/docs/index"))?,
+            self.request(
+                Method::Post,
+                &format!("indexes/{}/docs/index", encode_path_segment(index)),
+            )?,
             &body,
         )?
         .send()
@@ -345,7 +385,10 @@ impl SearchBackend for AzureSearchBackend {
 impl AzureSearchBackend {
     async fn execute_search(&self, index: &str, body: &Value) -> Result<Value> {
         let resp = json_body(
-            self.request(Method::Post, &format!("indexes/{index}/docs/search"))?,
+            self.request(
+                Method::Post,
+                &format!("indexes/{}/docs/search", encode_path_segment(index)),
+            )?,
             body,
         )?
         .send()
@@ -514,6 +557,40 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SearchError::IndexAlreadyExists(name) if name == "articles"));
+    }
+
+    #[tokio::test]
+    async fn create_index_percent_encodes_a_traversal_shaped_name() {
+        // A name like "../aliases" must stay confined to a single path
+        // segment under `indexes/` and must not be able to splice `../`
+        // into the request path to address some other resource once the
+        // request URL is parsed downstream (by a proxy or by Azure
+        // itself) - the same class of bug already fixed for `delete` in
+        // the `rusty-search-elasticsearch`/`rusty-search-algolia`
+        // siblings.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "name": "../aliases" })))
+            .mount(&server)
+            .await;
+
+        let backend = AzureSearchBackend::new(server.uri(), "test-key");
+        backend
+            .create_index("../aliases", articles_schema())
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let put_req = requests
+            .iter()
+            .find(|r| r.method.as_str() == "PUT")
+            .expect("create_index request was sent");
+        // Percent-encoded: stays as one segment under `indexes/`, unlike
+        // the un-encoded "/indexes/../aliases" this would produce
+        // pre-fix, which normalizes (e.g. via the `url` crate's/a
+        // proxy's dot-segment removal) to "/aliases" - escaping the
+        // `indexes/` namespace entirely.
+        assert_eq!(put_req.url.path(), "/indexes/..%2Faliases");
     }
 
     #[tokio::test]

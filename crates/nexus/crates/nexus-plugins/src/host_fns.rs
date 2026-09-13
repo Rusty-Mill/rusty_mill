@@ -785,7 +785,7 @@ fn register_host_invoke_command(linker: &mut Linker<PluginData>) -> Result<(), P
                 // serialization / cancelled signals — the audit's R3
                 // remedy was either a serialised envelope or distinct
                 // codes; this crate ships the latter.
-                let result = match dispatcher.dispatch(&target_plugin_id, &command_id, &args) {
+                let result = match dispatcher.dispatch(&caller_plugin_id, &target_plugin_id, &command_id, &args) {
                     Ok(v) => v,
                     Err(e) => {
                         let envelope = IpcErrorEnvelope::from_ipc_error(&e);

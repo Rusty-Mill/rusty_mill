@@ -234,7 +234,9 @@ impl KernelPluginContext {
             None => tokio_util::sync::CancellationToken::new(),
         };
 
-        if let Some(fut) = dispatcher.dispatch_async(&target, &command, args.clone()) {
+        if let Some(fut) =
+            dispatcher.dispatch_async(&self.plugin_id, &target, &command, args.clone())
+        {
             let scoped = crate::cancel::scope_async(dispatch_cancel.clone(), fut);
             return tokio::select! {
                 // Bias toward cancel so a same-tick cancel beats a stale
@@ -265,9 +267,10 @@ impl KernelPluginContext {
         let join = dispatch::spawn_blocking_sync_dispatch({
             let target = target.clone();
             let command = command.clone();
+            let caller_plugin_id = self.plugin_id.clone();
             move || {
                 crate::cancel::scope_sync(token_for_spawn, || {
-                    dispatcher.dispatch(&target, &command, &args)
+                    dispatcher.dispatch(&caller_plugin_id, &target, &command, &args)
                 })
             }
         });

@@ -38,6 +38,10 @@ const PING_EXPIRY: Duration = Duration::from_secs(15);
 /// TUN address with this prefix installs the connected route for the whole
 /// range, so peers are reachable without an explicit route command.
 const TAILNET_PREFIX_LEN: u8 = 10;
+/// Cap on the engine → userspace-netstack packet queue (Phase 7). Decrypted
+/// inbound packets are dropped once the netstack task falls this far
+/// behind, rather than growing an unbounded backlog in memory.
+pub const STACK_QUEUE_DEPTH: usize = 1024;
 
 /// Awaits the next TUN packet, or never resolves when there is no device.
 async fn recv_tun(tun: &Option<Tun>) -> Option<std::io::Result<Vec<u8>>> {
@@ -116,8 +120,10 @@ pub struct EngineConfig {
 /// (`ts-net`). The engine keeps the halves inside this struct; the stack keeps
 /// the mirror halves it created.
 pub struct StackIo {
-    /// Engine → stack: decrypted inbound IP packets destined for us.
-    pub inbound: mpsc::UnboundedSender<Vec<u8>>,
+    /// Engine → stack: decrypted inbound IP packets destined for us. Bounded
+    /// (see [`STACK_QUEUE_DEPTH`]) so a stalled netstack can't force the
+    /// engine to buffer an unbounded backlog.
+    pub inbound: mpsc::Sender<Vec<u8>>,
     /// Stack → engine: IP packets the stack wants sent onto the tailnet.
     pub outbound: mpsc::UnboundedReceiver<Vec<u8>>,
 }
@@ -258,7 +264,7 @@ pub struct Engine {
     filter: Filter,
     /// Userspace-stack endpoints (Phase 7). When present, decrypted inbound
     /// packets go to `stack_tx` and packets from `stack_rx` are encapsulated.
-    stack_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    stack_tx: Option<mpsc::Sender<Vec<u8>>>,
     stack_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
 }
 
@@ -711,10 +717,9 @@ impl Engine {
                         continue;
                     }
                     if let Some(stack_tx) = &self.stack_tx {
-                        // Phase 7: hand the packet to the userspace netstack.
-                        if stack_tx.send(ip_pkt).is_err() {
-                            tracing::debug!("engine: userspace stack gone; dropping");
-                        }
+                        // Phase 7: hand the packet to the userspace netstack,
+                        // via a bounded queue (see `forward_to_stack`).
+                        forward_to_stack(stack_tx, ip_pkt);
                     } else if let Some(tun) = &self.tun {
                         // Phase 4: hand the decrypted packet to the OS stack.
                         if let Err(e) = tun.send(&ip_pkt).await {
@@ -995,6 +1000,30 @@ fn ipv4_addrs(prefixes: &[ts_types::IpPrefix]) -> Vec<Ipv4Addr> {
         .collect()
 }
 
+/// Hands a decrypted packet to the userspace netstack's bounded inbound
+/// queue (`STACK_QUEUE_DEPTH`). Applies drop-newest backpressure: if the
+/// netstack task is behind and the queue is full, the packet is dropped
+/// rather than growing an unbounded backlog of decrypted payloads in
+/// memory — the same trade-off `ts-net` itself makes for its accept
+/// backlog and per-connection queues (drop on full, let the peer's own
+/// retransmits/keepalives recover the loss) rather than blocking the
+/// engine's single-threaded event loop on a slow consumer.
+///
+/// Returns whether the packet was queued, for testability.
+fn forward_to_stack(stack_tx: &mpsc::Sender<Vec<u8>>, ip_pkt: Vec<u8>) -> bool {
+    match stack_tx.try_send(ip_pkt) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::debug!("engine: userspace stack queue full; dropping packet");
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("engine: userspace stack gone; dropping");
+            false
+        }
+    }
+}
+
 /// Checks a decrypted inbound IPv4 packet against `filter`, after verifying
 /// its plaintext source actually belongs to the sending peer (`peer_meta`,
 /// looked up by the caller from `Engine::peers_meta`).
@@ -1147,5 +1176,33 @@ mod tests {
             !packet_allowed(&filter, Some(&meta), &ipv6_pkt),
             "non-IPv4 packets must be denied, not defaulted to allowed"
         );
+    }
+
+    /// Round 5: `deliver_wg` used to hand every ACL-passed decrypted packet
+    /// to the userspace netstack over an unbounded `mpsc` channel, so a
+    /// stalled netstack task let the queue (and memory) grow without bound.
+    /// `forward_to_stack` now uses a bounded channel and drops the newest
+    /// packet once it's full, instead of growing forever.
+    #[tokio::test]
+    async fn stack_queue_drops_newest_packet_once_full() {
+        let (tx, mut rx) = mpsc::channel(2);
+        assert!(
+            forward_to_stack(&tx, vec![1]),
+            "queue has room: should queue"
+        );
+        assert!(
+            forward_to_stack(&tx, vec![2]),
+            "queue has room: should queue"
+        );
+        assert!(
+            !forward_to_stack(&tx, vec![3]),
+            "queue is full: the packet must be dropped, not queued unbounded"
+        );
+
+        // Only the two packets that fit before the queue filled arrive; the
+        // third was dropped rather than silently buffered past the cap.
+        assert_eq!(rx.try_recv().unwrap(), vec![1]);
+        assert_eq!(rx.try_recv().unwrap(), vec![2]);
+        assert!(rx.try_recv().is_err());
     }
 }

@@ -1,8 +1,11 @@
 //! Wire-mirror IPC types for `com.nexus.security`.
 //!
-//! All credential operations are namespaced by the caller's plugin ID so
-//! a plugin cannot read another plugin's secrets. The vault key stored in
-//! the OS keyring is `"{plugin_id}:{name}"`.
+//! All credential operations are namespaced by the *verified* IPC caller
+//! identity (bound by the kernel/host dispatch boundary — see
+//! `nexus_plugin_api::ipc::ipc_caller_plugin_id`), never by a
+//! caller-supplied args field, so a plugin cannot read another plugin's
+//! secrets by claiming to be it. The vault key stored in the OS keyring is
+//! `"{caller_plugin_id}:{name}"`.
 
 use std::collections::BTreeMap;
 
@@ -27,8 +30,6 @@ use ts_rs::TS;
 )]
 #[serde(deny_unknown_fields)]
 pub struct GetSecretArgs {
-    /// Caller's plugin ID — used as the key namespace.
-    pub plugin_id: String,
     /// Short credential name (e.g. `"ssh_passphrase"`, `"api_key"`).
     pub name: String,
 }
@@ -63,8 +64,6 @@ pub struct GetSecretResult {
 )]
 #[serde(deny_unknown_fields)]
 pub struct SetSecretArgs {
-    /// Caller's plugin ID — used as the key namespace.
-    pub plugin_id: String,
     /// Short credential name.
     pub name: String,
     /// Secret value to store.
@@ -101,8 +100,6 @@ pub struct SetSecretResult {
 )]
 #[serde(deny_unknown_fields)]
 pub struct DeleteSecretArgs {
-    /// Caller's plugin ID — used as the key namespace.
-    pub plugin_id: String,
     /// Short credential name to delete.
     pub name: String,
 }
@@ -217,25 +214,11 @@ pub struct ClearAuditLogResult {
 }
 
 // ── list_secret_names ─────────────────────────────────────────────────────────
-
-/// Args for `com.nexus.security::list_secret_names` (handler id `4`).
-///
-/// Returns only names — never values. A plugin can only enumerate its own
-/// secrets (filtered by `plugin_id` prefix in the vault).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
-#[cfg_attr(
-    feature = "ts-export",
-    ts(
-        export,
-        export_to = "../../../packages/nexus-extension-api/src/generated/ipc/"
-    )
-)]
-#[serde(deny_unknown_fields)]
-pub struct ListSecretNamesArgs {
-    /// Caller's plugin ID — only secrets belonging to this plugin are listed.
-    pub plugin_id: String,
-}
+//
+// `list_secret_names` (handler id `4`) takes no args — it always lists the
+// verified caller's own secrets, namespaced by
+// `nexus_plugin_api::ipc::ipc_caller_plugin_id`. There is nothing for a
+// caller to supply, so there is no `ListSecretNamesArgs` type.
 
 /// Return type for `com.nexus.security::list_secret_names`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

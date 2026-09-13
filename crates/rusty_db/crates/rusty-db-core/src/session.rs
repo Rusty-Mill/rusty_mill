@@ -25,6 +25,11 @@ struct PendingWrite {
     operation: AuditOperation,
     query: Box<dyn ToSql + Send>,
     requires_row_affected: bool,
+    /// `T::REDACTED_COLUMNS` for whatever `Mapped` type this write was
+    /// queued for — carried alongside `query` (a type-erased `dyn ToSql`)
+    /// since `flush`'s audit-log rendering needs it, but by then `T`
+    /// itself is long gone.
+    redacted_columns: &'static [&'static str],
     /// Set by `add_mut`/`update_mut`/`delete_mut` to a closure calling the
     /// entity's `Lifecycle::after_insert`/`after_update`/`after_delete` on
     /// a snapshot taken at queue time — run once this specific write
@@ -32,6 +37,24 @@ struct PendingWrite {
     /// rolls back). `None` for every write queued by `add`/`update`/
     /// `delete` (unhooked, exactly as before this feature existed).
     after_write: Option<Box<dyn FnOnce()>>,
+}
+
+/// One `PendingWrite`, fully rendered to SQL text + params for a specific
+/// `Dialect` — what `flush` builds `rendered` out of before sending
+/// anything to the database, so a rollback partway through a batch never
+/// needs to re-render (or re-borrow `self.engine.dialect()` past the
+/// point `self.txn` gets mutably borrowed).
+struct RenderedWrite {
+    table: &'static str,
+    operation: AuditOperation,
+    sql: String,
+    params: Vec<Value>,
+    requires_row_affected: bool,
+    /// `write.query.param_columns(dialect)` — the column each entry in
+    /// `params` is bound to, position-for-position; see
+    /// `ToSql::param_columns`.
+    param_columns: Vec<Option<String>>,
+    redacted_columns: &'static [&'static str],
 }
 
 /// A unit of work: queues writes made through `add`/`update`/`delete`, and
@@ -191,6 +214,18 @@ impl Session {
     /// log (table `_rusty_db_audit_log` by default — see
     /// `with_audit_log_table` to use another), inside the same
     /// transaction as the write itself. See `audit_log` to read it back.
+    ///
+    /// **Every bound parameter value is persisted into that table in
+    /// plaintext by default**, in an ordinary, queryable table — this is
+    /// a write-ahead trail, not a secrets vault. If any write this
+    /// session flushes ever binds a password hash, API key, session
+    /// token, or other sensitive value, mark that column
+    /// `#[table(redacted)]` on the mapped struct (populating
+    /// `Mapped::REDACTED_COLUMNS`) so `Session::flush` renders it as
+    /// `audit::REDACTED_PLACEHOLDER` (`"[REDACTED]"`) in `params_text`
+    /// instead of the real value. Off by default (opt-in, like every
+    /// redaction-affecting behavior here) — an unmarked column keeps
+    /// rendering verbatim, exactly as before this existed.
     pub fn with_audit_log(mut self) -> Self {
         self.audit_enabled = true;
         self
@@ -198,6 +233,8 @@ impl Session {
 
     /// Like `with_audit_log`, using an audit table name other than the
     /// default `_rusty_db_audit_log` (matching `Migrator::with_table`).
+    /// Same plaintext-by-default warning applies: see `with_audit_log`'s
+    /// own doc comment for the `#[table(redacted)]` opt-in.
     pub fn with_audit_log_table(mut self, table: &'static str) -> Self {
         self.audit_enabled = true;
         self.audit_table = table;
@@ -224,6 +261,7 @@ impl Session {
             operation: AuditOperation::Insert,
             query: Box::new(entity.insert()),
             requires_row_affected: false,
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: None,
         });
     }
@@ -243,6 +281,7 @@ impl Session {
             operation: AuditOperation::Insert,
             query: Box::new(bulk),
             requires_row_affected: false,
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: None,
         });
     }
@@ -261,6 +300,7 @@ impl Session {
             operation: AuditOperation::Update,
             query: Box::new(entity.update()),
             requires_row_affected: T::VERSION_COLUMN.is_some(),
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: None,
         });
     }
@@ -287,6 +327,7 @@ impl Session {
             operation: AuditOperation::Delete,
             query: delete_query_for(entity),
             requires_row_affected: T::VERSION_COLUMN.is_some(),
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: None,
         });
     }
@@ -316,6 +357,7 @@ impl Session {
             operation: AuditOperation::Insert,
             query: Box::new(entity.insert()),
             requires_row_affected: false,
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: Some(Box::new(move || snapshot.after_insert())),
         });
         Ok(())
@@ -336,6 +378,7 @@ impl Session {
             operation: AuditOperation::Update,
             query: Box::new(entity.update()),
             requires_row_affected: T::VERSION_COLUMN.is_some(),
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: Some(Box::new(move || snapshot.after_update())),
         });
         Ok(())
@@ -362,6 +405,7 @@ impl Session {
             operation: AuditOperation::Delete,
             query: delete_query_for(entity),
             requires_row_affected: T::VERSION_COLUMN.is_some(),
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: Some(Box::new(move || snapshot.after_delete())),
         });
         Ok(())
@@ -399,6 +443,7 @@ impl Session {
             operation: AuditOperation::Update,
             query: Box::new(update),
             requires_row_affected: false,
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: None,
         });
     }
@@ -418,6 +463,7 @@ impl Session {
             operation: AuditOperation::Delete,
             query: Box::new(delete),
             requires_row_affected: false,
+            redacted_columns: T::REDACTED_COLUMNS,
             after_write: None,
         });
     }
@@ -442,19 +488,22 @@ impl Session {
             hook();
         }
 
-        let rendered: Vec<(&'static str, AuditOperation, String, Vec<Value>, bool)> = {
+        let rendered: Vec<RenderedWrite> = {
             let dialect = self.engine.dialect();
             self.pending
                 .iter()
                 .map(|write| {
                     let (sql, params) = write.query.to_sql(dialect);
-                    (
-                        write.table,
-                        write.operation,
+                    let param_columns = write.query.param_columns(dialect);
+                    RenderedWrite {
+                        table: write.table,
+                        operation: write.operation,
                         sql,
                         params,
-                        write.requires_row_affected,
-                    )
+                        requires_row_affected: write.requires_row_affected,
+                        param_columns,
+                        redacted_columns: write.redacted_columns,
+                    }
                 })
                 .collect()
         };
@@ -467,25 +516,33 @@ impl Session {
             self.ensure_audit_table().await?;
         }
 
-        for (table, operation, sql, params, requires_row_affected) in &rendered {
-            let affected = self.execute_or_rollback(sql, params).await?;
-            if *requires_row_affected && affected == 0 {
+        for write in &rendered {
+            let affected = self.execute_or_rollback(&write.sql, &write.params).await?;
+            if write.requires_row_affected && affected == 0 {
                 if let Some(txn) = self.txn.take() {
                     let _ = txn.rollback().await;
                 }
                 return Err(Error::Conflict(format!(
-                    "no row in {table:?} matched the expected primary key and version — \
-                     it was likely changed or deleted since this instance was loaded"
+                    "no row in {:?} matched the expected primary key and version — \
+                     it was likely changed or deleted since this instance was loaded",
+                    write.table
                 )));
             }
 
             if self.audit_enabled {
                 let audit_table = Table::new(self.audit_table);
                 let record = Insert::into_table(&audit_table)
-                    .value("table_name", *table)
-                    .value("operation", operation.as_str())
-                    .value("sql_text", sql.clone())
-                    .value("params_text", audit::params_to_text(params));
+                    .value("table_name", write.table)
+                    .value("operation", write.operation.as_str())
+                    .value("sql_text", write.sql.clone())
+                    .value(
+                        "params_text",
+                        audit::params_to_text(
+                            &write.params,
+                            &write.param_columns,
+                            write.redacted_columns,
+                        ),
+                    );
                 let dialect = self.engine.dialect();
                 let (audit_sql, audit_params) = record.to_sql(dialect);
                 self.execute_or_rollback(&audit_sql, &audit_params).await?;

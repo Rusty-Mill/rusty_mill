@@ -65,7 +65,7 @@ impl Node {
         let state = NodeState::load_or_generate(&config.state_dir)?;
 
         // Wire the engine's decrypted-packet path to our stack.
-        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let (inbound_tx, inbound_rx) = mpsc::channel(ts_engine::STACK_QUEUE_DEPTH);
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
         let engine_config = EngineConfig {

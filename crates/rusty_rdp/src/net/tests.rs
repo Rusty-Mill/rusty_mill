@@ -1254,6 +1254,7 @@ fn test_rsa_key_pair() -> (RsaPublicKey, RsaPrivateKey) {
         RsaPrivateKey {
             modulus_le: modulus_le.to_vec(),
             private_exponent_le: private_exponent_le.to_vec(),
+            exponent: 65537,
         },
     )
 }

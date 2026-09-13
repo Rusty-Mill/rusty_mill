@@ -37,6 +37,17 @@ const CALL_ME_MAYBE_RESEND: Duration = Duration::from_secs(2);
 /// (unreachable, NAT/DERP-only for its whole session) doesn't accumulate an
 /// entry every `HEARTBEAT_INTERVAL` forever.
 const PENDING_PING_EXPIRY: Duration = Duration::from_secs(15);
+/// Maximum number of candidate endpoints kept per peer. A peer that sends
+/// repeated call-me-maybe messages advertising many distinct (potentially
+/// fabricated) endpoints must not be able to grow `candidates` — and by
+/// extension `endpoint_to_node` — without bound; once the cap is hit, the
+/// oldest candidate is evicted to make room for the newest.
+const MAX_CANDIDATES_PER_PEER: usize = 8;
+/// Candidates that haven't been (re)confirmed by a call-me-maybe or inbound
+/// ping within this window are pruned on each `tick()`, so a peer that stops
+/// advertising an endpoint is eventually forgotten instead of sitting in
+/// `candidates` until the cap forces it out.
+const CANDIDATE_EXPIRY: Duration = Duration::from_secs(300);
 
 /// Which path a peer's traffic currently takes (for status/metrics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +70,10 @@ pub enum UdpInput {
 
 struct PeerPaths {
     disco_key: DiscoPublic,
-    /// Candidate endpoints learned via call-me-maybe / inbound pings.
-    candidates: Vec<SocketAddr>,
+    /// Candidate endpoints learned via call-me-maybe / inbound pings, each
+    /// paired with the instant it was last (re)confirmed — used by
+    /// `insert_candidate`'s cap and `prune_stale_candidates`' expiry.
+    candidates: Vec<(SocketAddr, Instant)>,
     /// The current verified direct endpoint, if any, and when it last ponged.
     direct: Option<(SocketAddr, Instant)>,
     /// When we last sent this peer a call-me-maybe (for throttled re-sends
@@ -254,6 +267,10 @@ impl MagicSock {
         // `pending` doesn't grow without bound for a peer that never pongs
         // back for its whole session.
         prune_stale_pings(&mut self.pending);
+        // Same idea for `candidates`/`endpoint_to_node`: drop entries a peer
+        // hasn't reconfirmed within `CANDIDATE_EXPIRY`, so a fabricated or
+        // long-abandoned endpoint doesn't linger below the insert-time cap.
+        prune_stale_candidates(&mut self.peers, &mut self.endpoint_to_node);
 
         // Re-send call-me-maybe to undiscovered peers, throttled.
         let need_cmm: Vec<NodePublic> = self
@@ -274,7 +291,7 @@ impl MagicSock {
             .peers
             .iter()
             .map(|(node, p)| {
-                let mut eps: Vec<SocketAddr> = p.candidates.clone();
+                let mut eps: Vec<SocketAddr> = p.candidates.iter().map(|(addr, _)| *addr).collect();
                 if let Some((addr, _)) = p.direct
                     && !eps.contains(&addr)
                 {
@@ -382,12 +399,7 @@ impl MagicSock {
         if ep.ip().is_unspecified() || ep.port() == 0 {
             return;
         }
-        if let Some(paths) = self.peers.get_mut(&node)
-            && !paths.candidates.contains(&ep)
-        {
-            paths.candidates.push(ep);
-        }
-        self.endpoint_to_node.entry(ep).or_insert(node);
+        insert_candidate(&mut self.peers, &mut self.endpoint_to_node, node, ep);
     }
 
     /// Sends a disco ping to `endpoint` over UDP, recording the transaction so
@@ -416,6 +428,61 @@ impl MagicSock {
 /// its whole session. Mirrors `ts-engine`'s own ICMP ping-table pruning.
 fn prune_stale_pings(pending: &mut HashMap<TxId, (NodePublic, SocketAddr, Instant)>) {
     pending.retain(|_, (_, _, started)| started.elapsed() < PENDING_PING_EXPIRY);
+}
+
+/// Records `ep` as a candidate endpoint for `node`, capping the per-peer
+/// candidate list at [`MAX_CANDIDATES_PER_PEER`] so a peer that advertises
+/// many distinct (potentially fabricated) endpoints via repeated
+/// call-me-maybe messages — or repeated pings from new sources — can't grow
+/// `candidates`, and by extension `endpoint_to_node`, without bound. An
+/// already-known candidate is just refreshed; a genuinely new one past the
+/// cap evicts the oldest, whose `endpoint_to_node` entry is dropped too
+/// unless it's still the peer's verified direct endpoint.
+fn insert_candidate(
+    peers: &mut HashMap<NodePublic, PeerPaths>,
+    endpoint_to_node: &mut HashMap<SocketAddr, NodePublic>,
+    node: NodePublic,
+    ep: SocketAddr,
+) {
+    let mut evicted = None;
+    if let Some(paths) = peers.get_mut(&node) {
+        if let Some(entry) = paths.candidates.iter_mut().find(|(addr, _)| *addr == ep) {
+            entry.1 = Instant::now();
+        } else {
+            if paths.candidates.len() >= MAX_CANDIDATES_PER_PEER {
+                let (addr, _) = paths.candidates.remove(0);
+                if paths.direct.map(|(a, _)| a) != Some(addr) {
+                    evicted = Some(addr);
+                }
+            }
+            paths.candidates.push((ep, Instant::now()));
+        }
+    }
+    if let Some(addr) = evicted {
+        endpoint_to_node.remove(&addr);
+    }
+    endpoint_to_node.entry(ep).or_insert(node);
+}
+
+/// Drops candidates that haven't been (re)confirmed within
+/// [`CANDIDATE_EXPIRY`], removing their `endpoint_to_node` entries too
+/// (unless still the peer's verified direct endpoint) — the time-based
+/// counterpart to `insert_candidate`'s cap, for a peer that stops
+/// advertising an endpoint well before the cap would ever be hit.
+fn prune_stale_candidates(
+    peers: &mut HashMap<NodePublic, PeerPaths>,
+    endpoint_to_node: &mut HashMap<SocketAddr, NodePublic>,
+) {
+    for paths in peers.values_mut() {
+        let direct = paths.direct.map(|(addr, _)| addr);
+        paths.candidates.retain(|(addr, learned)| {
+            let fresh = learned.elapsed() < CANDIDATE_EXPIRY;
+            if !fresh && direct != Some(*addr) {
+                endpoint_to_node.remove(addr);
+            }
+            fresh
+        });
+    }
 }
 
 /// How a disco message reached us.
@@ -617,6 +684,58 @@ mod tests {
             pending.contains_key(&fresh_tx),
             "fresh ping must survive pruning"
         );
+    }
+
+    /// A malicious or buggy peer sending repeated call-me-maybe messages
+    /// with many distinct (fabricated) endpoints must not grow `candidates`
+    /// — or, by extension, `endpoint_to_node` — without bound.
+    /// `insert_candidate`, the helper `add_candidate`/`on_call_me_maybe`
+    /// funnel through, must cap the per-peer candidate list at
+    /// `MAX_CANDIDATES_PER_PEER`, evicting the oldest entry (and its
+    /// `endpoint_to_node` mapping) to make room for each new one.
+    #[test]
+    fn insert_candidate_bounds_flood_of_distinct_endpoints() {
+        let node = NodePublic([9; 32]);
+        let mut peers = HashMap::new();
+        peers.insert(
+            node,
+            PeerPaths {
+                disco_key: DiscoPublic([2; 32]),
+                candidates: vec![],
+                direct: None,
+                last_call_me_maybe: None,
+            },
+        );
+        let mut endpoint_to_node = HashMap::new();
+
+        // Flood with far more distinct endpoints than any reasonable cap,
+        // as a peer spamming call-me-maybe with fabricated endpoints would.
+        let flood = MAX_CANDIDATES_PER_PEER * 50;
+        for i in 0..flood {
+            let ep = SocketAddr::from(([10, 0, (i / 256) as u8, (i % 256) as u8], 41641));
+            insert_candidate(&mut peers, &mut endpoint_to_node, node, ep);
+        }
+
+        assert_eq!(
+            peers[&node].candidates.len(),
+            MAX_CANDIDATES_PER_PEER,
+            "candidates must stay capped instead of growing with every distinct endpoint"
+        );
+        assert_eq!(
+            endpoint_to_node.len(),
+            MAX_CANDIDATES_PER_PEER,
+            "endpoint_to_node must not accumulate an entry per fabricated endpoint"
+        );
+
+        // The most recently learned endpoint must have survived eviction,
+        // and the very first one flooded in must have been evicted.
+        let newest = SocketAddr::from((
+            [10, 0, ((flood - 1) / 256) as u8, ((flood - 1) % 256) as u8],
+            41641,
+        ));
+        let oldest = SocketAddr::from(([10, 0, 0, 0], 41641));
+        assert!(endpoint_to_node.contains_key(&newest));
+        assert!(!endpoint_to_node.contains_key(&oldest));
     }
 
     /// End-to-end check that `MagicUdp` (the `LinuxUdpSocket` + `AsyncFd`

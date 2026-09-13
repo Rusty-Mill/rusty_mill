@@ -79,6 +79,15 @@ pub enum HttpPolicyError {
         /// Bytes seen before aborting.
         got: u64,
     },
+    /// The response was a redirect (3xx). Redirects are never followed —
+    /// `validate` only checks the allowlist against the first-hop host, so
+    /// silently following a `Location` header could route the request to
+    /// an internal/private address the allowlist was never asked about.
+    #[error("redirect response (status {status}) rejected — redirects are not followed")]
+    RedirectNotFollowed {
+        /// The 3xx status code returned by the allowlisted host.
+        status: u16,
+    },
 }
 
 /// A validated, ready-to-send request.
@@ -147,8 +156,14 @@ pub async fn execute(
     max_bytes: u64,
     timeout: Duration,
 ) -> Result<ExecutedResponse, HttpPolicyError> {
+    // SSRF hardening: `validate` only checks the allowlist against the
+    // *first-hop* host. The default reqwest redirect policy follows 3xx
+    // responses transparently, so an allowlisted host could redirect the
+    // request to an internal/private address and bypass the allowlist
+    // entirely. Disable redirects; any 3xx is rejected outright below.
     let client = reqwest::Client::builder()
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| HttpPolicyError::Http(e.to_string()))?;
 
@@ -167,6 +182,9 @@ pub async fn execute(
         .await
         .map_err(|e| HttpPolicyError::Http(e.to_string()))?;
     let status = resp.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(HttpPolicyError::RedirectNotFollowed { status });
+    }
 
     // Reject early if the declared length already blows the cap.
     if let Some(len) = resp.content_length() {
@@ -387,5 +405,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HttpPolicyError::TooLarge { max: 32, .. }));
+    }
+
+    #[tokio::test]
+    async fn execute_does_not_follow_redirect_off_allowlisted_host() {
+        // SSRF regression: `validate` only checks the *first-hop* host
+        // against the allowlist. Before this fix, `execute`'s client
+        // followed redirects transparently, so a 302 from an allowlisted
+        // host could route the request to an arbitrary disallowed host
+        // (e.g. an internal metadata service) without the allowlist ever
+        // seeing it. The redirect response itself must be surfaced as a
+        // rejection, not followed.
+        let base = spawn_one_shot_server(
+            "302 Found",
+            Vec::new(),
+            "Location: http://evil.invalid/steal\r\n",
+            |_req| {},
+        );
+        let req = ValidatedRequest {
+            method: "GET".to_string(),
+            url: Url::parse(&format!("{base}/redirect")).unwrap(),
+        };
+        let err = execute(&req, &BTreeMap::new(), None, 1024, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HttpPolicyError::RedirectNotFollowed { status: 302 }),
+            "expected RedirectNotFollowed{{status: 302}}, got {err:?}"
+        );
     }
 }

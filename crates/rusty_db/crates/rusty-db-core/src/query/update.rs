@@ -83,4 +83,30 @@ impl ToSql for Update {
 
         (sql, params)
     }
+
+    /// One entry per `SET`-clause assignment that actually binds a
+    /// parameter (skips a `Value::Null`, which `render_value_placeholder`
+    /// renders as a bare `NULL` literal instead), followed by one `None`
+    /// per `WHERE`-clause parameter (no single column to attribute a
+    /// filter literal to) — matching `to_sql`'s own params exactly, in
+    /// the same order. Renders `filter` a second time (into a throwaway
+    /// params buffer, discarded) purely to count how many parameters it
+    /// contributes, so this can never drift out of sync with what
+    /// `to_sql` itself binds.
+    fn param_columns(&self, dialect: &dyn Dialect) -> Vec<Option<String>> {
+        let mut columns: Vec<Option<String>> = self
+            .assignments
+            .iter()
+            .filter(|(_, value)| !matches!(value, Value::Null))
+            .map(|(column, _)| Some(column.clone()))
+            .collect();
+
+        if let Some(filter) = &self.filter {
+            let mut filter_params = Vec::new();
+            filter.render(dialect, &mut filter_params);
+            columns.extend(std::iter::repeat_n(None, filter_params.len()));
+        }
+
+        columns
+    }
 }

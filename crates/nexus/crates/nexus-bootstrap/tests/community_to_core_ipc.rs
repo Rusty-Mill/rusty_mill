@@ -24,6 +24,7 @@ struct EmptyCommunityDispatcher;
 impl IpcDispatcher for EmptyCommunityDispatcher {
     fn dispatch(
         &self,
+        _caller_plugin_id: &str,
         target_plugin_id: &str,
         _command_id: &str,
         _args: &serde_json::Value,
@@ -35,6 +36,7 @@ impl IpcDispatcher for EmptyCommunityDispatcher {
 
     fn dispatch_async(
         &self,
+        _caller_plugin_id: &str,
         _target_plugin_id: &str,
         _command_id: &str,
         _args: serde_json::Value,
@@ -52,6 +54,7 @@ struct StubCommunityDispatcher;
 impl IpcDispatcher for StubCommunityDispatcher {
     fn dispatch(
         &self,
+        _caller_plugin_id: &str,
         target_plugin_id: &str,
         command_id: &str,
         _args: &serde_json::Value,
@@ -91,6 +94,7 @@ fn community_dispatcher_falls_through_to_core_theme_plugin() {
 
     let cfg = composite
         .dispatch(
+            "com.test.caller",
             "com.nexus.theme",
             "get_theme_config",
             &serde_json::json!({}),
@@ -111,7 +115,12 @@ fn community_dispatcher_falls_through_to_core_storage_plugin() {
     let composite = build_composite(&runtime);
 
     let value = composite
-        .dispatch("com.nexus.storage", "query_files", &serde_json::json!({}))
+        .dispatch(
+            "com.test.caller",
+            "com.nexus.storage",
+            "query_files",
+            &serde_json::json!({}),
+        )
         .expect("query_files routes through fallback");
 
     assert!(
@@ -129,6 +138,7 @@ fn fallback_surfaces_core_command_not_found_errors() {
 
     let err = composite
         .dispatch(
+            "com.test.caller",
             "com.nexus.theme",
             "not-a-real-command",
             &serde_json::json!({}),
@@ -160,7 +170,12 @@ fn community_command_not_found_does_not_fall_through() {
     // retry through the core loader (which would return PluginNotFound
     // and change the error shape the caller sees).
     let err = composite
-        .dispatch("com.community.fake", "noop", &serde_json::json!({}))
+        .dispatch(
+            "com.test.caller",
+            "com.community.fake",
+            "noop",
+            &serde_json::json!({}),
+        )
         .unwrap_err();
 
     assert!(
@@ -179,6 +194,7 @@ fn empty_fallback_returns_primary_plugin_not_found() {
 
     let err = composite
         .dispatch(
+            "com.test.caller",
             "com.nexus.theme",
             "get_theme_config",
             &serde_json::json!({}),

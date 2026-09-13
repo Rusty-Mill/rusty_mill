@@ -49,6 +49,23 @@ fn compound_filters_render_with_parens_and_positional_params() {
 }
 
 #[test]
+fn eq_null_renders_as_a_bare_null_literal_not_a_typed_placeholder() {
+    // Binding `Value::Null` as a placeholder forces the driver to declare
+    // some concrete parameter type for it; Postgres then rejects assigning
+    // that type into a column of a genuinely different type (e.g. UUID).
+    // `= NULL` should render as a literal, with no parameter pushed at all.
+    let users = Table::new("users");
+    let query = Select::from(&users).filter(users.col("uuid_col").eq(Value::Null));
+
+    let (sql, params) = query.to_sql(&NumberedDialect);
+    assert_eq!(
+        sql,
+        r#"SELECT * FROM "users" WHERE "users"."uuid_col" = NULL"#
+    );
+    assert!(params.is_empty());
+}
+
+#[test]
 fn insert_only_adds_returning_when_dialect_supports_it() {
     let users = Table::new("users");
     let insert = Insert::into_table(&users)
@@ -1143,4 +1160,75 @@ fn alter_table_alter_column_type_panics_on_sqlite() {
 #[should_panic(expected = "does not support directly altering a column's type")]
 fn alter_table_alter_column_type_panics_on_mysql() {
     let _ = AlterTable::alter_column_type("users", "age", ColumnType::I64).to_sql(&MySqlDialect);
+}
+
+#[test]
+fn insert_param_columns_matches_assignments_skipping_null_and_raw() {
+    let users = Table::new("users");
+    let insert = Insert::into_table(&users)
+        .value("name", "ada")
+        .value("bio", Value::Null)
+        .raw_value("created_at", "CURRENT_TIMESTAMP")
+        .value("password_hash", "hunter2");
+
+    let (_, params) = insert.to_sql(&QuestionMarkDialect);
+    let columns = insert.param_columns(&QuestionMarkDialect);
+
+    // `bio` (Null) and `created_at` (raw) bind no placeholder at all, so
+    // neither contributes a `params`/`param_columns` entry.
+    assert_eq!(params.len(), columns.len());
+    assert_eq!(
+        columns,
+        vec![Some("name".to_string()), Some("password_hash".to_string()),]
+    );
+}
+
+#[test]
+fn update_param_columns_covers_set_clause_then_none_for_where_clause() {
+    let users = Table::new("users");
+    let update = Update::table(&users)
+        .set("name", "ada lovelace")
+        .set("password_hash", "hunter2")
+        .filter(users.col("id").eq(1_i64));
+
+    let (_, params) = update.to_sql(&QuestionMarkDialect);
+    let columns = update.param_columns(&QuestionMarkDialect);
+
+    assert_eq!(params.len(), columns.len());
+    assert_eq!(
+        columns,
+        vec![
+            Some("name".to_string()),
+            Some("password_hash".to_string()),
+            None,
+        ]
+    );
+}
+
+#[test]
+fn bulk_insert_param_columns_repeats_the_column_pattern_per_row() {
+    let users = Table::new("users");
+    let rows = vec![
+        Insert::into_table(&users)
+            .value("name", "ada")
+            .value("password_hash", "hunter2"),
+        Insert::into_table(&users)
+            .value("name", "grace")
+            .value("password_hash", "swordfish"),
+    ];
+    let bulk = BulkInsert::combine(rows).unwrap().unwrap();
+
+    let (_, params) = bulk.to_sql(&QuestionMarkDialect);
+    let columns = bulk.param_columns(&QuestionMarkDialect);
+
+    assert_eq!(params.len(), columns.len());
+    assert_eq!(
+        columns,
+        vec![
+            Some("name".to_string()),
+            Some("password_hash".to_string()),
+            Some("name".to_string()),
+            Some("password_hash".to_string()),
+        ]
+    );
 }

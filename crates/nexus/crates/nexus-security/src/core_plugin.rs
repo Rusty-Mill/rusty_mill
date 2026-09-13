@@ -231,7 +231,8 @@ impl CorePlugin for SecurityCorePlugin {
             HANDLER_GET_SECRET => {
                 // #190 spirit — strict-parse via typed `GetSecretArgs`.
                 let typed: crate::ipc::GetSecretArgs = parse_args(args, "get_secret")?;
-                let key = format!("{}:{}", typed.plugin_id, typed.name);
+                let caller = require_caller("get_secret")?;
+                let key = format!("{caller}:{}", typed.name);
                 let value = match self.vault.retrieve(&key) {
                     Ok(v) => Some(v),
                     Err(SecurityError::CredentialNotFound(_) | SecurityError::KeyringDisabled) => {
@@ -243,7 +244,8 @@ impl CorePlugin for SecurityCorePlugin {
             }
             HANDLER_SET_SECRET => {
                 let typed: crate::ipc::SetSecretArgs = parse_args(args, "set_secret")?;
-                let key = format!("{}:{}", typed.plugin_id, typed.name);
+                let caller = require_caller("set_secret")?;
+                let key = format!("{caller}:{}", typed.name);
                 self.vault
                     .store(&key, &typed.value)
                     .map_err(|e| map_err(&e))?;
@@ -252,7 +254,8 @@ impl CorePlugin for SecurityCorePlugin {
             }
             HANDLER_DELETE_SECRET => {
                 let typed: crate::ipc::DeleteSecretArgs = parse_args(args, "delete_secret")?;
-                let key = format!("{}:{}", typed.plugin_id, typed.name);
+                let caller = require_caller("delete_secret")?;
+                let key = format!("{caller}:{}", typed.name);
                 let ok = match self.vault.delete(&key) {
                     Ok(()) | Err(SecurityError::CredentialNotFound(_)) => {
                         self.known_names.remove(&key);
@@ -264,8 +267,10 @@ impl CorePlugin for SecurityCorePlugin {
                 to_typed(&crate::ipc::DeleteSecretResult { ok }, "delete_secret")
             }
             HANDLER_LIST_SECRET_NAMES => {
-                let typed: crate::ipc::ListSecretNamesArgs = parse_args(args, "list_secret_names")?;
-                let prefix = format!("{}:", typed.plugin_id);
+                // No args — always lists the verified caller's own secrets
+                // (see `crate::ipc`'s module docs).
+                let caller = require_caller("list_secret_names")?;
+                let prefix = format!("{caller}:");
                 let names: Vec<String> = self
                     .known_names
                     .iter()
@@ -434,6 +439,29 @@ where
     serde_json::from_value(args.clone()).map_err(|e| PluginError::ExecutionFailed {
         plugin_id: PLUGIN_ID.to_string(),
         reason: format!("{verb}: invalid args: {e}"),
+    })
+}
+
+/// Return the kernel-verified identity of the plugin issuing the current
+/// IPC call, for handlers that must namespace by *who* is calling rather
+/// than by anything the caller wrote into `args`.
+///
+/// Bound by the `IpcDispatcher` implementation that routed this dispatch
+/// (see `nexus_plugin_api::ipc::scope_caller`). Fails closed —
+/// `ExecutionFailed`, not a silent fallback — when no verified caller is
+/// bound, e.g. a direct `CorePlugin::dispatch` call that bypassed the
+/// scoped `IpcDispatcher` path entirely (tests must bind one explicitly
+/// via `nexus_plugin_api::ipc::scope_caller`).
+///
+/// # Errors
+/// Returns `PluginError::ExecutionFailed` when no caller is bound.
+fn require_caller(verb: &str) -> Result<String, PluginError> {
+    nexus_plugin_api::ipc::ipc_caller_plugin_id().ok_or_else(|| PluginError::ExecutionFailed {
+        plugin_id: PLUGIN_ID.to_string(),
+        reason: format!(
+            "{verb}: no verified caller identity — must be invoked through an \
+             IpcDispatcher (host::invoke_command / ipc_call), not a direct dispatch"
+        ),
     })
 }
 
@@ -670,13 +698,31 @@ mod tests {
         // KeyringDisabled which we map to {"value": null} so callers
         // can fall through to a default without special-casing the error.
         let mut plugin = SecurityCorePlugin::with_probe(None, ok_probe());
-        let result = plugin
-            .dispatch(
-                HANDLER_GET_SECRET,
-                &serde_json::json!({"plugin_id": "nexus.test", "name": "foo"}),
-            )
-            .unwrap();
+        let result = nexus_plugin_api::ipc::scope_caller("nexus.test", || {
+            plugin.dispatch(HANDLER_GET_SECRET, &serde_json::json!({"name": "foo"}))
+        })
+        .unwrap();
         assert_eq!(result, serde_json::json!({"value": null}));
+    }
+
+    #[test]
+    fn dispatch_get_secret_without_verified_caller_fails_closed() {
+        // Regression: a direct dispatch outside any `IpcDispatcher` scope
+        // (no bound caller identity) must be refused, not silently use an
+        // empty/absent namespace.
+        let mut plugin = SecurityCorePlugin::with_probe(None, ok_probe());
+        let err = plugin
+            .dispatch(HANDLER_GET_SECRET, &serde_json::json!({"name": "foo"}))
+            .unwrap_err();
+        match err {
+            PluginError::ExecutionFailed { reason, .. } => {
+                assert!(
+                    reason.contains("no verified caller identity"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -685,16 +731,13 @@ mod tests {
         // get/delete (which we soften to null/false), set surfaces the
         // error so the caller knows their secret was never persisted.
         let mut plugin = SecurityCorePlugin::with_probe(None, ok_probe());
-        let err = plugin
-            .dispatch(
+        let err = nexus_plugin_api::ipc::scope_caller("nexus.test", || {
+            plugin.dispatch(
                 HANDLER_SET_SECRET,
-                &serde_json::json!({
-                    "plugin_id": "nexus.test",
-                    "name": "foo",
-                    "value": "bar",
-                }),
+                &serde_json::json!({"name": "foo", "value": "bar"}),
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         match err {
             PluginError::ExecutionFailed { plugin_id, .. } => assert_eq!(plugin_id, PLUGIN_ID),
             other => panic!("expected ExecutionFailed, got {other:?}"),
@@ -702,17 +745,71 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_set_secret_missing_plugin_id_errors() {
+    fn list_secret_names_ignores_forged_plugin_id_and_uses_verified_caller() {
+        // Regression test for the confused-deputy fix: list_secret_names —
+        // and get_secret/set_secret/delete_secret, which derive the same
+        // OS-keyring namespace — must filter by the verified IPC caller
+        // identity (bound via `nexus_plugin_api::ipc::scope_caller`),
+        // never by a caller-supplied JSON field. Pre-fix, the args carried
+        // a `plugin_id` field read directly out of `args`: any plugin
+        // holding `ipc.call` could set `"plugin_id": "victim"` in its own
+        // request and enumerate (or read/overwrite) another plugin's
+        // secret namespace.
+        //
+        // `known_names` is seeded directly (as
+        // `dispatch_list_secret_names_filters_by_plugin_id` below does)
+        // since this crate deliberately never exercises the live OS
+        // keyring in unit tests — `set_secret` always fails closed with
+        // `KeyringDisabled` under `with_probe`'s disabled vault.
         let mut plugin = SecurityCorePlugin::with_probe(None, ok_probe());
-        let err = plugin
-            .dispatch(
-                HANDLER_SET_SECRET,
-                &serde_json::json!({"name": "foo", "value": "bar"}),
+        plugin
+            .known_names
+            .insert("victim.plugin:api_key".to_string());
+
+        // "attacker" — a different verified caller — cannot smuggle a
+        // `plugin_id` field into the request to see victim's secret names;
+        // the field no longer exists on the wire type and is never
+        // consulted even if present.
+        let attacker_view = nexus_plugin_api::ipc::scope_caller("attacker.plugin", || {
+            plugin.dispatch(
+                HANDLER_LIST_SECRET_NAMES,
+                &serde_json::json!({"plugin_id": "victim.plugin"}),
             )
-            .unwrap_err();
+        })
+        .unwrap();
+        assert_eq!(
+            attacker_view["names"].as_array().unwrap().len(),
+            0,
+            "attacker must not see victim's secret names, forged plugin_id or not"
+        );
+
+        // Sanity: victim, calling as itself, sees its own secret name.
+        let victim_view = nexus_plugin_api::ipc::scope_caller("victim.plugin", || {
+            plugin.dispatch(HANDLER_LIST_SECRET_NAMES, &serde_json::json!({}))
+        })
+        .unwrap();
+        assert_eq!(
+            victim_view["names"].as_array().unwrap().clone(),
+            vec![serde_json::json!("api_key")]
+        );
+    }
+
+    #[test]
+    fn get_secret_rejects_unknown_plugin_id_field_in_args() {
+        // Defense in depth: even an attempt to reintroduce the old field
+        // shape is rejected outright by `deny_unknown_fields`, rather than
+        // silently ignored or accidentally reconsulted.
+        let mut plugin = SecurityCorePlugin::with_probe(None, ok_probe());
+        let err = nexus_plugin_api::ipc::scope_caller("nexus.test", || {
+            plugin.dispatch(
+                HANDLER_GET_SECRET,
+                &serde_json::json!({"plugin_id": "victim", "name": "x"}),
+            )
+        })
+        .unwrap_err();
         match err {
             PluginError::ExecutionFailed { reason, .. } => {
-                assert!(reason.contains("plugin_id"), "got: {reason}");
+                assert!(reason.contains("unknown field"), "got: {reason}");
             }
             other => panic!("expected ExecutionFailed, got {other:?}"),
         }
@@ -728,12 +825,10 @@ mod tests {
         plugin.known_names.insert("nexus.foo:secret_b".to_string());
         plugin.known_names.insert("nexus.bar:other".to_string());
 
-        let result = plugin
-            .dispatch(
-                HANDLER_LIST_SECRET_NAMES,
-                &serde_json::json!({"plugin_id": "nexus.foo"}),
-            )
-            .unwrap();
+        let result = nexus_plugin_api::ipc::scope_caller("nexus.foo", || {
+            plugin.dispatch(HANDLER_LIST_SECRET_NAMES, &serde_json::json!({}))
+        })
+        .unwrap();
         let mut names: Vec<String> = result["names"]
             .as_array()
             .unwrap()
@@ -749,12 +844,10 @@ mod tests {
         // delete in disabled mode soft-fails so callers can run
         // best-effort cleanup without worrying about disabled keyrings.
         let mut plugin = SecurityCorePlugin::with_probe(None, ok_probe());
-        let result = plugin
-            .dispatch(
-                HANDLER_DELETE_SECRET,
-                &serde_json::json!({"plugin_id": "nexus.test", "name": "foo"}),
-            )
-            .unwrap();
+        let result = nexus_plugin_api::ipc::scope_caller("nexus.test", || {
+            plugin.dispatch(HANDLER_DELETE_SECRET, &serde_json::json!({"name": "foo"}))
+        })
+        .unwrap();
         assert_eq!(result, serde_json::json!({"ok": false}));
     }
 

@@ -127,25 +127,28 @@ impl RgaText {
     }
 
     /// Render to a `String` in RGA traversal order.
+    ///
+    /// Iterative (explicit stack, matching [`Self::id_at_visible_index`])
+    /// rather than recursive: a linear insertion chain (each character
+    /// parented on the previous one) can be arbitrarily deep, and a
+    /// naive one-frame-per-character recursion would stack-overflow
+    /// the process on a single large remote insert.
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();
-        for &root in &self.roots {
-            self.visit(root, &mut out);
+        let mut stack: Vec<OpId> = self.roots.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            if !node.tombstone {
+                out.push(node.ch);
+            }
+            for &child in node.children.iter().rev() {
+                stack.push(child);
+            }
         }
         out
-    }
-
-    fn visit(&self, id: OpId, out: &mut String) {
-        let Some(node) = self.nodes.get(&id) else {
-            return;
-        };
-        if !node.tombstone {
-            out.push(node.ch);
-        }
-        for &child in &node.children {
-            self.visit(child, out);
-        }
     }
 
     /// Build the **wire** op for a local insertion at the given
@@ -459,5 +462,25 @@ mod tests {
             renders.windows(2).all(|w| w[0] == w[1]),
             "all replays must converge, got {renders:?}"
         );
+    }
+
+    #[test]
+    fn render_large_linear_chain_does_not_overflow_stack() {
+        // Regression: `render` walked the tree with one recursive
+        // call per character. A linear insertion chain (each new
+        // character parented on the previous one — exactly what
+        // `from_chars` builds, and what a single large remote insert
+        // produces) has depth equal to its length, and nexus-collab's
+        // relay allows frames up to 16 MiB, easily encoding a
+        // multi-hundred-thousand-character insert. That recursion
+        // depth stack-overflows and aborts the process; the traversal
+        // must be iterative.
+        const N: usize = 300_000;
+        let s = SiteId::new();
+        let text = RgaText::from_chars(std::iter::repeat_n('a', N), |i| id(s, i as u64 + 1));
+        assert_eq!(text.len(), N);
+        let rendered = text.render();
+        assert_eq!(rendered.len(), N);
+        assert!(rendered.chars().all(|c| c == 'a'));
     }
 }

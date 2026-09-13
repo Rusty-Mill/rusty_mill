@@ -395,6 +395,7 @@ struct SlowAsyncDispatcher;
 impl crate::ipc::IpcDispatcher for SlowAsyncDispatcher {
     fn dispatch(
         &self,
+        _caller_plugin_id: &str,
         _target_plugin_id: &str,
         _command_id: &str,
         _args: &serde_json::Value,
@@ -404,6 +405,7 @@ impl crate::ipc::IpcDispatcher for SlowAsyncDispatcher {
 
     fn dispatch_async(
         &self,
+        _caller_plugin_id: &str,
         _target_plugin_id: &str,
         _command_id: &str,
         _args: serde_json::Value,
