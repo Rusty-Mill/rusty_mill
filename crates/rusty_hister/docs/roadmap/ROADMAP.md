@@ -209,7 +209,18 @@ independent of ADR-0002/0003)
       hand-rolled `attribute_filter` instead of a new `regex` dependency;
       a whole-document URL-rewrite pass instead of Go's per-selection
       scoping).
-- `rusty-hister-extractor`: the remaining 17 built-in extractors in
+- [x] `rusty-hister-extractor` (`GoDocExtractor`, §4.5.8): preview-only,
+      renders pkg.go.dev's `div.Documentation-content` element with
+      `href`/`src` resolved to absolute URLs. Done — 8 new unit tests (77
+      total in the crate), clippy/fmt clean. Go finds the element with a
+      hand-rolled tokenizer/depth-tracker (`golang.org/x/net/html` has no
+      CSS-selector API); the Rust port collapses to a single class
+      selector plus `ElementRef::html()` since `scraper` already builds a
+      full DOM. When no matching element exists, Go's `Preview`
+      *succeeds* with empty content rather than falling back (its
+      tokenizer loop just reaches EOF having never entered the "in
+      article" state) — reproduced faithfully rather than "corrected".
+- `rusty-hister-extractor`: the remaining 16 built-in extractors in
   default-chain order (§4.3), starting with the ones that have existing Go
   test coverage and budgeting fresh test authorship for the rest.
   Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a

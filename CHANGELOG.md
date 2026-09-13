@@ -9,6 +9,19 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `GoDocExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.8): a Rust port of
+  `server/extractor/extractors/godoc/godoc.go`, preview-only, rendering
+  pkg.go.dev's `div.Documentation-content` element with its `href`/`src`
+  attributes resolved to absolute URLs. Go finds that element with a
+  hand-rolled tokenizer that reconstructs HTML byte-by-byte while
+  tracking tag-nesting depth; since `scraper` already builds a full DOM,
+  the Rust port collapses this to a single CSS class selector plus
+  `ElementRef::html()` to serialize the matched subtree. When no such
+  element is present, Go's `Preview` succeeds with empty content rather
+  than falling back (its tokenizer loop reaches end-of-input having
+  never entered the "in article" state) — reproduced faithfully here. 8
+  new unit tests (77 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `StackExchangeExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.7): a Rust port of
   `server/extractor/extractors/stackexchange/stackexchange.go`, extract

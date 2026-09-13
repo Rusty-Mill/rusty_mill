@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Three concrete extractors so far:**
+//! **Four concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -30,6 +30,11 @@
 //!   `server/sanitizer/sanitizer.go`, `ammonia`-based) and `urlutil` (a
 //!   port of `server/extractor/urlutil/urlutil.go`, relative-to-absolute
 //!   URL rewriting).
+//! - [`GoDocExtractor`] (capability inventory §4.5.8) — preview-only,
+//!   renders pkg.go.dev's `div.Documentation-content` element with its
+//!   links resolved to absolute URLs. Go finds that element with a
+//!   hand-rolled tokenizer/depth-tracker; the Rust port collapses to a
+//!   single CSS class selector since `scraper` already builds a full DOM.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -39,6 +44,7 @@
 //! reading Hister's Go source, never copied).
 
 mod embeddedvideo;
+mod godoc;
 mod jsonld;
 mod registry;
 mod sanitizer;
@@ -46,6 +52,7 @@ mod stackexchange;
 mod urlutil;
 
 pub use embeddedvideo::EmbeddedVideoExtractor;
+pub use godoc::GoDocExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
