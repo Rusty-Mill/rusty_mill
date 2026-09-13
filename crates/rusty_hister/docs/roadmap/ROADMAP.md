@@ -193,7 +193,23 @@ independent of ADR-0002/0003)
       built on the new `scraper`/`ammonia` dependencies (CSS-selector
       queries for the element scan; no sanitization needed here since
       URLs are stored as opaque strings, not rendered).
-- `rusty-hister-extractor`: the remaining 18 built-in extractors in
+- [x] `rusty-hister-extractor` (`StackExchangeExtractor`, §4.5.7): extract
+      *and* preview for SE-network question pages (Stack Overflow, Server
+      Fault, Super User, Ask Ubuntu, `*.stackexchange.com`, and more).
+      Done — 31 new unit tests across `stackexchange` (10),
+      `sanitizer` (13), and `urlutil` (8) — 69 total in the crate,
+      clippy/fmt clean.
+      First extractor with real `preview()` output, so it also lands two
+      new shared support modules future preview-capable extractors will
+      reuse: `sanitizer` (`server/sanitizer/sanitizer.go` ported onto
+      `ammonia`) and `urlutil` (`server/extractor/urlutil/urlutil.go`
+      ported onto `scraper`'s tree-mutation API) — see PROJECT-STATUS.md
+      for both modules' documented approximations relative to the Go
+      originals (`bluemonday`'s per-attribute regex validation via a
+      hand-rolled `attribute_filter` instead of a new `regex` dependency;
+      a whole-document URL-rewrite pass instead of Go's per-selection
+      scoping).
+- `rusty-hister-extractor`: the remaining 17 built-in extractors in
   default-chain order (§4.3), starting with the ones that have existing Go
   test coverage and budgeting fresh test authorship for the rest.
   Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a

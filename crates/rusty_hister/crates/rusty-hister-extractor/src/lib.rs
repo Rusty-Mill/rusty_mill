@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Two concrete extractors so far:**
+//! **Three concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -23,6 +23,13 @@
 //!   sanitizing) — both added to this crate's dependencies after a
 //!   sovereignty-loop pass found no first-party `rusty_*` crate for
 //!   either (see `docs/PROJECT-STATUS.md`'s resolved open item).
+//! - [`StackExchangeExtractor`] (capability inventory §4.5.7) — extract
+//!   *and* preview, the first extractor with real rendered-HTML preview
+//!   output. Built on two new shared support modules other preview-capable
+//!   extractors will reuse: `sanitizer` (a Rust port of
+//!   `server/sanitizer/sanitizer.go`, `ammonia`-based) and `urlutil` (a
+//!   port of `server/extractor/urlutil/urlutil.go`, relative-to-absolute
+//!   URL rewriting).
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -34,6 +41,9 @@
 mod embeddedvideo;
 mod jsonld;
 mod registry;
+mod sanitizer;
+mod stackexchange;
+mod urlutil;
 
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use jsonld::JsonLdExtractor;
@@ -42,3 +52,5 @@ pub use rusty_hister_core::{
     Capabilities, Document, DocumentType, ExtractOutcome, Extractor, ExtractorConfig, HisterError,
     Metadata, PreviewOutcome, PreviewResponse,
 };
+pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
+pub use stackexchange::StackExchangeExtractor;

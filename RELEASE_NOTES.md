@@ -13,6 +13,42 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's StackExchange extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-stackexchange`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-stackexchange)
+
+Thirteenth Phase 1 increment. The third of the 20 built-in extractors, and
+the first with real rendered-HTML preview output rather than an enrich-only
+fallback.
+
+- **Added:** `StackExchangeExtractor` (capability inventory §4.5.7) — a
+  port of `server/extractor/extractors/stackexchange/stackexchange.go`.
+  Extract and preview: pulls the question and every already-rendered
+  answer from a Stack Exchange network question page (Stack Overflow,
+  Server Fault, Super User, Ask Ubuntu, `*.stackexchange.com`, and a
+  handful more), marking the accepted answer and harvesting
+  author/tags/score/published/answer-count metadata.
+- **Added:** two shared support modules other preview-capable extractors
+  will reuse — `sanitizer` (a Rust port of `server/sanitizer/sanitizer.go`
+  on `ammonia`, replacing Go's `bluemonday`; its SVG attribute-value
+  allow-list is reproduced with hand-rolled character-class predicates
+  via `ammonia`'s `attribute_filter` callback rather than adding a
+  `regex` dependency, since nothing else in this crate needs general
+  regex support) and `urlutil` (a port of
+  `server/extractor/urlutil/urlutil.go`'s relative-to-absolute URL
+  rewriting, implemented as a whole-document pass via `scraper`'s
+  tree-mutation API — broader than Go's per-`goquery.Selection` scoping,
+  but harmless for every current caller since each one serializes only
+  the specific subtree it cares about afterward).
+- **Unchanged scope:** Markdown/Org-mode parsing (§4.5.1-2) still need
+  their own, separately-decided dependency — not conflated with this
+  increment's HTML-sanitizing infrastructure.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 69 passed (31 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy --all-targets
+-- -D warnings` both clean.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's EmbeddedVideo extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-embeddedvideo`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-embeddedvideo)
 

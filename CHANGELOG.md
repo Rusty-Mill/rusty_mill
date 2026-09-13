@@ -9,6 +9,22 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `StackExchangeExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.7): a Rust port of
+  `server/extractor/extractors/stackexchange/stackexchange.go`, extract
+  *and* preview for Stack Exchange network question pages (Stack
+  Overflow, Server Fault, Super User, Ask Ubuntu, `*.stackexchange.com`,
+  and more) — the question plus every already-rendered answer, marking
+  the accepted one. The first extractor with real rendered-HTML preview
+  output, so it also lands two new shared support modules: `sanitizer`
+  (a Rust port of `server/sanitizer/sanitizer.go` on `ammonia`, replacing
+  Go's `bluemonday`, including a hand-rolled reproduction of its SVG
+  attribute-value allow-list via `ammonia`'s `attribute_filter` rather
+  than a new `regex` dependency) and `urlutil` (a port of
+  `server/extractor/urlutil/urlutil.go`'s relative-to-absolute URL
+  rewriting via `scraper`'s tree-mutation API). 31 new unit tests across
+  `stackexchange`/`sanitizer`/`urlutil` (69 total in the crate),
+  clippy/fmt clean.
 - `rusty-hister-extractor`'s `EmbeddedVideoExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.3): a Rust port of
   `server/extractor/extractors/embeddedvideo/extractor.go`, enrich-only,

@@ -12219,6 +12219,7 @@ name = "rusty-hister-extractor"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "chrono",
  "rusty-hister-core",
  "rusty_json",
  "scraper",
