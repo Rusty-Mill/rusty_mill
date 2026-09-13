@@ -201,11 +201,11 @@ impl Extractor for StackExchangeExtractor {
     }
 }
 
-fn selector(css: &str) -> Selector {
+pub(crate) fn selector(css: &str) -> Selector {
     Selector::parse(css).expect("static selector is valid")
 }
 
-fn element_text(element: &ElementRef) -> String {
+pub(crate) fn element_text(element: &ElementRef) -> String {
     element.text().collect::<String>()
 }
 
@@ -307,7 +307,7 @@ fn post_meta_line(verb: &str, date: &str, author: &str, score: &str) -> String {
     )
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

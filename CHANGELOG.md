@@ -9,6 +9,24 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `LobstersExtractor` (`rusty_hister`'s Phase
+  1, continued — capability inventory §4.5.10): a Rust port of
+  `server/extractor/extractors/lobsters/lobsters.go`, extract *and*
+  preview for lobste.rs story pages — submission metadata, story body,
+  and the full recursively-nested comment tree. The comment tree is
+  genuinely recursive (a `li.comments_subtree` nests
+  `ol.comments > li.comments_subtree` arbitrarily deep), walked with
+  `scraper`'s `ElementRef::child_elements()` (direct children only, to
+  avoid double-visiting deeper subtrees a broader descendant selector
+  would catch), mirroring Go's own recursive helpers. Reuses
+  `StackExchangeExtractor`'s small selector/text/escaping helpers
+  (promoted to `pub(crate)`) rather than a third copy of each. Preserves
+  a real Go asymmetry rather than "fixing" it: comment
+  author/score/timestamp are interpolated into the accumulated HTML
+  unescaped (unlike the story header/byline, which does escape) — with
+  no observable effect either way, since the whole accumulated string
+  still passes through `sanitizer::sanitize_html` before being returned.
+  6 new unit tests (83 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `GoDocExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.8): a Rust port of
   `server/extractor/extractors/godoc/godoc.go`, preview-only, rendering

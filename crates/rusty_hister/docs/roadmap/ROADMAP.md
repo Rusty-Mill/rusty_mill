@@ -220,7 +220,22 @@ independent of ADR-0002/0003)
       *succeeds* with empty content rather than falling back (its
       tokenizer loop just reaches EOF having never entered the "in
       article" state) — reproduced faithfully rather than "corrected".
-- `rusty-hister-extractor`: the remaining 16 built-in extractors in
+- [x] `rusty-hister-extractor` (`LobstersExtractor`, §4.5.10): extract
+      *and* preview for lobste.rs story pages — submission metadata,
+      story body, and the full recursively-nested comment tree. Done —
+      6 new unit tests (83 total in the crate), clippy/fmt clean. The
+      comment tree is genuinely recursive (`li.comments_subtree` nests
+      `ol.comments > li.comments_subtree` arbitrarily deep); walked with
+      `scraper`'s `ElementRef::child_elements()` (direct children only,
+      to avoid double-visiting deeper subtrees a broader descendant
+      selector would catch), mirroring Go's own recursive helpers.
+      Reuses `StackExchangeExtractor`'s selector/text/escaping helpers
+      (promoted to `pub(crate)`) rather than a third copy of each.
+      Preserves a real Go asymmetry rather than "fixing" it: comment
+      author/score/timestamp go into the accumulated HTML unescaped
+      (unlike the story header/byline) — no observable effect either
+      way, since the whole string is sanitized before being returned.
+- `rusty-hister-extractor`: the remaining 15 built-in extractors in
   default-chain order (§4.3), starting with the ones that have existing Go
   test coverage and budgeting fresh test authorship for the rest.
   Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a
