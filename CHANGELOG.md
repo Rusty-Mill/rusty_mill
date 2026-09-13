@@ -44,6 +44,30 @@ Removed / Fixed / Security, newest first.
   block's `src` attribute is read directly and thus round-trips through
   URL rewriting. 7 new unit tests (174 total in the crate), clippy/fmt
   clean.
+- `rusty-hister-extractor`'s `ReadabilityExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.4): a Rust port of the
+  `readabilityExtractor` in `server/extractor/extractor.go`, extract
+  *and* preview for any web page via the `readabilityrs` crate (a Rust
+  port of Mozilla's Readability.js — the same algorithm family Go's own
+  `codeberg.org/readeck/go-readability/v2` dependency belongs to) to
+  strip navigation, ads, and other boilerplate down to the main article
+  content. `matches` always returns `true`, like `BasicExtractor`; the
+  real chain places this extractor right before `Basic`, a better-quality
+  attempt that runs first with `Basic` as the true last resort. First new
+  external dependency decided by explicit user choice this session:
+  `readabilityrs` pulls in `scraper 0.25`/`ego-tree 0.10`, a major
+  version ahead of this crate's own `0.21`/`0.9` pins used by 8 existing
+  extractors — both versions now coexist in the dependency tree (extra
+  compile time/disk, zero risk to the existing extractors) rather than
+  bumping the existing pin or hand-rolling the algorithm. Go's
+  `readability.FromReader` folds URL validation and article extraction
+  into one error path; `readabilityrs` splits them, so this port maps a
+  URL-parse failure to `Abort` (matching Go's own separate `url.Parse`
+  failure) and a malformed-HTML error or no-article-found result to
+  `Fallback` (matching Go's `FromReader` error path). Two Go metadata
+  fields (a favicon URL, a `modified` timestamp) have no `readabilityrs`
+  equivalent and are deliberately not reproduced rather than silently
+  dropped. 7 new unit tests (181 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `YtdlpExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.17): a Rust port of
   `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`, extract

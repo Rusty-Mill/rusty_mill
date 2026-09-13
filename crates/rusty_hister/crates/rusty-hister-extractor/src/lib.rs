@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Sixteen concrete extractors so far:**
+//! **Seventeen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -169,6 +169,23 @@
 //!   `<a href>` inside one of those is flattened to text, not preserved
 //!   as a link; only the image block's `src` attribute is read directly
 //!   and thus round-trips through URL rewriting.
+//! - [`ReadabilityExtractor`] (capability inventory §4.4) — extract *and*
+//!   preview for any web page, using the [`readabilityrs`] crate (a Rust
+//!   port of Mozilla's Readability.js — the same algorithm family Go's
+//!   own `codeberg.org/readeck/go-readability/v2` dependency belongs to)
+//!   to strip navigation, ads, and other boilerplate down to the main
+//!   article content. `matches` always returns `true`, like
+//!   [`BasicExtractor`]; the real chain places this extractor right
+//!   before `Basic`, a better-quality attempt that runs first with
+//!   `Basic` as the true last resort. Go's `readability.FromReader` folds
+//!   URL validation and article extraction into one error path;
+//!   `readabilityrs` splits them, so this port maps a URL-parse failure
+//!   to `Abort` (matching Go's own separate `url.Parse` failure) and a
+//!   malformed-HTML error or no-article-found result to `Fallback`
+//!   (matching Go's `FromReader` error path). Two Go metadata fields have
+//!   no `readabilityrs` equivalent and are deliberately not reproduced
+//!   rather than silently dropped: a favicon URL and a `modified`
+//!   timestamp — documented in the module doc, not worked around.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -196,6 +213,7 @@ mod lobsters;
 mod markdown;
 mod notion;
 mod org;
+mod readability;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -217,6 +235,7 @@ pub use lobsters::LobstersExtractor;
 pub use markdown::MarkdownExtractor;
 pub use notion::NotionExtractor;
 pub use org::OrgModeExtractor;
+pub use readability::ReadabilityExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
