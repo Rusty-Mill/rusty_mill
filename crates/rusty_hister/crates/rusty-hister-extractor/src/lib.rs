@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Five concrete extractors so far:**
+//! **Six concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -41,6 +41,14 @@
 //!   `StackExchangeExtractor`'s small selector/text/escaping helpers
 //!   (now `pub(crate)` in that module) rather than duplicating them a
 //!   third time.
+//! - [`HackerNewsExtractor`] (capability inventory §4.5.11) — extract
+//!   *and* preview for news.ycombinator.com item pages. Unlike Lobsters,
+//!   comments here are a *flat* table with depth carried by an `indent`
+//!   attribute, reconstructed into nested lists by tracking that number
+//!   across the row sequence rather than recursing. The first extractor
+//!   to need `textutil` (a new shared, block-aware HTML-to-text
+//!   flattener — a Rust port of `server/extractor/textutil/textutil.go`,
+//!   which Go itself shares across `hackernews`/`discourse`/`reddit`).
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -51,15 +59,18 @@
 
 mod embeddedvideo;
 mod godoc;
+mod hackernews;
 mod jsonld;
 mod lobsters;
 mod registry;
 mod sanitizer;
 mod stackexchange;
+mod textutil;
 mod urlutil;
 
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use godoc::GoDocExtractor;
+pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
 pub use registry::Registry;

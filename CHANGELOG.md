@@ -9,6 +9,25 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `HackerNewsExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.11): a Rust port of
+  `server/extractor/extractors/hackernews/hackernews.go`, extract *and*
+  preview for news.ycombinator.com item pages. Unlike Lobsters, comments
+  here are a *flat* table with each row's depth carried by an `indent`
+  attribute on its leading `td.ind` cell, reconstructed into nested
+  `<ul>`/`<li>` lists by tracking that number across the row sequence (a
+  small state machine, not recursion). The first extractor to need a new
+  shared `textutil` module — a Rust port of
+  `server/extractor/textutil/textutil.go`, which flattens an HTML
+  subtree to plain text while turning block-element boundaries and
+  `<br>` into line breaks (unlike a bare text-node concatenation, which
+  runs multi-paragraph comment bodies together). Go itself shares
+  `textutil` across `hackernews`/`discourse`/`reddit`, so this port is
+  already positioned for reuse when those extractors land. `textutil`'s
+  recursive tree walk names `ego_tree::NodeRef` directly, so `ego-tree`
+  (already pinned transitively by `scraper` at the same version) is now
+  also a direct dependency of this crate. 8 new unit tests (98 total in
+  the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `LobstersExtractor` (`rusty_hister`'s Phase
   1, continued — capability inventory §4.5.10): a Rust port of
   `server/extractor/extractors/lobsters/lobsters.go`, extract *and*

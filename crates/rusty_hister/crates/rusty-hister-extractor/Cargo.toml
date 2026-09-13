@@ -24,3 +24,9 @@ ammonia = "4"
 # used by `rusty-hister-model` via `rusty_db`'s re-export) — this just
 # wires it directly into a crate that has no reason to depend on `rusty_db`.
 chrono.workspace = true
+# `scraper`'s own tree-node type, needed to name a recursive helper's
+# parameter type in `textutil.rs` (a block-aware HTML-to-text flattener).
+# Not a new dependency in practice — already pinned transitively by
+# `scraper` at this same version — just named directly rather than relying
+# on type inference to paper over it, since this crate calls into it by name.
+ego-tree = "0.9"

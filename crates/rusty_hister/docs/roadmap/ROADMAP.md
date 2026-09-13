@@ -235,7 +235,23 @@ independent of ADR-0002/0003)
       author/score/timestamp go into the accumulated HTML unescaped
       (unlike the story header/byline) — no observable effect either
       way, since the whole string is sanitized before being returned.
-- `rusty-hister-extractor`: the remaining 15 built-in extractors in
+- [x] `rusty-hister-extractor` (`HackerNewsExtractor`, §4.5.11): extract
+      *and* preview for news.ycombinator.com item pages. Done — 8 new
+      unit tests (98 total in the crate), clippy/fmt clean. Unlike
+      Lobsters, comments here are a *flat* table with each row's depth
+      carried by an `indent` attribute, reconstructed into nested
+      `<ul>`/`<li>` lists by tracking that number across the row
+      sequence (a small state machine, not recursion). The first
+      extractor to need a new shared `textutil` module — a port of
+      `server/extractor/textutil/textutil.go`, which flattens an HTML
+      subtree to plain text turning block-element boundaries and `<br>`
+      into line breaks (so multi-paragraph comment bodies don't run
+      together, unlike a bare text-node concatenation). Go itself shares
+      `textutil` across `hackernews`/`discourse`/`reddit`, so it's
+      already positioned for reuse when those land. `ego-tree` (already
+      pinned transitively by `scraper`) is now a direct dependency too,
+      needed to name `NodeRef` in `textutil`'s recursive tree walk.
+- `rusty-hister-extractor`: the remaining 14 built-in extractors in
   default-chain order (§4.3), starting with the ones that have existing Go
   test coverage and budgeting fresh test authorship for the rest.
   Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a

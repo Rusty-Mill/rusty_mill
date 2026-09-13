@@ -12220,6 +12220,7 @@ version = "0.1.0"
 dependencies = [
  "ammonia",
  "chrono",
+ "ego-tree",
  "rusty-hister-core",
  "rusty_json",
  "scraper",
