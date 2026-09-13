@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 use contract::{
     Capabilities, ContractError, DirEntryInfo, FileLock, FsRoot, LockGuard, Metadata,
@@ -166,6 +167,34 @@ impl FileLock for Workspace {
     }
 }
 
+/// Per-stream cap on captured `stdout`/`stderr` bytes for
+/// [`NativeProcessRunner::run`]. A misbehaving or malicious child that
+/// writes gigabytes to its stdout/stderr must not grow this process's
+/// memory unboundedly just because the caller only asked to run a
+/// process — the same "unbounded read with no size cap" bug class already
+/// fixed for line-oriented transports elsewhere in this workspace (see
+/// `nexus-acp`'s `MAX_LINE_BYTES`), applied here to whole-process capture.
+const MAX_CAPTURED_STREAM_BYTES: usize = 10 * 1024 * 1024;
+
+/// Reads `reader` to EOF, retaining at most `cap` bytes. Bytes beyond the
+/// cap are still read and discarded (not buffered) rather than left on the
+/// pipe: leaving them would let the child block forever on a full pipe
+/// buffer once we stop reading, turning a size cap into a hang.
+fn capture_stream_bounded(mut reader: impl std::io::Read, cap: usize) -> std::io::Result<Vec<u8>> {
+    let mut captured = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            return Ok(captured);
+        }
+        if captured.len() < cap {
+            let take = (cap - captured.len()).min(n);
+            captured.extend_from_slice(&buf[..take]);
+        }
+    }
+}
+
 /// Non-interactive process execution via `std::process`, already portable.
 pub struct NativeProcessRunner;
 
@@ -180,11 +209,38 @@ impl ProcessRunner for NativeProcessRunner {
             cmd.env_clear();
         }
         cmd.envs(&spec.env);
-        let output = cmd.output()?;
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+        // Taken unconditionally: both streams were just configured as
+        // `piped()` above, so `stdout`/`stderr` are always `Some` here.
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        // Drain both pipes concurrently, on their own threads, *before*
+        // blocking on `wait()` below — otherwise a child that fills the
+        // stdout pipe while we're blocked waiting for it to exit deadlocks
+        // (nobody is reading stdout, the child blocks writing to it, and
+        // it never exits for `wait()` to observe).
+        let stdout_reader =
+            thread::spawn(move || capture_stream_bounded(stdout, MAX_CAPTURED_STREAM_BYTES));
+        let stderr_reader =
+            thread::spawn(move || capture_stream_bounded(stderr, MAX_CAPTURED_STREAM_BYTES));
+
+        let status = child.wait()?;
+        let stdout = stdout_reader
+            .join()
+            .expect("stdout reader thread panicked")?;
+        let stderr = stderr_reader
+            .join()
+            .expect("stderr reader thread panicked")?;
+
         Ok(ProcessOutput {
-            status: output.status.code().unwrap_or(-1),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            status: status.code().unwrap_or(-1),
+            stdout,
+            stderr,
         })
     }
 }
@@ -502,6 +558,41 @@ mod tests {
         let output = runner.run(&spec).unwrap();
         assert_eq!(output.status, 0);
         assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
+    }
+
+    #[test]
+    fn process_runner_truncates_stdout_past_cap_instead_of_buffering_unboundedly() {
+        // Before the fix, `NativeProcessRunner::run` used `Command::output()`,
+        // which buffers a child's entire stdout/stderr with no size cap —
+        // a child that writes well past `MAX_CAPTURED_STREAM_BYTES` must
+        // come back truncated at the cap, not fully buffered.
+        let dir = std::env::temp_dir().join(format!("compat-cap-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big_file = dir.join("big.txt");
+        let payload = vec![b'x'; MAX_CAPTURED_STREAM_BYTES + 4096];
+        std::fs::write(&big_file, &payload).unwrap();
+
+        let runner = NativeProcessRunner;
+        let spec = if cfg!(windows) {
+            // `cmd /C` re-quotes a single joined-string argument (e.g.
+            // `type "C:\...\big.txt"`) into something its own line parser
+            // rejects; passing `type` and the path as separate args lets
+            // `Command`'s own Windows quoting handle the path correctly.
+            ProcessSpec::new("cmd")
+                .arg("/C")
+                .arg("type")
+                .arg(big_file.to_str().unwrap())
+        } else {
+            ProcessSpec::new("cat").arg(big_file.to_str().unwrap())
+        };
+        let output = runner.run(&spec).unwrap();
+        assert_eq!(
+            output.stdout.len(),
+            MAX_CAPTURED_STREAM_BYTES,
+            "stdout must be truncated at the cap rather than buffered past it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -139,7 +139,15 @@ pub async fn fetch(
 /// Returns a [`DownloadError`] if the request errors, the response is
 /// unsuccessful, the cap is exceeded, or the write fails.
 pub async fn fetch_url(url: Url, dest: &Path, max_bytes: u64) -> Result<u64, DownloadError> {
+    // SSRF hardening: `validate` only checks the *first-hop* host against
+    // the allowlist. The default reqwest redirect policy follows 3xx
+    // responses transparently, so an allowlisted host could redirect the
+    // request to an internal/private address and bypass the allowlist
+    // entirely. Disable redirects and treat any 3xx as a hard failure
+    // (`is_success()` is false for 3xx, so this falls straight into the
+    // existing status check below) rather than re-validating a hop chain.
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| DownloadError::Http(e.to_string()))?;
     let mut resp = client
@@ -277,5 +285,42 @@ mod tests {
         let partial: DownloadPolicy = serde_json::from_str("{\"enabled\":true}").unwrap();
         assert!(partial.enabled);
         assert_eq!(partial.max_bytes, DownloadPolicy::default().max_bytes);
+    }
+
+    #[tokio::test]
+    async fn fetch_url_does_not_follow_redirect_off_allowlisted_host() {
+        // SSRF regression: `validate` only checks the *first-hop* host
+        // against the allowlist. Before this fix, `fetch_url`'s client
+        // followed redirects transparently, so an allowlisted host could
+        // 302 the request to an arbitrary (e.g. internal/metadata) address
+        // that the allowlist never saw. The redirect response itself must
+        // be rejected, not followed.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = "HTTP/1.1 302 Found\r\n\
+                     Location: http://169.254.169.254/latest/meta-data\r\n\
+                     Content-Length: 0\r\n\
+                     Connection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let url = Url::parse(&format!("http://{addr}/download")).expect("parse loopback url");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("out.bin");
+        let err = fetch_url(url, &dest, 1024).await.unwrap_err();
+        match err {
+            DownloadError::Http(msg) => assert!(msg.contains("302"), "got: {msg}"),
+            other => panic!("expected Http(\"status 302 ...\"), got {other:?}"),
+        }
+        assert!(!dest.exists(), "no bytes should have been written to dest");
     }
 }

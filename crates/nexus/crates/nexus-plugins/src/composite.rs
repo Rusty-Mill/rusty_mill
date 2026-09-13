@@ -79,14 +79,18 @@ impl CompositeIpcDispatcher {
 impl IpcDispatcher for CompositeIpcDispatcher {
     fn dispatch(
         &self,
+        caller_plugin_id: &str,
         target_plugin_id: &str,
         command_id: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, IpcError> {
-        match self.primary.dispatch(target_plugin_id, command_id, args) {
+        match self
+            .primary
+            .dispatch(caller_plugin_id, target_plugin_id, command_id, args)
+        {
             Err(IpcError::PluginNotFound { plugin_id }) => {
                 if let Some(fb) = self.fallback.get() {
-                    fb.dispatch(target_plugin_id, command_id, args)
+                    fb.dispatch(caller_plugin_id, target_plugin_id, command_id, args)
                 } else {
                     Err(IpcError::PluginNotFound { plugin_id })
                 }
@@ -97,19 +101,22 @@ impl IpcDispatcher for CompositeIpcDispatcher {
 
     fn dispatch_async(
         &self,
+        caller_plugin_id: &str,
         target_plugin_id: &str,
         command_id: &str,
         args: serde_json::Value,
     ) -> Option<IpcFuture> {
-        if let Some(fut) = self
-            .primary
-            .dispatch_async(target_plugin_id, command_id, args.clone())
-        {
+        if let Some(fut) = self.primary.dispatch_async(
+            caller_plugin_id,
+            target_plugin_id,
+            command_id,
+            args.clone(),
+        ) {
             return Some(fut);
         }
         self.fallback
             .get()
-            .and_then(|fb| fb.dispatch_async(target_plugin_id, command_id, args))
+            .and_then(|fb| fb.dispatch_async(caller_plugin_id, target_plugin_id, command_id, args))
     }
 }
 
@@ -122,6 +129,7 @@ mod tests {
     impl IpcDispatcher for FixedDispatcher {
         fn dispatch(
             &self,
+            _caller: &str,
             _t: &str,
             _c: &str,
             _a: &serde_json::Value,
@@ -154,7 +162,7 @@ mod tests {
         let composite = CompositeIpcDispatcher::new(ok("primary"), cell);
 
         let out = composite
-            .dispatch("com.x", "do", &serde_json::json!({}))
+            .dispatch("com.test.caller", "com.x", "do", &serde_json::json!({}))
             .unwrap();
 
         assert_eq!(out, serde_json::json!({ "from": "primary" }));
@@ -167,7 +175,7 @@ mod tests {
         let composite = CompositeIpcDispatcher::new(not_found("com.x"), cell);
 
         let out = composite
-            .dispatch("com.x", "do", &serde_json::json!({}))
+            .dispatch("com.test.caller", "com.x", "do", &serde_json::json!({}))
             .unwrap();
 
         assert_eq!(out, serde_json::json!({ "from": "fallback" }));
@@ -180,7 +188,7 @@ mod tests {
         let composite = CompositeIpcDispatcher::new(command_not_found("com.x", "nope"), cell);
 
         let err = composite
-            .dispatch("com.x", "nope", &serde_json::json!({}))
+            .dispatch("com.test.caller", "com.x", "nope", &serde_json::json!({}))
             .unwrap_err();
 
         assert!(matches!(err, IpcError::CommandNotFound { .. }));
@@ -192,7 +200,7 @@ mod tests {
         let composite = CompositeIpcDispatcher::new(not_found("com.x"), cell);
 
         let err = composite
-            .dispatch("com.x", "do", &serde_json::json!({}))
+            .dispatch("com.test.caller", "com.x", "do", &serde_json::json!({}))
             .unwrap_err();
 
         assert!(matches!(err, IpcError::PluginNotFound { .. }));
@@ -205,13 +213,13 @@ mod tests {
 
         // Before installation: propagates the primary's PluginNotFound.
         assert!(composite
-            .dispatch("com.x", "do", &serde_json::json!({}))
+            .dispatch("com.test.caller", "com.x", "do", &serde_json::json!({}))
             .is_err());
 
         // After installation: falls through.
         cell.set(ok("late"));
         let out = composite
-            .dispatch("com.x", "do", &serde_json::json!({}))
+            .dispatch("com.test.caller", "com.x", "do", &serde_json::json!({}))
             .unwrap();
         assert_eq!(out, serde_json::json!({ "from": "late" }));
     }

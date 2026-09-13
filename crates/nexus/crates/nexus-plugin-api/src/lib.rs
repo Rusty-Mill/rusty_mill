@@ -10,7 +10,8 @@
 //! - [`Capability`] / [`CapabilitySet`] — permission system
 //! - [`TrustLevel`] / [`PluginInfo`] / [`PluginStatus`] — plugin identity
 //! - [`NexusEvent`] / [`EventFilter`] / [`EventMetadata`] / [`PublishedEvent`] — events
-//! - [`IpcDispatcher`] / [`IpcFuture`] — IPC abstractions
+//! - [`IpcDispatcher`] / [`IpcFuture`] — IPC abstractions; [`ipc_caller_plugin_id`] /
+//!   [`scope_caller`] — kernel-verified caller identity for the dispatch in progress
 //! - [`IpcError`] / [`BusError`] / [`CapabilityError`] — stable error surface
 //! - [`IpcErrorEnvelope`] / [`IpcErrorKind`] — wire-stable IPC error envelope
 //! - [`LogLevel`] — log severity
@@ -41,7 +42,7 @@ pub mod token;
 pub use capability::{Capability, CapabilityParseError, CapabilitySet};
 pub use error::{BusError, CapabilityError, IpcError, IpcErrorEnvelope, IpcErrorKind};
 pub use event::{EventFilter, EventMetadata, NexusEvent, PublishedEvent, StopReason};
-pub use ipc::{IpcDispatcher, IpcFuture};
+pub use ipc::{ipc_caller_plugin_id, scope_caller, IpcDispatcher, IpcFuture};
 pub use log::LogLevel;
 pub use plugin::{PluginInfo, PluginStatus, TrustLevel};
 pub use session::{SessionKind, SessionOutcome};

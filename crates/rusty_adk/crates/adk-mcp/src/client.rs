@@ -11,10 +11,11 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
+use crate::line_read::read_capped_line;
 use crate::protocol::PROTOCOL_VERSION;
 
 /// How to reach an MCP server.
@@ -57,7 +58,7 @@ impl ConnectionParams {
 struct StdioConnection {
     child: Child,
     stdin: ChildStdin,
-    stdout: Lines<BufReader<ChildStdout>>,
+    stdout: BufReader<ChildStdout>,
     next_id: i64,
 }
 
@@ -92,7 +93,7 @@ impl StdioConnection {
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout).lines(),
+            stdout: BufReader::new(stdout),
             next_id: 1,
         })
     }
@@ -106,9 +107,7 @@ impl StdioConnection {
         self.write(&payload).await?;
 
         loop {
-            let line = self
-                .stdout
-                .next_line()
+            let line = read_capped_line(&mut self.stdout)
                 .await?
                 .ok_or_else(|| AdkError::Other("MCP server closed the connection".into()))?;
             if line.trim().is_empty() {
@@ -525,5 +524,26 @@ mod tests {
         assert_eq!(command, "npx");
         assert_eq!(args, vec!["-y", "server"]);
         assert_eq!(env, vec![("KEY".to_string(), "v".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn a_stdout_line_past_the_cap_with_no_newline_errors_instead_of_growing_unboundedly() {
+        // Regression test for the same read `StdioConnection::request` performs
+        // on `self.stdout`: a misbehaving MCP subprocess that never terminates
+        // a line must not be allowed to grow the client's read buffer forever.
+        use crate::line_read::{read_capped_line, MAX_LINE_BYTES};
+        use tokio::io::AsyncWriteExt;
+
+        let payload_len = MAX_LINE_BYTES as usize + 1;
+        let (mut writer, reader_half) = tokio::io::duplex(payload_len + 4096);
+        writer.write_all(&vec![b'a'; payload_len]).await.unwrap();
+        drop(writer);
+
+        let mut stdout = BufReader::new(reader_half);
+        let result = read_capped_line(&mut stdout).await;
+        assert!(
+            result.is_err(),
+            "expected the unterminated oversized line to be rejected"
+        );
     }
 }

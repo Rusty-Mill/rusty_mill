@@ -13,7 +13,7 @@
 use std::io;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// 16 MiB ceiling per line. A single message larger than this is almost
 /// certainly a protocol bug; we'd rather close the connection than try
@@ -123,11 +123,20 @@ where
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
+        // Cap the read itself via `.take(...)` so a peer that never
+        // sends a newline can't grow the buffer past MAX_LINE_BYTES —
+        // checking `n` only *after* `read_line` returns is too late,
+        // since by then the buffer has already grown unboundedly.
+        let n = (&mut *reader)
+            .take(MAX_LINE_BYTES as u64)
+            .read_line(&mut line)
+            .await?;
         if n == 0 {
             return Err(TransportError::Eof);
         }
-        if n > MAX_LINE_BYTES {
+        if n as u64 >= MAX_LINE_BYTES as u64 && !line.ends_with('\n') {
+            // The cap (not a real newline) is what stopped this read:
+            // the line itself is oversized.
             return Err(TransportError::Oversized(n));
         }
         let trimmed = line.trim();
@@ -231,5 +240,44 @@ mod tests {
         let mut reader = BufReader::new(&line[..]);
         let err = read_message(&mut reader).await.unwrap_err();
         assert!(matches!(err, TransportError::BadBody(_)));
+    }
+
+    #[tokio::test]
+    async fn caps_unterminated_line_before_it_grows_unboundedly() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use tokio::io::{AsyncRead, ReadBuf};
+
+        /// A reader that never emits a newline and never reaches EOF —
+        /// stands in for a peer sending an unterminated multi-gigabyte
+        /// line. If `read_message` only checked the line length
+        /// *after* `read_line` returned, this would drive unbounded
+        /// buffer growth and never terminate; the preventive
+        /// `.take(MAX_LINE_BYTES)` wrapper must stop the read at the
+        /// cap regardless.
+        struct InfiniteJunk;
+
+        impl AsyncRead for InfiniteJunk {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                buf.put_slice(&vec![b'x'; buf.remaining()]);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut reader = BufReader::new(InfiniteJunk);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_message(&mut reader),
+        )
+        .await
+        .expect("read_message must return promptly instead of buffering an unbounded line");
+        assert!(
+            matches!(result, Err(TransportError::Oversized(n)) if n as u64 == MAX_LINE_BYTES as u64),
+            "expected Oversized({MAX_LINE_BYTES}), got {result:?}"
+        );
     }
 }

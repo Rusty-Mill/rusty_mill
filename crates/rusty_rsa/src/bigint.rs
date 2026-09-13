@@ -297,6 +297,86 @@ impl BigUint {
         }
         result
     }
+
+    /// Extended Euclidean algorithm: `self`'s modular inverse mod
+    /// `modulus`, or `None` if `self` and `modulus` share a common
+    /// factor (no inverse exists). Not constant-time and must never be
+    /// called on a secret value for the same reason as [`modpow`](Self::modpow)
+    /// -- RSA blinding (`rusty_rdp::security::RsaPrivateKey::decrypt`) is
+    /// the intended caller, and it only ever inverts a fresh random
+    /// blinding factor, never a key component, so there is no secret
+    /// input here to leak.
+    pub fn mod_inverse(&self, modulus: &BigUint) -> Option<BigUint> {
+        if modulus.is_zero() || modulus.compare(&BigUint::one()) == Ordering::Equal {
+            return None;
+        }
+        // Extended Euclidean algorithm. `BigUint` is unsigned, so the
+        // Bezout coefficient `s` is tracked as a (magnitude, is_negative)
+        // pair via the `signed_*` helpers below instead.
+        let mut old_r = self.rem(modulus);
+        let mut r = modulus.clone();
+        let mut old_s: (BigUint, bool) = (BigUint::one(), false);
+        let mut s: (BigUint, bool) = (BigUint::zero(), false);
+
+        while !r.is_zero() {
+            let (q, rem) = old_r.divmod(&r);
+            old_r = r;
+            r = rem;
+
+            let qs = signed_mul(&q, &s);
+            let new_s = signed_sub(&old_s, &qs);
+            old_s = s;
+            s = new_s;
+        }
+
+        if old_r.compare(&BigUint::one()) != Ordering::Equal {
+            return None;
+        }
+
+        let (mag, negative) = old_s;
+        let mag = mag.rem(modulus);
+        Some(if negative && !mag.is_zero() {
+            modulus.sub(&mag)
+        } else {
+            mag
+        })
+    }
+}
+
+/// `a + b` for `(magnitude, is_negative)` pairs, used by
+/// [`BigUint::mod_inverse`]'s extended Euclidean algorithm to do signed
+/// arithmetic with only `BigUint`'s unsigned operations.
+fn signed_add(a: &(BigUint, bool), b: &(BigUint, bool)) -> (BigUint, bool) {
+    if a.1 == b.1 {
+        (a.0.add(&b.0), a.1)
+    } else {
+        match a.0.compare(&b.0) {
+            Ordering::Equal => (BigUint::zero(), false),
+            Ordering::Greater => (a.0.sub(&b.0), a.1),
+            Ordering::Less => (b.0.sub(&a.0), b.1),
+        }
+    }
+}
+
+/// `-a`, keeping zero canonically non-negative.
+fn signed_negate(a: &(BigUint, bool)) -> (BigUint, bool) {
+    if a.0.is_zero() {
+        (a.0.clone(), false)
+    } else {
+        (a.0.clone(), !a.1)
+    }
+}
+
+/// `a - b` for `(magnitude, is_negative)` pairs.
+fn signed_sub(a: &(BigUint, bool), b: &(BigUint, bool)) -> (BigUint, bool) {
+    signed_add(a, &signed_negate(b))
+}
+
+/// `q * b`, where `q` is always a non-negative division quotient.
+fn signed_mul(q: &BigUint, b: &(BigUint, bool)) -> (BigUint, bool) {
+    let mag = q.mul(&b.0);
+    let negative = if mag.is_zero() { false } else { b.1 };
+    (mag, negative)
 }
 
 #[cfg(test)]
@@ -432,5 +512,26 @@ mod tests {
             from_u64(5).modpow(&from_u64(3), &BigUint::one()),
             BigUint::zero()
         );
+    }
+
+    #[test]
+    fn mod_inverse_matches_known_value_and_round_trips_via_mulmod() {
+        // 3 * 4 = 12 = 1 (mod 11) -- textbook small example.
+        let inv = from_u64(3).mod_inverse(&from_u64(11)).unwrap();
+        assert_eq!(inv, from_u64(4));
+        assert_eq!(from_u64(3).mulmod(&inv, &from_u64(11)), BigUint::one());
+
+        // Larger modulus: check the inverse via mulmod rather than a
+        // precomputed constant.
+        let n = from_u64(3233);
+        let r = from_u64(1001);
+        let r_inv = r.mod_inverse(&n).unwrap();
+        assert_eq!(r.mulmod(&r_inv, &n), BigUint::one());
+    }
+
+    #[test]
+    fn mod_inverse_returns_none_when_not_coprime() {
+        // gcd(4, 8) = 4, so 4 has no inverse mod 8.
+        assert_eq!(from_u64(4).mod_inverse(&from_u64(8)), None);
     }
 }

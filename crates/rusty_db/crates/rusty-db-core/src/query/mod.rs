@@ -32,6 +32,19 @@ use crate::value::Value;
 /// `Update`, `Delete`); `Engine`'s convenience methods accept `&dyn ToSql`.
 pub trait ToSql {
     fn to_sql(&self, dialect: &dyn Dialect) -> (String, Vec<Value>);
+
+    /// The column name each parameter `to_sql` produces is bound to, in
+    /// the same order and count as its own `Vec<Value>` — `None` for a
+    /// parameter with no single associated column (e.g. a `WHERE`-clause
+    /// literal). Empty by default, meaning "no column information
+    /// available" — every audit-log redaction check against it becomes a
+    /// no-op, the same verbatim rendering `Session::flush`'s audit entry
+    /// always used before per-column redaction existed. Overridden by
+    /// `Insert`/`BulkInsert`/`Update`, the only query kinds a `Session`
+    /// ever builds an audited `INSERT`/`UPDATE` from.
+    fn param_columns(&self, _dialect: &dyn Dialect) -> Vec<Option<String>> {
+        Vec::new()
+    }
 }
 
 /// Renders one bound value for a `VALUES`/`SET` clause: a literal `NULL`

@@ -19,6 +19,9 @@ smoltcp = { version = "0.13", default-features = false, features = [
 ] }
 tracing.workspace = true
 thiserror.workspace = true
+# The `write_waker` backpressure lock in `stack.rs` is always immediately
+# unwrapped; parking_lot avoids the poisoning-error boilerplate for that.
+parking_lot = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util", "net"] }

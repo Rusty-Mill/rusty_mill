@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use platform::error::Result;
+use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::{Child, Command, ExitStatus, GroupHandle, Signal, Spawner};
 use platform_async::process::{AsyncChild, AsyncSpawner, BoxFuture};
 use platform_linux::LinuxSpawner;
@@ -332,11 +332,20 @@ impl Future for WaitJob {
             let result_slot = Arc::clone(&this.result);
             let waker = cx.waker().clone();
             let pid = this.pid;
-            std::thread::spawn(move || {
-                let outcome = platform_linux::sys::spawn::wait_job(pid);
-                *result_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
-                waker.wake();
-            });
+            let spawned = std::thread::Builder::new()
+                .name("rustils-async-waitjob".to_owned())
+                .spawn(move || {
+                    let outcome = platform_linux::sys::spawn::wait_job(pid);
+                    *result_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
+                    waker.wake();
+                });
+            if let Err(e) = spawned {
+                return Poll::Ready(Err(PlatformError::new(
+                    ErrorKind::Other,
+                    OsCode::Errno(e.raw_os_error().unwrap_or(0)),
+                    "spawn waitjob thread",
+                )));
+            }
         }
         Poll::Pending
     }

@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -184,6 +185,33 @@ fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
         .map(|b| b.body(bytes))
 }
 
+/// Characters that must be percent-encoded when a caller-supplied core or
+/// index `name` is spliced into a single path segment of a Solr request
+/// URL: ASCII controls/space plus every character with structural meaning
+/// in a URL (`/` a path separator, `?`/`#` starting the query/fragment,
+/// `%` the escape character itself, and the remaining `gen-delims`/
+/// backslash). This keeps a caller-supplied `name`/`index` confined to
+/// exactly one path segment, so it can't escape the `solr/` namespace,
+/// introduce an extra segment, or address a different core than the one
+/// already validated by `require_known`.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'{')
+    .add(b'}');
+
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
+
 #[async_trait]
 impl SearchBackend for SolrBackend {
     async fn create_index(&self, name: &str, schema: CoreSchema) -> Result<()> {
@@ -206,7 +234,10 @@ impl SearchBackend for SolrBackend {
 
         let (body, fields) = build_add_field_body(&schema);
         let resp = json_body(
-            self.request(Method::Post, &format!("solr/{name}/schema"))?,
+            self.request(
+                Method::Post,
+                &format!("solr/{}/schema", encode_path_segment(name)),
+            )?,
             &body,
         )?
         .send()
@@ -257,8 +288,11 @@ impl SearchBackend for SolrBackend {
             .collect();
 
         let resp = json_body(
-            self.request(Method::Post, &format!("solr/{index}/update"))?
-                .query([("wt", "json")]),
+            self.request(
+                Method::Post,
+                &format!("solr/{}/update", encode_path_segment(index)),
+            )?
+            .query([("wt", "json")]),
             &json!(commands),
         )?
         .send()
@@ -272,8 +306,11 @@ impl SearchBackend for SolrBackend {
         self.require_known(index).await?;
 
         let resp = json_body(
-            self.request(Method::Post, &format!("solr/{index}/update"))?
-                .query([("wt", "json")]),
+            self.request(
+                Method::Post,
+                &format!("solr/{}/update", encode_path_segment(index)),
+            )?
+            .query([("wt", "json")]),
             &json!({ "delete": { "id": id } }),
         )?
         .send()
@@ -307,7 +344,10 @@ impl SearchBackend for SolrBackend {
         }
 
         let resp = self
-            .request(Method::Get, &format!("solr/{index}/select"))?
+            .request(
+                Method::Get,
+                &format!("solr/{}/select", encode_path_segment(index)),
+            )?
             .query(query_params)
             .send()
             .await
@@ -321,8 +361,11 @@ impl SearchBackend for SolrBackend {
         self.require_known(index).await?;
 
         let resp = json_body(
-            self.request(Method::Post, &format!("solr/{index}/update"))?
-                .query([("wt", "json")]),
+            self.request(
+                Method::Post,
+                &format!("solr/{}/update", encode_path_segment(index)),
+            )?
+            .query([("wt", "json")]),
             &json!({ "commit": {} }),
         )?
         .send()
@@ -414,6 +457,36 @@ mod tests {
         let query: std::collections::HashMap<_, _> = create.url.query_pairs().collect();
         assert_eq!(query.get("action").map(|v| v.as_ref()), Some("CREATE"));
         assert_eq!(query.get("name").map(|v| v.as_ref()), Some("articles"));
+    }
+
+    #[tokio::test]
+    async fn create_index_percent_encodes_a_traversal_shaped_name_in_the_schema_update_path() {
+        // A core name shaped like a path traversal ("../admin/cores") must
+        // not be able to splice extra path segments into the schema-update
+        // request and escape the `solr/` namespace - see round-5 finding
+        // for `create_index`'s `solr/{name}/schema` call.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+            .mount(&server)
+            .await;
+
+        let backend = SolrBackend::new(server.uri());
+        backend
+            .create_index("../admin/cores", articles_schema())
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let schema_update = requests
+            .iter()
+            .find(|r| r.url.path().ends_with("/schema"))
+            .expect("schema update request was sent");
+
+        // The traversal-shaped name must stay confined to a single
+        // percent-encoded path segment under `solr/`, not escape into
+        // `/admin/cores/schema`.
+        assert_eq!(schema_update.url.path(), "/solr/..%2Fadmin%2Fcores/schema");
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ repository = "https://github.com/baileyrd/rusty_tailscale"
 [dependencies]
 ts-types.workspace = true
 ts-key.workspace = true
-tokio = { workspace = true, features = ["net", "io-util", "rt", "macros"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http-body-util.workspace = true

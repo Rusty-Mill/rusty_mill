@@ -473,6 +473,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
@@ -8237,6 +8238,7 @@ dependencies = [
  "landlock",
  "libc 0.2.189",
  "nexus-kernel",
+ "nexus-plugin-api",
  "nexus-plugins",
  "nexus-types",
  "reqwest 0.13.4",
@@ -10525,6 +10527,7 @@ dependencies = [
  "anyhow",
  "compat",
  "contract",
+ "crossterm",
 ]
 
 [[package]]
@@ -12475,6 +12478,7 @@ name = "rusty-search-azure-search"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "percent-encoding",
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
@@ -12561,6 +12565,7 @@ name = "rusty-search-solr"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "percent-encoding",
  "rusty-search-core",
  "rusty_request",
  "rusty_serde",
@@ -16450,6 +16455,7 @@ dependencies = [
 name = "ts-net"
 version = "0.0.1"
 dependencies = [
+ "parking_lot",
  "smoltcp",
  "thiserror 1.0.69",
  "tokio",

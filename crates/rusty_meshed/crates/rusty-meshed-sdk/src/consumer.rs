@@ -404,12 +404,16 @@ impl<E: DomainEvent, S: AsyncRead + AsyncWrite + Unpin + Send> DataProductConsum
         Ok(topic)
     }
 
-    /// Returns `false` the first time `event_id` is seen (and records
-    /// it), `true` on every subsequent call (SDK-037) -- what
-    /// [`run`](Self::run) uses to run `process()` at most once per
-    /// unique event ID.
-    pub fn is_duplicate(&mut self, event_id: &str) -> bool {
-        !self.seen_event_ids.insert(event_id.to_string())
+    /// Returns `true` if `event_id` has already been recorded as
+    /// successfully processed (SDK-037) -- a read-only membership
+    /// check with no mutating side effect. [`run`](Self::run) calls
+    /// this *before* `process()` to skip records already committed on
+    /// a prior iteration, and records `event_id` as seen only *after*
+    /// `process()` actually succeeds -- so a failed `process()` call
+    /// never marks its event seen, and remains retryable on the next
+    /// `run()` call instead of being silently skipped forever.
+    pub fn is_duplicate(&self, event_id: &str) -> bool {
+        self.seen_event_ids.contains(event_id)
     }
 
     /// Resolves the topic (SDK-031..033), joins this consumer's group
@@ -644,9 +648,12 @@ impl<E: DomainEvent, S: AsyncRead + AsyncWrite + Unpin + Send> DataProductConsum
     /// deserialized via `E::deserialize`, a hard failure ending the loop
     /// (the source's own uncaught deserializer error would too); skipped
     /// if [`is_duplicate`](Self::is_duplicate) says so; otherwise `process`
-    /// is awaited and, only once it succeeds, that record's offset is
-    /// committed via `OffsetCommit` before moving to the next one
-    /// (SDK-040).
+    /// is awaited and, only once it succeeds, is the event's id recorded
+    /// as seen and that record's offset committed via `OffsetCommit`,
+    /// before moving to the next one (SDK-040). A failed `process()` call
+    /// ends the loop (see [`ConsumerRunError::Process`]) without marking
+    /// the event seen or committing its offset, so it remains retryable
+    /// on the next `run()` call rather than being silently dropped.
     ///
     /// On exit (the stop handle was signaled), sends a best-effort
     /// `LeaveGroup` -- this port's `consumer.close()` equivalent
@@ -680,12 +687,19 @@ impl<E: DomainEvent, S: AsyncRead + AsyncWrite + Unpin + Send> DataProductConsum
                             continue;
                         };
                         let event = E::deserialize(value)?;
-                        if self.is_duplicate(&event.base().event_id) {
+                        let event_id = event.base().event_id.clone();
+                        if self.is_duplicate(&event_id) {
                             continue;
                         }
 
                         process(event).await.map_err(ConsumerRunError::Process)?;
 
+                        // Recorded as seen only once `process` has
+                        // actually succeeded -- see `is_duplicate`'s own
+                        // doc for why a failed attempt must stay
+                        // retryable on the next `run()` call instead of
+                        // being marked seen and silently skipped.
+                        self.seen_event_ids.insert(event_id);
                         let next_offset = base_offset + index as i64 + 1;
                         self.commit_offset(&topic, partition_index, next_offset)
                             .await?;
@@ -988,10 +1002,15 @@ mod tests {
     }
 
     #[test]
-    fn is_duplicate_returns_false_once_then_true_on_repeats() {
+    fn is_duplicate_is_a_read_only_check_against_seen_event_ids() {
         let (client, _peer) = unused_kafka_client();
         let mut consumer = consumer_with(RegistryClient::new("http://unused.invalid"), client);
+        // Calling `is_duplicate` never mutates `seen_event_ids` -- see
+        // `run`'s own doc for why the mutating insert moved to the
+        // success path instead.
         assert!(!consumer.is_duplicate("evt-1"));
+        assert!(!consumer.is_duplicate("evt-1"));
+        consumer.seen_event_ids.insert("evt-1".to_string());
         assert!(consumer.is_duplicate("evt-1"));
         assert!(!consumer.is_duplicate("evt-2"));
     }
@@ -1320,7 +1339,7 @@ mod tests {
             base: BaseEvent::new("req-1"),
         };
         let event_id = event.base.event_id.clone();
-        consumer.is_duplicate(&event_id); // seed as already seen
+        consumer.seen_event_ids.insert(event_id.clone()); // seed as already seen
         let value = event.serialize();
 
         let stop_handle = consumer.stop_handle();
@@ -1389,5 +1408,164 @@ mod tests {
 
         assert_eq!(processed, 0);
         assert_eq!(consumer.next_fetch_offsets[&0], 0);
+    }
+
+    /// Regression test for the bug where `is_duplicate` used to be
+    /// called (and mutate `seen_event_ids`) *before* `process()` ran:
+    /// a `process()` failure on the first `run()` call would still
+    /// permanently mark the event's id seen, so a second `run()` call
+    /// retrying the same uncommitted offset would skip it forever
+    /// without ever reprocessing or committing it. Drives two `run()`
+    /// calls on the same consumer instance against one continuous fake
+    /// broker connection: the first fetches a record whose `process`
+    /// callback fails (ending that `run()` call before any commit);
+    /// the second fetches the *same* record at the *same* (still
+    /// uncommitted) offset and succeeds, asserting it actually gets
+    /// reprocessed and committed rather than silently skipped.
+    #[rusty_tokio::test]
+    async fn run_reprocesses_a_previously_failed_event_on_the_next_run_call() {
+        let (client_io, mut peer) = duplex(8192);
+        let client = KafkaClient::new(client_io, None);
+        let mut consumer = consumer_with(RegistryClient::new("http://unused.invalid"), client);
+        consumer.member_id = "consumer-1".to_string();
+        consumer.generation_id = 1;
+        consumer.subscribed_topic = Some("t".to_string());
+        consumer.assigned_partitions = vec![0];
+        consumer.next_fetch_offsets.insert(0, 5);
+
+        let stop_handle = consumer.stop_handle();
+
+        let event = TestEvent {
+            base: BaseEvent::new("req-1"),
+        };
+        let event_id = event.base.event_id.clone();
+
+        let server = rusty_tokio::spawn(async move {
+            // First run(): Heartbeat -> Fetch (record at offset 5) ->
+            // `process()` fails, ending the loop with no OffsetCommit.
+            let (header, _body) = recv_request(&mut peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::HEARTBEAT);
+            let response = rusty_kafka::protocol::heartbeat::HeartbeatResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::FETCH);
+            let response = FetchResponse {
+                throttle_time_ms: 0,
+                topics: vec![FetchTopicResponse {
+                    name: "t".to_string(),
+                    partitions: vec![FetchPartitionResponse {
+                        partition_index: 0,
+                        error_code: 0,
+                        high_watermark: 6,
+                        last_stable_offset: 6,
+                        aborted_transactions: vec![],
+                        records: vec![Record {
+                            key: None,
+                            value: Some(event.serialize()),
+                            headers: vec![],
+                        }],
+                    }],
+                }],
+            };
+            let mut writer = Writer::new();
+            response.encode(&mut writer, 1_735_689_600_000).unwrap();
+            send_response(&mut peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            // Second run(): the retry. Heartbeat -> Fetch (the SAME
+            // record, still at offset 5, since nothing committed it) ->
+            // `process()` succeeds this time -> OffsetCommit -> stop ->
+            // LeaveGroup.
+            let (header, _body) = recv_request(&mut peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::HEARTBEAT);
+            let response = rusty_kafka::protocol::heartbeat::HeartbeatResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::FETCH);
+            let response = FetchResponse {
+                throttle_time_ms: 0,
+                topics: vec![FetchTopicResponse {
+                    name: "t".to_string(),
+                    partitions: vec![FetchPartitionResponse {
+                        partition_index: 0,
+                        error_code: 0,
+                        high_watermark: 6,
+                        last_stable_offset: 6,
+                        aborted_transactions: vec![],
+                        records: vec![Record {
+                            key: None,
+                            value: Some(event.serialize()),
+                            headers: vec![],
+                        }],
+                    }],
+                }],
+            };
+            let mut writer = Writer::new();
+            response.encode(&mut writer, 1_735_689_600_000).unwrap();
+            send_response(&mut peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, body) = recv_request(&mut peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::OFFSET_COMMIT);
+            let mut reader = rusty_wire::Reader::new(&body);
+            let decoded = OffsetCommitRequest::decode(&mut reader).unwrap();
+            assert_eq!(decoded.topics[0].partitions[0].committed_offset, 6);
+            let response = OffsetCommitResponse {
+                topics: vec![OffsetCommitTopicResponse {
+                    name: "t".to_string(),
+                    partitions: vec![OffsetCommitPartitionResponse {
+                        partition_index: 0,
+                        error_code: 0,
+                    }],
+                }],
+            };
+            let mut writer = Writer::new();
+            response.encode(&mut writer).unwrap();
+            stop_handle.stop();
+            send_response(&mut peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+
+            let (header, _body) = recv_request(&mut peer).await.unwrap();
+            assert_eq!(header.api_key, api_key::LEAVE_GROUP);
+            let response = LeaveGroupResponse { error_code: 0 };
+            let mut writer = Writer::new();
+            response.encode(&mut writer);
+            send_response(&mut peer, header.correlation_id, writer.as_slice())
+                .await
+                .unwrap();
+        });
+
+        let first_result = consumer
+            .run(|_: TestEvent| async { Err("boom".to_string()) })
+            .await;
+        assert!(matches!(first_result, Err(ConsumerRunError::Process(_))));
+        // The failed attempt must not have advanced the offset.
+        assert_eq!(consumer.next_fetch_offsets[&0], 5);
+
+        let mut processed = Vec::new();
+        consumer
+            .run(|event: TestEvent| {
+                processed.push(event.base.event_id.clone());
+                async { Ok(()) }
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(processed, vec![event_id]);
+        assert_eq!(consumer.next_fetch_offsets[&0], 6);
     }
 }

@@ -75,6 +75,56 @@ fn down_engine() -> Engine {
     Engine::new(std::sync::Arc::new(DownDriver))
 }
 
+/// A `Driver` whose `connect()` succeeds — unlike `DownDriver`, which fails
+/// there — but whose connection then fails every query it's asked to run,
+/// standing in for a connection lost *during* a query (e.g. the server
+/// resetting the socket mid-request) rather than at connect time. Real
+/// drivers report this as `Error::Connection` (a `to_core_err` bug used to
+/// misclassify it as `Error::Database`, which `ReplicaSet` never treats as
+/// failover-worthy); this double reports it the same, correct way
+/// directly.
+struct MidQueryFailureDriver;
+
+struct MidQueryFailureConnection;
+
+#[async_trait]
+impl rusty_db::Executor for MidQueryFailureConnection {
+    async fn execute(&mut self, _sql: &str, _params: &[Value]) -> rusty_db::Result<u64> {
+        Err(Error::Connection("connection reset mid-query".to_string()))
+    }
+
+    async fn fetch_all(&mut self, _sql: &str, _params: &[Value]) -> rusty_db::Result<Vec<Row>> {
+        Err(Error::Connection("connection reset mid-query".to_string()))
+    }
+
+    async fn fetch_optional(
+        &mut self,
+        _sql: &str,
+        _params: &[Value],
+    ) -> rusty_db::Result<Option<Row>> {
+        Err(Error::Connection("connection reset mid-query".to_string()))
+    }
+}
+
+impl Connection for MidQueryFailureConnection {}
+
+#[async_trait]
+impl Driver for MidQueryFailureDriver {
+    async fn connect(&self) -> rusty_db::Result<Box<dyn Connection>> {
+        Ok(Box::new(MidQueryFailureConnection))
+    }
+
+    fn dialect(&self) -> &dyn rusty_db::Dialect {
+        static DIALECT: rusty_db::dialect::QuestionMarkDialect =
+            rusty_db::dialect::QuestionMarkDialect;
+        &DIALECT
+    }
+}
+
+fn mid_query_failure_engine() -> Engine {
+    Engine::new(std::sync::Arc::new(MidQueryFailureDriver))
+}
+
 fn label_of(rows: Vec<Node>) -> String {
     rows.into_iter().next().unwrap().label
 }
@@ -114,6 +164,26 @@ async fn a_down_replica_fails_over_to_the_next_healthy_one() -> rusty_db::Result
     // Every read's rotation includes the down replica at some point, but
     // it should never surface as an error or an empty result — it always
     // fails over to the one healthy replica.
+    for _ in 0..4 {
+        let rows: Vec<Node> = set.fetch_all_as(&Select::from(&Node::table())).await?;
+        assert_eq!(label_of(rows), "replica-healthy");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replica_that_fails_mid_query_fails_over_to_the_next_healthy_one() -> rusty_db::Result<()>
+{
+    // Unlike `a_down_replica_fails_over_to_the_next_healthy_one` above,
+    // this replica's `connect()` succeeds — its connection only fails once
+    // a query actually runs on it, the same shape of failure a real
+    // driver reports when the server drops the connection mid-request.
+    let primary = node_engine("mid_query_failover_primary", "primary").await?;
+    let healthy_replica = node_engine("mid_query_failover_healthy", "replica-healthy").await?;
+
+    let set = ReplicaSet::with_replicas(primary, vec![mid_query_failure_engine(), healthy_replica]);
+
     for _ in 0..4 {
         let rows: Vec<Node> = set.fetch_all_as(&Select::from(&Node::table())).await?;
         assert_eq!(label_of(rows), "replica-healthy");

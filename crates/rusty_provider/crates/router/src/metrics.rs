@@ -108,7 +108,7 @@ impl Metrics {
         let inbound_rate_limit_rejections_total = IntCounterVec::new(
             Opts::new(
                 "rusty_provider_inbound_rate_limit_rejections_total",
-                "Requests to this router's own API rejected for exceeding a per-client or per-IP rate limit, labeled by the resolved caller identity (\"client:<name>\" or \"ip:<addr>\").",
+                "Requests to this router's own API rejected for exceeding a per-client or per-IP rate limit, labeled by the resolved caller identity (\"client:<name>\" for a bounded, config-defined [[clients]] entry, or the fixed bucket \"ip\" for every source-IP-derived rejection -- the raw address itself is never used as a label value, since it's attacker-controlled and would otherwise let a caller rotating source IPs grow this counter's cardinality without bound).",
             ),
             &["identity"],
         )
@@ -253,9 +253,24 @@ impl Metrics {
         }
     }
 
+    /// Records a rejection under `identity`'s label -- except every
+    /// `"ip:<addr>"` identity (the caller's own source IP, never
+    /// authenticated and trivially rotated, e.g. across an attacker-owned
+    /// IPv6 /64) collapses to the single fixed `"ip"` bucket instead of
+    /// using the raw address as a label value. Without this, an attacker
+    /// rotating source IPs would create one permanent new Prometheus time
+    /// series per distinct address, exhausting process memory over time.
+    /// A `"client:<name>"` identity is unaffected -- `name` only ever
+    /// comes from a finite, operator-configured `[[clients]]` list, so it
+    /// carries no unbounded-cardinality risk.
     pub fn record_inbound_rate_limit_rejection(&self, identity: &str) {
+        let label = if identity.starts_with("ip:") {
+            "ip"
+        } else {
+            identity
+        };
         self.inbound_rate_limit_rejections_total
-            .with_label_values(&[identity])
+            .with_label_values(&[label])
             .inc();
     }
 
@@ -507,13 +522,57 @@ mod tests {
             ),
             2.0
         );
+        // A "client:<name>" identity keeps its distinguishing label
+        // (bounded by the finite, operator-configured [[clients]] list),
+        // but an "ip:<addr>" identity collapses to the fixed "ip" bucket
+        // rather than using the raw, caller-controlled address as a label
+        // value.
         assert_eq!(
             metric_value(
                 &rendered,
                 "rusty_provider_inbound_rate_limit_rejections_total",
-                &["identity=\"ip:127.0.0.1\""],
+                &["identity=\"ip\""],
             ),
             1.0
+        );
+    }
+
+    #[test]
+    fn record_inbound_rate_limit_rejection_bounds_label_cardinality_across_many_distinct_ips() {
+        // Before the fix, every distinct "ip:<addr>" identity became its
+        // own permanent Prometheus label combination -- an attacker
+        // rotating source IPs (trivially cheap via an IPv6 /64) could grow
+        // this counter's label set without bound. Recording a rejection
+        // under many distinct source IPs must land in exactly one "ip"
+        // time series, not one per address.
+        let metrics = Metrics::new();
+        for i in 0..2000 {
+            metrics.record_inbound_rate_limit_rejection(&format!(
+                "ip:10.0.{}.{}",
+                i / 256,
+                i % 256
+            ));
+        }
+
+        let rendered = metrics.render();
+        let ip_series_lines = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("rusty_provider_inbound_rate_limit_rejections_total")
+                    && line.contains("identity=")
+            })
+            .count();
+        assert_eq!(
+            ip_series_lines, 1,
+            "every ip:<addr> identity must collapse into a single bounded time series, not one per address"
+        );
+        assert_eq!(
+            metric_value(
+                &rendered,
+                "rusty_provider_inbound_rate_limit_rejections_total",
+                &["identity=\"ip\""],
+            ),
+            2000.0
         );
     }
 

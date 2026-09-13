@@ -23,6 +23,8 @@
 //! offer it; new deployments should negotiate TLS/CredSSP instead. See
 //! [`crate::crypto`] for the caveats on the primitives.
 
+use std::cmp::Ordering;
+
 use crate::crypto::bignum::BigUint;
 use crate::crypto::{md5::Md5, rc4::Rc4, sha1::Sha1};
 use crate::cursor::{Reader, Writer};
@@ -94,6 +96,11 @@ pub struct RsaPrivateKey {
     pub modulus_le: Vec<u8>,
     /// Private exponent `d`, little-endian.
     pub private_exponent_le: Vec<u8>,
+    /// Public exponent `e` (conventionally 65537). Not needed for the
+    /// textbook `c^d mod n` decryption itself, but [`decrypt`](Self::decrypt)
+    /// needs it to compute the RSA blinding factor that keeps that
+    /// `modpow` call off a raw, attacker-chosen ciphertext.
+    pub exponent: u32,
 }
 
 impl RsaPrivateKey {
@@ -105,15 +112,82 @@ impl RsaPrivateKey {
 
     /// RSA-decrypt `data` (`m = c^d mod n`), returning `key_length()`
     /// little-endian bytes.
+    ///
+    /// Applies RSA blinding (Kocher's countermeasure) around the
+    /// `modpow(&d, ...)` call: `BigUint::modpow` is explicitly
+    /// non-constant-time, and this method is reachable straight from
+    /// network input (`net::server`'s Security Exchange PDU handling), so
+    /// decrypting a raw attacker-chosen ciphertext would let a remote
+    /// attacker correlate `modpow`'s timing across repeated requests to
+    /// recover the secret exponent `d`. Blinding multiplies the
+    /// ciphertext by a fresh random `r^e mod n` before the secret-exponent
+    /// `modpow`, then divides `r` back out of the result -- the timing
+    /// signal now depends on the random, secret-independent `r`, not on
+    /// `d`.
     pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
         let c = BigUint::from_bytes_le(data);
         let n = BigUint::from_bytes_le(&self.modulus_le);
         let d = BigUint::from_bytes_le(&self.private_exponent_le);
-        let m = c.modpow(&d, &n);
+        let e = BigUint::from_bytes_le(&self.exponent.to_le_bytes());
+
+        let (r, r_inv) = random_blinding_factor(&n, self.key_length());
+        let blind = r.modpow(&e, &n);
+        let blinded_c = c.mulmod(&blind, &n);
+        let blinded_m = blinded_c.modpow(&d, &n);
+        let m = blinded_m.mulmod(&r_inv, &n);
+
         m.to_bytes_le(self.key_length()).ok_or(Error::InvalidValue {
             field: "RSA plaintext",
             value: "exceeds modulus length".to_string(),
         })
+    }
+}
+
+/// Draws a random RSA blinding factor `r` coprime to `n` (so it has a
+/// modular inverse) and returns `(r, r^-1 mod n)`. Randomness comes from
+/// `/dev/urandom` where available, falling back to a coarse time-derived
+/// stream otherwise (mirrors `krb5::kdc`'s own std-only fallback, for the
+/// same reason: this crate is dependency-free by default, and `decrypt`
+/// takes no `Csprng` parameter). `r` only needs to vary per call to break
+/// the timing correlation between requests -- it is not a secret itself
+/// -- so this fallback is an acceptable trade for keeping `decrypt`'s
+/// signature unchanged.
+///
+/// `n` is the product of two large primes, so a random value failing to
+/// be coprime to it is astronomically unlikely; the bounded retry loop
+/// with a final identity fallback (`r = 1`, i.e. no blinding) exists
+/// purely so this can never loop forever, not because that path is
+/// expected to run.
+fn random_blinding_factor(n: &BigUint, byte_len: usize) -> (BigUint, BigUint) {
+    for _ in 0..16 {
+        let mut buf = vec![0u8; byte_len];
+        fill_random_bytes(&mut buf);
+        let candidate = BigUint::from_bytes_le(&buf).rem(n);
+        if candidate.is_zero() || candidate.compare(&BigUint::one()) == Ordering::Equal {
+            continue;
+        }
+        if let Some(inv) = candidate.mod_inverse(n) {
+            return (candidate, inv);
+        }
+    }
+    (BigUint::one(), BigUint::one())
+}
+
+/// Fills `buf` with randomness: `/dev/urandom` where available, or a
+/// coarse time-derived stream otherwise. See [`random_blinding_factor`]
+/// for why this weaker fallback is acceptable here.
+fn fill_random_bytes(buf: &mut [u8]) {
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if std::io::Read::read_exact(&mut f, buf).is_ok() {
+            return;
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = ((now >> ((i * 8) % 64)) as u8) ^ ((i as u8).wrapping_mul(37).wrapping_add(11));
     }
 }
 
@@ -623,6 +697,7 @@ mod tests {
         let key = RsaPrivateKey {
             modulus_le: vec![0xA1, 0x0C],
             private_exponent_le: 413u32.to_le_bytes().to_vec(),
+            exponent: 17,
         };
         assert_eq!(key.key_length(), 2);
         let plain = key.decrypt(&[0xE6, 0x0A]).unwrap();
@@ -638,10 +713,42 @@ mod tests {
         let private = RsaPrivateKey {
             modulus_le: vec![0xA1, 0x0C],
             private_exponent_le: 413u32.to_le_bytes().to_vec(),
+            exponent: 17,
         };
         let cipher = public.encrypt(&[65]).unwrap();
         let plain = private.decrypt(&cipher).unwrap();
         assert_eq!(plain[0], 65);
+    }
+
+    #[test]
+    fn rsa_private_key_decrypt_blinding_preserves_plaintext() {
+        // Same toy key as the other RSA tests (n=3233, e=17, d=413).
+        // `decrypt` draws a fresh random blinding factor `r` every call
+        // (see `random_blinding_factor`), so calling it many times over
+        // many different plaintexts exercises the multiply-blind /
+        // modpow / unblind path against many different `r` values --
+        // far more than a single deterministic call would. A bug in
+        // that math (e.g. a wrong `mod_inverse`, or forgetting to
+        // unblind the result) would corrupt the recovered plaintext for
+        // most values of `r` and should surface well before the loop
+        // below finishes.
+        let public = RsaPublicKey {
+            modulus_le: vec![0xA1, 0x0C],
+            exponent: 17,
+        };
+        let private = RsaPrivateKey {
+            modulus_le: vec![0xA1, 0x0C],
+            private_exponent_le: 413u32.to_le_bytes().to_vec(),
+            exponent: 17,
+        };
+        for m in 0u16..=200 {
+            let m = m as u8;
+            let cipher = public.encrypt(&[m]).unwrap();
+            for _ in 0..5 {
+                let plain = private.decrypt(&cipher).unwrap();
+                assert_eq!(plain[0], m, "blinded decrypt corrupted plaintext for m={m}");
+            }
+        }
     }
 
     #[test]

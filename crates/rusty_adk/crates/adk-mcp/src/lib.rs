@@ -48,6 +48,9 @@
 pub mod protocol;
 pub mod server;
 
+#[cfg(any(feature = "stdio", feature = "client"))]
+mod line_read;
+
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "http")]
@@ -255,5 +258,27 @@ mod tests {
         assert_eq!(first["id"], 1);
         assert_eq!(second["id"], 2);
         assert_eq!(second["result"]["tools"].as_array().unwrap().len(), 2);
+    }
+
+    #[cfg(feature = "stdio")]
+    #[tokio::test]
+    async fn the_stdio_transport_rejects_a_line_past_the_cap_with_no_newline() {
+        // Regression test: `AsyncBufReadExt::lines()` has no maximum line
+        // length, so a misbehaving peer that never sends a newline would
+        // grow `serve_stream`'s internal buffer without bound. It must
+        // error out once the cap is hit instead.
+        use tokio::io::AsyncWriteExt;
+
+        let payload_len = line_read::MAX_LINE_BYTES as usize + 1;
+        let (mut writer, reader_half) = tokio::io::duplex(payload_len + 4096);
+        writer.write_all(&vec![b'a'; payload_len]).await.unwrap();
+        drop(writer);
+
+        let mut output: Vec<u8> = Vec::new();
+        let result = serve_stream(&test_server(), reader_half, &mut output).await;
+        assert!(
+            result.is_err(),
+            "expected the unterminated oversized line to be rejected"
+        );
     }
 }

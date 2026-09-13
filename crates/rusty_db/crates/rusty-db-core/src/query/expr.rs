@@ -1,3 +1,4 @@
+use super::render_value_placeholder;
 use super::select::Select;
 use super::table::Column;
 use crate::dialect::Dialect;
@@ -487,10 +488,7 @@ impl Expr {
     pub fn render(&self, dialect: &dyn Dialect, params: &mut Vec<Value>) -> String {
         match self {
             Expr::Column(c) => c.qualified_sql(dialect),
-            Expr::Literal(v) => {
-                params.push(v.clone());
-                dialect.placeholder(params.len())
-            }
+            Expr::Literal(v) => render_value_placeholder(v, dialect, params),
             Expr::BinOp(lhs, op, rhs) => {
                 format!(
                     "{} {} {}",
