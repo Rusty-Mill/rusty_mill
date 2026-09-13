@@ -2,8 +2,6 @@
 //! `write_frontmatter`, `note_find_duplicates`, `note_create_unique`,
 //! `note_random`, `note_merge`, `note_create_from_title`.
 
-use std::path::Path;
-
 use nexus_plugins::PluginError;
 use serde_json::Value;
 
@@ -77,24 +75,32 @@ pub(crate) fn build_appended(existing: &str, snippet: &str) -> String {
 /// unreadable bytes / non-markdown all return
 /// `{ status: null, fields: {} }` so callers can branch on `status`
 /// without a separate existence check.
-pub(crate) fn read_frontmatter(forge_root: &Path, args: &Value) -> Result<Value, PluginError> {
+pub(crate) fn read_frontmatter(engine: &StorageEngine, args: &Value) -> Result<Value, PluginError> {
     // #190 / R7 — strict-parse via typed `StorageReadFrontmatterArgs`.
     let StorageReadFrontmatterArgs { path } = parse_args(args, "read_frontmatter")?;
-    let result = read_frontmatter_for_path(forge_root, &path);
+    let result = read_frontmatter_for_path(engine, &path);
     to_value(&result, "read_frontmatter")
 }
 
-fn read_frontmatter_for_path(forge_root: &Path, path: &str) -> crate::ipc::ReadFrontmatterResult {
-    let abs = forge_root.join(path);
-    let Ok(content) = std::fs::read_to_string(&abs) else {
+fn read_frontmatter_for_path(
+    engine: &StorageEngine,
+    path: &str,
+) -> crate::ipc::ReadFrontmatterResult {
+    // Route through `read_file`, which confines `path` to the forge
+    // root via `resolve_within` (see issue #72) — a raw
+    // `forge_root.join(path)` here would let an absolute path or a
+    // Windows drive-relative form escape the forge entirely.
+    let Ok(bytes) = engine.read_file(path) else {
         return crate::ipc::ReadFrontmatterResult::default();
     };
-    crate::ipc::frontmatter_from_source(&content)
+    let Ok(content) = std::str::from_utf8(&bytes) else {
+        return crate::ipc::ReadFrontmatterResult::default();
+    };
+    crate::ipc::frontmatter_from_source(content)
 }
 
 pub(crate) fn write_frontmatter(
     engine: &StorageEngine,
-    forge_root: &Path,
     args: &Value,
 ) -> Result<Value, PluginError> {
     // #190 / R7 — strict-parse via typed `StorageWriteFrontmatterArgs`
@@ -105,8 +111,17 @@ pub(crate) fn write_frontmatter(
     // custom error string; both paths now route through the standard
     // strictness gate.
     let StorageWriteFrontmatterArgs { path, key, value } = parse_args(args, "write_frontmatter")?;
-    let current = std::fs::read_to_string(forge_root.join(&path))
+    // Route through `read_file`, which confines `path` to the forge
+    // root via `resolve_within` (see issue #72) instead of a raw
+    // `forge_root.join(path)` read.
+    let current_bytes = engine
+        .read_file(&path)
         .map_err(|e| exec_err(format!("write_frontmatter '{path}' key='{key}' read: {e}")))?;
+    let current = String::from_utf8(current_bytes).map_err(|e| {
+        exec_err(format!(
+            "write_frontmatter '{path}' key='{key}': existing file is not valid UTF-8: {e}"
+        ))
+    })?;
     let next = crate::core_plugin::apply_frontmatter_edit(&current, &key, value.as_deref());
     engine
         .write_file(&path, next.as_bytes())

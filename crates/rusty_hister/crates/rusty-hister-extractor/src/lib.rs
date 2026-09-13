@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Twelve concrete extractors so far:**
+//! **Fourteen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,6 +110,34 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`DiscourseExtractor`] (capability inventory §4.5.4) — extract *and*
+//!   preview for Discourse forum topic pages. A topic page can carry the
+//!   same content in up to three places at once — a (often
+//!   double-JSON-encoded) `#data-preloaded` hydration blob, the
+//!   already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block
+//!   — and, like Go, this port merges all three by post id/number rather
+//!   than picking just one, preferring each field's highest-fidelity
+//!   source by a `source_rank` (rendered DOM > preloaded JSON > JSON-LD,
+//!   matching Go's own ranking). Reuses `WikipediaExtractor`'s
+//!   reparse-as-fragment trick for cleaning/URL-rewriting a post body.
+//! - [`YtdlpExtractor`] (capability inventory §4.5.17) — extract *and*
+//!   preview for video-hosting pages (YouTube, Vimeo, and others), by
+//!   shelling out to the external `yt-dlp` binary rather than parsing
+//!   `document.html` at all — the only extractor in this crate that works
+//!   entirely from `document.url`. **Disabled by default**, matching Go:
+//!   this extractor is useless without `yt-dlp` installed, so opting a
+//!   chain into it is a deliberate administrative choice, not automatic.
+//!   Three deliberate simplifications from the Go original, documented in
+//!   the module doc rather than worked around: no thumbnail download (no
+//!   general-purpose HTTP client to reuse — `thumbnail_url` metadata
+//!   holds the original URL instead), no per-instance job-slot
+//!   concurrency limit or cancellation (no other extractor models
+//!   either), and preview renders HTML directly rather than Go's
+//!   structured JSON handed to a frontend template (`PreviewResponse` has
+//!   no template-hint field). The first extractor to use `rusty_json`'s
+//!   `serde` feature (`#[derive(serde::Deserialize)]` on `VideoInfo` and
+//!   friends) rather than walking `rusty_json::Value` by hand, since
+//!   `yt-dlp --dump-json`'s output is a fixed, known shape.
 //! - [`ReadabilityExtractor`] (capability inventory §4.4) — extract *and*
 //!   preview for any web page, using the [`readabilityrs`] crate (a Rust
 //!   port of Mozilla's Readability.js — the same algorithm family Go's
@@ -144,6 +172,7 @@
 
 mod basic;
 mod chatgpt;
+mod discourse;
 mod embeddedvideo;
 mod github;
 mod godoc;
@@ -158,9 +187,11 @@ mod stackexchange;
 mod textutil;
 mod urlutil;
 mod wikipedia;
+mod ytdlp;
 
 pub use basic::BasicExtractor;
 pub use chatgpt::ChatGptExtractor;
+pub use discourse::DiscourseExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;
@@ -177,3 +208,4 @@ pub use rusty_hister_core::{
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
 pub use wikipedia::WikipediaExtractor;
+pub use ytdlp::YtdlpExtractor;

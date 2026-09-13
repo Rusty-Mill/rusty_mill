@@ -2180,7 +2180,13 @@ fn receive_data_loop(
         let data = if st.no_compress {
             data
         } else {
-            crate::compress::decompress(&data)
+            match crate::compress::decompress(&data) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::debug!("data decompress error: {e}");
+                    return;
+                }
+            }
         };
         if data.len() < 8 {
             log::debug!("short data frame");
@@ -2191,7 +2197,23 @@ fn receive_data_loop(
             log::debug!("chunk arrived for closed file");
             return;
         }
-        if let Err(e) = write_at(st.file.as_mut().unwrap(), &data[8..], pos) {
+        let chunk = &data[8..];
+        let end = match pos.checked_add(chunk.len() as u64) {
+            Some(e) => e,
+            None => {
+                log::debug!("chunk position overflow (pos={pos}, len={})", chunk.len());
+                return;
+            }
+        };
+        if st.size >= 0 && end > st.size as u64 {
+            log::debug!(
+                "chunk offset {pos} (len {}) exceeds declared file size {}; aborting transfer",
+                chunk.len(),
+                st.size
+            );
+            return;
+        }
+        if let Err(e) = write_at(st.file.as_mut().unwrap(), chunk, pos) {
             log::debug!("write error: {e}");
             return;
         }
@@ -2384,5 +2406,96 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Regression: `receive_data_loop` used to hand the wire-supplied `pos`
+    // straight to `write_at` with no check against the negotiated file
+    // size (`RecvState.size`, set from the sender's declared `fi.size`). A
+    // malicious sender could send a chunk whose `pos` sat at or beyond that
+    // size, causing the receiver to sparse-allocate an arbitrarily large
+    // file on disk despite having agreed to a small transfer. The loop now
+    // validates `pos + chunk.len()` against `RecvState.size` and aborts
+    // instead of writing.
+    #[test]
+    fn receive_data_loop_rejects_pos_beyond_declared_size() {
+        use std::net::{TcpListener, TcpStream};
+
+        fn tcp_pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let connector = std::thread::spawn(move || TcpStream::connect(addr).unwrap());
+            let (server, _) = listener.accept().unwrap();
+            (server, connector.join().unwrap())
+        }
+
+        let (data_recv_end, data_send_end) = tcp_pair();
+        let (ctrl_recv_end, _ctrl_send_end) = tcp_pair();
+
+        let key = vec![0u8; 32];
+        let conn = Comm::new(data_recv_end).unwrap();
+        let mut attacker = Comm::new(data_send_end).unwrap();
+        let control_tx = Arc::new(Mutex::new(Comm::new(ctrl_recv_end).unwrap()));
+
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-croc-writeoffset-test-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.bin");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        const DECLARED_SIZE: i64 = 10;
+        file.set_len(DECLARED_SIZE as u64).unwrap();
+
+        let mut state = RecvState::new();
+        state.file = Some(file);
+        state.path = path.clone();
+        state.size = DECLARED_SIZE;
+        state.closed = false;
+        state.chunks_expected = 1;
+        state.no_compress = true;
+        let recv = Arc::new(Mutex::new(state));
+
+        let loop_key = key.clone();
+        let loop_recv = Arc::clone(&recv);
+        let handle =
+            std::thread::spawn(move || receive_data_loop(conn, loop_key, loop_recv, control_tx));
+
+        // Malicious chunk: pos sits exactly at the declared file size, and
+        // the payload would push the write past it.
+        let mut plaintext = (DECLARED_SIZE as u64).to_le_bytes().to_vec();
+        plaintext.extend_from_slice(b"hack");
+        let encrypted = crypt::encrypt(&plaintext, &key).unwrap();
+        attacker.send(&encrypted).unwrap();
+        // Close the data connection so that if the loop doesn't reject the
+        // chunk (pre-fix behavior) it gets EOF on its next `receive()`
+        // instead of blocking on the connection's multi-hour idle timeout.
+        drop(attacker);
+
+        // The loop must reject the chunk and return instead of hanging or
+        // writing past the negotiated size.
+        handle.join().unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            meta.len(),
+            DECLARED_SIZE as u64,
+            "file must not grow past the negotiated size"
+        );
+        let st = recv.lock().unwrap();
+        assert_eq!(
+            st.total_sent, 0,
+            "rejected chunk must not be counted as received"
+        );
+        assert_eq!(st.chunks_transferred, 0);
+        drop(st);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

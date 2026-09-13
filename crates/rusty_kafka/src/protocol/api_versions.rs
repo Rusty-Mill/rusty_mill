@@ -5,7 +5,7 @@
 //! rather than assuming a version blindly.
 
 use crate::error::CodecError;
-use crate::wire::{read_array_len, read_i16};
+use crate::wire::{read_checked_array_len, read_i16};
 use rusty_wire::{Reader, Writer};
 
 /// `ApiVersionsRequest` v0 -- no body fields; the header alone is the
@@ -45,8 +45,9 @@ impl ApiVersionsResponse {
     /// is already consumed by the caller).
     pub fn decode(reader: &mut Reader) -> Result<Self, CodecError> {
         let error_code = read_i16(reader)?;
-        let count = read_array_len(reader)?.max(0);
-        let mut api_versions = Vec::with_capacity(count as usize);
+        const API_VERSION_MIN_LEN: usize = 2 + 2 + 2; // api_key + min_version + max_version
+        let count = read_checked_array_len(reader, API_VERSION_MIN_LEN)?;
+        let mut api_versions = Vec::with_capacity(count);
         for _ in 0..count {
             api_versions.push(ApiVersion {
                 api_key: read_i16(reader)?,
@@ -117,5 +118,20 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         let response = ApiVersionsResponse::decode(&mut reader).unwrap();
         assert_eq!(response.error_code, 35);
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_api_version_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i16(&mut writer, 0); // error_code
+        crate::wire::write_i32(&mut writer, i32::MAX); // api_version count
+        writer.write_bytes(&[0, 1, 2, 3]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = ApiVersionsResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)
+        ));
     }
 }

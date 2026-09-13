@@ -45,6 +45,14 @@ pub struct Grammar {
 /// grammar from hanging the parser instead of failing fast.
 const MAX_CANDIDATES: usize = 4096;
 
+/// Cap on nested `(...)` group depth in a GBNF grammar. Each nested group
+/// adds one level of native recursion in `parse_sequence`; an
+/// externally-sourced grammar (e.g. `whisper-command`'s `--grammar` file)
+/// with tens of thousands of nested groups would otherwise overflow the
+/// stack and abort the process. 64 mirrors `rusty_llama::grammar`'s
+/// `MAX_NESTING_DEPTH` for the identical class of concern.
+const MAX_NESTING_DEPTH: u32 = 64;
+
 #[derive(Clone, Debug, Default)]
 struct TrieNode {
     children: HashMap<char, TrieNode>,
@@ -158,18 +166,18 @@ fn parse_alternatives(expr: &str) -> Result<Vec<Alternative>, String> {
             b'(' if !in_quote => depth += 1,
             b')' if !in_quote => depth -= 1,
             b'|' if !in_quote && depth == 0 => {
-                alts.push(parse_sequence(expr[start..i].trim())?);
+                alts.push(parse_sequence(expr[start..i].trim(), 0)?);
                 start = i + 1;
             }
             _ => {}
         }
         i += 1;
     }
-    alts.push(parse_sequence(expr[start..].trim())?);
+    alts.push(parse_sequence(expr[start..].trim(), 0)?);
     Ok(alts)
 }
 
-fn parse_sequence(expr: &str) -> Result<Alternative, String> {
+fn parse_sequence(expr: &str, depth: u32) -> Result<Alternative, String> {
     let mut terms = Vec::new();
     let bytes = expr.as_bytes();
     let mut i = 0usize;
@@ -186,17 +194,21 @@ fn parse_sequence(expr: &str) -> Result<Alternative, String> {
                 i = end + 1;
             }
             b'(' => {
-                let mut depth = 1i32;
+                let group_depth = depth + 1;
+                if group_depth > MAX_NESTING_DEPTH {
+                    return Err("grammar group nesting exceeds the maximum depth".to_string());
+                }
+                let mut paren_depth = 1i32;
                 let mut j = i + 1;
-                while j < bytes.len() && depth > 0 {
+                while j < bytes.len() && paren_depth > 0 {
                     match bytes[j] {
-                        b'(' => depth += 1,
-                        b')' => depth -= 1,
+                        b'(' => paren_depth += 1,
+                        b')' => paren_depth -= 1,
                         _ => {}
                     }
                     j += 1;
                 }
-                if depth != 0 {
+                if paren_depth != 0 {
                     return Err("unbalanced parentheses".to_string());
                 }
                 let inner = &expr[i + 1..j - 1];
@@ -215,7 +227,7 @@ fn parse_sequence(expr: &str) -> Result<Alternative, String> {
                             .to_string(),
                     );
                 }
-                terms.extend(parse_sequence(inner.trim())?);
+                terms.extend(parse_sequence(inner.trim(), group_depth)?);
                 i = j;
             }
             b'[' => {
@@ -394,5 +406,26 @@ word ::= "a""#,
         let src = "# a comment\n\nroot ::= \"ok\"\n";
         let g = Grammar::parse(src, "root").unwrap();
         assert_eq!(g.candidates(), &["ok".to_string()]);
+    }
+
+    #[test]
+    fn deeply_nested_parens_are_rejected_instead_of_overflowing_the_stack() {
+        // 10_000 levels of `(...)` nesting is far past MAX_NESTING_DEPTH
+        // but far below anything that would itself overflow the test
+        // harness's stack — the parser must bail with an `Err` well
+        // before that, rather than recursing through parse_sequence ->
+        // parse_sequence -> ... until the native stack overflows and
+        // aborts the process.
+        let mut expr = String::new();
+        for _ in 0..10_000 {
+            expr.push('(');
+        }
+        expr.push_str("\"x\"");
+        for _ in 0..10_000 {
+            expr.push(')');
+        }
+        let src = format!("root ::= {expr}\n");
+        let err = Grammar::parse(&src, "root").expect_err("deeply nested group must be rejected");
+        assert!(err.contains("nesting"), "actual: {err}");
     }
 }

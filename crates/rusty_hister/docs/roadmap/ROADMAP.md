@@ -330,11 +330,39 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
+- [x] `rusty-hister-extractor` (`DiscourseExtractor`, §4.5.4): extract
+      *and* preview for Discourse forum topic pages. Done — 6 new unit
+      tests (145 total in the crate), clippy/fmt clean. Like Reddit, a
+      topic page can carry the same content in up to three places at
+      once — a (often double-JSON-encoded) `#data-preloaded` hydration
+      blob, the already-rendered post DOM, and a `schema.org` `QAPage`
+      JSON-LD block — and, like Go, this port merges all three by post
+      id/number rather than picking just one, preferring each field's
+      highest-fidelity source by a `source_rank` (rendered DOM >
+      preloaded JSON > JSON-LD, matching Go's own ranking). Reuses
+      `WikipediaExtractor`'s reparse-as-fragment trick for
+      cleaning/URL-rewriting a post body.
+- [x] `rusty-hister-extractor` (`YtdlpExtractor`, §4.5.17): extract *and*
+      preview for video-hosting pages (YouTube, Vimeo, and others), by
+      shelling out to the external `yt-dlp` binary rather than parsing
+      `document.html` at all. Done — 14 new unit tests (159 total in the
+      crate), clippy/fmt clean. Disabled by default, matching Go, since
+      it's useless without `yt-dlp` installed. Three deliberate
+      simplifications from the Go original: no thumbnail download (no
+      general-purpose HTTP client in this cluster to reuse — `rusty_http`
+      is a sans-IO protocol layer with no client; stores `thumbnail_url`
+      instead of Go's base64-embedded image data), no per-instance
+      job-slot concurrency limit or cancellation, and preview renders HTML
+      directly rather than Go's structured JSON handed to a frontend
+      template. The first extractor to use `rusty_json`'s `serde` feature
+      (`#[derive(serde::Deserialize)]`) rather than walking
+      `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is
+      a fixed, known shape.
 - [x] `rusty-hister-extractor` (`ReadabilityExtractor`, §4.4): extract
       *and* preview for any web page via the `readabilityrs` crate (a
       Rust port of Mozilla's Readability.js — the same algorithm family
       Go's own `go-readability` dependency belongs to). Done — 7 new unit
-      tests (146 total in the crate), clippy/fmt clean. Dependency
+      tests (166 total in the crate), clippy/fmt clean. Dependency
       decision made by explicit user choice: `readabilityrs` pulls in
       `scraper 0.25`/`ego-tree 0.10`, a major version ahead of this
       crate's own `0.21`/`0.9` pins used by 8 existing extractors — both

@@ -548,10 +548,21 @@ impl FileList {
         w.into_vec()
     }
 
+    /// `CLIPRDR_FILELIST` has no spec-mandated maximum, but a legitimate
+    /// clipboard file transfer numbers at most a few thousand files; cap
+    /// well above that before trusting the declared count for allocation.
+    const MAX_ENTRIES: usize = 8192;
+
     /// Decode from bytes.
     pub fn decode(buf: &[u8]) -> Result<FileList> {
         let mut r = Reader::new(buf);
         let count = r.read_u32_le()? as usize;
+        if count > Self::MAX_ENTRIES {
+            return Err(Error::InvalidValue {
+                field: "CLIPRDR_FILELIST count",
+                value: count.to_string(),
+            });
+        }
         let mut files = Vec::with_capacity(count);
         for _ in 0..count {
             files.push(FileDescriptor::decode(&mut r)?);
@@ -1034,6 +1045,20 @@ mod tests {
     fn file_list_empty_roundtrip() {
         let list = FileList { files: vec![] };
         assert_eq!(FileList::decode(&list.encode()).unwrap(), list);
+    }
+
+    #[test]
+    fn file_list_huge_count_is_rejected() {
+        let mut w = Writer::new();
+        w.write_u32_le(0xFFFF_FFFF); // declared count far exceeds the wire limit
+        let buf = w.into_vec();
+        assert!(matches!(
+            FileList::decode(&buf).unwrap_err(),
+            Error::InvalidValue {
+                field: "CLIPRDR_FILELIST count",
+                ..
+            }
+        ));
     }
 
     #[test]

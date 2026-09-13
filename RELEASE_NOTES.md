@@ -16,7 +16,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Readability extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-readability`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-readability)
 
-Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+Twenty-fourth Phase 1 increment. The fourteenth of the 20 built-in extractors.
 
 - **Added:** `ReadabilityExtractor` (capability inventory §4.4) — a port
   of the `readabilityExtractor` in `server/extractor/extractor.go`.
@@ -41,6 +41,53 @@ Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
 - **Honest gaps:** two Go metadata fields (a favicon URL, a `modified`
   timestamp) have no `readabilityrs` equivalent and are deliberately not
   reproduced rather than silently dropped.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Ytdlp extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-ytdlp`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-ytdlp)
+
+Twenty-third Phase 1 increment. The thirteenth of the 20 built-in extractors.
+
+- **Added:** `YtdlpExtractor` (capability inventory §4.5.17) — a port of
+  `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`.
+  Extract and preview for video-hosting pages (YouTube, Vimeo, and
+  others), by shelling out to the external `yt-dlp` binary rather than
+  parsing `document.html` at all — the only extractor in this crate that
+  works entirely from `document.url`. Disabled by default, matching Go,
+  since it's useless without `yt-dlp` installed.
+- **Three deliberate simplifications** from the Go original, documented
+  rather than worked around: no thumbnail download (no general-purpose
+  HTTP client in this cluster to reuse — `rusty_http` is a sans-IO
+  protocol layer with no client; stores `thumbnail_url` instead of Go's
+  base64-embedded image data), no per-instance job-slot concurrency limit
+  or cancellation, and preview renders HTML directly rather than Go's
+  structured JSON handed to a frontend template.
+- **New trick:** the first extractor to use `rusty_json`'s `serde`
+  feature (`#[derive(serde::Deserialize)]`) rather than walking
+  `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is a
+  fixed, known shape.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Discourse extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-discourse`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-discourse)
+
+Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+
+- **Added:** `DiscourseExtractor` (capability inventory §4.5.4) — a port of
+  `server/extractor/extractors/discourse/discourse.go`. Extract and
+  preview for Discourse forum topic pages.
+- **Three sources, one merge:** like Reddit, a topic page can carry the
+  same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block.
+  Like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking).
+- **Reused, not reinvented:** `WikipediaExtractor`'s reparse-as-fragment
+  trick for cleaning/URL-rewriting a post body.
 
 ---
 

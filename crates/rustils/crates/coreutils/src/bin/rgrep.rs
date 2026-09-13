@@ -51,7 +51,7 @@ fn search_dir(dir: &Path, re: &Regex, invert: bool, line_nums: bool) -> io::Resu
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let ignore_case = args.contains(&"-i".to_string());
     let invert_match = args.contains(&"-v".to_string());
     let line_numbers = args.contains(&"-n".to_string());

@@ -37,6 +37,11 @@ pub enum ClientError {
     Protocol(ProtocolError),
     Server(String),
     UnexpectedResponse(Response),
+    /// The response's declared frame length exceeded
+    /// [`crate::server::MAX_FRAME_LEN`] -- rejected before the body buffer
+    /// is allocated, mirroring the same cap `server.rs` enforces on the
+    /// request side (see that module's top-level docs).
+    FrameTooLarge(u32),
 }
 
 impl fmt::Display for ClientError {
@@ -48,6 +53,11 @@ impl fmt::Display for ClientError {
             ClientError::UnexpectedResponse(response) => {
                 write!(f, "unexpected response: {response:?}")
             }
+            ClientError::FrameTooLarge(len) => write!(
+                f,
+                "response frame length {len} exceeds the {}-byte cap",
+                crate::server::MAX_FRAME_LEN
+            ),
         }
     }
 }
@@ -135,6 +145,14 @@ impl Client {
     /// response back. A [`Response::Error`] is unwrapped into
     /// [`ClientError::Server`] here so every other method's match arms only
     /// have to handle the responses that actually mean success.
+    ///
+    /// A response header claiming a body past
+    /// [`crate::server::MAX_FRAME_LEN`] is rejected as
+    /// [`ClientError::FrameTooLarge`] before the body buffer is ever
+    /// allocated -- a malicious or buggy server can't make this client
+    /// allocate an unbounded amount of memory on its say-so, mirroring the
+    /// cap `server.rs` enforces on the request side (see that module's
+    /// top-level docs).
     async fn request(&self, req: Request) -> Result<Response, ClientError> {
         let encoded = protocol::encode_request(&req);
         let framed = protocol::frame(&encoded);
@@ -142,8 +160,11 @@ impl Client {
 
         let mut header = [0u8; 4];
         self.stream.read_exact(&mut header).await?;
-        let len = protocol::frame_len(header) as usize;
-        let mut body = vec![0u8; len];
+        let len = protocol::frame_len(header);
+        if len > crate::server::MAX_FRAME_LEN {
+            return Err(ClientError::FrameTooLarge(len));
+        }
+        let mut body = vec![0u8; len as usize];
         self.stream.read_exact(&mut body).await?;
 
         match protocol::decode_response(&body)? {
@@ -157,7 +178,7 @@ impl Client {
 mod tests {
     use std::sync::Arc;
 
-    use rusty_tokio::io::SimDriver;
+    use rusty_tokio::io::{SimDriver, TcpListener};
 
     use super::*;
     use crate::clock::SimClock;
@@ -275,5 +296,35 @@ mod tests {
         assert_eq!(client_b.fetch(off_b).await.unwrap(), b"from b");
 
         server.abort();
+    }
+
+    /// A response header claiming a body past `MAX_FRAME_LEN` is rejected
+    /// as `ClientError::FrameTooLarge` before the client ever allocates a
+    /// buffer for it. The mock server here declares an oversized length
+    /// and then sends nothing further -- if `request` still tried to
+    /// allocate and read the (never-sent) body, this test would hang
+    /// instead of returning promptly with an error.
+    #[rusty_tokio::test]
+    async fn a_response_frame_claiming_more_than_the_cap_is_rejected() {
+        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mock_server = rusty_tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let oversized_len = server::MAX_FRAME_LEN + 1;
+            stream
+                .write_all(&oversized_len.to_be_bytes())
+                .await
+                .unwrap();
+        });
+
+        let client = Client::connect(addr).await.unwrap();
+        let err = client.produce(b"hello").await.unwrap_err();
+        assert!(matches!(
+            err,
+            ClientError::FrameTooLarge(len) if len == server::MAX_FRAME_LEN + 1
+        ));
+
+        mock_server.await.unwrap();
     }
 }
