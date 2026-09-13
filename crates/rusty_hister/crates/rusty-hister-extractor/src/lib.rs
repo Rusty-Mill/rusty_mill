@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Nineteen concrete extractors so far:**
+//! **All twenty built-in extractors are now implemented:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -217,10 +217,26 @@
 //!   URL), and — only when neither of those finds anything — the page's
 //!   own Open Graph/Twitter Card meta tags as a single fallback post for
 //!   the page's own URL.
+//! - [`TwitterExtractor`] (capability inventory §4.5.15) — decomposes a
+//!   Twitter/X profile/feed/tweet page into one [`Document`] per visible
+//!   tweet, the third and last extractor to reuse the
+//!   [`Document::extra_documents`]/[`Document::skip_indexing`] capability
+//!   extension Mastodon established. Unlike a multi-source merge, Twitter
+//!   has only one real source (the rendered DOM) plus a page-meta
+//!   fallback, and candidates are deduped by canonical URL (first match
+//!   wins) rather than merged field-by-field. Its own trick with no
+//!   Mastodon/Bluesky equivalent: Twitter/X shortens every link in a
+//!   tweet's body through its own `t.co` redirector, so this port rewrites
+//!   each `t.co` anchor's `href` back to its real destination (from a
+//!   `data-expanded-url`/`title` attribute or the anchor's own visible
+//!   text) and patches the plain-text version the same way — reparsing
+//!   the whole tweet subtree as its own fragment up front
+//!   (`WikipediaExtractor::extract`'s clone trick) so both that rewrite
+//!   and the ordinary relative-to-absolute URL pass can mutate the same
+//!   copy in sequence.
 //!
-//! Twitter (capability inventory §4.5.15) can now reuse the same
-//! `extra_documents`/`skip_indexing` mechanism Mastodon and Bluesky
-//! established; porting it just hasn't happened yet.
+//! All 20 built-in extractors (capability inventory §4.3-§4.5) are now
+//! implemented.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -249,6 +265,7 @@ mod registry;
 mod sanitizer;
 mod stackexchange;
 mod textutil;
+mod twitter;
 mod urlutil;
 mod wikipedia;
 mod ytdlp;
@@ -276,5 +293,6 @@ pub use rusty_hister_core::{
 };
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
+pub use twitter::TwitterExtractor;
 pub use wikipedia::WikipediaExtractor;
 pub use ytdlp::YtdlpExtractor;

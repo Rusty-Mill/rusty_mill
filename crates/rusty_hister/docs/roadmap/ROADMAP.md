@@ -438,12 +438,24 @@ independent of ADR-0002/0003)
       anchor linking to a post URL), and — only when neither of those
       finds anything — the page's own Open Graph/Twitter Card meta tags
       as a single fallback post for the page's own URL.
-- Twitter (§4.5.15) can now reuse the same `extra_documents`/
-  `skip_indexing` mechanism Mastodon and Bluesky established; porting it
-  just hasn't happened yet.
-- `rusty-hister-extractor`: the last built-in extractor, Twitter (§4.3),
-  budgeting fresh test authorship since it has no existing Go test
-  coverage to draw on directly.
+- [x] `rusty-hister-extractor` (`TwitterExtractor`, §4.5.15): decomposes
+      a Twitter/X profile/feed/tweet page into one `Document` per visible
+      tweet, the third and last extractor to use the capability extension
+      above. Done — 6 new unit tests (199 total in the crate), clippy/fmt
+      clean. Unlike a multi-source merge, Twitter has only one real
+      source (the rendered DOM) plus a page-meta fallback, and candidates
+      are deduped by canonical URL (first match wins) rather than merged
+      field-by-field. Its own trick with no Mastodon/Bluesky equivalent:
+      Twitter/X shortens every link in a tweet's body through its own
+      `t.co` redirector, so this port rewrites each `t.co` anchor's
+      `href` back to its real destination (from a `data-expanded-url`/
+      `title` attribute or the anchor's own visible text) and patches the
+      plain-text version the same way — reparsing the whole tweet
+      subtree as its own fragment up front so both that rewrite and the
+      ordinary relative-to-absolute URL pass can mutate the same copy in
+      sequence.
+- **All 20 built-in extractors are now implemented — Phase 1's extractor
+  set is complete.**
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of

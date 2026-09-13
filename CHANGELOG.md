@@ -112,6 +112,29 @@ Removed / Fixed / Security, newest first.
   "per-page multi-document extraction" open item and unblocks
   Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15). 1 new unit
   test (17 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `TwitterExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.15): a Rust port of
+  `server/extractor/extractors/twitter/extractor.go`, decomposing a
+  Twitter/X profile/feed/tweet page into one `Document` per visible
+  tweet — the third and last extractor to use the `extra_documents`/
+  `skip_indexing` capability extension above. Unlike a multi-source
+  merge, Twitter has only one real source (the rendered DOM) plus a
+  page-meta fallback, and candidates are deduped by canonical URL (first
+  match wins) rather than merged field-by-field. Its own trick with no
+  Mastodon/Bluesky equivalent: Twitter/X shortens every link in a
+  tweet's body through its own `t.co` redirector, so this port rewrites
+  each `t.co` anchor's `href` back to its real destination (from a
+  `data-expanded-url`/`title` attribute or the anchor's own visible
+  text) and patches the plain-text version the same way — reparsing the
+  whole tweet subtree as its own fragment up front
+  (`WikipediaExtractor::extract`'s clone trick) so both that rewrite and
+  the ordinary relative-to-absolute URL pass can mutate the same copy in
+  sequence. One Go behavior isn't reproduced: replacing a `t.co`-only
+  anchor's *visible text* with the expanded URL — cosmetic only (the
+  more important `href` fix and the plain-text substitution both still
+  happen), and `scraper`'s tree has no cheap child-replacement primitive
+  for it. 6 new unit tests (199 total in the crate), clippy/fmt clean.
+  All 20 built-in extractors are now ported.
 - `rusty-hister-extractor`'s `BlueskyExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.14): a Rust port of
   `server/extractor/extractors/bluesky/extractor.go`, decomposing a

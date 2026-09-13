@@ -1,15 +1,16 @@
 # PROJECT-STATUS: rusty_hister
 
 Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s
-nineteenth concrete extractor, Bluesky — the second to reuse the
-`rusty-hister-core` capability extension `MastodonExtractor` established:
-`Document::extra_documents`/`Document::skip_indexing`, two new additive
-fields (empty/`false` by default, every prior extractor unaffected)
-mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing`. Twitter can
-now reuse the same mechanism too; porting it just hasn't happened yet.
-Follows the eighteenth, Mastodon — the first to need this capability
-extension, resolving the "Mastodon/Bluesky/Twitter blocked" open item
-this doc previously carried. And the seventeenth, Readability — extract
+twentieth and last concrete extractor, Twitter — the third and last to
+reuse the `rusty-hister-core` capability extension `MastodonExtractor`
+established: `Document::extra_documents`/`Document::skip_indexing`, two
+new additive fields (empty/`false` by default, every prior extractor
+unaffected) mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing`.
+**All 20 built-in extractors are now implemented — Phase 1's extractor
+set is complete.** Follows the nineteenth, Bluesky — the second to reuse
+this capability extension. And the eighteenth, Mastodon — the first to
+need this capability extension, resolving the "Mastodon/Bluesky/Twitter
+blocked" open item this doc previously carried. And the seventeenth, Readability — extract
 and preview for any web page via the `readabilityrs` crate (a Rust port
 of Mozilla's Readability.js, the same algorithm family Go's own
 `go-readability` dependency belongs to). First new external dependency
@@ -60,7 +61,7 @@ licensing policy) are settled. Three crates now have real implementation:
   mechanism (capability inventory §4.2): ordered registration
   (`register`/`register_before`), two-phase enrich-then-extract execution,
   a separate preview chain with case-insensitive starting-point selection,
-  and config merging (`apply_configs`). **Nineteen concrete extractors so far:**
+  and config merging (`apply_configs`). **All twenty built-in extractors are now implemented:**
   `JsonLdExtractor` (capability inventory §4.5.5) — enrich-only, parses
   `application/ld+json` script tags into normalized schema.org metadata
   (`type`/`headline`), flattening `@graph`/array wrappers and deep-
@@ -334,6 +335,21 @@ licensing policy) are settled. Three crates now have real implementation:
   only when neither of those finds anything — the page's own Open
   Graph/Twitter Card meta tags as a single fallback post for the page's
   own URL.
+  **`TwitterExtractor`** (capability inventory §4.5.15) — decomposes a
+  Twitter/X profile/feed/tweet page into one `Document` per visible
+  tweet, the third and last extractor to reuse the
+  `extra_documents`/`skip_indexing` capability extension
+  `MastodonExtractor` established. Unlike a multi-source merge, Twitter
+  has only one real source (the rendered DOM) plus a page-meta fallback,
+  and candidates are deduped by canonical URL (first match wins) rather
+  than merged field-by-field. Its own trick with no Mastodon/Bluesky
+  equivalent: Twitter/X shortens every link in a tweet's body through
+  its own `t.co` redirector, so this port rewrites each `t.co` anchor's
+  `href` back to its real destination (from a `data-expanded-url`/
+  `title` attribute or the anchor's own visible text) and patches the
+  plain-text version the same way — reparsing the whole tweet subtree as
+  its own fragment up front so both that rewrite and the ordinary
+  relative-to-absolute URL pass can mutate the same copy in sequence.
 - `rusty-hister-model` — the nine `#[derive(Mapped)]` types from
   `automigrate()`'s list (capability inventory §7.2: `User`, `Link`,
   `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`,
@@ -539,7 +555,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
   no signature changes were needed anywhere else in the SDK and every
   extractor written before this addition is unaffected.
   `MastodonExtractor` is the first to use it, `BlueskyExtractor` the
-  second; a future
+  second, and `TwitterExtractor` the third and last; a future
   `rusty-hister-indexer` is what actually walks `extra_documents`
   recursively (not yet built) — this only unblocks the *extractor* side.
 - **Whether `rusty_hister` needs to open a pre-existing Hister-Go-created
@@ -631,7 +647,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. `Document` also carries `extra_documents`/`skip_indexing`, an additive extension mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing`. 17 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | **Query layer complete** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions), and all of `user.go` (15 functions: account CRUD, Argon2id password hashing/verification, token issuance, admin toggling, raw rules-JSON get/set) — **all six Go model files' query layers are now ported**. 131 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior, and `user.go`'s create/authenticate/delete/token/rename/password/oauth/admin/rules behavior), clippy/fmt clean. |
-| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), `StackExchangeExtractor` (§4.5.7), `GoDocExtractor` (§4.5.8), `LobstersExtractor` (§4.5.10), `HackerNewsExtractor` (§4.5.11), `GitHubExtractor` (§4.5.9), `ChatGptExtractor` (§4.5.18), `BasicExtractor` (§4.4), `WikipediaExtractor` (§4.5.12), `RedditExtractor` (§4.5.6), `DiscourseExtractor` (§4.5.4), `YtdlpExtractor` (§4.5.17), `MarkdownExtractor` (§4.5.1), `OrgModeExtractor` (§4.5.2), `NotionExtractor` (§4.5.16), `ReadabilityExtractor` (§4.4), `MastodonExtractor` (§4.5.13), and `BlueskyExtractor` (§4.5.14) as concrete extractors, and shared support modules (`sanitizer`, `urlutil`, `textutil`) other extractors reuse. 193 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the last built-in extractor that needs real HTML parsing/sanitizing; Twitter can now reuse `Document::extra_documents`/`skip_indexing`, unblocked by Mastodon's own capability extension. |
+| `rusty-hister-extractor` | **Implemented — all 20 built-in extractors done** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), `StackExchangeExtractor` (§4.5.7), `GoDocExtractor` (§4.5.8), `LobstersExtractor` (§4.5.10), `HackerNewsExtractor` (§4.5.11), `GitHubExtractor` (§4.5.9), `ChatGptExtractor` (§4.5.18), `BasicExtractor` (§4.4), `WikipediaExtractor` (§4.5.12), `RedditExtractor` (§4.5.6), `DiscourseExtractor` (§4.5.4), `YtdlpExtractor` (§4.5.17), `MarkdownExtractor` (§4.5.1), `OrgModeExtractor` (§4.5.2), `NotionExtractor` (§4.5.16), `ReadabilityExtractor` (§4.4), `MastodonExtractor` (§4.5.13), `BlueskyExtractor` (§4.5.14), and `TwitterExtractor` (§4.5.15) as concrete extractors, and shared support modules (`sanitizer`, `urlutil`, `textutil`) other extractors reuse. 199 unit tests, clippy/fmt clean. `Document::extra_documents`/`skip_indexing` (added for Mastodon) ended up shared by all three social-media extractors (Mastodon, Bluesky, Twitter). |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |

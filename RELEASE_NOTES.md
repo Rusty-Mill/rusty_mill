@@ -13,6 +13,43 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Twitter extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-twitter`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-twitter)
+
+Twenty-ninth Phase 1 increment. The twentieth and last of the 20
+built-in extractors — Phase 1's extractor set is now complete.
+
+- **Added, core capability:** `Document::extra_documents`/
+  `Document::skip_indexing` on `rusty-hister-core` — an additive
+  extension (empty/`false` by default, every prior extractor unaffected)
+  mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+  directly rather than growing `ExtractOutcome` a new variant, so no
+  signature changes were needed anywhere else in the SDK. Resolves
+  `PROJECT-STATUS.md`'s "per-page multi-document extraction" open item
+  and unblocks Mastodon/Bluesky/Twitter.
+- **Added, extractor:** `TwitterExtractor` (capability inventory §4.5.15)
+  — a port of `server/extractor/extractors/twitter/extractor.go`.
+  Decomposes a Twitter/X profile/feed/tweet page into one `Document` per
+  visible tweet, the third and last extractor to use the capability
+  extension above.
+- **One source, deduped by URL:** unlike Bluesky's own multi-source
+  merge, Twitter has only one real source (the rendered DOM) plus a
+  page-meta fallback, and candidates are deduped by canonical URL (first
+  match wins) rather than merged field-by-field.
+- **`t.co` link unshortening:** Twitter/X shortens every link in a
+  tweet's body through its own `t.co` redirector, so this port rewrites
+  each `t.co` anchor's `href` back to its real destination (from a
+  `data-expanded-url`/`title` attribute or the anchor's own visible
+  text) and patches the plain-text version the same way — reparsing the
+  whole tweet subtree as its own fragment up front so both that rewrite
+  and the ordinary relative-to-absolute URL pass can mutate the same
+  copy in sequence. One Go behavior isn't reproduced: replacing a
+  `t.co`-only anchor's *visible text* with the expanded URL — cosmetic
+  only, since the more important `href` fix and the plain-text
+  substitution both still happen.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Bluesky extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-bluesky`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-bluesky)
 
