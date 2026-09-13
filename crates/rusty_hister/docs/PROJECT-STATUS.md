@@ -1,8 +1,8 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s second
-concrete extractor, EmbeddedVideo — first to use the newly-added
-`scraper`/`ammonia` dependencies).
+Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s third
+concrete extractor, StackExchange — first with real `preview()` output,
+and first to need shared `sanitizer`/`urlutil` support modules).
 
 ## Where this is
 
@@ -17,7 +17,7 @@ licensing policy) are settled. Three crates now have real implementation:
   mechanism (capability inventory §4.2): ordered registration
   (`register`/`register_before`), two-phase enrich-then-extract execution,
   a separate preview chain with case-insensitive starting-point selection,
-  and config merging (`apply_configs`). **Two concrete extractors so far:**
+  and config merging (`apply_configs`). **Three concrete extractors so far:**
   `JsonLdExtractor` (capability inventory §4.5.5) — enrich-only, parses
   `application/ld+json` script tags into normalized schema.org metadata
   (`type`/`headline`), flattening `@graph`/array wrappers and deep-
@@ -35,7 +35,23 @@ licensing policy) are settled. Three crates now have real implementation:
   (HTML sanitizing), added directly to this crate's dependencies — see
   the now-resolved open item below for the sovereignty-loop pass and
   false start (an unrelated private repo, `rusty_dbs`) that preceded
-  this.
+  this. **`StackExchangeExtractor`** (capability inventory §4.5.7) —
+  extract *and* preview: pulls the question and every already-rendered
+  answer from a Stack Exchange network question page (Stack Overflow,
+  Server Fault, Super User, Ask Ubuntu, `*.stackexchange.com`, and a few
+  more). The first extractor with real rendered-HTML preview output
+  (rather than an enrich-only fallback or a plain fallback response), so
+  it's also the first to need two new shared support modules other
+  preview-capable extractors will reuse: `sanitizer` (a Rust port of
+  `server/sanitizer/sanitizer.go` on `ammonia`, replacing Go's
+  `bluemonday`, including a hand-rolled reproduction of its SVG
+  attribute-value allow-list via `ammonia`'s `attribute_filter` callback
+  rather than adding a `regex` dependency) and `urlutil` (a port of
+  `server/extractor/urlutil/urlutil.go`'s relative-to-absolute URL
+  rewriting, done as a whole-document pass via `scraper`'s tree-mutation
+  API rather than Go's per-`goquery.Selection` scoping — documented in
+  the module itself as harmless for every current caller, since each one
+  serializes only the specific subtree it cares about afterward).
 - `rusty-hister-model` — the nine `#[derive(Mapped)]` types from
   `automigrate()`'s list (capability inventory §7.2: `User`, `Link`,
   `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`,
@@ -316,7 +332,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | **Query layer complete** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions), and all of `user.go` (15 functions: account CRUD, Argon2id password hashing/verification, token issuance, admin toggling, raw rules-JSON get/set) — **all six Go model files' query layers are now ported**. 131 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior, and `user.go`'s create/authenticate/delete/token/rename/password/oauth/admin/rules behavior), clippy/fmt clean. |
-| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5) and `EmbeddedVideoExtractor` (§4.5.3) as concrete extractors. 38 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 18 built-in extractors that need real HTML parsing/sanitizing. |
+| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), and `StackExchangeExtractor` (§4.5.7) as concrete extractors, and two shared support modules (`sanitizer`, `urlutil`) other preview-capable extractors will reuse. 69 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 17 built-in extractors that need real HTML parsing/sanitizing. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |

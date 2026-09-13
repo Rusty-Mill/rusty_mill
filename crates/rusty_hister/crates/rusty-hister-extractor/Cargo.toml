@@ -18,3 +18,9 @@ rusty_json = { path = "../../../rusty_json" }
 # went through before adding a new external dependency.
 scraper = "0.21"
 ammonia = "4"
+# Timestamp parsing/formatting for extractors' `published`-style metadata
+# (StackExchange's `dateCreated`, and future extractors with similar
+# fields). Already an approved workspace dependency (root `Cargo.toml`,
+# used by `rusty-hister-model` via `rusty_db`'s re-export) — this just
+# wires it directly into a crate that has no reason to depend on `rusty_db`.
+chrono.workspace = true
