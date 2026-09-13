@@ -17,8 +17,8 @@
 
 use crate::error::CodecError;
 use crate::wire::{
-    read_array_len, read_i16, read_i32, read_nullable_bytes, read_string, write_i16, write_i32,
-    write_nullable_bytes, write_string,
+    read_checked_array_len, read_i16, read_i32, read_nullable_bytes, read_string, write_i16,
+    write_i32, write_nullable_bytes, write_string,
 };
 use rusty_wire::{Reader, Writer};
 
@@ -45,8 +45,9 @@ pub fn encode_subscription(topics: &[String]) -> Result<Vec<u8>, CodecError> {
 pub fn decode_subscription(bytes: &[u8]) -> Result<Vec<String>, CodecError> {
     let mut reader = Reader::new(bytes);
     let _version = read_i16(&mut reader)?;
-    let topic_count = read_array_len(&mut reader)?.max(0);
-    let mut topics = Vec::with_capacity(topic_count as usize);
+    const SUBSCRIPTION_TOPIC_MIN_LEN: usize = 2; // empty topic name string
+    let topic_count = read_checked_array_len(&mut reader, SUBSCRIPTION_TOPIC_MIN_LEN)?;
+    let mut topics = Vec::with_capacity(topic_count);
     for _ in 0..topic_count {
         topics.push(read_string(&mut reader)?);
     }
@@ -77,12 +78,14 @@ pub fn encode_assignment(partitions: &[(String, Vec<i32>)]) -> Result<Vec<u8>, C
 pub fn decode_assignment(bytes: &[u8]) -> Result<Vec<(String, Vec<i32>)>, CodecError> {
     let mut reader = Reader::new(bytes);
     let _version = read_i16(&mut reader)?;
-    let topic_count = read_array_len(&mut reader)?.max(0);
-    let mut assignments = Vec::with_capacity(topic_count as usize);
+    const ASSIGNMENT_TOPIC_MIN_LEN: usize = 2 + 4; // empty topic name + partition_count
+    let topic_count = read_checked_array_len(&mut reader, ASSIGNMENT_TOPIC_MIN_LEN)?;
+    let mut assignments = Vec::with_capacity(topic_count);
     for _ in 0..topic_count {
         let topic = read_string(&mut reader)?;
-        let partition_count = read_array_len(&mut reader)?.max(0);
-        let mut partition_indexes = Vec::with_capacity(partition_count as usize);
+        const ASSIGNMENT_PARTITION_MIN_LEN: usize = 4; // one i32 partition index
+        let partition_count = read_checked_array_len(&mut reader, ASSIGNMENT_PARTITION_MIN_LEN)?;
+        let mut partition_indexes = Vec::with_capacity(partition_count);
         for _ in 0..partition_count {
             partition_indexes.push(read_i32(&mut reader)?);
         }
@@ -132,5 +135,49 @@ mod tests {
     fn assignment_round_trips_no_topics() {
         let bytes = encode_assignment(&[]).unwrap();
         assert!(decode_assignment(&bytes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn decode_subscription_rejects_a_huge_topic_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i16(&mut writer, VERSION);
+        write_i32(&mut writer, i32::MAX); // topic count
+        writer.write_bytes(&[0]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let err = decode_subscription(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 1)
+        ));
+    }
+
+    #[test]
+    fn decode_assignment_rejects_a_huge_topic_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i16(&mut writer, VERSION);
+        write_i32(&mut writer, i32::MAX); // topic count
+        writer.write_bytes(&[0, 1]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let err = decode_assignment(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
+    }
+
+    #[test]
+    fn decode_assignment_rejects_a_huge_partition_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i16(&mut writer, VERSION);
+        write_i32(&mut writer, 1); // topic count
+        write_string(&mut writer, "t").unwrap(); // topic name
+        write_i32(&mut writer, i32::MAX); // partition count
+        writer.write_bytes(&[0, 1]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let err = decode_assignment(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
     }
 }

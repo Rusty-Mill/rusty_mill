@@ -1439,3 +1439,123 @@ fn write_file_overwriting_binary_attachment_replaces_prior_row() {
         "overwrite must replace, not duplicate, the row"
     );
 }
+
+// ── Round 6: `.bases` CRUD + frontmatter path-confinement bypass ─────────
+//
+// `base_create`, `handlers::bases::load`, and `read_frontmatter` used to
+// join the caller-supplied `path` straight onto the forge root
+// (`forge_root.join(path)` / raw `std::fs::read_to_string`) instead of
+// routing through `resolve_within`. `PathBuf::join` replaces the base
+// entirely when the right-hand side is absolute, and plain `fs`/`join`
+// calls don't reject `..` components either — so a caller could read or
+// write arbitrary files outside the forge. These tests plant a real file
+// outside the forge and prove neither an absolute path nor a `..`-shaped
+// relpath can reach it any more.
+
+#[test]
+fn base_create_rejects_absolute_path() {
+    use nexus_types::bases::BaseSchema;
+
+    let dir = tmp();
+    let engine = StorageEngine::init(dir.path()).expect("init");
+    let schema = BaseSchema {
+        version: "1.0".to_string(),
+        fields: serde_json::Map::new(),
+    };
+
+    // Absolute path outside the forge root. Uses a sibling `TempDir` (not
+    // a bare path under the shared system temp folder) so a fix
+    // regression can't leak an undeleted directory across test runs.
+    let outside_dir = tmp();
+    let outside = outside_dir.path().join("escaped.bases");
+    let err = engine
+        .base_create(outside.to_str().unwrap(), &schema, Vec::new())
+        .expect_err("absolute path must be rejected");
+    assert!(
+        matches!(err, StorageError::PermissionDenied(_)),
+        "expected PermissionDenied, got {err:?}"
+    );
+    assert!(
+        !outside.exists(),
+        "base_create must not create anything outside the forge root"
+    );
+}
+
+#[test]
+fn read_frontmatter_rejects_traversal_and_absolute_paths() {
+    let dir = tmp();
+    let engine = StorageEngine::init(dir.path()).expect("init");
+
+    // Plant a real file with real frontmatter OUTSIDE the forge. If path
+    // confinement is bypassed, `read_frontmatter` would happily read it
+    // and leak `status: leaked` back to the caller.
+    let secret_dir = tmp();
+    let secret_path = secret_dir.path().join("secret.md");
+    std::fs::write(&secret_path, "---\nstatus: leaked\n---\nbody").expect("write secret");
+
+    // `..`-shaped relpath climbing out of the forge root into the
+    // sibling temp directory.
+    let traversal = format!(
+        "../{}/secret.md",
+        secret_dir.path().file_name().unwrap().to_str().unwrap()
+    );
+    let args = serde_json::json!({ "path": traversal });
+    let result =
+        crate::handlers::notes::read_frontmatter(&engine, &args).expect("handler must not error");
+    assert_eq!(
+        result["status"],
+        serde_json::Value::Null,
+        "traversal path must not leak frontmatter from outside the forge"
+    );
+
+    // Absolute path pointing straight at the same secret file.
+    let args = serde_json::json!({ "path": secret_path.to_str().unwrap() });
+    let result =
+        crate::handlers::notes::read_frontmatter(&engine, &args).expect("handler must not error");
+    assert_eq!(
+        result["status"],
+        serde_json::Value::Null,
+        "absolute path must not leak frontmatter from outside the forge"
+    );
+}
+
+#[test]
+fn base_load_handler_rejects_traversal_path() {
+    use nexus_types::bases::{Base, BaseMetadata, BaseSchema};
+
+    let dir = tmp();
+
+    // Plant a real base OUTSIDE the forge. If `handlers::bases::load`
+    // bypassed confinement, it would happily load it.
+    let secret_dir = tmp();
+    let secret_base = secret_dir.path().join("leak.bases");
+    let seed = Base {
+        name: "Leak".to_string(),
+        schema: BaseSchema {
+            version: "1.0".to_string(),
+            fields: serde_json::Map::new(),
+        },
+        records: Vec::new(),
+        views: Vec::new(),
+        relations: Vec::new(),
+        metadata: BaseMetadata::default(),
+    };
+    nexus_types::bases::save_base(&secret_base, &seed).expect("save secret base");
+
+    let traversal = format!(
+        "../{}/leak.bases",
+        secret_dir.path().file_name().unwrap().to_str().unwrap()
+    );
+    let args = serde_json::json!({ "path": traversal });
+    let err = crate::handlers::bases::load(dir.path(), &args)
+        .expect_err("traversal path must be rejected");
+    match err {
+        nexus_plugins::PluginError::ExecutionFailed { reason, .. } => {
+            assert!(
+                reason.contains("base_load"),
+                "unexpected rejection reason: {reason}"
+            );
+        }
+        other => panic!("expected ExecutionFailed, got {other:?}"),
+    }
+}

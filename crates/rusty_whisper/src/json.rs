@@ -69,10 +69,21 @@ pub fn escape(s: &str) -> String {
     out
 }
 
+/// Cap on nested `{`/`[` container depth in a parsed JSON document.
+/// `parse_value`/`parse_object`/`parse_array` mutually recurse one level
+/// per nested container; a deeply nested document (e.g. the `grammar`
+/// field of an untrusted `/inference` request, or a compromised
+/// chat-completions server's response body fed through `llm_client`'s
+/// `extract_reply`/`extract_error`, or a `--session` file) would otherwise
+/// overflow the stack and abort the process. 64 mirrors this workspace's
+/// established recursion-cap convention (e.g. `rusty_jinja::parser::MAX_NESTING_DEPTH`,
+/// `rusty_llama::grammar::MAX_NESTING_DEPTH`).
+const MAX_NESTING_DEPTH: u32 = 64;
+
 pub fn parse(input: &str) -> Result<Value, String> {
     let chars: Vec<char> = input.chars().collect();
     let mut pos = 0;
-    let value = parse_value(&chars, &mut pos)?;
+    let value = parse_value(&chars, &mut pos, 0)?;
     skip_ws(&chars, &mut pos);
     if pos != chars.len() {
         return Err(format!("trailing data at offset {pos}"));
@@ -86,11 +97,11 @@ fn skip_ws(chars: &[char], pos: &mut usize) {
     }
 }
 
-fn parse_value(chars: &[char], pos: &mut usize) -> Result<Value, String> {
+fn parse_value(chars: &[char], pos: &mut usize, depth: u32) -> Result<Value, String> {
     skip_ws(chars, pos);
     match chars.get(*pos) {
-        Some('{') => parse_object(chars, pos),
-        Some('[') => parse_array(chars, pos),
+        Some('{') => parse_object(chars, pos, depth),
+        Some('[') => parse_array(chars, pos, depth),
         Some('"') => Ok(Value::String(parse_string(chars, pos)?)),
         Some('t') => parse_literal(chars, pos, "true", Value::Bool(true)),
         Some('f') => parse_literal(chars, pos, "false", Value::Bool(false)),
@@ -116,7 +127,13 @@ fn parse_literal(
     Ok(value)
 }
 
-fn parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
+fn parse_object(chars: &[char], pos: &mut usize, depth: u32) -> Result<Value, String> {
+    let depth = depth + 1;
+    if depth > MAX_NESTING_DEPTH {
+        return Err(format!(
+            "object nesting exceeds the maximum depth ({MAX_NESTING_DEPTH})"
+        ));
+    }
     *pos += 1; // '{'
     let mut map = BTreeMap::new();
     skip_ws(chars, pos);
@@ -135,7 +152,7 @@ fn parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
             return Err(format!("expected ':' at offset {pos}"));
         }
         *pos += 1;
-        let value = parse_value(chars, pos)?;
+        let value = parse_value(chars, pos, depth)?;
         map.insert(key, value);
         skip_ws(chars, pos);
         match chars.get(*pos) {
@@ -152,7 +169,13 @@ fn parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
-fn parse_array(chars: &[char], pos: &mut usize) -> Result<Value, String> {
+fn parse_array(chars: &[char], pos: &mut usize, depth: u32) -> Result<Value, String> {
+    let depth = depth + 1;
+    if depth > MAX_NESTING_DEPTH {
+        return Err(format!(
+            "array nesting exceeds the maximum depth ({MAX_NESTING_DEPTH})"
+        ));
+    }
     *pos += 1; // '['
     let mut items = Vec::new();
     skip_ws(chars, pos);
@@ -161,7 +184,7 @@ fn parse_array(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         return Ok(Value::Array(items));
     }
     loop {
-        items.push(parse_value(chars, pos)?);
+        items.push(parse_value(chars, pos, depth)?);
         skip_ws(chars, pos);
         match chars.get(*pos) {
             Some(',') => {
@@ -346,5 +369,38 @@ mod tests {
     #[test]
     fn escape_control_char() {
         assert_eq!(escape("\u{1}"), "\"\\u0001\"");
+    }
+
+    #[test]
+    fn deeply_nested_arrays_are_rejected_instead_of_overflowing_the_stack() {
+        // 10_000 levels of nesting is far past MAX_NESTING_DEPTH but far
+        // below anything that would itself overflow the test harness's
+        // stack — the parser must bail with an `Err` well before that,
+        // rather than recursing through parse_value -> parse_array ->
+        // parse_value -> ... until the native stack overflows and aborts
+        // the process.
+        let mut doc = String::new();
+        for _ in 0..10_000 {
+            doc.push('[');
+        }
+        for _ in 0..10_000 {
+            doc.push(']');
+        }
+        let err = parse(&doc).expect_err("deeply nested array must be rejected");
+        assert!(err.contains("nesting"), "actual: {err}");
+    }
+
+    #[test]
+    fn deeply_nested_objects_are_rejected_instead_of_overflowing_the_stack() {
+        let mut doc = String::new();
+        for _ in 0..10_000 {
+            doc.push_str(r#"{"a":"#);
+        }
+        doc.push_str("null");
+        for _ in 0..10_000 {
+            doc.push('}');
+        }
+        let err = parse(&doc).expect_err("deeply nested object must be rejected");
+        assert!(err.contains("nesting"), "actual: {err}");
     }
 }

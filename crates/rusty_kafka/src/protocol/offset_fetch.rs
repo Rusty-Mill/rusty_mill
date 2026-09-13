@@ -17,8 +17,8 @@
 
 use crate::error::CodecError;
 use crate::wire::{
-    read_array_len, read_i16, read_i32, read_i64, read_nullable_string, read_string, write_i16,
-    write_i32, write_i64, write_nullable_string, write_string,
+    read_array_len, read_checked_array_len, read_i16, read_i32, read_i64, read_nullable_string,
+    read_string, write_i16, write_i32, write_i64, write_nullable_string, write_string,
 };
 use rusty_wire::{Reader, Writer};
 
@@ -118,12 +118,14 @@ pub struct OffsetFetchResponse {
 impl OffsetFetchResponse {
     /// Decodes the response body.
     pub fn decode(reader: &mut Reader) -> Result<Self, CodecError> {
-        let topic_count = read_array_len(reader)?.max(0);
-        let mut topics = Vec::with_capacity(topic_count as usize);
+        const OFFSET_FETCH_TOPIC_MIN_LEN: usize = 2 + 4; // empty name + partition_count
+        let topic_count = read_checked_array_len(reader, OFFSET_FETCH_TOPIC_MIN_LEN)?;
+        let mut topics = Vec::with_capacity(topic_count);
         for _ in 0..topic_count {
             let name = read_string(reader)?;
-            let partition_count = read_array_len(reader)?.max(0);
-            let mut partitions = Vec::with_capacity(partition_count as usize);
+            const OFFSET_FETCH_PARTITION_MIN_LEN: usize = 4 + 8 + 2 + 2; // partition_index + committed_offset + empty metadata + error_code
+            let partition_count = read_checked_array_len(reader, OFFSET_FETCH_PARTITION_MIN_LEN)?;
+            let mut partitions = Vec::with_capacity(partition_count);
             for _ in 0..partition_count {
                 partitions.push(OffsetFetchPartitionResponse {
                     partition_index: read_i32(reader)?,
@@ -249,5 +251,35 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         let decoded = OffsetFetchResponse::decode(&mut reader).unwrap();
         assert_eq!(decoded.topics[0].partitions[0].committed_offset, -1);
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_topic_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, i32::MAX); // topic count
+        writer.write_bytes(&[0, 1]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = OffsetFetchResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_partition_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, 1); // topic count
+        write_string(&mut writer, "t").unwrap(); // topic name
+        write_i32(&mut writer, i32::MAX); // partition count
+        writer.write_bytes(&[0, 1, 2]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = OffsetFetchResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 3)
+        ));
     }
 }

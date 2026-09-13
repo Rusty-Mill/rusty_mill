@@ -43,17 +43,29 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "ul",
 ];
 
+/// Maximum DOM nesting depth walked when flattening a subtree to text.
+/// (`hackernews::selection_text` calls this over untrusted crawled-page
+/// markup); a pathologically deep DOM would
+/// otherwise recurse `write_node_text` without bound and overflow the
+/// stack. 64 matches this workspace's established recursion-cap
+/// convention (e.g. `nexus-database::formula::eval::MAX_RECURSION_DEPTH`,
+/// `rusty_jinja::parser::MAX_NESTING_DEPTH`).
+const MAX_NODE_DEPTH: usize = 64;
+
 /// Flattens `element`'s subtree to plain text. Unlike a plain
 /// text-node concatenation, block elements and `<br>` become line breaks
 /// so the shape of the original content survives; `<script>`/`<style>`/
 /// `<svg>`/`<button>` contents are skipped entirely.
 pub fn selection_text(element: &ElementRef) -> String {
     let mut out = String::new();
-    write_node_text(&mut out, **element);
+    write_node_text(&mut out, **element, 0);
     normalize_text(&out)
 }
 
-fn write_node_text(out: &mut String, node: NodeRef<Node>) {
+fn write_node_text(out: &mut String, node: NodeRef<Node>, depth: usize) {
+    if depth > MAX_NODE_DEPTH {
+        return;
+    }
     match node.value() {
         Node::Text(text) => out.push_str(text),
         Node::Element(el) => {
@@ -70,7 +82,7 @@ fn write_node_text(out: &mut String, node: NodeRef<Node>) {
                 write_text_break(out);
             }
             for child in node.children() {
-                write_node_text(out, child);
+                write_node_text(out, child, depth + 1);
             }
             if is_block {
                 write_text_break(out);
@@ -78,7 +90,7 @@ fn write_node_text(out: &mut String, node: NodeRef<Node>) {
         }
         _ => {
             for child in node.children() {
-                write_node_text(out, child);
+                write_node_text(out, child, depth + 1);
             }
         }
     }
@@ -179,5 +191,28 @@ mod tests {
     fn nested_inline_markup_does_not_insert_breaks() {
         let text = text_of("<p id='x'>see <a href='/x'>this link</a> here</p>", "#x");
         assert_eq!(text, "see this link here");
+    }
+
+    #[test]
+    fn deeply_nested_dom_recursion_is_capped_instead_of_overflowing_the_stack() {
+        let total_depth = 5000;
+        let mut html = String::from("<div id='x'>");
+        for i in 0..total_depth {
+            html.push_str(&format!("<div>L{i}"));
+        }
+        for _ in 0..total_depth {
+            html.push_str("</div>");
+        }
+        html.push_str("</div>");
+        let text = text_of(&html, "#x");
+        assert!(text.contains("L0"), "shallow content must be present");
+        assert!(
+            text.contains(&format!("L{}", MAX_NODE_DEPTH - 2)),
+            "content at the cap boundary must still be present"
+        );
+        assert!(
+            !text.contains(&format!("L{}", MAX_NODE_DEPTH - 1)),
+            "recursion past the cap must stop instead of walking arbitrarily deep"
+        );
     }
 }
