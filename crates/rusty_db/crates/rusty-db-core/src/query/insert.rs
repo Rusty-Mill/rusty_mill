@@ -107,4 +107,18 @@ impl ToSql for Insert {
 
         (sql, params)
     }
+
+    /// One entry per assignment that actually binds a parameter (skips
+    /// `InsertValue::Raw` fragments and a `Bound(Value::Null)`, neither of
+    /// which `render_insert_value` turns into a placeholder) — matching
+    /// `to_sql`'s own params exactly, in the same order.
+    fn param_columns(&self, _dialect: &dyn Dialect) -> Vec<Option<String>> {
+        self.assignments
+            .iter()
+            .filter_map(|(column, value)| match value {
+                InsertValue::Bound(v) if !matches!(v, Value::Null) => Some(Some(column.clone())),
+                _ => None,
+            })
+            .collect()
+    }
 }

@@ -215,14 +215,21 @@ impl CrdtDoc {
         Ok(RemoteOutcome::Applied)
     }
 
-    /// First RGA parent referenced by `op.rga_ops` that this doc has
-    /// not yet observed — neither in the target block's local RGA
-    /// mirror nor introduced earlier within this same batch (a
-    /// multi-character `InsertText` chains each character onto the
-    /// previous one's freshly-minted id, so those forward references
-    /// are causally ready by construction). `None` when every
-    /// referenced parent is ready, including for non-text ops (which
-    /// carry no `rga_ops`).
+    /// First RGA reference in `op.rga_ops` — an `Insert`'s `parent` or
+    /// a `Delete`'s `target` — that this doc has not yet observed,
+    /// neither in the target block's local RGA mirror nor introduced
+    /// earlier within this same batch (a multi-character `InsertText`
+    /// chains each character onto the previous one's freshly-minted
+    /// id, so those forward references are causally ready by
+    /// construction). `None` when every reference is ready, including
+    /// for non-text ops (which carry no `rga_ops`).
+    ///
+    /// A `Delete` whose `target` is unknown is just as causally
+    /// pending as an `Insert` whose `parent` is unknown: applying it
+    /// anyway would let [`RgaText::apply_delete`] silently no-op on
+    /// the missing node, and once the target's insert later arrives
+    /// it would land as a live, never-tombstoned character — a
+    /// permanent, silent merge divergence between replicas.
     fn missing_rga_parent(&self, op: &CrdtOp) -> Option<OpId> {
         if op.rga_ops.is_empty() {
             return None;
@@ -231,15 +238,24 @@ impl CrdtDoc {
         let rga = self.rga.get(&primary);
         let mut introduced: HashSet<OpId> = HashSet::new();
         for rga_op in &op.rga_ops {
-            if let RgaTextOp::Insert { id, parent, .. } = rga_op {
-                if let Some(parent) = parent {
+            match rga_op {
+                RgaTextOp::Insert { id, parent, .. } => {
+                    if let Some(parent) = parent {
+                        let known =
+                            rga.is_some_and(|r| r.contains(*parent)) || introduced.contains(parent);
+                        if !known {
+                            return Some(*parent);
+                        }
+                    }
+                    introduced.insert(*id);
+                }
+                RgaTextOp::Delete { target, .. } => {
                     let known =
-                        rga.is_some_and(|r| r.contains(*parent)) || introduced.contains(parent);
+                        rga.is_some_and(|r| r.contains(*target)) || introduced.contains(target);
                     if !known {
-                        return Some(*parent);
+                        return Some(*target);
                     }
                 }
-                introduced.insert(*id);
             }
         }
         None
@@ -1000,5 +1016,72 @@ mod tests {
             RemoteOutcome::Conflict(Conflict::ConcurrentBlockEdit { .. }) => {}
             other => panic!("expected ConcurrentBlockEdit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_delete_before_target_insert_does_not_diverge() {
+        // Regression: a `Delete` rga_op whose target character hasn't
+        // arrived yet must be treated as causally pending — same as
+        // an `Insert` with an unknown parent — not silently dropped
+        // by `RgaText::apply_delete`'s no-op-on-unknown-target
+        // behaviour. Silently dropping it lets the delete get marked
+        // "handled" (logged, never retried) before its target exists;
+        // once the target's insert *does* arrive it lands in the RGA
+        // as a live node forever — permanent, silent divergence.
+        let s1 = SiteId::new();
+        let s2 = SiteId::new();
+        let s3 = SiteId::new();
+        let (tree, b) = tree_with_block_content("hello");
+        let mut doc1 = CrdtDoc::new(s1, tree.clone());
+        let mut doc2 = CrdtDoc::new(s2, tree.clone());
+        let mut doc3 = CrdtDoc::new(s3, tree);
+
+        // Site 1 appends then deletes a character at the tail.
+        let op_insert = doc1.apply_local(&insert_text_op(b, 5, "x")).unwrap();
+        let op_delete = doc1.apply_local(&delete_text_op(b, 5, "x")).unwrap();
+        assert_eq!(doc1.tree().get(b).unwrap().content, "hello");
+
+        // Site 3 touches the same block's annotations only (no text
+        // content change) so that site 2's `block_meta.last_writer`
+        // becomes an op site 1's delete never saw, forcing the RGA
+        // "concurrent merge" path on delivery instead of a tree-level
+        // apply.
+        let op_annotations = doc3
+            .apply_local(&Operation::UpdateAnnotations {
+                block_id: b,
+                old_annotations: vec![],
+                new_annotations: vec![],
+            })
+            .unwrap();
+        assert!(matches!(
+            doc2.apply_remote(op_annotations).unwrap(),
+            RemoteOutcome::Applied
+        ));
+
+        // Reordered gossip: the delete arrives before its target's insert.
+        let err = doc2.apply_remote(op_delete.clone()).unwrap_err();
+        assert!(
+            matches!(err, CrdtError::CausallyPending(_)),
+            "delete with unknown target must be causally pending, got {err:?}"
+        );
+        assert!(!doc2.log().contains(op_delete.id));
+        assert_eq!(doc2.tree().get(b).unwrap().content, "hello");
+
+        // Deliver the dependency, then retry the delete.
+        assert!(matches!(
+            doc2.apply_remote(op_insert).unwrap(),
+            RemoteOutcome::Applied
+        ));
+        assert!(matches!(
+            doc2.apply_remote(op_delete).unwrap(),
+            RemoteOutcome::Applied
+        ));
+
+        assert_eq!(
+            doc1.tree().get(b).unwrap().content,
+            doc2.tree().get(b).unwrap().content,
+            "replicas must converge once the delete's dependency arrives"
+        );
+        assert_eq!(doc2.tree().get(b).unwrap().content, "hello");
     }
 }

@@ -376,8 +376,29 @@ pub struct PostgresConnection {
     conn: PoolConnection<Postgres>,
 }
 
+/// Maps a post-connect `sqlx::Error` to this crate's `Error`, classifying
+/// connection-shaped failures (the socket dropping mid-query, the pool
+/// having been closed out from under us, the pool's background worker
+/// crashing) as `Error::Connection` rather than `Error::Database`.
+///
+/// This matters for `ReplicaSet`: it only fails over to the next
+/// replica/primary on `Error::Connection`, so a connection lost *during* a
+/// query (as opposed to at `connect()` time, which is already mapped to
+/// `Error::Connection` by every `Driver::connect` impl) needs the same
+/// classification here, or a mid-query outage never triggers failover.
 fn to_core_err(e: sqlx::Error) -> Error {
-    Error::Database(e.to_string())
+    if is_connection_shaped(&e) {
+        Error::Connection(e.to_string())
+    } else {
+        Error::Database(e.to_string())
+    }
+}
+
+fn is_connection_shaped(e: &sqlx::Error) -> bool {
+    matches!(
+        e,
+        sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed
+    )
 }
 
 /// Turns a decoded Postgres array (each element independently nullable)
@@ -750,5 +771,46 @@ impl Connection for PostgresConnection {
                 yield row_from_postgres(&row.map_err(to_core_err)?)?;
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_errors_are_classified_as_connection_errors_for_replica_failover() {
+        // A `to_core_err` regression: before classifying connection-shaped
+        // `sqlx::Error`s, every post-connect failure -- including a socket
+        // dropping mid-query -- came back as `Error::Database`, which
+        // `ReplicaSet` never treats as failover-worthy (it only retries on
+        // `Error::Connection`). A mid-query outage would then surface as a
+        // hard error instead of failing over to the next replica/primary.
+        let io_err = sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        ));
+
+        assert!(matches!(to_core_err(io_err), Error::Connection(_)));
+    }
+
+    #[test]
+    fn pool_closed_and_worker_crashed_are_also_classified_as_connection_errors() {
+        assert!(matches!(
+            to_core_err(sqlx::Error::PoolClosed),
+            Error::Connection(_)
+        ));
+        assert!(matches!(
+            to_core_err(sqlx::Error::WorkerCrashed),
+            Error::Connection(_)
+        ));
+    }
+
+    #[test]
+    fn genuine_database_errors_are_still_classified_as_database_errors() {
+        assert!(matches!(
+            to_core_err(sqlx::Error::RowNotFound),
+            Error::Database(_)
+        ));
     }
 }

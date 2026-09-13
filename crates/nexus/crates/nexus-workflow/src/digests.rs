@@ -798,6 +798,7 @@ mod tests {
     impl IpcDispatcher for StubDispatcher {
         fn dispatch(
             &self,
+            _caller: &str,
             target: &str,
             command: &str,
             args: &serde_json::Value,

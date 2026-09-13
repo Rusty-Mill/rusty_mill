@@ -338,6 +338,7 @@ mod tests {
     impl IpcDispatcher for StubMcp {
         fn dispatch(
             &self,
+            _caller: &str,
             target: &str,
             command: &str,
             _args: &serde_json::Value,
@@ -350,6 +351,7 @@ mod tests {
 
         fn dispatch_async(
             &self,
+            _caller: &str,
             target: &str,
             command: &str,
             args: serde_json::Value,

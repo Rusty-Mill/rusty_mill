@@ -202,10 +202,13 @@ impl SearchBackend for ElasticsearchBackend {
         }
 
         let (body, fields) = build_index_body(&schema);
-        let resp = json_body(self.request(Method::Put, name)?, &body)?
-            .send()
-            .await
-            .map_err(backend_err)?;
+        let resp = json_body(
+            self.request(Method::Put, &encode_path_segment(name))?,
+            &body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
 
         if resp.status().as_u16() == 400 {
             let body = resp.text().unwrap_or_default();
@@ -228,7 +231,7 @@ impl SearchBackend for ElasticsearchBackend {
         self.require_known(name).await?;
 
         let resp = self
-            .request(Method::Delete, name)?
+            .request(Method::Delete, &encode_path_segment(name))?
             .send()
             .await
             .map_err(backend_err)?;
@@ -321,7 +324,10 @@ impl SearchBackend for ElasticsearchBackend {
         }
 
         let resp = json_body(
-            self.request(Method::Post, &format!("{index}/_search"))?,
+            self.request(
+                Method::Post,
+                &format!("{}/_search", encode_path_segment(index)),
+            )?,
             &body,
         )?
         .send()
@@ -342,7 +348,10 @@ impl SearchBackend for ElasticsearchBackend {
         self.require_known(index).await?;
 
         let resp = self
-            .request(Method::Post, &format!("{index}/_refresh"))?
+            .request(
+                Method::Post,
+                &format!("{}/_refresh", encode_path_segment(index)),
+            )?
             .send()
             .await
             .map_err(backend_err)?;
@@ -703,5 +712,129 @@ mod tests {
             .create_index("articles", articles_schema())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_index_percent_encodes_a_traversal_shaped_name() {
+        // A name like "../_cluster/settings" must not be able to escape the
+        // index namespace and reach an arbitrary cluster endpoint once
+        // `Url::parse` normalizes the unescaped ".." segment away - see
+        // finding fixed in `delete_path` (round 2) and now applied here.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "acknowledged": true })))
+            .mount(&server)
+            .await;
+
+        let backend = ElasticsearchBackend::new(server.uri());
+        backend
+            .create_index("../_cluster/settings", articles_schema())
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        // Pre-fix this would be normalized to the bare "/_cluster/settings"
+        // (the ".." popped against the request root), reaching the cluster
+        // settings endpoint instead of an index-scoped one.
+        assert_eq!(requests[0].url.path(), "/..%2F_cluster%2Fsettings");
+    }
+
+    #[tokio::test]
+    async fn delete_index_percent_encodes_a_traversal_shaped_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "acknowledged": true })))
+            .mount(&server)
+            .await;
+        let backend = ElasticsearchBackend::new(server.uri());
+        backend
+            .create_index("../_cluster/settings", articles_schema())
+            .await
+            .unwrap();
+
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        backend.delete_index("../_cluster/settings").await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let delete_request = requests
+            .iter()
+            .find(|r| r.method.as_str() == "DELETE")
+            .expect("delete request was sent");
+        // Pre-fix this would be normalized to the bare "/_cluster/settings".
+        assert_eq!(delete_request.url.path(), "/..%2F_cluster%2Fsettings");
+    }
+
+    #[tokio::test]
+    async fn search_percent_encodes_a_traversal_shaped_index_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "acknowledged": true })))
+            .mount(&server)
+            .await;
+        let backend = ElasticsearchBackend::new(server.uri());
+        backend
+            .create_index("../_cluster/settings", articles_schema())
+            .await
+            .unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "hits": { "total": { "value": 0, "relation": "eq" }, "hits": [] }
+            })))
+            .mount(&server)
+            .await;
+        backend
+            .search("../_cluster/settings", Query::match_all().into())
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let search_request = requests
+            .iter()
+            .find(|r| r.method.as_str() == "POST")
+            .expect("search request was sent");
+        // Pre-fix this would be normalized to "/_cluster/settings/_search",
+        // escaping the per-index namespace entirely.
+        assert_eq!(
+            search_request.url.path(),
+            "/..%2F_cluster%2Fsettings/_search"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_percent_encodes_a_traversal_shaped_index_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "acknowledged": true })))
+            .mount(&server)
+            .await;
+        let backend = ElasticsearchBackend::new(server.uri());
+        backend
+            .create_index("../_cluster/settings", articles_schema())
+            .await
+            .unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "_shards": { "successful": 1 } })),
+            )
+            .mount(&server)
+            .await;
+        backend.commit("../_cluster/settings").await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let commit_request = requests
+            .iter()
+            .find(|r| r.method.as_str() == "POST")
+            .expect("commit request was sent");
+        // Pre-fix this would be normalized to "/_cluster/settings/_refresh".
+        assert_eq!(
+            commit_request.url.path(),
+            "/..%2F_cluster%2Fsettings/_refresh"
+        );
     }
 }

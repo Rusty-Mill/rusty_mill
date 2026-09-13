@@ -582,6 +582,9 @@ pub struct Router {
     /// which wire format a provider speaks, not on its specific model.
     provider_kinds: HashMap<String, ProviderKind>,
     routes: HashMap<String, Vec<String>>,
+    /// Hard cap on `resolve_chain`'s output length -- see
+    /// `ServerConfig::max_chain_length`'s doc comment for why this exists.
+    max_chain_length: usize,
     /// `[[routes]]` alias -> its resolved `strategy = "fusion"` settings,
     /// for every alias that has one (i.e. `strategy = "fusion"` *and* a
     /// resolvable `judge`). An alias absent here always uses ordinary
@@ -1234,6 +1237,7 @@ impl Router {
             providers,
             provider_kinds,
             routes,
+            max_chain_length: config.server.max_chain_length,
             fusion_routes,
             pricing: Arc::new(pricing),
             zdr_providers,
@@ -1719,6 +1723,12 @@ impl Router {
     /// request rather than an operator-predefined one. Otherwise, the chain
     /// is either a configured alias's fallback chain, or a single
     /// "provider/model" entry.
+    ///
+    /// Rejects (rather than silently truncates) a resolved chain longer
+    /// than `max_chain_length` -- see `ServerConfig::max_chain_length`'s
+    /// doc comment. Checked before the chain is ever handed to
+    /// `dispatch_uncached`'s sequential fallback loop, which makes one
+    /// real outbound `provider.chat()` call per entry.
     fn resolve_chain(
         &self,
         model: &str,
@@ -1733,6 +1743,13 @@ impl Router {
                 None => vec![model.to_string()],
             },
         };
+
+        if entries.len() > self.max_chain_length {
+            return Err(RouterError::ChainTooLong(
+                entries.len(),
+                self.max_chain_length,
+            ));
+        }
 
         entries
             .into_iter()
@@ -3003,6 +3020,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use config::default_max_chain_length;
     use webhook::RetryPolicy;
 
     /// Directly construct a `Router` with arbitrary private-field state,
@@ -3026,6 +3044,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.into_iter().map(String::from).collect()))
                 .collect(),
+            max_chain_length: default_max_chain_length(),
             fusion_routes: HashMap::new(),
             pricing: Arc::new(
                 pricing
@@ -5246,6 +5265,67 @@ mod tests {
         let empty: Vec<String> = vec![];
         let result = router.resolve_chain("smart", Some(&empty)).unwrap();
         assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
+    #[test]
+    fn resolve_chain_rejects_a_models_array_that_pushes_the_chain_over_max_chain_length() {
+        // A client-supplied `models` fallback array has no length cap of
+        // its own -- resolve_chain must reject a combined model+fallbacks
+        // chain longer than the router's configured max_chain_length,
+        // rather than building it and letting dispatch_uncached fire one
+        // real outbound provider.chat() call per entry.
+        let router = Router {
+            max_chain_length: 3,
+            ..test_router(vec![], vec![], vec![], vec![], vec![])
+        };
+        let fallbacks = vec![
+            "openai/m2".to_string(),
+            "gemini/m3".to_string(),
+            "anthropic/m4".to_string(),
+        ];
+        // "anthropic/m1" + 3 fallbacks = 4 entries, over the cap of 3.
+        let err = router
+            .resolve_chain("anthropic/m1", Some(&fallbacks))
+            .unwrap_err();
+        assert!(matches!(err, RouterError::ChainTooLong(4, 3)));
+        assert_eq!(err.status_code(), 400);
+    }
+
+    #[test]
+    fn resolve_chain_accepts_a_chain_exactly_at_max_chain_length() {
+        let router = Router {
+            max_chain_length: 3,
+            ..test_router(vec![], vec![], vec![], vec![], vec![])
+        };
+        let fallbacks = vec!["openai/m2".to_string(), "gemini/m3".to_string()];
+        // "anthropic/m1" + 2 fallbacks = 3 entries, exactly at the cap.
+        let result = router
+            .resolve_chain("anthropic/m1", Some(&fallbacks))
+            .unwrap();
+        assert_eq!(
+            result,
+            chain(&[("anthropic", "m1"), ("openai", "m2"), ("gemini", "m3")])
+        );
+    }
+
+    #[test]
+    fn resolve_chain_rejects_an_oversized_configured_route_alias_chain_too() {
+        // The cap applies uniformly to resolve_chain's output regardless
+        // of source -- an operator-configured [[routes]] alias chain over
+        // the limit is rejected the same as an oversized client-supplied
+        // models array.
+        let router = Router {
+            max_chain_length: 2,
+            ..test_router(
+                vec![],
+                vec![("smart", vec!["anthropic/m1", "openai/m2", "gemini/m3"])],
+                vec![],
+                vec![],
+                vec![],
+            )
+        };
+        let err = router.resolve_chain("smart", None).unwrap_err();
+        assert!(matches!(err, RouterError::ChainTooLong(3, 2)));
     }
 
     // --- apply_preferences ---------------------------------------------------

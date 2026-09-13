@@ -50,6 +50,18 @@ pub trait Mapped {
     /// building the same "still active" condition into your own queries.
     const SOFT_DELETE_COLUMN: Option<&'static str> = None;
 
+    /// Column names marked `#[table(redacted)]` — rendered as the fixed
+    /// placeholder `"[REDACTED]"` (see `audit::REDACTED_PLACEHOLDER`) by
+    /// `Session::flush`'s audit-log entry instead of their real bound
+    /// value, when this session was built with `with_audit_log`/
+    /// `with_audit_log_table`. Empty by default (opt-in, matching every
+    /// other feature-flag const here): with no column marked, audit-log
+    /// text renders every bound parameter verbatim, exactly as before
+    /// this existed. Mark any column carrying a password hash, API key,
+    /// session token, or other sensitive value that must never land in
+    /// the (ordinary, queryable) audit table in plaintext.
+    const REDACTED_COLUMNS: &'static [&'static str] = &[];
+
     /// A `<column> = false` filter excluding soft-deleted rows, or `None`
     /// for a type with no `#[table(soft_delete)]` column. Needs no
     /// per-type code generation — built entirely from `TABLE_NAME` and

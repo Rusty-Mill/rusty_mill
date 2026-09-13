@@ -11,6 +11,7 @@
 //! Noise bytes bundled with the upgrade response) is `rusty_http`'s job, not
 //! hand-rolled here anymore -- see `DESIGN.md`'s dependency table.
 
+use std::time::Duration;
 use tokio::net::TcpStream;
 use ts_key::MachinePrivate;
 
@@ -27,6 +28,11 @@ const HANDSHAKE_HEADER: &str = "X-Tailscale-Handshake";
 /// giving up -- generous for a control server's own responses, small enough
 /// to bound a hung/malicious peer.
 const MAX_HEAD_LEN: usize = 64 * 1024;
+/// Bound on TCP connect + the full plain-HTTP request/response round trip
+/// (`fetch_control_key`) or the connect/upgrade/Noise-handshake sequence
+/// (`dial`) -- a control server that never responds must not hang the
+/// caller forever.
+const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlHttpError {
@@ -44,6 +50,8 @@ pub enum ControlHttpError {
     Handshake(#[from] ConnectError),
     #[error("HTTP transport error: {0}")]
     Http(#[from] rusty_http::TransportError),
+    #[error("timed out connecting to control server")]
+    Timeout,
 }
 
 /// A parsed `http://host:port` control URL.
@@ -96,44 +104,63 @@ pub async fn fetch_control_key(
     url: &ControlUrl,
     protocol_version: u16,
 ) -> Result<ts_types::MachinePublic, ControlHttpError> {
-    let stream = TcpStream::connect(url.socket_addr()).await?;
-    let mut transport = AsyncTransport::new(stream);
+    fetch_control_key_with_timeout(url, protocol_version, CONTROL_CONNECT_TIMEOUT).await
+}
 
-    let mut headers = HeaderMap::new();
-    headers
-        .insert("Host", &url.authority)
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    headers
-        .insert("Connection", "close")
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    transport
-        .write_request_head(&RequestHead {
-            method: Method::Get,
-            target: format!("/key?v={protocol_version}"),
-            version: Version::Http11,
-            headers,
-        })
-        .await?;
+/// Fetches the control key with an explicit bound on TCP connect + the full
+/// request/response round trip, rather than the [`CONTROL_CONNECT_TIMEOUT`]
+/// default [`fetch_control_key`] uses. Exists so tests can exercise the
+/// hang/timeout path without waiting out the production timeout.
+async fn fetch_control_key_with_timeout(
+    url: &ControlUrl,
+    protocol_version: u16,
+    timeout: Duration,
+) -> Result<ts_types::MachinePublic, ControlHttpError> {
+    match tokio::time::timeout(timeout, async {
+        let stream = TcpStream::connect(url.socket_addr()).await?;
+        let mut transport = AsyncTransport::new(stream);
 
-    let head = transport.read_response_head(MAX_HEAD_LEN).await?;
-    if head.status.as_u16() != 200 {
-        return Err(ControlHttpError::HttpStatus(
-            head.status.as_u16(),
-            "/key".into(),
-        ));
+        let mut headers = HeaderMap::new();
+        headers
+            .insert("Host", &url.authority)
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        headers
+            .insert("Connection", "close")
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        transport
+            .write_request_head(&RequestHead {
+                method: Method::Get,
+                target: format!("/key?v={protocol_version}"),
+                version: Version::Http11,
+                headers,
+            })
+            .await?;
+
+        let head = transport.read_response_head(MAX_HEAD_LEN).await?;
+        if head.status.as_u16() != 200 {
+            return Err(ControlHttpError::HttpStatus(
+                head.status.as_u16(),
+                "/key".into(),
+            ));
+        }
+        let framing = rusty_http::body::response_framing(&head.headers, &Method::Get, head.status)
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        let body = transport.read_body(framing).await?;
+
+        #[derive(serde::Deserialize)]
+        struct KeyResponse {
+            #[serde(rename = "publicKey")]
+            public_key: ts_types::MachinePublic,
+        }
+        let parsed: KeyResponse =
+            serde_json::from_slice(&body).map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        Ok(parsed.public_key)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ControlHttpError::Timeout),
     }
-    let framing = rusty_http::body::response_framing(&head.headers, &Method::Get, head.status)
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    let body = transport.read_body(framing).await?;
-
-    #[derive(serde::Deserialize)]
-    struct KeyResponse {
-        #[serde(rename = "publicKey")]
-        public_key: ts_types::MachinePublic,
-    }
-    let parsed: KeyResponse =
-        serde_json::from_slice(&body).map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    Ok(parsed.public_key)
 }
 
 /// Dials the control server and upgrades the connection to the Noise
@@ -144,50 +171,78 @@ pub async fn dial(
     control_key: &[u8; 32],
     protocol_version: u16,
 ) -> Result<Conn<Replay<TcpStream>>, ControlHttpError> {
-    let (init, handshake) = client_initiation(machine_key, control_key, protocol_version);
+    dial_with_timeout(
+        url,
+        machine_key,
+        control_key,
+        protocol_version,
+        CONTROL_CONNECT_TIMEOUT,
+    )
+    .await
+}
 
-    let stream = TcpStream::connect(url.socket_addr()).await?;
-    let mut transport = AsyncTransport::new(stream);
+/// Dials with an explicit bound on TCP connect + the full upgrade/Noise
+/// handshake sequence, rather than the [`CONTROL_CONNECT_TIMEOUT`] default
+/// [`dial`] uses. Exists so tests can exercise the hang/timeout path without
+/// waiting out the production timeout.
+async fn dial_with_timeout(
+    url: &ControlUrl,
+    machine_key: &MachinePrivate,
+    control_key: &[u8; 32],
+    protocol_version: u16,
+    timeout: Duration,
+) -> Result<Conn<Replay<TcpStream>>, ControlHttpError> {
+    match tokio::time::timeout(timeout, async {
+        let (init, handshake) = client_initiation(machine_key, control_key, protocol_version);
 
-    let mut headers = HeaderMap::new();
-    headers
-        .insert("Host", &url.authority)
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    headers
-        .insert("Upgrade", UPGRADE_HEADER_VALUE)
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    headers
-        .insert("Connection", "upgrade")
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    headers
-        .insert(HANDSHAKE_HEADER, &rusty_base64::encode_standard(&init))
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    headers
-        .insert("Content-Length", "0")
-        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
-    transport
-        .write_request_head(&RequestHead {
-            method: Method::Post,
-            target: UPGRADE_PATH.to_string(),
-            version: Version::Http11,
-            headers,
-        })
-        .await?;
+        let stream = TcpStream::connect(url.socket_addr()).await?;
+        let mut transport = AsyncTransport::new(stream);
 
-    // Read only the HTTP response head; `rusty_http` consumes exactly the
-    // head, so any bytes bundled with it in the same read belong to the
-    // Noise stream, not this parse -- reclaim them via `into_parts` below
-    // rather than let a plain `into_inner` silently drop them.
-    let head = transport.read_response_head(MAX_HEAD_LEN).await?;
-    if head.status.as_u16() != 101 {
-        return Err(ControlHttpError::NoUpgrade(head.status.as_u16()));
+        let mut headers = HeaderMap::new();
+        headers
+            .insert("Host", &url.authority)
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        headers
+            .insert("Upgrade", UPGRADE_HEADER_VALUE)
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        headers
+            .insert("Connection", "upgrade")
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        headers
+            .insert(HANDSHAKE_HEADER, &rusty_base64::encode_standard(&init))
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        headers
+            .insert("Content-Length", "0")
+            .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        transport
+            .write_request_head(&RequestHead {
+                method: Method::Post,
+                target: UPGRADE_PATH.to_string(),
+                version: Version::Http11,
+                headers,
+            })
+            .await?;
+
+        // Read only the HTTP response head; `rusty_http` consumes exactly the
+        // head, so any bytes bundled with it in the same read belong to the
+        // Noise stream, not this parse -- reclaim them via `into_parts` below
+        // rather than let a plain `into_inner` silently drop them.
+        let head = transport.read_response_head(MAX_HEAD_LEN).await?;
+        if head.status.as_u16() != 101 {
+            return Err(ControlHttpError::NoUpgrade(head.status.as_u16()));
+        }
+        let (stream, leftover) = transport.into_parts();
+        let io = Replay::new(leftover, stream);
+
+        // `io` now carries the Noise response + records, replaying any of it
+        // that arrived bundled with the upgrade response.
+        Ok(controlbase::connect_deferred(io, handshake).await?)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ControlHttpError::Timeout),
     }
-    let (stream, leftover) = transport.into_parts();
-    let io = Replay::new(leftover, stream);
-
-    // `io` now carries the Noise response + records, replaying any of it
-    // that arrived bundled with the upgrade response.
-    Ok(controlbase::connect_deferred(io, handshake).await?)
 }
 
 #[cfg(test)]
@@ -217,4 +272,66 @@ mod tests {
     // byte-exact-consumption guarantee the Noise handoff depends on) is
     // `rusty_http`'s job now and is covered by its own test suite -- see
     // `rusty_http::head`'s tests, not duplicated here.
+
+    /// A control server that accepts the TCP connection but never writes a
+    /// byte back must not hang `fetch_control_key` forever -- it should
+    /// give up within the caller-supplied bound.
+    #[tokio::test]
+    async fn fetch_control_key_times_out_on_unresponsive_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Deliberately never `accept`/write anything back: the kernel
+        // completes the TCP handshake from its listen backlog, so `connect`
+        // succeeds at the socket level but every subsequent read hangs.
+
+        let url = ControlUrl::parse(&format!("http://{addr}")).unwrap();
+        let start = std::time::Instant::now();
+        let result = fetch_control_key_with_timeout(&url, 1, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ControlHttpError::Timeout) => {}
+            Err(other) => panic!("expected Timeout, got: {other}"),
+            Ok(_) => panic!("expected a timeout error, got Ok"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "fetch_control_key_with_timeout should give up quickly, took {elapsed:?}"
+        );
+        drop(listener);
+    }
+
+    /// A control server that accepts the TCP connection but never writes a
+    /// byte back must not hang `dial` forever -- it should give up within
+    /// the caller-supplied bound.
+    #[tokio::test]
+    async fn dial_times_out_on_unresponsive_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let url = ControlUrl::parse(&format!("http://{addr}")).unwrap();
+        let machine_key = MachinePrivate::generate();
+        let control_key = [0u8; 32];
+        let start = std::time::Instant::now();
+        let result = dial_with_timeout(
+            &url,
+            &machine_key,
+            &control_key,
+            1,
+            Duration::from_millis(200),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ControlHttpError::Timeout) => {}
+            Err(other) => panic!("expected Timeout, got: {other}"),
+            Ok(_) => panic!("expected a timeout error, got Ok"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "dial_with_timeout should give up quickly, took {elapsed:?}"
+        );
+        drop(listener);
+    }
 }

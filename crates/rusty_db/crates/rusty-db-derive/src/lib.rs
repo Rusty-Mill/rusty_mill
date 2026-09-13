@@ -23,7 +23,7 @@
 //! ```
 //!
 //! generates:
-//! - `impl Mapped for User` (`TABLE_NAME`, `COLUMNS`, `PRIMARY_KEY`, `VERSION_COLUMN`, `SOFT_DELETE_COLUMN`)
+//! - `impl Mapped for User` (`TABLE_NAME`, `COLUMNS`, `PRIMARY_KEY`, `VERSION_COLUMN`, `SOFT_DELETE_COLUMN`, `REDACTED_COLUMNS`)
 //! - `impl FromRow for User` (decodes a `Row` by column name)
 //! - `impl Entity for User` (so `Session::add` can queue it generically)
 //! - `User::table() -> Table`
@@ -70,6 +70,16 @@
 //! itself is unaffected — it's always a real `DELETE`, for explicit/direct
 //! use outside a `Session`. See `Mapped::not_deleted_filter` for building
 //! the same "still active" condition into your own queries.
+//!
+//! Any number of fields may be marked `#[table(redacted)]` — an opt-in
+//! per-column redaction marker for `Session`'s audit log (see
+//! `Session::with_audit_log`): a marked column's bound value renders as
+//! `audit::REDACTED_PLACEHOLDER` (`"[REDACTED]"`) in an audit entry's
+//! `params_text` instead of the real value, in every `INSERT`/`UPDATE`
+//! this struct's `insert()`/`update()` produces. Off by default — an
+//! unmarked column keeps rendering verbatim in the (ordinary, queryable)
+//! audit table, exactly as before this existed. Mark any column carrying
+//! a password hash, API key, session token, or other sensitive value.
 //!
 //! A field additionally marked `#[table(default = "...")]` (a raw SQL
 //! fragment, e.g. `"CURRENT_TIMESTAMP"` or `"'pending'"` — distinct from a
@@ -183,6 +193,7 @@ struct FieldInfo {
     primary_key: bool,
     version: bool,
     soft_delete: bool,
+    redacted: bool,
     default: Option<syn::LitStr>,
 }
 
@@ -425,6 +436,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         let mut primary_key = false;
         let mut version = false;
         let mut soft_delete = false;
+        let mut redacted = false;
         let mut default: Option<syn::LitStr> = None;
 
         for attr in &field.attrs {
@@ -445,13 +457,16 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
                 } else if meta.path.is_ident("soft_delete") {
                     soft_delete = true;
                     Ok(())
+                } else if meta.path.is_ident("redacted") {
+                    redacted = true;
+                    Ok(())
                 } else if meta.path.is_ident("default") {
                     let lit: syn::LitStr = meta.value()?.parse()?;
                     default = Some(lit);
                     Ok(())
                 } else {
                     Err(meta.error(
-                        "unsupported #[table(...)] field attribute; expected `column = \"...\"`, `primary_key`, `version`, `soft_delete`, or `default = \"...\"`",
+                        "unsupported #[table(...)] field attribute; expected `column = \"...\"`, `primary_key`, `version`, `soft_delete`, `redacted`, or `default = \"...\"`",
                     ))
                 }
             })?;
@@ -473,6 +488,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             primary_key,
             version,
             soft_delete,
+            redacted,
             default,
         });
     }
@@ -571,6 +587,16 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         }
         None => quote! { ::std::option::Option::None },
     };
+
+    // Unlike primary_key/version/soft_delete (each capped at one field),
+    // any number of columns may be marked `#[table(redacted)]` — there's
+    // no structural reason to limit how many sensitive columns one table
+    // has.
+    let redacted_column_lits: Vec<&str> = fields
+        .iter()
+        .filter(|f| f.redacted)
+        .map(|f| f.column.as_str())
+        .collect();
 
     let update_and_delete = match primary_key {
         Some(pk) => {
@@ -718,6 +744,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             const PRIMARY_KEY: ::std::option::Option<&'static str> = #primary_key_const;
             const VERSION_COLUMN: ::std::option::Option<&'static str> = #version_column_const;
             const SOFT_DELETE_COLUMN: ::std::option::Option<&'static str> = #soft_delete_column_const;
+            const REDACTED_COLUMNS: &'static [&'static str] = &[#(#redacted_column_lits),*];
         }
 
         impl #core::FromRow for #struct_ident {
@@ -2912,6 +2939,7 @@ mod tests {
             primary_key: false,
             version: false,
             soft_delete: false,
+            redacted: false,
             default: None,
         }
     }

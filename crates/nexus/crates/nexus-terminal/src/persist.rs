@@ -41,6 +41,7 @@ use ts_rs::TS;
 use crate::ansi::strip_ansi;
 use crate::error::TerminalError;
 use crate::session::SessionId;
+use nexus_types::paths::resolve_within;
 
 /// Persisted session metadata — the PRD-09 §2.2 "session state
 /// serialization" shape, plus enough bookkeeping for LRU eviction.
@@ -318,7 +319,7 @@ impl SqliteSessionStore {
                 params![id],
             )
             .map_err(|e| TerminalError::Persist(e.to_string()))?;
-        let path = self.scrollback_path(id);
+        let path = self.scrollback_path(id)?;
         if path.exists() {
             // Best-effort: remove the file; surface I/O errors so the
             // caller sees failures to clean up.
@@ -342,7 +343,7 @@ impl SqliteSessionStore {
     /// Propagates [`TerminalError::Io`] on filesystem failures and
     /// [`TerminalError::Persist`] on FTS5 SQL errors.
     pub fn save_scrollback(&self, id: &str, bytes: &[u8]) -> Result<(), TerminalError> {
-        let path = self.scrollback_path(id);
+        let path = self.scrollback_path(id)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -533,7 +534,7 @@ impl SqliteSessionStore {
     /// Propagates [`TerminalError::Io`] on filesystem failures other
     /// than a missing file.
     pub fn load_scrollback(&self, id: &str) -> Result<Option<Vec<u8>>, TerminalError> {
-        let path = self.scrollback_path(id);
+        let path = self.scrollback_path(id)?;
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -542,9 +543,17 @@ impl SqliteSessionStore {
     }
 
     /// Where `id`'s scrollback blob lives on disk.
-    #[must_use]
-    pub fn scrollback_path(&self, id: &str) -> PathBuf {
-        self.scrollback_dir.join(id).join("scrollback.bin")
+    ///
+    /// # Errors
+    /// Returns [`TerminalError::Persist`] if `id` contains a path
+    /// component (`..`, a leading `/`, a Windows drive prefix, …)
+    /// that would let it escape `scrollback_dir` — `id` is caller
+    /// (IPC) controlled, so this must be validated before any join,
+    /// not just sanitized cosmetically.
+    pub fn scrollback_path(&self, id: &str) -> Result<PathBuf, TerminalError> {
+        let dir = resolve_within(&self.scrollback_dir, id)
+            .map_err(|e| TerminalError::Persist(format!("invalid session id '{id}': {e}")))?;
+        Ok(dir.join("scrollback.bin"))
     }
 }
 
@@ -704,6 +713,37 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let store = SqliteSessionStore::in_memory(tmp.path()).expect("mem store");
         assert!(store.load_scrollback("ghost").expect("load").is_none());
+    }
+
+    #[test]
+    fn load_scrollback_rejects_path_traversal_id() {
+        let tmp = tempdir().expect("tempdir");
+        let scrollback_root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&scrollback_root).expect("mkdir sessions");
+        let store = SqliteSessionStore::in_memory(&scrollback_root).expect("mem store");
+
+        // Plant a "secret" file just outside `scrollback_root` — the
+        // spot `scrollback_root.join("../outside").join("scrollback.bin")`
+        // resolves to.
+        let outside_dir = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside_dir).expect("mkdir outside");
+        std::fs::write(outside_dir.join("scrollback.bin"), b"top secret")
+            .expect("write planted secret");
+
+        // Pre-fix, `scrollback_path` joined `id` onto `scrollback_dir`
+        // with no traversal guard, so this id resolved straight through
+        // to the planted file and `load_scrollback` returned its bytes.
+        // It must now be rejected outright instead of leaking content.
+        let result = store.load_scrollback("../outside");
+        assert!(
+            result.is_err(),
+            "traversal-shaped id must be rejected, got {result:?}"
+        );
+
+        assert!(store.scrollback_path("../outside").is_err());
+        assert!(store.scrollback_path("/etc/passwd").is_err());
+        // Sanity: an ordinary id still resolves fine.
+        assert!(store.scrollback_path("normal-id").is_ok());
     }
 
     // ── BL-063 — FTS5 indexing tests ────────────────────────────────

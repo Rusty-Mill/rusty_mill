@@ -181,12 +181,13 @@ impl AlgoliaBackend {
     /// crate's SearchBackend methods to the synchronous read-your-writes
     /// contract the trait expects.
     async fn wait_task(&self, index: &str, task_id: u64) -> Result<()> {
+        let encoded_index = encode_path_segment(index);
         for _ in 0..TASK_POLL_MAX_ATTEMPTS {
             let resp = self
                 .request(
                     Method::Get,
                     &self.write_host,
-                    &format!("1/indexes/{index}/task/{task_id}"),
+                    &format!("1/indexes/{encoded_index}/task/{task_id}"),
                 )?
                 .send()
                 .await
@@ -231,11 +232,12 @@ impl SearchBackend for AlgoliaBackend {
         }
 
         let (settings, fields) = build_settings(&schema);
+        let encoded_name = encode_path_segment(name);
         let resp = json_body(
             self.request(
                 Method::Put,
                 &self.write_host,
-                &format!("1/indexes/{name}/settings"),
+                &format!("1/indexes/{encoded_name}/settings"),
             )?,
             &settings,
         )?
@@ -254,11 +256,12 @@ impl SearchBackend for AlgoliaBackend {
     async fn delete_index(&self, name: &str) -> Result<()> {
         self.require_known(name).await?;
 
+        let encoded_name = encode_path_segment(name);
         let resp = self
             .request(
                 Method::Delete,
                 &self.write_host,
-                &format!("1/indexes/{name}"),
+                &format!("1/indexes/{encoded_name}"),
             )?
             .send()
             .await
@@ -290,11 +293,12 @@ impl SearchBackend for AlgoliaBackend {
             })
             .collect();
 
+        let encoded_index = encode_path_segment(index);
         let resp = json_body(
             self.request(
                 Method::Post,
                 &self.write_host,
-                &format!("1/indexes/{index}/batch"),
+                &format!("1/indexes/{encoded_index}/batch"),
             )?,
             &json!({ "requests": requests }),
         )?
@@ -356,11 +360,12 @@ impl SearchBackend for AlgoliaBackend {
             body["length"] = json!(request.limit);
         }
 
+        let encoded_index = encode_path_segment(index);
         let resp = json_body(
             self.request(
                 Method::Post,
                 &self.read_host,
-                &format!("1/indexes/{index}/query"),
+                &format!("1/indexes/{encoded_index}/query"),
             )?,
             &body,
         )?
@@ -663,6 +668,42 @@ mod tests {
             .find(|r| r.method.as_str() == "DELETE")
             .expect("delete request was sent");
         assert_eq!(delete_req.url.path(), "/1/indexes/articles/1%2F2");
+    }
+
+    #[tokio::test]
+    async fn create_index_percent_encodes_a_traversal_shaped_name() {
+        let server = MockServer::start().await;
+        let backend = backend(&server);
+
+        // No path filter: pre-fix, the raw `../keys` name collapses the
+        // `..` segment during URL parsing and the request never reaches
+        // `/1/indexes/...` at all, so an unconditional mock is required to
+        // observe (rather than reject) that escaped request.
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "taskID": 9 })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "status": "published" })),
+            )
+            .mount(&server)
+            .await;
+
+        // A `../` in the index name must not be able to escape the
+        // `1/indexes/` namespace once path normalization happens anywhere
+        // downstream.
+        backend
+            .create_index("../keys", articles_schema())
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let put_req = requests
+            .iter()
+            .find(|r| r.method.as_str() == "PUT")
+            .expect("settings PUT request was sent");
+        assert_eq!(put_req.url.path(), "/1/indexes/%2E%2E%2Fkeys/settings");
     }
 
     #[tokio::test]

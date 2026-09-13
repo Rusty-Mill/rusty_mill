@@ -28,6 +28,11 @@ pub enum RouterError {
     )]
     RequestBudgetExceeded(String, f64),
 
+    #[error(
+        "model chain length {0} exceeds configured max_chain_length ({1}); reduce the models fallback list or raise server.max_chain_length"
+    )]
+    ChainTooLong(usize, usize),
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 }
@@ -42,6 +47,7 @@ impl RouterError {
             RouterError::UnknownPreset(_) => 400,
             RouterError::ModerationFlagged(_) => 400,
             RouterError::RequestBudgetExceeded(_, _) => 402,
+            RouterError::ChainTooLong(_, _) => 400,
             RouterError::Provider(e) => e.status_code(),
         }
     }
@@ -117,6 +123,11 @@ mod tests {
             RouterError::RequestBudgetExceeded("smart".to_string(), 0.01).status_code(),
             402
         );
+    }
+
+    #[test]
+    fn chain_too_long_maps_to_400() {
+        assert_eq!(RouterError::ChainTooLong(50, 20).status_code(), 400);
     }
 
     #[test]

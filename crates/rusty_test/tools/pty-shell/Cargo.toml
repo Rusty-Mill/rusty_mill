@@ -9,3 +9,4 @@ publish.workspace = true
 contract.workspace = true
 compat.workspace = true
 anyhow.workspace = true
+crossterm.workspace = true

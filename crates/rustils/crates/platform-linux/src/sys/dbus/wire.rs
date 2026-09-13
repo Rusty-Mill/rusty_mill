@@ -166,23 +166,56 @@ fn marshal_one(ty: &str, v: &Value, buf: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+/// Maximum container nesting depth `unmarshal_one` will recurse
+/// through (`a`, `(`, `v`, `{`) before giving up. The D-Bus
+/// specification itself caps signature nesting at 32 (`ARRAY`/
+/// `STRUCT`/`DICT_ENTRY`) plus `VARIANT`'s own indirection, but
+/// `VARIANT` bodies carry their own inline signature read straight off
+/// the wire (not bounded by any single signature string's length), so
+/// a malicious peer can nest `v`-in-`v`-in-`v`... arbitrarily deep at
+/// a cost of only a few bytes per level. Without a depth cap that
+/// recursion overflows the stack before any error can be returned.
+/// `64` matches the spec's own nesting limit with headroom for
+/// legitimate deeply-nested structs/arrays.
+const MAX_NESTING_DEPTH: usize = 64;
+
+fn nesting_too_deep() -> PlatformError {
+    PlatformError::new(
+        ErrorKind::InvalidInput,
+        OsCode::None,
+        "D-Bus value nesting exceeds the maximum supported depth",
+    )
+}
+
 /// Unmarshal one [`Value`] per complete type in `sig`, starting at
 /// `*offset` (which is byte offset zero of the *message*, not of `buf` —
 /// callers slicing a message apart still pass the message-relative
 /// offset so alignment padding is computed against the right origin).
 pub fn unmarshal(sig: &str, buf: &[u8], offset: &mut usize) -> Result<Vec<Value>> {
+    unmarshal_at_depth(sig, buf, offset, 0)
+}
+
+fn unmarshal_at_depth(
+    sig: &str,
+    buf: &[u8],
+    offset: &mut usize,
+    depth: usize,
+) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let mut remaining = sig;
     while !remaining.is_empty() {
         let (this_ty, rest) = split_one(remaining)?;
-        out.push(unmarshal_one(this_ty, buf, offset)?);
+        out.push(unmarshal_one(this_ty, buf, offset, depth)?);
         remaining = rest;
     }
     Ok(out)
 }
 
-fn unmarshal_one(ty: &str, buf: &[u8], offset: &mut usize) -> Result<Value> {
+fn unmarshal_one(ty: &str, buf: &[u8], offset: &mut usize, depth: usize) -> Result<Value> {
     let c = ty.as_bytes()[0];
+    if matches!(c, b'a' | b'(' | b'v' | b'{') && depth >= MAX_NESTING_DEPTH {
+        return Err(nesting_too_deep());
+    }
     macro_rules! num {
         ($align:expr, $n:expr, $ty:ty, $variant:path) => {{
             align_read(buf, offset, $align)?;
@@ -239,7 +272,7 @@ fn unmarshal_one(ty: &str, buf: &[u8], offset: &mut usize) -> Result<Value> {
             }
             let mut items = Vec::new();
             while *offset < content_end {
-                items.push(unmarshal_one(elem_sig, buf, offset)?);
+                items.push(unmarshal_one(elem_sig, buf, offset, depth + 1)?);
             }
             if *offset != content_end {
                 return Err(bad_signature(
@@ -250,11 +283,11 @@ fn unmarshal_one(ty: &str, buf: &[u8], offset: &mut usize) -> Result<Value> {
         }
         b'(' => {
             align_read(buf, offset, 8)?;
-            let fields = unmarshal(&ty[1..ty.len() - 1], buf, offset)?;
+            let fields = unmarshal_at_depth(&ty[1..ty.len() - 1], buf, offset, depth + 1)?;
             Value::Struct(fields)
         }
         b'v' => {
-            let Value::Signature(inner_sig) = unmarshal_one("g", buf, offset)? else {
+            let Value::Signature(inner_sig) = unmarshal_one("g", buf, offset, depth)? else {
                 unreachable!("unmarshal_one(\"g\", ..) always returns Value::Signature")
             };
             if type_len(inner_sig.as_bytes())? != inner_sig.len() {
@@ -262,14 +295,14 @@ fn unmarshal_one(ty: &str, buf: &[u8], offset: &mut usize) -> Result<Value> {
                     "variant signature is not a single complete type",
                 ));
             }
-            Value::Variant(Box::new(unmarshal_one(&inner_sig, buf, offset)?))
+            Value::Variant(Box::new(unmarshal_one(&inner_sig, buf, offset, depth + 1)?))
         }
         b'{' => {
             align_read(buf, offset, 8)?;
             let inner = &ty[1..ty.len() - 1];
             let (key_ty, val_ty) = split_one(inner)?;
-            let key = unmarshal_one(key_ty, buf, offset)?;
-            let val = unmarshal_one(val_ty, buf, offset)?;
+            let key = unmarshal_one(key_ty, buf, offset, depth + 1)?;
+            let val = unmarshal_one(val_ty, buf, offset, depth + 1)?;
             Value::DictEntry(Box::new(key), Box::new(val))
         }
         _ => return Err(bad_signature("unsupported type code")),
@@ -426,6 +459,29 @@ mod tests {
         let mut offset = 0;
         let e = unmarshal("s", &buf, &mut offset).unwrap_err();
         assert_eq!(e.kind, ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn unmarshal_rejects_deeply_nested_variants_instead_of_overflowing_stack() {
+        // A `VARIANT`'s inner signature is read straight off the wire one
+        // level at a time (unlike an array/struct, whose full nesting
+        // depth is fixed by a single signature string), so a peer can
+        // drive `unmarshal_one` arbitrarily deep for the price of 3 bytes
+        // ("v" as a one-byte-length-prefixed, NUL-terminated signature)
+        // per level. Build far more levels than any depth cap should
+        // ever allow, terminated by a real "y" (byte) value, and confirm
+        // this comes back as an error rather than blowing the stack.
+        const DEPTH: usize = 100_000;
+        let mut buf = Vec::with_capacity(DEPTH * 3 + 4);
+        for _ in 0..DEPTH {
+            buf.extend_from_slice(&[1, b'v', 0]); // signature "v" + NUL
+        }
+        buf.extend_from_slice(&[1, b'y', 0, 0x2a]); // signature "y" + NUL, then the byte
+
+        let mut offset = 0;
+        let err =
+            unmarshal("v", &buf, &mut offset).expect_err("must reject, not overflow the stack");
+        assert_eq!(err.kind, ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -314,7 +314,14 @@ impl Template {
         let (body, target) = self.render(&values)?;
 
         let target_path = PathBuf::from(&target);
-        if target_path.is_absolute() || target.contains("..") {
+        // Reject absolute paths, `..` hops, and any `:` in the rendered
+        // target. On Windows, `PathBuf::join` treats a drive-relative
+        // component like `C:evil.md` as a full path replacement rather
+        // than an append (it has no root, so `is_absolute()` misses it),
+        // which would otherwise let a client-supplied `target` escape
+        // `dest_root` entirely. Mirrors the `nexus-workflow` fix for the
+        // same bug class (`handlers/templates.rs::sanitize_filename`).
+        if target_path.is_absolute() || target.contains("..") || target.contains(':') {
             return Err(ApplyError::PathEscape { path: target });
         }
         let abs = dest_root.join(&target_path);
@@ -476,6 +483,19 @@ mod tests {
     #[test]
     fn rejects_path_escape() {
         let t = parse("---\nname: x\ntarget_path: ../escape.md\n---\nbad\n");
+        let dir = tempdir().unwrap();
+        let err = t.apply(&BTreeMap::new(), dir.path(), false).unwrap_err();
+        assert!(matches!(err, ApplyError::PathEscape { .. }));
+    }
+
+    #[test]
+    fn rejects_windows_drive_relative_escape() {
+        // On Windows, `PathBuf::from("C:evil.md")` has no root (it's
+        // "drive-relative", not absolute), so `is_absolute()` alone
+        // misses it — but `dest_root.join("C:evil.md")` replaces
+        // `dest_root` entirely, letting a client-supplied target escape
+        // the intended directory. Must be rejected regardless of platform.
+        let t = parse("---\nname: x\ntarget_path: \"C:evil.md\"\n---\nbad\n");
         let dir = tempdir().unwrap();
         let err = t.apply(&BTreeMap::new(), dir.path(), false).unwrap_err();
         assert!(matches!(err, ApplyError::PathEscape { .. }));

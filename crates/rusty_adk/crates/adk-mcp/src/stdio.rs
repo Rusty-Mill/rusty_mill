@@ -7,8 +7,9 @@
 //! protocol, and a stray `println!` corrupts the stream.
 
 use adk_core::Result;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::line_read::read_capped_line;
 use crate::server::McpServer;
 
 /// Serves `server` over stdin and stdout until stdin closes.
@@ -26,9 +27,9 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
 
-    while let Some(line) = lines.next_line().await? {
+    while let Some(line) = read_capped_line(&mut reader).await? {
         let line = line.trim();
         if line.is_empty() {
             continue;

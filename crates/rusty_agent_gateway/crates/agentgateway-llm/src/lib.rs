@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::{AiBackend, BackendAuth, Policies, RateLimitKind};
 use agentgateway_core::{Headers, RateLimiter, Retry, RetryAfter, Rewrite};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, StreamBody};
@@ -54,6 +54,16 @@ use translate::Usage;
 /// buffered to be translated, and an unbounded buffer on a public endpoint is
 /// a memory limit waiting to be found.
 pub const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Largest upstream response body this gateway buffers before giving up.
+///
+/// Larger than [`MAX_REQUEST_BYTES`]: an answer legitimately runs longer than
+/// the request that produced it, and refusing an ordinary long completion the
+/// way an oversized inbound body is refused would be treating a normal
+/// response as abuse. It is still bounded for the same reason the request is
+/// -- see [`read_capped`], which enforces it by hand because
+/// `reqwest::Response` has no `http_body_util::Limited` of its own.
+pub const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Failure to build an LLM backend.
 #[derive(Debug, thiserror::Error)]
@@ -537,7 +547,16 @@ impl LlmBackend {
         // reshaped: the message is the useful part, and a gateway that
         // rewrites "invalid api key" into "bad gateway" costs an afternoon.
         if !status.is_success() {
-            let body = response.bytes().await.unwrap_or_default();
+            let body = match read_capped(response, MAX_RESPONSE_BYTES).await {
+                Ok(body) => body,
+                Err(err) => {
+                    tracing::warn!(%err, "reading the provider's error response failed");
+                    return error(
+                        StatusCode::BAD_GATEWAY,
+                        "the provider response was too large or truncated",
+                    );
+                }
+            };
             tracing::warn!(
                 provider = self.provider.name(),
                 %status,
@@ -566,13 +585,13 @@ impl LlmBackend {
         model: &str,
         context: &GuardContext,
     ) -> Response<LlmBody> {
-        let bytes = match response.bytes().await {
+        let bytes = match read_capped(response, MAX_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::warn!(%err, "reading the provider response failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
-                    "the provider response was truncated",
+                    "the provider response was too large or truncated",
                 );
             }
         };
@@ -637,13 +656,13 @@ impl LlmBackend {
         model: &str,
         context: &GuardContext,
     ) -> Response<LlmBody> {
-        let bytes = match response.bytes().await {
+        let bytes = match read_capped(response, MAX_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::warn!(%err, "reading the provider response failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
-                    "the provider response was truncated",
+                    "the provider response was too large or truncated",
                 );
             }
         };
@@ -1052,6 +1071,40 @@ fn full(bytes: Bytes) -> LlmBody {
     BodyExt::boxed(http_body_util::Full::new(bytes).map_err(|never| match never {}))
 }
 
+/// Failure to read a provider response within [`MAX_RESPONSE_BYTES`].
+#[derive(Debug, thiserror::Error)]
+enum ResponseReadError {
+    /// The response exceeded the cap before it finished arriving.
+    #[error("the provider response exceeded {0} bytes")]
+    TooLarge(u64),
+    /// The connection failed while a response already in flight was read.
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+}
+
+/// Read a provider response's body, refusing to buffer past `cap` bytes.
+///
+/// `handle`, `buffered` and `guarded_stream` all used to call
+/// `response.bytes().await` directly, which collects the whole body no
+/// matter how large the provider makes it -- asymmetric with the
+/// `http_body_util::Limited` wrap this file puts around an inbound request.
+/// `reqwest::Response` has no equivalent wrapper, so the cap is enforced by
+/// hand: `bytes_stream` is read chunk by chunk and abandoned the moment the
+/// running total would exceed it, rather than collecting everything and
+/// checking after the fact.
+async fn read_capped(response: reqwest::Response, cap: u64) -> Result<Bytes, ResponseReadError> {
+    let mut stream = response.bytes_stream();
+    let mut buf = BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buf.len() as u64 + chunk.len() as u64 > cap {
+            return Err(ResponseReadError::TooLarge(cap));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.freeze())
+}
+
 #[cfg(test)]
 mod tests {
     use agentgateway_config::{AiProvider, AiProviderParams, PathRewrite, UrlRewrite};
@@ -1221,5 +1274,56 @@ mod tests {
         let err = endpoint(&provider, &policies(Some("user:secret@host"), None), None)
             .expect_err("should not resolve");
         assert!(err.to_string().contains("backendAuth"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_response_larger_than_the_cap_is_rejected_rather_than_buffered_whole() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // One byte past the cap: a body this size must never be buffered
+        // whole, which is exactly what `response.bytes().await` used to do
+        // before `read_capped` existed.
+        let oversized = vec![b'a'; (MAX_RESPONSE_BYTES + 1) as usize];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(oversized))
+            .mount(&server)
+            .await;
+
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("mock server should answer");
+
+        let backend = LlmBackend {
+            provider: provider("openai", None),
+            model: None,
+            key: None,
+            request_headers: None,
+            endpoint: String::new(),
+            retry: None,
+            shape: None,
+            caching: None,
+            guard: None,
+            tokens: None,
+            client: reqwest::Client::new(),
+        };
+
+        let result = backend
+            .buffered(
+                response,
+                StatusCode::OK,
+                "gpt-4o-mini",
+                &GuardContext::default(),
+            )
+            .await;
+
+        assert_eq!(
+            result.status(),
+            StatusCode::BAD_GATEWAY,
+            "an oversized provider response must be rejected, not buffered whole"
+        );
     }
 }

@@ -7,6 +7,7 @@
 use bytes::Bytes;
 use h2::client::SendRequest;
 use http::{Method, Request};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use ts_key::MachinePrivate;
 use ts_types::tailcfg::{
@@ -40,6 +41,10 @@ pub enum ClientError {
     FrameTooLarge(u32),
     #[error("map stream ended unexpectedly")]
     StreamEnded,
+    #[error("timed out establishing HTTP/2 session with control server")]
+    Timeout,
+    #[error("unary response body exceeds sanity limit ({0} bytes)")]
+    ResponseTooLarge(usize),
 }
 
 /// A control client bound to one tailnet identity.
@@ -83,17 +88,7 @@ impl ControlClient {
         )
         .await?;
         let conn = skip_early_payload(conn).await?;
-
-        let (send, connection) = h2::client::handshake(conn).await?;
-        // Drive the HTTP/2 connection in the background; it ends when the
-        // session is dropped or the server closes.
-        let driver = tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        Ok(H2Session {
-            send,
-            _driver: DriverGuard(driver),
-        })
+        h2_handshake(conn, H2_HANDSHAKE_TIMEOUT).await
     }
 
     /// Registers the node key with the control server using a preauth key.
@@ -218,6 +213,34 @@ impl ControlClient {
     }
 }
 
+/// Bound on the HTTP/2 client preface exchange once the Noise channel is
+/// open, mirroring `controlhttp`'s own connect-chain timeout -- a peer that
+/// completes the Noise handshake but never speaks HTTP/2 must not hang the
+/// caller forever.
+const H2_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Performs the HTTP/2 client preface exchange over an already-established
+/// transport, bounded by `timeout`. A free function (rather than inlined in
+/// `open_h2`) so tests can drive it directly over a `tokio::io::duplex` pair
+/// without needing a full Noise handshake.
+async fn h2_handshake<T>(conn: T, timeout: Duration) -> Result<H2Session, ClientError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (send, connection) = tokio::time::timeout(timeout, h2::client::handshake(conn))
+        .await
+        .map_err(|_| ClientError::Timeout)??;
+    // Drive the HTTP/2 connection in the background; it ends when the
+    // session is dropped or the server closes.
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(H2Session {
+        send,
+        _driver: DriverGuard(driver),
+    })
+}
+
 /// Consumes the optional server early payload from the Noise plaintext
 /// stream before HTTP/2 begins. Headscale sends none; a real Tailscale
 /// control server may. Returns an IO stream positioned at the first HTTP/2
@@ -258,6 +281,11 @@ impl Drop for DriverGuard {
     }
 }
 
+/// Cap on an accumulated unary response body, mirroring `BodyReader::next_frame`'s
+/// per-frame cap -- a control server streaming an unbounded body must not
+/// grow this buffer without limit.
+const MAX_RESPONSE_BODY_LEN: usize = 16 << 20;
+
 /// One HTTP/2 session over a Noise channel.
 struct H2Session {
     send: SendRequest<Bytes>,
@@ -271,6 +299,9 @@ impl H2Session {
         let mut stream = self.request_stream(uri, body).await?;
         let mut out = Vec::new();
         while let Some(chunk) = stream.next_chunk().await? {
+            if out.len() + chunk.len() > MAX_RESPONSE_BODY_LEN {
+                return Err(ClientError::ResponseTooLarge(out.len() + chunk.len()));
+            }
             out.extend_from_slice(&chunk);
         }
         Ok(out)
@@ -357,6 +388,89 @@ impl BodyReader {
                     return Err(ClientError::StreamEnded);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `h2::client::handshake` writes the client preface (and buffers the
+    /// initial SETTINGS frame) but never waits for anything from the peer,
+    /// so it can only hang on a stalled *write* -- e.g. a peer that stops
+    /// reading and lets the transport's send buffer fill. A tiny
+    /// `tokio::io::duplex` with nobody ever draining the far end reproduces
+    /// exactly that: the preface write blocks forever without the timeout.
+    /// Uses a duplex pair rather than a full Noise handshake because
+    /// `h2_handshake` only needs an `AsyncRead + AsyncWrite` transport.
+    #[tokio::test]
+    async fn h2_handshake_times_out_on_silent_peer() {
+        let (near, _far) = tokio::io::duplex(1);
+
+        let start = std::time::Instant::now();
+        let result = h2_handshake(near, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ClientError::Timeout) => {}
+            Err(other) => panic!("expected Timeout, got: {other}"),
+            Ok(_) => panic!("expected a timeout error, got Ok"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "h2_handshake should give up quickly, took {elapsed:?}"
+        );
+    }
+
+    /// A control server streaming a response body past the sanity cap must
+    /// be rejected before `H2Session::request` grows its accumulation
+    /// buffer without limit.
+    #[tokio::test]
+    async fn request_rejects_oversized_response_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            if let Some(result) = connection.accept().await {
+                let (_request, mut respond) = result.unwrap();
+                if let Ok(mut send) = respond.send_response(http::Response::new(()), false) {
+                    // One chunk past `MAX_RESPONSE_BODY_LEN`; a capped
+                    // reader must give up long before this loop finishes.
+                    let chunk = Bytes::from(vec![0u8; 1 << 20]);
+                    let chunks = (MAX_RESPONSE_BODY_LEN >> 20) + 1;
+                    for i in 0..chunks {
+                        if send.send_data(chunk.clone(), i + 1 == chunks).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            while connection.accept().await.is_some() {}
+        });
+
+        let client_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (send_request, connection) = h2::client::handshake(client_stream).await.unwrap();
+        let driver = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let mut session = H2Session {
+            send: send_request,
+            _driver: DriverGuard(driver),
+        };
+
+        let uri: http::Uri = format!("http://{addr}/machine/register").parse().unwrap();
+        let result =
+            tokio::time::timeout(Duration::from_secs(10), session.request(uri, Vec::new()))
+                .await
+                .expect("request should not hang");
+
+        match result {
+            Err(ClientError::ResponseTooLarge(_)) => {}
+            Err(other) => panic!("expected ResponseTooLarge, got: {other}"),
+            Ok(body) => panic!("expected rejection, got {} byte body", body.len()),
         }
     }
 }

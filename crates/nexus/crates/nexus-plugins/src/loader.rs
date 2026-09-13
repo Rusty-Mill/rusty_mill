@@ -2553,6 +2553,7 @@ impl SharedPluginLoader {
 impl IpcDispatcher for SharedPluginLoader {
     fn dispatch(
         &self,
+        caller_plugin_id: &str,
         target_plugin_id: &str,
         command_id: &str,
         args: &serde_json::Value,
@@ -2621,7 +2622,9 @@ impl IpcDispatcher for SharedPluginLoader {
                 reason: String::new(),
             })?;
         let handler_start = std::time::Instant::now();
-        let result = guard.dispatch(handler_id, args);
+        let result = nexus_plugin_api::ipc::scope_caller(caller_plugin_id, || {
+            guard.dispatch(handler_id, args)
+        });
         let handler_elapsed = handler_start.elapsed();
         drop(guard);
         let lock_wait = handler_start.saturating_duration_since(wait_start);
@@ -2654,6 +2657,7 @@ impl IpcDispatcher for SharedPluginLoader {
     /// awaited, so handlers may issue nested `ipc_call`s without deadlocking.
     fn dispatch_async(
         &self,
+        caller_plugin_id: &str,
         target_plugin_id: &str,
         command_id: &str,
         args: serde_json::Value,
@@ -2673,7 +2677,9 @@ impl IpcDispatcher for SharedPluginLoader {
                 .map(|r| r.handler_id)?;
             let backend = lp.backend.clone();
             let mut guard = backend.lock().ok()?;
-            guard.dispatch_async(handler_id, &args)?
+            nexus_plugin_api::ipc::scope_caller(caller_plugin_id, || {
+                guard.dispatch_async(handler_id, &args)
+            })?
         };
 
         Some(Box::pin(async move {

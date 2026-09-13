@@ -17,6 +17,11 @@ rusty_serde = { workspace = true }
 # being replaced by it - see convert.rs.
 serde_json = { workspace = true }
 rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
+# Used to percent-encode caller-supplied core/index path segments before
+# they are spliced into an HTTP request path (e.g. `solr/{name}/schema`) -
+# same crate/version rusty-search-elasticsearch already uses for the same
+# purpose.
+percent-encoding = "2"
 tokio = { workspace = true, features = ["sync"] }
 rusty_uuid = { path = "../../../rusty_uuid" }
 rusty_time = { path = "../../../rusty_time" }

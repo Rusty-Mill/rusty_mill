@@ -221,8 +221,10 @@ impl<'a> Future for WaitAny<'a> {
                 Poll::Pending => {}
             }
         }
-        if Pin::new(&mut this.timeout).poll(cx).is_ready() {
-            return Poll::Ready(Ok(None));
+        match Pin::new(&mut this.timeout).poll(cx) {
+            Poll::Ready(Ok(())) => return Poll::Ready(Ok(None)),
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => {}
         }
         Poll::Pending
     }
@@ -242,34 +244,78 @@ struct Timeout {
 
 impl Timeout {
     fn new(duration: Option<Duration>) -> Self {
+        // `Instant::now() + d` panics on overflow (e.g. `Duration::MAX`).
+        // Fall back to a safe, practically-unreachable ceiling instead of
+        // propagating that panic — a caller passing an enormous timeout
+        // means "don't time out in practice", not "crash the process".
+        let deadline = duration.map(|d| {
+            Instant::now()
+                .checked_add(d)
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(u32::MAX as u64))
+        });
         Self {
-            deadline: duration.map(|d| Instant::now() + d),
+            deadline,
             thread_armed: false,
         }
     }
 }
 
 impl Future for Timeout {
-    type Output = ();
+    type Output = Result<()>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let this = self.get_mut();
         let Some(deadline) = this.deadline else {
             return Poll::Pending;
         };
         let now = Instant::now();
         if now >= deadline {
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
         }
         if !this.thread_armed {
             this.thread_armed = true;
             let waker = cx.waker().clone();
             let remaining = deadline.saturating_duration_since(now);
-            std::thread::spawn(move || {
-                std::thread::sleep(remaining);
-                waker.wake();
-            });
+            let spawned = std::thread::Builder::new()
+                .name("rustils-async-timeout".to_owned())
+                .spawn(move || {
+                    std::thread::sleep(remaining);
+                    waker.wake();
+                });
+            if let Err(e) = spawned {
+                return Poll::Ready(Err(PlatformError::new(
+                    ErrorKind::Other,
+                    OsCode::Errno(e.raw_os_error().unwrap_or(0)),
+                    "spawn timeout thread",
+                )));
+            }
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    /// Regression test for a `deadline: Instant::now() + d` overflow panic:
+    /// an enormous timeout (e.g. `Duration::MAX`, as a caller might pass to
+    /// mean "effectively no timeout") must not panic when constructing or
+    /// polling `Timeout`, either directly or through `wait_any`.
+    #[test]
+    fn timeout_with_duration_max_does_not_panic() {
+        let mut timeout = Timeout::new(Some(Duration::MAX));
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut cx = Context::from_waker(&waker);
+        let poll = Pin::new(&mut timeout).poll(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
     }
 }

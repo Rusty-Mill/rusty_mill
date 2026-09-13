@@ -29,6 +29,12 @@ use ts_types::{MaskedPrefs, PingResult, Prefs, Status};
 
 /// Cap on the HTTP/1.1 request head we'll buffer before giving up.
 const MAX_HEAD_LEN: usize = 64 * 1024;
+/// Cap on a request body (only `PATCH /localapi/v0/prefs` has one, a small
+/// JSON masked-prefs edit). A declared `Content-Length` past this is
+/// rejected before a single byte of the body is read, so a lying or
+/// malicious client can't force us to buffer or wait on an unbounded
+/// amount of data.
+const MAX_BODY_LEN: u64 = 1 << 20; // 1 MiB
 
 /// The data source behind the LocalAPI: the daemon implements this over the
 /// engine handle. Every method is infallible at this layer — errors are
@@ -108,22 +114,47 @@ async fn serve_connection<B: LocalBackend>(
     loop {
         let head = transport.read_request_head(MAX_HEAD_LEN).await?;
         let framing = rusty_http::body::request_framing(&head.headers)?;
+        if let rusty_http::body::Framing::ContentLength(len) = framing
+            && len > MAX_BODY_LEN
+        {
+            let (status, content_type, resp_body) = text_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("request body exceeds {MAX_BODY_LEN} byte limit"),
+            );
+            write_response(&mut transport, status, content_type, &resp_body).await?;
+            // The oversized body was never read off the wire, so the
+            // connection can no longer be trusted to be framed correctly
+            // for a next request -- close it instead of looping.
+            return Ok(());
+        }
         let body = transport.read_body(framing).await?;
         let (status, content_type, resp_body) = handle(backend, &head, &body).await;
-
-        let mut headers = HeaderMap::new();
-        let _ = headers.insert("Content-Length", &resp_body.len().to_string());
-        let _ = headers.insert("Content-Type", content_type);
-        transport
-            .write_response_head(&ResponseHead {
-                status,
-                reason: reason_phrase(status).to_string(),
-                version: Version::Http11,
-                headers,
-            })
-            .await?;
-        transport.write_body(&resp_body).await?;
+        write_response(&mut transport, status, content_type, &resp_body).await?;
     }
+}
+
+/// Writes a `(status, content_type, body)` triple as a full HTTP/1.1
+/// response -- the framing every reply on a connection shares, whether it
+/// came from routing a request or from rejecting one up front.
+#[cfg(unix)]
+async fn write_response(
+    transport: &mut AsyncTransport<UnixStream>,
+    status: StatusCode,
+    content_type: &str,
+    body: &[u8],
+) -> rusty_http::TransportResult<()> {
+    let mut headers = HeaderMap::new();
+    let _ = headers.insert("Content-Length", &body.len().to_string());
+    let _ = headers.insert("Content-Type", content_type);
+    transport
+        .write_response_head(&ResponseHead {
+            status,
+            reason: reason_phrase(status).to_string(),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+    transport.write_body(body).await
 }
 
 /// Removes a stale socket, binds a fresh one, and tightens its permissions.
@@ -166,6 +197,7 @@ fn reason_phrase(status: StatusCode) -> &'static str {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
         _ => "",
     }
@@ -261,5 +293,61 @@ mod tests {
         );
         assert_eq!(query_param("ip=100.64.0.2", "missing"), None);
         assert_eq!(query_param("", "ip"), None);
+    }
+
+    /// Round 5: `serve_connection` used to call `read_body` with no cap on
+    /// a declared `Content-Length`, so a PATCH claiming a huge body (that
+    /// never actually arrives) would hang the connection forever waiting
+    /// for bytes to read. The cap must reject it up front with a 413,
+    /// without ever trying to read the body.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oversized_content_length_is_rejected_before_reading_the_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct EmptyBackend;
+        impl LocalBackend for EmptyBackend {
+            async fn status(&self) -> Status {
+                Status::default()
+            }
+            async fn edit_prefs(&self, _masked: MaskedPrefs) -> Prefs {
+                Prefs::default()
+            }
+            async fn ping(&self, _ip: std::net::IpAddr) -> PingResult {
+                PingResult::default()
+            }
+        }
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            let backend = EmptyBackend;
+            let _ = serve_connection(server, &backend).await;
+        });
+
+        // A PATCH declaring a body far past the cap; the body itself is
+        // never sent. If the cap weren't enforced up front, `read_body`
+        // would block forever waiting for bytes that never arrive.
+        let request = format!(
+            "PATCH /localapi/v0/prefs HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_LEN + 1
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("server must respond (and close) instead of hanging on the oversized body")
+        .unwrap();
+
+        let response = String::from_utf8(response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "expected a 413 Payload Too Large, got: {response}"
+        );
+
+        server_task.await.unwrap();
     }
 }

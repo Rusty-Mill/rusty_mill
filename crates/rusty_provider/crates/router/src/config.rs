@@ -15,6 +15,14 @@ fn default_max_body_bytes() -> usize {
     20 * 1024 * 1024
 }
 
+/// Sane default for `ServerConfig::max_chain_length` -- generous enough
+/// for any realistic operator-configured `[[routes]]` fallback chain,
+/// small enough that a client-supplied `models` array can't drive
+/// unbounded sequential outbound `provider.chat()` calls per request.
+pub(crate) fn default_max_chain_length() -> usize {
+    20
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
@@ -58,8 +66,22 @@ pub struct ServerConfig {
     /// so a burst spread across many clients (or a single client under a
     /// generous/no rate limit) can't exhaust upstream provider rate limits
     /// or local resources with no backpressure. Unset means no cap.
-    #[serde(default)]
     pub max_concurrent_requests: Option<usize>,
+    /// Hard cap on the number of "provider/model" candidates a single
+    /// request's resolved chain (its `model` plus either a configured
+    /// `[[routes]]` alias's chain or a client-supplied `models` fallback
+    /// array) may contain, enforced by `Router::resolve_chain`. Without
+    /// this, a client sending a huge `models` array would drive one real
+    /// outbound provider request per entry, sequentially, with no cap --
+    /// unbounded amplification against a configured provider even when
+    /// that provider has no self-imposed `requests_per_minute` (this
+    /// crate's documented default: unset means no self-imposed limit). A
+    /// chain longer than this is rejected outright rather than silently
+    /// truncated, so a caller relying on a specific fallback ordering
+    /// finds out immediately instead of silently losing entries off the
+    /// end.
+    #[serde(default = "default_max_chain_length")]
+    pub max_chain_length: usize,
     /// Restricts CORS to an explicit browser-origin allowlist instead of
     /// the default any-origin behavior. Unset preserves today's behavior
     /// unchanged -- this is opt-in hardening, not a default flip, so an
@@ -79,9 +101,10 @@ impl Default for ServerConfig {
             port: default_port(),
             max_body_bytes: default_max_body_bytes(),
             api_key_env: None,
-            default_rate_limit_rpm: None,
             admin_key_env: None,
+            default_rate_limit_rpm: None,
             max_concurrent_requests: None,
+            max_chain_length: default_max_chain_length(),
             cors_allowed_origins: None,
         }
     }
@@ -936,6 +959,7 @@ mod tests {
         assert_eq!(config.server.admin_key_env, None);
         assert_eq!(config.server.max_body_bytes, 20 * 1024 * 1024);
         assert_eq!(config.server.max_concurrent_requests, None);
+        assert_eq!(config.server.max_chain_length, 20);
     }
 
     #[test]
@@ -952,6 +976,7 @@ mod tests {
             admin_key_env = "RP_ADMIN_KEY"
             max_body_bytes = 1048576
             max_concurrent_requests = 50
+            max_chain_length = 5
             "#,
         )
         .unwrap();
@@ -962,6 +987,7 @@ mod tests {
         assert_eq!(config.server.admin_key_env.as_deref(), Some("RP_ADMIN_KEY"));
         assert_eq!(config.server.max_body_bytes, 1048576);
         assert_eq!(config.server.max_concurrent_requests, Some(50));
+        assert_eq!(config.server.max_chain_length, 5);
     }
 
     // --- providers -------------------------------------------------------------
