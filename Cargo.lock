@@ -12229,6 +12229,7 @@ dependencies = [
  "rusty-hister-core",
  "rusty_json",
  "scraper",
+ "serde",
 ]
 
 [[package]]

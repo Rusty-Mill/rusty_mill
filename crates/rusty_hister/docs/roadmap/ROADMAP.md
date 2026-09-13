@@ -342,6 +342,22 @@ independent of ADR-0002/0003)
       preloaded JSON > JSON-LD, matching Go's own ranking). Reuses
       `WikipediaExtractor`'s reparse-as-fragment trick for
       cleaning/URL-rewriting a post body.
+- [x] `rusty-hister-extractor` (`YtdlpExtractor`, §4.5.17): extract *and*
+      preview for video-hosting pages (YouTube, Vimeo, and others), by
+      shelling out to the external `yt-dlp` binary rather than parsing
+      `document.html` at all. Done — 14 new unit tests (159 total in the
+      crate), clippy/fmt clean. Disabled by default, matching Go, since
+      it's useless without `yt-dlp` installed. Three deliberate
+      simplifications from the Go original: no thumbnail download (no
+      general-purpose HTTP client in this cluster to reuse — `rusty_http`
+      is a sans-IO protocol layer with no client; stores `thumbnail_url`
+      instead of Go's base64-embedded image data), no per-instance
+      job-slot concurrency limit or cancellation, and preview renders HTML
+      directly rather than Go's structured JSON handed to a frontend
+      template. The first extractor to use `rusty_json`'s `serde` feature
+      (`#[derive(serde::Deserialize)]`) rather than walking
+      `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is
+      a fixed, known shape.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/

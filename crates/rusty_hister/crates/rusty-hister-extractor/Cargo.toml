@@ -44,3 +44,12 @@ percent-encoding = "2"
 # transitively by `scraper` at this same version — named directly here
 # rather than reaching for it through an unrelated re-export.
 html5ever = "0.29"
+# `#[derive(Deserialize)]` for Ytdlp's `VideoInfo` struct, driven through
+# `rusty_json::from_str` (this crate's own JSON parser is `serde`-compatible
+# via its optional "serde" feature, already enabled by `rusty_json`'s own
+# defaults) rather than walking a `rusty_json::Value` by hand the way
+# Reddit/Discourse's open-ended JSON-LD payloads need to. Already an
+# approved workspace dependency (root `Cargo.toml`, with the "derive"
+# feature already enabled workspace-wide) — this just wires it directly
+# into a crate that has no other reason to depend on it yet.
+serde.workspace = true
