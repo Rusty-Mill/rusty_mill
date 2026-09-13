@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Fourteen concrete extractors so far:**
+//! **Sixteen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -138,6 +138,16 @@
 //!   `serde` feature (`#[derive(serde::Deserialize)]` on `VideoInfo` and
 //!   friends) rather than walking `rusty_json::Value` by hand, since
 //!   `yt-dlp --dump-json`'s output is a fixed, known shape.
+//! - [`MarkdownExtractor`] (capability inventory §4.5.1) and
+//!   [`OrgModeExtractor`] (§4.5.2) — preview-only, structurally identical
+//!   twins for locally indexed Markdown/Org files. Both are trivial by
+//!   design: `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+//!   `rusty-hister-indexer`'s future job, not this crate's) already
+//!   renders the source to HTML and stores it in `document.html` at
+//!   index time, so each extractor's only job is to sanitize and return
+//!   whatever HTML is already there — no markdown/org-mode-parsing
+//!   dependency of its own, since adding one here would just duplicate
+//!   work the indexer already has to do.
 //! - [`NotionExtractor`] (capability inventory §4.5.16) — extract *and*
 //!   preview for Notion pages on `notion.so` and `*.notion.site`. Notion
 //!   serves an empty SPA shell over plain HTTP and only renders content
@@ -183,7 +193,9 @@ mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod markdown;
 mod notion;
+mod org;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -202,7 +214,9 @@ pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use markdown::MarkdownExtractor;
 pub use notion::NotionExtractor;
+pub use org::OrgModeExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{

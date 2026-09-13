@@ -16,7 +16,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Notion extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-notion`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-notion)
 
-Twenty-fourth Phase 1 increment. The fourteenth of the 20 built-in extractors.
+Twenty-fifth Phase 1 increment. The sixteenth of the 20 built-in extractors.
 
 - **Added:** `NotionExtractor` (capability inventory §4.5.16) — a port of
   `server/extractor/extractors/notion/notion.go`. Extract and preview for
@@ -41,6 +41,27 @@ Twenty-fourth Phase 1 increment. The fourteenth of the 20 built-in extractors.
   is flattened to text, not preserved as a link; only the image block's
   `src` attribute is read directly and thus round-trips through URL
   rewriting.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Markdown and Org extractors
+**2026-09-13** · branch [`claude/hister-phase1-extractor-markdown-org`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-markdown-org)
+
+Twenty-fourth Phase 1 increment. The fourteenth and fifteenth of the 20
+built-in extractors.
+
+- **Added:** `MarkdownExtractor` (capability inventory §4.5.1) and
+  `OrgModeExtractor` (§4.5.2) — ports of
+  `server/extractor/extractors/{markdown/markdown,org/org}.go`.
+  Preview-only, structurally identical twins for locally indexed
+  Markdown/Org files.
+- **No new dependency needed, correcting an earlier assumption:**
+  `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there — no markdown/org-mode parser belongs in this crate at
+  all.
 
 ---
 

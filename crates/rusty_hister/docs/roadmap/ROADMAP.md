@@ -358,9 +358,19 @@ independent of ADR-0002/0003)
       (`#[derive(serde::Deserialize)]`) rather than walking
       `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is
       a fixed, known shape.
+- [x] `rusty-hister-extractor` (`MarkdownExtractor` §4.5.1,
+      `OrgModeExtractor` §4.5.2): preview-only, structurally identical
+      twins for locally indexed Markdown/Org files. Done — 8 new unit
+      tests (167 total in the crate), clippy/fmt clean. Turned out to
+      need **no** markdown/org-mode parser dependency at all, correcting
+      an earlier assumption in this roadmap: `Indexer.AddMarkdown`/
+      `AddOrg` (§5.7, `rusty-hister-indexer`'s future job) already
+      renders the source to HTML and stores it in `document.html` at
+      index time, so each extractor's only job is to sanitize and return
+      whatever HTML is already there.
 - [x] `rusty-hister-extractor` (`NotionExtractor`, §4.5.16): extract *and*
       preview for Notion pages on `notion.so` and `*.notion.site`. Done —
-      7 new unit tests (166 total in the crate), clippy/fmt clean.
+      7 new unit tests (174 total in the crate), clippy/fmt clean.
       Re-assessed as implementable now rather than blocked on the
       JS-rendering crawler backend: the extractor code itself only ever
       reads `document.html`, like every other extractor, so the crawler
@@ -382,14 +392,12 @@ independent of ADR-0002/0003)
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 8 built-in extractors in
+- `rusty-hister-extractor`: the remaining 6 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
-  authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
-  markdown/org-mode parser, a separate dependency choice of their own,
-  not yet made. Readability (§4.4) needs a similar dependency decision of
-  its own (a Rust Readability-algorithm implementation, or a fresh port of
-  Go's `go-readability`).
+  authorship for the rest. Readability (§4.4) needs a dependency decision
+  of its own (a Rust Readability-algorithm implementation, or a fresh
+  port of Go's `go-readability`).
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of
