@@ -13,6 +13,39 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Lobsters extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-lobsters`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-lobsters)
+
+Fifteenth Phase 1 increment. The fifth of the 20 built-in extractors, and
+the first with a genuinely recursive comment tree.
+
+- **Added:** `LobstersExtractor` (capability inventory §4.5.10) — a port
+  of `server/extractor/extractors/lobsters/lobsters.go`. Extract and
+  preview: submission metadata, story body, and the full
+  recursively-nested comment tree from a lobste.rs story page
+  (`li.comments_subtree` nests `ol.comments > li.comments_subtree`
+  arbitrarily deep). Walked with `scraper`'s `ElementRef::child_elements()`
+  (direct children only, avoiding the double-visit a broader descendant
+  selector would cause on nested subtrees), mirroring the shape of Go's
+  own recursive helpers.
+- **Reuse, not duplication:** `StackExchangeExtractor`'s small
+  selector/text/escaping helpers (`selector`, `element_text`,
+  `html_escape`) are now `pub(crate)` and reused here rather than copied
+  a third time.
+- **Behavior preserved deliberately:** Go's `writeCommentHTML`
+  interpolates comment author/score/timestamp into the accumulated HTML
+  *unescaped* (unlike the story header/byline, which does escape). Kept
+  as-is rather than "fixed", since the whole accumulated string still
+  passes through `sanitizer::sanitize_html` before being returned — the
+  same defense Go's own `sanitizer.SanitizeHTML` provides at the same
+  point, so the asymmetry has no observable security effect.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 83 passed (6 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` both clean.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's GoDoc extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-godoc`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-godoc)
 

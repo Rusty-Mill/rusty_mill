@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Four concrete extractors so far:**
+//! **Five concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -35,6 +35,12 @@
 //!   links resolved to absolute URLs. Go finds that element with a
 //!   hand-rolled tokenizer/depth-tracker; the Rust port collapses to a
 //!   single CSS class selector since `scraper` already builds a full DOM.
+//! - [`LobstersExtractor`] (capability inventory §4.5.10) — extract *and*
+//!   preview, pulling the submission metadata, story body, and full
+//!   recursively-nested comment tree from a lobste.rs story page. Reuses
+//!   `StackExchangeExtractor`'s small selector/text/escaping helpers
+//!   (now `pub(crate)` in that module) rather than duplicating them a
+//!   third time.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -46,6 +52,7 @@
 mod embeddedvideo;
 mod godoc;
 mod jsonld;
+mod lobsters;
 mod registry;
 mod sanitizer;
 mod stackexchange;
@@ -54,6 +61,7 @@ mod urlutil;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use godoc::GoDocExtractor;
 pub use jsonld::JsonLdExtractor;
+pub use lobsters::LobstersExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
     Capabilities, Document, DocumentType, ExtractOutcome, Extractor, ExtractorConfig, HisterError,
