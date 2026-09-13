@@ -9,6 +9,30 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `GitHubExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.9): a Rust port of
+  `server/extractor/extractors/github/github.go`, extract *and* preview
+  for repository overview, issue, issue-list, and pull-request pages on
+  github.com. Go matches these four URL shapes with independent regexes;
+  hand-rolled here as small string/character-class predicates instead of
+  adding a `regex` dependency for what are fairly mechanical path-shape
+  checks — two Go regex quirks (issue URLs allow only a single non-slash
+  character after a `#` fragment marker, pull-request URLs allow a full
+  non-slash run) reproduced exactly rather than "corrected". The README
+  HTML comes from an embedded `<script type="application/json">`
+  payload, parsed with `rusty_json` (already this crate's dependency for
+  `Metadata`) rather than adding `serde_json`. `Preview` doesn't
+  re-sanitize its whole accumulated buffer the way prior extractors do —
+  only the README HTML passes through `sanitizer::sanitize_html`,
+  matching a real Go asymmetry (the metadata card around it is built
+  from HTML-escaped plain strings, already safe). 8 new unit tests (106
+  total in the crate), clippy/fmt clean.
+
+  Also flagged (not silently dropped): Mastodon, Bluesky, and Twitter
+  each decompose one page into multiple indexed documents (Go:
+  `Document.ExtraDocuments`/`SkipIndexing`), a capability
+  `rusty-hister-core` doesn't model yet — see
+  `crates/rusty_hister/docs/PROJECT-STATUS.md`'s Open items.
 - `rusty-hister-extractor`'s `HackerNewsExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.11): a Rust port of
   `server/extractor/extractors/hackernews/hackernews.go`, extract *and*
