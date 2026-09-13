@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Twelve concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,6 +110,27 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`NotionExtractor`] (capability inventory §4.5.16) — extract *and*
+//!   preview for Notion pages on `notion.so` and `*.notion.site`. Notion
+//!   serves an empty SPA shell over plain HTTP and only renders content
+//!   client-side, so this only produces real output when `document.html`
+//!   was captured by a JavaScript-rendering crawler backend — a
+//!   *production* dependency on how the document was crawled, not a
+//!   dependency of this module's own code on the crawler: like every
+//!   other extractor here, it only ever reads `document.html`. When the
+//!   rendered block tree isn't present, `extract`/`preview` report
+//!   `Abort` rather than `Fallback`, matching Go's own
+//!   `AbortExtraction`/`AbortPreview`. Notion's rendered DOM nests
+//!   presentational wrapper `<div>`s deeply; a single substring-attribute
+//!   selector (`[class*="notion-"][class*="-block"]`, identical to Go's
+//!   own `goquery` selector) finds every block at any depth, so both the
+//!   text and HTML walks skip a match whose own ancestor also matches to
+//!   avoid double-counting a block's children. List/heading/quote/
+//!   paragraph blocks render via plain-text extraction before escaping,
+//!   exactly like Go's own `writeTag`/list handling — so an inline
+//!   `<a href>` inside one of those is flattened to text, not preserved
+//!   as a link; only the image block's `src` attribute is read directly
+//!   and thus round-trips through URL rewriting.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -133,6 +154,7 @@ mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod notion;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -149,6 +171,7 @@ pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use notion::NotionExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
