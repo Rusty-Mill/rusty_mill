@@ -9,6 +9,91 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `HackerNewsExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.11): a Rust port of
+  `server/extractor/extractors/hackernews/hackernews.go`, extract *and*
+  preview for news.ycombinator.com item pages. Unlike Lobsters, comments
+  here are a *flat* table with each row's depth carried by an `indent`
+  attribute on its leading `td.ind` cell, reconstructed into nested
+  `<ul>`/`<li>` lists by tracking that number across the row sequence (a
+  small state machine, not recursion). The first extractor to need a new
+  shared `textutil` module — a Rust port of
+  `server/extractor/textutil/textutil.go`, which flattens an HTML
+  subtree to plain text while turning block-element boundaries and
+  `<br>` into line breaks (unlike a bare text-node concatenation, which
+  runs multi-paragraph comment bodies together). Go itself shares
+  `textutil` across `hackernews`/`discourse`/`reddit`, so this port is
+  already positioned for reuse when those extractors land. `textutil`'s
+  recursive tree walk names `ego_tree::NodeRef` directly, so `ego-tree`
+  (already pinned transitively by `scraper` at the same version) is now
+  also a direct dependency of this crate. 8 new unit tests (98 total in
+  the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `LobstersExtractor` (`rusty_hister`'s Phase
+  1, continued — capability inventory §4.5.10): a Rust port of
+  `server/extractor/extractors/lobsters/lobsters.go`, extract *and*
+  preview for lobste.rs story pages — submission metadata, story body,
+  and the full recursively-nested comment tree. The comment tree is
+  genuinely recursive (a `li.comments_subtree` nests
+  `ol.comments > li.comments_subtree` arbitrarily deep), walked with
+  `scraper`'s `ElementRef::child_elements()` (direct children only, to
+  avoid double-visiting deeper subtrees a broader descendant selector
+  would catch), mirroring Go's own recursive helpers. Reuses
+  `StackExchangeExtractor`'s small selector/text/escaping helpers
+  (promoted to `pub(crate)`) rather than a third copy of each. Preserves
+  a real Go asymmetry rather than "fixing" it: comment
+  author/score/timestamp are interpolated into the accumulated HTML
+  unescaped (unlike the story header/byline, which does escape) — with
+  no observable effect either way, since the whole accumulated string
+  still passes through `sanitizer::sanitize_html` before being returned.
+  6 new unit tests (83 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `GoDocExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.8): a Rust port of
+  `server/extractor/extractors/godoc/godoc.go`, preview-only, rendering
+  pkg.go.dev's `div.Documentation-content` element with its `href`/`src`
+  attributes resolved to absolute URLs. Go finds that element with a
+  hand-rolled tokenizer that reconstructs HTML byte-by-byte while
+  tracking tag-nesting depth; since `scraper` already builds a full DOM,
+  the Rust port collapses this to a single CSS class selector plus
+  `ElementRef::html()` to serialize the matched subtree. When no such
+  element is present, Go's `Preview` succeeds with empty content rather
+  than falling back (its tokenizer loop reaches end-of-input having
+  never entered the "in article" state) — reproduced faithfully here. 8
+  new unit tests (77 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `StackExchangeExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.7): a Rust port of
+  `server/extractor/extractors/stackexchange/stackexchange.go`, extract
+  *and* preview for Stack Exchange network question pages (Stack
+  Overflow, Server Fault, Super User, Ask Ubuntu, `*.stackexchange.com`,
+  and more) — the question plus every already-rendered answer, marking
+  the accepted one. The first extractor with real rendered-HTML preview
+  output, so it also lands two new shared support modules: `sanitizer`
+  (a Rust port of `server/sanitizer/sanitizer.go` on `ammonia`, replacing
+  Go's `bluemonday`, including a hand-rolled reproduction of its SVG
+  attribute-value allow-list via `ammonia`'s `attribute_filter` rather
+  than a new `regex` dependency) and `urlutil` (a port of
+  `server/extractor/urlutil/urlutil.go`'s relative-to-absolute URL
+  rewriting via `scraper`'s tree-mutation API). 31 new unit tests across
+  `stackexchange`/`sanitizer`/`urlutil` (69 total in the crate),
+  clippy/fmt clean.
+- `rusty-hister-extractor`'s `EmbeddedVideoExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.3): a Rust port of
+  `server/extractor/extractors/embeddedvideo/extractor.go`, enrich-only,
+  scanning `<video>`/`<source>`/`<iframe>`/`<embed>`/`<object>` elements
+  for embedded video URLs and storing them (deduplicated, in document
+  order) as a JSON array at `Metadata["videos"]`. `<iframe>`/`<embed>`/
+  `<object>` URLs are only accepted when they match a known video-hosting
+  service by full `https://` prefix; `<video>`/`<source>` URLs are
+  trusted as first-party content, matching Go. 9 new unit tests (38
+  total in the crate), clippy/fmt clean.
+- `scraper` and `ammonia` to `rusty-hister-extractor` — CSS-selector HTML
+  parsing and HTML sanitizing (both `html5ever`-based) for the built-in
+  extractors that need real HTML parsing, most of the 20. A sovereignty-
+  loop pass first checked `baileyrd/rusty_dbs` at the user's suggestion,
+  but it turned out to be an unrelated, private, `UNLICENSED` repo with
+  no wrapper API around its own bare `scraper`/`ammonia` additions — see
+  `crates/rusty_hister/docs/PROJECT-STATUS.md`'s Resolved section for the
+  full account. `EmbeddedVideoExtractor` (below) is the first extractor
+  built on these.
 - `rusty-hister-extractor`'s first concrete extractor, `JsonLdExtractor`
   (`rusty_hister`'s Phase 1, continued — capability inventory §4.5.5): a
   Rust port of `server/extractor/extractors/jsonld/jsonld.go`,

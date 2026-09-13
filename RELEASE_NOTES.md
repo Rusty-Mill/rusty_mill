@@ -13,6 +13,187 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's HackerNews extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-hackernews`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-hackernews)
+
+Sixteenth Phase 1 increment. The sixth of the 20 built-in extractors, and
+the first with a flat, depth-indented comment table rather than nested
+markup.
+
+- **Added:** `HackerNewsExtractor` (capability inventory §4.5.11) — a
+  port of `server/extractor/extractors/hackernews/hackernews.go`. Extract
+  and preview: submission metadata, self text, and the full comment tree
+  from a news.ycombinator.com item page. Unlike Lobsters, comments here
+  are a flat table with each row's depth carried by an `indent` attribute
+  on its leading `td.ind` cell, reconstructed into nested `<ul>`/`<li>`
+  lists by tracking that number across the row sequence — a small state
+  machine, not recursion.
+- **Added:** a new shared `textutil` module — a Rust port of
+  `server/extractor/textutil/textutil.go`, which flattens an HTML subtree
+  to plain text while turning block-element boundaries and `<br>` into
+  line breaks, so multi-paragraph comment bodies don't run together the
+  way a bare text-node concatenation would. Go itself shares this helper
+  across `hackernews`/`discourse`/`reddit`, so it's already positioned
+  for reuse when those extractors land. `ego-tree` (already pinned
+  transitively by `scraper` at the same version) is now a direct
+  dependency too, needed to name `NodeRef` in `textutil`'s recursive
+  tree walk.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 98 passed (8 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` both clean.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Lobsters extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-lobsters`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-lobsters)
+
+Fifteenth Phase 1 increment. The fifth of the 20 built-in extractors, and
+the first with a genuinely recursive comment tree.
+
+- **Added:** `LobstersExtractor` (capability inventory §4.5.10) — a port
+  of `server/extractor/extractors/lobsters/lobsters.go`. Extract and
+  preview: submission metadata, story body, and the full
+  recursively-nested comment tree from a lobste.rs story page
+  (`li.comments_subtree` nests `ol.comments > li.comments_subtree`
+  arbitrarily deep). Walked with `scraper`'s `ElementRef::child_elements()`
+  (direct children only, avoiding the double-visit a broader descendant
+  selector would cause on nested subtrees), mirroring the shape of Go's
+  own recursive helpers.
+- **Reuse, not duplication:** `StackExchangeExtractor`'s small
+  selector/text/escaping helpers (`selector`, `element_text`,
+  `html_escape`) are now `pub(crate)` and reused here rather than copied
+  a third time.
+- **Behavior preserved deliberately:** Go's `writeCommentHTML`
+  interpolates comment author/score/timestamp into the accumulated HTML
+  *unescaped* (unlike the story header/byline, which does escape). Kept
+  as-is rather than "fixed", since the whole accumulated string still
+  passes through `sanitizer::sanitize_html` before being returned — the
+  same defense Go's own `sanitizer.SanitizeHTML` provides at the same
+  point, so the asymmetry has no observable security effect.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 83 passed (6 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` both clean.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's GoDoc extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-godoc`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-godoc)
+
+Fourteenth Phase 1 increment. The fourth of the 20 built-in extractors —
+preview-only, and the first whose Go implementation needed a hand-rolled
+tokenizer/depth-tracker that `scraper`'s DOM-based API replaces outright.
+
+- **Added:** `GoDocExtractor` (capability inventory §4.5.8) — a port of
+  `server/extractor/extractors/godoc/godoc.go`. Renders pkg.go.dev's
+  `div.Documentation-content` element with its `href`/`src` attributes
+  resolved to absolute URLs, via `sanitizer`/`urlutil` from the previous
+  increment. Go finds that element with a hand-rolled tokenizer that
+  reconstructs HTML byte-by-byte while tracking tag-nesting depth
+  (`golang.org/x/net/html` has no CSS-selector API); since `scraper`
+  already builds a full DOM, the Rust port collapses this to a single
+  CSS class selector plus `ElementRef::html()` to serialize the matched
+  subtree — no manual depth-tracking needed.
+- **Behavior preserved deliberately:** when no matching element is
+  present, Go's tokenizer loop reaches end-of-input having never entered
+  the "in article" state, and `Preview` *succeeds* with empty content
+  rather than falling back. Reproduced faithfully rather than
+  "corrected" to a `Fallback`, since that's this extractor's real,
+  observable behavior in Go.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 77 passed (8 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` both clean.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's StackExchange extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-stackexchange`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-stackexchange)
+
+Thirteenth Phase 1 increment. The third of the 20 built-in extractors, and
+the first with real rendered-HTML preview output rather than an enrich-only
+fallback.
+
+- **Added:** `StackExchangeExtractor` (capability inventory §4.5.7) — a
+  port of `server/extractor/extractors/stackexchange/stackexchange.go`.
+  Extract and preview: pulls the question and every already-rendered
+  answer from a Stack Exchange network question page (Stack Overflow,
+  Server Fault, Super User, Ask Ubuntu, `*.stackexchange.com`, and a
+  handful more), marking the accepted answer and harvesting
+  author/tags/score/published/answer-count metadata.
+- **Added:** two shared support modules other preview-capable extractors
+  will reuse — `sanitizer` (a Rust port of `server/sanitizer/sanitizer.go`
+  on `ammonia`, replacing Go's `bluemonday`; its SVG attribute-value
+  allow-list is reproduced with hand-rolled character-class predicates
+  via `ammonia`'s `attribute_filter` callback rather than adding a
+  `regex` dependency, since nothing else in this crate needs general
+  regex support) and `urlutil` (a port of
+  `server/extractor/urlutil/urlutil.go`'s relative-to-absolute URL
+  rewriting, implemented as a whole-document pass via `scraper`'s
+  tree-mutation API — broader than Go's per-`goquery.Selection` scoping,
+  but harmless for every current caller since each one serializes only
+  the specific subtree it cares about afterward).
+- **Unchanged scope:** Markdown/Org-mode parsing (§4.5.1-2) still need
+  their own, separately-decided dependency — not conflated with this
+  increment's HTML-sanitizing infrastructure.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 69 passed (31 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy --all-targets
+-- -D warnings` both clean.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's EmbeddedVideo extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-embeddedvideo`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-embeddedvideo)
+
+Twelfth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry and `JsonLdExtractor`, and `rusty-hister-model`'s complete query
+layer, previous entries below). The second of the 20 built-in extractors,
+and the first to use `scraper`/`ammonia` — the HTML-parsing/sanitizing
+dependency choice the previous increment deliberately deferred.
+
+- **Decided:** the HTML-parsing/sanitizing dependency question for the
+  extractor cluster — `scraper` (CSS-selector HTML parsing, built on
+  `html5ever`) and `ammonia` (HTML sanitizing, also `html5ever`-based),
+  added directly to `rusty-hister-extractor`. Both are common,
+  well-maintained crates.io crates sharing the same underlying parser, so
+  only one HTML-parsing engine enters the dependency tree. A
+  sovereignty-loop pass first checked `baileyrd/rusty_dbs` at the user's
+  suggestion, but it turned out to be an unrelated private repo (a
+  subprocess/editor-integration utility crate, `dbs-connector-support`,
+  with `scraper`/`ammonia` added bare and unwrapped) and a poor fit
+  regardless — `UNLICENSED`, incompatible with this workspace's `MIT OR
+  Apache-2.0`, and `rusty_mill`'s own convention is a full `git subtree`
+  merge for a first-party sibling, not a permanent pinned dependency on
+  an external repo.
+- **Added:** `EmbeddedVideoExtractor` (capability inventory §4.5.3) — a
+  port of `server/extractor/extractors/embeddedvideo/extractor.go`.
+  Enrich-only: scans `<video>`/`<source>`/`<iframe>`/`<embed>`/`<object>`
+  elements via a `scraper` CSS selector (`"video, source, iframe, embed,
+  object"`), and stores discovered video URLs — deduplicated, in
+  document order — as a JSON array at `Metadata["videos"]`.
+  `<iframe>`/`<embed>`/`<object>` URLs are only accepted when they match
+  a known video-hosting service by full `https://` prefix (a prefix
+  check, not a substring check, so `https://evil.com/youtube.com/embed/`
+  is correctly rejected); `<video>`/`<source>` URLs are trusted as
+  first-party content, matching Go. `<source>` additionally requires an
+  ancestor `<video>` element, reproduced via `scraper`'s ancestor
+  traversal in place of Go's token-stream `inVideo` flag.
+- **Unchanged scope:** no sanitization needed here — URLs are stored as
+  opaque strings, never rendered as HTML, so `ammonia` isn't exercised by
+  this extractor (a later one will be the first to need it).
+- **Added:** 9 new unit tests (38 total in the crate) — native `<video>`
+  with a nested `<source>`, a `<video>`'s own `src` attribute, a
+  `<source>` outside any `<video>` correctly ignored, known-host
+  acceptance for `<iframe>`, rejection of a URL that only superficially
+  resembles a known host, `<embed>`/`<object>` acceptance, URL
+  deduplication, the no-video-elements fallback, and the `matches`
+  quick-check pre-scan — independently derived, not copied, per
+  ADR-0001's licensing policy (this file has no Go test coverage to
+  begin with — capability inventory marks it `[UNTESTED]`). clippy/fmt
+  clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's first concrete extractor (JSON-LD)
 **2026-09-12** · branch [`claude/hister-phase1-extractor-jsonld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-jsonld)
 

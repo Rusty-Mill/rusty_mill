@@ -363,7 +363,7 @@ fn strip_html_tags(s: &str) -> String {
 /// (there are 2000+ in the HTML5 spec) — the common subset that actually
 /// appears in JSON-LD text fields in practice; an unrecognized entity is
 /// left as literal text rather than dropped.
-fn unescape_html_entities(s: &str) -> String {
+pub(crate) fn unescape_html_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(amp_pos) = rest.find('&') {

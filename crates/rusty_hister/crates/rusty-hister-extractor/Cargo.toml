@@ -11,3 +11,22 @@ publish = false
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
 rusty_json = { path = "../../../rusty_json" }
+# HTML parsing/CSS-selector querying and HTML sanitizing for the built-in
+# extractors that need real HTML parsing (most of the remaining ones) — no
+# first-party `rusty_*` crate covers either; see
+# `docs/PROJECT-STATUS.md`'s open item for the sovereignty-loop pass this
+# went through before adding a new external dependency.
+scraper = "0.21"
+ammonia = "4"
+# Timestamp parsing/formatting for extractors' `published`-style metadata
+# (StackExchange's `dateCreated`, and future extractors with similar
+# fields). Already an approved workspace dependency (root `Cargo.toml`,
+# used by `rusty-hister-model` via `rusty_db`'s re-export) — this just
+# wires it directly into a crate that has no reason to depend on `rusty_db`.
+chrono.workspace = true
+# `scraper`'s own tree-node type, needed to name a recursive helper's
+# parameter type in `textutil.rs` (a block-aware HTML-to-text flattener).
+# Not a new dependency in practice — already pinned transitively by
+# `scraper` at this same version — just named directly rather than relying
+# on type inference to paper over it, since this crate calls into it by name.
+ego-tree = "0.9"
