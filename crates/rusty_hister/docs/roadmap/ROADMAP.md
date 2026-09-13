@@ -281,18 +281,35 @@ independent of ADR-0002/0003)
       whitespace pass. The first extractor to report
       `ExtractOutcome`/`PreviewOutcome::Abort` (matched URL, no visible
       turns) rather than `Fallback`, matching Go's own `AbortExtraction`.
+- [x] `rusty-hister-extractor` (`BasicExtractor`, §4.4): extract *and*
+      preview, the universal last-resort fallback. Done — 8 new unit
+      tests (121 total in the crate), clippy/fmt clean. `matches` always
+      returns `true`; this only works because a real chain places it
+      last, after everything more specific has had its chance. Go walks
+      the raw byte stream with its own HTML tokenizer, tracking "inside
+      `<body>`"/"inside `<script>`/`<style>`/`<noscript>`" by hand; ported
+      here as a `scraper`-based walk of the parsed `<body>` element's
+      subtree instead — simpler, but not quite equivalent for a fragment
+      with no `<body>` tag at all (documented in the module rather than
+      reproduced, since `html5ever` always synthesizes one and this has no
+      practical effect on real crawled pages). Text nodes are concatenated
+      with no separators at all, deliberately cruder than `textutil`'s
+      block-aware flattening — matching Go's own token-by-token
+      concatenation exactly.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 12 built-in extractors in
+- `rusty-hister-extractor`: the remaining 11 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
   markdown/org-mode parser, a separate dependency choice of their own,
-  not yet made.
+  not yet made. Readability (§4.4) needs a similar dependency decision of
+  its own (a Rust Readability-algorithm implementation, or a fresh port of
+  Go's `go-readability`).
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of

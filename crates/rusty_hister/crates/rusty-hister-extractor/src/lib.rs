@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eight concrete extractors so far:**
+//! **Nine concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -72,6 +72,14 @@
 //!   pass. The first extractor to use `ExtractOutcome`/`PreviewOutcome`'s
 //!   `Abort` variant: a matched conversation URL with no visible turns is
 //!   a dead end for the whole chain, not a "try the next extractor" case.
+//! - [`BasicExtractor`] (capability inventory §4.4) — extract *and*
+//!   preview, the universal last-resort fallback: strips markup from any
+//!   HTML document and keeps whatever plain text and `<title>` remain.
+//!   `matches` always returns `true`; this only works because a real
+//!   chain places it last, after everything more specific has already had
+//!   its chance. Deliberately cruder than `textutil`'s block-aware
+//!   flattening — text nodes are concatenated with no separators at all,
+//!   matching Go's own token-by-token concatenation exactly.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -87,6 +95,7 @@
 //! policy governing how their tests are written (from independently
 //! reading Hister's Go source, never copied).
 
+mod basic;
 mod chatgpt;
 mod embeddedvideo;
 mod github;
@@ -100,6 +109,7 @@ mod stackexchange;
 mod textutil;
 mod urlutil;
 
+pub use basic::BasicExtractor;
 pub use chatgpt::ChatGptExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
