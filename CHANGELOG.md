@@ -9,6 +9,28 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `NotionExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.16): a Rust port of
+  `server/extractor/extractors/notion/notion.go`, extract *and* preview
+  for Notion pages on `notion.so` and `*.notion.site`. Re-assessed as
+  implementable now rather than blocked on the JS-rendering crawler
+  backend: the extractor code itself only ever reads `document.html`,
+  like every other extractor, so the crawler dependency is a
+  *production* one (whether that field holds real rendered content), not
+  a code dependency. When the rendered block tree isn't present,
+  `extract`/`preview` report `Abort` rather than `Fallback`, matching
+  Go's own `AbortExtraction`/`AbortPreview`. Notion's rendered DOM nests
+  presentational wrapper `<div>`s deeply; a single substring-attribute
+  selector (`[class*="notion-"][class*="-block"]`, identical to Go's own
+  `goquery` selector) finds every block at any depth, so both the text
+  and HTML walks skip a match whose own ancestor also matches to avoid
+  double-counting a block's children. List/heading/quote/paragraph
+  blocks render via plain-text extraction before escaping, exactly like
+  Go's own `writeTag`/list handling — so an inline `<a href>` inside one
+  of those is flattened to text, not preserved as a link; only the image
+  block's `src` attribute is read directly and thus round-trips through
+  URL rewriting. 7 new unit tests (146 total in the crate), clippy/fmt
+  clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview

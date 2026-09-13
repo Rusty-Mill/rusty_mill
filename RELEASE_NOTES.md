@@ -13,6 +13,37 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Notion extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-notion`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-notion)
+
+Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+
+- **Added:** `NotionExtractor` (capability inventory §4.5.16) — a port of
+  `server/extractor/extractors/notion/notion.go`. Extract and preview for
+  Notion pages on `notion.so` and `*.notion.site`.
+- **Unblocked, not blocked:** previously flagged as waiting on the
+  JS-rendering crawler backend; re-reading Go's source shows the
+  extractor code itself only ever reads `document.html`, like every
+  other extractor here, so the crawler dependency is a *production* one
+  (whether that field holds real rendered content, since Notion serves
+  an empty SPA shell over plain HTTP), not a code dependency. Reports
+  `Abort` rather than `Fallback` when the rendered block tree isn't
+  present, matching Go's own `AbortExtraction`/`AbortPreview`.
+- **One selector, any depth:** Notion's rendered DOM nests presentational
+  wrapper `<div>`s deeply; a single substring-attribute selector
+  (`[class*="notion-"][class*="-block"]`, identical to Go's own
+  `goquery` selector) finds every block at any depth, so both the text
+  and HTML walks skip a match whose own ancestor also matches to avoid
+  double-counting a block's children.
+- **A faithful lossy quirk:** list/heading/quote/paragraph blocks render
+  via plain-text extraction before escaping, exactly like Go's own
+  `writeTag`/list handling — so an inline `<a href>` inside one of those
+  is flattened to text, not preserved as a link; only the image block's
+  `src` attribute is read directly and thus round-trips through URL
+  rewriting.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
 
