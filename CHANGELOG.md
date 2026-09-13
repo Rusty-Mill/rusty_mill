@@ -9,6 +9,32 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-core`'s `Document::extra_documents`/
+  `Document::skip_indexing` (`rusty_hister`'s Phase 1, continued):
+  an additive extension — empty/`false` by default, so every extractor
+  written before this addition is unaffected — mirroring Go's own
+  `Document.ExtraDocuments`/`SkipIndexing` shape directly rather than
+  growing `ExtractOutcome` a new variant, so no signature changes were
+  needed anywhere else in the SDK. Resolves `PROJECT-STATUS.md`'s
+  "per-page multi-document extraction" open item and unblocks
+  Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15). 1 new unit
+  test (17 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `MastodonExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.13): a Rust port of
+  `server/extractor/extractors/mastodon/extractor.go`, decomposing a
+  Mastodon timeline/status page into one `Document` per visible toot —
+  the first extractor to use the `extra_documents`/`skip_indexing`
+  capability extension above. `matches` accepts a real Mastodon page
+  (fingerprinted the same way Go does, by a `"repository":
+  "mastodon/mastodon"` substring) or a toot document this extractor
+  already produced (a recursion guard via `metadata["type"] == "toot"`,
+  matching Go's own). `preview` is a direct port of Go's own admittedly
+  unfinished implementation (Go's source itself carries a `// TODO
+  enhance the toot preview` comment): an optional `<h1>`-derived heading
+  followed by the *entire original page's* raw HTML, sanitized —
+  reproduced faithfully rather than "fixed" beyond Go's own
+  currently-shipped behavior. 6 new unit tests (145 total in the crate),
+  clippy/fmt clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview

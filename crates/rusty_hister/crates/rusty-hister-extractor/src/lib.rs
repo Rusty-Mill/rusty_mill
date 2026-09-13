@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Twelve concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,13 +110,27 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`MastodonExtractor`] (capability inventory §4.5.13) — decomposes a
+//!   Mastodon timeline/status page into one [`Document`] per visible
+//!   toot. The first extractor to need a real `rusty-hister-core`
+//!   capability extension: [`Document::extra_documents`]/
+//!   [`Document::skip_indexing`], two new additive fields (empty/`false`
+//!   by default, so every prior extractor is unaffected) mirroring Go's
+//!   own `Document.ExtraDocuments`/`SkipIndexing` — a future indexer
+//!   walks `extra_documents` recursively, the same mechanism Bluesky and
+//!   Twitter will reuse once ported. `matches` accepts a real Mastodon
+//!   page (fingerprinted the same way Go does) or a toot document this
+//!   extractor already produced (a recursion guard via
+//!   `metadata["type"] == "toot"`, matching Go's own). `preview` is a
+//!   direct port of Go's own admittedly unfinished implementation (Go's
+//!   source itself carries a `// TODO enhance the toot preview` comment):
+//!   an optional `<h1>`-derived heading followed by the *entire original
+//!   page's* raw HTML, sanitized — reproduced faithfully rather than
+//!   "fixed" beyond Go's own currently-shipped behavior.
 //!
-//! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
-//! portable: their real behavior decomposes one timeline/thread page into
-//! *multiple* indexed documents (Go's `Document.ExtraDocuments`/
-//! `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
-//! `ExtractOutcome` don't model yet. Flagged in `docs/PROJECT-STATUS.md`
-//! as an open item rather than silently dropped or worked around.
+//! Bluesky/Twitter (capability inventory §4.5.14-15) can now reuse the
+//! same `extra_documents`/`skip_indexing` mechanism `MastodonExtractor`
+//! established; porting them just hasn't happened yet.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -133,6 +147,7 @@ mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod mastodon;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -149,6 +164,7 @@ pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use mastodon::MastodonExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
