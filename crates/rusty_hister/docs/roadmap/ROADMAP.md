@@ -330,13 +330,25 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
+- [x] `rusty-hister-extractor` (`DiscourseExtractor`, §4.5.4): extract
+      *and* preview for Discourse forum topic pages. Done — 6 new unit
+      tests (145 total in the crate), clippy/fmt clean. Like Reddit, a
+      topic page can carry the same content in up to three places at
+      once — a (often double-JSON-encoded) `#data-preloaded` hydration
+      blob, the already-rendered post DOM, and a `schema.org` `QAPage`
+      JSON-LD block — and, like Go, this port merges all three by post
+      id/number rather than picking just one, preferring each field's
+      highest-fidelity source by a `source_rank` (rendered DOM >
+      preloaded JSON > JSON-LD, matching Go's own ranking). Reuses
+      `WikipediaExtractor`'s reparse-as-fragment trick for
+      cleaning/URL-rewriting a post body.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 9 built-in extractors in
+- `rusty-hister-extractor`: the remaining 8 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a

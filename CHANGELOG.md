@@ -9,6 +9,19 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `DiscourseExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.4): a Rust port of
+  `server/extractor/extractors/discourse/discourse.go`, extract *and*
+  preview for Discourse forum topic pages. Like Reddit, a topic page can
+  carry the same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block —
+  and, like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking). Reuses `WikipediaExtractor`'s reparse-as-fragment trick
+  for cleaning/URL-rewriting a post body. 6 new unit tests (145 total in
+  the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview
