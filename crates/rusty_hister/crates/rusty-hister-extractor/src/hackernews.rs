@@ -277,6 +277,15 @@ fn parse_story(html: &Html) -> Story<'_> {
     }
 }
 
+/// Maximum comment nesting depth accepted from a crawled page's `indent`
+/// attribute. Hacker News threads rarely nest beyond a few dozen levels;
+/// the attribute comes straight from untrusted crawled markup, so an
+/// attacker-controlled `indent="999999999"` is clamped here before it can
+/// reach `"  ".repeat(depth)` or the `<ul>`/`</li></ul>` loops in
+/// [`write_comment_tree`] — both of which would otherwise attempt an
+/// allocation/iteration count proportional to the attacker-chosen value.
+const MAX_COMMENT_DEPTH: usize = 100;
+
 /// One row of the flat comment table.
 struct Comment {
     depth: usize,
@@ -295,7 +304,8 @@ fn comment_rows(html: &Html) -> Vec<Comment> {
             .and_then(|el| el.value().attr("indent"))
             .and_then(|s| s.parse::<i64>().ok())
             .filter(|&d| d >= 0)
-            .unwrap_or(0) as usize;
+            .unwrap_or(0)
+            .min(MAX_COMMENT_DEPTH as i64) as usize;
         let text = row.select(&selector(".commtext")).next();
         // Collapsed and flagged comments keep their row but carry no
         // body. They are still worth a line so the thread shape
@@ -565,5 +575,41 @@ mod tests {
             }
             other => panic!("expected Previewed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn comment_rows_clamps_a_maliciously_large_indent_value() {
+        let html_src = r##"
+            <html><body>
+            <table><tbody>
+                <tr class="athing comtr">
+                    <td class="ind" indent="999999999"></td>
+                    <td>
+                        <div class="comhead"><a class="hnuser">eve</a></div>
+                        <div class="commtext">Malicious depth.</div>
+                    </td>
+                </tr>
+            </tbody></table>
+            </body></html>
+        "##;
+        let html = Html::parse_document(html_src);
+        let comments = comment_rows(&html);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(
+            comments[0].depth, MAX_COMMENT_DEPTH,
+            "an attacker-controlled indent must be clamped rather than used as-is"
+        );
+    }
+
+    #[test]
+    fn extract_completes_with_a_maliciously_large_indent_value() {
+        let html_src = ITEM_PAGE.replace(r#"indent="0""#, r#"indent="999999999""#);
+        let ext = HackerNewsExtractor::default();
+        let result = ext.extract(&doc("https://news.ycombinator.com/item?id=1", &html_src));
+        assert!(
+            matches!(result, ExtractOutcome::Extracted(_)),
+            "extraction must complete instead of attempting an allocation \
+             proportional to the attacker-chosen indent"
+        );
     }
 }

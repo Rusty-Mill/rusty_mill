@@ -558,9 +558,20 @@ impl ClientNetworkData {
         w.into_vec()
     }
 
+    /// `TS_UD_CS_NET` (MS-RDPBCGR 2.2.1.3.4) limits a client to requesting
+    /// at most 31 static virtual channels; reject anything past that
+    /// before trusting `count` for a `Vec::with_capacity` allocation.
+    const MAX_CHANNELS: usize = 31;
+
     fn decode(body: &[u8]) -> Result<ClientNetworkData> {
         let mut r = Reader::new(body);
         let count = r.read_u32_le()? as usize;
+        if count > Self::MAX_CHANNELS {
+            return Err(Error::InvalidValue {
+                field: "TS_UD_CS_NET channelCount",
+                value: count.to_string(),
+            });
+        }
         let mut channels = Vec::with_capacity(count);
         for _ in 0..count {
             let name_bytes = r.read_bytes(8)?;
@@ -953,5 +964,19 @@ mod tests {
         );
         // Re-encoding reproduces the input.
         assert_eq!(encode_user_data(&parsed).unwrap(), bytes);
+    }
+
+    #[test]
+    fn client_network_huge_channel_count_is_rejected() {
+        let mut w = Writer::new();
+        w.write_u32_le(0xFFFF_FFFF); // declared channelCount far exceeds the wire limit
+        let body = w.into_vec();
+        assert!(matches!(
+            ClientNetworkData::decode(&body).unwrap_err(),
+            Error::InvalidValue {
+                field: "TS_UD_CS_NET channelCount",
+                ..
+            }
+        ));
     }
 }

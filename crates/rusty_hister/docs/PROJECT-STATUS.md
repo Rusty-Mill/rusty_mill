@@ -1,14 +1,37 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s twelfth
-concrete extractor, Bluesky — the first to need a real
+Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s
+seventeenth concrete extractor, Bluesky — the first to need a real
 `rusty-hister-core` capability extension: `Document::extra_documents`/
 `Document::skip_indexing`, two new additive fields (empty/`false` by
 default, every prior extractor unaffected) mirroring Go's own
 `Document.ExtraDocuments`/`SkipIndexing`, resolving the "Mastodon/
 Bluesky/Twitter blocked" open item this doc previously carried. Mastodon
 and Twitter can now reuse the same mechanism; porting them just hasn't
-happened yet).
+happened yet. Follows the sixteenth, Notion — extract and preview for
+Notion pages, re-assessed as implementable now rather than blocked on
+the JS-rendering crawler backend: the extractor code itself only ever
+reads `document.html`, like every other extractor, so the crawler
+dependency is a *production* one (whether that field holds real
+rendered content), not a code dependency. Reports `Abort` rather than
+`Fallback` when the rendered block tree isn't present, matching Go's
+own `AbortExtraction`/`AbortPreview`. And the fourteenth and fifteenth,
+Markdown and Org — trivial preview-only twins for locally indexed files,
+since `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+`rusty-hister-indexer`'s future job) already renders the source to HTML
+at index time, so each extractor only sanitizes and returns whatever
+HTML is already there. No new markdown/org-mode-parsing dependency
+needed. And the thirteenth, Ytdlp — extract and preview for
+video-hosting pages by shelling out to the external `yt-dlp` binary
+rather than parsing `document.html`, the only extractor in this crate
+that works entirely from `document.url`. Disabled by default, matching
+Go, since it's useless without `yt-dlp` installed. And the twelfth,
+Discourse — forum topic pages that can carry the same content in up to
+three places at once (a
+double-JSON-encoded `#data-preloaded` hydration blob, the rendered post
+DOM, and a `schema.org` JSON-LD block), merged by post id/number
+field-by-field via a per-source `source_rank` rather than picking just
+one source).
 
 ## Where this is
 
@@ -28,7 +51,7 @@ licensing policy) are settled. Three crates now have real implementation:
   mechanism (capability inventory §4.2): ordered registration
   (`register`/`register_before`), two-phase enrich-then-extract execution,
   a separate preview chain with case-insensitive starting-point selection,
-  and config merging (`apply_configs`). **Twelve concrete extractors so far:**
+  and config merging (`apply_configs`). **Seventeen concrete extractors so far:**
   `JsonLdExtractor` (capability inventory §4.5.5) — enrich-only, parses
   `application/ld+json` script tags into normalized schema.org metadata
   (`type`/`headline`), flattening `@graph`/array wrappers and deep-
@@ -196,6 +219,65 @@ licensing policy) are settled. Three crates now have real implementation:
   element copies only the kept nodes into a fresh `ego_tree` fragment
   (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
   text isn't double-counted into its parent's.
+  **`DiscourseExtractor`** (capability inventory §4.5.4) — extract *and*
+  preview for Discourse forum topic pages. Like Reddit, a topic page can
+  carry the same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block —
+  and, like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking). Reuses `WikipediaExtractor`'s reparse-as-fragment trick
+  for cleaning/URL-rewriting a post body.
+  **`YtdlpExtractor`** (capability inventory §4.5.17) — extract *and*
+  preview for video-hosting pages (YouTube, Vimeo, and others), by
+  shelling out to the external `yt-dlp` binary rather than parsing
+  `document.html` at all — the only extractor in this crate that works
+  entirely from `document.url`. Disabled by default, matching Go, since
+  it's useless without `yt-dlp` installed, so opting a chain into it is a
+  deliberate administrative choice, not automatic. Three deliberate
+  simplifications from the Go original: no thumbnail download (no
+  general-purpose HTTP client in this cluster to reuse for a one-off
+  image fetch — `rusty_http` is a sans-IO protocol layer with no client;
+  `thumbnail_url` metadata holds the original URL instead of Go's
+  base64-embedded image data), no per-instance job-slot concurrency limit
+  or cancellation (no other extractor's trait models either), and preview
+  renders HTML directly rather than Go's structured JSON handed to a
+  frontend template (`PreviewResponse` has no template-hint field). The
+  first extractor to use `rusty_json`'s `serde` feature
+  (`#[derive(serde::Deserialize)]` on `VideoInfo` and friends) rather than
+  walking `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output
+  is a fixed, known shape.
+  **`MarkdownExtractor`** (capability inventory §4.5.1) and
+  **`OrgModeExtractor`** (§4.5.2) — preview-only, structurally identical
+  twins for locally indexed Markdown/Org files. Both are trivial by
+  design: `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there — no markdown/org-mode-parsing dependency of its own,
+  since adding one here would just duplicate work the indexer already
+  has to do.
+  **`NotionExtractor`** (capability inventory §4.5.16) — extract *and*
+  preview for Notion pages on `notion.so` and `*.notion.site`. Notion
+  serves an empty SPA shell over plain HTTP and only renders content
+  client-side, so this only produces real output when `document.html`
+  was captured by a JavaScript-rendering crawler backend — a *production*
+  dependency on how the document was crawled, not a dependency of this
+  module's own code on the crawler: like every other extractor here, it
+  only ever reads `document.html`. When the rendered block tree isn't
+  present, `extract`/`preview` report `Abort` rather than `Fallback`,
+  matching Go's own `AbortExtraction`/`AbortPreview`. Notion's rendered
+  DOM nests presentational wrapper `<div>`s deeply; a single
+  substring-attribute selector (`[class*="notion-"][class*="-block"]`,
+  identical to Go's own `goquery` selector) finds every block at any
+  depth, so both the text and HTML walks skip a match whose own ancestor
+  also matches to avoid double-counting a block's children.
+  List/heading/quote/paragraph blocks render via plain-text extraction
+  before escaping, exactly like Go's own `writeTag`/list handling — so an
+  inline `<a href>` inside one of those is flattened to text, not
+  preserved as a link; only the image block's `src` attribute is read
+  directly and thus round-trips through URL rewriting.
   **`BlueskyExtractor`** (capability inventory §4.5.14) — decomposes a
   Bluesky profile/feed/thread page into one `Document` per visible post.
   The first extractor to need a real `rusty-hister-core` capability
@@ -507,9 +589,9 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 
 | Crate | Status |
 |---|---|
-| `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
+| `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. `Document` also carries `extra_documents`/`skip_indexing`, an additive extension mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing`. 17 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | **Query layer complete** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions), and all of `user.go` (15 functions: account CRUD, Argon2id password hashing/verification, token issuance, admin toggling, raw rules-JSON get/set) — **all six Go model files' query layers are now ported**. 131 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior, and `user.go`'s create/authenticate/delete/token/rename/password/oauth/admin/rules behavior), clippy/fmt clean. |
-| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), `StackExchangeExtractor` (§4.5.7), `GoDocExtractor` (§4.5.8), `LobstersExtractor` (§4.5.10), `HackerNewsExtractor` (§4.5.11), `GitHubExtractor` (§4.5.9), `ChatGptExtractor` (§4.5.18), `BasicExtractor` (§4.4), `WikipediaExtractor` (§4.5.12), `RedditExtractor` (§4.5.6), and `BlueskyExtractor` (§4.5.14) as concrete extractors, and shared support modules (`sanitizer`, `urlutil`, `textutil`) other extractors reuse. 145 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 8 built-in extractors that need real HTML parsing/sanitizing; Mastodon/Twitter can now reuse `Document::extra_documents`/`skip_indexing`, unblocked by Bluesky's own capability extension. |
+| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), `StackExchangeExtractor` (§4.5.7), `GoDocExtractor` (§4.5.8), `LobstersExtractor` (§4.5.10), `HackerNewsExtractor` (§4.5.11), `GitHubExtractor` (§4.5.9), `ChatGptExtractor` (§4.5.18), `BasicExtractor` (§4.4), `WikipediaExtractor` (§4.5.12), `RedditExtractor` (§4.5.6), `DiscourseExtractor` (§4.5.4), `YtdlpExtractor` (§4.5.17), `MarkdownExtractor` (§4.5.1), `OrgModeExtractor` (§4.5.2), `NotionExtractor` (§4.5.16), and `BlueskyExtractor` (§4.5.14) as concrete extractors, and shared support modules (`sanitizer`, `urlutil`, `textutil`) other extractors reuse. 180 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 3 built-in extractors that need real HTML parsing/sanitizing; Mastodon/Twitter can now reuse `Document::extra_documents`/`skip_indexing`, unblocked by Bluesky's own capability extension; Readability needs its own dependency decision. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |

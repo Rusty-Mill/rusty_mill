@@ -499,24 +499,7 @@ impl Window {
                         // WM_CHAR: a UTF-16 code unit, possibly one half of a surrogate
                         // pair for a character outside the Basic Multilingual Plane.
                         let unit = msg.w_param as u16;
-                        if let Some(high) = self.pending_surrogate.take() {
-                            if (0xDC00..=0xDFFF).contains(&unit) {
-                                let scalar = 0x10000
-                                    + (((high as u32) - 0xD800) << 10)
-                                    + ((unit as u32) - 0xDC00);
-                                if let Some(ch) = char::from_u32(scalar) {
-                                    events.push(Event::ReceivedCharacter(ch));
-                                }
-                            }
-                        } else if (0xD800..=0xDBFF).contains(&unit) {
-                            self.pending_surrogate = Some(unit);
-                        } else if unit >= 0x20 {
-                            // Below 0x20 are ASCII control characters (Return, Backspace,
-                            // Tab, Escape, ...) already reported via KeyPressed above.
-                            if let Some(ch) = char::from_u32(unit as u32) {
-                                events.push(Event::ReceivedCharacter(ch));
-                            }
-                        }
+                        handle_wm_char(&mut self.pending_surrogate, unit, &mut events);
                     }
                     _ => {}
                 }
@@ -657,6 +640,39 @@ fn vk_to_keycode(vk: usize) -> KeyCode {
     }
 }
 
+/// Handles one `WM_CHAR` UTF-16 code unit, combining surrogate pairs into a
+/// single scalar value and emitting [`Event::ReceivedCharacter`] for
+/// printable characters.
+///
+/// A pending high surrogate that isn't followed by a matching low surrogate
+/// is an invalid/unpaired surrogate: it's discarded, but the *current* unit
+/// must still be run through the ordinary-character handling below rather
+/// than silently dropped (an `if`/`else if` chain would abandon it here).
+#[cfg(windows)]
+fn handle_wm_char(pending_surrogate: &mut Option<u16>, unit: u16, events: &mut Vec<Event>) {
+    let mut handled = false;
+    if let Some(high) = pending_surrogate.take() {
+        if (0xDC00..=0xDFFF).contains(&unit) {
+            let scalar = 0x10000 + (((high as u32) - 0xD800) << 10) + ((unit as u32) - 0xDC00);
+            if let Some(ch) = char::from_u32(scalar) {
+                events.push(Event::ReceivedCharacter(ch));
+            }
+            handled = true;
+        }
+    }
+    if !handled {
+        if (0xD800..=0xDBFF).contains(&unit) {
+            *pending_surrogate = Some(unit);
+        } else if unit >= 0x20 {
+            // Below 0x20 are ASCII control characters (Return, Backspace,
+            // Tab, Escape, ...) already reported via KeyPressed above.
+            if let Some(ch) = char::from_u32(unit as u32) {
+                events.push(Event::ReceivedCharacter(ch));
+            }
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -687,6 +703,39 @@ mod tests {
     #[test]
     fn unknown_vk_falls_back() {
         assert_eq!(vk_to_keycode(0xFF), KeyCode::Unknown(0xFF));
+    }
+
+    #[test]
+    fn unpaired_high_surrogate_does_not_drop_next_char() {
+        // An unpaired high surrogate (0xD800) followed by an ordinary
+        // character ('A') must still emit `ReceivedCharacter('A')` instead
+        // of being silently swallowed because the pending surrogate wasn't
+        // completed by a matching low surrogate.
+        let mut pending_surrogate: Option<u16> = None;
+        let mut events = Vec::new();
+
+        handle_wm_char(&mut pending_surrogate, 0xD800, &mut events);
+        assert_eq!(pending_surrogate, Some(0xD800));
+        assert!(events.is_empty());
+
+        handle_wm_char(&mut pending_surrogate, 'A' as u16, &mut events);
+        assert_eq!(pending_surrogate, None);
+        assert_eq!(events, alloc::vec![Event::ReceivedCharacter('A')]);
+    }
+
+    #[test]
+    fn valid_surrogate_pair_combines_into_one_char() {
+        // U+1F600 GRINNING FACE = high 0xD83D, low 0xDE00.
+        let mut pending_surrogate: Option<u16> = None;
+        let mut events = Vec::new();
+
+        handle_wm_char(&mut pending_surrogate, 0xD83D, &mut events);
+        assert_eq!(pending_surrogate, Some(0xD83D));
+        assert!(events.is_empty());
+
+        handle_wm_char(&mut pending_surrogate, 0xDE00, &mut events);
+        assert_eq!(pending_surrogate, None);
+        assert_eq!(events, alloc::vec![Event::ReceivedCharacter('\u{1F600}')]);
     }
 }
 

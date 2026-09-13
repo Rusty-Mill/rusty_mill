@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Twelve concrete extractors so far:**
+//! **Seventeen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,6 +110,65 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`DiscourseExtractor`] (capability inventory §4.5.4) — extract *and*
+//!   preview for Discourse forum topic pages. A topic page can carry the
+//!   same content in up to three places at once — a (often
+//!   double-JSON-encoded) `#data-preloaded` hydration blob, the
+//!   already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block
+//!   — and, like Go, this port merges all three by post id/number rather
+//!   than picking just one, preferring each field's highest-fidelity
+//!   source by a `source_rank` (rendered DOM > preloaded JSON > JSON-LD,
+//!   matching Go's own ranking). Reuses `WikipediaExtractor`'s
+//!   reparse-as-fragment trick for cleaning/URL-rewriting a post body.
+//! - [`YtdlpExtractor`] (capability inventory §4.5.17) — extract *and*
+//!   preview for video-hosting pages (YouTube, Vimeo, and others), by
+//!   shelling out to the external `yt-dlp` binary rather than parsing
+//!   `document.html` at all — the only extractor in this crate that works
+//!   entirely from `document.url`. **Disabled by default**, matching Go:
+//!   this extractor is useless without `yt-dlp` installed, so opting a
+//!   chain into it is a deliberate administrative choice, not automatic.
+//!   Three deliberate simplifications from the Go original, documented in
+//!   the module doc rather than worked around: no thumbnail download (no
+//!   general-purpose HTTP client to reuse — `thumbnail_url` metadata
+//!   holds the original URL instead), no per-instance job-slot
+//!   concurrency limit or cancellation (no other extractor models
+//!   either), and preview renders HTML directly rather than Go's
+//!   structured JSON handed to a frontend template (`PreviewResponse` has
+//!   no template-hint field). The first extractor to use `rusty_json`'s
+//!   `serde` feature (`#[derive(serde::Deserialize)]` on `VideoInfo` and
+//!   friends) rather than walking `rusty_json::Value` by hand, since
+//!   `yt-dlp --dump-json`'s output is a fixed, known shape.
+//! - [`MarkdownExtractor`] (capability inventory §4.5.1) and
+//!   [`OrgModeExtractor`] (§4.5.2) — preview-only, structurally identical
+//!   twins for locally indexed Markdown/Org files. Both are trivial by
+//!   design: `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+//!   `rusty-hister-indexer`'s future job, not this crate's) already
+//!   renders the source to HTML and stores it in `document.html` at
+//!   index time, so each extractor's only job is to sanitize and return
+//!   whatever HTML is already there — no markdown/org-mode-parsing
+//!   dependency of its own, since adding one here would just duplicate
+//!   work the indexer already has to do.
+//! - [`NotionExtractor`] (capability inventory §4.5.16) — extract *and*
+//!   preview for Notion pages on `notion.so` and `*.notion.site`. Notion
+//!   serves an empty SPA shell over plain HTTP and only renders content
+//!   client-side, so this only produces real output when `document.html`
+//!   was captured by a JavaScript-rendering crawler backend — a
+//!   *production* dependency on how the document was crawled, not a
+//!   dependency of this module's own code on the crawler: like every
+//!   other extractor here, it only ever reads `document.html`. When the
+//!   rendered block tree isn't present, `extract`/`preview` report
+//!   `Abort` rather than `Fallback`, matching Go's own
+//!   `AbortExtraction`/`AbortPreview`. Notion's rendered DOM nests
+//!   presentational wrapper `<div>`s deeply; a single substring-attribute
+//!   selector (`[class*="notion-"][class*="-block"]`, identical to Go's
+//!   own `goquery` selector) finds every block at any depth, so both the
+//!   text and HTML walks skip a match whose own ancestor also matches to
+//!   avoid double-counting a block's children. List/heading/quote/
+//!   paragraph blocks render via plain-text extraction before escaping,
+//!   exactly like Go's own `writeTag`/list handling — so an inline
+//!   `<a href>` inside one of those is flattened to text, not preserved
+//!   as a link; only the image block's `src` attribute is read directly
+//!   and thus round-trips through URL rewriting.
 //! - [`BlueskyExtractor`] (capability inventory §4.5.14) — decomposes a
 //!   Bluesky profile/feed/thread page into one [`Document`] per visible
 //!   post. The first extractor to need a real `rusty-hister-core`
@@ -143,12 +202,16 @@
 mod basic;
 mod bluesky;
 mod chatgpt;
+mod discourse;
 mod embeddedvideo;
 mod github;
 mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod markdown;
+mod notion;
+mod org;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -156,16 +219,21 @@ mod stackexchange;
 mod textutil;
 mod urlutil;
 mod wikipedia;
+mod ytdlp;
 
 pub use basic::BasicExtractor;
 pub use bluesky::BlueskyExtractor;
 pub use chatgpt::ChatGptExtractor;
+pub use discourse::DiscourseExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use markdown::MarkdownExtractor;
+pub use notion::NotionExtractor;
+pub use org::OrgModeExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
@@ -175,3 +243,4 @@ pub use rusty_hister_core::{
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
 pub use wikipedia::WikipediaExtractor;
+pub use ytdlp::YtdlpExtractor;

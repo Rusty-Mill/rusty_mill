@@ -62,6 +62,7 @@ pub struct Message {
 pub enum MessageError {
     Json(serde_json::Error),
     Crypt(crypt::CryptError),
+    Decompress(std::io::Error),
 }
 
 impl std::fmt::Display for MessageError {
@@ -69,6 +70,7 @@ impl std::fmt::Display for MessageError {
         match self {
             MessageError::Json(e) => write!(f, "json error: {e}"),
             MessageError::Crypt(e) => write!(f, "crypt error: {e}"),
+            MessageError::Decompress(e) => write!(f, "decompress error: {e}"),
         }
     }
 }
@@ -91,7 +93,7 @@ pub fn decode(key: Option<&[u8]>, b: &[u8]) -> Result<Message, MessageError> {
         Some(k) => crypt::decrypt(b, k).map_err(MessageError::Crypt)?,
         None => b.to_vec(),
     };
-    let json = compress::decompress(&compressed);
+    let json = compress::decompress(&compressed).map_err(MessageError::Decompress)?;
     serde_json::from_slice(&json).map_err(MessageError::Json)
 }
 

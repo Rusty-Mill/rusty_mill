@@ -330,6 +330,62 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
+- [x] `rusty-hister-extractor` (`DiscourseExtractor`, §4.5.4): extract
+      *and* preview for Discourse forum topic pages. Done — 6 new unit
+      tests (145 total in the crate), clippy/fmt clean. Like Reddit, a
+      topic page can carry the same content in up to three places at
+      once — a (often double-JSON-encoded) `#data-preloaded` hydration
+      blob, the already-rendered post DOM, and a `schema.org` `QAPage`
+      JSON-LD block — and, like Go, this port merges all three by post
+      id/number rather than picking just one, preferring each field's
+      highest-fidelity source by a `source_rank` (rendered DOM >
+      preloaded JSON > JSON-LD, matching Go's own ranking). Reuses
+      `WikipediaExtractor`'s reparse-as-fragment trick for
+      cleaning/URL-rewriting a post body.
+- [x] `rusty-hister-extractor` (`YtdlpExtractor`, §4.5.17): extract *and*
+      preview for video-hosting pages (YouTube, Vimeo, and others), by
+      shelling out to the external `yt-dlp` binary rather than parsing
+      `document.html` at all. Done — 14 new unit tests (159 total in the
+      crate), clippy/fmt clean. Disabled by default, matching Go, since
+      it's useless without `yt-dlp` installed. Three deliberate
+      simplifications from the Go original: no thumbnail download (no
+      general-purpose HTTP client in this cluster to reuse — `rusty_http`
+      is a sans-IO protocol layer with no client; stores `thumbnail_url`
+      instead of Go's base64-embedded image data), no per-instance
+      job-slot concurrency limit or cancellation, and preview renders HTML
+      directly rather than Go's structured JSON handed to a frontend
+      template. The first extractor to use `rusty_json`'s `serde` feature
+      (`#[derive(serde::Deserialize)]`) rather than walking
+      `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is
+      a fixed, known shape.
+- [x] `rusty-hister-extractor` (`MarkdownExtractor` §4.5.1,
+      `OrgModeExtractor` §4.5.2): preview-only, structurally identical
+      twins for locally indexed Markdown/Org files. Done — 8 new unit
+      tests (167 total in the crate), clippy/fmt clean. Turned out to
+      need **no** markdown/org-mode parser dependency at all, correcting
+      an earlier assumption in this roadmap: `Indexer.AddMarkdown`/
+      `AddOrg` (§5.7, `rusty-hister-indexer`'s future job) already
+      renders the source to HTML and stores it in `document.html` at
+      index time, so each extractor's only job is to sanitize and return
+      whatever HTML is already there.
+- [x] `rusty-hister-extractor` (`NotionExtractor`, §4.5.16): extract *and*
+      preview for Notion pages on `notion.so` and `*.notion.site`. Done —
+      7 new unit tests (174 total in the crate), clippy/fmt clean.
+      Re-assessed as implementable now rather than blocked on the
+      JS-rendering crawler backend: the extractor code itself only ever
+      reads `document.html`, like every other extractor, so the crawler
+      dependency is a *production* one (whether that field holds real
+      rendered content), not a code dependency. Reports `Abort` rather
+      than `Fallback` when the rendered block tree isn't present,
+      matching Go's own `AbortExtraction`/`AbortPreview`. A single
+      substring-attribute selector (`[class*="notion-"][class*="-block"]`,
+      identical to Go's own `goquery` selector) finds every block at any
+      depth in Notion's deeply nested presentational wrapper `<div>`s.
+      List/heading/quote/paragraph blocks render via plain-text
+      extraction before escaping, exactly like Go's own `writeTag`/list
+      handling, so an inline `<a href>` is flattened to text rather than
+      preserved as a link; only the image block's `src` attribute is read
+      directly and round-trips through URL rewriting.
 - [x] `rusty-hister-core`: `Document::extra_documents`/
       `Document::skip_indexing`, an additive extension (empty/`false` by
       default, every prior extractor unaffected) resolving
@@ -340,7 +396,7 @@ independent of ADR-0002/0003)
 - [x] `rusty-hister-extractor` (`BlueskyExtractor`, §4.5.14): decomposes
       a Bluesky profile/feed/thread page into one `Document` per visible
       post, the first extractor to use the capability extension above.
-      Done — 6 new unit tests (145 total in the crate), clippy/fmt clean.
+      Done — 6 new unit tests (180 total in the crate), clippy/fmt clean.
       Bluesky pages can carry the same post data in up to three
       independent forms; like Go, this port tries all three in priority
       order and merges results by canonical post URL rather than picking
@@ -353,14 +409,12 @@ independent of ADR-0002/0003)
 - Mastodon and Twitter (§4.5.13, §4.5.15) can now reuse the same
   `extra_documents`/`skip_indexing` mechanism Bluesky established;
   porting them just hasn't happened yet.
-- `rusty-hister-extractor`: the remaining 8 built-in extractors in
+- `rusty-hister-extractor`: the remaining 3 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
-  authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
-  markdown/org-mode parser, a separate dependency choice of their own,
-  not yet made. Readability (§4.4) needs a similar dependency decision of
-  its own (a Rust Readability-algorithm implementation, or a fresh port of
-  Go's `go-readability`).
+  authorship for the rest. Readability (§4.4) needs a dependency decision
+  of its own (a Rust Readability-algorithm implementation, or a fresh
+  port of Go's `go-readability`).
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of
@@ -399,9 +453,12 @@ started)
 - `bidi`-equivalent backend: **out of v1 scope** — ADR-0003 explicitly
   descoped it, not merely deferred it pending a sign-off. Revisit only if a
   concrete driver-free-deployment need arises later.
-- Re-enable the Notion extractor, which hard-depends on JS rendering
-  existing at all (§4.5.16) — satisfied by the CDP backend above; not
-  affected by BiDi's descope.
+- The Notion extractor (§4.5.16, already implemented — see Phase 1) only
+  ever reads `document.html` like every other extractor, so it needed no
+  code changes to build; it just produces real output in *production*
+  once this CDP backend exists, since Notion serves an empty SPA shell
+  over plain HTTP and only renders content client-side. Not affected by
+  BiDi's descope.
 
 ## Later phases (out of v1, tracked for visibility only)
 

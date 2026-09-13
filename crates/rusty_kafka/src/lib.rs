@@ -71,5 +71,7 @@ pub mod record_batch;
 pub mod testing;
 mod wire;
 
-pub use client::{KafkaClient, DEFAULT_MAX_FRAME_LEN};
+pub use client::{
+    KafkaClient, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_FRAME_LEN,
+};
 pub use error::{ClientError, CodecError};

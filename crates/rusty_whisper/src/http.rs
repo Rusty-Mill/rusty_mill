@@ -33,6 +33,19 @@ impl Request {
     }
 }
 
+/// Reject request bodies larger than this — a memory-exhaustion guard on
+/// the client-supplied `Content-Length` header, which otherwise feeds
+/// straight into `vec![0u8; len]` before any routing/auth happens (this
+/// function runs on every accepted connection). 256 MiB matches this
+/// crate's existing sane-maximum precedent (`model::MAX_LEN`) and
+/// comfortably covers `/inference`'s largest realistic multipart audio
+/// upload.
+const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
+
+fn body_within_limit(content_length: usize) -> bool {
+    content_length <= MAX_BODY_BYTES
+}
+
 /// Read and parse one request from `r`: the request line, headers up to
 /// the blank line, then a `Content-Length`-sized body if present (chunked
 /// transfer-encoding isn't supported — this server only ever needs to
@@ -73,6 +86,12 @@ pub fn parse_request(r: &mut impl Read) -> io::Result<Request> {
         .and_then(|v| v.parse::<usize>().ok())
     {
         Some(len) if len > 0 => {
+            if !body_within_limit(len) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("request body too large ({len} bytes, max {MAX_BODY_BYTES})"),
+                ));
+            }
             let mut buf = vec![0u8; len];
             reader.read_exact(&mut buf)?;
             buf
@@ -272,6 +291,21 @@ mod tests {
         let req = parse_request(&mut Cursor::new(raw)).unwrap();
         assert_eq!(req.method, "POST");
         assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn parse_request_rejects_a_content_length_over_the_cap() {
+        let raw = format!(
+            "POST /inference HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        let err = parse_request(&mut Cursor::new(raw)).unwrap_err();
+        // Pre-fix this hits `read_exact` on a short buffer instead, which
+        // fails with `UnexpectedEof` rather than the cap's `InvalidData` --
+        // proving the cap rejects the oversized length before ever trying
+        // to allocate `vec![0u8; len]` for it.
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 
     #[test]
