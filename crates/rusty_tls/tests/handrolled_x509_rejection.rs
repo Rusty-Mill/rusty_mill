@@ -902,3 +902,64 @@ fn the_subject_alt_name_iterator_always_terminates() {
         assert!(seen <= 4, "unexpectedly many names from {contents:02x?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Performance: duplicate-extension detection must not be quadratic
+// ---------------------------------------------------------------------------
+
+/// A unique, structurally valid OID: a fixed two-arc prefix (`1.2`) plus a
+/// base-128 encoded index as a third arc, so `count` extensions never
+/// collide and never trip [`X509Error::DuplicateExtension`].
+///
+/// General base-128, big-endian, continuation bit set on every octet but the
+/// last — not the two-byte special case, which silently mis-encodes any
+/// index at or above 2^14.
+fn unique_oid(index: usize) -> Vec<u8> {
+    let mut digits = vec![(index & 0x7f) as u8];
+    let mut rest = index >> 7;
+    while rest > 0 {
+        digits.push(0x80 | (rest & 0x7f) as u8);
+        rest >>= 7;
+    }
+    digits.reverse();
+
+    let mut out = vec![0x2a]; // 1.2
+    out.extend_from_slice(&digits);
+    out
+}
+
+/// Regression test for an O(n^2) duplicate-OID check: `read_extensions` used
+/// to test membership in a `Vec` it grew by one on every iteration, so `n`
+/// extensions cost `n^2/2` comparisons overall. Every certificate this crate
+/// parses — server or client, before any trust decision — goes through this
+/// path, so a peer could pad a certificate with extensions to burn CPU on
+/// the process parsing it.
+///
+/// With the O(1)-amortized `HashSet` this parses in milliseconds; the
+/// quadratic `Vec::contains` version takes seconds at this `count` on any
+/// reasonable machine, so the bound below distinguishes the two rather than
+/// merely tolerating either.
+#[test]
+fn many_unique_extensions_parse_without_quadratic_blowup() {
+    let count = 20_000usize;
+    let extensions: Vec<Vec<u8>> = (0..count)
+        .map(|i| extension(&unique_oid(i), false, &[]))
+        .collect();
+
+    let der = CertBuilder {
+        extensions: Some(extensions),
+        ..Default::default()
+    }
+    .build();
+
+    let start = std::time::Instant::now();
+    let cert = Certificate::parse(&der).expect("distinct OIDs must parse without a duplicate");
+    let elapsed = start.elapsed();
+
+    assert!(cert.extensions().unhandled_critical().is_empty());
+    assert!(
+        elapsed < std::time::Duration::from_millis(1000),
+        "parsing {count} unique extensions took {elapsed:?}; duplicate-OID \
+         detection must be sub-quadratic in the extension count"
+    );
+}

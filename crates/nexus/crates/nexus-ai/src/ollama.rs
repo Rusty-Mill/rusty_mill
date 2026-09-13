@@ -10,6 +10,7 @@ use crate::provider::{
     AiProvider, ChatMessage, ChatTurn, ChatTurnOutput, Role, TokenUsage,
     ToolCall as ProviderToolCall,
 };
+use crate::stream_buffer::push_stream_bytes;
 use crate::tools::ToolSchema;
 
 /// Default base URL for a local Ollama instance. Override via
@@ -460,7 +461,7 @@ impl AiProvider for OllamaProvider {
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AiError::Provider(e.to_string()))?;
-            buf.extend_from_slice(&bytes);
+            push_stream_bytes(&mut buf, &bytes)?;
 
             while let Some(newline_pos) = buf.iter().position(|&b| b == b'\n') {
                 let line_bytes: Vec<u8> = buf.drain(..=newline_pos).collect();
@@ -566,7 +567,7 @@ impl AiProvider for OllamaProvider {
 
         'outer: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AiError::Provider(e.to_string()))?;
-            buf.extend_from_slice(&bytes);
+            push_stream_bytes(&mut buf, &bytes)?;
 
             while let Some(newline_pos) = buf.iter().position(|&b| b == b'\n') {
                 let line_bytes: Vec<u8> = buf.drain(..=newline_pos).collect();

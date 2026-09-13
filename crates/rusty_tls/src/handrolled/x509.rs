@@ -56,6 +56,8 @@
 //! - any DER encoding is non-canonical — see [`super::der`], which is where
 //!   most of the strictness lives.
 
+use std::collections::HashSet;
+
 use super::der::{DerError, ObjectIdentifier, Reader, Tag};
 
 /// Certificate version, as encoded.
@@ -822,7 +824,7 @@ fn read_extensions(mut list: Reader<'_>) -> Result<Extensions<'_>> {
     }
 
     let mut extensions = Extensions::default();
-    let mut seen: Vec<ObjectIdentifier<'_>> = Vec::new();
+    let mut seen: HashSet<ObjectIdentifier<'_>> = HashSet::new();
 
     while !list.is_empty() {
         let mut extension = list.read_sequence()?;
@@ -841,10 +843,9 @@ fn read_extensions(mut list: Reader<'_>) -> Result<Extensions<'_>> {
         let contents = extension.read(Tag::OCTET_STRING)?.contents;
         extension.finish()?;
 
-        if seen.contains(&id) {
+        if !seen.insert(id) {
             return Err(X509Error::DuplicateExtension);
         }
-        seen.push(id);
 
         let mut inner = Reader::new(contents);
         match id {

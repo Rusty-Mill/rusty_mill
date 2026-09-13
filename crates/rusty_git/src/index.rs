@@ -171,6 +171,18 @@ impl Index {
         let count = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
 
         let content_len = data.len() - SHA1_DIGEST_LEN;
+
+        // Bound the claimed entry count against the bytes actually available
+        // before trusting it for a pre-allocation -- each entry consumes at
+        // least ENTRY_FIXED_LEN bytes (checked again per-entry below), so a
+        // `count` that can't possibly fit in the remaining file is rejected
+        // here instead of driving an allocation-bomb `Vec::with_capacity`
+        // sized off an attacker-controlled 4-byte header field.
+        let max_possible_entries = content_len.saturating_sub(12) / ENTRY_FIXED_LEN;
+        if count > max_possible_entries {
+            return Err(IndexError::Truncated);
+        }
+
         let expected_checksum = &data[content_len..];
         let mut hasher = Sha1::new();
         hasher.update(&data[..content_len]);
@@ -356,5 +368,20 @@ mod tests {
         assert_eq!(back, index);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncated_index_with_huge_claimed_count_is_rejected_without_allocating() {
+        // A minimal (truncated) index file whose header claims ~2 billion
+        // entries. Pre-fix, this drove `Vec::with_capacity(count)` off the
+        // raw header field before any check against the actual (tiny) file
+        // length -- an allocation-bomb DoS on a truncated/corrupt
+        // `.git/index`. Post-fix this must return `Err` quickly instead.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(DIRC_MAGIC);
+        bytes.extend_from_slice(&INDEX_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&0x7FFF_FFFFu32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; SHA1_DIGEST_LEN]); // trailing checksum slot
+        assert_eq!(Index::from_bytes(&bytes), Err(IndexError::Truncated));
     }
 }

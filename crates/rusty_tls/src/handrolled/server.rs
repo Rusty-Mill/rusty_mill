@@ -476,13 +476,20 @@ pub struct ClientAuth<'a> {
 // Framing
 // ---------------------------------------------------------------------------
 
-fn plaintext_record(typ: ContentType, fragment: &[u8]) -> Vec<u8> {
+fn plaintext_record(typ: ContentType, fragment: &[u8]) -> Result<Vec<u8>> {
+    if fragment.len() > usize::from(u16::MAX) {
+        return Err(RecordError::FragmentTooLong {
+            len: fragment.len(),
+            max: usize::from(u16::MAX),
+        }
+        .into());
+    }
     let mut out = Vec::with_capacity(HEADER_LEN + fragment.len());
     out.push(typ.as_u8());
     out.extend_from_slice(&[0x03, 0x03]);
     out.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
     out.extend_from_slice(fragment);
-    out
+    Ok(out)
 }
 
 const CHANGE_CIPHER_SPEC: u8 = 20;
@@ -644,7 +651,7 @@ impl<'a> ServerHandshake<'a> {
         // Always in the clear. A server that failed before deriving keys has
         // none, and one that failed afterwards is telling the peer something
         // the peer can already infer from the connection dying.
-        Some(plaintext_record(ContentType::Alert, &[2, description.0]))
+        Some(plaintext_record(ContentType::Alert, &[2, description.0]).ok()?)
     }
 
     fn read_record_inner(&mut self, record: &[u8]) -> Result<Vec<u8>> {
@@ -1164,10 +1171,10 @@ impl ServerHandshake<'_> {
         transcript_head.extend_from_slice(&hash.hash(message.encoded));
         transcript_head.extend_from_slice(&retry);
 
-        let mut out = plaintext_record(ContentType::Handshake, &retry);
+        let mut out = plaintext_record(ContentType::Handshake, &retry)?;
         // Appendix D.4 puts this after the server's *first* message, which is
         // this one. The real ServerHello later must not send a second.
-        out.extend_from_slice(&plaintext_record(ContentType::ChangeCipherSpec, &[0x01]));
+        out.extend_from_slice(&plaintext_record(ContentType::ChangeCipherSpec, &[0x01])?);
 
         self.state = State::AwaitRetriedClientHello(Box::new(Retrying {
             group,
@@ -1456,9 +1463,9 @@ impl ServerHandshake<'_> {
         let client_keys = traffic_keys(hash, &client_handshake_secret, aead.key_len());
         let opener = Opener::new(aead, &client_keys.key, &client_keys.iv)?;
 
-        let mut out = plaintext_record(ContentType::Handshake, &server_hello);
+        let mut out = plaintext_record(ContentType::Handshake, &server_hello)?;
         if send_change_cipher_spec {
-            out.extend_from_slice(&plaintext_record(ContentType::ChangeCipherSpec, &[0x01]));
+            out.extend_from_slice(&plaintext_record(ContentType::ChangeCipherSpec, &[0x01])?);
         }
         out.extend_from_slice(&sealer.seal(ContentType::Handshake, &flight, 0)?);
 

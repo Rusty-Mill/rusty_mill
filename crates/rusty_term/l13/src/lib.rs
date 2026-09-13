@@ -140,7 +140,11 @@ pub fn handle(payload: &[u8], state: &mut impl TerminalState, responses: &mut Ve
                 Ok(result) => Response::success(req.id, result),
                 Err(error) => Response::error(Some(req.id), error),
             };
-            send(protocol, &Message::Response(response), responses);
+            send(
+                &sanitize_protocol_tag(protocol),
+                &Message::Response(response),
+                responses,
+            );
         }
         // Notifications (e.g. MCP `notifications/initialized`) need no reply, and
         // we issue no requests, so any response from the peer is ignored.
@@ -593,6 +597,29 @@ fn render_set_status(
     Ok(json!({}))
 }
 
+/// Restrict an untrusted protocol tag to a safe character class before it is
+/// echoed into an OSC response frame.
+///
+/// `protocol` is parsed verbatim from the untrusted OSC 5379 payload — the
+/// bytes up to the first `;` of whatever the child's stdout emits, which may
+/// be attacker-controlled (e.g. the output of `cat`ing a hostile file, or of
+/// a compromised program). On the unrecognized-protocol path in [`handle`],
+/// this tag flows into [`send`]'s frame as raw bytes rather than through
+/// serde_json's string escaping (unlike the JSON-RPC body). Left unsanitized,
+/// a tag containing control bytes or the ESC/ST framing sequence (`ESC \`)
+/// could terminate the response OSC early and splice arbitrary bytes into
+/// the reply queued back to the child's stdin — a PTY input-injection
+/// primitive. Every protocol this crate actually speaks
+/// ([`SUPPORTED_PROTOCOLS`]) is plain ASCII alphanumerics, so restricting to
+/// that class (plus `-`/`_`/`.` for forward compatibility) never affects a
+/// legitimate reply.
+fn sanitize_protocol_tag(protocol: &str) -> String {
+    protocol
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect()
+}
+
 /// Frame `msg` as `OSC <CODE> ; <protocol> ; <json> ST` and queue it for the child.
 fn send(protocol: &str, msg: &Message, responses: &mut Vec<u8>) {
     let Ok(json) = serde_json::to_string(msg) else {
@@ -891,5 +918,72 @@ mod tests {
             .unwrap();
         let (_protocol, json) = body.split_once(';').unwrap();
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn unrecognized_protocol_tag_is_sanitized_before_echo() {
+        // A malicious/compromised child can emit an OSC 5379 payload whose
+        // protocol tag contains raw control bytes, including the `ESC \`
+        // (ST) sequence that terminates the response frame itself. Left
+        // unsanitized, `send` would splice those bytes verbatim into the
+        // reply queued for the child's stdin, letting the tag prematurely
+        // close the OSC and inject trailing bytes as if they were typed —
+        // a PTY input-injection primitive.
+        let malicious_tag = "evil\x1b\\rm -rf /\x07pwn";
+        let mut state = FakeTerminal::default();
+        let payload = format!(
+            "{malicious_tag};{}",
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "whatever", "params": null })
+        );
+        let mut responses = Vec::new();
+        handle(payload.as_bytes(), &mut state, &mut responses);
+        assert!(!responses.is_empty());
+
+        // Exactly one `ESC \` (ST) sequence may appear: the legitimate frame
+        // terminator `send` appends itself. Any earlier occurrence means the
+        // attacker's embedded ST leaked through raw and split the frame.
+        let st_positions: Vec<usize> = responses
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| w[0] == 0x1b && w[1] == b'\\')
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            st_positions,
+            vec![responses.len() - 2],
+            "unsanitized protocol tag injected an extra OSC terminator into the \
+             PTY-bound response frame: {:?}",
+            String::from_utf8_lossy(&responses)
+        );
+
+        // No raw BEL byte from the tag may survive into the frame: the only
+        // place the tag's bytes can legitimately reappear is inside the
+        // JSON-escaped `message` field, where serde_json renders this as the
+        // six printable characters `\u0007`, never the raw 0x07 byte.
+        assert_eq!(
+            responses.iter().filter(|&&b| b == 0x07).count(),
+            0,
+            "raw BEL byte from the tag leaked into the response frame"
+        );
+
+        // The frame's own `<protocol>` field — written as raw bytes by
+        // `send`, not through serde_json's string escaping — must be reduced
+        // to the safe character class `sanitize_protocol_tag` produces, not
+        // the raw attacker-controlled tag (which contains ESC/backslash/
+        // space/BEL, none of which are in that class).
+        let text = std::str::from_utf8(&responses).unwrap();
+        let body = text
+            .strip_prefix("\x1b]5379;")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap();
+        let (protocol_field, _json) = body.split_once(';').unwrap();
+        assert_eq!(protocol_field, sanitize_protocol_tag(malicious_tag));
+        assert!(
+            protocol_field
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+            "raw attacker-controlled tag content leaked into the frame's protocol field: {protocol_field:?}"
+        );
     }
 }

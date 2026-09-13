@@ -12,7 +12,10 @@ use wasmtime::{Caller, Linker};
 use nexus_kernel::{audit, Capability, IpcErrorEnvelope, IpcErrorKind};
 use nexus_types::PathValidationError;
 
-use crate::{sandbox::PluginData, PluginError};
+use crate::{
+    sandbox::{NetworkPolicy, PluginData},
+    PluginError,
+};
 
 // ─── Error-code constants ─────────────────────────────────────────────────────
 
@@ -1099,6 +1102,101 @@ fn register_host_notify(linker: &mut Linker<PluginData>) -> Result<(), PluginErr
 /// lacks `NetHttp`, `HOST_BUFFER_OVERFLOW` when the JSON response exceeds
 /// `out_cap`, or `HOST_ERROR` on any other failure (invalid request JSON,
 /// policy refusal, transport error, response-size cap exceeded).
+/// Outcome of a successfully executed brokered HTTP request.
+#[derive(Debug)]
+struct HttpRequestOutcome {
+    /// HTTP status code (never a 3xx — see [`execute_http_request`]).
+    status: u16,
+    /// Response headers. Repeated header names are joined with `", "`.
+    headers: std::collections::BTreeMap<String, String>,
+    /// Raw response body bytes, capped at `policy.max_response_bytes`.
+    body: Vec<u8>,
+}
+
+/// Execute an already-[`NetworkPolicy::validate`]d brokered request.
+///
+/// SSRF hardening: `NetworkPolicy::validate` only checks the allowlist
+/// against the *first-hop* host. The default reqwest redirect policy
+/// follows 3xx responses transparently, so an allowlisted host could
+/// redirect the request to an internal/private address and bypass the
+/// allowlist entirely. Disable redirects and reject any 3xx response
+/// outright instead of following it — mirrors
+/// `nexus_security::http_policy::execute`'s identical hardening for the
+/// sibling `http_request` IPC broker.
+///
+/// # Errors
+/// Returns a human-readable reason string on client-build failure,
+/// transport error, redirect response, or a response exceeding
+/// `policy.max_response_bytes`.
+fn execute_http_request(
+    policy: &NetworkPolicy,
+    method: &str,
+    url: reqwest::Url,
+    headers: &std::collections::BTreeMap<String, String>,
+    body: Option<String>,
+) -> Result<HttpRequestOutcome, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(policy.timeout_ms))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("client build failed: {e}"))?;
+
+    let reqwest_method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| format!("invalid method: {e}"))?;
+    let mut builder = client.request(reqwest_method, url);
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    if let Some(b) = body {
+        builder = builder.body(b);
+    }
+
+    let resp = builder
+        .send()
+        .map_err(|e| format!("transport error: {e}"))?;
+    let status = resp.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(format!(
+            "redirect response (status {status}) rejected — redirects are not followed"
+        ));
+    }
+
+    let mut resp_headers = std::collections::BTreeMap::new();
+    for (name, value) in resp.headers() {
+        let Ok(value_str) = value.to_str() else {
+            continue;
+        };
+        resp_headers
+            .entry(name.as_str().to_string())
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(value_str);
+            })
+            .or_insert_with(|| value_str.to_string());
+    }
+
+    // Bound memory use regardless of what (or whether) the server
+    // declares Content-Length: read at most cap+1 bytes so an over-cap
+    // response is detected without buffering the whole thing.
+    let mut body_bytes = Vec::new();
+    let mut limited = resp.take(policy.max_response_bytes.saturating_add(1));
+    limited
+        .read_to_end(&mut body_bytes)
+        .map_err(|e| format!("body read failed: {e}"))?;
+    if u64::try_from(body_bytes.len()).unwrap_or(u64::MAX) > policy.max_response_bytes {
+        return Err(format!(
+            "response exceeded the {}-byte cap",
+            policy.max_response_bytes
+        ));
+    }
+
+    Ok(HttpRequestOutcome {
+        status,
+        headers: resp_headers,
+        body: body_bytes,
+    })
+}
+
 // Same shape as `register_host_invoke_command` above: one linear
 // func_wrap registration, not a candidate for decomposition.
 #[allow(clippy::too_many_lines)]
@@ -1160,72 +1258,19 @@ fn register_host_http_request(linker: &mut Linker<PluginData>) -> Result<(), Plu
                     }
                 };
 
-                let client = match reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_millis(policy.timeout_ms))
-                    .build()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(plugin_id = %plugin_id, "host::http_request: client build failed: {e}");
-                        return HOST_ERROR;
-                    }
-                };
-                let Ok(reqwest_method) = reqwest::Method::from_bytes(method.as_bytes()) else {
-                    return HOST_ERROR;
-                };
-                let mut builder = client.request(reqwest_method, parsed_url);
-                for (name, value) in &headers {
-                    builder = builder.header(name, value);
-                }
-                if let Some(b) = body {
-                    builder = builder.body(b);
-                }
-
-                let resp = match builder.send() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(plugin_id = %plugin_id, "host::http_request: transport error: {e}");
-                        return HOST_ERROR;
-                    }
-                };
-                let status = resp.status().as_u16();
-                let mut resp_headers = std::collections::BTreeMap::new();
-                for (name, value) in resp.headers() {
-                    let Ok(value_str) = value.to_str() else {
-                        continue;
+                let outcome =
+                    match execute_http_request(&policy, &method, parsed_url, &headers, body) {
+                        Ok(o) => o,
+                        Err(reason) => {
+                            tracing::warn!(plugin_id = %plugin_id, "host::http_request: {reason}");
+                            return HOST_ERROR;
+                        }
                     };
-                    resp_headers
-                        .entry(name.as_str().to_string())
-                        .and_modify(|existing: &mut String| {
-                            existing.push_str(", ");
-                            existing.push_str(value_str);
-                        })
-                        .or_insert_with(|| value_str.to_string());
-                }
 
-                // Bound memory use regardless of what (or whether) the
-                // server declares Content-Length: read at most cap+1 bytes
-                // so an over-cap response is detected without buffering
-                // the whole thing.
-                let mut body_bytes = Vec::new();
-                let mut limited = resp.take(policy.max_response_bytes.saturating_add(1));
-                if let Err(e) = limited.read_to_end(&mut body_bytes) {
-                    tracing::warn!(plugin_id = %plugin_id, "host::http_request: body read failed: {e}");
-                    return HOST_ERROR;
-                }
-                if u64::try_from(body_bytes.len()).unwrap_or(u64::MAX) > policy.max_response_bytes {
-                    tracing::warn!(
-                        plugin_id = %plugin_id,
-                        "host::http_request: response exceeded the {}-byte cap",
-                        policy.max_response_bytes
-                    );
-                    return HOST_ERROR;
-                }
-
-                let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+                let body_b64 = base64::engine::general_purpose::STANDARD.encode(&outcome.body);
                 let result = serde_json::json!({
-                    "status": status,
-                    "headers": resp_headers,
+                    "status": outcome.status,
+                    "headers": outcome.headers,
                     "body": body_b64,
                 });
                 let result_bytes = match serde_json::to_vec(&result) {
@@ -1322,6 +1367,77 @@ mod tests {
             sorted.len(),
             codes.len(),
             "each IpcErrorKind variant must project onto a distinct HOST_* code"
+        );
+    }
+
+    // ── C81 SSRF regression: redirects must not be followed ────────────────
+
+    /// Spawn a one-shot HTTP/1.1 server on a loopback port that replies to
+    /// the first connection with `status`/`extra_headers`/`response_body`.
+    /// Mirrors `nexus_security::http_policy`'s test helper of the same
+    /// shape — no new test-only HTTP-mocking dependency needed.
+    fn spawn_one_shot_server(
+        status: &'static str,
+        response_body: Vec<u8>,
+        extra_headers: &'static str,
+    ) -> String {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = vec![0u8; 8192];
+                let _ = stream.read(&mut buf).unwrap_or(0);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&response_body);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            enabled: true,
+            allowed_hosts: vec!["allowed.example.com".to_string()],
+            max_response_bytes: 1024,
+            timeout_ms: 5_000,
+        }
+    }
+
+    #[test]
+    fn execute_http_request_does_not_follow_redirect_off_allowlisted_host() {
+        // SSRF regression: before this fix, `register_host_http_request`
+        // built a `reqwest::blocking::Client` with the default redirect
+        // policy (follow transparently), so a plugin could send a request
+        // to an allowed host that 302-redirects to a disallowed/internal
+        // host and the WASM sandbox's `NetworkPolicy` allowlist — checked
+        // only against the *first-hop* URL — would never see the real
+        // destination. The redirect response must be rejected outright,
+        // not followed.
+        let base = spawn_one_shot_server(
+            "302 Found",
+            Vec::new(),
+            "Location: http://evil.invalid/steal\r\n",
+        );
+        let url = reqwest::Url::parse(&format!("{base}/redirect")).expect("parse test url");
+        let err = execute_http_request(
+            &test_network_policy(),
+            "GET",
+            url,
+            &std::collections::BTreeMap::new(),
+            None,
+        )
+        .expect_err("redirect response must be rejected");
+        assert!(
+            err.contains("redirect") && err.contains("302"),
+            "expected a redirect-rejection error, got: {err}"
         );
     }
 }

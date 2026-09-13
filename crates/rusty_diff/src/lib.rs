@@ -7,13 +7,37 @@ pub enum DiffOp<T> {
     Delete(T),
 }
 
+/// Upper bound on `old.len() + new.len()` for which the full Myers algorithm's
+/// O(D^2)-memory edit-graph trace (one `Vec<isize>` frontier retained per edit
+/// distance `0..=D`, where `D` can be as large as `old.len() + new.len()`) is
+/// computed. Without this guard, `diff_myers` is reachable with attacker- or
+/// user-controlled input of unbounded size (e.g. via `rgit diff` on any
+/// substantially modified tracked file) and its memory usage grows
+/// quadratically without limit, risking exhaustion on large or pathologically
+/// dissimilar inputs. Beyond the cap, `diff_myers` falls back to a trivial
+/// linear-memory diff (delete everything from `old`, then insert everything
+/// from `new`) instead of the full algorithm, trading diff quality for a hard
+/// memory ceiling on inputs that size alone already flags as abnormal.
+pub const MAX_DIFF_INPUT_LEN: usize = 20_000;
+
 /// Computes line-by-line or item-by-item diff using the classic Myers algorithm.
+///
+/// If `old.len() + new.len()` exceeds [`MAX_DIFF_INPUT_LEN`], returns a
+/// trivial delete-all/insert-all diff instead of running the full algorithm;
+/// see [`MAX_DIFF_INPUT_LEN`] for why.
 pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> {
     let n = old.len();
     let m = new.len();
 
     if n == 0 && m == 0 {
         return Vec::new();
+    }
+
+    if n + m > MAX_DIFF_INPUT_LEN {
+        let mut result = Vec::with_capacity(n + m);
+        result.extend(old.iter().cloned().map(DiffOp::Delete));
+        result.extend(new.iter().cloned().map(DiffOp::Insert));
+        return result;
     }
 
     let max_d = n + m;
@@ -354,6 +378,65 @@ mod tests {
         let new: Vec<&str> = vec![];
         let ops = diff_myers(&old, &new);
         assert_eq!(ops, vec![DiffOp::Delete("a"), DiffOp::Delete("b")]);
+    }
+
+    #[test]
+    fn test_diff_myers_over_cap_uses_bounded_fallback_not_quadratic_trace() {
+        // Regression for unbounded O(D^2) trace memory in `diff_myers`
+        // (`trace.push(v.clone())` once per edit distance, reachable via
+        // `rgit diff` on any sufficiently modified tracked file). `old` and
+        // `new` here are *identical*, so a full Myers run (no size guard)
+        // would find zero edits and return an all-`Keep` result almost
+        // instantly, without ever growing the trace. The size guard must
+        // instead trigger purely on `old.len() + new.len()` exceeding
+        // `MAX_DIFF_INPUT_LEN` and fall back to the linear delete-all/
+        // insert-all diff regardless of content. Asserting that exact
+        // delete-then-insert shape (rather than all-`Keep`) proves the
+        // size-guarded fallback ran instead of the real algorithm — which is
+        // the mechanism that keeps memory bounded no matter how large or
+        // pathologically dissimilar `old`/`new` are, instead of growing
+        // without bound as input size increases.
+        let half = MAX_DIFF_INPUT_LEN;
+        let old: Vec<usize> = (0..half).collect();
+        let new: Vec<usize> = (0..half).collect();
+        assert!(old.len() + new.len() > MAX_DIFF_INPUT_LEN);
+
+        let start = std::time::Instant::now();
+        let ops = diff_myers(&old, &new);
+        let elapsed = start.elapsed();
+
+        assert_eq!(ops.len(), old.len() + new.len());
+        assert!(
+            ops[..old.len()]
+                .iter()
+                .all(|op| matches!(op, DiffOp::Delete(_))),
+            "expected the fallback's delete-all prefix, got a real Myers trace instead"
+        );
+        assert!(
+            ops[old.len()..]
+                .iter()
+                .all(|op| matches!(op, DiffOp::Insert(_))),
+            "expected the fallback's insert-all suffix, got a real Myers trace instead"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "fallback path must be O(n + m) and complete quickly, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_diff_myers_at_cap_still_uses_full_algorithm() {
+        // Sanity check on the guard's boundary: input sized at (not over)
+        // `MAX_DIFF_INPUT_LEN` must still take the real Myers path and
+        // produce a genuine diff (with `Keep`s), not the fallback.
+        let old: Vec<usize> = (0..MAX_DIFF_INPUT_LEN / 2 - 1).collect();
+        let mut new = old.clone();
+        new.push(999_999); // one extra element beyond the shared prefix
+        assert!(old.len() + new.len() <= MAX_DIFF_INPUT_LEN);
+
+        let ops = diff_myers(&old, &new);
+        assert!(ops.iter().any(|op| matches!(op, DiffOp::Keep(_))));
+        assert!(matches!(ops.last(), Some(DiffOp::Insert(999_999))));
     }
 
     #[test]

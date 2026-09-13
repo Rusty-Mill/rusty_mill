@@ -70,18 +70,28 @@ pub fn win32_to_posix(win_path: &str) -> String {
     let bytes = s.as_bytes();
     if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic() {
         let drive_char = (bytes[0] as char).to_ascii_lowercase();
-        let rest = if bytes.len() > 2 {
+        if bytes.len() > 2 {
             let r = &s[2..];
+            // A separator immediately after the colon means drive-absolute
+            // (`C:\foo` / `C:/foo`). Its absence means drive-relative
+            // (`C:foo`, i.e. "foo" relative to drive C's current directory) —
+            // a distinct, legal Windows path form with no POSIX equivalent
+            // (POSIX has a single process-wide cwd, not one per drive).
+            let is_absolute = r.starts_with('\\') || r.starts_with('/');
             let r_posix = r.replace('\\', "/");
-            if !r_posix.starts_with('/') {
-                format!("/{}", r_posix)
-            } else {
-                r_posix
+            if is_absolute {
+                let rest = if r_posix.starts_with('/') {
+                    r_posix
+                } else {
+                    format!("/{}", r_posix)
+                };
+                return format!("/{}{}", drive_char, rest);
             }
-        } else {
-            "/".to_string()
-        };
-        return format!("/{}{}", drive_char, rest);
+            // Drive-relative: must not be aliased to the absolute `/<drive>/...`
+            // form. Preserve the drive-relative notation distinctly instead.
+            return format!("{}:{}", drive_char, r_posix);
+        }
+        return format!("/{}/", drive_char);
     }
 
     s.replace('\\', "/")
@@ -184,6 +194,25 @@ mod tests {
         );
         assert_eq!(win32_to_posix("C:"), "/c/");
         assert_eq!(win32_to_posix("NUL"), "/dev/null");
+    }
+
+    #[test]
+    fn test_win32_to_posix_drive_relative_distinct_from_absolute() {
+        // `C:foo.txt` (drive-relative: relative to drive C's current
+        // directory) must NOT be silently aliased to the same output as
+        // `C:\foo.txt` (drive-absolute).
+        let relative = win32_to_posix("C:foo.txt");
+        let absolute = win32_to_posix(r"C:\foo.txt");
+        assert_ne!(relative, absolute);
+        assert_eq!(absolute, "/c/foo.txt");
+        assert_eq!(relative, "c:foo.txt");
+
+        // Also holds for nested drive-relative paths.
+        let relative_nested = win32_to_posix(r"D:sub\dir\file.txt");
+        let absolute_nested = win32_to_posix(r"D:\sub\dir\file.txt");
+        assert_ne!(relative_nested, absolute_nested);
+        assert_eq!(absolute_nested, "/d/sub/dir/file.txt");
+        assert_eq!(relative_nested, "d:sub/dir/file.txt");
     }
 
     #[test]
