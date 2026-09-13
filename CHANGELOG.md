@@ -9,6 +9,26 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `WikipediaExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.12): a Rust port of
+  `server/extractor/extractors/wikipedia/{wikipedia,style,text}.go`,
+  extract *and* preview for `*.wikipedia.org/wiki/...` article pages. The
+  largest port so far. Go's `goquery` mutates its parse tree in place
+  (`.Remove()`, `.SetAttr()`, `.ReplaceWithHtml()`), which
+  `scraper::ElementRef` has no equivalent for (it's a read-only view);
+  ported here as `NodeId`-based mutation of the same `ego_tree` instead —
+  attribute changes via `Tree::get_mut`, removals via `NodeMut::detach`,
+  an element swap for the `<video>`-to-`<img>`-poster replacement —
+  always collecting the `NodeId`s a selector pass needs into an owned
+  `Vec` before mutating, since an `ElementRef` (an immutable borrow of the
+  tree) can't stay alive across a `get_mut` call (a mutable one). Needed
+  `html5ever` as a new direct dependency (already pinned transitively by
+  `scraper` at this same version) to construct attribute names/values by
+  hand. One Go behavior isn't reproduced: wrapping a wikitable in a
+  horizontally-scrolling `<div>` for preview, which has no cheap
+  `NodeId`-based equivalent and isn't covered by Go's own tests — a
+  documented, cosmetic-only simplification. 10 new unit tests (131 total
+  in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `BasicExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.4): a Rust port of the
   `basicExtractor` in `server/extractor/extractor.go`, the universal

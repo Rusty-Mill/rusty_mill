@@ -13,6 +13,43 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Wikipedia extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-wikipedia`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-wikipedia)
+
+Twentieth Phase 1 increment. The tenth of the 20 built-in extractors, and
+the largest port so far.
+
+- **Added:** `WikipediaExtractor` (capability inventory §4.5.12) — a port
+  of `server/extractor/extractors/wikipedia/{wikipedia,style,text}.go`.
+  Extract and preview for `*.wikipedia.org/wiki/...` article pages:
+  article text, infobox key/value pairs, and wikitables for extraction; a
+  richly styled preview (inline styles standing in for Wikipedia's own,
+  sanitizer-stripped CSS classes) for rendering.
+- **New approach, no DOM mutation API to lean on:** Go's `goquery`
+  mutates its parse tree in place (`.Remove()`, `.SetAttr()`,
+  `.ReplaceWithHtml()`), which `scraper::ElementRef` has no equivalent
+  for — it's a read-only view. This port instead mutates the same
+  `ego_tree` by `NodeId`: attribute changes via `Tree::get_mut`, removals
+  via `NodeMut::detach`, an element swap for the `<video>`-to-`<img>`
+  poster replacement. Every pass collects the `NodeId`s a selector needs
+  to touch into an owned `Vec` before mutating, since an `ElementRef`
+  can't stay borrowed across a `get_mut` call.
+- **New dependency:** `html5ever` (already pinned transitively by
+  `scraper` at this same version), needed to construct attribute
+  names/values by hand for the mutation above.
+- **Behavior preserved deliberately:** the infobox text pass reads from
+  the original, un-cleaned content while the general article-text pass
+  reads from a cleaned clone with navboxes/references/etc. already
+  removed — Go builds that clone by re-serializing and re-parsing the
+  content subtree, and this port does the same rather than eliminating
+  the clone now that in-place mutation is possible.
+- **Not reproduced, documented instead:** wrapping a wikitable in a
+  horizontally-scrolling `<div>` for preview has no cheap `NodeId`-based
+  equivalent and isn't covered by Go's own tests — a cosmetic-only gap,
+  not a content or search-quality loss.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Basic extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-basic`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-basic)
 

@@ -296,13 +296,30 @@ independent of ADR-0002/0003)
       with no separators at all, deliberately cruder than `textutil`'s
       block-aware flattening — matching Go's own token-by-token
       concatenation exactly.
+- [x] `rusty-hister-extractor` (`WikipediaExtractor`, §4.5.12): extract
+      *and* preview for `*.wikipedia.org/wiki/...` article pages. Done —
+      10 new unit tests (131 total in the crate), clippy/fmt clean. The
+      largest port so far. Go's `goquery` mutates its parse tree in place
+      (`.Remove()`, `.SetAttr()`, `.ReplaceWithHtml()`), which
+      `scraper::ElementRef` has no equivalent for (it's a read-only view);
+      ported here as `NodeId`-based mutation of the same `ego_tree`
+      instead — attribute changes via `Tree::get_mut`, removals via
+      `NodeMut::detach`, an element swap for the `<video>`-to-`<img>`
+      poster replacement — always collecting the `NodeId`s a selector pass
+      needs into an owned `Vec` before mutating, since an `ElementRef`
+      can't stay borrowed across a `get_mut` call. Needed `html5ever` as a
+      new direct dependency (already pinned transitively by `scraper` at
+      this same version) to construct attribute names/values by hand. One
+      Go behavior isn't reproduced: wrapping a wikitable in a
+      horizontally-scrolling `<div>` for preview, which has no cheap
+      `NodeId`-based equivalent and isn't covered by Go's own tests.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 11 built-in extractors in
+- `rusty-hister-extractor`: the remaining 10 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
