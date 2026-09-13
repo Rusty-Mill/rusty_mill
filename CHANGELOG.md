@@ -133,7 +133,7 @@ Removed / Fixed / Security, newest first.
   anchor's *visible text* with the expanded URL — cosmetic only (the
   more important `href` fix and the plain-text substitution both still
   happen), and `scraper`'s tree has no cheap child-replacement primitive
-  for it. 6 new unit tests (199 total in the crate), clippy/fmt clean.
+  for it. 6 new unit tests (204 total in the crate), clippy/fmt clean.
   All 20 built-in extractors are now ported.
 - `rusty-hister-extractor`'s `BlueskyExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.14): a Rust port of
