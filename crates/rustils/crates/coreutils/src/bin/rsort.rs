@@ -6,7 +6,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let reverse = args.contains(&"-r".to_string());
     let numeric = args.contains(&"-n".to_string());
 

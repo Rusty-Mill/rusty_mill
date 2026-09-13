@@ -6,8 +6,8 @@
 
 use crate::error::CodecError;
 use crate::wire::{
-    read_array_len, read_i16, read_i32, read_nullable_string, read_string, write_i16, write_i32,
-    write_nullable_string, write_string,
+    read_array_len, read_checked_array_len, read_i16, read_i32, read_nullable_string, read_string,
+    write_i16, write_i32, write_nullable_string, write_string,
 };
 use rusty_wire::{Reader, Writer};
 
@@ -161,8 +161,9 @@ pub struct CreateTopicsResponse {
 impl CreateTopicsResponse {
     /// Decodes the response body.
     pub fn decode(reader: &mut Reader) -> Result<Self, CodecError> {
-        let count = read_array_len(reader)?.max(0);
-        let mut topics = Vec::with_capacity(count as usize);
+        const CREATABLE_TOPIC_RESULT_MIN_LEN: usize = 2 + 2; // empty name + error_code
+        let count = read_checked_array_len(reader, CREATABLE_TOPIC_RESULT_MIN_LEN)?;
+        let mut topics = Vec::with_capacity(count);
         for _ in 0..count {
             topics.push(CreatableTopicResult {
                 name: read_string(reader)?,
@@ -325,5 +326,19 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         let decoded = CreateTopicsRequest::decode(&mut reader).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_topic_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, i32::MAX); // topic count
+        writer.write_bytes(&[0, 1]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = CreateTopicsResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
     }
 }

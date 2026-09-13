@@ -9,6 +9,99 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `MarkdownExtractor` (capability inventory
+  §4.5.1) and `OrgModeExtractor` (§4.5.2) (`rusty_hister`'s Phase 1,
+  continued): Rust ports of
+  `server/extractor/extractors/{markdown/markdown,org/org}.go`,
+  preview-only, structurally identical twins for locally indexed
+  Markdown/Org files. Both turned out to need no markdown/org-mode-
+  parsing dependency at all — correcting an earlier assumption — since
+  `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there. 8 new unit tests (167 total in the crate), clippy/fmt
+  clean.
+- `rusty-hister-extractor`'s `NotionExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.16): a Rust port of
+  `server/extractor/extractors/notion/notion.go`, extract *and* preview
+  for Notion pages on `notion.so` and `*.notion.site`. Re-assessed as
+  implementable now rather than blocked on the JS-rendering crawler
+  backend: the extractor code itself only ever reads `document.html`,
+  like every other extractor, so the crawler dependency is a
+  *production* one (whether that field holds real rendered content), not
+  a code dependency. When the rendered block tree isn't present,
+  `extract`/`preview` report `Abort` rather than `Fallback`, matching
+  Go's own `AbortExtraction`/`AbortPreview`. Notion's rendered DOM nests
+  presentational wrapper `<div>`s deeply; a single substring-attribute
+  selector (`[class*="notion-"][class*="-block"]`, identical to Go's own
+  `goquery` selector) finds every block at any depth, so both the text
+  and HTML walks skip a match whose own ancestor also matches to avoid
+  double-counting a block's children. List/heading/quote/paragraph
+  blocks render via plain-text extraction before escaping, exactly like
+  Go's own `writeTag`/list handling — so an inline `<a href>` inside one
+  of those is flattened to text, not preserved as a link; only the image
+  block's `src` attribute is read directly and thus round-trips through
+  URL rewriting. 7 new unit tests (174 total in the crate), clippy/fmt
+  clean.
+- `rusty-hister-extractor`'s `ReadabilityExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.4): a Rust port of the
+  `readabilityExtractor` in `server/extractor/extractor.go`, extract
+  *and* preview for any web page via the `readabilityrs` crate (a Rust
+  port of Mozilla's Readability.js — the same algorithm family Go's own
+  `codeberg.org/readeck/go-readability/v2` dependency belongs to) to
+  strip navigation, ads, and other boilerplate down to the main article
+  content. `matches` always returns `true`, like `BasicExtractor`; the
+  real chain places this extractor right before `Basic`, a better-quality
+  attempt that runs first with `Basic` as the true last resort. First new
+  external dependency decided by explicit user choice this session:
+  `readabilityrs` pulls in `scraper 0.25`/`ego-tree 0.10`, a major
+  version ahead of this crate's own `0.21`/`0.9` pins used by 8 existing
+  extractors — both versions now coexist in the dependency tree (extra
+  compile time/disk, zero risk to the existing extractors) rather than
+  bumping the existing pin or hand-rolling the algorithm. Go's
+  `readability.FromReader` folds URL validation and article extraction
+  into one error path; `readabilityrs` splits them, so this port maps a
+  URL-parse failure to `Abort` (matching Go's own separate `url.Parse`
+  failure) and a malformed-HTML error or no-article-found result to
+  `Fallback` (matching Go's `FromReader` error path). Two Go metadata
+  fields (a favicon URL, a `modified` timestamp) have no `readabilityrs`
+  equivalent and are deliberately not reproduced rather than silently
+  dropped. 7 new unit tests (181 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `YtdlpExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.17): a Rust port of
+  `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`, extract
+  *and* preview for video-hosting pages (YouTube, Vimeo, and others), by
+  shelling out to the external `yt-dlp` binary rather than parsing
+  `document.html` at all — the only extractor in this crate that works
+  entirely from `document.url`. Disabled by default, matching Go, since
+  it's useless without `yt-dlp` installed. Three deliberate
+  simplifications from the Go original, documented rather than worked
+  around: no thumbnail download (no general-purpose HTTP client in this
+  cluster to reuse for a one-off image fetch — `rusty_http` is a sans-IO
+  protocol layer with no client; `thumbnail_url` metadata holds the
+  original URL instead of Go's base64-embedded image data), no
+  per-instance job-slot concurrency limit or cancellation (no other
+  extractor's trait models either), and preview renders HTML directly
+  rather than Go's structured JSON handed to a frontend template
+  (`PreviewResponse` has no template-hint field). The first extractor to
+  use `rusty_json`'s `serde` feature (`#[derive(serde::Deserialize)]` on
+  `VideoInfo` and friends) rather than walking `rusty_json::Value` by
+  hand, since `yt-dlp --dump-json`'s output is a fixed, known shape. 14
+  new unit tests (159 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `DiscourseExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.4): a Rust port of
+  `server/extractor/extractors/discourse/discourse.go`, extract *and*
+  preview for Discourse forum topic pages. Like Reddit, a topic page can
+  carry the same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block —
+  and, like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking). Reuses `WikipediaExtractor`'s reparse-as-fragment trick
+  for cleaning/URL-rewriting a post body. 6 new unit tests (145 total in
+  the crate), clippy/fmt clean.
 - `rusty-hister-core`'s `Document::extra_documents`/
   `Document::skip_indexing` (`rusty_hister`'s Phase 1, continued):
   an additive extension — empty/`false` by default, so every extractor
@@ -23,7 +116,7 @@ Removed / Fixed / Security, newest first.
   Phase 1, continued — capability inventory §4.5.15): a Rust port of
   `server/extractor/extractors/twitter/extractor.go`, decomposing a
   Twitter/X profile/feed/tweet page into one `Document` per visible
-  tweet — the first extractor to use the `extra_documents`/
+  tweet — the third and last extractor to use the `extra_documents`/
   `skip_indexing` capability extension above. Unlike a multi-source
   merge, Twitter has only one real source (the rendered DOM) plus a
   page-meta fallback, and candidates are deduped by canonical URL (first
@@ -40,7 +133,39 @@ Removed / Fixed / Security, newest first.
   anchor's *visible text* with the expanded URL — cosmetic only (the
   more important `href` fix and the plain-text substitution both still
   happen), and `scraper`'s tree has no cheap child-replacement primitive
-  for it. 6 new unit tests (145 total in the crate), clippy/fmt clean.
+  for it. 6 new unit tests (199 total in the crate), clippy/fmt clean.
+  All 20 built-in extractors are now ported.
+- `rusty-hister-extractor`'s `BlueskyExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.14): a Rust port of
+  `server/extractor/extractors/bluesky/extractor.go`, decomposing a
+  Bluesky profile/feed/thread page into one `Document` per visible post
+  — the first extractor to use the `extra_documents`/`skip_indexing`
+  capability extension above. Bluesky pages can carry the same post data
+  in up to three independent forms; like Go, this port tries all three
+  in priority order and merges results by canonical post URL rather than
+  picking just one: a `schema.org` JSON-LD block walked recursively
+  through several wrapper keys, the already-rendered post DOM (found via
+  known selectors plus a fallback heuristic that walks up from any
+  anchor linking to a post URL), and — only when neither of those finds
+  anything — the page's own Open Graph/Twitter Card meta tags as a
+  single fallback post for the page's own URL. 6 new unit tests (193
+  total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `MastodonExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.13): a Rust port of
+  `server/extractor/extractors/mastodon/extractor.go`, decomposing a
+  Mastodon timeline/status page into one `Document` per visible toot —
+  the first extractor to use the `extra_documents`/`skip_indexing`
+  capability extension above. `matches` accepts a real Mastodon page
+  (fingerprinted the same way Go does, by a `"repository":
+  "mastodon/mastodon"` substring) or a toot document this extractor
+  already produced (a recursion guard via `metadata["type"] == "toot"`,
+  matching Go's own). `preview` is a direct port of Go's own admittedly
+  unfinished implementation (Go's source itself carries a `// TODO
+  enhance the toot preview` comment): an optional `<h1>`-derived heading
+  followed by the *entire original page's* raw HTML, sanitized —
+  reproduced faithfully rather than "fixed" beyond Go's own
+  currently-shipped behavior. 6 new unit tests (187 total in the crate),
+  clippy/fmt clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview

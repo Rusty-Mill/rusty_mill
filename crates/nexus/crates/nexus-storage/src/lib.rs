@@ -727,7 +727,7 @@ impl StorageEngine {
         schema: &nexus_types::bases::BaseSchema,
         seed_records: Vec<nexus_types::bases::BaseRecord>,
     ) -> Result<nexus_types::bases::Base, StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         if abs_dir.exists() {
             return Err(StorageError::CorruptFile {
                 path: path.to_string(),
@@ -770,7 +770,7 @@ impl StorageEngine {
         path: &str,
         mut record: nexus_types::bases::BaseRecord,
     ) -> Result<nexus_types::bases::BaseRecord, StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
 
         if record.id.is_empty() {
@@ -804,7 +804,7 @@ impl StorageEngine {
         record_id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<nexus_types::bases::BaseRecord, StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
 
         let record = base
@@ -842,7 +842,7 @@ impl StorageEngine {
         name: &str,
         definition: serde_json::Value,
     ) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         if base.schema.fields.contains_key(name) {
             return Err(StorageError::CorruptFile {
@@ -874,7 +874,7 @@ impl StorageEngine {
         definition: &serde_json::Value,
         migrate_values: bool,
     ) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         let old_def = base
             .schema
@@ -920,7 +920,7 @@ impl StorageEngine {
         if old_name == new_name {
             return Ok(());
         }
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         if base.schema.fields.contains_key(new_name) {
             return Err(StorageError::CorruptFile {
@@ -952,7 +952,7 @@ impl StorageEngine {
     ///
     /// Returns [`StorageError`] on I/O / parse / DB failure.
     pub fn base_property_delete(&self, path: &str, name: &str) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         if base.schema.fields.remove(name).is_none() {
             return Ok(());
@@ -977,7 +977,7 @@ impl StorageEngine {
         path: &str,
         view: nexus_types::bases::BaseView,
     ) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         if base.views.iter().any(|v| v.name == view.name) {
             return Err(StorageError::CorruptFile {
@@ -1004,7 +1004,7 @@ impl StorageEngine {
         path: &str,
         view: nexus_types::bases::BaseView,
     ) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         let slot = base
             .views
@@ -1024,7 +1024,7 @@ impl StorageEngine {
     ///
     /// Returns [`StorageError`] on I/O / parse / DB failure.
     pub fn base_view_delete(&self, path: &str, name: &str) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         let before = base.views.len();
         base.views.retain(|v| v.name != name);
@@ -1049,7 +1049,7 @@ impl StorageEngine {
     ///
     /// Returns [`StorageError`] on I/O / parse / DB failure.
     pub fn base_record_soft_delete(&self, path: &str, record_id: &str) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         let mut touched = false;
         for record in &mut base.records {
@@ -1074,7 +1074,7 @@ impl StorageEngine {
     ///
     /// Returns [`StorageError`] on I/O / parse / DB failure.
     pub fn base_record_restore(&self, path: &str, record_id: &str) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         let mut touched = false;
         for record in &mut base.records {
@@ -1104,7 +1104,7 @@ impl StorageEngine {
     ///
     /// Returns [`StorageError`] on I/O / parse / DB failure.
     pub fn base_record_delete(&self, path: &str, record_id: &str) -> Result<(), StorageError> {
-        let abs_dir = self.forge.root().join(path);
+        let abs_dir = resolve_within(self.forge.root(), path)?;
         let mut base = nexus_types::bases::load_base(&abs_dir)?;
         let before = base.records.len();
         base.records.retain(|r| r.id != record_id);

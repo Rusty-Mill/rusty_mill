@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let create_parents = args.contains(&"-p".to_string());
     let targets: Vec<&String> = args
         .iter()

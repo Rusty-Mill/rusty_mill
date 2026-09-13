@@ -79,12 +79,15 @@ impl InstanceInner {
         // `Drop`, after every use of `get_instance_proc_addr`/`fns`.
         let get_instance_proc_addr_raw =
             unsafe { get_proc_address(module, "vkGetInstanceProcAddr") };
-        let Some(get_instance_proc_addr_raw) = get_instance_proc_addr_raw else {
-            // SAFETY: `module` isn't used again after this.
-            unsafe {
-                let _ = free_library(module);
+        let get_instance_proc_addr_raw = match get_instance_proc_addr_raw {
+            Ok(Some(raw)) => raw,
+            Ok(None) | Err(_) => {
+                // SAFETY: `module` isn't used again after this.
+                unsafe {
+                    let _ = free_library(module);
+                }
+                return Err(VulkanError::MissingEntryPoint("vkGetInstanceProcAddr"));
             }
-            return Err(VulkanError::MissingEntryPoint("vkGetInstanceProcAddr"));
         };
         // SAFETY: `vkGetInstanceProcAddr` has this exact signature per the
         // Vulkan spec; `get_instance_proc_addr_raw` was resolved from the

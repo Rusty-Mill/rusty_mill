@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let mut num_lines: usize = 10;
     let mut files = Vec::new();
 

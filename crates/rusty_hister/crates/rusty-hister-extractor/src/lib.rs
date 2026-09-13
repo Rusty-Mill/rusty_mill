@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Twelve concrete extractors so far:**
+//! **All twenty built-in extractors are now implemented:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,15 +110,118 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
-//! - [`TwitterExtractor`] (capability inventory §4.5.15) — decomposes a
-//!   Twitter/X profile/feed/tweet page into one [`Document`] per visible
-//!   tweet. The first extractor to need a real `rusty-hister-core`
+//! - [`DiscourseExtractor`] (capability inventory §4.5.4) — extract *and*
+//!   preview for Discourse forum topic pages. A topic page can carry the
+//!   same content in up to three places at once — a (often
+//!   double-JSON-encoded) `#data-preloaded` hydration blob, the
+//!   already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block
+//!   — and, like Go, this port merges all three by post id/number rather
+//!   than picking just one, preferring each field's highest-fidelity
+//!   source by a `source_rank` (rendered DOM > preloaded JSON > JSON-LD,
+//!   matching Go's own ranking). Reuses `WikipediaExtractor`'s
+//!   reparse-as-fragment trick for cleaning/URL-rewriting a post body.
+//! - [`YtdlpExtractor`] (capability inventory §4.5.17) — extract *and*
+//!   preview for video-hosting pages (YouTube, Vimeo, and others), by
+//!   shelling out to the external `yt-dlp` binary rather than parsing
+//!   `document.html` at all — the only extractor in this crate that works
+//!   entirely from `document.url`. **Disabled by default**, matching Go:
+//!   this extractor is useless without `yt-dlp` installed, so opting a
+//!   chain into it is a deliberate administrative choice, not automatic.
+//!   Three deliberate simplifications from the Go original, documented in
+//!   the module doc rather than worked around: no thumbnail download (no
+//!   general-purpose HTTP client to reuse — `thumbnail_url` metadata
+//!   holds the original URL instead), no per-instance job-slot
+//!   concurrency limit or cancellation (no other extractor models
+//!   either), and preview renders HTML directly rather than Go's
+//!   structured JSON handed to a frontend template (`PreviewResponse` has
+//!   no template-hint field). The first extractor to use `rusty_json`'s
+//!   `serde` feature (`#[derive(serde::Deserialize)]` on `VideoInfo` and
+//!   friends) rather than walking `rusty_json::Value` by hand, since
+//!   `yt-dlp --dump-json`'s output is a fixed, known shape.
+//! - [`MarkdownExtractor`] (capability inventory §4.5.1) and
+//!   [`OrgModeExtractor`] (§4.5.2) — preview-only, structurally identical
+//!   twins for locally indexed Markdown/Org files. Both are trivial by
+//!   design: `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+//!   `rusty-hister-indexer`'s future job, not this crate's) already
+//!   renders the source to HTML and stores it in `document.html` at
+//!   index time, so each extractor's only job is to sanitize and return
+//!   whatever HTML is already there — no markdown/org-mode-parsing
+//!   dependency of its own, since adding one here would just duplicate
+//!   work the indexer already has to do.
+//! - [`NotionExtractor`] (capability inventory §4.5.16) — extract *and*
+//!   preview for Notion pages on `notion.so` and `*.notion.site`. Notion
+//!   serves an empty SPA shell over plain HTTP and only renders content
+//!   client-side, so this only produces real output when `document.html`
+//!   was captured by a JavaScript-rendering crawler backend — a
+//!   *production* dependency on how the document was crawled, not a
+//!   dependency of this module's own code on the crawler: like every
+//!   other extractor here, it only ever reads `document.html`. When the
+//!   rendered block tree isn't present, `extract`/`preview` report
+//!   `Abort` rather than `Fallback`, matching Go's own
+//!   `AbortExtraction`/`AbortPreview`. Notion's rendered DOM nests
+//!   presentational wrapper `<div>`s deeply; a single substring-attribute
+//!   selector (`[class*="notion-"][class*="-block"]`, identical to Go's
+//!   own `goquery` selector) finds every block at any depth, so both the
+//!   text and HTML walks skip a match whose own ancestor also matches to
+//!   avoid double-counting a block's children. List/heading/quote/
+//!   paragraph blocks render via plain-text extraction before escaping,
+//!   exactly like Go's own `writeTag`/list handling — so an inline
+//!   `<a href>` inside one of those is flattened to text, not preserved
+//!   as a link; only the image block's `src` attribute is read directly
+//!   and thus round-trips through URL rewriting.
+//! - [`ReadabilityExtractor`] (capability inventory §4.4) — extract *and*
+//!   preview for any web page, using the [`readabilityrs`] crate (a Rust
+//!   port of Mozilla's Readability.js — the same algorithm family Go's
+//!   own `codeberg.org/readeck/go-readability/v2` dependency belongs to)
+//!   to strip navigation, ads, and other boilerplate down to the main
+//!   article content. `matches` always returns `true`, like
+//!   [`BasicExtractor`]; the real chain places this extractor right
+//!   before `Basic`, a better-quality attempt that runs first with
+//!   `Basic` as the true last resort. Go's `readability.FromReader` folds
+//!   URL validation and article extraction into one error path;
+//!   `readabilityrs` splits them, so this port maps a URL-parse failure
+//!   to `Abort` (matching Go's own separate `url.Parse` failure) and a
+//!   malformed-HTML error or no-article-found result to `Fallback`
+//!   (matching Go's `FromReader` error path). Two Go metadata fields have
+//!   no `readabilityrs` equivalent and are deliberately not reproduced
+//!   rather than silently dropped: a favicon URL and a `modified`
+//!   timestamp — documented in the module doc, not worked around.
+//! - [`MastodonExtractor`] (capability inventory §4.5.13) — decomposes a
+//!   Mastodon timeline/status page into one [`Document`] per visible
+//!   toot. The first extractor to need a real `rusty-hister-core`
 //!   capability extension: [`Document::extra_documents`]/
 //!   [`Document::skip_indexing`], two new additive fields (empty/`false`
 //!   by default, so every prior extractor is unaffected) mirroring Go's
 //!   own `Document.ExtraDocuments`/`SkipIndexing` — a future indexer
-//!   walks `extra_documents` recursively, the same mechanism Mastodon and
-//!   Bluesky will reuse once ported. Unlike a multi-source merge, Twitter
+//!   walks `extra_documents` recursively, the same mechanism Bluesky and
+//!   Twitter will reuse once ported. `matches` accepts a real Mastodon
+//!   page (fingerprinted the same way Go does) or a toot document this
+//!   extractor already produced (a recursion guard via
+//!   `metadata["type"] == "toot"`, matching Go's own). `preview` is a
+//!   direct port of Go's own admittedly unfinished implementation (Go's
+//!   source itself carries a `// TODO enhance the toot preview` comment):
+//!   an optional `<h1>`-derived heading followed by the *entire original
+//!   page's* raw HTML, sanitized — reproduced faithfully rather than
+//!   "fixed" beyond Go's own currently-shipped behavior.
+//! - [`BlueskyExtractor`] (capability inventory §4.5.14) — decomposes a
+//!   Bluesky profile/feed/thread page into one [`Document`] per visible
+//!   post, the second extractor to reuse the
+//!   [`Document::extra_documents`]/[`Document::skip_indexing`] capability
+//!   extension `MastodonExtractor` established. Bluesky pages can carry
+//!   the same post data in up to three independent forms; like Go, this
+//!   port tries all three in priority order and merges results by
+//!   canonical post URL rather than picking just one: a `schema.org`
+//!   JSON-LD block walked recursively through several wrapper keys, the
+//!   already-rendered post DOM (found via known selectors plus a
+//!   fallback heuristic that walks up from any anchor linking to a post
+//!   URL), and — only when neither of those finds anything — the page's
+//!   own Open Graph/Twitter Card meta tags as a single fallback post for
+//!   the page's own URL.
+//! - [`TwitterExtractor`] (capability inventory §4.5.15) — decomposes a
+//!   Twitter/X profile/feed/tweet page into one [`Document`] per visible
+//!   tweet, the third and last extractor to reuse the
+//!   [`Document::extra_documents`]/[`Document::skip_indexing`] capability
+//!   extension Mastodon established. Unlike a multi-source merge, Twitter
 //!   has only one real source (the rendered DOM) plus a page-meta
 //!   fallback, and candidates are deduped by canonical URL (first match
 //!   wins) rather than merged field-by-field. Its own trick with no
@@ -132,9 +235,8 @@
 //!   and the ordinary relative-to-absolute URL pass can mutate the same
 //!   copy in sequence.
 //!
-//! Mastodon/Bluesky (capability inventory §4.5.13-14) can now reuse the
-//! same `extra_documents`/`skip_indexing` mechanism Twitter established;
-//! porting them just hasn't happened yet.
+//! All 20 built-in extractors (capability inventory §4.3-§4.5) are now
+//! implemented.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -144,13 +246,20 @@
 //! reading Hister's Go source, never copied).
 
 mod basic;
+mod bluesky;
 mod chatgpt;
+mod discourse;
 mod embeddedvideo;
 mod github;
 mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod markdown;
+mod mastodon;
+mod notion;
+mod org;
+mod readability;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -159,15 +268,23 @@ mod textutil;
 mod twitter;
 mod urlutil;
 mod wikipedia;
+mod ytdlp;
 
 pub use basic::BasicExtractor;
+pub use bluesky::BlueskyExtractor;
 pub use chatgpt::ChatGptExtractor;
+pub use discourse::DiscourseExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use markdown::MarkdownExtractor;
+pub use mastodon::MastodonExtractor;
+pub use notion::NotionExtractor;
+pub use org::OrgModeExtractor;
+pub use readability::ReadabilityExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
@@ -178,3 +295,4 @@ pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
 pub use twitter::TwitterExtractor;
 pub use wikipedia::WikipediaExtractor;
+pub use ytdlp::YtdlpExtractor;

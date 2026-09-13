@@ -16,8 +16,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Twitter extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-twitter`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-twitter)
 
-Twenty-second Phase 1 increment. The twelfth of the 20 built-in
-extractors.
+Twenty-ninth Phase 1 increment. The twentieth and last of the 20
+built-in extractors — Phase 1's extractor set is now complete.
 
 - **Added, core capability:** `Document::extra_documents`/
   `Document::skip_indexing` on `rusty-hister-core` — an additive
@@ -30,8 +30,8 @@ extractors.
 - **Added, extractor:** `TwitterExtractor` (capability inventory §4.5.15)
   — a port of `server/extractor/extractors/twitter/extractor.go`.
   Decomposes a Twitter/X profile/feed/tweet page into one `Document` per
-  visible tweet, the first extractor to use the capability extension
-  above.
+  visible tweet, the third and last extractor to use the capability
+  extension above.
 - **One source, deduped by URL:** unlike Bluesky's own multi-source
   merge, Twitter has only one real source (the rendered DOM) plus a
   page-meta fallback, and candidates are deduped by canonical URL (first
@@ -47,6 +47,199 @@ extractors.
   `t.co`-only anchor's *visible text* with the expanded URL — cosmetic
   only, since the more important `href` fix and the plain-text
   substitution both still happen.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Bluesky extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-bluesky`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-bluesky)
+
+Twenty-eighth Phase 1 increment. The nineteenth of the 20 built-in
+extractors.
+
+- **Added, core capability:** `Document::extra_documents`/
+  `Document::skip_indexing` on `rusty-hister-core` — an additive
+  extension (empty/`false` by default, every prior extractor unaffected)
+  mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+  directly rather than growing `ExtractOutcome` a new variant, so no
+  signature changes were needed anywhere else in the SDK. Resolves
+  `PROJECT-STATUS.md`'s "per-page multi-document extraction" open item
+  and unblocks Mastodon/Bluesky/Twitter.
+- **Added, extractor:** `BlueskyExtractor` (capability inventory §4.5.14)
+  — a port of `server/extractor/extractors/bluesky/extractor.go`.
+  Decomposes a Bluesky profile/feed/thread page into one `Document` per
+  visible post, the first extractor to use the capability extension
+  above.
+- **Three sources, one merge:** Bluesky pages can carry the same post
+  data in up to three independent forms; like Go, this port tries all
+  three in priority order and merges results by canonical post URL
+  rather than picking just one: a `schema.org` JSON-LD block walked
+  recursively through several wrapper keys, the already-rendered post
+  DOM (found via known selectors plus a fallback heuristic that walks up
+  from any anchor linking to a post URL), and — only when neither of
+  those finds anything — the page's own Open Graph/Twitter Card meta
+  tags as a single fallback post for the page's own URL.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Mastodon extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-mastodon`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-mastodon)
+
+Twenty-seventh Phase 1 increment. The eighteenth of the 20 built-in
+extractors.
+
+- **Added, core capability:** `Document::extra_documents`/
+  `Document::skip_indexing` on `rusty-hister-core` — an additive
+  extension (empty/`false` by default, every prior extractor unaffected)
+  mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+  directly rather than growing `ExtractOutcome` a new variant, so no
+  signature changes were needed anywhere else in the SDK. Resolves
+  `PROJECT-STATUS.md`'s "per-page multi-document extraction" open item
+  and unblocks Mastodon/Bluesky/Twitter.
+- **Added, extractor:** `MastodonExtractor` (capability inventory
+  §4.5.13) — a port of
+  `server/extractor/extractors/mastodon/extractor.go`. Decomposes a
+  Mastodon timeline/status page into one `Document` per visible toot,
+  the first extractor to use the capability extension above.
+- **Recursion guard:** `matches` accepts a real Mastodon page
+  (fingerprinted the same way Go does) or a toot document this extractor
+  already produced (`metadata["type"] == "toot"`, matching Go's own),
+  so a future indexer re-running the chain over each `extra_documents`
+  entry doesn't re-explode an already-extracted toot.
+- **Faithful, not "fixed":** `preview` is a direct port of Go's own
+  admittedly unfinished implementation (Go's source itself carries a
+  `// TODO enhance the toot preview` comment): an optional
+  `<h1>`-derived heading followed by the *entire original page's* raw
+  HTML, sanitized.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Readability extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-readability`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-readability)
+
+Twenty-sixth Phase 1 increment. The seventeenth of the 20 built-in extractors.
+
+- **Added:** `ReadabilityExtractor` (capability inventory §4.4) — a port
+  of the `readabilityExtractor` in `server/extractor/extractor.go`.
+  Extract and preview for any web page via the `readabilityrs` crate (a
+  Rust port of Mozilla's Readability.js — the same algorithm family Go's
+  own `go-readability` dependency belongs to), stripping navigation, ads,
+  and other boilerplate down to the main article content. `matches`
+  always returns `true`, like `BasicExtractor`; the real chain places
+  this extractor right before `Basic`.
+- **Dependency decision, by explicit user choice:** `readabilityrs`
+  pulls in `scraper 0.25`/`ego-tree 0.10`, a major version ahead of this
+  crate's own `0.21`/`0.9` pins used by 8 existing extractors. Both
+  versions now coexist in the dependency tree (extra compile time/disk,
+  zero risk to the existing extractors) rather than bumping the existing
+  pin or hand-rolling the algorithm.
+- **Error-shape adaptation:** Go's `readability.FromReader` folds URL
+  validation and article extraction into one error path; `readabilityrs`
+  splits them, so this port maps a URL-parse failure to `Abort` (matching
+  Go's own separate `url.Parse` failure) and a malformed-HTML error or
+  no-article-found result to `Fallback` (matching Go's `FromReader` error
+  path).
+- **Honest gaps:** two Go metadata fields (a favicon URL, a `modified`
+  timestamp) have no `readabilityrs` equivalent and are deliberately not
+  reproduced rather than silently dropped.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Notion extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-notion`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-notion)
+
+Twenty-fifth Phase 1 increment. The sixteenth of the 20 built-in extractors.
+
+- **Added:** `NotionExtractor` (capability inventory §4.5.16) — a port of
+  `server/extractor/extractors/notion/notion.go`. Extract and preview for
+  Notion pages on `notion.so` and `*.notion.site`.
+- **Unblocked, not blocked:** previously flagged as waiting on the
+  JS-rendering crawler backend; re-reading Go's source shows the
+  extractor code itself only ever reads `document.html`, like every
+  other extractor here, so the crawler dependency is a *production* one
+  (whether that field holds real rendered content, since Notion serves
+  an empty SPA shell over plain HTTP), not a code dependency. Reports
+  `Abort` rather than `Fallback` when the rendered block tree isn't
+  present, matching Go's own `AbortExtraction`/`AbortPreview`.
+- **One selector, any depth:** Notion's rendered DOM nests presentational
+  wrapper `<div>`s deeply; a single substring-attribute selector
+  (`[class*="notion-"][class*="-block"]`, identical to Go's own
+  `goquery` selector) finds every block at any depth, so both the text
+  and HTML walks skip a match whose own ancestor also matches to avoid
+  double-counting a block's children.
+- **A faithful lossy quirk:** list/heading/quote/paragraph blocks render
+  via plain-text extraction before escaping, exactly like Go's own
+  `writeTag`/list handling — so an inline `<a href>` inside one of those
+  is flattened to text, not preserved as a link; only the image block's
+  `src` attribute is read directly and thus round-trips through URL
+  rewriting.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Markdown and Org extractors
+**2026-09-13** · branch [`claude/hister-phase1-extractor-markdown-org`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-markdown-org)
+
+Twenty-fourth Phase 1 increment. The fourteenth and fifteenth of the 20
+built-in extractors.
+
+- **Added:** `MarkdownExtractor` (capability inventory §4.5.1) and
+  `OrgModeExtractor` (§4.5.2) — ports of
+  `server/extractor/extractors/{markdown/markdown,org/org}.go`.
+  Preview-only, structurally identical twins for locally indexed
+  Markdown/Org files.
+- **No new dependency needed, correcting an earlier assumption:**
+  `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there — no markdown/org-mode parser belongs in this crate at
+  all.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Ytdlp extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-ytdlp`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-ytdlp)
+
+Twenty-third Phase 1 increment. The thirteenth of the 20 built-in extractors.
+
+- **Added:** `YtdlpExtractor` (capability inventory §4.5.17) — a port of
+  `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`.
+  Extract and preview for video-hosting pages (YouTube, Vimeo, and
+  others), by shelling out to the external `yt-dlp` binary rather than
+  parsing `document.html` at all — the only extractor in this crate that
+  works entirely from `document.url`. Disabled by default, matching Go,
+  since it's useless without `yt-dlp` installed.
+- **Three deliberate simplifications** from the Go original, documented
+  rather than worked around: no thumbnail download (no general-purpose
+  HTTP client in this cluster to reuse — `rusty_http` is a sans-IO
+  protocol layer with no client; stores `thumbnail_url` instead of Go's
+  base64-embedded image data), no per-instance job-slot concurrency limit
+  or cancellation, and preview renders HTML directly rather than Go's
+  structured JSON handed to a frontend template.
+- **New trick:** the first extractor to use `rusty_json`'s `serde`
+  feature (`#[derive(serde::Deserialize)]`) rather than walking
+  `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is a
+  fixed, known shape.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Discourse extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-discourse`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-discourse)
+
+Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+
+- **Added:** `DiscourseExtractor` (capability inventory §4.5.4) — a port of
+  `server/extractor/extractors/discourse/discourse.go`. Extract and
+  preview for Discourse forum topic pages.
+- **Three sources, one merge:** like Reddit, a topic page can carry the
+  same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block.
+  Like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking).
+- **Reused, not reinvented:** `WikipediaExtractor`'s reparse-as-fragment
+  trick for cleaning/URL-rewriting a post body.
 
 ---
 

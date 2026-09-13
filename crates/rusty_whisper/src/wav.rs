@@ -7,6 +7,26 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+/// Sane ceiling for a single RIFF chunk's declared size, matching
+/// `model.rs`'s `MAX_LEN` convention for untrusted length fields read off
+/// the wire/file. whisper.cpp's real WAV chunks (even hours of 16-bit PCM
+/// audio) fit comfortably under this; a chunk header claiming more is a
+/// corrupt or hostile file (e.g. a near-`u32::MAX` size), not a genuine
+/// audio chunk — reject it before allocating rather than attempting a
+/// multi-gigabyte `vec![0u8; size]`. This crate's `/inference` upload
+/// endpoint feeds untrusted bytes straight into `read_wav`/`WavStream::new`.
+const MAX_CHUNK_SIZE: usize = 1 << 28;
+
+fn check_chunk_size(size: usize, what: &str) -> io::Result<usize> {
+    if size > MAX_CHUNK_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{what} chunk size {size} exceeds sane maximum ({MAX_CHUNK_SIZE})"),
+        ));
+    }
+    Ok(size)
+}
+
 pub struct WavData {
     pub sample_rate: u32,
     /// Mono samples in [-1, 1] (channels averaged).
@@ -51,6 +71,7 @@ impl<R: Read> WavStream<R> {
                             format!("fmt chunk too small ({size} bytes, need >= 16)"),
                         ));
                     }
+                    let size = check_chunk_size(size, "fmt")?;
                     let mut fmt = vec![0u8; size];
                     r.read_exact(&mut fmt)?;
                     format = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
@@ -76,7 +97,8 @@ impl<R: Read> WavStream<R> {
                     });
                 }
                 _ => {
-                    let mut skip = vec![0u8; size + (size & 1)];
+                    let skip_len = check_chunk_size(size, "unknown")? + (size & 1);
+                    let mut skip = vec![0u8; skip_len];
                     r.read_exact(&mut skip)?;
                 }
             }
@@ -144,6 +166,7 @@ pub fn read_wav(r: &mut impl Read) -> io::Result<WavData> {
                         format!("fmt chunk too small ({size} bytes, need >= 16)"),
                     ));
                 }
+                let size = check_chunk_size(size, "fmt")?;
                 let mut fmt = vec![0u8; size];
                 r.read_exact(&mut fmt)?;
                 format = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
@@ -152,13 +175,15 @@ pub fn read_wav(r: &mut impl Read) -> io::Result<WavData> {
                 bits = u16::from_le_bytes(fmt[14..16].try_into().unwrap());
             }
             b"data" => {
+                let size = check_chunk_size(size, "data")?;
                 let mut d = vec![0u8; size];
                 r.read_exact(&mut d)?;
                 data = Some(d);
             }
             _ => {
                 // Skip unknown chunk (chunks are word-aligned).
-                let mut skip = vec![0u8; size + (size & 1)];
+                let skip_len = check_chunk_size(size, "unknown")? + (size & 1);
+                let mut skip = vec![0u8; skip_len];
                 r.read_exact(&mut skip)?;
             }
         }
@@ -376,6 +401,88 @@ mod tests {
 
         assert!(read_wav(&mut Cursor::new(wav.clone())).is_err());
         assert!(WavStream::new(Cursor::new(wav)).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_fmt_chunk_in_read_wav() {
+        // `fmt ` declares a ~4 GiB payload — round 3 already guards the
+        // out-of-bounds-slice panic for a too-*small* fmt chunk (< 16
+        // bytes); this crafted ~20-byte file instead declares a chunk size
+        // near `u32::MAX`, which must be rejected before the loader
+        // attempts `vec![0u8; size]` rather than allocating multiple GiB.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&999u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+
+        let err = read_wav(&mut Cursor::new(wav)).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_oversized_fmt_chunk_in_wav_stream() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&999u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+
+        let err = WavStream::new(Cursor::new(wav)).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_oversized_data_chunk_in_read_wav() {
+        // A valid, small `fmt ` chunk followed by a `data` chunk declaring
+        // a ~4 GiB payload: must be rejected before `vec![0u8; size]`.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&999u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&32000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+
+        let err = read_wav(&mut Cursor::new(wav)).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_oversized_unknown_chunk_in_read_wav() {
+        // An unrecognized chunk (e.g. `LIST`) declaring a ~4 GiB payload
+        // hits the generic skip path, which must be capped too.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&999u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+
+        let err = read_wav(&mut Cursor::new(wav)).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_oversized_unknown_chunk_in_wav_stream() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&999u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+
+        let err = WavStream::new(Cursor::new(wav)).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

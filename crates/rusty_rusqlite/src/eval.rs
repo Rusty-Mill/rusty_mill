@@ -8,7 +8,7 @@
 //! signature — [`evaluate`] is now defined in terms of it (an empty
 //! registry), so both stay in sync from one implementation.
 
-use crate::dml_select::{BinaryOp, Expr, Select};
+use crate::dml_select::{BinaryOp, Expr, Select, MAX_EXPR_DEPTH};
 use crate::error::{Error, Result};
 use crate::value::Value;
 use std::cmp::Ordering;
@@ -26,7 +26,7 @@ pub type ScalarFn = dyn Fn(&[Value]) -> Result<Value>;
 /// (a different module, to avoid a circular dependency — see
 /// [`SubqueryFn`]'s own doc comment) can supply.
 pub fn evaluate(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<Value> {
-    evaluate_with_context(expr, column_names, row, &HashMap::new(), None)
+    evaluate_with_context(expr, column_names, row, &HashMap::new(), None, 0)
 }
 
 /// Resolves `name` to its index in `column_names`. Tries an exact match
@@ -74,7 +74,7 @@ pub fn evaluate_with_functions(
     row: &[Value],
     functions: &HashMap<String, Box<ScalarFn>>,
 ) -> Result<Value> {
-    evaluate_with_context(expr, column_names, row, functions, None)
+    evaluate_with_context(expr, column_names, row, functions, None, 0)
 }
 
 /// A subquery executor (issue #131): given a parsed, uncorrelated
@@ -112,7 +112,12 @@ pub(crate) fn evaluate_with_context(
     row: &[Value],
     functions: &HashMap<String, Box<ScalarFn>>,
     subqueries: Option<&SubqueryFn>,
+    depth: u32,
 ) -> Result<Value> {
+    if depth > MAX_EXPR_DEPTH {
+        return Err(Error::ExpressionTooDeep);
+    }
+    let depth = depth + 1;
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Column(name) => {
@@ -120,8 +125,8 @@ pub(crate) fn evaluate_with_context(
             Ok(row[idx].clone())
         }
         Expr::BinaryOp { op, left, right } => {
-            let l = evaluate_with_context(left, column_names, row, functions, subqueries)?;
-            let r = evaluate_with_context(right, column_names, row, functions, subqueries)?;
+            let l = evaluate_with_context(left, column_names, row, functions, subqueries, depth)?;
+            let r = evaluate_with_context(right, column_names, row, functions, subqueries, depth)?;
             let ord = compare_values(&l, &r);
             let result = match op {
                 BinaryOp::Eq => ord == Ordering::Equal,
@@ -139,7 +144,7 @@ pub(crate) fn evaluate_with_context(
                 .ok_or_else(|| Error::FunctionNotFound(name.clone()))?;
             let arg_values = args
                 .iter()
-                .map(|a| evaluate_with_context(a, column_names, row, functions, subqueries))
+                .map(|a| evaluate_with_context(a, column_names, row, functions, subqueries, depth))
                 .collect::<Result<Vec<Value>>>()?;
             f(&arg_values)
         }
@@ -150,6 +155,7 @@ pub(crate) fn evaluate_with_context(
                 row,
                 functions,
                 subqueries,
+                depth,
             )?)?;
             let r = to_bool3(evaluate_with_context(
                 right,
@@ -157,6 +163,7 @@ pub(crate) fn evaluate_with_context(
                 row,
                 functions,
                 subqueries,
+                depth,
             )?)?;
             let result = match (l, r) {
                 (Some(false), _) | (_, Some(false)) => Some(false),
@@ -172,6 +179,7 @@ pub(crate) fn evaluate_with_context(
                 row,
                 functions,
                 subqueries,
+                depth,
             )?)?;
             let r = to_bool3(evaluate_with_context(
                 right,
@@ -179,6 +187,7 @@ pub(crate) fn evaluate_with_context(
                 row,
                 functions,
                 subqueries,
+                depth,
             )?)?;
             let result = match (l, r) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
@@ -194,6 +203,7 @@ pub(crate) fn evaluate_with_context(
                 row,
                 functions,
                 subqueries,
+                depth,
             )?)?;
             Ok(bool3_to_value(v.map(|b| !b)))
         }
@@ -203,11 +213,13 @@ pub(crate) fn evaluate_with_context(
             escape,
             negate,
         } => {
-            let l = evaluate_with_context(left, column_names, row, functions, subqueries)?;
-            let p = evaluate_with_context(pattern, column_names, row, functions, subqueries)?;
+            let l = evaluate_with_context(left, column_names, row, functions, subqueries, depth)?;
+            let p =
+                evaluate_with_context(pattern, column_names, row, functions, subqueries, depth)?;
             let esc = match escape {
                 Some(e) => {
-                    match evaluate_with_context(e, column_names, row, functions, subqueries)? {
+                    match evaluate_with_context(e, column_names, row, functions, subqueries, depth)?
+                    {
                         Value::Null => return Ok(Value::Null),
                         other => Some(value_as_text(&other)?.chars().next().ok_or_else(|| {
                             Error::UnrecognizedStatement("ESCAPE must be one character".to_string())
@@ -229,8 +241,9 @@ pub(crate) fn evaluate_with_context(
             pattern,
             negate,
         } => {
-            let l = evaluate_with_context(left, column_names, row, functions, subqueries)?;
-            let p = evaluate_with_context(pattern, column_names, row, functions, subqueries)?;
+            let l = evaluate_with_context(left, column_names, row, functions, subqueries, depth)?;
+            let p =
+                evaluate_with_context(pattern, column_names, row, functions, subqueries, depth)?;
             Ok(match (value_as_text_opt(&l), value_as_text_opt(&p)) {
                 (Some(text), Some(pat)) => {
                     let matched = crate::like::glob_match(&text, &pat);
@@ -245,9 +258,9 @@ pub(crate) fn evaluate_with_context(
             high,
             negate,
         } => {
-            let v = evaluate_with_context(expr, column_names, row, functions, subqueries)?;
-            let lo = evaluate_with_context(low, column_names, row, functions, subqueries)?;
-            let hi = evaluate_with_context(high, column_names, row, functions, subqueries)?;
+            let v = evaluate_with_context(expr, column_names, row, functions, subqueries, depth)?;
+            let lo = evaluate_with_context(low, column_names, row, functions, subqueries, depth)?;
+            let hi = evaluate_with_context(high, column_names, row, functions, subqueries, depth)?;
             if v == Value::Null || lo == Value::Null || hi == Value::Null {
                 return Ok(Value::Null);
             }
@@ -256,14 +269,15 @@ pub(crate) fn evaluate_with_context(
             Ok(bool3_to_value(Some(matched != *negate)))
         }
         Expr::InList { expr, list, negate } => {
-            let x = evaluate_with_context(expr, column_names, row, functions, subqueries)?;
+            let x = evaluate_with_context(expr, column_names, row, functions, subqueries, depth)?;
             if x == Value::Null {
                 return Ok(Value::Null);
             }
             let mut found = false;
             let mut saw_null = false;
             for item in list {
-                let v = evaluate_with_context(item, column_names, row, functions, subqueries)?;
+                let v =
+                    evaluate_with_context(item, column_names, row, functions, subqueries, depth)?;
                 if v == Value::Null {
                     saw_null = true;
                     continue;
@@ -298,7 +312,7 @@ pub(crate) fn evaluate_with_context(
                     "IN (SELECT ...) is not supported in this evaluation context".to_string(),
                 )
             })?;
-            let x = evaluate_with_context(expr, column_names, row, functions, subqueries)?;
+            let x = evaluate_with_context(expr, column_names, row, functions, subqueries, depth)?;
             if x == Value::Null {
                 return Ok(Value::Null);
             }
@@ -366,14 +380,21 @@ pub(crate) fn evaluate_with_context(
                     row,
                     functions,
                     subqueries,
+                    depth,
                 )?),
                 None => None,
             };
             for (cond, result) in branches {
                 let matched = match &operand_value {
                     Some(ov) => {
-                        let cv =
-                            evaluate_with_context(cond, column_names, row, functions, subqueries)?;
+                        let cv = evaluate_with_context(
+                            cond,
+                            column_names,
+                            row,
+                            functions,
+                            subqueries,
+                            depth,
+                        )?;
                         // Simple-form matching is `=` comparison; a NULL
                         // operand or NULL WHEN value never matches (same
                         // "unknown isn't true" rule as every other
@@ -383,17 +404,32 @@ pub(crate) fn evaluate_with_context(
                             && compare_values(ov, &cv) == Ordering::Equal
                     }
                     None => {
-                        let cv =
-                            evaluate_with_context(cond, column_names, row, functions, subqueries)?;
+                        let cv = evaluate_with_context(
+                            cond,
+                            column_names,
+                            row,
+                            functions,
+                            subqueries,
+                            depth,
+                        )?;
                         to_bool3(cv)?.unwrap_or(false)
                     }
                 };
                 if matched {
-                    return evaluate_with_context(result, column_names, row, functions, subqueries);
+                    return evaluate_with_context(
+                        result,
+                        column_names,
+                        row,
+                        functions,
+                        subqueries,
+                        depth,
+                    );
                 }
             }
             match else_result {
-                Some(e) => evaluate_with_context(e, column_names, row, functions, subqueries),
+                Some(e) => {
+                    evaluate_with_context(e, column_names, row, functions, subqueries, depth)
+                }
                 None => Ok(Value::Null),
             }
         }
@@ -441,6 +477,7 @@ pub(crate) fn evaluate_bool_with_context(
         row,
         functions,
         subqueries,
+        0,
     )?)
 }
 
@@ -994,5 +1031,22 @@ mod tests {
             evaluate_with_functions(&expr, &cols(), &[], &functions),
             Err(Error::FunctionNotFound("MISSING".into()))
         );
+    }
+
+    #[test]
+    fn hand_built_expr_deeper_than_the_parser_would_ever_produce_is_rejected() {
+        // `Expr`/`evaluate` are public API, so nothing stops a caller
+        // from hand-constructing a tree far deeper than
+        // `dml_select::MAX_EXPR_DEPTH` -- entirely bypassing the
+        // parser's own recursion guard. 10,000 nested `Expr::Not` is far
+        // past that cap but far below anything that would itself
+        // overflow the test harness's stack -- the evaluator must bail
+        // with `Error::ExpressionTooDeep` well before that, rather than
+        // recursing through `evaluate_with_context` once per level.
+        let mut expr = lit(1);
+        for _ in 0..10_000 {
+            expr = Expr::Not(Box::new(expr));
+        }
+        assert_eq!(evaluate(&expr, &cols(), &[]), Err(Error::ExpressionTooDeep));
     }
 }
