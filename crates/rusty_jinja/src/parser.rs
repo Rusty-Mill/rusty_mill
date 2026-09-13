@@ -17,8 +17,9 @@ pub struct Parser {
 
 type PResult<T> = Result<T, &'static str>;
 
-/// Cap on nested parenthesized groups, chained `not`s, and nested call/
-/// filter argument lists. Each level of paren nesting re-enters the full
+/// Cap on nested parenthesized groups, chained `not`s, chained unary
+/// negation, nested bracket-index expressions, and nested call/filter
+/// argument lists. Each level of paren nesting re-enters the full
 /// eight-function precedence chain (`parse_or` through `parse_primary`),
 /// not just one frame, so this is deliberately much lower than
 /// `rusty_regx`'s `MAX_NESTING_DEPTH` (250) — 64 mirrors the same
@@ -235,7 +236,12 @@ impl Parser {
                 }
                 Token::LBracket => {
                     self.advance();
+                    self.depth += 1;
+                    if self.depth > MAX_NESTING_DEPTH {
+                        return Err("expression nesting exceeds the maximum depth");
+                    }
                     let index = self.parse_expr()?;
+                    self.depth -= 1;
                     self.expect(&Token::RBracket)?;
                     expr = match index {
                         Expr::Str(s) => Expr::Attr(Box::new(expr), s),
@@ -290,11 +296,19 @@ impl Parser {
                 "none" => Ok(Expr::None),
                 _ => Ok(Expr::Var(name)),
             },
-            Token::Minus => Ok(Expr::BinOp(
-                BinOp::Sub,
-                Box::new(Expr::Num(0.0)),
-                Box::new(self.parse_postfix()?),
-            )),
+            Token::Minus => {
+                self.depth += 1;
+                if self.depth > MAX_NESTING_DEPTH {
+                    return Err("expression nesting exceeds the maximum depth");
+                }
+                let inner = self.parse_postfix()?;
+                self.depth -= 1;
+                Ok(Expr::BinOp(
+                    BinOp::Sub,
+                    Box::new(Expr::Num(0.0)),
+                    Box::new(inner),
+                ))
+            }
             Token::LParen => {
                 self.depth += 1;
                 if self.depth > MAX_NESTING_DEPTH {
@@ -416,6 +430,30 @@ mod tests {
     #[test]
     fn deeply_chained_nots_error_instead_of_overflowing_the_stack() {
         let src = alloc::format!("{}true", "not ".repeat(50_000));
+        let result = Parser::new(tokenize(&src).unwrap()).parse_expr_to_eof();
+        assert_eq!(result, Err("expression nesting exceeds the maximum depth"));
+    }
+
+    #[test]
+    fn deeply_nested_bracket_index_errors_instead_of_overflowing_the_stack() {
+        // Tens of thousands of nested `[...]` indices would recurse
+        // `parse_postfix` -> `parse_expr` -> ... -> `parse_postfix` once
+        // per level with no depth guard, overflowing the native stack and
+        // aborting the process. With the guard this must return a clean
+        // `Err` instead.
+        let src = alloc::format!("{}0{}", "a[".repeat(50_000), "]".repeat(50_000));
+        let result = Parser::new(tokenize(&src).unwrap()).parse_expr_to_eof();
+        assert_eq!(result, Err("expression nesting exceeds the maximum depth"));
+    }
+
+    #[test]
+    fn deeply_chained_unary_minus_errors_instead_of_overflowing_the_stack() {
+        // Tens of thousands of chained unary `-` would recurse
+        // `parse_primary` -> `parse_postfix` -> `parse_primary` once per
+        // level with no depth guard, overflowing the native stack and
+        // aborting the process. With the guard this must return a clean
+        // `Err` instead.
+        let src = alloc::format!("{}1", "-".repeat(50_000));
         let result = Parser::new(tokenize(&src).unwrap()).parse_expr_to_eof();
         assert_eq!(result, Err("expression nesting exceeds the maximum depth"));
     }

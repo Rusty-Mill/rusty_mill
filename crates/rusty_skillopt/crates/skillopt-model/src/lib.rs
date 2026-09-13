@@ -3,6 +3,7 @@ pub mod anthropic;
 pub mod azure_openai;
 pub mod claude_cli;
 pub mod factory;
+mod http;
 pub mod mock;
 pub mod openai_compat;
 

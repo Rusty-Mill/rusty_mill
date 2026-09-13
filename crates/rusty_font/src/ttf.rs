@@ -1322,6 +1322,66 @@ mod tests {
     }
 
     #[test]
+    fn cff_glyph_outline_rejects_a_bounded_depth_branching_subroutine_bomb() {
+        // A chain of CHAIN_LEN distinct global subroutines: subr[i] calls
+        // subr[i + 1] FANOUT times in sequence, and only subr[i + 1] --
+        // never itself -- so actual call nesting never exceeds CHAIN_LEN
+        // (== Interpreter::MAX_DEPTH). That matters because a *literal*
+        // self-recursive subroutine would hit the depth cap on its very
+        // first (deepest) recursive path, and that `None` propagates all
+        // the way back up through every enclosing `run()` via `?` --
+        // aborting immediately, in roughly linear work. This chain never
+        // trips that early-abort, yet each of its CHAIN_LEN levels still
+        // fans out to FANOUT further calls before returning normally, so
+        // total charstring executions are FANOUT^(CHAIN_LEN - 1) -- about
+        // 10^9 for FANOUT = CHAIN_LEN = 10 -- all of which a depth cap
+        // alone lets run to completion. Only a separate total-operation
+        // budget can bound this.
+        const FANOUT: i32 = 10;
+        const CHAIN_LEN: i32 = 10;
+
+        // subr_bias(10) per the Type 2 spec (fewer than 1240 subrs).
+        let push_index = |idx: i32| -> u8 { (idx + 32) as u8 };
+
+        let mut subrs: Vec<Vec<u8>> = Vec::new();
+        for i in 0..CHAIN_LEN {
+            if i == CHAIN_LEN - 1 {
+                subrs.push(Vec::new()); // leaf: no further calls
+            } else {
+                let mut body = Vec::new();
+                for _ in 0..FANOUT {
+                    body.push(push_index(i + 1));
+                    body.push(29); // callgsubr
+                }
+                subrs.push(body);
+            }
+        }
+        let subr_refs: Vec<&[u8]> = subrs.iter().map(|s| s.as_slice()).collect();
+
+        // Main charstring: call subr[0] once.
+        let charstring: alloc::vec::Vec<u8> = alloc::vec![push_index(0), 29];
+
+        let cff = build_cff_table(&[&charstring], &subr_refs, &[]);
+        let font =
+            Font::parse(&build_otto_font(&cff, 1)).expect("synthetic OTTO font should parse");
+
+        let start = std::time::Instant::now();
+        let outline = font.glyph_outline(0);
+        let elapsed = start.elapsed();
+
+        assert!(
+            outline.is_none(),
+            "a branching (but depth-bounded) subroutine bomb should be rejected by a total \
+             per-glyph operation budget, not merely capped by nesting depth"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "glyph_outline should reject the operation-budget-exceeding charstring quickly, \
+             took {elapsed:?} instead"
+        );
+    }
+
+    #[test]
     fn parses_a_real_system_font_and_reports_sane_metadata() {
         let Some(bytes) = load_system_font("arial.ttf") else {
             eprintln!("skipping: arial.ttf not found on this machine");

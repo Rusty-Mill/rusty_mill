@@ -1,6 +1,6 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s twelfth
+Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s thirteenth
 concrete extractor, Notion — extract and preview for Notion pages,
 re-assessed as implementable now rather than blocked on the JS-rendering
 crawler backend: the extractor code itself only ever reads
@@ -8,9 +8,14 @@ crawler backend: the extractor code itself only ever reads
 a *production* one (whether that field holds real rendered content), not
 a code dependency. Reports `Abort` rather than `Fallback` when the
 rendered block tree isn't present, matching Go's own
-`AbortExtraction`/`AbortPreview`. Mastodon/Bluesky/Twitter flagged as
-blocked on a `rusty-hister-core` capability gap — Go's per-page
-multi-document extraction — rather than silently ported without it).
+`AbortExtraction`/`AbortPreview`. Follows the twelfth, Discourse — forum
+topic pages that can carry the same content in up to three places at once
+(a double-JSON-encoded `#data-preloaded` hydration blob, the rendered
+post DOM, and a `schema.org` JSON-LD block), merged by post id/number
+field-by-field via a per-source `source_rank` rather than picking just
+one source. Mastodon/Bluesky/Twitter flagged as blocked on a
+`rusty-hister-core` capability gap — Go's per-page multi-document
+extraction — rather than silently ported without it).
 
 ## Where this is
 
@@ -193,6 +198,16 @@ licensing policy) are settled. Three crates now have real implementation:
   element copies only the kept nodes into a fresh `ego_tree` fragment
   (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
   text isn't double-counted into its parent's.
+  **`DiscourseExtractor`** (capability inventory §4.5.4) — extract *and*
+  preview for Discourse forum topic pages. Like Reddit, a topic page can
+  carry the same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block —
+  and, like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking). Reuses `WikipediaExtractor`'s reparse-as-fragment trick
+  for cleaning/URL-rewriting a post body.
   **`NotionExtractor`** (capability inventory §4.5.16) — extract *and*
   preview for Notion pages on `notion.so` and `*.notion.site`. Notion
   serves an empty SPA shell over plain HTTP and only renders content
@@ -509,7 +524,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | **Query layer complete** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions), and all of `user.go` (15 functions: account CRUD, Argon2id password hashing/verification, token issuance, admin toggling, raw rules-JSON get/set) — **all six Go model files' query layers are now ported**. 131 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior, and `user.go`'s create/authenticate/delete/token/rename/password/oauth/admin/rules behavior), clippy/fmt clean. |
-| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), `StackExchangeExtractor` (§4.5.7), `GoDocExtractor` (§4.5.8), `LobstersExtractor` (§4.5.10), `HackerNewsExtractor` (§4.5.11), `GitHubExtractor` (§4.5.9), `ChatGptExtractor` (§4.5.18), `BasicExtractor` (§4.4), `WikipediaExtractor` (§4.5.12), `RedditExtractor` (§4.5.6), and `NotionExtractor` (§4.5.16) as concrete extractors, and shared support modules (`sanitizer`, `urlutil`, `textutil`) other extractors reuse. 146 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 8 built-in extractors that need real HTML parsing/sanitizing (Mastodon/Bluesky/Twitter additionally blocked on a core capability gap — see Open items). |
+| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5), `EmbeddedVideoExtractor` (§4.5.3), `StackExchangeExtractor` (§4.5.7), `GoDocExtractor` (§4.5.8), `LobstersExtractor` (§4.5.10), `HackerNewsExtractor` (§4.5.11), `GitHubExtractor` (§4.5.9), `ChatGptExtractor` (§4.5.18), `BasicExtractor` (§4.4), `WikipediaExtractor` (§4.5.12), `RedditExtractor` (§4.5.6), `DiscourseExtractor` (§4.5.4), and `NotionExtractor` (§4.5.16) as concrete extractors, and shared support modules (`sanitizer`, `urlutil`, `textutil`) other extractors reuse. 152 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 7 built-in extractors that need real HTML parsing/sanitizing (Mastodon/Bluesky/Twitter additionally blocked on a core capability gap — see Open items). |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |
