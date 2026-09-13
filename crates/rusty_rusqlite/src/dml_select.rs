@@ -10,6 +10,31 @@ use crate::ddl::ParseError;
 use crate::token::Token;
 use crate::value::Value;
 
+/// Cap on nested parenthesized boolean sub-expressions and chained `NOT`
+/// prefixes in the `WHERE`/`HAVING`/`CASE` boolean-expression grammar
+/// (`SelectParser::parse_or_expr`/`parse_and_expr`/`parse_not_expr`/
+/// `parse_bool_primary`), matching this workspace's `rusty_json::parser`
+/// `MAX_NESTING_DEPTH` guard pattern and value. Without it, attacker-
+/// controlled SQL text such as `WHERE ((((...(1=1)...))))` with thousands
+/// of nesting levels (or an equally long chain of `NOT`s) recurses the
+/// parser — and, since the evaluator walks the same tree, the evaluator
+/// too — until the stack overflows and the process aborts.
+///
+/// This is a fixed internal cap, not [`crate::config::Limit::ExprDepth`]
+/// (stored via `Connection::limit`/`set_limit` but otherwise unconsulted,
+/// same as this crate's other `Limit`/`DbConfig` variants) — wiring the
+/// parser to that per-connection value would need threading a
+/// `Connection` reference through every free-standing `parse_*` entry
+/// point in this module and `ddl.rs`'s `CHECK`/`DEFAULT` reuse of
+/// [`parse_expr_at`], not just this one already-vulnerable code path.
+///
+/// `pub(crate)`: `eval::evaluate_with_context` reuses the same value for
+/// its own recursion guard, since [`Expr`] and the `evaluate*` functions
+/// are public API — a caller can hand-build an `Expr` tree deeper than
+/// any this parser would ever produce and evaluate it directly, bypassing
+/// this cap entirely unless the evaluator enforces its own.
+pub(crate) const MAX_EXPR_DEPTH: u32 = 128;
+
 /// The result-column list of a `SELECT`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectColumns {
@@ -385,6 +410,7 @@ pub(crate) fn parse_select_at(tokens: &[Token], pos: usize) -> Result<(Select, u
         tokens,
         pos,
         in_having: false,
+        depth: 0,
     };
     p.expect_ident("SELECT")?;
 
@@ -532,6 +558,7 @@ pub fn parse_with_select(tokens: &[Token]) -> Result<WithSelect, ParseError> {
         tokens,
         pos: 0,
         in_having: false,
+        depth: 0,
     };
     p.expect_ident("WITH")?;
 
@@ -574,6 +601,7 @@ pub(crate) fn parse_expr_at(tokens: &[Token], pos: usize) -> Result<(Expr, usize
         tokens,
         pos,
         in_having: false,
+        depth: 0,
     };
     let expr = p.parse_or_expr()?;
     Ok((expr, p.pos))
@@ -594,6 +622,7 @@ pub(crate) fn parse_operand_at(tokens: &[Token], pos: usize) -> Result<(Expr, us
         tokens,
         pos,
         in_having: false,
+        depth: 0,
     };
     let expr = p.parse_operand()?;
     Ok((expr, p.pos))
@@ -605,6 +634,13 @@ struct SelectParser<'a> {
     /// Set only while parsing a `HAVING` clause (issue #125) — see
     /// [`SelectParser::parse_operand`]'s aggregate-reference branch.
     in_having: bool,
+    /// Current nesting depth of the boolean-expression grammar, guarded
+    /// against [`MAX_EXPR_DEPTH`] at the two points that actually
+    /// recurse: chained `NOT` in [`SelectParser::parse_not_expr`] and
+    /// parenthesized grouping in [`SelectParser::parse_bool_primary`].
+    /// `parse_or_expr`/`parse_and_expr` only loop over `OR`/`AND` at a
+    /// fixed stack depth, so they don't need their own counter.
+    depth: u32,
 }
 
 impl<'a> SelectParser<'a> {
@@ -858,13 +894,31 @@ impl<'a> SelectParser<'a> {
         Ok(left)
     }
 
+    /// Enters one level of boolean-expression nesting (a chained `NOT`
+    /// or a parenthesized group), erroring past [`MAX_EXPR_DEPTH`]
+    /// instead of letting the caller recurse further and overflow the
+    /// stack. Callers MUST pair a successful call with a matching
+    /// `self.depth -= 1` once their recursive body returns.
+    fn enter_expr_depth(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError::UnexpectedToken(
+                "expression nesting exceeds the maximum depth".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// `NOT expr` (right-recursive, so `NOT NOT x` parses) or a plain
     /// boolean primary.
     fn parse_not_expr(&mut self) -> Result<Expr, ParseError> {
         if self.peek_ident("NOT") {
             self.advance();
-            let inner = self.parse_not_expr()?;
-            Ok(Expr::Not(Box::new(inner)))
+            self.enter_expr_depth()?;
+            let inner = self.parse_not_expr();
+            self.depth -= 1;
+            Ok(Expr::Not(Box::new(inner?)))
         } else {
             self.parse_bool_primary()
         }
@@ -887,7 +941,10 @@ impl<'a> SelectParser<'a> {
     fn parse_bool_primary(&mut self) -> Result<Expr, ParseError> {
         if self.peek_punct("(") && !self.peek_ident_at(1, "SELECT") {
             self.advance();
-            let inner = self.parse_or_expr()?;
+            self.enter_expr_depth()?;
+            let inner = self.parse_or_expr();
+            self.depth -= 1;
+            let inner = inner?;
             self.expect_punct(")")?;
             Ok(inner)
         } else {
@@ -2176,5 +2233,40 @@ mod tests {
             },
             other => panic!("expected a top-level BinaryOp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deeply_nested_parenthesized_where_is_rejected_instead_of_overflowing_the_stack() {
+        // 10,000 levels of `(` ... `1=1` ... `)` nesting is far past
+        // MAX_EXPR_DEPTH but far below anything that would itself
+        // overflow the test harness's stack -- the parser must bail with
+        // an `Err` well before that, rather than recursing through
+        // parse_or_expr -> parse_and_expr -> parse_not_expr ->
+        // parse_bool_primary -> parse_or_expr ... once per nesting level.
+        let nesting = 10_000;
+        let sql = format!(
+            "SELECT a FROM t WHERE {}1=1{}",
+            "(".repeat(nesting),
+            ")".repeat(nesting)
+        );
+        let tokens = tokenize(&sql).unwrap();
+        assert!(matches!(
+            parse_select(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn chained_not_is_rejected_instead_of_overflowing_the_stack() {
+        // 10,000 chained `NOT`s recurses SelectParser::parse_not_expr
+        // directly into itself once per `NOT` -- a separate unbounded
+        // recursion vector from parenthesized grouping, guarded by the
+        // same depth counter.
+        let sql = format!("SELECT a FROM t WHERE {}1=1", "NOT ".repeat(10_000));
+        let tokens = tokenize(&sql).unwrap();
+        assert!(matches!(
+            parse_select(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
     }
 }

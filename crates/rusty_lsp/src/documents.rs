@@ -132,28 +132,38 @@ impl Documents {
     }
 
     /// Apply a document change (`textDocument/didChange`), patching in the
-    /// full-document or incremental edits in order. Returns `true` if the
-    /// change was applied.
+    /// full-document or incremental edits in order. Returns `Ok(true)` if
+    /// the change was applied.
     ///
-    /// Two kinds of change are ignored (returning `false`): a change for a
-    /// document that isn't open (matching how the rest of the framework
+    /// Two kinds of change are ignored (returning `Ok(false)`): a change for
+    /// a document that isn't open (matching how the rest of the framework
     /// treats messages referencing unknown state), and a change whose
     /// version is **older** than the stored version, which guards against
     /// replayed or reordered edits.
-    pub async fn did_change(&self, params: &DidChangeTextDocumentParams) -> bool {
+    ///
+    /// Returns `Err` without mutating further if an incremental edit's
+    /// range is inverted (`range.end` resolves before `range.start`) —
+    /// mirroring [`crate::text::apply_edits_with`]'s same check — instead
+    /// of panicking inside `String::replace_range`.
+    pub async fn did_change(&self, params: &DidChangeTextDocumentParams) -> crate::Result<bool> {
         let mut documents = self.inner.write().await;
         let Some(entry) = documents.get_mut(&params.text_document.uri) else {
-            return false;
+            return Ok(false);
         };
         if params.text_document.version < entry.document.version {
-            return false;
+            return Ok(false);
         }
         let document = &mut entry.document;
-        for change in &params.content_changes {
+        for (order, change) in params.content_changes.iter().enumerate() {
             match change.range {
                 Some(range) => {
                     let start = position_to_offset_with(&document.text, range.start, self.encoding);
                     let end = position_to_offset_with(&document.text, range.end, self.encoding);
+                    if start > end {
+                        return Err(crate::Error::invalid_params(format!(
+                            "textDocument/didChange: content change {order} has end before start"
+                        )));
+                    }
                     document.text.replace_range(start..end, &change.text);
                 }
                 None => document.text.clone_from(&change.text),
@@ -162,7 +172,7 @@ impl Documents {
         document.version = params.text_document.version;
         // The text changed; the cached line index no longer matches it.
         entry.index = OnceLock::new();
-        true
+        Ok(true)
     }
 
     /// Forget a closed document (`textDocument/didClose`), returning it.
@@ -311,7 +321,8 @@ mod tests {
                     text: "goodbye".to_owned(),
                 }],
             })
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(
             documents.text("file:///a").await.as_deref(),
@@ -344,7 +355,8 @@ mod tests {
                     },
                 ],
             })
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(
             documents.text("file:///a").await.as_deref(),
@@ -382,7 +394,8 @@ mod tests {
                     text: "v5 text".to_owned(),
                 }],
             })
-            .await;
+            .await
+            .unwrap();
 
         // A replayed older change must not clobber the newer state.
         let applied = documents
@@ -396,7 +409,8 @@ mod tests {
                     text: "stale".to_owned(),
                 }],
             })
-            .await;
+            .await
+            .unwrap();
         assert!(!applied);
         assert_eq!(
             documents.text("file:///a").await.as_deref(),
@@ -455,7 +469,8 @@ mod tests {
                     text: "y".to_owned(),
                 }],
             })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(documents.text("file:///a").await.as_deref(), Some("é😀y"));
     }
 
@@ -509,7 +524,8 @@ mod tests {
                     text: "zero ".to_owned(),
                 }],
             })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(
             documents.offset_at("file:///a", Position::new(1, 0)).await,
             Some(9)
@@ -525,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn change_to_unopened_document_is_ignored() {
         let documents = Documents::new();
-        documents
+        let applied = documents
             .did_change(&DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
                     uri: "file:///never-opened".into(),
@@ -536,9 +552,40 @@ mod tests {
                     text: "x".to_owned(),
                 }],
             })
+            .await
+            .unwrap();
+
+        assert!(!applied);
+        assert!(documents.get("file:///never-opened").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn inverted_incremental_range_is_rejected_instead_of_panicking() {
+        let documents = Documents::new();
+        documents.did_open(&open("file:///a", "hello world")).await;
+
+        // `range.end` (column 2) resolves before `range.start` (column 5):
+        // a buggy or malicious client sending this must not panic inside
+        // `String::replace_range`.
+        let result = documents
+            .did_change(&DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: "file:///a".into(),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(0, 5), Position::new(0, 2))),
+                    text: "x".to_owned(),
+                }],
+            })
             .await;
 
-        assert!(documents.get("file:///never-opened").await.is_none());
+        assert!(result.is_err());
+        // The document must remain untouched by the rejected edit.
+        assert_eq!(
+            documents.text("file:///a").await.as_deref(),
+            Some("hello world")
+        );
     }
 }
 

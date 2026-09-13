@@ -19,7 +19,7 @@ fn dest_for_source(dst_path: &Path, dst_is_dir: bool, src_path: &Path) -> Option
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let paths: Vec<&String> = args
         .iter()
         .skip(1)

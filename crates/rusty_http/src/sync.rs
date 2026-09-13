@@ -16,7 +16,10 @@
 
 use std::io::{Read, Write};
 
-use crate::body::{self, ChunkedDecoder, Framing, Progress, DEFAULT_MAX_LINE_LEN};
+use crate::body::{
+    self, ChunkedDecoder, Framing, Progress, DEFAULT_MAX_BODY_LEN, DEFAULT_MAX_LINE_LEN,
+};
+use crate::error::Error;
 use crate::head::{self, Outcome, RequestHead, ResponseHead};
 use crate::transport::{unexpected_eof, Result};
 
@@ -150,18 +153,31 @@ impl<T: Read + Write> SyncTransport<T> {
 
     /// Reads a whole body into memory according to `framing`. For
     /// [`Framing::Chunked`], uses [`Self::read_chunked_body`] with
-    /// [`crate::body::DEFAULT_MAX_LINE_LEN`] -- call that directly for a
+    /// [`crate::body::DEFAULT_MAX_LINE_LEN`]; for [`Framing::ContentLength`]
+    /// and [`Framing::Close`], uses [`Self::read_content_length_body`]/
+    /// [`Self::read_close_delimited_body`] with
+    /// [`crate::body::DEFAULT_MAX_BODY_LEN`] -- call those directly for a
     /// different bound.
     pub fn read_body(&mut self, framing: Framing) -> Result<Vec<u8>> {
         match framing {
             Framing::None => Ok(Vec::new()),
-            Framing::ContentLength(len) => self.read_content_length_body(len),
-            Framing::Close => self.read_close_delimited_body(),
+            Framing::ContentLength(len) => self.read_content_length_body(len, DEFAULT_MAX_BODY_LEN),
+            Framing::Close => self.read_close_delimited_body(DEFAULT_MAX_BODY_LEN),
             Framing::Chunked => self.read_chunked_body(DEFAULT_MAX_LINE_LEN),
         }
     }
 
-    fn read_content_length_body(&mut self, len: u64) -> Result<Vec<u8>> {
+    /// Reads a `Content-Length`-framed body into memory, rejecting a
+    /// declared length over `max_body_len` **before** allocating anything
+    /// for it -- an untrusted peer's `Content-Length` header must not be
+    /// trusted to size a buffer, let alone to have that buffer actually
+    /// filled. See [`Self::read_body`], which uses
+    /// [`crate::body::DEFAULT_MAX_BODY_LEN`]; call this directly for a
+    /// different bound.
+    pub fn read_content_length_body(&mut self, len: u64, max_body_len: u64) -> Result<Vec<u8>> {
+        if len > max_body_len {
+            return Err(Error::BodyTooLarge.into());
+        }
         // Cap the *initial* reservation regardless of the declared length
         // (which an untrusted peer controls) -- the `Vec` still grows to
         // fit the real body via `extend_from_slice`, this just avoids
@@ -184,12 +200,22 @@ impl<T: Read + Write> SyncTransport<T> {
         Ok(out)
     }
 
-    fn read_close_delimited_body(&mut self) -> Result<Vec<u8>> {
+    /// Reads a close-delimited body into memory, aborting once the
+    /// running total exceeds `max_body_len` -- unlike
+    /// [`Self::read_content_length_body`], there's no declared length to
+    /// check upfront, so the cap can only be enforced as bytes actually
+    /// accumulate. See [`Self::read_body`], which uses
+    /// [`crate::body::DEFAULT_MAX_BODY_LEN`]; call this directly for a
+    /// different bound.
+    pub fn read_close_delimited_body(&mut self, max_body_len: u64) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         loop {
             if self.start < self.end {
                 out.extend_from_slice(&self.buf[self.start..self.end]);
                 self.start = self.end;
+                if out.len() as u64 > max_body_len {
+                    return Err(Error::BodyTooLarge.into());
+                }
             }
             if self.fill_more()? == 0 {
                 return Ok(out);
@@ -523,6 +549,48 @@ mod tests {
         let head = t.read_request_head(8192).unwrap();
         let framing = body::request_framing(&head.headers).unwrap();
         assert!(t.read_body(framing).is_err());
+    }
+
+    #[test]
+    fn rejects_a_content_length_over_the_cap_before_reading_it() {
+        // The declared length is far past a tiny cap; no body bytes are
+        // even on the wire. If the cap weren't enforced up front, the
+        // read loop would try to fill it from the transport, hit an
+        // immediate EOF, and report `unexpected_eof` instead of
+        // `BodyTooLarge` -- so this also proves the rejection happens
+        // before a single read is attempted.
+        let wire = b"POST /a HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        let head = t.read_request_head(8192).unwrap();
+        let framing = body::request_framing(&head.headers).unwrap();
+        let Framing::ContentLength(len) = framing else {
+            panic!("expected Content-Length framing");
+        };
+        let err = t
+            .read_content_length_body(len, 1024)
+            .expect_err("a declared length over the cap must be rejected");
+        assert!(matches!(
+            err,
+            crate::transport::Error::Http(crate::error::Error::BodyTooLarge)
+        ));
+    }
+
+    #[test]
+    fn aborts_a_close_delimited_body_once_the_cap_is_exceeded() {
+        let mut wire = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
+        wire.extend(std::iter::repeat_n(b'x', 5000));
+        let mut t = SyncTransport::new(Loopback::new(&wire));
+        let head = t.read_response_head(8192).unwrap();
+        let framing =
+            body::response_framing(&head.headers, &Method::Get, StatusCode::from_u16(200)).unwrap();
+        assert_eq!(framing, Framing::Close);
+        let err = t
+            .read_close_delimited_body(1024)
+            .expect_err("a close-delimited body over the cap must be rejected");
+        assert!(matches!(
+            err,
+            crate::transport::Error::Http(crate::error::Error::BodyTooLarge)
+        ));
     }
 
     fn collect_all(mut reader: BodyReader<Loopback>) -> Vec<u8> {

@@ -129,6 +129,20 @@ fn write_bytes_field(writer: &mut Writer, value: Option<&[u8]>) {
     }
 }
 
+/// The fewest bytes a single [`Record`] can possibly encode as: a
+/// 1-byte length varint, a 1-byte `attributes`, three more 1-byte
+/// varints (`timestampDelta`, `offsetDelta`, `keyLength` as `-1`),
+/// `valueLength` as `-1` (1 byte), and `headersCount` as `0` (1 byte).
+/// Used to bound `records_count` against the buffer's actual
+/// remaining bytes before it drives a `Vec::with_capacity` call.
+const MIN_RECORD_SIZE: usize = 7;
+
+/// The fewest bytes a single record header entry can possibly encode
+/// as: `headerKeyLength` as `0` (1 byte) plus `headerValueLength` as
+/// `-1` (1 byte). Used the same way as [`MIN_RECORD_SIZE`], for a
+/// record's `header_count`.
+const MIN_HEADER_SIZE: usize = 2;
+
 /// Decodes a record batch v2 built by [`encode_batch`] -- exists so
 /// this module's own tests can round-trip and hand-verify the format,
 /// not because any real caller needs it (`ProduceResponse` never
@@ -157,6 +171,12 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Vec<Record>, CodecError> {
     if records_count < 0 {
         return Err(CodecError::InvalidArrayLength(records_count));
     }
+    if (records_count as usize).saturating_mul(MIN_RECORD_SIZE) > reader.remaining() {
+        return Err(CodecError::ArrayLengthExceedsBuffer(
+            records_count,
+            reader.remaining(),
+        ));
+    }
 
     let mut records = Vec::with_capacity(records_count as usize);
     for _ in 0..records_count {
@@ -175,6 +195,12 @@ fn decode_record(reader: &mut Reader) -> Result<Record, CodecError> {
     let header_count = read_varint(reader)?;
     if header_count < 0 {
         return Err(CodecError::InvalidArrayLength(header_count));
+    }
+    if (header_count as usize).saturating_mul(MIN_HEADER_SIZE) > reader.remaining() {
+        return Err(CodecError::ArrayLengthExceedsBuffer(
+            header_count,
+            reader.remaining(),
+        ));
     }
     let mut headers = Vec::with_capacity(header_count as usize);
     for _ in 0..header_count {
@@ -227,18 +253,27 @@ fn write_varlong(writer: &mut Writer, value: i64) {
     }
 }
 
+/// A varint/varlong needs at most this many continuation bytes to
+/// encode any `i64`/`u64` value (`ceil(64 / 7)`). Capped so a
+/// malformed byte stream with the continuation bit set past this
+/// point can't drive `shift` to an invalid (>= 64) bit-shift amount.
+const MAX_VARINT_BYTES: usize = 10;
+
 fn read_varlong(reader: &mut Reader) -> Result<i64, CodecError> {
     let mut result: u64 = 0;
     let mut shift = 0u32;
-    loop {
+    for i in 0..MAX_VARINT_BYTES {
         let byte = reader.read_u8()?;
+        if i == MAX_VARINT_BYTES - 1 && byte & 0x80 != 0 {
+            return Err(CodecError::MalformedVarint);
+        }
         result |= ((byte & 0x7f) as u64) << shift;
         if byte & 0x80 == 0 {
-            break;
+            return Ok(((result >> 1) as i64) ^ -((result & 1) as i64));
         }
         shift += 7;
     }
-    Ok(((result >> 1) as i64) ^ -((result & 1) as i64))
+    Err(CodecError::MalformedVarint)
 }
 
 fn write_varint(writer: &mut Writer, value: i32) {
@@ -431,5 +466,55 @@ mod tests {
         corrupted[last] ^= 0xFF;
         let recomputed_after_corruption = crc32c(&corrupted[21..]);
         assert_ne!(stored_crc, recomputed_after_corruption);
+    }
+
+    #[test]
+    fn decode_batch_rejects_a_records_count_of_i32_max_in_a_tiny_buffer() {
+        // A crafted batch declaring i32::MAX records but with no
+        // record bytes actually present must be rejected before it
+        // drives a multi-gigabyte `Vec::with_capacity` call.
+        let mut bytes = encode_batch(&[], 0);
+        let len = bytes.len();
+        bytes[len - 4..].copy_from_slice(&i32::MAX.to_be_bytes());
+        let err = decode_batch(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 0)
+        ));
+    }
+
+    #[test]
+    fn decode_record_rejects_a_header_count_of_i32_max_in_a_tiny_buffer() {
+        // Same shape of attack as the batch-level `records_count`
+        // check, but against a single record's `headersCount` field.
+        let mut body = Writer::new();
+        write_varint(&mut body, 0); // record length, unused by decode_record
+        body.write_u8(0); // attributes
+        write_varlong(&mut body, 0); // timestampDelta
+        write_varint(&mut body, 0); // offsetDelta
+        write_bytes_field(&mut body, None); // key
+        write_bytes_field(&mut body, None); // value
+        write_varint(&mut body, i32::MAX); // headersCount: huge, no headers follow
+        let bytes = body.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = decode_record(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 0)
+        ));
+    }
+
+    #[test]
+    fn read_varlong_rejects_a_malformed_continuation_chain_past_ten_bytes() {
+        // Ten bytes, each with the continuation bit set, demand an
+        // 11th byte -- more than any valid i64/u64 varint needs. Left
+        // unchecked, accumulating `shift` past 63 and shifting into it
+        // panics (`attempt to shift left with overflow`) instead of
+        // reporting a decode error.
+        let mut bytes = vec![0x80u8; 10];
+        bytes.push(0x00);
+        let mut reader = Reader::new(&bytes);
+        let err = read_varlong(&mut reader).unwrap_err();
+        assert!(matches!(err, CodecError::MalformedVarint));
     }
 }

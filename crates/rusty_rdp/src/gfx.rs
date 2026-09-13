@@ -1260,8 +1260,19 @@ impl Avc420MetaBlock {
         }
     }
 
+    /// `RFX_AVC420_METABLOCK` has no spec-mandated maximum, but a frame is
+    /// realistically composited from at most a few hundred regions; cap
+    /// well above that before trusting `count` for allocation.
+    const MAX_REGIONS: usize = 512;
+
     fn decode(r: &mut Reader<'_>) -> Result<Avc420MetaBlock> {
         let count = r.read_u32_le()? as usize;
+        if count > Self::MAX_REGIONS {
+            return Err(Error::InvalidValue {
+                field: "RFX_AVC420_METABLOCK numRegionRects",
+                value: count.to_string(),
+            });
+        }
         let mut region_rects = Vec::with_capacity(count);
         for _ in 0..count {
             region_rects.push(Rect16::decode(r)?);
@@ -2266,5 +2277,20 @@ mod tests {
         }
         .encode();
         assert!(Avc444BitmapStream::decode(&both).unwrap().stream2.is_some());
+    }
+
+    #[test]
+    fn avc420_meta_block_huge_region_count_is_rejected() {
+        let mut w = Writer::new();
+        w.write_u32_le(0xFFFF_FFFF); // declared numRegionRects far exceeds the cap
+        let bytes = w.into_vec();
+        let mut r = Reader::new(bytes.as_slice());
+        assert!(matches!(
+            Avc420MetaBlock::decode(&mut r).unwrap_err(),
+            Error::InvalidValue {
+                field: "RFX_AVC420_METABLOCK numRegionRects",
+                ..
+            }
+        ));
     }
 }

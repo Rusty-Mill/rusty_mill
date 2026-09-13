@@ -141,6 +141,13 @@ fn build_request_body(model: &str, messages: &[Message], opts: &ChatOptions) -> 
     format!("{{{}}}", fields.join(","))
 }
 
+/// Reject response bodies larger than this — a memory-exhaustion guard on
+/// the `Content-Length` header sent back by the connected LLM server,
+/// which is operator-configured but potentially compromised or SSRF'd.
+/// Matches `rusty_llama::server`'s own request-body cap, since that's the
+/// crate most likely to be listening on the other end of this connection.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Reads an HTTP/1.1 response's status line, headers (for
 /// `Content-Length`), then exactly that many body bytes.
 fn read_response(stream: &mut TcpStream) -> std::io::Result<(u16, String)> {
@@ -170,6 +177,12 @@ fn read_response(stream: &mut TcpStream) -> std::io::Result<(u16, String)> {
         }
     }
 
+    if content_length > MAX_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("response body too large ({content_length} bytes, max {MAX_BODY_BYTES})"),
+        ));
+    }
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
@@ -302,5 +315,28 @@ mod tests {
             .chat(&[Message::user("hi")], &ChatOptions::default())
             .unwrap_err();
         assert!(err.contains("connect to"));
+    }
+
+    #[test]
+    fn read_response_rejects_a_content_length_over_the_cap() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                MAX_BODY_BYTES + 1
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        let err = read_response(&mut client).unwrap_err();
+        // Pre-fix this hits `read_exact` on a short buffer instead, which
+        // fails with `UnexpectedEof` rather than the cap's `InvalidData` --
+        // proving the cap rejects the oversized length before ever trying
+        // to allocate `vec![0u8; content_length]` for it.
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("too large"), "{err}");
+        server.join().unwrap();
     }
 }

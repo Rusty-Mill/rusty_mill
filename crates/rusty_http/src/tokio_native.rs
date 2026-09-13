@@ -21,7 +21,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-use crate::body::{self, ChunkedDecoder, Framing, Progress, DEFAULT_MAX_LINE_LEN};
+use crate::body::{
+    self, ChunkedDecoder, Framing, Progress, DEFAULT_MAX_BODY_LEN, DEFAULT_MAX_LINE_LEN,
+};
+use crate::error::Error;
 use crate::head::{self, Outcome, RequestHead, ResponseHead};
 use crate::transport::{unexpected_eof, Result};
 
@@ -151,13 +154,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
     pub async fn read_body(&mut self, framing: Framing) -> Result<Vec<u8>> {
         match framing {
             Framing::None => Ok(Vec::new()),
-            Framing::ContentLength(len) => self.read_content_length_body(len).await,
-            Framing::Close => self.read_close_delimited_body().await,
+            Framing::ContentLength(len) => {
+                self.read_content_length_body(len, DEFAULT_MAX_BODY_LEN)
+                    .await
+            }
+            Framing::Close => self.read_close_delimited_body(DEFAULT_MAX_BODY_LEN).await,
             Framing::Chunked => self.read_chunked_body(DEFAULT_MAX_LINE_LEN).await,
         }
     }
 
-    async fn read_content_length_body(&mut self, len: u64) -> Result<Vec<u8>> {
+    /// Reads a `Content-Length`-framed body into memory. See
+    /// [`crate::sync::SyncTransport::read_content_length_body`].
+    pub async fn read_content_length_body(
+        &mut self,
+        len: u64,
+        max_body_len: u64,
+    ) -> Result<Vec<u8>> {
+        if len > max_body_len {
+            return Err(Error::BodyTooLarge.into());
+        }
         let cap = usize::try_from(len).unwrap_or(usize::MAX).min(1 << 20);
         let mut out = Vec::with_capacity(cap);
         while (out.len() as u64) < len {
@@ -174,12 +189,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
         Ok(out)
     }
 
-    async fn read_close_delimited_body(&mut self) -> Result<Vec<u8>> {
+    /// Reads a close-delimited body into memory. See
+    /// [`crate::sync::SyncTransport::read_close_delimited_body`].
+    pub async fn read_close_delimited_body(&mut self, max_body_len: u64) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         loop {
             if self.start < self.end {
                 out.extend_from_slice(&self.buf[self.start..self.end]);
                 self.start = self.end;
+                if out.len() as u64 > max_body_len {
+                    return Err(Error::BodyTooLarge.into());
+                }
             }
             if self.fill_more().await? == 0 {
                 return Ok(out);
@@ -530,6 +550,53 @@ mod tests {
         assert_eq!(framing, Framing::Close);
         let body = t.read_body(framing).await.unwrap();
         assert_eq!(body, b"whatever is left");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_content_length_over_the_cap_before_reading_it() {
+        // The declared length is far past a tiny cap; no body bytes are
+        // even on the wire. If the cap weren't enforced up front, the
+        // read loop would try to fill it from the transport, hit an
+        // immediate EOF, and report `unexpected_eof` instead of
+        // `BodyTooLarge` -- so this also proves the rejection happens
+        // before a single read is attempted.
+        let io = wired_with(b"POST /a HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n").await;
+        let mut t = AsyncTransport::new(io);
+        let head = t.read_request_head(8192).await.unwrap();
+        let framing = body::request_framing(&head.headers).unwrap();
+        let Framing::ContentLength(len) = framing else {
+            panic!("expected Content-Length framing");
+        };
+        let err = t
+            .read_content_length_body(len, 1024)
+            .await
+            .expect_err("a declared length over the cap must be rejected");
+        assert!(matches!(
+            err,
+            crate::transport::Error::Http(crate::error::Error::BodyTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn aborts_a_close_delimited_body_once_the_cap_is_exceeded() {
+        let mut wire = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
+        wire.extend(std::iter::repeat_n(b'x', 5000));
+        let (mut feeder, reader) = duplex(wire.len());
+        feeder.write_all(&wire).await.unwrap();
+        drop(feeder);
+        let mut t = AsyncTransport::new(reader);
+        let head = t.read_response_head(8192).await.unwrap();
+        let framing =
+            body::response_framing(&head.headers, &Method::Get, StatusCode::from_u16(200)).unwrap();
+        assert_eq!(framing, Framing::Close);
+        let err = t
+            .read_close_delimited_body(1024)
+            .await
+            .expect_err("a close-delimited body over the cap must be rejected");
+        assert!(matches!(
+            err,
+            crate::transport::Error::Http(crate::error::Error::BodyTooLarge)
+        ));
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod args;
 pub mod cat;
 pub mod ls;
 pub mod term_report;

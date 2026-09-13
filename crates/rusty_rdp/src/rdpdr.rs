@@ -678,10 +678,21 @@ impl ClientDeviceListAnnouncePdu {
         wrap(PAKID_CORE_DEVICELIST_ANNOUNCE, body.as_slice())
     }
 
+    /// `DR_CORE_DEVICELIST_ANNOUNCE_REQ` has no spec-mandated maximum, but
+    /// a real client redirects at most a few dozen drives/ports/printers;
+    /// cap well above that before trusting `count` for allocation.
+    const MAX_DEVICES: usize = 255;
+
     /// Decode from bytes.
     pub fn decode(buf: &[u8]) -> Result<ClientDeviceListAnnouncePdu> {
         let mut r = unwrap(buf, PAKID_CORE_DEVICELIST_ANNOUNCE)?;
         let count = r.read_u32_le()?;
+        if count as usize > Self::MAX_DEVICES {
+            return Err(Error::InvalidValue {
+                field: "DR_CORE_DEVICELIST_ANNOUNCE_REQ DeviceCount",
+                value: count.to_string(),
+            });
+        }
         let mut devices = Vec::with_capacity(count as usize);
         for _ in 0..count {
             devices.push(DeviceAnnounce::decode_from(&mut r)?);
@@ -3282,5 +3293,19 @@ mod tests {
         assert!(DeviceCloseResponsePdu::decode(&close_resp)
             .unwrap()
             .succeeded());
+    }
+
+    #[test]
+    fn client_device_list_announce_huge_count_is_rejected() {
+        let mut body = Writer::new();
+        body.write_u32_le(0xFFFF_FFFF); // declared DeviceCount far exceeds the cap
+        let buf = wrap(PAKID_CORE_DEVICELIST_ANNOUNCE, body.as_slice());
+        assert!(matches!(
+            ClientDeviceListAnnouncePdu::decode(&buf).unwrap_err(),
+            Error::InvalidValue {
+                field: "DR_CORE_DEVICELIST_ANNOUNCE_REQ DeviceCount",
+                ..
+            }
+        ));
     }
 }

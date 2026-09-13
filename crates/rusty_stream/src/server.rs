@@ -42,7 +42,7 @@ use crate::retention::Log;
 /// for. A client's declared length past this is rejected before any
 /// allocation or read of the body happens -- see this module's top-level
 /// docs.
-const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024; // 16 MiB
+pub(crate) const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024; // 16 MiB
 
 /// Everything a connection needs to dispatch a request — a `Log` and a
 /// `ConsumerOffsets`, each independently lockable. Cheap to clone (two
