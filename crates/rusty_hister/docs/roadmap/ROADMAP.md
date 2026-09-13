@@ -441,7 +441,7 @@ independent of ADR-0002/0003)
 - [x] `rusty-hister-extractor` (`TwitterExtractor`, §4.5.15): decomposes
       a Twitter/X profile/feed/tweet page into one `Document` per visible
       tweet, the third and last extractor to use the capability extension
-      above. Done — 6 new unit tests (199 total in the crate), clippy/fmt
+      above. Done — 6 new unit tests (204 total in the crate), clippy/fmt
       clean. Unlike a multi-source merge, Twitter has only one real
       source (the rendered DOM) plus a page-meta fallback, and candidates
       are deduped by canonical URL (first match wins) rather than merged
