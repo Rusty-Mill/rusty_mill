@@ -13,6 +13,36 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's GoDoc extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-godoc`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-godoc)
+
+Fourteenth Phase 1 increment. The fourth of the 20 built-in extractors —
+preview-only, and the first whose Go implementation needed a hand-rolled
+tokenizer/depth-tracker that `scraper`'s DOM-based API replaces outright.
+
+- **Added:** `GoDocExtractor` (capability inventory §4.5.8) — a port of
+  `server/extractor/extractors/godoc/godoc.go`. Renders pkg.go.dev's
+  `div.Documentation-content` element with its `href`/`src` attributes
+  resolved to absolute URLs, via `sanitizer`/`urlutil` from the previous
+  increment. Go finds that element with a hand-rolled tokenizer that
+  reconstructs HTML byte-by-byte while tracking tag-nesting depth
+  (`golang.org/x/net/html` has no CSS-selector API); since `scraper`
+  already builds a full DOM, the Rust port collapses this to a single
+  CSS class selector plus `ElementRef::html()` to serialize the matched
+  subtree — no manual depth-tracking needed.
+- **Behavior preserved deliberately:** when no matching element is
+  present, Go's tokenizer loop reaches end-of-input having never entered
+  the "in article" state, and `Preview` *succeeds* with empty content
+  rather than falling back. Reproduced faithfully rather than
+  "corrected" to a `Fallback`, since that's this extractor's real,
+  observable behavior in Go.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 77 passed (8 new for
+this increment), 0 failed; `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` both clean.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's StackExchange extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-stackexchange`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-stackexchange)
 
