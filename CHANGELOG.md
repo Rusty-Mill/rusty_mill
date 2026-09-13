@@ -9,6 +9,19 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `MarkdownExtractor` (capability inventory
+  §4.5.1) and `OrgModeExtractor` (§4.5.2) (`rusty_hister`'s Phase 1,
+  continued): Rust ports of
+  `server/extractor/extractors/{markdown/markdown,org/org}.go`,
+  preview-only, structurally identical twins for locally indexed
+  Markdown/Org files. Both turned out to need no markdown/org-mode-
+  parsing dependency at all — correcting an earlier assumption — since
+  `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there. 8 new unit tests (147 total in the crate), clippy/fmt
+  clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview

@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Thirteen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,6 +110,16 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`MarkdownExtractor`] (capability inventory §4.5.1) and
+//!   [`OrgModeExtractor`] (§4.5.2) — preview-only, structurally identical
+//!   twins for locally indexed Markdown/Org files. Both are trivial by
+//!   design: `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+//!   `rusty-hister-indexer`'s future job, not this crate's) already
+//!   renders the source to HTML and stores it in `document.html` at
+//!   index time, so each extractor's only job is to sanitize and return
+//!   whatever HTML is already there — no markdown/org-mode-parsing
+//!   dependency of its own, since adding one here would just duplicate
+//!   work the indexer already has to do.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -133,6 +143,8 @@ mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod markdown;
+mod org;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -149,6 +161,8 @@ pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use markdown::MarkdownExtractor;
+pub use org::OrgModeExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{

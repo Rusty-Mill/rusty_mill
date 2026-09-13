@@ -13,6 +13,27 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Markdown and Org extractors
+**2026-09-13** · branch [`claude/hister-phase1-extractor-markdown-org`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-markdown-org)
+
+Twenty-second Phase 1 increment. The twelfth and thirteenth of the 20
+built-in extractors.
+
+- **Added:** `MarkdownExtractor` (capability inventory §4.5.1) and
+  `OrgModeExtractor` (§4.5.2) — ports of
+  `server/extractor/extractors/{markdown/markdown,org/org}.go`.
+  Preview-only, structurally identical twins for locally indexed
+  Markdown/Org files.
+- **No new dependency needed, correcting an earlier assumption:**
+  `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there — no markdown/org-mode parser belongs in this crate at
+  all.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
 
