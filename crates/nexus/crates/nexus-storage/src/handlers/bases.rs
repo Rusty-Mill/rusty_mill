@@ -193,7 +193,8 @@ pub(crate) fn index(
     // shared `StoragePathArgs`. Reply is the new typed
     // `StorageBaseIndexResult { base_id }`.
     let StoragePathArgs { path } = parse_args(args, "base_index")?;
-    let abs_dir = forge_root.join(&path);
+    let abs_dir = crate::resolve_within(forge_root, &path)
+        .map_err(|e| exec_err(format!("base_index: {e}")))?;
     let base = nexus_types::bases::load_base(&abs_dir)
         .map_err(|e| exec_err(format!("base_index: load: {e}")))?;
     let base_id = engine
@@ -205,7 +206,8 @@ pub(crate) fn index(
 pub(crate) fn load(forge_root: &Path, args: &Value) -> Result<Value, PluginError> {
     // #190 / R7 — `base_load` takes a plain `{ path }`.
     let StoragePathArgs { path } = parse_args(args, "base_load")?;
-    let abs_dir = forge_root.join(&path);
+    let abs_dir = crate::resolve_within(forge_root, &path)
+        .map_err(|e| exec_err(format!("base_load: {e}")))?;
     let base =
         nexus_types::bases::load_base(&abs_dir).map_err(|e| exec_err(format!("base_load: {e}")))?;
     to_value(&base, "base_load")

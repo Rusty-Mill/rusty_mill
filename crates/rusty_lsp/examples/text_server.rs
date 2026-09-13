@@ -101,7 +101,12 @@ impl LanguageServer for TextServer {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        self.documents.did_change(&params).await;
+        if let Err(err) = self.documents.did_change(&params).await {
+            let _ = self
+                .client
+                .log_message(MessageType::Error, format!("rejected didChange: {err}"));
+            return;
+        }
         self.publish_diagnostics(&uri).await;
     }
 

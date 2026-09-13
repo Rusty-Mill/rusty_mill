@@ -21,10 +21,25 @@ use crate::protocol::sync_group::{SyncGroupRequest, SyncGroupResponse};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_wire::{Reader, Writer};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Duration;
 
 /// Default cap on a single response frame's declared size (16 MiB) --
 /// see [`crate::frame::read_frame`].
 pub const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+/// Default bound on establishing the initial TCP connection to a
+/// broker (see [`KafkaClient::connect_with_timeout`]). Without this, a
+/// broker whose TCP handshake never completes (a firewall black hole,
+/// an overloaded accept queue, ...) would hang [`KafkaClient::connect`]
+/// forever.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default bound on one request/response round trip inside
+/// [`KafkaClient::call`] (see [`KafkaClient::with_call_timeout`]).
+/// Without this, a broker that accepts a request and then never
+/// responds -- or stalls mid-frame -- would hang the calling task
+/// forever with no way to bound it.
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A minimal Kafka client: one request in flight at a time over one
 /// connection. See the crate's module doc for scope.
@@ -33,15 +48,32 @@ pub struct KafkaClient<S> {
     client_id: Option<String>,
     next_correlation_id: AtomicI32,
     max_frame_len: usize,
+    call_timeout: Duration,
 }
 
 impl KafkaClient<TcpStream> {
     /// Connects to a single broker at `addr` (e.g. `"localhost:9092"`,
     /// matching `PlatformConfig::kafka_bootstrap_servers`). Talks to
     /// exactly this broker for every request -- no controller/leader
-    /// discovery yet, see the crate's module doc.
+    /// discovery yet, see the crate's module doc. Bounded by
+    /// [`DEFAULT_CONNECT_TIMEOUT`]; see
+    /// [`KafkaClient::connect_with_timeout`] to override.
     pub async fn connect(addr: &str, client_id: Option<String>) -> Result<Self, ClientError> {
-        let io = TcpStream::connect(addr).await?;
+        Self::connect_with_timeout(addr, client_id, DEFAULT_CONNECT_TIMEOUT).await
+    }
+
+    /// Like [`connect`](Self::connect), but with an explicit bound on
+    /// how long the TCP handshake is allowed to take. Returns
+    /// [`ClientError::ConnectTimeout`] if `connect_timeout` elapses
+    /// first.
+    pub async fn connect_with_timeout(
+        addr: &str,
+        client_id: Option<String>,
+        connect_timeout: Duration,
+    ) -> Result<Self, ClientError> {
+        let io = rusty_tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
+            .await
+            .map_err(|_| ClientError::ConnectTimeout(connect_timeout))??;
         Ok(KafkaClient::new(io, client_id))
     }
 }
@@ -56,6 +88,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
             client_id,
             next_correlation_id: AtomicI32::new(0),
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
+            call_timeout: DEFAULT_CALL_TIMEOUT,
         }
     }
 
@@ -63,6 +96,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
     /// tests exercising [`ClientError::FrameTooLarge`]).
     pub fn with_max_frame_len(mut self, max_frame_len: usize) -> Self {
         self.max_frame_len = max_frame_len;
+        self
+    }
+
+    /// Overrides the default bound on one request/response round trip
+    /// in [`call`](Self::call). Defaults to [`DEFAULT_CALL_TIMEOUT`].
+    pub fn with_call_timeout(mut self, call_timeout: Duration) -> Self {
+        self.call_timeout = call_timeout;
         self
     }
 
@@ -87,9 +127,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         let mut writer = Writer::new();
         header.encode(&mut writer)?;
         encode_body(&mut writer)?;
-        crate::frame::write_frame(&mut self.io, writer.as_slice()).await?;
-
-        let response_bytes = crate::frame::read_frame(&mut self.io, self.max_frame_len).await?;
+        let call_timeout = self.call_timeout;
+        let max_frame_len = self.max_frame_len;
+        let response_bytes = rusty_tokio::time::timeout(call_timeout, async {
+            crate::frame::write_frame(&mut self.io, writer.as_slice()).await?;
+            crate::frame::read_frame(&mut self.io, max_frame_len).await
+        })
+        .await
+        .map_err(|_| ClientError::CallTimeout(call_timeout))??;
         let mut reader = Reader::new(&response_bytes);
         let response_header = ResponseHeader::decode(&mut reader)?;
         if response_header.correlation_id != correlation_id {
@@ -846,5 +891,57 @@ mod tests {
         let err = client.api_versions().await.unwrap_err();
         server.await.unwrap();
         assert!(matches!(err, ClientError::CorrelationMismatch(_, _)));
+    }
+
+    /// `192.0.2.0/24` is TEST-NET-1 (RFC 5737): reserved for
+    /// documentation/examples, guaranteed never to be assigned to a
+    /// real host, so nothing ever answers the SYN and the connect
+    /// genuinely stays pending rather than racing a fast loopback
+    /// handshake that could complete synchronously on the very first
+    /// poll (a real, actively-accepting local listener isn't a safe
+    /// stand-in here for exactly that reason). Confirmed in this
+    /// environment to block for multiple seconds with no ICMP
+    /// unreachable, so the short `connect_timeout` below is what ends
+    /// the wait, not the network stack. Before the fix, `connect` had
+    /// no timeout at all and this would hang until the test runner's
+    /// own deadline killed it.
+    #[rusty_tokio::test]
+    async fn connect_with_timeout_times_out_when_nothing_answers_the_syn() {
+        let start = std::time::Instant::now();
+        let result =
+            KafkaClient::connect_with_timeout("192.0.2.1:65000", None, Duration::from_millis(200))
+                .await;
+        let err = match result {
+            Ok(_) => panic!("connect to a TEST-NET-1 address must not succeed"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, ClientError::ConnectTimeout(_)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "connect must time out promptly instead of hanging"
+        );
+    }
+
+    /// A broker that accepts a request but never sends a response must
+    /// not hang `call` forever -- it must time out per
+    /// `with_call_timeout`. Before the fix, `call` had no deadline at
+    /// all and this test would hang indefinitely.
+    #[rusty_tokio::test]
+    async fn call_times_out_when_the_broker_never_responds() {
+        let (client_io, peer) = duplex(1024);
+        let mut client =
+            KafkaClient::new(client_io, None).with_call_timeout(Duration::from_millis(20));
+
+        let start = std::time::Instant::now();
+        let err = client.api_versions().await.unwrap_err();
+        assert!(matches!(err, ClientError::CallTimeout(_)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "call must time out promptly instead of hanging"
+        );
+        // Keep the peer alive until after the assertion -- the point is
+        // that the client's own configured deadline fires, not that the
+        // peer connection was dropped out from under it.
+        drop(peer);
     }
 }

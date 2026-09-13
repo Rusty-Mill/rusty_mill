@@ -18,6 +18,19 @@ use crate::util::next_line;
 /// instead of to the whole head.
 pub const DEFAULT_MAX_LINE_LEN: usize = 8 * 1024;
 
+/// Default cap on a whole `Content-Length`-framed or close-delimited body
+/// a transport adapter will buffer into memory (see
+/// `sync::SyncTransport::read_content_length_body`/
+/// `read_close_delimited_body` and their `async_tokio`/`tokio_native`
+/// counterparts). Larger than [`crate::head::DEFAULT_MAX_HEAD_LEN`] since a body
+/// carries real payload rather than framing metadata, but still bounded:
+/// an untrusted peer's declared `Content-Length` (or an unbounded
+/// close-delimited stream) must not be allowed to buffer arbitrarily
+/// much into memory. 128x the head default, matching the `1 << 20`
+/// initial-allocation clamp those functions already used to avoid
+/// pre-allocating on a bogus declared length.
+pub const DEFAULT_MAX_BODY_LEN: u64 = 1 << 20;
+
 /// How a message body's end is determined once the head is parsed.
 /// Requests and responses use this differently (see
 /// [`request_framing`]/[`response_framing`]): a request without a framing

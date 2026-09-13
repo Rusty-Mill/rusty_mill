@@ -46,6 +46,12 @@ pub enum CodecError {
     /// [`crate::record_batch`]'s module doc for why).
     #[error("record batch magic byte {0} is not the supported value (2)")]
     UnsupportedMagic(u8),
+    /// A varint/varlong (record batch's variable-length base-128
+    /// integer encoding) carried more continuation bytes than the 10
+    /// needed to encode any `i64`/`u64` value -- rejected before the
+    /// accumulating bit-shift could reach an invalid (>= 64) amount.
+    #[error("varint has more continuation bytes than the 10 needed to encode any i64/u64 value")]
+    MalformedVarint,
 }
 
 /// Errors from talking to a Kafka broker over the wire: connection,
@@ -72,4 +78,14 @@ pub enum ClientError {
     /// should be treated as unusable.
     #[error("response correlation_id {0} did not match the request's {1}")]
     CorrelationMismatch(i32, i32),
+    /// Establishing the TCP connection to the broker didn't finish
+    /// within the configured connect timeout -- see
+    /// [`crate::client::KafkaClient::connect_with_timeout`].
+    #[error("connect timed out after {0:?}")]
+    ConnectTimeout(std::time::Duration),
+    /// One request/response round trip didn't finish within the
+    /// configured call timeout -- see
+    /// [`crate::client::KafkaClient::with_call_timeout`].
+    #[error("call timed out after {0:?}")]
+    CallTimeout(std::time::Duration),
 }

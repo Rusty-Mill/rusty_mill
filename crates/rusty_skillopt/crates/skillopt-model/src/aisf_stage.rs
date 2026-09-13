@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use skillopt_core::{ChatBackend, Message};
@@ -63,12 +64,41 @@ fn new_scratch_dir(stage: &str) -> std::io::Result<tempfile::TempDir> {
 pub struct AisfStageBackend {
     binary_path: PathBuf,
     stage: String,
+    timeout: Duration,
 }
 
 impl AisfStageBackend {
     pub fn new(binary_path: PathBuf, stage: String) -> Self {
-        Self { binary_path, stage }
+        Self {
+            binary_path,
+            stage,
+            timeout: DEFAULT_TIMEOUT,
+        }
     }
+
+    /// Overrides the default 300s subprocess wait timeout. AISF's
+    /// `eval-stage` runs a whole multi-turn tool-use loop per call, so a
+    /// wedged agent (stuck tool call, hung model request, etc.) would
+    /// otherwise block `chat()` -- and therefore `Engine::train` -- forever;
+    /// see [`AisfStageError::Timeout`].
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// Default AISF `eval-stage` subprocess wait timeout. Long enough for a
+/// real multi-turn agent rollout (these may be long-running invocations),
+/// short enough to still recover a stuck `Engine::train` run instead of
+/// hanging forever.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Errors specific to [`AisfStageBackend`] that a caller may want to match
+/// on directly rather than parse out of the `anyhow` chain's `Display` text.
+#[derive(Debug, thiserror::Error)]
+pub enum AisfStageError {
+    #[error("AISF `eval-stage` did not finish within {0:?} and was killed")]
+    Timeout(Duration),
 }
 
 #[async_trait]
@@ -105,6 +135,11 @@ impl ChatBackend for AisfStageBackend {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // A timed-out wait below drops this future's `Child`; killing
+            // the still-running process on drop (rather than orphaning it)
+            // is exactly what makes the timeout actually recover the slot
+            // instead of leaking a wedged subprocess.
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 anyhow::anyhow!("failed to spawn AISF binary {:?}: {e}", self.binary_path)
@@ -114,7 +149,10 @@ impl ChatBackend for AisfStageBackend {
         stdin.write_all(messages[1].content.as_bytes()).await?;
         drop(stdin); // close our end so eval-stage's stdin read sees EOF
 
-        let output = child.wait_with_output().await?;
+        let output = match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
+            Ok(result) => result?,
+            Err(_elapsed) => return Err(AisfStageError::Timeout(self.timeout).into()),
+        };
         anyhow::ensure!(
             output.status.success(),
             "AISF `eval-stage {}` exited with {}: {}",
