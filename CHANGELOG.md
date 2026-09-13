@@ -9,6 +9,41 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `MarkdownExtractor` (capability inventory
+  §4.5.1) and `OrgModeExtractor` (§4.5.2) (`rusty_hister`'s Phase 1,
+  continued): Rust ports of
+  `server/extractor/extractors/{markdown/markdown,org/org}.go`,
+  preview-only, structurally identical twins for locally indexed
+  Markdown/Org files. Both turned out to need no markdown/org-mode-
+  parsing dependency at all — correcting an earlier assumption — since
+  `Indexer.AddMarkdown`/`AddOrg` (capability inventory §5.7,
+  `rusty-hister-indexer`'s future job, not this crate's) already renders
+  the source to HTML and stores it in `document.html` at index time, so
+  each extractor's only job is to sanitize and return whatever HTML is
+  already there. 8 new unit tests (167 total in the crate), clippy/fmt
+  clean.
+- `rusty-hister-extractor`'s `NotionExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.16): a Rust port of
+  `server/extractor/extractors/notion/notion.go`, extract *and* preview
+  for Notion pages on `notion.so` and `*.notion.site`. Re-assessed as
+  implementable now rather than blocked on the JS-rendering crawler
+  backend: the extractor code itself only ever reads `document.html`,
+  like every other extractor, so the crawler dependency is a
+  *production* one (whether that field holds real rendered content), not
+  a code dependency. When the rendered block tree isn't present,
+  `extract`/`preview` report `Abort` rather than `Fallback`, matching
+  Go's own `AbortExtraction`/`AbortPreview`. Notion's rendered DOM nests
+  presentational wrapper `<div>`s deeply; a single substring-attribute
+  selector (`[class*="notion-"][class*="-block"]`, identical to Go's own
+  `goquery` selector) finds every block at any depth, so both the text
+  and HTML walks skip a match whose own ancestor also matches to avoid
+  double-counting a block's children. List/heading/quote/paragraph
+  blocks render via plain-text extraction before escaping, exactly like
+  Go's own `writeTag`/list handling — so an inline `<a href>` inside one
+  of those is flattened to text, not preserved as a link; only the image
+  block's `src` attribute is read directly and thus round-trips through
+  URL rewriting. 7 new unit tests (174 total in the crate), clippy/fmt
+  clean.
 - `rusty-hister-extractor`'s `ReadabilityExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.4): a Rust port of the
   `readabilityExtractor` in `server/extractor/extractor.go`, extract
@@ -32,7 +67,7 @@ Removed / Fixed / Security, newest first.
   `Fallback` (matching Go's `FromReader` error path). Two Go metadata
   fields (a favicon URL, a `modified` timestamp) have no `readabilityrs`
   equivalent and are deliberately not reproduced rather than silently
-  dropped. 7 new unit tests (166 total in the crate), clippy/fmt clean.
+  dropped. 7 new unit tests (181 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `YtdlpExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.17): a Rust port of
   `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`, extract
@@ -53,7 +88,7 @@ Removed / Fixed / Security, newest first.
   use `rusty_json`'s `serde` feature (`#[derive(serde::Deserialize)]` on
   `VideoInfo` and friends) rather than walking `rusty_json::Value` by
   hand, since `yt-dlp --dump-json`'s output is a fixed, known shape. 14
-  new unit tests (153 total in the crate), clippy/fmt clean.
+  new unit tests (159 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `DiscourseExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.4): a Rust port of
   `server/extractor/extractors/discourse/discourse.go`, extract *and*
