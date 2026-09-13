@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Twelve concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,6 +110,24 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`YtdlpExtractor`] (capability inventory §4.5.17) — extract *and*
+//!   preview for video-hosting pages (YouTube, Vimeo, and others), by
+//!   shelling out to the external `yt-dlp` binary rather than parsing
+//!   `document.html` at all — the only extractor in this crate that works
+//!   entirely from `document.url`. **Disabled by default**, matching Go:
+//!   this extractor is useless without `yt-dlp` installed, so opting a
+//!   chain into it is a deliberate administrative choice, not automatic.
+//!   Three deliberate simplifications from the Go original, documented in
+//!   the module doc rather than worked around: no thumbnail download (no
+//!   general-purpose HTTP client to reuse — `thumbnail_url` metadata
+//!   holds the original URL instead), no per-instance job-slot
+//!   concurrency limit or cancellation (no other extractor models
+//!   either), and preview renders HTML directly rather than Go's
+//!   structured JSON handed to a frontend template (`PreviewResponse` has
+//!   no template-hint field). The first extractor to use `rusty_json`'s
+//!   `serde` feature (`#[derive(serde::Deserialize)]` on `VideoInfo` and
+//!   friends) rather than walking `rusty_json::Value` by hand, since
+//!   `yt-dlp --dump-json`'s output is a fixed, known shape.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -140,6 +158,7 @@ mod stackexchange;
 mod textutil;
 mod urlutil;
 mod wikipedia;
+mod ytdlp;
 
 pub use basic::BasicExtractor;
 pub use chatgpt::ChatGptExtractor;
@@ -158,3 +177,4 @@ pub use rusty_hister_core::{
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
 pub use wikipedia::WikipediaExtractor;
+pub use ytdlp::YtdlpExtractor;

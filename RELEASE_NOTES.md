@@ -13,6 +13,32 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Ytdlp extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-ytdlp`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-ytdlp)
+
+Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+
+- **Added:** `YtdlpExtractor` (capability inventory §4.5.17) — a port of
+  `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`.
+  Extract and preview for video-hosting pages (YouTube, Vimeo, and
+  others), by shelling out to the external `yt-dlp` binary rather than
+  parsing `document.html` at all — the only extractor in this crate that
+  works entirely from `document.url`. Disabled by default, matching Go,
+  since it's useless without `yt-dlp` installed.
+- **Three deliberate simplifications** from the Go original, documented
+  rather than worked around: no thumbnail download (no general-purpose
+  HTTP client in this cluster to reuse — `rusty_http` is a sans-IO
+  protocol layer with no client; stores `thumbnail_url` instead of Go's
+  base64-embedded image data), no per-instance job-slot concurrency limit
+  or cancellation, and preview renders HTML directly rather than Go's
+  structured JSON handed to a frontend template.
+- **New trick:** the first extractor to use `rusty_json`'s `serde`
+  feature (`#[derive(serde::Deserialize)]`) rather than walking
+  `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is a
+  fixed, known shape.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
 

@@ -330,13 +330,29 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
+- [x] `rusty-hister-extractor` (`YtdlpExtractor`, §4.5.17): extract *and*
+      preview for video-hosting pages (YouTube, Vimeo, and others), by
+      shelling out to the external `yt-dlp` binary rather than parsing
+      `document.html` at all. Done — 14 new unit tests (153 total in the
+      crate), clippy/fmt clean. Disabled by default, matching Go, since
+      it's useless without `yt-dlp` installed. Three deliberate
+      simplifications from the Go original: no thumbnail download (no
+      general-purpose HTTP client in this cluster to reuse — `rusty_http`
+      is a sans-IO protocol layer with no client; stores `thumbnail_url`
+      instead of Go's base64-embedded image data), no per-instance
+      job-slot concurrency limit or cancellation, and preview renders HTML
+      directly rather than Go's structured JSON handed to a frontend
+      template. The first extractor to use `rusty_json`'s `serde` feature
+      (`#[derive(serde::Deserialize)]`) rather than walking
+      `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is
+      a fixed, known shape.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 9 built-in extractors in
+- `rusty-hister-extractor`: the remaining 8 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
