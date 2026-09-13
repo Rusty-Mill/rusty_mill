@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Ten concrete extractors so far:**
+//! **Eleven concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -94,6 +94,22 @@
 //!   One cosmetic-only Go behavior isn't reproduced: wrapping a wikitable
 //!   in a horizontally-scrolling `<div>`, which has no cheap `NodeId`-based
 //!   equivalent and isn't covered by Go's own tests.
+//! - [`RedditExtractor`] (capability inventory §4.5.6) — extract *and*
+//!   preview for Reddit post pages. Reddit has shipped at least three
+//!   different markups for the same post over the years — modern
+//!   `shreddit-*` web components, the legacy `old.reddit.com` DOM, and a
+//!   `schema.org` JSON-LD block many pages embed regardless of which HTML
+//!   renders — so, like Go, this port copes with an ordered list of
+//!   CSS-selector candidates (first non-empty/first-match wins) rather
+//!   than branching on "which Reddit era is this" up front. The crate's
+//!   third real `textutil` caller. Reuses two tricks already established
+//!   by earlier extractors for `scraper::ElementRef`'s read-only API: a
+//!   post/comment body's URL rewriting re-parses that subtree's own HTML
+//!   as a standalone fragment (`WikipediaExtractor::extract`'s clone
+//!   trick), and reading a comment's own text when it has no dedicated
+//!   body element copies only the kept nodes into a fresh `ego_tree`
+//!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
+//!   nested reply's text isn't double-counted into its parent's.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -117,6 +133,7 @@ mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod reddit;
 mod registry;
 mod sanitizer;
 mod stackexchange;
@@ -132,6 +149,7 @@ pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
     Capabilities, Document, DocumentType, ExtractOutcome, Extractor, ExtractorConfig, HisterError,
