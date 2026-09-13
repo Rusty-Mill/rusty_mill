@@ -254,6 +254,7 @@ struct Interpreter<'a> {
     contour_ends: Vec<usize>,
     contour_open: bool,
     depth: u32,
+    ops: u32,
 }
 
 impl<'a> Interpreter<'a> {
@@ -261,6 +262,20 @@ impl<'a> Interpreter<'a> {
     /// guards against a malformed or (`callsubr`-cycle) pathological
     /// charstring recursing unboundedly.
     const MAX_DEPTH: u32 = 10;
+
+    /// Total number of charstring instructions (operand pushes and
+    /// operators alike, across the top-level charstring and every
+    /// `callsubr`/`callgsubr` it invokes, however deeply nested) that may
+    /// execute while interpreting one glyph. `MAX_DEPTH` alone only
+    /// bounds nesting *depth*, not branching: a subroutine that calls
+    /// several further subroutines at each of the (permitted) 10 nesting
+    /// levels can still produce a total instruction count exponential in
+    /// that branching factor, all of it running to completion before the
+    /// depth cap ever triggers on an 11th level. Real glyphs execute at
+    /// most a few hundred charstring operators, so tens of thousands is
+    /// generous headroom while still bounding worst-case work to
+    /// milliseconds.
+    const MAX_OPS: u32 = 50_000;
 
     fn close_contour(&mut self) {
         if self.contour_open {
@@ -336,6 +351,10 @@ impl<'a> Interpreter<'a> {
     fn run(&mut self, code: &[u8]) -> Option<bool> {
         let mut pos = 0usize;
         while pos < code.len() {
+            self.ops += 1;
+            if self.ops > Self::MAX_OPS {
+                return None;
+            }
             let b0 = code[pos];
             if b0 >= 32 || b0 == 28 {
                 let (value, adv): (f32, usize) = match b0 {
@@ -698,6 +717,7 @@ pub(crate) fn glyph_outline(data: &[u8], cff: &CffTable, glyph_id: u16) -> Optio
         contour_ends: Vec::new(),
         contour_open: false,
         depth: 0,
+        ops: 0,
     };
     interp.run(charstring)?;
     interp.close_contour();

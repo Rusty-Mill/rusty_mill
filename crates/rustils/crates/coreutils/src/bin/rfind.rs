@@ -44,7 +44,7 @@ fn walk_dir(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let mut search_path = ".".to_string();
     let mut name_pattern: Option<String> = None;
     let mut type_filter: Option<char> = None;

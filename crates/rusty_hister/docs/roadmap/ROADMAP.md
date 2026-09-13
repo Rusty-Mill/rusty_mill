@@ -330,10 +330,22 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
+- [x] `rusty-hister-extractor` (`DiscourseExtractor`, §4.5.4): extract
+      *and* preview for Discourse forum topic pages. Done — 6 new unit
+      tests (145 total in the crate), clippy/fmt clean. Like Reddit, a
+      topic page can carry the same content in up to three places at
+      once — a (often double-JSON-encoded) `#data-preloaded` hydration
+      blob, the already-rendered post DOM, and a `schema.org` `QAPage`
+      JSON-LD block — and, like Go, this port merges all three by post
+      id/number rather than picking just one, preferring each field's
+      highest-fidelity source by a `source_rank` (rendered DOM >
+      preloaded JSON > JSON-LD, matching Go's own ranking). Reuses
+      `WikipediaExtractor`'s reparse-as-fragment trick for
+      cleaning/URL-rewriting a post body.
 - [x] `rusty-hister-extractor` (`YtdlpExtractor`, §4.5.17): extract *and*
       preview for video-hosting pages (YouTube, Vimeo, and others), by
       shelling out to the external `yt-dlp` binary rather than parsing
-      `document.html` at all. Done — 14 new unit tests (153 total in the
+      `document.html` at all. Done — 14 new unit tests (159 total in the
       crate), clippy/fmt clean. Disabled by default, matching Go, since
       it's useless without `yt-dlp` installed. Three deliberate
       simplifications from the Go original: no thumbnail download (no

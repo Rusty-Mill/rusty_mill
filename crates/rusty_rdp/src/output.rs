@@ -202,12 +202,23 @@ pub fn parse_bitmap_rectangles(data: &[u8]) -> Result<Vec<BitmapData>> {
     Ok(rects)
 }
 
+/// `TS_UPDATE_PALETTE` (MS-RDPBCGR 2.2.9.1.1.3.1.2.1) fixes `numberColors`
+/// at 256 in practice; cap well above that before trusting the declared
+/// count for allocation.
+const MAX_PALETTE_ENTRIES: usize = 256;
+
 /// Parse a palette update body: `pad2Octets`, `numberColors`, then the RGB
 /// entries (the bytes after any `updateType`).
 pub fn parse_palette(data: &[u8]) -> Result<PaletteUpdate> {
     let mut r = Reader::new(data);
     let _pad = r.read_u16_le()?;
     let count = r.read_u32_le()? as usize;
+    if count > MAX_PALETTE_ENTRIES {
+        return Err(Error::InvalidValue {
+            field: "TS_UPDATE_PALETTE numberColors",
+            value: count.to_string(),
+        });
+    }
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let rgb = r.read_bytes(3)?;
@@ -497,6 +508,21 @@ mod tests {
             UpdatePdu::decode(&bytes).unwrap_err(),
             Error::InvalidValue {
                 field: "pduType2",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_palette_huge_count_is_rejected() {
+        let mut w = Writer::new();
+        w.write_u16_le(0); // pad2Octets
+        w.write_u32_le(0xFFFF_FFFF); // declared numberColors far exceeds the cap
+        let body = w.into_vec();
+        assert!(matches!(
+            parse_palette(&body).unwrap_err(),
+            Error::InvalidValue {
+                field: "TS_UPDATE_PALETTE numberColors",
                 ..
             }
         ));

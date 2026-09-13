@@ -264,6 +264,17 @@ impl DateTime {
             nano = value;
         }
 
+        // RFC 3339 permits a leap second (`:60`) in the seconds field to represent an
+        // inserted UTC leap second. A fixed-point civil `Time` has no slot for a real
+        // 61st second, so per RFC 3339's own recommended handling we normalize a leap
+        // second to the last representable instant of the same minute (`:59.999999999`)
+        // rather than rejecting timestamps like `1998-12-31T23:59:60Z` outright.
+        let (second, nano) = if second == 60 {
+            (59, 999_999_999)
+        } else {
+            (second, nano)
+        };
+
         if idx >= bytes.len() {
             return Err("Missing timezone offset");
         }
@@ -442,5 +453,21 @@ mod tests {
     fn parse_rejects_out_of_range_offset_components() {
         assert!(DateTime::parse("2026-08-12T01:18:55+00:99").is_err());
         assert!(DateTime::parse("2026-08-12T01:18:55+99:00").is_err());
+    }
+
+    #[test]
+    fn parse_accepts_rfc3339_leap_second() {
+        // 1998-12-31T23:59:60Z was a real historical UTC leap second. RFC 3339
+        // explicitly permits `:60` in the seconds field, so this must parse
+        // successfully rather than being rejected as an invalid time.
+        let dt = DateTime::parse("1998-12-31T23:59:60Z").unwrap();
+        // Normalized to the last representable instant of the same minute.
+        assert_eq!(dt.time().second(), 59);
+        assert_eq!(dt.time().nanosecond(), 999_999_999);
+        assert_eq!(dt.date().year(), 1998);
+        assert_eq!(dt.date().month(), 12);
+        assert_eq!(dt.date().day(), 31);
+        assert_eq!(dt.time().hour(), 23);
+        assert_eq!(dt.time().minute(), 59);
     }
 }

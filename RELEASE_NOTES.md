@@ -16,7 +16,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Ytdlp extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-ytdlp`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-ytdlp)
 
-Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+Twenty-third Phase 1 increment. The thirteenth of the 20 built-in extractors.
 
 - **Added:** `YtdlpExtractor` (capability inventory §4.5.17) — a port of
   `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`.
@@ -36,6 +36,27 @@ Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
   feature (`#[derive(serde::Deserialize)]`) rather than walking
   `rusty_json::Value` by hand, since `yt-dlp --dump-json`'s output is a
   fixed, known shape.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Discourse extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-discourse`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-discourse)
+
+Twenty-second Phase 1 increment. The twelfth of the 20 built-in extractors.
+
+- **Added:** `DiscourseExtractor` (capability inventory §4.5.4) — a port of
+  `server/extractor/extractors/discourse/discourse.go`. Extract and
+  preview for Discourse forum topic pages.
+- **Three sources, one merge:** like Reddit, a topic page can carry the
+  same content in up to three places at once — a (often
+  double-JSON-encoded) `#data-preloaded` hydration blob, the
+  already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block.
+  Like Go, this port merges all three by post id/number rather than
+  picking just one, preferring each field's highest-fidelity source by a
+  `source_rank` (rendered DOM > preloaded JSON > JSON-LD, matching Go's
+  own ranking).
+- **Reused, not reinvented:** `WikipediaExtractor`'s reparse-as-fragment
+  trick for cleaning/URL-rewriting a post body.
 
 ---
 
