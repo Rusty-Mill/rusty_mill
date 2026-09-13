@@ -13,6 +13,37 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Bluesky extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-bluesky`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-bluesky)
+
+Twenty-second Phase 1 increment. The twelfth of the 20 built-in
+extractors.
+
+- **Added, core capability:** `Document::extra_documents`/
+  `Document::skip_indexing` on `rusty-hister-core` — an additive
+  extension (empty/`false` by default, every prior extractor unaffected)
+  mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+  directly rather than growing `ExtractOutcome` a new variant, so no
+  signature changes were needed anywhere else in the SDK. Resolves
+  `PROJECT-STATUS.md`'s "per-page multi-document extraction" open item
+  and unblocks Mastodon/Bluesky/Twitter.
+- **Added, extractor:** `BlueskyExtractor` (capability inventory §4.5.14)
+  — a port of `server/extractor/extractors/bluesky/extractor.go`.
+  Decomposes a Bluesky profile/feed/thread page into one `Document` per
+  visible post, the first extractor to use the capability extension
+  above.
+- **Three sources, one merge:** Bluesky pages can carry the same post
+  data in up to three independent forms; like Go, this port tries all
+  three in priority order and merges results by canonical post URL
+  rather than picking just one: a `schema.org` JSON-LD block walked
+  recursively through several wrapper keys, the already-rendered post
+  DOM (found via known selectors plus a fallback heuristic that walks up
+  from any anchor linking to a post URL), and — only when neither of
+  those finds anything — the page's own Open Graph/Twitter Card meta
+  tags as a single fallback post for the page's own URL.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
 

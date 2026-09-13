@@ -330,13 +330,30 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
-- **Blocked, flagged rather than silently ported without it**: Mastodon,
-  Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
-  page into multiple indexed documents (Go: `Document.ExtraDocuments`/
-  `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
-  `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
-  for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 9 built-in extractors in
+- [x] `rusty-hister-core`: `Document::extra_documents`/
+      `Document::skip_indexing`, an additive extension (empty/`false` by
+      default, every prior extractor unaffected) resolving
+      PROJECT-STATUS.md's "per-page multi-document extraction" open item
+      — mirrors Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+      directly rather than growing `ExtractOutcome` a new variant, so no
+      signature changes were needed anywhere else in the SDK.
+- [x] `rusty-hister-extractor` (`BlueskyExtractor`, §4.5.14): decomposes
+      a Bluesky profile/feed/thread page into one `Document` per visible
+      post, the first extractor to use the capability extension above.
+      Done — 6 new unit tests (145 total in the crate), clippy/fmt clean.
+      Bluesky pages can carry the same post data in up to three
+      independent forms; like Go, this port tries all three in priority
+      order and merges results by canonical post URL rather than picking
+      just one: a `schema.org` JSON-LD block walked recursively through
+      several wrapper keys, the already-rendered post DOM (found via
+      known selectors plus a fallback heuristic that walks up from any
+      anchor linking to a post URL), and — only when neither of those
+      finds anything — the page's own Open Graph/Twitter Card meta tags
+      as a single fallback post for the page's own URL.
+- Mastodon and Twitter (§4.5.13, §4.5.15) can now reuse the same
+  `extra_documents`/`skip_indexing` mechanism Bluesky established;
+  porting them just hasn't happened yet.
+- `rusty-hister-extractor`: the remaining 8 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a

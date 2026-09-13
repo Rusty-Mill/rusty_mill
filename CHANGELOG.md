@@ -9,6 +9,31 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-core`'s `Document::extra_documents`/
+  `Document::skip_indexing` (`rusty_hister`'s Phase 1, continued):
+  an additive extension — empty/`false` by default, so every extractor
+  written before this addition is unaffected — mirroring Go's own
+  `Document.ExtraDocuments`/`SkipIndexing` shape directly rather than
+  growing `ExtractOutcome` a new variant, so no signature changes were
+  needed anywhere else in the SDK. Resolves `PROJECT-STATUS.md`'s
+  "per-page multi-document extraction" open item and unblocks
+  Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15). 1 new unit
+  test (17 total in the crate), clippy/fmt clean.
+- `rusty-hister-extractor`'s `BlueskyExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.14): a Rust port of
+  `server/extractor/extractors/bluesky/extractor.go`, decomposing a
+  Bluesky profile/feed/thread page into one `Document` per visible post
+  — the first extractor to use the `extra_documents`/`skip_indexing`
+  capability extension above. Bluesky pages can carry the same post data
+  in up to three independent forms; like Go, this port tries all three
+  in priority order and merges results by canonical post URL rather than
+  picking just one: a `schema.org` JSON-LD block walked recursively
+  through several wrapper keys, the already-rendered post DOM (found via
+  known selectors plus a fallback heuristic that walks up from any
+  anchor linking to a post URL), and — only when neither of those finds
+  anything — the page's own Open Graph/Twitter Card meta tags as a
+  single fallback post for the page's own URL. 6 new unit tests (145
+  total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview

@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Twelve concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,13 +110,28 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`BlueskyExtractor`] (capability inventory §4.5.14) — decomposes a
+//!   Bluesky profile/feed/thread page into one [`Document`] per visible
+//!   post. The first extractor to need a real `rusty-hister-core`
+//!   capability extension: [`Document::extra_documents`]/
+//!   [`Document::skip_indexing`], two new additive fields (empty/`false`
+//!   by default, so every prior extractor is unaffected) mirroring Go's
+//!   own `Document.ExtraDocuments`/`SkipIndexing` — a future indexer
+//!   walks `extra_documents` recursively, the same mechanism Mastodon and
+//!   Twitter will reuse once ported. Bluesky pages can carry the same
+//!   post data in up to three independent forms; like Go, this port
+//!   tries all three in priority order and merges results by canonical
+//!   post URL rather than picking just one: a `schema.org` JSON-LD block
+//!   walked recursively through several wrapper keys, the
+//!   already-rendered post DOM (found via known selectors plus a
+//!   fallback heuristic that walks up from any anchor linking to a post
+//!   URL), and — only when neither of those finds anything — the page's
+//!   own Open Graph/Twitter Card meta tags as a single fallback post for
+//!   the page's own URL.
 //!
-//! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
-//! portable: their real behavior decomposes one timeline/thread page into
-//! *multiple* indexed documents (Go's `Document.ExtraDocuments`/
-//! `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
-//! `ExtractOutcome` don't model yet. Flagged in `docs/PROJECT-STATUS.md`
-//! as an open item rather than silently dropped or worked around.
+//! Mastodon/Twitter (capability inventory §4.5.13, §4.5.15) can now
+//! reuse the same `extra_documents`/`skip_indexing` mechanism Bluesky
+//! established; porting them just hasn't happened yet.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -126,6 +141,7 @@
 //! reading Hister's Go source, never copied).
 
 mod basic;
+mod bluesky;
 mod chatgpt;
 mod embeddedvideo;
 mod github;
@@ -142,6 +158,7 @@ mod urlutil;
 mod wikipedia;
 
 pub use basic::BasicExtractor;
+pub use bluesky::BlueskyExtractor;
 pub use chatgpt::ChatGptExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
