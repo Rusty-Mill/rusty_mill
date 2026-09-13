@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Seven concrete extractors so far:**
+//! **Eight concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -58,6 +58,20 @@
 //!   re-sanitize its whole accumulated buffer the way the extractors
 //!   above do — only the embedded README HTML passes through
 //!   `sanitizer::sanitize_html`, matching a real Go asymmetry.
+//! - [`ChatGptExtractor`] (capability inventory §4.5.18) — extract *and*
+//!   preview for chatgpt.com conversation URLs (authenticated, shared, and
+//!   custom-GPT). `scraper::ElementRef` is read-only, so Go's
+//!   clone-then-remove content-cleaning pattern has no direct equivalent;
+//!   this port instead copies only the kept nodes into a fresh
+//!   `ego_tree`-backed fragment (`Html::new_fragment()` +
+//!   `NodeMut::append()`). Go's own conversation text writer is a
+//!   superset of `textutil` (it also handles list bullets and table-cell
+//!   separators) and isn't built on it, so this port mirrors that with
+//!   its own `ConversationTextWriter` rather than generalizing `textutil`
+//!   speculatively — reusing only its final `normalize_text` whitespace
+//!   pass. The first extractor to use `ExtractOutcome`/`PreviewOutcome`'s
+//!   `Abort` variant: a matched conversation URL with no visible turns is
+//!   a dead end for the whole chain, not a "try the next extractor" case.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -73,6 +87,7 @@
 //! policy governing how their tests are written (from independently
 //! reading Hister's Go source, never copied).
 
+mod chatgpt;
 mod embeddedvideo;
 mod github;
 mod godoc;
@@ -85,6 +100,7 @@ mod stackexchange;
 mod textutil;
 mod urlutil;
 
+pub use chatgpt::ChatGptExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;

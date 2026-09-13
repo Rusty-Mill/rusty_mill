@@ -13,6 +13,39 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's ChatGPT extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-chatgpt`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-chatgpt)
+
+Eighteenth Phase 1 increment. The eighth of the 20 built-in extractors.
+
+- **Added:** `ChatGptExtractor` (capability inventory §4.5.18) — a port of
+  `server/extractor/extractors/chatgpt/extractor.go`. Extract and preview
+  for chatgpt.com conversation URLs (authenticated, public-shared, and
+  custom-GPT). Conversation turns are found via `<article
+  data-testid="conversation-turn-...">` wrappers, falling back to bare
+  `[data-message-author-role]` elements for public-share/custom-GPT pages
+  that skip the wrapper; hidden turns/ancestors and cross-role nested
+  content are excluded throughout.
+- **New approach, no DOM mutation:** `scraper::ElementRef` is read-only,
+  so Go's clone-then-remove content-cleaning pattern has no direct
+  equivalent. This port instead copies only the kept nodes into a fresh
+  `ego_tree`-backed fragment (`Html::new_fragment()` +
+  `NodeMut::append()`), used for both plain-text extraction and preview
+  HTML.
+- **Not generalized speculatively:** Go's own conversation-text writer is
+  a superset of `textutil` (it also handles list bullets and table-cell
+  separators) and isn't built on `textutil` either, so this port mirrors
+  that with its own `ConversationTextWriter` rather than generalizing
+  `textutil` for a shape only this one extractor needs — reusing only its
+  final `normalize_text` whitespace pass.
+- **Behavior preserved deliberately:** the first extractor to report
+  `ExtractOutcome`/`PreviewOutcome::Abort` (a matched conversation URL
+  with no visible turns) rather than `Fallback`, matching Go's own
+  `AbortExtraction` since that's a dead end for the whole chain, not a
+  case for the next extractor to try.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's GitHub extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-github`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-github)
 

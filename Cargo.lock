@@ -12224,6 +12224,7 @@ dependencies = [
  "ammonia",
  "chrono",
  "ego-tree",
+ "percent-encoding",
  "rusty-hister-core",
  "rusty_json",
  "scraper",
