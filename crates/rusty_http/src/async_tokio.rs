@@ -470,7 +470,7 @@ mod tests {
     #[rusty_tokio::test]
     async fn aborts_a_close_delimited_body_once_the_cap_is_exceeded() {
         let mut wire = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
-        wire.extend(std::iter::repeat(b'x').take(5000));
+        wire.extend(std::iter::repeat_n(b'x', 5000));
         let (mut feeder, reader) = duplex(wire.len());
         feeder.write_all(&wire).await.unwrap();
         drop(feeder);
