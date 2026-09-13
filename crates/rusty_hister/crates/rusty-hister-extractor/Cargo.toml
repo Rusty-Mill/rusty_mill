@@ -35,3 +35,12 @@ ego-tree = "0.9"
 # `url` crate (via `ammonia`) at this same version — named directly here
 # rather than reaching for it through an unrelated crate's re-export.
 percent-encoding = "2"
+# Direct attribute/element construction for Wikipedia's preview styling
+# pass (setting inline `style` attributes on existing nodes, and swapping
+# a `<video>` node for an `<img>`) — `scraper::ElementRef` gives no
+# mutation API of its own, but `Html`'s underlying `ego_tree::Tree` can be
+# mutated by `NodeId`, and doing that for element attributes means
+# building `html5ever` attribute/name values directly. Already pinned
+# transitively by `scraper` at this same version — named directly here
+# rather than reaching for it through an unrelated re-export.
+html5ever = "0.29"

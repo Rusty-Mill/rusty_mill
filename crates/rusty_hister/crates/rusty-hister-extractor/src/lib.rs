@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Nine concrete extractors so far:**
+//! **Ten concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -80,6 +80,20 @@
 //!   its chance. Deliberately cruder than `textutil`'s block-aware
 //!   flattening — text nodes are concatenated with no separators at all,
 //!   matching Go's own token-by-token concatenation exactly.
+//! - [`WikipediaExtractor`] (capability inventory §4.5.12) — extract *and*
+//!   preview for `*.wikipedia.org/wiki/...` article pages: article text,
+//!   infobox key/value pairs, and wikitables for extraction; a richly
+//!   styled preview (inline styles standing in for Wikipedia's own,
+//!   sanitizer-stripped CSS classes) for rendering. The largest port so
+//!   far — Go's `goquery` mutates its parse tree in place (`.Remove()`,
+//!   `.SetAttr()`, `.ReplaceWithHtml()`), which `scraper::ElementRef` has
+//!   no equivalent for; this port instead mutates the same `ego_tree` by
+//!   `NodeId` (attribute changes via `Tree::get_mut`, removals via
+//!   `NodeMut::detach`), always collecting the `NodeId`s a selector pass
+//!   needs into an owned `Vec` before mutating (see the module's own doc).
+//!   One cosmetic-only Go behavior isn't reproduced: wrapping a wikitable
+//!   in a horizontally-scrolling `<div>`, which has no cheap `NodeId`-based
+//!   equivalent and isn't covered by Go's own tests.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -108,6 +122,7 @@ mod sanitizer;
 mod stackexchange;
 mod textutil;
 mod urlutil;
+mod wikipedia;
 
 pub use basic::BasicExtractor;
 pub use chatgpt::ChatGptExtractor;
@@ -124,3 +139,4 @@ pub use rusty_hister_core::{
 };
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
+pub use wikipedia::WikipediaExtractor;
