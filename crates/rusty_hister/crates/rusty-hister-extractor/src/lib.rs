@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eighteen concrete extractors so far:**
+//! **Nineteen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -203,10 +203,24 @@
 //!   an optional `<h1>`-derived heading followed by the *entire original
 //!   page's* raw HTML, sanitized — reproduced faithfully rather than
 //!   "fixed" beyond Go's own currently-shipped behavior.
+//! - [`BlueskyExtractor`] (capability inventory §4.5.14) — decomposes a
+//!   Bluesky profile/feed/thread page into one [`Document`] per visible
+//!   post, the second extractor to reuse the
+//!   [`Document::extra_documents`]/[`Document::skip_indexing`] capability
+//!   extension `MastodonExtractor` established. Bluesky pages can carry
+//!   the same post data in up to three independent forms; like Go, this
+//!   port tries all three in priority order and merges results by
+//!   canonical post URL rather than picking just one: a `schema.org`
+//!   JSON-LD block walked recursively through several wrapper keys, the
+//!   already-rendered post DOM (found via known selectors plus a
+//!   fallback heuristic that walks up from any anchor linking to a post
+//!   URL), and — only when neither of those finds anything — the page's
+//!   own Open Graph/Twitter Card meta tags as a single fallback post for
+//!   the page's own URL.
 //!
-//! Bluesky/Twitter (capability inventory §4.5.14-15) can now reuse the
-//! same `extra_documents`/`skip_indexing` mechanism `MastodonExtractor`
-//! established; porting them just hasn't happened yet.
+//! Twitter (capability inventory §4.5.15) can now reuse the same
+//! `extra_documents`/`skip_indexing` mechanism Mastodon and Bluesky
+//! established; porting it just hasn't happened yet.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -216,6 +230,7 @@
 //! reading Hister's Go source, never copied).
 
 mod basic;
+mod bluesky;
 mod chatgpt;
 mod discourse;
 mod embeddedvideo;
@@ -239,6 +254,7 @@ mod wikipedia;
 mod ytdlp;
 
 pub use basic::BasicExtractor;
+pub use bluesky::BlueskyExtractor;
 pub use chatgpt::ChatGptExtractor;
 pub use discourse::DiscourseExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;

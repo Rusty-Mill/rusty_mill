@@ -425,12 +425,25 @@ independent of ADR-0002/0003)
       by the *entire original page's* raw HTML, sanitized — reproduced
       faithfully rather than "fixed" beyond Go's own currently-shipped
       behavior.
-- Bluesky and Twitter (§4.5.14-15) can now reuse the same
-  `extra_documents`/`skip_indexing` mechanism Mastodon established;
-  porting them just hasn't happened yet.
-- `rusty-hister-extractor`: the remaining 2 built-in extractors in
-  default-chain order (§4.3), starting with the ones that have existing
-  Go test coverage and budgeting fresh test authorship for the rest.
+- [x] `rusty-hister-extractor` (`BlueskyExtractor`, §4.5.14): decomposes
+      a Bluesky profile/feed/thread page into one `Document` per visible
+      post, the second extractor to use the capability extension above.
+      Done — 6 new unit tests (193 total in the crate), clippy/fmt clean.
+      Bluesky pages can carry the same post data in up to three
+      independent forms; like Go, this port tries all three in priority
+      order and merges results by canonical post URL rather than picking
+      just one: a `schema.org` JSON-LD block walked recursively through
+      several wrapper keys, the already-rendered post DOM (found via
+      known selectors plus a fallback heuristic that walks up from any
+      anchor linking to a post URL), and — only when neither of those
+      finds anything — the page's own Open Graph/Twitter Card meta tags
+      as a single fallback post for the page's own URL.
+- Twitter (§4.5.15) can now reuse the same `extra_documents`/
+  `skip_indexing` mechanism Mastodon and Bluesky established; porting it
+  just hasn't happened yet.
+- `rusty-hister-extractor`: the last built-in extractor, Twitter (§4.3),
+  budgeting fresh test authorship since it has no existing Go test
+  coverage to draw on directly.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of
