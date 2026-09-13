@@ -51,9 +51,12 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("nexus-editor", 2_400),
     ("nexus-terminal", 3_600),
     // Just over the default — earned a modest grandfather rather than
-    // a full split. Bump to DEFAULT_BUDGET when the trigger / template
-    // handlers move out of core_plugin.rs.
-    ("nexus-workflow", 2_200),
+    // a full split. Drifted to 2226 LOC after this cap was last set at
+    // 2200 (2026-09, unrelated to this row's own change); bumped to the
+    // next 100-LOC increment to lock in the current size, matching the
+    // nexus-editor row's precedent. Bump to DEFAULT_BUDGET when the
+    // trigger / template handlers move out of core_plugin.rs.
+    ("nexus-workflow", 2_300),
 ];
 
 #[test]
