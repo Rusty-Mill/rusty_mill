@@ -9,6 +9,27 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `YtdlpExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.17): a Rust port of
+  `server/extractor/extractors/ytdlp/{ytdlp,types,format,vtt}.go`, extract
+  *and* preview for video-hosting pages (YouTube, Vimeo, and others), by
+  shelling out to the external `yt-dlp` binary rather than parsing
+  `document.html` at all — the only extractor in this crate that works
+  entirely from `document.url`. Disabled by default, matching Go, since
+  it's useless without `yt-dlp` installed. Three deliberate
+  simplifications from the Go original, documented rather than worked
+  around: no thumbnail download (no general-purpose HTTP client in this
+  cluster to reuse for a one-off image fetch — `rusty_http` is a sans-IO
+  protocol layer with no client; `thumbnail_url` metadata holds the
+  original URL instead of Go's base64-embedded image data), no
+  per-instance job-slot concurrency limit or cancellation (no other
+  extractor's trait models either), and preview renders HTML directly
+  rather than Go's structured JSON handed to a frontend template
+  (`PreviewResponse` has no template-hint field). The first extractor to
+  use `rusty_json`'s `serde` feature (`#[derive(serde::Deserialize)]` on
+  `VideoInfo` and friends) rather than walking `rusty_json::Value` by
+  hand, since `yt-dlp --dump-json`'s output is a fixed, known shape. 14
+  new unit tests (153 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.6): a Rust port of
   `server/extractor/extractors/reddit/reddit.go`, extract *and* preview
