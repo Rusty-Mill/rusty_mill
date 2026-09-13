@@ -13,6 +13,133 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
+
+Twenty-first Phase 1 increment. The eleventh of the 20 built-in extractors.
+
+- **Added:** `RedditExtractor` (capability inventory §4.5.6) — a port of
+  `server/extractor/extractors/reddit/reddit.go`. Extract and preview for
+  Reddit post pages.
+- **New approach, three markups at once:** Reddit has shipped at least
+  three different markups for the same post over the years — modern
+  `shreddit-*` web components, the legacy `old.reddit.com` DOM, and a
+  `schema.org` JSON-LD block many pages embed regardless of which HTML
+  renders. Like Go, this port copes with an ordered list of CSS-selector
+  candidates (first non-empty/first-match wins) rather than branching on
+  "which Reddit era is this" up front.
+- **Reused, not reinvented:** the crate's third real `textutil` caller
+  (Go itself shares it across `hackernews`/`discourse`/`reddit`). Two
+  tricks already established for `scraper::ElementRef`'s read-only API
+  carry over directly: a post/comment body's URL rewriting re-parses that
+  subtree's own HTML as a standalone fragment
+  (`WikipediaExtractor::extract`'s clone trick), and reading a comment's
+  own text when it has no dedicated body element copies only the kept
+  nodes into a fresh `ego_tree` fragment (`ChatGptExtractor`'s
+  content-cleaning approach) so a nested reply's text isn't
+  double-counted into its parent's.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Wikipedia extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-wikipedia`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-wikipedia)
+
+Twentieth Phase 1 increment. The tenth of the 20 built-in extractors, and
+the largest port so far.
+
+- **Added:** `WikipediaExtractor` (capability inventory §4.5.12) — a port
+  of `server/extractor/extractors/wikipedia/{wikipedia,style,text}.go`.
+  Extract and preview for `*.wikipedia.org/wiki/...` article pages:
+  article text, infobox key/value pairs, and wikitables for extraction; a
+  richly styled preview (inline styles standing in for Wikipedia's own,
+  sanitizer-stripped CSS classes) for rendering.
+- **New approach, no DOM mutation API to lean on:** Go's `goquery`
+  mutates its parse tree in place (`.Remove()`, `.SetAttr()`,
+  `.ReplaceWithHtml()`), which `scraper::ElementRef` has no equivalent
+  for — it's a read-only view. This port instead mutates the same
+  `ego_tree` by `NodeId`: attribute changes via `Tree::get_mut`, removals
+  via `NodeMut::detach`, an element swap for the `<video>`-to-`<img>`
+  poster replacement. Every pass collects the `NodeId`s a selector needs
+  to touch into an owned `Vec` before mutating, since an `ElementRef`
+  can't stay borrowed across a `get_mut` call.
+- **New dependency:** `html5ever` (already pinned transitively by
+  `scraper` at this same version), needed to construct attribute
+  names/values by hand for the mutation above.
+- **Behavior preserved deliberately:** the infobox text pass reads from
+  the original, un-cleaned content while the general article-text pass
+  reads from a cleaned clone with navboxes/references/etc. already
+  removed — Go builds that clone by re-serializing and re-parsing the
+  content subtree, and this port does the same rather than eliminating
+  the clone now that in-place mutation is possible.
+- **Not reproduced, documented instead:** wrapping a wikitable in a
+  horizontally-scrolling `<div>` for preview has no cheap `NodeId`-based
+  equivalent and isn't covered by Go's own tests — a cosmetic-only gap,
+  not a content or search-quality loss.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Basic extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-basic`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-basic)
+
+Nineteenth Phase 1 increment. The ninth of the 20 built-in extractors.
+
+- **Added:** `BasicExtractor` (capability inventory §4.4) — a port of the
+  `basicExtractor` in `server/extractor/extractor.go`. The universal
+  last-resort fallback: strips markup from any HTML document and keeps
+  whatever plain text and `<title>` remain. `matches` always returns
+  `true` — this only works because a real chain places it last, after
+  everything more specific has had its chance.
+- **Approach, documented rather than perfectly replicated:** Go walks the
+  raw byte stream with its own HTML tokenizer, tracking "inside
+  `<body>`"/"inside `<script>`/`<style>`/`<noscript>`" by hand; this port
+  instead selects the parsed `<body>` element via `scraper` and walks its
+  subtree. Simpler, but not quite equivalent for a fragment with no
+  `<body>` tag at all — Go would find no text there, while `html5ever`
+  always synthesizes one — a difference documented in the module rather
+  than reproduced, since it has no practical effect on real crawled pages.
+- **Behavior preserved deliberately:** text nodes are concatenated with no
+  separators at all (not even between block elements), deliberately
+  cruder than `textutil`'s block-aware flattening, matching Go's own
+  token-by-token concatenation exactly. `Preview` doesn't derive anything
+  from `document.html`; like Go, it just HTML-escapes whatever
+  `document.text` already holds, succeeding with empty content when there
+  is none rather than falling back.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's ChatGPT extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-chatgpt`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-chatgpt)
+
+Eighteenth Phase 1 increment. The eighth of the 20 built-in extractors.
+
+- **Added:** `ChatGptExtractor` (capability inventory §4.5.18) — a port of
+  `server/extractor/extractors/chatgpt/extractor.go`. Extract and preview
+  for chatgpt.com conversation URLs (authenticated, public-shared, and
+  custom-GPT). Conversation turns are found via `<article
+  data-testid="conversation-turn-...">` wrappers, falling back to bare
+  `[data-message-author-role]` elements for public-share/custom-GPT pages
+  that skip the wrapper; hidden turns/ancestors and cross-role nested
+  content are excluded throughout.
+- **New approach, no DOM mutation:** `scraper::ElementRef` is read-only,
+  so Go's clone-then-remove content-cleaning pattern has no direct
+  equivalent. This port instead copies only the kept nodes into a fresh
+  `ego_tree`-backed fragment (`Html::new_fragment()` +
+  `NodeMut::append()`), used for both plain-text extraction and preview
+  HTML.
+- **Not generalized speculatively:** Go's own conversation-text writer is
+  a superset of `textutil` (it also handles list bullets and table-cell
+  separators) and isn't built on `textutil` either, so this port mirrors
+  that with its own `ConversationTextWriter` rather than generalizing
+  `textutil` for a shape only this one extractor needs — reusing only its
+  final `normalize_text` whitespace pass.
+- **Behavior preserved deliberately:** the first extractor to report
+  `ExtractOutcome`/`PreviewOutcome::Abort` (a matched conversation URL
+  with no visible turns) rather than `Fallback`, matching Go's own
+  `AbortExtraction` since that's a dead end for the whole chain, not a
+  case for the next extractor to try.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's GitHub extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-github`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-github)
 

@@ -104,7 +104,7 @@ fn write_text_break(out: &mut String) {
 
 /// Collapses runs of whitespace within lines and runs of blank lines down
 /// to one, and trims the result.
-fn normalize_text(text: &str) -> String {
+pub(crate) fn normalize_text(text: &str) -> String {
     let text = text
         .replace('\u{a0}', " ")
         .replace("\r\n", "\n")

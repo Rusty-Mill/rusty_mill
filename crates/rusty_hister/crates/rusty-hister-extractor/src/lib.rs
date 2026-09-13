@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Seven concrete extractors so far:**
+//! **Eleven concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -58,6 +58,58 @@
 //!   re-sanitize its whole accumulated buffer the way the extractors
 //!   above do — only the embedded README HTML passes through
 //!   `sanitizer::sanitize_html`, matching a real Go asymmetry.
+//! - [`ChatGptExtractor`] (capability inventory §4.5.18) — extract *and*
+//!   preview for chatgpt.com conversation URLs (authenticated, shared, and
+//!   custom-GPT). `scraper::ElementRef` is read-only, so Go's
+//!   clone-then-remove content-cleaning pattern has no direct equivalent;
+//!   this port instead copies only the kept nodes into a fresh
+//!   `ego_tree`-backed fragment (`Html::new_fragment()` +
+//!   `NodeMut::append()`). Go's own conversation text writer is a
+//!   superset of `textutil` (it also handles list bullets and table-cell
+//!   separators) and isn't built on it, so this port mirrors that with
+//!   its own `ConversationTextWriter` rather than generalizing `textutil`
+//!   speculatively — reusing only its final `normalize_text` whitespace
+//!   pass. The first extractor to use `ExtractOutcome`/`PreviewOutcome`'s
+//!   `Abort` variant: a matched conversation URL with no visible turns is
+//!   a dead end for the whole chain, not a "try the next extractor" case.
+//! - [`BasicExtractor`] (capability inventory §4.4) — extract *and*
+//!   preview, the universal last-resort fallback: strips markup from any
+//!   HTML document and keeps whatever plain text and `<title>` remain.
+//!   `matches` always returns `true`; this only works because a real
+//!   chain places it last, after everything more specific has already had
+//!   its chance. Deliberately cruder than `textutil`'s block-aware
+//!   flattening — text nodes are concatenated with no separators at all,
+//!   matching Go's own token-by-token concatenation exactly.
+//! - [`WikipediaExtractor`] (capability inventory §4.5.12) — extract *and*
+//!   preview for `*.wikipedia.org/wiki/...` article pages: article text,
+//!   infobox key/value pairs, and wikitables for extraction; a richly
+//!   styled preview (inline styles standing in for Wikipedia's own,
+//!   sanitizer-stripped CSS classes) for rendering. The largest port so
+//!   far — Go's `goquery` mutates its parse tree in place (`.Remove()`,
+//!   `.SetAttr()`, `.ReplaceWithHtml()`), which `scraper::ElementRef` has
+//!   no equivalent for; this port instead mutates the same `ego_tree` by
+//!   `NodeId` (attribute changes via `Tree::get_mut`, removals via
+//!   `NodeMut::detach`), always collecting the `NodeId`s a selector pass
+//!   needs into an owned `Vec` before mutating (see the module's own doc).
+//!   One cosmetic-only Go behavior isn't reproduced: wrapping a wikitable
+//!   in a horizontally-scrolling `<div>`, which has no cheap `NodeId`-based
+//!   equivalent and isn't covered by Go's own tests.
+//! - [`RedditExtractor`] (capability inventory §4.5.6) — extract *and*
+//!   preview for Reddit post pages. Reddit has shipped at least three
+//!   different markups for the same post over the years — modern
+//!   `shreddit-*` web components, the legacy `old.reddit.com` DOM, and a
+//!   `schema.org` JSON-LD block many pages embed regardless of which HTML
+//!   renders — so, like Go, this port copes with an ordered list of
+//!   CSS-selector candidates (first non-empty/first-match wins) rather
+//!   than branching on "which Reddit era is this" up front. The crate's
+//!   third real `textutil` caller. Reuses two tricks already established
+//!   by earlier extractors for `scraper::ElementRef`'s read-only API: a
+//!   post/comment body's URL rewriting re-parses that subtree's own HTML
+//!   as a standalone fragment (`WikipediaExtractor::extract`'s clone
+//!   trick), and reading a comment's own text when it has no dedicated
+//!   body element copies only the kept nodes into a fresh `ego_tree`
+//!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
+//!   nested reply's text isn't double-counted into its parent's.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -73,24 +125,31 @@
 //! policy governing how their tests are written (from independently
 //! reading Hister's Go source, never copied).
 
+mod basic;
+mod chatgpt;
 mod embeddedvideo;
 mod github;
 mod godoc;
 mod hackernews;
 mod jsonld;
 mod lobsters;
+mod reddit;
 mod registry;
 mod sanitizer;
 mod stackexchange;
 mod textutil;
 mod urlutil;
+mod wikipedia;
 
+pub use basic::BasicExtractor;
+pub use chatgpt::ChatGptExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
+pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
     Capabilities, Document, DocumentType, ExtractOutcome, Extractor, ExtractorConfig, HisterError,
@@ -98,3 +157,4 @@ pub use rusty_hister_core::{
 };
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
+pub use wikipedia::WikipediaExtractor;

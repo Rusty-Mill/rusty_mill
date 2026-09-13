@@ -30,3 +30,17 @@ chrono.workspace = true
 # `scraper` at this same version — just named directly rather than relying
 # on type inference to paper over it, since this crate calls into it by name.
 ego-tree = "0.9"
+# Percent-decoding for ChatGPT's conversation-path-segment validation
+# (matching Go's `url.PathUnescape`). Already pinned transitively by the
+# `url` crate (via `ammonia`) at this same version — named directly here
+# rather than reaching for it through an unrelated crate's re-export.
+percent-encoding = "2"
+# Direct attribute/element construction for Wikipedia's preview styling
+# pass (setting inline `style` attributes on existing nodes, and swapping
+# a `<video>` node for an `<img>`) — `scraper::ElementRef` gives no
+# mutation API of its own, but `Html`'s underlying `ego_tree::Tree` can be
+# mutated by `NodeId`, and doing that for element attributes means
+# building `html5ever` attribute/name values directly. Already pinned
+# transitively by `scraper` at this same version — named directly here
+# rather than reaching for it through an unrelated re-export.
+html5ever = "0.29"
