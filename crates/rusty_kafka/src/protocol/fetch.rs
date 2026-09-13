@@ -19,8 +19,8 @@
 use crate::error::CodecError;
 use crate::record_batch::{self, Record};
 use crate::wire::{
-    read_array_len, read_i16, read_i32, read_i64, read_i8, read_nullable_bytes, read_string,
-    write_i16, write_i32, write_i64, write_i8, write_string,
+    read_array_len, read_checked_array_len, read_i16, read_i32, read_i64, read_i8,
+    read_nullable_bytes, read_string, write_i16, write_i32, write_i64, write_i8, write_string,
 };
 use rusty_wire::{Reader, Writer};
 
@@ -186,19 +186,22 @@ impl FetchResponse {
     /// Decodes the response body.
     pub fn decode(reader: &mut Reader) -> Result<Self, CodecError> {
         let throttle_time_ms = read_i32(reader)?;
-        let topic_count = read_array_len(reader)?.max(0);
-        let mut topics = Vec::with_capacity(topic_count as usize);
+        const FETCH_TOPIC_MIN_LEN: usize = 2 + 4; // empty name + partition_count
+        let topic_count = read_checked_array_len(reader, FETCH_TOPIC_MIN_LEN)?;
+        let mut topics = Vec::with_capacity(topic_count);
         for _ in 0..topic_count {
             let name = read_string(reader)?;
-            let partition_count = read_array_len(reader)?.max(0);
-            let mut partitions = Vec::with_capacity(partition_count as usize);
+            const FETCH_PARTITION_MIN_LEN: usize = 4 + 2 + 8 + 8 + 4 + 4; // partition_index + error_code + high_watermark + last_stable_offset + aborted_count + records
+            let partition_count = read_checked_array_len(reader, FETCH_PARTITION_MIN_LEN)?;
+            let mut partitions = Vec::with_capacity(partition_count);
             for _ in 0..partition_count {
                 let partition_index = read_i32(reader)?;
                 let error_code = read_i16(reader)?;
                 let high_watermark = read_i64(reader)?;
                 let last_stable_offset = read_i64(reader)?;
-                let aborted_count = read_array_len(reader)?.max(0);
-                let mut aborted_transactions = Vec::with_capacity(aborted_count as usize);
+                const ABORTED_TRANSACTION_MIN_LEN: usize = 8 + 8; // producer_id + first_offset
+                let aborted_count = read_checked_array_len(reader, ABORTED_TRANSACTION_MIN_LEN)?;
+                let mut aborted_transactions = Vec::with_capacity(aborted_count);
                 for _ in 0..aborted_count {
                     aborted_transactions.push(AbortedTransaction {
                         producer_id: read_i64(reader)?,
@@ -387,5 +390,59 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         let decoded = FetchResponse::decode(&mut reader).unwrap();
         assert_eq!(decoded.topics[0].partitions[0].error_code, 3);
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_topic_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, 0); // throttle_time_ms
+        write_i32(&mut writer, i32::MAX); // topic count
+        writer.write_bytes(&[0, 1]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = FetchResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_partition_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, 0); // throttle_time_ms
+        write_i32(&mut writer, 1); // topic count
+        write_string(&mut writer, "t").unwrap(); // topic name
+        write_i32(&mut writer, i32::MAX); // partition count
+        writer.write_bytes(&[0, 1, 2]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = FetchResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 3)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_aborted_transaction_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i32(&mut writer, 0); // throttle_time_ms
+        write_i32(&mut writer, 1); // topic count
+        write_string(&mut writer, "t").unwrap(); // topic name
+        write_i32(&mut writer, 1); // partition count
+        write_i32(&mut writer, 0); // partition_index
+        write_i16(&mut writer, 0); // error_code
+        write_i64(&mut writer, 0); // high_watermark
+        write_i64(&mut writer, 0); // last_stable_offset
+        write_i32(&mut writer, i32::MAX); // aborted_transaction count
+        writer.write_bytes(&[0, 1, 2, 3]); // partition floor met, not enough for aborted_count
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = FetchResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 4)
+        ));
     }
 }

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let recursive = args.contains(&"-r".to_string())
         || args.contains(&"-R".to_string())
         || args.contains(&"-rf".to_string());

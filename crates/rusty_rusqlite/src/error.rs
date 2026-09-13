@@ -116,6 +116,16 @@ pub enum Error {
     /// than one table in scope is an error, not a silent "pick the
     /// first one" — qualify it (`t1.id`) to disambiguate.
     AmbiguousColumn(String),
+    /// An [`Expr`](crate::dml_select::Expr) tree passed to
+    /// `eval::evaluate_with_context` nested past
+    /// `eval::MAX_EVAL_DEPTH`. Every tree the SQL parser itself produces
+    /// is already bounded well under this by
+    /// `dml_select::MAX_EXPR_DEPTH` — this only fires for a tree built
+    /// some other way (`Expr`/`evaluate`/`evaluate_bool` are public API,
+    /// so an embedder can hand-construct one), guarding the evaluator's
+    /// own recursion against a stack overflow independently of the
+    /// parser's guard.
+    ExpressionTooDeep,
 }
 
 impl fmt::Display for Error {
@@ -162,6 +172,7 @@ impl fmt::Display for Error {
             Error::IndexAlreadyExists(name) => write!(f, "index {name:?} already exists"),
             Error::IndexNotFound(name) => write!(f, "no such index: {name:?}"),
             Error::AmbiguousColumn(name) => write!(f, "ambiguous column name: {name:?}"),
+            Error::ExpressionTooDeep => write!(f, "expression tree is too large"),
         }
     }
 }

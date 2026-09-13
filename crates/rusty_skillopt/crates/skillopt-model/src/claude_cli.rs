@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use skillopt_core::{ChatBackend, Message, Role};
@@ -73,12 +74,38 @@ fn partition_messages(messages: &[Message]) -> anyhow::Result<(String, String)> 
 /// `AisfStageBackend`.
 pub struct ClaudeCliBackend {
     model: String,
+    timeout: Duration,
 }
 
 impl ClaudeCliBackend {
     pub fn new(model: String) -> Self {
-        Self { model }
+        Self {
+            model,
+            timeout: DEFAULT_TIMEOUT,
+        }
     }
+
+    /// Overrides the default 300s subprocess wait timeout. A `claude -p`
+    /// invocation that never exits (hung auth prompt, wedged CLI session,
+    /// etc.) would otherwise block `chat()` -- and therefore
+    /// `Engine::train` -- forever; see [`ClaudeCliError::Timeout`].
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// Default `claude -p` subprocess wait timeout. Long enough for a real
+/// completion (these may be long-running CLI invocations), short enough to
+/// still recover a stuck `Engine::train` run instead of hanging forever.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Errors specific to [`ClaudeCliBackend`] that a caller may want to match
+/// on directly rather than parse out of the `anyhow` chain's `Display` text.
+#[derive(Debug, thiserror::Error)]
+pub enum ClaudeCliError {
+    #[error("`claude -p` did not finish within {0:?} and was killed")]
+    Timeout(Duration),
 }
 
 #[async_trait]
@@ -101,7 +128,12 @@ impl ChatBackend for ClaudeCliBackend {
             .arg(&self.model)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // A timed-out wait below drops this future's `Child`; killing
+            // the still-running process on drop (rather than orphaning it)
+            // is exactly what makes the timeout actually recover the slot
+            // instead of leaking a wedged subprocess.
+            .kill_on_drop(true);
 
         let _sys_file = if system_prompt.is_empty() {
             None
@@ -119,7 +151,10 @@ impl ChatBackend for ClaudeCliBackend {
         stdin.write_all(user_prompt.as_bytes()).await?;
         drop(stdin); // close our end so claude -p's stdin read sees EOF
 
-        let output = child.wait_with_output().await?;
+        let output = match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
+            Ok(result) => result?,
+            Err(_elapsed) => return Err(ClaudeCliError::Timeout(self.timeout).into()),
+        };
         anyhow::ensure!(
             output.status.success(),
             "`claude -p` exited with {}: {}",

@@ -5,7 +5,7 @@ use std::io::{self, BufRead};
 use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let mut cmd_name = "echo".to_string();
     let mut base_args = Vec::new();
 

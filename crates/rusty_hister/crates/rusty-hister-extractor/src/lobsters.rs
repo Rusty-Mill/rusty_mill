@@ -30,6 +30,16 @@ use scraper::{CaseSensitivity, ElementRef, Html};
 
 const MATCH_URL_PREFIX: &str = "https://lobste.rs/s/";
 
+/// Maximum `li.comments_subtree > ol.comments` nesting depth walked when
+/// rendering a thread. The crawled page's comment tree is untrusted and
+/// genuinely recursive (see the module doc); a pathologically deep chain
+/// would otherwise recurse `write_comment_text`/`write_comment_html`
+/// without bound and overflow the stack. 64 matches this workspace's
+/// established recursion-cap convention (e.g.
+/// `nexus-database::formula::eval::MAX_RECURSION_DEPTH`,
+/// `rusty_jinja::parser::MAX_NESTING_DEPTH`).
+const MAX_COMMENT_DEPTH: usize = 64;
+
 #[derive(Debug, Default)]
 pub struct LobstersExtractor {
     config: ExtractorConfig,
@@ -190,7 +200,7 @@ impl Extractor for LobstersExtractor {
             out.push_str("<h2>Comments</h2>");
             out.push_str(r#"<ol class="comments">"#);
             for comment in &comments {
-                write_comment_html(&mut out, comment);
+                write_comment_html(&mut out, comment, 0);
             }
             out.push_str("</ol>");
         }
@@ -299,10 +309,12 @@ fn write_comment_text(out: &mut String, subtree: &ElementRef, depth: usize) {
             }
         }
     }
-    if let Some(ol_comments) = subtree.select(&selector("ol.comments")).next() {
-        for child in ol_comments.child_elements() {
-            if is_comments_subtree(&child) {
-                write_comment_text(out, &child, depth + 1);
+    if depth < MAX_COMMENT_DEPTH {
+        if let Some(ol_comments) = subtree.select(&selector("ol.comments")).next() {
+            for child in ol_comments.child_elements() {
+                if is_comments_subtree(&child) {
+                    write_comment_text(out, &child, depth + 1);
+                }
             }
         }
     }
@@ -310,7 +322,7 @@ fn write_comment_text(out: &mut String, subtree: &ElementRef, depth: usize) {
 
 /// Renders a single comment subtree as nested `<li>`/`<ol>`, preserving the
 /// original reply hierarchy.
-fn write_comment_html(out: &mut String, subtree: &ElementRef) {
+fn write_comment_html(out: &mut String, subtree: &ElementRef, depth: usize) {
     let Some(comment) = subtree.select(&selector("div.comment")).next() else {
         return;
     };
@@ -353,17 +365,19 @@ fn write_comment_html(out: &mut String, subtree: &ElementRef) {
     out.push_str("</p>");
     out.push_str(&body);
 
-    if let Some(ol_comments) = subtree.select(&selector("ol.comments")).next() {
-        let children: Vec<_> = ol_comments
-            .child_elements()
-            .filter(is_comments_subtree)
-            .collect();
-        if !children.is_empty() {
-            out.push_str(r#"<ol class="comments">"#);
-            for child in &children {
-                write_comment_html(out, child);
+    if depth < MAX_COMMENT_DEPTH {
+        if let Some(ol_comments) = subtree.select(&selector("ol.comments")).next() {
+            let children: Vec<_> = ol_comments
+                .child_elements()
+                .filter(is_comments_subtree)
+                .collect();
+            if !children.is_empty() {
+                out.push_str(r#"<ol class="comments">"#);
+                for child in &children {
+                    write_comment_html(out, child, depth + 1);
+                }
+                out.push_str("</ol>");
             }
-            out.push_str("</ol>");
         }
     }
     out.push_str("</li>");
@@ -518,5 +532,67 @@ mod tests {
             }
             other => panic!("expected Extracted, got {other:?}"),
         }
+    }
+
+    /// Builds a comment thread nesting `total_depth` levels deep, each
+    /// comment's body text tagged with its own depth index (`body0`,
+    /// `body1`, ...) so a truncation cap can be verified by checking which
+    /// indices made it into the rendered output.
+    fn nested_comment_chain_html(total_depth: usize) -> String {
+        let mut html = String::from(
+            r##"<html><body><li class="story"><div class="link"><a class="u-url" href="#">T</a></div></li><div id="story_comments"><ol class="comments">"##,
+        );
+        for i in 0..total_depth {
+            html.push_str(&format!(
+                r#"<li class="comments_subtree"><div class="comment" data-shortid="c{i}"><div class="comment_text">body{i}</div></div><ol class="comments">"#
+            ));
+        }
+        for _ in 0..total_depth {
+            html.push_str("</ol></li>");
+        }
+        html.push_str("</ol></div></body></html>");
+        html
+    }
+
+    #[test]
+    fn deeply_nested_comment_text_recursion_is_capped_instead_of_overflowing_the_stack() {
+        let html = nested_comment_chain_html(5000);
+        let ext = LobstersExtractor::default();
+        let text = match ext.extract(&doc("https://lobste.rs/s/abc123/x", &html)) {
+            ExtractOutcome::Extracted(result) => result.text.unwrap(),
+            other => panic!("expected Extracted, got {other:?}"),
+        };
+        assert!(text.contains("body0"), "root comment must be present");
+        assert!(
+            text.contains(&format!("body{MAX_COMMENT_DEPTH}")),
+            "comment at the cap boundary must still be present"
+        );
+        assert!(
+            !text.contains(&format!("body{}", MAX_COMMENT_DEPTH + 1)),
+            "recursion past the cap must stop instead of walking arbitrarily deep"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_comment_html_recursion_is_capped_instead_of_overflowing_the_stack() {
+        let html_str = nested_comment_chain_html(5000);
+        let html = Html::parse_document(&html_str);
+        let root = html
+            .select(&selector(
+                "#story_comments > ol.comments > li.comments_subtree",
+            ))
+            .next()
+            .expect("root comment subtree must parse");
+        let mut out = String::new();
+        write_comment_html(&mut out, &root, 0);
+        assert!(out.contains("body0"), "root comment must be present");
+        assert!(
+            out.contains(&format!("body{MAX_COMMENT_DEPTH}")),
+            "comment at the cap boundary must still be present"
+        );
+        assert!(
+            !out.contains(&format!("body{}", MAX_COMMENT_DEPTH + 1)),
+            "recursion past the cap must stop instead of walking arbitrarily deep"
+        );
     }
 }

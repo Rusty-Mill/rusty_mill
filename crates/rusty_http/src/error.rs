@@ -31,6 +31,15 @@ pub enum Error {
     /// reasoning as [`Error::HeadTooLarge`], applied to chunked-body
     /// framing lines instead of the head.
     ChunkFramingTooLarge,
+    /// A `Content-Length`-framed or close-delimited body exceeded the
+    /// caller-supplied `max_body_len` bound -- for `Content-Length`
+    /// framing this is reported before a single body byte is read (the
+    /// declared length alone is enough to know it's too large); for
+    /// close-delimited framing it's reported once the running total
+    /// crosses the bound, since there's no declared length to check
+    /// upfront. Same reasoning as [`Error::HeadTooLarge`], applied to
+    /// the body instead of the head.
+    BodyTooLarge,
 }
 
 impl fmt::Display for Error {
@@ -52,6 +61,7 @@ impl fmt::Display for Error {
                     "chunked body framing line exceeded the maximum allowed size"
                 )
             }
+            Error::BodyTooLarge => write!(f, "http body exceeded the maximum allowed size"),
         }
     }
 }

@@ -15,8 +15,8 @@
 
 use crate::error::CodecError;
 use crate::wire::{
-    read_array_len, read_i16, read_i32, read_nullable_bytes, read_string, write_i16, write_i32,
-    write_nullable_bytes, write_string,
+    read_array_len, read_checked_array_len, read_i16, read_i32, read_nullable_bytes, read_string,
+    write_i16, write_i32, write_nullable_bytes, write_string,
 };
 use rusty_wire::{Reader, Writer};
 
@@ -136,8 +136,9 @@ impl JoinGroupResponse {
         let group_protocol = read_string(reader)?;
         let leader_id = read_string(reader)?;
         let member_id = read_string(reader)?;
-        let member_count = read_array_len(reader)?.max(0);
-        let mut members = Vec::with_capacity(member_count as usize);
+        const JOIN_GROUP_MEMBER_MIN_LEN: usize = 2 + 4; // empty member_id + metadata
+        let member_count = read_checked_array_len(reader, JOIN_GROUP_MEMBER_MIN_LEN)?;
+        let mut members = Vec::with_capacity(member_count);
         for _ in 0..member_count {
             let member_id = read_string(reader)?;
             let metadata = read_nullable_bytes(reader)?.unwrap_or(&[]).to_vec();
@@ -273,5 +274,24 @@ mod tests {
         let decoded = JoinGroupResponse::decode(&mut reader).unwrap();
         assert!(decoded.members.is_empty());
         assert!(!decoded.is_leader());
+    }
+
+    #[test]
+    fn decode_rejects_a_huge_member_count_from_a_tiny_buffer() {
+        let mut writer = Writer::new();
+        write_i16(&mut writer, 0); // error_code
+        write_i32(&mut writer, 1); // generation_id
+        write_string(&mut writer, "range").unwrap(); // group_protocol
+        write_string(&mut writer, "consumer-1-abc").unwrap(); // leader_id
+        write_string(&mut writer, "consumer-1-abc").unwrap(); // member_id
+        write_i32(&mut writer, i32::MAX); // member count
+        writer.write_bytes(&[0, 1]); // nowhere near enough bytes
+        let bytes = writer.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let err = JoinGroupResponse::decode(&mut reader).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::ArrayLengthExceedsBuffer(i32::MAX, 2)
+        ));
     }
 }

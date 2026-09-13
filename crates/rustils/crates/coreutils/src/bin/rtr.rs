@@ -5,7 +5,7 @@ use std::env;
 use std::io::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let delete = args.contains(&"-d".to_string());
     let non_opts: Vec<&String> = args
         .iter()

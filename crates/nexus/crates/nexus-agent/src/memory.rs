@@ -214,9 +214,12 @@ pub enum MemoryError {
 ///
 /// # Errors
 /// Returns [`MemoryError::InvalidAgentId`] when the id is empty,
-/// over 96 chars, or contains characters outside
-/// `[A-Za-z0-9_.\-]` (period is allowed so reverse-DNS ids like
-/// `com.nexus.agent.coder` work).
+/// over 96 chars, contains characters outside `[A-Za-z0-9_.\-]`
+/// (period is allowed so reverse-DNS ids like `com.nexus.agent.coder`
+/// work), or — once split on `.` — contains an empty, `.`, or `..`
+/// component. The latter check blocks bare `.`/`..` path-traversal
+/// ids (`agent_dir`/`history_path` join the id directly into a path)
+/// while still allowing legitimate reverse-DNS-style ids.
 pub fn normalize_agent_id(agent_id: &str) -> Result<&str, MemoryError> {
     if agent_id.is_empty() || agent_id.len() > 96 {
         return Err(MemoryError::InvalidAgentId(agent_id.to_string()));
@@ -225,6 +228,12 @@ pub fn normalize_agent_id(agent_id: &str) -> Result<&str, MemoryError> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
     if !safe {
+        return Err(MemoryError::InvalidAgentId(agent_id.to_string()));
+    }
+    let has_dot_traversal_component = agent_id
+        .split('.')
+        .any(|part| part.is_empty() || part == "." || part == "..");
+    if has_dot_traversal_component {
         return Err(MemoryError::InvalidAgentId(agent_id.to_string()));
     }
     Ok(agent_id)
@@ -836,6 +845,18 @@ mod tests {
     fn normalize_agent_id_rejects_too_long() {
         let long = "a".repeat(97);
         assert!(normalize_agent_id(&long).is_err());
+    }
+
+    #[test]
+    fn normalize_agent_id_rejects_dot_path_components() {
+        assert!(
+            normalize_agent_id("..").is_err(),
+            "'..' must not resolve out of the agent's directory scope"
+        );
+        assert!(
+            normalize_agent_id(".").is_err(),
+            "'.' must not resolve to the parent agents directory"
+        );
     }
 
     #[test]

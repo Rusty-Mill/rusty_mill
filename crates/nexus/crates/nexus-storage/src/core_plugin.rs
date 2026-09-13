@@ -978,12 +978,8 @@ impl CorePlugin for StorageCorePlugin {
             HANDLER_REPLACE_IN_FILES => {
                 crate::handlers::search::replace_in_files(engine, &self.forge_root, args)
             }
-            HANDLER_READ_FRONTMATTER => {
-                crate::handlers::notes::read_frontmatter(&self.forge_root, args)
-            }
-            HANDLER_WRITE_FRONTMATTER => {
-                crate::handlers::notes::write_frontmatter(engine, &self.forge_root, args)
-            }
+            HANDLER_READ_FRONTMATTER => crate::handlers::notes::read_frontmatter(engine, args),
+            HANDLER_WRITE_FRONTMATTER => crate::handlers::notes::write_frontmatter(engine, args),
             HANDLER_NOTE_FIND_DUPLICATES => crate::handlers::notes::find_duplicates(engine, args),
             HANDLER_NOTE_CREATE_UNIQUE => crate::handlers::notes::create_unique(engine, args),
             HANDLER_NOTE_RANDOM => crate::handlers::notes::random(engine, args),

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use skillopt_core::{ChatBackend, Message, Role};
@@ -6,6 +8,14 @@ use skillopt_core::{ChatBackend, Message, Role};
 /// override `api_version`. Azure requires this as a query param; there's no
 /// meaningful "unversioned" default the way there is for plain OpenAI.
 pub const DEFAULT_API_VERSION: &str = "2024-06-01";
+
+/// Default HTTP timeout for a single `chat` call. Chat completions can
+/// legitimately take tens of seconds to generate, so this is generous
+/// rather than tight -- it exists to recover from a stalled or hostile
+/// endpoint instead of hanging `Engine::train` forever, matching the
+/// `DEFAULT_TIMEOUT` convention `aisf_stage`/`claude_cli` already use for
+/// the same purpose on their own (subprocess-based) request paths.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Azure OpenAI's chat-completions API differs from plain OpenAI in two
 /// ways `openai_compatible` doesn't accommodate: auth is an `api-key`
@@ -24,6 +34,7 @@ pub struct AzureOpenAiBackend {
     api_version: String,
     temperature: Option<f32>,
     max_tokens: u32,
+    timeout: Duration,
 }
 
 impl AzureOpenAiBackend {
@@ -43,7 +54,14 @@ impl AzureOpenAiBackend {
             api_version: api_version.unwrap_or_else(|| DEFAULT_API_VERSION.to_string()),
             temperature,
             max_tokens,
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// Overrides the default 120s HTTP timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -111,11 +129,11 @@ impl ChatBackend for AzureOpenAiBackend {
             .post(url)
             .header("api-key", &self.api_key)
             .json(&req)
+            .timeout(self.timeout)
             .send()
             .await?;
 
-        let status = resp.status();
-        let body = resp.text().await?;
+        let (status, body) = crate::http::read_capped_body(resp).await?;
         anyhow::ensure!(
             status.is_success(),
             "azure openai API error ({status}): {body}"
@@ -253,5 +271,69 @@ mod tests {
             !request.contains("//openai/deployments"),
             "trailing slash on endpoint should not produce a double slash, got:\n{request}"
         );
+    }
+
+    fn backend(endpoint: String) -> AzureOpenAiBackend {
+        AzureOpenAiBackend::new("secret-key".into(), endpoint, "dep".into(), None, None, 64)
+    }
+
+    #[tokio::test]
+    async fn chat_times_out_on_stalled_server_instead_of_hanging() {
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            addr_tx
+                .send(listener.local_addr().unwrap().to_string())
+                .unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+        let addr = addr_rx.recv().unwrap();
+        let backend = backend(format!("http://{addr}")).with_timeout(Duration::from_millis(200));
+
+        let start = std::time::Instant::now();
+        let err = backend.chat(&[Message::user("hi")]).await.unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "chat should have timed out quickly instead of hanging, took {:?}",
+            start.elapsed()
+        );
+        assert!(
+            err.chain()
+                .filter_map(|e| e.downcast_ref::<reqwest::Error>())
+                .any(reqwest::Error::is_timeout),
+            "expected a timeout error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_oversized_response_instead_of_buffering_it() {
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            addr_tx
+                .send(listener.local_addr().unwrap().to_string())
+                .unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let oversized_len = crate::http::MAX_RESPONSE_BODY_BYTES as u64 + 1;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {oversized_len}\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let addr = addr_rx.recv().unwrap();
+
+        let backend = backend(format!("http://{addr}")).with_timeout(Duration::from_secs(5));
+        let err = backend.chat(&[Message::user("hi")]).await.unwrap_err();
+        assert!(
+            err.to_string().contains("cap"),
+            "expected an over-cap rejection, got: {err}"
+        );
+
+        let _ = server.join();
     }
 }

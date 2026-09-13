@@ -221,7 +221,10 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
         dtype: i32,
         offset: usize,
     }
-    let mut infos = Vec::with_capacity(n_tensors);
+    // Cap pre-allocation so a malicious/huge n_tensors header can't force
+    // an unbounded allocation before the read loop hits truncated data and
+    // errors out cleanly (mirrors rusty_llama's gguf.rs).
+    let mut infos = Vec::with_capacity(n_tensors.min(1 << 16));
     for _ in 0..n_tensors {
         let name = String::from_utf8_lossy(&p.string()?).into_owned();
         let n_dims = p.u32()? as usize;
@@ -268,6 +271,12 @@ pub fn load(r: &mut impl Read) -> io::Result<Model> {
                         info.name
                     ))
                 })?;
+                if !n_elems.is_multiple_of(QK) {
+                    return Err(err(format!(
+                        "gguf: tensor '{}': {n_elems} elements not divisible by block size",
+                        info.name
+                    )));
+                }
                 (n_elems / QK).checked_mul(bb).ok_or_else(overflow)?
             }
         };
@@ -611,6 +620,71 @@ mod tests {
         }
         match load(&mut Cursor::new(buf)) {
             Ok(_) => panic!("overflowing tensor dims should be rejected"),
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+        }
+    }
+
+    #[test]
+    fn huge_tensor_count_is_rejected_without_oom() {
+        // A crafted header claiming an enormous tensor count must not force
+        // an unbounded `Vec::with_capacity` allocation; the capped
+        // pre-allocation lets the read loop hit the truncated tensor
+        // descriptor section and fail cleanly instead.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer { w: &mut buf };
+            w.u32(VERSION).unwrap();
+            w.u64(u64::MAX).unwrap(); // n_tensors: absurdly large
+            w.u64(13).unwrap(); // n_kv: architecture + alignment + 11 hparams
+            w.string(b"general.architecture").unwrap();
+            w.u32(T_STRING).unwrap();
+            w.string(b"whisper").unwrap();
+            w.string(b"general.alignment").unwrap();
+            w.u32(T_U32).unwrap();
+            w.u32(ALIGNMENT as u32).unwrap();
+            for key in HPARAM_KEYS.iter() {
+                w.kv_i32(key, 1).unwrap();
+            }
+            // No tensor descriptors follow: the buffer ends here.
+        }
+        match load(&mut Cursor::new(buf)) {
+            Ok(_) => panic!("huge tensor count over a truncated file should be rejected"),
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+        }
+    }
+
+    #[test]
+    fn quantized_tensor_not_multiple_of_block_size_is_rejected() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer { w: &mut buf };
+            w.u32(VERSION).unwrap();
+            w.u64(1).unwrap(); // n_tensors
+            w.u64(13).unwrap(); // n_kv: architecture + alignment + 11 hparams
+            w.string(b"general.architecture").unwrap();
+            w.u32(T_STRING).unwrap();
+            w.string(b"whisper").unwrap();
+            w.string(b"general.alignment").unwrap();
+            w.u32(T_U32).unwrap();
+            w.u32(ALIGNMENT as u32).unwrap();
+            for key in HPARAM_KEYS.iter() {
+                w.kv_i32(key, 1).unwrap();
+            }
+            // Q8_0 tensor shaped [2, 31]: 62 elements, not a multiple of
+            // QK (32) — must be rejected instead of silently truncated.
+            w.string(b"bad").unwrap();
+            w.u32(2).unwrap(); // n_dims
+            w.u64(31).unwrap();
+            w.u64(2).unwrap();
+            w.u32(8).unwrap(); // dtype Q8_0
+            w.u64(0).unwrap(); // offset
+        }
+        // Padding so the tensor's byte range is within bounds; only the
+        // block-size-divisibility check (not the out-of-bounds check)
+        // should be able to reject this tensor.
+        buf.extend(std::iter::repeat_n(0u8, 128));
+        match load(&mut Cursor::new(buf)) {
+            Ok(_) => panic!("non-block-aligned quantized tensor should be rejected"),
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
         }
     }

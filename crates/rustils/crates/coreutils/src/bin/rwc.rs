@@ -28,7 +28,7 @@ fn count_reader<R: Read>(mut reader: R) -> io::Result<Counts> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = coreutils::args::collect_lossy(env::args_os());
     let count_lines = args.contains(&"-l".to_string());
     let count_words = args.contains(&"-w".to_string());
     let count_bytes = args.contains(&"-c".to_string()) || args.contains(&"-m".to_string());

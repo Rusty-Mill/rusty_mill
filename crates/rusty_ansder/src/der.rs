@@ -174,6 +174,12 @@ pub fn read_integer_u32(r: &mut Reader<'_>) -> Result<u32> {
             value: "non-canonical encoding: redundant leading 0x00".to_string(),
         });
     }
+    if bytes.len() == 5 && bytes[0] != 0x00 {
+        return Err(Error::InvalidValue {
+            field: "DER integer",
+            value: "value out of range for u32".to_string(),
+        });
+    }
     let mut val = 0u32;
     for &b in bytes {
         val = (val << 8) | (b as u32);
@@ -247,6 +253,18 @@ mod tests {
         // high bit of the leading content byte is set, so this must be
         // rejected rather than reinterpreted as the unsigned value 255.
         let bytes = [0x02u8, 0x01, 0xFF];
+        let mut r = Reader::new(&bytes);
+        assert!(read_integer_u32(&mut r).is_err());
+    }
+
+    #[test]
+    fn read_integer_u32_rejects_a_5_byte_overflowing_encoding() {
+        // DER encoding of 2^32: tag INTEGER, length 5, content
+        // 01 00 00 00 00. This value does not fit in a u32; the leading
+        // content byte is non-zero, so the accumulation loop would
+        // silently shift it off the end of a u32 and return a truncated
+        // value (0) instead of erroring.
+        let bytes = [0x02u8, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00];
         let mut r = Reader::new(&bytes);
         assert!(read_integer_u32(&mut r).is_err());
     }

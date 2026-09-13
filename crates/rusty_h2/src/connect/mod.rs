@@ -116,6 +116,40 @@ struct StreamEntry {
     flow: FlowControl,
 }
 
+/// The still-buffering state of a HEADERS or PUSH_PROMISE frame whose
+/// `END_HEADERS` flag was not set, waiting for CONTINUATION frame(s)
+/// (RFC 9113 §6.10) to complete the header block before it can be run
+/// through the (stateful, connection-wide) HPACK decoder.
+#[derive(Debug, Clone)]
+enum PendingHeaderBlock {
+    Headers {
+        stream_id: u32,
+        end_stream: bool,
+        fragment: Vec<u8>,
+    },
+    PushPromise {
+        stream_id: u32,
+        promised_stream_id: u32,
+        fragment: Vec<u8>,
+    },
+}
+
+impl PendingHeaderBlock {
+    fn stream_id(&self) -> u32 {
+        match self {
+            PendingHeaderBlock::Headers { stream_id, .. } => *stream_id,
+            PendingHeaderBlock::PushPromise { stream_id, .. } => *stream_id,
+        }
+    }
+
+    fn fragment_mut(&mut self) -> &mut Vec<u8> {
+        match self {
+            PendingHeaderBlock::Headers { fragment, .. } => fragment,
+            PendingHeaderBlock::PushPromise { fragment, .. } => fragment,
+        }
+    }
+}
+
 /// The connection state machine: settings negotiation, flow control, and
 /// frame dispatch, driving the real per-stream state machine
 /// ([`crate::stream::Stream`]) and real HPACK codec
@@ -132,6 +166,7 @@ pub struct Connection {
     peer_type: PeerType,
     close_reason: Option<H2Error>,
     seen_preface: bool,
+    pending_header_block: Option<PendingHeaderBlock>,
 }
 
 // `Encoder`/`Decoder` don't implement `Debug` (their internal HPACK
@@ -171,6 +206,7 @@ impl Connection {
             peer_type,
             close_reason: None,
             seen_preface: false,
+            pending_header_block: None,
         }
     }
 
@@ -288,11 +324,12 @@ impl Connection {
             Frame::RstStream(rst) => self.handle_rst_stream(rst),
             Frame::GoAway(goaway) => self.handle_goaway(goaway),
             Frame::PushPromise(pp) => self.handle_push_promise(pp),
-            // PRIORITY/CONTINUATION/unknown frames carry no
-            // connection-state-affecting semantics this driver tracks
-            // (RFC 9113 §5.5's "MUST ignore" rule for unknown frame
-            // types, and PRIORITY's tree is a real gap — see README).
-            Frame::Priority(_) | Frame::Continuation(_) | Frame::Unknown { .. } => Ok(vec![]),
+            Frame::Continuation(cont) => self.handle_continuation(cont),
+            // PRIORITY/unknown frames carry no connection-state-affecting
+            // semantics this driver tracks (RFC 9113 §5.5's "MUST ignore"
+            // rule for unknown frame types, and PRIORITY's tree is a real
+            // gap — see README).
+            Frame::Priority(_) | Frame::Unknown { .. } => Ok(vec![]),
         }
     }
 
@@ -342,20 +379,54 @@ impl Connection {
         &mut self,
         headers: crate::frame::headers::HeadersFrame,
     ) -> Result<Vec<Frame>> {
+        if self.pending_header_block.is_some() {
+            return Err(H2Error::Connection(
+                ErrorCode::ProtocolError,
+                "HEADERS received while a prior header block is still awaiting CONTINUATION",
+            ));
+        }
+        if !headers.end_headers {
+            // RFC 9113 §6.10: a header block split across HEADERS and
+            // CONTINUATION frames must be reassembled before it's run
+            // through the (stateful) HPACK decoder -- decoding a lone
+            // fragment here would desync the shared dynamic table for
+            // the rest of the connection.
+            self.pending_header_block = Some(PendingHeaderBlock::Headers {
+                stream_id: headers.stream_id,
+                end_stream: headers.end_stream,
+                fragment: headers.header_block_fragment,
+            });
+            return Ok(vec![]);
+        }
+        self.finish_headers(
+            headers.stream_id,
+            headers.end_stream,
+            &headers.header_block_fragment,
+        )
+    }
+
+    /// Runs a complete (possibly CONTINUATION-reassembled) header block
+    /// through HPACK and applies the resulting stream-state transition.
+    fn finish_headers(
+        &mut self,
+        stream_id: u32,
+        end_stream: bool,
+        header_block_fragment: &[u8],
+    ) -> Result<Vec<Frame>> {
         // Decoding still runs (and must: HPACK is stateful, so even a
         // stream we otherwise reject needs its header block consumed to
         // keep the dynamic table in sync with the peer) before any
         // stream-state bookkeeping.
-        let _fields = self.decoder.decode(&headers.header_block_fragment)?;
+        let _fields = self.decoder.decode(header_block_fragment)?;
 
-        self.reject_if_over_max_concurrent_streams(headers.stream_id)?;
+        self.reject_if_over_max_concurrent_streams(stream_id)?;
 
-        let entry = self.stream_entry(headers.stream_id);
+        let entry = self.stream_entry(stream_id);
         entry.stream.apply(Event::RecvHeaders)?;
-        if headers.end_stream {
+        if end_stream {
             entry.stream.apply(Event::RecvEndStream)?;
         }
-        self.prune_if_closed(headers.stream_id);
+        self.prune_if_closed(stream_id);
         Ok(vec![])
     }
 
@@ -393,16 +464,82 @@ impl Connection {
                 "PUSH_PROMISE received with push disabled",
             ));
         }
+        if self.pending_header_block.is_some() {
+            return Err(H2Error::Connection(
+                ErrorCode::ProtocolError,
+                "PUSH_PROMISE received while a prior header block is still awaiting CONTINUATION",
+            ));
+        }
+        if !pp.end_headers {
+            // Same reassembly requirement as HEADERS (RFC 9113 §6.10).
+            self.pending_header_block = Some(PendingHeaderBlock::PushPromise {
+                stream_id: pp.stream_id,
+                promised_stream_id: pp.promised_stream_id,
+                fragment: pp.header_block_fragment,
+            });
+            return Ok(vec![]);
+        }
+        self.finish_push_promise(pp.promised_stream_id, &pp.header_block_fragment)
+    }
+
+    /// Runs a complete (possibly CONTINUATION-reassembled) PUSH_PROMISE
+    /// header block through HPACK and reserves the promised stream.
+    fn finish_push_promise(
+        &mut self,
+        promised_stream_id: u32,
+        header_block_fragment: &[u8],
+    ) -> Result<Vec<Frame>> {
         // Decode (dynamic-table state must stay in sync, same reasoning
-        // as `handle_headers`) and reserve the promised stream via the
+        // as `finish_headers`) and reserve the promised stream via the
         // real state machine. Actually delivering the pushed response
         // itself isn't implemented -- a documented gap, not a silent
         // no-op: the stream is genuinely reserved, just never fulfilled.
-        let _fields = self.decoder.decode(&pp.header_block_fragment)?;
-        self.reject_if_over_max_concurrent_streams(pp.promised_stream_id)?;
-        let entry = self.stream_entry(pp.promised_stream_id);
+        let _fields = self.decoder.decode(header_block_fragment)?;
+        self.reject_if_over_max_concurrent_streams(promised_stream_id)?;
+        let entry = self.stream_entry(promised_stream_id);
         entry.stream.apply(Event::RecvPushPromise)?;
         Ok(vec![])
+    }
+
+    /// Merges a CONTINUATION frame's fragment into the pending
+    /// HEADERS/PUSH_PROMISE header block it continues (RFC 9113 §6.10),
+    /// only running the reassembled block through HPACK once
+    /// `END_HEADERS` is finally set.
+    fn handle_continuation(
+        &mut self,
+        cont: crate::frame::continuation::ContinuationFrame,
+    ) -> Result<Vec<Frame>> {
+        let Some(mut pending) = self.pending_header_block.take() else {
+            return Err(H2Error::Connection(
+                ErrorCode::ProtocolError,
+                "CONTINUATION received without a preceding HEADERS/PUSH_PROMISE",
+            ));
+        };
+        if pending.stream_id() != cont.stream_id {
+            return Err(H2Error::Connection(
+                ErrorCode::ProtocolError,
+                "CONTINUATION stream id does not match the header block it continues",
+            ));
+        }
+        pending
+            .fragment_mut()
+            .extend_from_slice(&cont.header_block_fragment);
+        if !cont.end_headers {
+            self.pending_header_block = Some(pending);
+            return Ok(vec![]);
+        }
+        match pending {
+            PendingHeaderBlock::Headers {
+                stream_id,
+                end_stream,
+                fragment,
+            } => self.finish_headers(stream_id, end_stream, &fragment),
+            PendingHeaderBlock::PushPromise {
+                promised_stream_id,
+                fragment,
+                ..
+            } => self.finish_push_promise(promised_stream_id, &fragment),
+        }
     }
 }
 
@@ -673,5 +810,81 @@ mod tests {
             err,
             H2Error::Connection(ErrorCode::ProtocolError, _)
         ));
+    }
+
+    #[test]
+    fn continuation_frame_is_merged_into_the_preceding_header_block() {
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        let mut encoder = Encoder::new(4096);
+
+        // A header whose value is long enough that splitting the encoded
+        // block near its tail lands inside the value's string encoding,
+        // not on a frame boundary -- decoding either half alone (the
+        // pre-fix bug: decoding regardless of `end_headers`) must fail.
+        let field = HeaderField::new(
+            "x-custom-header-name",
+            "some-long-header-value-used-to-force-a-split-mid-string",
+        );
+        let mut full_block = Vec::new();
+        encoder.encode(std::slice::from_ref(&field), &mut full_block);
+        assert!(
+            full_block.len() > 10,
+            "test header block too short to split meaningfully"
+        );
+        let split = full_block.len() - 3;
+        let (first_part, second_part) = full_block.split_at(split);
+
+        // HEADERS with END_HEADERS unset must not be decoded yet -- it's
+        // buffered pending the CONTINUATION that completes it.
+        let responses = conn
+            .apply_frame(Frame::Headers(HeadersFrame {
+                stream_id: 1,
+                end_stream: false,
+                end_headers: false,
+                priority: None,
+                header_block_fragment: first_part.to_vec(),
+            }))
+            .unwrap();
+        assert!(responses.is_empty());
+        assert!(
+            !conn.streams.contains_key(&1),
+            "stream must not open until the full header block is decoded"
+        );
+
+        // The CONTINUATION frame completes the header block; only now
+        // should it be decoded, updating the dynamic table exactly once.
+        conn.apply_frame(Frame::Continuation(
+            crate::frame::continuation::ContinuationFrame {
+                stream_id: 1,
+                end_headers: true,
+                header_block_fragment: second_part.to_vec(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(conn.streams[&1].stream.state, StreamState::Open);
+        assert_eq!(conn.decoder.dynamic_table_len(), 1);
+
+        // A subsequent request that references the same header via HPACK
+        // indexing must decode against the correctly-synced dynamic
+        // table built from the *complete*, reassembled block -- proving
+        // the shared table wasn't desynced by decoding a lone fragment.
+        let mut second_block = Vec::new();
+        encoder.encode(&[field], &mut second_block);
+        assert_eq!(
+            second_block.len(),
+            1,
+            "peer encoder should now emit a single indexed byte for a repeated header"
+        );
+
+        conn.apply_frame(Frame::Headers(HeadersFrame {
+            stream_id: 3,
+            end_stream: false,
+            end_headers: true,
+            priority: None,
+            header_block_fragment: second_block,
+        }))
+        .unwrap();
+        assert_eq!(conn.streams[&3].stream.state, StreamState::Open);
+        assert_eq!(conn.decoder.dynamic_table_len(), 1);
     }
 }
