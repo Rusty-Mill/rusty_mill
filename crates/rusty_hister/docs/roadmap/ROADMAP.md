@@ -175,16 +175,29 @@ independent of ADR-0002/0003)
       first specifically because it could reuse this cluster's existing
       `rusty_json` dependency and needed only a small, purpose-built
       HTML-scanning/text-sanitizing helper (not a general HTML-parsing or
-      sanitizer library) — see PROJECT-STATUS.md's new open item on the
-      bigger, cross-cutting dependency decision most of the remaining 19
-      extractors will need.
-- `rusty-hister-extractor`: the remaining 19 built-in extractors in
+      sanitizer library), deferring the bigger, cross-cutting HTML-
+      parsing/sanitizer dependency decision most of the remaining 19
+      extractors need.
+- [x] **Decided**: HTML-parsing/sanitizing dependency choice for the
+      extractor cluster — `scraper` + `ammonia`, added directly to
+      `rusty-hister-extractor`. A sovereignty-loop pass first checked
+      `baileyrd/rusty_dbs` (at the user's suggestion) but it turned out
+      unrelated and a poor fit (private, `UNLICENSED`, no wrapper API) —
+      see PROJECT-STATUS.md's Resolved section for the full account.
+- [x] `rusty-hister-extractor` (`EmbeddedVideoExtractor`, §4.5.3):
+      enrich-only, scans `<video>`/`<source>`/`<iframe>`/`<embed>`/
+      `<object>` elements for embedded video URLs, applying a known-host
+      prefix allowlist to `iframe`/`embed`/`object` (`video`/`source` are
+      trusted as first-party content, matching Go). Done — 9 new unit
+      tests (38 total in the crate), clippy/fmt clean. First extractor
+      built on the new `scraper`/`ammonia` dependencies (CSS-selector
+      queries for the element scan; no sanitization needed here since
+      URLs are stored as opaque strings, not rendered).
+- `rusty-hister-extractor`: the remaining 18 built-in extractors in
   default-chain order (§4.3), starting with the ones that have existing Go
-  test coverage (10 of the remaining 19) and budgeting fresh test
-  authorship for the other 9. Most need the HTML-parsing/sanitizer
-  dependency decision flagged in PROJECT-STATUS.md's open items —
+  test coverage and budgeting fresh test authorship for the rest.
   Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a
-  separate dependency choice of their own.
+  separate dependency choice of their own, not yet made.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of

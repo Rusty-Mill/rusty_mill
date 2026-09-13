@@ -9,6 +9,25 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `EmbeddedVideoExtractor` (`rusty_hister`'s
+  Phase 1, continued — capability inventory §4.5.3): a Rust port of
+  `server/extractor/extractors/embeddedvideo/extractor.go`, enrich-only,
+  scanning `<video>`/`<source>`/`<iframe>`/`<embed>`/`<object>` elements
+  for embedded video URLs and storing them (deduplicated, in document
+  order) as a JSON array at `Metadata["videos"]`. `<iframe>`/`<embed>`/
+  `<object>` URLs are only accepted when they match a known video-hosting
+  service by full `https://` prefix; `<video>`/`<source>` URLs are
+  trusted as first-party content, matching Go. 9 new unit tests (38
+  total in the crate), clippy/fmt clean.
+- `scraper` and `ammonia` to `rusty-hister-extractor` — CSS-selector HTML
+  parsing and HTML sanitizing (both `html5ever`-based) for the built-in
+  extractors that need real HTML parsing, most of the 20. A sovereignty-
+  loop pass first checked `baileyrd/rusty_dbs` at the user's suggestion,
+  but it turned out to be an unrelated, private, `UNLICENSED` repo with
+  no wrapper API around its own bare `scraper`/`ammonia` additions — see
+  `crates/rusty_hister/docs/PROJECT-STATUS.md`'s Resolved section for the
+  full account. `EmbeddedVideoExtractor` (below) is the first extractor
+  built on these.
 - `rusty-hister-extractor`'s first concrete extractor, `JsonLdExtractor`
   (`rusty_hister`'s Phase 1, continued — capability inventory §4.5.5): a
   Rust port of `server/extractor/extractors/jsonld/jsonld.go`,

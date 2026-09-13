@@ -13,6 +13,56 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's EmbeddedVideo extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-embeddedvideo`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-embeddedvideo)
+
+Twelfth Phase 1 increment (after `rusty-hister-core`, `rusty-hister-extractor`'s
+registry and `JsonLdExtractor`, and `rusty-hister-model`'s complete query
+layer, previous entries below). The second of the 20 built-in extractors,
+and the first to use `scraper`/`ammonia` — the HTML-parsing/sanitizing
+dependency choice the previous increment deliberately deferred.
+
+- **Decided:** the HTML-parsing/sanitizing dependency question for the
+  extractor cluster — `scraper` (CSS-selector HTML parsing, built on
+  `html5ever`) and `ammonia` (HTML sanitizing, also `html5ever`-based),
+  added directly to `rusty-hister-extractor`. Both are common,
+  well-maintained crates.io crates sharing the same underlying parser, so
+  only one HTML-parsing engine enters the dependency tree. A
+  sovereignty-loop pass first checked `baileyrd/rusty_dbs` at the user's
+  suggestion, but it turned out to be an unrelated private repo (a
+  subprocess/editor-integration utility crate, `dbs-connector-support`,
+  with `scraper`/`ammonia` added bare and unwrapped) and a poor fit
+  regardless — `UNLICENSED`, incompatible with this workspace's `MIT OR
+  Apache-2.0`, and `rusty_mill`'s own convention is a full `git subtree`
+  merge for a first-party sibling, not a permanent pinned dependency on
+  an external repo.
+- **Added:** `EmbeddedVideoExtractor` (capability inventory §4.5.3) — a
+  port of `server/extractor/extractors/embeddedvideo/extractor.go`.
+  Enrich-only: scans `<video>`/`<source>`/`<iframe>`/`<embed>`/`<object>`
+  elements via a `scraper` CSS selector (`"video, source, iframe, embed,
+  object"`), and stores discovered video URLs — deduplicated, in
+  document order — as a JSON array at `Metadata["videos"]`.
+  `<iframe>`/`<embed>`/`<object>` URLs are only accepted when they match
+  a known video-hosting service by full `https://` prefix (a prefix
+  check, not a substring check, so `https://evil.com/youtube.com/embed/`
+  is correctly rejected); `<video>`/`<source>` URLs are trusted as
+  first-party content, matching Go. `<source>` additionally requires an
+  ancestor `<video>` element, reproduced via `scraper`'s ancestor
+  traversal in place of Go's token-stream `inVideo` flag.
+- **Unchanged scope:** no sanitization needed here — URLs are stored as
+  opaque strings, never rendered as HTML, so `ammonia` isn't exercised by
+  this extractor (a later one will be the first to need it).
+- **Added:** 9 new unit tests (38 total in the crate) — native `<video>`
+  with a nested `<source>`, a `<video>`'s own `src` attribute, a
+  `<source>` outside any `<video>` correctly ignored, known-host
+  acceptance for `<iframe>`, rejection of a URL that only superficially
+  resembles a known host, `<embed>`/`<object>` acceptance, URL
+  deduplication, the no-video-elements fallback, and the `matches`
+  quick-check pre-scan — independently derived, not copied, per
+  ADR-0001's licensing policy (this file has no Go test coverage to
+  begin with — capability inventory marks it `[UNTESTED]`). clippy/fmt
+  clean.
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's first concrete extractor (JSON-LD)
 **2026-09-12** · branch [`claude/hister-phase1-extractor-jsonld`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-jsonld)
 

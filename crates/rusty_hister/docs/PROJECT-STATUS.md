@@ -1,7 +1,8 @@
 # PROJECT-STATUS: rusty_hister
 
-Last updated: 2026-09-12 (Phase 1: `rusty-hister-extractor`'s first
-concrete extractor, JSON-LD).
+Last updated: 2026-09-13 (Phase 1: `rusty-hister-extractor`'s second
+concrete extractor, EmbeddedVideo — first to use the newly-added
+`scraper`/`ammonia` dependencies).
 
 ## Where this is
 
@@ -16,18 +17,25 @@ licensing policy) are settled. Three crates now have real implementation:
   mechanism (capability inventory §4.2): ordered registration
   (`register`/`register_before`), two-phase enrich-then-extract execution,
   a separate preview chain with case-insensitive starting-point selection,
-  and config merging (`apply_configs`). **One concrete extractor so far:
-  `JsonLdExtractor`** (capability inventory §4.5.5) — enrich-only, parses
+  and config merging (`apply_configs`). **Two concrete extractors so far:**
+  `JsonLdExtractor` (capability inventory §4.5.5) — enrich-only, parses
   `application/ld+json` script tags into normalized schema.org metadata
   (`type`/`headline`), flattening `@graph`/array wrappers and deep-
   sanitizing every non-`@`-prefixed string field. Chosen as the first of
   the 20 built-in extractors specifically because it could reuse this
   cluster's existing `rusty_json` dependency for JSON parsing and needed
   only a small, purpose-built HTML-scanning/text-sanitizing helper rather
-  than a general HTML-parsing or sanitizer library — most of the
-  remaining 19 extractors will need one or both eventually, a bigger,
-  cross-cutting dependency decision deliberately deferred rather than
-  made unilaterally on this first extractor. See the new open item below.
+  than a general HTML-parsing or sanitizer library, deferring that bigger
+  dependency decision. **`EmbeddedVideoExtractor`** (capability inventory
+  §4.5.3) — enrich-only, scans `<video>`/`<source>`/`<iframe>`/`<embed>`/
+  `<object>` elements for embedded video URLs, applying a known-host
+  prefix allowlist to `iframe`/`embed`/`object` (not `video`/`source`,
+  which are trusted as first-party content, matching Go). The first
+  extractor to use `scraper` (CSS-selector HTML parsing) and `ammonia`
+  (HTML sanitizing), added directly to this crate's dependencies — see
+  the now-resolved open item below for the sovereignty-loop pass and
+  false start (an unrelated private repo, `rusty_dbs`) that preceded
+  this.
 - `rusty-hister-model` — the nine `#[derive(Mapped)]` types from
   `automigrate()`'s list (capability inventory §7.2: `User`, `Link`,
   `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`,
@@ -195,30 +203,27 @@ now **out of v1 scope**, per ADR-0003's decision.
   copied verbatim into this cluster. Fresh Rust tests are derived from
   independently reading and understanding each Go test's behavior instead.
   This binds every extractor and query-grammar test written from here on.
+- **HTML-parsing and HTML-sanitizing library choice for the extractors**
+  — resolved 2026-09-13, per the user: add `scraper` (CSS-selector HTML
+  parsing, built on `html5ever`) and `ammonia` (HTML sanitizing, also
+  `html5ever`-based) directly as `rusty-hister-extractor` dependencies.
+  A sovereignty-loop pass first checked `baileyrd/rusty_dbs` (a private,
+  `UNLICENSED` personal repo, at the user's suggestion) — it turned out
+  to be unrelated (a subprocess/editor-integration utility crate,
+  `dbs-connector-support`, that had `scraper`/`ammonia` added bare with
+  no wrapper API) and a poor fit regardless (no license grant compatible
+  with this workspace's `MIT OR Apache-2.0`, and `rusty_mill`'s own
+  convention is a full `git subtree` merge for a first-party sibling, not
+  a permanent pinned dependency on an external repo). `EmbeddedVideoExtractor`
+  (capability inventory §4.5.3) is the first extractor built on the new
+  dependencies. Both are common, well-maintained crates.io crates sharing
+  the same underlying `html5ever` parser, so only one HTML-parsing engine
+  enters the dependency tree even though two crates were added.
 
 ## Open items carried from the capability inventory (not blocking, but
 unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 §13 and inline flags)
 
-- **HTML-parsing and HTML-sanitizing library choice for the remaining
-  extractors** — deliberately not decided yet. Go's extractors lean on
-  `golang.org/x/net/html` (tokenizing/DOM-ish walking) and `server/
-  sanitizer` (a `bluemonday`-backed HTML-allowlist + strict-text-policy
-  module used by nearly every extractor that touches real HTML). Neither
-  exists in this Rust cluster: `JsonLdExtractor` (the first concrete
-  extractor, landed 2026-09-12) avoided the decision entirely by
-  hand-rolling a narrow `<script>`-block scanner and a narrow tag-strip/
-  entity-decode text sanitizer scoped to exactly its own needs — not a
-  general solution. Most of the other 19 built-in extractors (Discourse,
-  Reddit, StackExchange, GitHub, Wikipedia, and others that parse or
-  render real page HTML) will need general HTML parsing and/or the
-  HTML-vs-text sanitizer-policy split (`SanitizeHTML`/`SanitizeTrustedHTML`/
-  `SanitizeText`, including Wikipedia's "trusted layout styles" exception,
-  capability inventory §7) for real. This is a cross-cutting,
-  architecturally significant dependency choice — closer in weight to
-  ADR-0002/ADR-0003 than to a single extractor's own sovereignty check —
-  flagged here for explicit sign-off (or its own ADR) before the next
-  extractor that actually needs it, rather than picked unilaterally.
 - `sqlite-vec` C-extension story for the SQLite vectorstore backend — folded
   into ADR-0002 rather than decided separately, since it's downstream of the
   storage-engine choice.
@@ -311,7 +316,7 @@ unresolved — see `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md`
 |---|---|
 | `rusty-hister-core` | **In progress** — `Document`, `Extractor` trait + `Capabilities`/`ExtractorConfig`/`ExtractOutcome`/`PreviewOutcome`/`PreviewResponse`, `HisterError`. 16 unit tests, clippy/fmt clean. `DocumentType`'s wire-format integer encoding deliberately left unassigned (see its doc comment) until `rusty-hister-server` needs it and the real Hister values are confirmed. |
 | `rusty-hister-model` | **Query layer complete** — schema: nine `#[derive(Mapped)]` types (`User`, `Link`, `History`, `HistoryLink`, `CrawlJob`, `CrawlURL`, `WebSession`, `DocumentVersion`, `EmbeddingJob`), soft-delete via `rusty_db`'s `#[table(soft_delete)]`, fresh-install SQLite+Postgres migrations via `rusty_db::Migrator`. Query layer: `EmbeddingJob`'s embedding-queue state machine (9 functions), `WebSession`'s lookup/expiry helpers (4 functions), `DocumentVersion`'s save/move/count/list helpers (5 functions), all of `crawl.go` (`CrawlJob`'s lifecycle, 7 functions, plus `CrawlURL`'s queue mechanics, 12 functions), all of `history.go` (`Link`/`History::get_or_create`, plus `HistoryLink`'s 8 query functions), and all of `user.go` (15 functions: account CRUD, Argon2id password hashing/verification, token issuance, admin toggling, raw rules-JSON get/set) — **all six Go model files' query layers are now ported**. 131 unit tests (real SQLite round-trips, unique-constraint/duplicate-rejection checks, migration up/down/status, the embedding queue's dedup/claim/retry/dirty-job semantics, `WebSession`'s create/get/refresh/delete round trips, `DocumentVersion`'s save/list/count/move/list_until behavior, `CrawlJob`/`CrawlURL`'s full lifecycle and queue-mechanics behavior, `history.go`'s get-or-create/pin/record-selection/delete/ranking/pagination/filtering/suggestion behavior, and `user.go`'s create/authenticate/delete/token/rename/password/oauth/admin/rules behavior), clippy/fmt clean. |
-| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5) as the first concrete extractor. 29 unit tests, clippy/fmt clean. 19 of 20 built-in extractors remain — most need a not-yet-decided HTML-parsing/sanitizer dependency, see the open item above. |
+| `rusty-hister-extractor` | **In progress** — `Registry` (chain-of-responsibility: ordered registration, two-phase enrich/extract, preview-chain starting points, config merging), plus `JsonLdExtractor` (§4.5.5) and `EmbeddedVideoExtractor` (§4.5.3) as concrete extractors. 38 unit tests, clippy/fmt clean. `scraper`/`ammonia` now available for the remaining 18 built-in extractors that need real HTML parsing/sanitizing. |
 | `rusty-hister-indexer` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-vectorstore` | Skeleton only — unblocked by ADR-0002, not yet started |
 | `rusty-hister-crawler` | Skeleton only — CDP backend unblocked by ADR-0003, not yet started; BiDi backend out of v1 scope |

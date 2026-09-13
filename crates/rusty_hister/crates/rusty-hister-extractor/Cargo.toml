@@ -11,3 +11,10 @@ publish = false
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
 rusty_json = { path = "../../../rusty_json" }
+# HTML parsing/CSS-selector querying and HTML sanitizing for the built-in
+# extractors that need real HTML parsing (most of the remaining ones) — no
+# first-party `rusty_*` crate covers either; see
+# `docs/PROJECT-STATUS.md`'s open item for the sovereignty-loop pass this
+# went through before adding a new external dependency.
+scraper = "0.21"
+ammonia = "4"
