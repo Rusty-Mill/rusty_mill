@@ -405,16 +405,32 @@ independent of ADR-0002/0003)
       `Fallback`. Two Go metadata fields (a favicon URL, a `modified`
       timestamp) have no `readabilityrs` equivalent and are deliberately
       not reproduced rather than silently dropped.
-- **Blocked, flagged rather than silently ported without it**: Mastodon,
-  Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
-  page into multiple indexed documents (Go: `Document.ExtraDocuments`/
-  `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
-  `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
-  for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 3 built-in extractors in
-  default-chain order (§4.3) not blocked on the above, starting with the
-  ones that have existing Go test coverage and budgeting fresh test
-  authorship for the rest.
+- [x] `rusty-hister-core`: `Document::extra_documents`/
+      `Document::skip_indexing`, an additive extension (empty/`false` by
+      default, every prior extractor unaffected) resolving
+      PROJECT-STATUS.md's "per-page multi-document extraction" open item
+      — mirrors Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+      directly rather than growing `ExtractOutcome` a new variant, so no
+      signature changes were needed anywhere else in the SDK.
+- [x] `rusty-hister-extractor` (`MastodonExtractor`, §4.5.13): decomposes
+      a Mastodon timeline/status page into one `Document` per visible
+      toot, the first extractor to use the capability extension above.
+      Done — 6 new unit tests (187 total in the crate), clippy/fmt clean.
+      `matches` accepts a real Mastodon page (fingerprinted the same way
+      Go does) or a toot document this extractor already produced (a
+      recursion guard via `metadata["type"] == "toot"`, matching Go's
+      own). `preview` is a direct port of Go's own admittedly unfinished
+      implementation (Go's source itself carries a `// TODO enhance the
+      toot preview` comment): an optional `<h1>`-derived heading followed
+      by the *entire original page's* raw HTML, sanitized — reproduced
+      faithfully rather than "fixed" beyond Go's own currently-shipped
+      behavior.
+- Bluesky and Twitter (§4.5.14-15) can now reuse the same
+  `extra_documents`/`skip_indexing` mechanism Mastodon established;
+  porting them just hasn't happened yet.
+- `rusty-hister-extractor`: the remaining 2 built-in extractors in
+  default-chain order (§4.3), starting with the ones that have existing
+  Go test coverage and budgeting fresh test authorship for the rest.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of

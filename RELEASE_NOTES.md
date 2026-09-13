@@ -13,6 +13,38 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Mastodon extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-mastodon`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-mastodon)
+
+Twenty-seventh Phase 1 increment. The eighteenth of the 20 built-in
+extractors.
+
+- **Added, core capability:** `Document::extra_documents`/
+  `Document::skip_indexing` on `rusty-hister-core` — an additive
+  extension (empty/`false` by default, every prior extractor unaffected)
+  mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+  directly rather than growing `ExtractOutcome` a new variant, so no
+  signature changes were needed anywhere else in the SDK. Resolves
+  `PROJECT-STATUS.md`'s "per-page multi-document extraction" open item
+  and unblocks Mastodon/Bluesky/Twitter.
+- **Added, extractor:** `MastodonExtractor` (capability inventory
+  §4.5.13) — a port of
+  `server/extractor/extractors/mastodon/extractor.go`. Decomposes a
+  Mastodon timeline/status page into one `Document` per visible toot,
+  the first extractor to use the capability extension above.
+- **Recursion guard:** `matches` accepts a real Mastodon page
+  (fingerprinted the same way Go does) or a toot document this extractor
+  already produced (`metadata["type"] == "toot"`, matching Go's own),
+  so a future indexer re-running the chain over each `extra_documents`
+  entry doesn't re-explode an already-extracted toot.
+- **Faithful, not "fixed":** `preview` is a direct port of Go's own
+  admittedly unfinished implementation (Go's source itself carries a
+  `// TODO enhance the toot preview` comment): an optional
+  `<h1>`-derived heading followed by the *entire original page's* raw
+  HTML, sanitized.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Readability extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-readability`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-readability)
 
