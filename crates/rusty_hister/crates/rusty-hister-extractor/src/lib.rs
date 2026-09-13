@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Twelve concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,6 +110,16 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`DiscourseExtractor`] (capability inventory §4.5.4) — extract *and*
+//!   preview for Discourse forum topic pages. A topic page can carry the
+//!   same content in up to three places at once — a (often
+//!   double-JSON-encoded) `#data-preloaded` hydration blob, the
+//!   already-rendered post DOM, and a `schema.org` `QAPage` JSON-LD block
+//!   — and, like Go, this port merges all three by post id/number rather
+//!   than picking just one, preferring each field's highest-fidelity
+//!   source by a `source_rank` (rendered DOM > preloaded JSON > JSON-LD,
+//!   matching Go's own ranking). Reuses `WikipediaExtractor`'s
+//!   reparse-as-fragment trick for cleaning/URL-rewriting a post body.
 //!
 //! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
 //! portable: their real behavior decomposes one timeline/thread page into
@@ -127,6 +137,7 @@
 
 mod basic;
 mod chatgpt;
+mod discourse;
 mod embeddedvideo;
 mod github;
 mod godoc;
@@ -143,6 +154,7 @@ mod wikipedia;
 
 pub use basic::BasicExtractor;
 pub use chatgpt::ChatGptExtractor;
+pub use discourse::DiscourseExtractor;
 pub use embeddedvideo::EmbeddedVideoExtractor;
 pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;
