@@ -16,7 +16,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Bluesky extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-bluesky`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-bluesky)
 
-Twenty-sixth Phase 1 increment. The seventeenth of the 20 built-in
+Twenty-eighth Phase 1 increment. The nineteenth of the 20 built-in
 extractors.
 
 - **Added, core capability:** `Document::extra_documents`/
@@ -41,6 +41,69 @@ extractors.
   from any anchor linking to a post URL), and — only when neither of
   those finds anything — the page's own Open Graph/Twitter Card meta
   tags as a single fallback post for the page's own URL.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Mastodon extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-mastodon`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-mastodon)
+
+Twenty-seventh Phase 1 increment. The eighteenth of the 20 built-in
+extractors.
+
+- **Added, core capability:** `Document::extra_documents`/
+  `Document::skip_indexing` on `rusty-hister-core` — an additive
+  extension (empty/`false` by default, every prior extractor unaffected)
+  mirroring Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+  directly rather than growing `ExtractOutcome` a new variant, so no
+  signature changes were needed anywhere else in the SDK. Resolves
+  `PROJECT-STATUS.md`'s "per-page multi-document extraction" open item
+  and unblocks Mastodon/Bluesky/Twitter.
+- **Added, extractor:** `MastodonExtractor` (capability inventory
+  §4.5.13) — a port of
+  `server/extractor/extractors/mastodon/extractor.go`. Decomposes a
+  Mastodon timeline/status page into one `Document` per visible toot,
+  the first extractor to use the capability extension above.
+- **Recursion guard:** `matches` accepts a real Mastodon page
+  (fingerprinted the same way Go does) or a toot document this extractor
+  already produced (`metadata["type"] == "toot"`, matching Go's own),
+  so a future indexer re-running the chain over each `extra_documents`
+  entry doesn't re-explode an already-extracted toot.
+- **Faithful, not "fixed":** `preview` is a direct port of Go's own
+  admittedly unfinished implementation (Go's source itself carries a
+  `// TODO enhance the toot preview` comment): an optional
+  `<h1>`-derived heading followed by the *entire original page's* raw
+  HTML, sanitized.
+
+---
+
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Readability extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-readability`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-readability)
+
+Twenty-sixth Phase 1 increment. The seventeenth of the 20 built-in extractors.
+
+- **Added:** `ReadabilityExtractor` (capability inventory §4.4) — a port
+  of the `readabilityExtractor` in `server/extractor/extractor.go`.
+  Extract and preview for any web page via the `readabilityrs` crate (a
+  Rust port of Mozilla's Readability.js — the same algorithm family Go's
+  own `go-readability` dependency belongs to), stripping navigation, ads,
+  and other boilerplate down to the main article content. `matches`
+  always returns `true`, like `BasicExtractor`; the real chain places
+  this extractor right before `Basic`.
+- **Dependency decision, by explicit user choice:** `readabilityrs`
+  pulls in `scraper 0.25`/`ego-tree 0.10`, a major version ahead of this
+  crate's own `0.21`/`0.9` pins used by 8 existing extractors. Both
+  versions now coexist in the dependency tree (extra compile time/disk,
+  zero risk to the existing extractors) rather than bumping the existing
+  pin or hand-rolling the algorithm.
+- **Error-shape adaptation:** Go's `readability.FromReader` folds URL
+  validation and article extraction into one error path; `readabilityrs`
+  splits them, so this port maps a URL-parse failure to `Abort` (matching
+  Go's own separate `url.Parse` failure) and a malformed-HTML error or
+  no-article-found result to `Fallback` (matching Go's `FromReader` error
+  path).
+- **Honest gaps:** two Go metadata fields (a favicon URL, a `modified`
+  timestamp) have no `readabilityrs` equivalent and are deliberately not
+  reproduced rather than silently dropped.
 
 ---
 

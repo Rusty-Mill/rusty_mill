@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Seventeen concrete extractors so far:**
+//! **Nineteen concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -169,28 +169,58 @@
 //!   `<a href>` inside one of those is flattened to text, not preserved
 //!   as a link; only the image block's `src` attribute is read directly
 //!   and thus round-trips through URL rewriting.
-//! - [`BlueskyExtractor`] (capability inventory §4.5.14) — decomposes a
-//!   Bluesky profile/feed/thread page into one [`Document`] per visible
-//!   post. The first extractor to need a real `rusty-hister-core`
+//! - [`ReadabilityExtractor`] (capability inventory §4.4) — extract *and*
+//!   preview for any web page, using the [`readabilityrs`] crate (a Rust
+//!   port of Mozilla's Readability.js — the same algorithm family Go's
+//!   own `codeberg.org/readeck/go-readability/v2` dependency belongs to)
+//!   to strip navigation, ads, and other boilerplate down to the main
+//!   article content. `matches` always returns `true`, like
+//!   [`BasicExtractor`]; the real chain places this extractor right
+//!   before `Basic`, a better-quality attempt that runs first with
+//!   `Basic` as the true last resort. Go's `readability.FromReader` folds
+//!   URL validation and article extraction into one error path;
+//!   `readabilityrs` splits them, so this port maps a URL-parse failure
+//!   to `Abort` (matching Go's own separate `url.Parse` failure) and a
+//!   malformed-HTML error or no-article-found result to `Fallback`
+//!   (matching Go's `FromReader` error path). Two Go metadata fields have
+//!   no `readabilityrs` equivalent and are deliberately not reproduced
+//!   rather than silently dropped: a favicon URL and a `modified`
+//!   timestamp — documented in the module doc, not worked around.
+//! - [`MastodonExtractor`] (capability inventory §4.5.13) — decomposes a
+//!   Mastodon timeline/status page into one [`Document`] per visible
+//!   toot. The first extractor to need a real `rusty-hister-core`
 //!   capability extension: [`Document::extra_documents`]/
 //!   [`Document::skip_indexing`], two new additive fields (empty/`false`
 //!   by default, so every prior extractor is unaffected) mirroring Go's
 //!   own `Document.ExtraDocuments`/`SkipIndexing` — a future indexer
-//!   walks `extra_documents` recursively, the same mechanism Mastodon and
-//!   Twitter will reuse once ported. Bluesky pages can carry the same
-//!   post data in up to three independent forms; like Go, this port
-//!   tries all three in priority order and merges results by canonical
-//!   post URL rather than picking just one: a `schema.org` JSON-LD block
-//!   walked recursively through several wrapper keys, the
+//!   walks `extra_documents` recursively, the same mechanism Bluesky and
+//!   Twitter will reuse once ported. `matches` accepts a real Mastodon
+//!   page (fingerprinted the same way Go does) or a toot document this
+//!   extractor already produced (a recursion guard via
+//!   `metadata["type"] == "toot"`, matching Go's own). `preview` is a
+//!   direct port of Go's own admittedly unfinished implementation (Go's
+//!   source itself carries a `// TODO enhance the toot preview` comment):
+//!   an optional `<h1>`-derived heading followed by the *entire original
+//!   page's* raw HTML, sanitized — reproduced faithfully rather than
+//!   "fixed" beyond Go's own currently-shipped behavior.
+//! - [`BlueskyExtractor`] (capability inventory §4.5.14) — decomposes a
+//!   Bluesky profile/feed/thread page into one [`Document`] per visible
+//!   post, the second extractor to reuse the
+//!   [`Document::extra_documents`]/[`Document::skip_indexing`] capability
+//!   extension `MastodonExtractor` established. Bluesky pages can carry
+//!   the same post data in up to three independent forms; like Go, this
+//!   port tries all three in priority order and merges results by
+//!   canonical post URL rather than picking just one: a `schema.org`
+//!   JSON-LD block walked recursively through several wrapper keys, the
 //!   already-rendered post DOM (found via known selectors plus a
 //!   fallback heuristic that walks up from any anchor linking to a post
 //!   URL), and — only when neither of those finds anything — the page's
 //!   own Open Graph/Twitter Card meta tags as a single fallback post for
 //!   the page's own URL.
 //!
-//! Mastodon/Twitter (capability inventory §4.5.13, §4.5.15) can now
-//! reuse the same `extra_documents`/`skip_indexing` mechanism Bluesky
-//! established; porting them just hasn't happened yet.
+//! Twitter (capability inventory §4.5.15) can now reuse the same
+//! `extra_documents`/`skip_indexing` mechanism Mastodon and Bluesky
+//! established; porting it just hasn't happened yet.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -210,8 +240,10 @@ mod hackernews;
 mod jsonld;
 mod lobsters;
 mod markdown;
+mod mastodon;
 mod notion;
 mod org;
+mod readability;
 mod reddit;
 mod registry;
 mod sanitizer;
@@ -232,8 +264,10 @@ pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;
 pub use lobsters::LobstersExtractor;
 pub use markdown::MarkdownExtractor;
+pub use mastodon::MastodonExtractor;
 pub use notion::NotionExtractor;
 pub use org::OrgModeExtractor;
+pub use readability::ReadabilityExtractor;
 pub use reddit::RedditExtractor;
 pub use registry::Registry;
 pub use rusty_hister_core::{
