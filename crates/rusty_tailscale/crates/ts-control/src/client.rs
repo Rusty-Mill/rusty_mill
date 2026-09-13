@@ -462,8 +462,14 @@ mod tests {
         };
 
         let uri: http::Uri = format!("http://{addr}/machine/register").parse().unwrap();
+        // Default h2 flow-control windows (64 KiB) mean streaming past the
+        // 16 MiB cap needs hundreds of WINDOW_UPDATE round trips; under
+        // loaded/virtualized CI runners this legitimately takes longer
+        // than a tight bound, so this margin is generous on purpose --
+        // the assertion below is what actually proves the cap works, not
+        // how fast it fires.
         let result =
-            tokio::time::timeout(Duration::from_secs(10), session.request(uri, Vec::new()))
+            tokio::time::timeout(Duration::from_secs(30), session.request(uri, Vec::new()))
                 .await
                 .expect("request should not hang");
 
