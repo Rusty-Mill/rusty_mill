@@ -368,6 +368,24 @@ independent of ADR-0002/0003)
       renders the source to HTML and stores it in `document.html` at
       index time, so each extractor's only job is to sanitize and return
       whatever HTML is already there.
+- [x] `rusty-hister-extractor` (`NotionExtractor`, §4.5.16): extract *and*
+      preview for Notion pages on `notion.so` and `*.notion.site`. Done —
+      7 new unit tests (174 total in the crate), clippy/fmt clean.
+      Re-assessed as implementable now rather than blocked on the
+      JS-rendering crawler backend: the extractor code itself only ever
+      reads `document.html`, like every other extractor, so the crawler
+      dependency is a *production* one (whether that field holds real
+      rendered content), not a code dependency. Reports `Abort` rather
+      than `Fallback` when the rendered block tree isn't present,
+      matching Go's own `AbortExtraction`/`AbortPreview`. A single
+      substring-attribute selector (`[class*="notion-"][class*="-block"]`,
+      identical to Go's own `goquery` selector) finds every block at any
+      depth in Notion's deeply nested presentational wrapper `<div>`s.
+      List/heading/quote/paragraph blocks render via plain-text
+      extraction before escaping, exactly like Go's own `writeTag`/list
+      handling, so an inline `<a href>` is flattened to text rather than
+      preserved as a link; only the image block's `src` attribute is read
+      directly and round-trips through URL rewriting.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
@@ -418,9 +436,12 @@ started)
 - `bidi`-equivalent backend: **out of v1 scope** — ADR-0003 explicitly
   descoped it, not merely deferred it pending a sign-off. Revisit only if a
   concrete driver-free-deployment need arises later.
-- Re-enable the Notion extractor, which hard-depends on JS rendering
-  existing at all (§4.5.16) — satisfied by the CDP backend above; not
-  affected by BiDi's descope.
+- The Notion extractor (§4.5.16, already implemented — see Phase 1) only
+  ever reads `document.html` like every other extractor, so it needed no
+  code changes to build; it just produces real output in *production*
+  once this CDP backend exists, since Notion serves an empty SPA shell
+  over plain HTTP and only renders content client-side. Not affected by
+  BiDi's descope.
 
 ## Later phases (out of v1, tracked for visibility only)
 
