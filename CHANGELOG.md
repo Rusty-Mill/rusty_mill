@@ -9,6 +9,25 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `ChatGptExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.18): a Rust port of
+  `server/extractor/extractors/chatgpt/extractor.go`, extract *and*
+  preview for chatgpt.com conversation URLs (authenticated, public-shared,
+  and custom-GPT). `scraper::ElementRef` is read-only, so Go's
+  clone-then-remove content-cleaning pattern has no direct equivalent;
+  ported instead by copying only the kept nodes into a fresh
+  `ego_tree`-backed fragment (`Html::new_fragment()` + `NodeMut::append()`)
+  rather than mutating the parsed document. Go's own conversation-text
+  writer is a superset of `textutil` (it also handles list bullets and
+  table-cell separators) and isn't built on `textutil` either, so this
+  port mirrors that with its own `ConversationTextWriter` rather than
+  generalizing `textutil` speculatively — reusing only its final
+  `normalize_text` whitespace pass. The first extractor to report
+  `ExtractOutcome`/`PreviewOutcome::Abort` (a matched conversation URL
+  with no visible turns) rather than `Fallback`, matching Go's own
+  `AbortExtraction` since that's a dead end for the whole chain, not a
+  case for the next extractor to try. 7 new unit tests (113 total in the
+  crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `GitHubExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.9): a Rust port of
   `server/extractor/extractors/github/github.go`, extract *and* preview

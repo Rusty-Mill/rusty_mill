@@ -30,3 +30,8 @@ chrono.workspace = true
 # `scraper` at this same version — just named directly rather than relying
 # on type inference to paper over it, since this crate calls into it by name.
 ego-tree = "0.9"
+# Percent-decoding for ChatGPT's conversation-path-segment validation
+# (matching Go's `url.PathUnescape`). Already pinned transitively by the
+# `url` crate (via `ammonia`) at this same version — named directly here
+# rather than reaching for it through an unrelated crate's re-export.
+percent-encoding = "2"

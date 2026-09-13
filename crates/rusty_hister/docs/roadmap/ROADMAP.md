@@ -266,13 +266,28 @@ independent of ADR-0002/0003)
       `serde_json`. `Preview` doesn't re-sanitize its whole buffer the
       way prior extractors do — only the README HTML passes through
       `sanitizer::sanitize_html`, matching a real Go asymmetry.
+- [x] `rusty-hister-extractor` (`ChatGptExtractor`, §4.5.18): extract
+      *and* preview for chatgpt.com conversation URLs (authenticated,
+      public-shared, and custom-GPT). Done — 7 new unit tests (113 total
+      in the crate), clippy/fmt clean. `scraper::ElementRef` is read-only,
+      so Go's clone-then-remove content-cleaning pattern has no direct
+      equivalent; ported instead by copying only the kept nodes into a
+      fresh `ego_tree`-backed fragment (`Html::new_fragment()` +
+      `NodeMut::append()`). Go's own conversation-text writer is a
+      superset of `textutil` (adds list-bullet and table-cell-separator
+      handling) and isn't built on it either, so this port mirrors that
+      with its own `ConversationTextWriter` rather than generalizing
+      `textutil` speculatively — reusing only its final `normalize_text`
+      whitespace pass. The first extractor to report
+      `ExtractOutcome`/`PreviewOutcome::Abort` (matched URL, no visible
+      turns) rather than `Fallback`, matching Go's own `AbortExtraction`.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 13 built-in extractors in
+- `rusty-hister-extractor`: the remaining 12 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
