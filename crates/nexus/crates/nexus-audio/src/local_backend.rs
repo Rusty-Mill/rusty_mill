@@ -38,8 +38,10 @@
 //! [`AudioError::BackendNotEnabled`] with a hint at install
 //! commands.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -51,6 +53,23 @@ use crate::AudioError;
 
 const STT_NAME: &str = "local";
 const TTS_NAME: &str = "local";
+
+/// Hard cap on the request + response time for the Whisper model
+/// download. Without this a slow, hostile, or misconfigured download
+/// source can block `ensure_model` (and thus the calling dispatch
+/// thread) forever — `reqwest::blocking` has no timeout by default.
+/// 5 minutes is generous even for the largest shipped model
+/// (`small.en`, ~466 MB) on a slow connection, while still bounding
+/// the wait.
+const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Hard cap on the downloaded model body. The largest model size this
+/// backend advertises (`small.en`) is ~466 MB; cap well above that so
+/// legitimate downloads always succeed while a hostile/misconfigured
+/// URL can't stream unbounded bytes into memory before we notice.
+/// Mirrors the `MAX_BODY_BYTES` cap pattern used for other HTTP reads
+/// in this workspace (e.g. `nexus-linkpreview`).
+const MAX_MODEL_BYTES: u64 = 800 * 1024 * 1024;
 
 /// Build the local Whisper STT backend.
 #[must_use]
@@ -107,13 +126,49 @@ impl LocalWhisperStt {
             target = %path.display(),
             "BL-117 local-audio: downloading Whisper model (first launch)"
         );
-        let bytes = reqwest::blocking::get(&url)
+        let client = reqwest::blocking::Client::builder()
+            .timeout(MODEL_DOWNLOAD_TIMEOUT)
+            .build()
+            .map_err(AudioError::Network)?;
+        let mut resp = client
+            .get(&url)
+            .send()
             .map_err(AudioError::Network)?
             .error_for_status()
-            .map_err(AudioError::Network)?
-            .bytes()
             .map_err(AudioError::Network)?;
-        std::fs::write(&path, &bytes).map_err(AudioError::Io)?;
+        // Reject upfront if the server announces a body over the cap,
+        // before reading anything.
+        if let Some(len) = resp.content_length() {
+            if len > MAX_MODEL_BYTES {
+                return Err(AudioError::Backend {
+                    backend: STT_NAME.to_string(),
+                    reason: format!(
+                        "model download for '{size}' reports {len} bytes, exceeding the \
+                         {MAX_MODEL_BYTES}-byte cap; refusing to download"
+                    ),
+                });
+            }
+        }
+        // Also cap the actual bytes read: a server that lies about (or
+        // omits) Content-Length can't be used to stream unbounded data
+        // into memory. `take` bounds the reader at one byte past the
+        // cap so we can tell "exactly at the cap" apart from "over the
+        // cap" below rather than silently truncating a legitimate file.
+        let mut buf = Vec::new();
+        resp.by_ref()
+            .take(MAX_MODEL_BYTES + 1)
+            .read_to_end(&mut buf)
+            .map_err(AudioError::Io)?;
+        if buf.len() as u64 > MAX_MODEL_BYTES {
+            return Err(AudioError::Backend {
+                backend: STT_NAME.to_string(),
+                reason: format!(
+                    "model download for '{size}' exceeded the {MAX_MODEL_BYTES}-byte cap; \
+                     refusing to buffer further"
+                ),
+            });
+        }
+        std::fs::write(&path, &buf).map_err(AudioError::Io)?;
         Ok(path)
     }
 
@@ -325,17 +380,63 @@ fn run_platform_tts(text: &str, out: &Path) -> Result<(), AudioError> {
     Ok(())
 }
 
+/// Quote `s` as a PowerShell single-quoted string literal. Single-quoted
+/// strings in PowerShell are true literals: unlike double-quoted strings,
+/// they never interpolate variables (`$foo`) or subexpressions (`$(...)`)
+/// — the only special character is the quote delimiter itself, escaped by
+/// doubling it. Used only for the paths embedded in the SAPI script below;
+/// the synthesized *text* never goes through this (or any) script-string
+/// interpolation path — see `run_platform_tts`.
 #[cfg(target_os = "windows")]
-fn run_platform_tts(text: &str, out: &Path) -> Result<(), AudioError> {
-    let escaped = text.replace('"', "`\"");
-    let script = format!(
+fn powershell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+/// Build the PowerShell SAPI script. `text_file` is a path to a file
+/// already holding the text to speak — it is read back as *data*
+/// (`Get-Content -Raw`), never interpolated into the script string. This
+/// is deliberate: embedding untrusted text into a PowerShell `-Command`
+/// string (even after quote-escaping) is vulnerable to `$(...)`
+/// subexpression injection inside double-quoted contexts, letting
+/// attacker-controlled text (e.g. text read aloud from an untrusted
+/// source) execute arbitrary PowerShell. Routing it through a file read
+/// instead means the text can never be reinterpreted as code, regardless
+/// of its contents.
+#[cfg(target_os = "windows")]
+fn build_windows_tts_script(out: &Path, text_file: &Path) -> String {
+    format!(
         "Add-Type -AssemblyName System.Speech; \
          $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
-         $s.SetOutputToWaveFile(\"{}\"); \
-         $s.Speak(\"{}\");",
-        out.display(),
-        escaped
-    );
+         $s.SetOutputToWaveFile({out}); \
+         $text = Get-Content -LiteralPath {text_file} -Raw -Encoding UTF8; \
+         $s.Speak($text);",
+        out = powershell_single_quote(&out.display().to_string()),
+        text_file = powershell_single_quote(&text_file.display().to_string()),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn run_platform_tts(text: &str, out: &Path) -> Result<(), AudioError> {
+    // Text is written to a temp file and read back by the script as data
+    // (see `build_windows_tts_script`) instead of being concatenated into
+    // the `-Command` string, so it can never be reinterpreted as
+    // PowerShell code no matter what it contains.
+    let text_file = tempfile::Builder::new()
+        .prefix("nexus-tts-text-")
+        .suffix(".txt")
+        .tempfile()
+        .map_err(AudioError::Io)?;
+    std::fs::write(text_file.path(), text).map_err(AudioError::Io)?;
+    let script = build_windows_tts_script(out, text_file.path());
     let status = Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
         .status()
@@ -453,5 +554,128 @@ mod tests {
         // 1000 + (-500) = 500, /2 = 250; /max ~= 250 / 32768 ~ 0.00763
         let expected = f32::midpoint(1000.0_f32, -500.0_f32) / 32768.0;
         assert!((samples[0] - expected).abs() < 1e-4);
+    }
+
+    // ─── BL-117 defect fixes: PowerShell injection + unbounded download ───
+
+    /// Regression for the PowerShell `$(...)` subexpression-injection RCE:
+    /// before the fix, `run_platform_tts` built the `-Command` string by
+    /// double-quote-escaping `text` and splicing it straight into a
+    /// double-quoted `Speak("...")` literal, where `$(...)` is evaluated as
+    /// a live subexpression. The fixed script routes text through a file
+    /// (read back via `Get-Content -Raw`) instead, so none of it — payload
+    /// included — ever appears in the command text at all.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_tts_script_never_embeds_text_for_interpolation() {
+        let payload = "hello $(New-Item -ItemType File -Path 'C:\\pwned.txt' -Force) world";
+        let out = Path::new(r"C:\out.wav");
+        let text_file = Path::new(r"C:\Users\x\AppData\Local\Temp\nexus-tts-text-abcd.txt");
+        let script = build_windows_tts_script(out, text_file);
+        assert!(
+            !script.contains(payload),
+            "payload text must never be interpolated into the PowerShell command string: {script}"
+        );
+        assert!(
+            !script.contains("New-Item"),
+            "no fragment of the payload should leak into the command string: {script}"
+        );
+        assert!(
+            script.contains("Get-Content") && script.contains("-Raw"),
+            "text must be read back from disk as data, not embedded in the script: {script}"
+        );
+    }
+
+    /// End-to-end proof mirroring the manual repro used to confirm the
+    /// vulnerability: a payload shaped like a PowerShell subexpression
+    /// that, if ever evaluated as code, creates a marker file. Verified by
+    /// hand against the pre-fix escaping logic (`text.replace('"',
+    /// "`\"")` spliced into a double-quoted `Speak("...")` literal) that
+    /// the marker file *is* created there. Post-fix, `run_platform_tts`
+    /// only ever hands PowerShell the text via `Get-Content -Raw` on a
+    /// temp file, so the subexpression is never parsed as code.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_tts_treats_subexpression_payload_as_inert_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("marker_proof.txt");
+        let payload = format!(
+            "hello $(New-Item -ItemType File -Path '{}' -Force) world",
+            marker.display()
+        );
+        let out_wav = dir.path().join("out.wav");
+        run_platform_tts(&payload, &out_wav).expect("TTS shell-out should succeed");
+        assert!(
+            !marker.exists(),
+            "subexpression payload must not execute: marker file must not exist"
+        );
+        assert!(
+            out_wav.exists() && std::fs::metadata(&out_wav).unwrap().len() > 0,
+            "TTS should still produce audio for the literal (unexecuted) text"
+        );
+    }
+
+    /// Regression for the unbounded, timeout-less `ensure_model` download:
+    /// before the fix, `ensure_model` called
+    /// `reqwest::blocking::get(&url).bytes()` with no client timeout and no
+    /// size cap, so a hostile/misconfigured download source that declares
+    /// an oversized `Content-Length` and then never sends the body would
+    /// block the calling thread indefinitely. Post-fix, the declared
+    /// length is checked against `MAX_MODEL_BYTES` before any body byte is
+    /// read (or waited for), so this returns an error almost immediately
+    /// instead of hanging.
+    #[test]
+    fn ensure_model_rejects_oversized_download_without_hanging() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration as StdDuration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = Read::read(&mut stream, &mut buf);
+                // Declare a body far larger than any real Whisper model
+                // (and far larger than MAX_MODEL_BYTES) via Content-Length,
+                // then hold the connection open without ever sending that
+                // many bytes — a hostile/misconfigured server stalling the
+                // caller.
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    10u64 * 1024 * 1024 * 1024 // 10 GiB, never actually sent
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                // Stall: a pre-fix caller with no cap/timeout would block
+                // here indefinitely waiting for the declared body.
+                std::thread::sleep(StdDuration::from_secs(120));
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = AudioConfig {
+            local_model_dir: dir.path().to_path_buf(),
+            local_model_size: "tiny.en".to_string(),
+            whisper_model_url_template: format!("http://{addr}/ggml-{{size}}.bin"),
+            ..AudioConfig::default()
+        };
+        let stt = LocalWhisperStt {
+            cfg,
+            ctx: None,
+            loaded_size: None,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = stt.ensure_model();
+            let _ = tx.send(result.is_err());
+        });
+        let got_err = rx.recv_timeout(StdDuration::from_secs(15)).expect(
+            "ensure_model must reject an oversized/hostile download within a bounded \
+             time instead of hanging indefinitely",
+        );
+        assert!(got_err, "oversized download must be rejected, not accepted");
     }
 }

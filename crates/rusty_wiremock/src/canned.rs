@@ -62,7 +62,14 @@ pub fn spawn(responses: Vec<MockResponse>) -> String {
     thread::spawn(move || {
         for response in responses {
             let (mut stream, _) = listener.accept().expect("accept mock connection");
-            read_request_head(&mut stream);
+            if !read_request_head(&mut stream) {
+                // Header block exceeded the hard cap without ever finding the
+                // end-of-headers marker: there is no way to safely determine
+                // (or drain) a body, so reject the connection outright rather
+                // than respond against a guess.
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                continue;
+            }
 
             let payload = format!(
                 "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -88,12 +95,28 @@ pub fn spawn(responses: Vec<MockResponse>) -> String {
 /// and Windows' TCP stack surfaces it as a hard connection reset far more
 /// readily than Linux's (the write raced a peer close instead of quietly
 /// truncating).
-fn read_request_head(stream: &mut std::net::TcpStream) {
-    let mut buf = [0u8; 8192];
+///
+/// The scratch buffer starts at 8192 bytes but grows (doubling) up to
+/// `MAX_HEADER_BYTES` if the end-of-headers marker hasn't shown up yet --
+/// a header block that got cut off mid-scan previously caused
+/// `content_length` to be parsed from a truncated, often terminator-less
+/// slice (silently defaulting to 0) and skipped the body-drain loop
+/// entirely, reintroducing the exact write-races-peer-close race described
+/// above. A header block that still exceeds `MAX_HEADER_BYTES` without a
+/// terminator is rejected outright (returns `false`) instead of being
+/// parsed from a partial buffer.
+const MAX_HEADER_BYTES: usize = 1024 * 1024;
+
+fn read_request_head(stream: &mut std::net::TcpStream) -> bool {
+    let mut buf = vec![0u8; 8192];
     let mut total = 0usize;
     let header_end = loop {
         if total == buf.len() {
-            break total;
+            if buf.len() >= MAX_HEADER_BYTES {
+                return false;
+            }
+            let grown = (buf.len() * 2).min(MAX_HEADER_BYTES);
+            buf.resize(grown, 0);
         }
         let n = stream.read(&mut buf[total..]).unwrap_or(0);
         if n == 0 {
@@ -114,6 +137,7 @@ fn read_request_head(stream: &mut std::net::TcpStream) {
         }
         body_read += n;
     }
+    true
 }
 
 /// Parses a `Content-Length` header's value out of a raw HTTP header block,
@@ -177,5 +201,43 @@ mod tests {
             content_length(b"GET / HTTP/1.1\r\nContent-Length: nope\r\n\r\n"),
             0
         );
+    }
+
+    #[test]
+    fn drains_body_when_headers_exceed_initial_scratch_buffer() {
+        // Padding headers pushed well past the (former fixed) 8192-byte
+        // scratch buffer so that both the end-of-headers marker AND the
+        // real `Content-Length` header land past byte 8192. Pre-fix, the
+        // header scan gave up at the 8192-byte cap, treated that truncated
+        // slice (which never even contains a `Content-Length` line) as the
+        // full header block, defaulted `content_length` to 0, and skipped
+        // draining the body entirely -- exactly the write-races-peer-close
+        // bug this module's doc comment warns about.
+        let base_url = spawn(vec![MockResponse::ok(r#"{"ok":true}"#)]);
+        let addr = base_url.trim_start_matches("http://");
+        let mut stream = TcpStream::connect(addr).expect("connect");
+
+        let body = "x".repeat(200);
+        let padding: String = (0..600)
+            .map(|i| format!("X-Pad-{i}: 0123456789012345\r\n"))
+            .collect();
+        assert!(
+            padding.len() > 8192,
+            "padding must exceed the old fixed scratch buffer"
+        );
+
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: x\r\n{padding}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).expect("write request");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown write half");
+
+        let mut out = String::new();
+        stream.read_to_string(&mut out).expect("read response");
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "{out}");
+        assert!(out.ends_with(r#"{"ok":true}"#), "{out}");
     }
 }

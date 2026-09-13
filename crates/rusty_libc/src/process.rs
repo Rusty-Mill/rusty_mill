@@ -84,7 +84,14 @@ pub fn getgroups(buf: &mut [u32]) -> Result<&[u32], Errno> {
     // many entries.
     let ret = unsafe { syscall2(nr::GETGROUPS, buf.len(), buf.as_mut_ptr() as usize) };
     let n = from_ret(ret)?;
-    Ok(&buf[..n])
+    // `getgroups(2)` has a documented `size == 0` special case: the kernel
+    // ignores the (zero) size cap and returns the *true* group count instead
+    // of clamping to it, precisely so callers can query the count before
+    // sizing a real buffer (see [`ngroups`]). Bound `n` by the actual buffer
+    // length before slicing so that count-query usage (`buf` empty, `n`
+    // potentially far larger) never slices out of bounds; normal nonzero-size
+    // calls always have `n <= buf.len()` already, so this is a no-op for them.
+    Ok(&buf[..n.min(buf.len())])
 }
 
 // --- privilege: setuid/setgid family ----------------------------------------
@@ -1050,6 +1057,49 @@ mod tests {
         // A larger-than-needed buffer still reports exactly `n` entries.
         let mut spare = std::vec![0u32; n + 4];
         assert_eq!(getgroups(&mut spare).expect("getgroups spare").len(), n);
+    }
+
+    #[test]
+    fn getgroups_empty_buffer_does_not_panic_when_process_has_groups() {
+        use crate::wait;
+
+        // Regression test for the `getgroups(2)` `size == 0` special case:
+        // the kernel ignores the (zero) size cap and returns the *true*
+        // group count instead of clamping to it (this is exactly what
+        // `ngroups()` above relies on). Pre-fix, `getgroups` sliced
+        // `&buf[..n]` unconditionally, so calling it with an empty `buf`
+        // while the process has >= 1 supplementary group panics with an
+        // out-of-bounds slice. Force at least one supplementary group in a
+        // forked child (mutating real credential state, hence the fork --
+        // see `fork`'s safety note; this child only issues raw syscalls
+        // before `exit_group`), then confirm `getgroups(&mut [])` returns
+        // cleanly rather than panicking, via `catch_unwind` so the
+        // regression is detected deterministically regardless of how a
+        // panicking single-thread child process happens to terminate.
+        match unsafe { fork() }.expect("fork") {
+            0 => {
+                match setgroups(&[100, 200]) {
+                    Ok(()) => {}
+                    // Unprivileged: can't force a nonzero group count here.
+                    // Nothing more this child can assert; exit cleanly.
+                    Err(Errno::EPERM) => exit_group(0),
+                    Err(_) => exit_group(1),
+                }
+
+                let result = std::panic::catch_unwind(|| getgroups(&mut []));
+                match result {
+                    Ok(Ok([])) => exit_group(0),
+                    Ok(Ok(_)) => exit_group(2),
+                    Ok(Err(_)) => exit_group(3),
+                    Err(_) => exit_group(4), // panicked: the regression
+                }
+            }
+            pid => {
+                let (_, status) = wait::waitpid(pid, 0).expect("waitpid");
+                assert!(wait::wifexited(status), "child did not exit normally");
+                assert_eq!(wait::wexitstatus(status), 0, "child assertion failed");
+            }
+        }
     }
 
     #[test]

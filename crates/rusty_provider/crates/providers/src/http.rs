@@ -2,6 +2,14 @@ use std::time::Duration;
 
 use rp_core::ProviderError;
 
+/// Caps how much of an upstream response body this crate will buffer in
+/// memory. A misbehaving or hostile endpoint that returns (or declares) an
+/// arbitrarily large body must not be able to grow this process without
+/// bound. Mirrors the `MAX_RESPONSE_BODY_BYTES` convention `rp-skillopt`'s
+/// `skillopt-model::http::read_capped_body` already established for the
+/// same purpose on its own chat backends.
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Default total-request timeout for a provider's `reqwest::Client`, used
 /// by every adapter's `new()`. Generous on purpose -- a non-streaming
 /// completion from a large or reasoning-heavy model, or a long-running
@@ -23,8 +31,42 @@ pub fn build_client(timeout: Duration) -> reqwest::Client {
         .expect("reqwest client should build with a timeout configured")
 }
 
+/// Reads `resp`'s body into `Bytes`, refusing to buffer past
+/// [`MAX_RESPONSE_BODY_BYTES`]. Replaces `resp.text().await`/`resp.json().await`,
+/// which collect the whole body no matter how large the endpoint makes it.
+///
+/// Checked twice: once against a declared `Content-Length` before reading
+/// anything (the fast path for a well-behaved but oversized response), and
+/// once against a running total while streaming chunks (for a response
+/// with no -- or a lying -- `Content-Length`).
+pub(crate) async fn read_capped_body(
+    resp: reqwest::Response,
+) -> Result<bytes::Bytes, ProviderError> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BODY_BYTES as u64 {
+            return Err(ProviderError::Decode(format!(
+                "response declared Content-Length {len}, exceeding the {MAX_RESPONSE_BODY_BYTES}-byte cap"
+            )));
+        }
+    }
+
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(map_reqwest_error)? {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
+            return Err(ProviderError::Decode(format!(
+                "response body exceeded the {MAX_RESPONSE_BODY_BYTES}-byte cap"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes::Bytes::from(buf))
+}
+
 /// Turn a non-2xx reqwest response into a classified `ProviderError`,
-/// consuming the body for the error message.
+/// consuming the body (capped at [`MAX_RESPONSE_BODY_BYTES`]) for the error
+/// message.
 pub async fn map_error_response(resp: reqwest::Response) -> ProviderError {
     let status = resp.status();
     let retry_after_secs = resp
@@ -32,7 +74,10 @@ pub async fn map_error_response(resp: reqwest::Response) -> ProviderError {
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
-    let body = resp.text().await.unwrap_or_default();
+    let body = match read_capped_body(resp).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(err) => return err,
+    };
     let message = extract_error_message(&body).unwrap_or(body);
 
     match status.as_u16() {
@@ -104,6 +149,59 @@ mod tests {
         let client = build_client(Duration::from_secs(5));
         let resp = client.get(server.uri()).send().await.unwrap();
         assert!(resp.status().is_success());
+    }
+
+    // --- read_capped_body / map_error_response ----------------------------------
+
+    /// Spawns a one-shot raw TCP server that accepts a single request and
+    /// replies with `status_line` plus an oversized declared
+    /// `Content-Length` and no actual body -- exercising the fast
+    /// Content-Length-based rejection path without ever having to
+    /// transfer (or buffer) gigabytes of data.
+    fn oversized_content_length_server(
+        status_line: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let oversized_len = MAX_RESPONSE_BODY_BYTES as u64 + 1;
+            let response = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {oversized_len}\r\n\r\n"
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn read_capped_body_rejects_a_response_with_an_oversized_declared_content_length() {
+        let (addr, server) = oversized_content_length_server("HTTP/1.1 200 OK");
+        let client = build_client(Duration::from_secs(5));
+        let resp = client.get(format!("http://{addr}")).send().await.unwrap();
+
+        let err = read_capped_body(resp).await.unwrap_err();
+        assert!(
+            err.to_string().contains("cap"),
+            "expected an over-cap rejection, got: {err}"
+        );
+        let _ = server.join();
+    }
+
+    #[tokio::test]
+    async fn map_error_response_rejects_an_oversized_body_instead_of_buffering_it() {
+        let (addr, server) = oversized_content_length_server("HTTP/1.1 500 Internal Server Error");
+        let client = build_client(Duration::from_secs(5));
+        let resp = client.get(format!("http://{addr}")).send().await.unwrap();
+
+        let err = map_error_response(resp).await;
+        assert!(
+            err.to_string().contains("cap"),
+            "expected an over-cap rejection, got: {err}"
+        );
+        let _ = server.join();
     }
 
     #[test]

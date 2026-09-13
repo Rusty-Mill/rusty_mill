@@ -1,5 +1,7 @@
 //! Applying a parsed patch to file content, with stale-TAG 3-way merge.
 
+use std::collections::HashMap;
+
 use crate::error::HashlineError;
 use crate::parse::{FileSection, Op};
 use crate::snapshot::SnapshotStore;
@@ -123,12 +125,25 @@ pub fn apply_ops(content: &str, ops: &[Op]) -> Result<String, HashlineError> {
         }
     }
 
+    // Index insert-anchor ops by target line so the reconstruction loop below
+    // looks each line up in O(1) instead of linearly scanning every op per
+    // line (which is O(n*m) for n file lines and m insert ops). Insertion
+    // order within a line is preserved via the per-line index list.
+    let mut pre_by_line: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, (anchor, _)) in pre.iter().enumerate() {
+        pre_by_line.entry(*anchor).or_default().push(idx);
+    }
+    let mut post_by_line: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, (anchor, _)) in post.iter().enumerate() {
+        post_by_line.entry(*anchor).or_default().push(idx);
+    }
+
     let mut out: Vec<String> = head;
     for (i, original) in lines.iter().enumerate() {
         let line = i + 1;
-        for (anchor, body) in &pre {
-            if *anchor == line {
-                out.extend(body.iter().cloned());
+        if let Some(idxs) = pre_by_line.get(&line) {
+            for &idx in idxs {
+                out.extend(pre[idx].1.iter().cloned());
             }
         }
         match &cover[i] {
@@ -136,9 +151,9 @@ pub fn apply_ops(content: &str, ops: &[Op]) -> Result<String, HashlineError> {
             Some(Cover::Swap(body)) => out.extend(body.iter().cloned()),
             Some(Cover::Del) => {}
         }
-        for (anchor, body) in &post {
-            if *anchor == line {
-                out.extend(body.iter().cloned());
+        if let Some(idxs) = post_by_line.get(&line) {
+            for &idx in idxs {
+                out.extend(post[idx].1.iter().cloned());
             }
         }
     }
@@ -247,6 +262,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "ONE\n2\n4\n5\nSIX\n");
+    }
+
+    #[test]
+    fn many_insert_ops_reconstruct_in_near_linear_time() {
+        // Regression test for a quadratic (O(n*m)) blowup: apply_ops used to
+        // linearly re-scan the *entire* pre/post insert-anchor list for every
+        // file line. A patch with many distinct INS.PRE/INS.POST ops against a
+        // large file made that O(n*m), which a hostile hashline patch could
+        // exploit as a CPU-exhaustion DoS (nexus-storage's `edit` handler
+        // feeds untrusted patch content into this crate). With the indexed
+        // (HashMap-backed) lookup this is O(n+m) and completes quickly even
+        // at this size; the old linear-scan implementation took far longer
+        // than the bound below for the same input.
+        use std::time::Instant;
+
+        let n = 20_000usize;
+        let mut content = String::with_capacity(n * 3);
+        for i in 1..=n {
+            content.push_str(&i.to_string());
+            content.push('\n');
+        }
+
+        let mut ops = Vec::with_capacity(n * 2);
+        for line in 1..=n {
+            ops.push(Op::InsPre {
+                line,
+                body: vec![format!("pre{line}")],
+            });
+            ops.push(Op::InsPost {
+                line,
+                body: vec![format!("post{line}")],
+            });
+        }
+
+        let start = Instant::now();
+        let out = apply_ops(&content, &ops).unwrap();
+        let elapsed = start.elapsed();
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "pre1");
+        assert_eq!(lines[1], "1");
+        assert_eq!(lines[2], "post1");
+        assert_eq!(lines[lines.len() - 1], "post20000");
+
+        assert!(
+            elapsed.as_millis() < 1000,
+            "apply_ops took {elapsed:?} for {n} lines / {} ops; expected \
+             near-linear time, not the old O(n*m) anchor scan",
+            ops.len()
+        );
     }
 
     #[test]

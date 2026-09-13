@@ -34,20 +34,33 @@ impl AwkProgram {
     /// Runs this program: `BEGIN` rules once, then `lines` fed through the
     /// main rules one record at a time, then `END` rules once. `field_sep`
     /// is awk's `FS` (`" "` for the default whitespace-splitting behavior).
-    /// Calls `emit` once per output line, in order.
+    /// Calls `emit` once per output line, in order. Returns `Err` (and
+    /// stops processing further input) if the program hits a runtime
+    /// error, such as a field index or `NF` assignment beyond the
+    /// interpreter's field-count cap.
     pub fn run<'a>(
         &self,
         lines: impl Iterator<Item = &'a str>,
         field_sep: &str,
         mut emit: impl FnMut(&str),
-    ) {
+    ) -> Result<(), String> {
         let mut interp = Interp::new(field_sep);
         interp.run_begin(&self.program, &mut emit);
+        if let Some(err) = interp.take_error() {
+            return Err(err);
+        }
         for line in lines {
             interp.set_record(line);
             interp.run_main_rules(&self.program, &mut emit);
+            if let Some(err) = interp.take_error() {
+                return Err(err);
+            }
         }
         interp.run_end(&self.program, &mut emit);
+        if let Some(err) = interp.take_error() {
+            return Err(err);
+        }
+        Ok(())
     }
 }
 
@@ -58,7 +71,8 @@ mod tests {
     fn run(script: &str, input: &[&str], fs: &str) -> Vec<String> {
         let prog = AwkProgram::parse(script).unwrap();
         let mut out = Vec::new();
-        prog.run(input.iter().copied(), fs, |l| out.push(l.to_string()));
+        prog.run(input.iter().copied(), fs, |l| out.push(l.to_string()))
+            .unwrap();
         out
     }
 
@@ -191,5 +205,47 @@ mod tests {
 
         let out = run(r#"{n = 10; n -= 3; n *= 2; n /= 2; print n}"#, &["x"], " ");
         assert_eq!(out, vec!["7"]);
+    }
+
+    #[test]
+    fn oversized_field_index_assignment_errors_instead_of_allocating() {
+        // `$999999999 = 1` would otherwise `Vec::resize` to ~1 billion
+        // elements -- an allocation-exhaustion DoS from ordinary input.
+        let prog = AwkProgram::parse("{ $999999999 = 1 }").unwrap();
+        let result = prog.run(["a"].iter().copied(), " ", |_| {});
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oversized_nf_assignment_errors_instead_of_allocating() {
+        // Same DoS shape via `NF = <huge>` instead of a field index.
+        let prog = AwkProgram::parse("{ NF = 999999999 }").unwrap();
+        let result = prog.run(["a"].iter().copied(), " ", |_| {});
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn field_index_and_nf_within_the_cap_still_work() {
+        // The cap must not affect ordinary, well within-range usage.
+        let out = run(r#"{$5="e"; print NF, $0}"#, &["a b c"], " ");
+        assert_eq!(out, vec!["5 a b c  e"]);
+    }
+
+    #[test]
+    fn scientific_notation_field_value_parses_correctly() {
+        // "1e10" was truncated to "1" by `parse_leading_number`'s missing
+        // exponent handling, disagreeing with `looks_numeric` (which
+        // accepts the whole string as numeric via `str::parse::<f64>`).
+        let out = run("{print $1 + 1}", &["1e3"], " ");
+        assert_eq!(out, vec!["1001"]);
+    }
+
+    #[test]
+    fn scientific_notation_string_literal_arithmetic() {
+        let out = run(r#"BEGIN{print "1e3" + 1}"#, &[], " ");
+        assert_eq!(out, vec!["1001"]);
+
+        let out = run(r#"BEGIN{print "2.5e-3" + 1}"#, &[], " ");
+        assert_eq!(out, vec!["1.0025"]);
     }
 }

@@ -13,6 +13,40 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Round 7 `/codex-build` monorepo review: 38 findings fixed
+**2026-09-13** · report [`CODEX-MONOREPO-REVIEW-2026-09-13-round7.md`](CODEX-MONOREPO-REVIEW-2026-09-13-round7.md)
+
+Seventh independent review pass in this recurring series (rounds 1-6:
+`CODEX-MONOREPO-REVIEW.md`, `-2026-09-12.md`, `-round3.md` through
+`-round6.md`). 15 parallel read-only scouts covered crate families no
+prior round had reached at all or only shallowly: `rusty_git`, `rusty_diff`,
+`rusty_ansi`/`mill-term`/`rpath`/`rusty_term`'s `l13`, `rusty_serde`,
+`rusty_tls`/`rusty_wiremock`, `rusty_libc`, `rusty_regx`/`rusty_simd`/
+`rusty_sha1`/`rusty_text`, `rusty_crypto_key`/`rusty_gpu`/`rusty_vulkan`,
+`rusty_provider`'s adapters and `rusty_inventrory`'s `inventory-core`,
+`rusty_llama` beyond earlier GGUF-only fixes, and roughly two dozen leaf
+`nexus-*` crates never previously audited in depth.
+
+- **Fixed:** 38 findings, each landed with a regression test proven to
+  fail against the pre-fix code and pass post-fix, by 25 parallel fix
+  tasks. Full per-finding detail (location, trigger, fix, regression test,
+  severity) is in the linked report; see its own **Disposition** table and
+  per-crate sections rather than duplicating that detail here.
+- **Fixed:** 7 additional real lint violations (`clippy::doc_markdown`,
+  `doc_lazy_continuation`, `unnecessary_cast`, `collapsible_match`,
+  `cast_possible_wrap` ×3, `redundant_guards`) introduced by the fix code
+  itself, caught by a closing `cargo fmt` + `cargo clippy --all-targets -D
+  warnings` sweep across all 25 touched crates and fixed directly.
+- **Known limitation, flagged for a future round, not fixed here:**
+  `rusty_serde`'s `Value` type has no custom `Drop`, so a sufficiently
+  deep in-memory `Value` tree (~2,000-5,000+ levels) overflows the stack
+  merely by being dropped, independently of the deserializer recursion
+  guards this round added (which prevent such a tree from being built by
+  the JSON/RON text parsers in the first place, but don't protect a
+  `Value` tree constructed by hand via the public API).
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
 

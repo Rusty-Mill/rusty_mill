@@ -20,7 +20,9 @@ use crate::model::{Memory, MemoryType};
 pub const SELF_PLUGIN_ID: &str = "com.nexus.memory";
 
 /// Substrings (case-insensitive) that mark a JSON object key as carrying a
-/// secret; matching values are replaced with `[redacted]` before storage.
+/// secret, or — when followed by `=`/`:` inside a string VALUE — mark that
+/// value as a smuggled `key=value`/`key: value` secret pair. Matching keys
+/// (or values) are replaced with `[redacted]` before storage.
 const SECRET_KEY_MARKERS: &[&str] = &[
     "api_key",
     "apikey",
@@ -31,6 +33,29 @@ const SECRET_KEY_MARKERS: &[&str] = &[
     "authorization",
     "credential",
     "private_key",
+];
+
+/// Case-insensitive substrings that mark a whole string VALUE as
+/// secret-shaped regardless of its key — recognizable token prefixes
+/// (OpenAI/GitHub/Slack/AWS/Google API keys) and the bare `Bearer ` scheme,
+/// so a secret embedded under an innocuous key (e.g. `{"note": "leaked:
+/// sk-abc123..."}`) is still caught.
+const SECRET_VALUE_MARKERS: &[&str] = &[
+    "sk-",
+    "sk_",
+    "pk_",
+    "rk_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "xox",
+    "akia",
+    "asia",
+    "aiza",
+    "bearer ",
 ];
 
 /// Convert a bus event into an episodic [`Memory`], or `None` when it must not
@@ -117,12 +142,17 @@ fn describe(event: &NexusEvent, source: &str) -> (String, Option<Value>, String)
     }
 }
 
-/// Return `value` with secret-looking object values replaced by `[redacted]`.
+/// Return `value` with secret-looking object keys and secret-shaped string
+/// values replaced by `[redacted]`.
 fn redact(mut value: Value) -> Value {
     redact_in_place(&mut value);
     value
 }
 
+/// Recursively redact both secret-named object keys and secret-shaped
+/// string values (whether they sit under an innocuous key, inside an
+/// array, or nested arbitrarily deep) — a secret is not only ever named by
+/// its key (e.g. `{"note": "api_key=sk-abc123..."}` or `["sk-abc123..."]`).
 fn redact_in_place(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -139,6 +169,9 @@ fn redact_in_place(value: &mut Value) {
                 redact_in_place(item);
             }
         }
+        Value::String(s) if looks_like_secret_value(s) => {
+            *value = Value::String("[redacted]".to_string());
+        }
         _ => {}
     }
 }
@@ -146,6 +179,27 @@ fn redact_in_place(value: &mut Value) {
 fn is_secret_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     SECRET_KEY_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// True when a string VALUE is itself secret-shaped: it either carries a
+/// recognizable secret-token prefix (`sk-…`, `ghp_…`, a bare `Bearer …`
+/// scheme, …) or smuggles a `marker=value`/`marker: value` pair — the same
+/// markers [`is_secret_key`] checks against object keys — inside otherwise
+/// innocuous free text.
+fn looks_like_secret_value(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+
+    if SECRET_VALUE_MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+
+    SECRET_KEY_MARKERS.iter().any(|marker| {
+        lower.find(marker).is_some_and(|idx| {
+            lower[idx + marker.len()..]
+                .trim_start()
+                .starts_with(['=', ':'])
+        })
+    })
 }
 
 #[cfg(test)]
@@ -246,5 +300,46 @@ mod tests {
         let m = event_to_memory(&ev).unwrap();
         assert_eq!(m.tags, vec!["PluginStarted".to_string()]);
         assert!(m.content.contains("com.nexus.git"));
+    }
+
+    #[test]
+    fn redacts_secret_smuggled_inside_an_innocuous_string_value() {
+        // A secret is not only ever named by its key — it can be embedded
+        // as free text under a harmless-looking key. Pre-fix, redact_in_place
+        // only inspected object KEYS, so this payload passed through
+        // verbatim into the durable, hub-synced episodic Memory.
+        let ev = custom(
+            "com.nexus.ai",
+            "com.nexus.ai.config_set",
+            serde_json::json!({
+                "note": "remember api_key=sk-abc123def456ghi789",
+                "harmless": "just a normal sentence with no secrets",
+            }),
+        );
+        let m = event_to_memory(&ev).unwrap();
+        assert_eq!(m.metadata["payload"]["note"], "[redacted]");
+        assert_eq!(
+            m.metadata["payload"]["harmless"],
+            "just a normal sentence with no secrets"
+        );
+    }
+
+    #[test]
+    fn redacts_secret_shaped_value_inside_an_array() {
+        // Array elements are never object keys, so a bearer token or raw
+        // API key living inside a JSON array must be caught by scanning
+        // string VALUES, not just keys.
+        let ev = custom(
+            "com.nexus.ai",
+            "com.nexus.ai.config_set",
+            serde_json::json!({
+                "history": ["hello", "Bearer eyJhbGciOiJIUzI1NiJ9.secret.sig", "sk-liveabc123456"]
+            }),
+        );
+        let m = event_to_memory(&ev).unwrap();
+        let history = m.metadata["payload"]["history"].as_array().unwrap();
+        assert_eq!(history[0], "hello");
+        assert_eq!(history[1], "[redacted]");
+        assert_eq!(history[2], "[redacted]");
     }
 }

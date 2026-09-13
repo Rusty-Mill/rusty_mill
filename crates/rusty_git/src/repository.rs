@@ -242,6 +242,14 @@ impl Repository {
         Ok(commit_oid)
     }
 
+    /// Caps recursive tree-flattening depth so a maliciously (or
+    /// accidentally) deeply nested chain of single-entry tree objects --
+    /// forgeable directly, since this crate's own stored-block zlib
+    /// format doesn't require real git's Huffman coding, unlike a real
+    /// `git`-written repository -- errors out instead of overflowing the
+    /// stack. Real repositories never come close to this depth.
+    const MAX_TREE_DEPTH: u32 = 64;
+
     /// Recursively flattens a tree object into `path -> raw blob hash`,
     /// joining subtree paths with `/`.
     fn flatten_tree(
@@ -249,7 +257,11 @@ impl Repository {
         tree_oid: &str,
         prefix: &str,
         out: &mut BTreeMap<String, [u8; SHA1_DIGEST_LEN]>,
+        depth: u32,
     ) -> Result<(), ObjectError> {
+        if depth > Self::MAX_TREE_DEPTH {
+            return Err(ObjectError::TooDeep(tree_oid.to_string()));
+        }
         let (_, content) = read_object(&self.git_dir, tree_oid)?;
         for entry in decode_tree(&content)? {
             let path = if prefix.is_empty() {
@@ -258,7 +270,7 @@ impl Repository {
                 format!("{prefix}/{}", entry.name)
             };
             if entry.mode == "40000" {
-                self.flatten_tree(&hex(&entry.hash), &path, out)?;
+                self.flatten_tree(&hex(&entry.hash), &path, out, depth + 1)?;
             } else {
                 out.insert(path, entry.hash);
             }
@@ -271,7 +283,7 @@ impl Repository {
         if let Some(commit_oid) = self.head_commit() {
             if let Ok((_, content)) = read_object(&self.git_dir, &commit_oid) {
                 if let Ok(commit) = decode_commit(&content) {
-                    let _ = self.flatten_tree(&commit.tree, "", &mut out);
+                    let _ = self.flatten_tree(&commit.tree, "", &mut out, 0);
                 }
             }
         }
@@ -393,6 +405,7 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::objects::{encode_tree, TreeEntry};
 
     fn temp_repo(name: &str) -> Repository {
         let dir =
@@ -511,6 +524,42 @@ mod tests {
         let index = repo.index().unwrap();
         let paths: Vec<&str> = index.entries().iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, vec!["README.md", "src/main.rs"]);
+
+        let _ = fs::remove_dir_all(&repo.work_tree);
+    }
+
+    #[test]
+    fn flatten_tree_errors_past_max_depth_instead_of_overflowing_the_stack() {
+        let repo = temp_repo("deep_tree");
+
+        // An empty tree as the innermost leaf.
+        let mut current_oid =
+            write_object(&repo.git_dir, ObjectKind::Tree, &encode_tree(&[])).unwrap();
+
+        // Wrap it in a chain of single-entry subtrees, deeper than
+        // MAX_TREE_DEPTH -- forgeable directly since this crate's own
+        // stored-block zlib format doesn't require real git's Huffman
+        // coding (see the module doc), unlike a real repository.
+        for i in 0..(Repository::MAX_TREE_DEPTH as usize + 16) {
+            let mut hash = [0u8; SHA1_DIGEST_LEN];
+            for (j, byte) in hash.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&current_oid[j * 2..j * 2 + 2], 16).unwrap();
+            }
+            let entry = TreeEntry {
+                mode: "40000".to_string(),
+                name: format!("d{i}"),
+                hash,
+            };
+            let content = encode_tree(&[entry]);
+            current_oid = write_object(&repo.git_dir, ObjectKind::Tree, &content).unwrap();
+        }
+
+        let mut out = BTreeMap::new();
+        let result = repo.flatten_tree(&current_oid, "", &mut out, 0);
+        assert!(
+            matches!(result, Err(ObjectError::TooDeep(_))),
+            "expected TooDeep error, got {result:?}"
+        );
 
         let _ = fs::remove_dir_all(&repo.work_tree);
     }

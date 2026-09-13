@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout.lock();
     program.run(lines.iter().map(String::as_str), &field_sep, |l| {
         let _ = writeln!(out, "{l}");
-    });
+    })?;
 
     Ok(())
 }

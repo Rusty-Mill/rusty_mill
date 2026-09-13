@@ -408,13 +408,32 @@ impl<'de> Deserialize<'de> for Value {
 /// tagged enums use the same mechanism for the fields alongside the tag.
 pub struct ValueDeserializer<E> {
     value: Value,
+    depth: usize,
     _marker: PhantomData<E>,
 }
+
+/// Maximum depth of nested `Value::Seq`/`Value::Map` trees this
+/// deserializer will descend into. `ValueSeqAccess`/`ValueMapAccess`
+/// construct a fresh `ValueDeserializer` per element/value with no other
+/// bound, so a sufficiently deep in-memory `Value` tree - however it was
+/// built, independently of either format parser's own nesting guard -
+/// would otherwise overflow the native stack before any error could be
+/// produced.
+const MAX_VALUE_DEPTH: usize = 128;
 
 impl<E> ValueDeserializer<E> {
     pub fn new(value: Value) -> Self {
         ValueDeserializer {
             value,
+            depth: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    fn with_depth(value: Value, depth: usize) -> Self {
+        ValueDeserializer {
+            value,
+            depth,
             _marker: PhantomData,
         }
     }
@@ -430,6 +449,9 @@ where
     where
         V: Visitor<'de>,
     {
+        if self.depth > MAX_VALUE_DEPTH {
+            return Err(E::custom("exceeded maximum nesting depth"));
+        }
         match self.value {
             Value::Null => visitor.visit_unit(),
             Value::Bool(b) => visitor.visit_bool(b),
@@ -437,8 +459,10 @@ where
             Value::UInt(v) => visitor.visit_u64(v),
             Value::Float(v) => visitor.visit_f64(v),
             Value::String(s) => visitor.visit_string(s),
-            Value::Seq(items) => visitor.visit_seq(ValueSeqAccess::new(items)),
-            Value::Map(entries) => visitor.visit_map(ValueMapAccess::new(entries)),
+            Value::Seq(items) => visitor.visit_seq(ValueSeqAccess::new(items, self.depth + 1)),
+            Value::Map(entries) => {
+                visitor.visit_map(ValueMapAccess::with_depth(entries, self.depth + 1))
+            }
         }
     }
 
@@ -448,7 +472,7 @@ where
     {
         match self.value {
             Value::Null => visitor.visit_none(),
-            other => visitor.visit_some(ValueDeserializer::<E>::new(other)),
+            other => visitor.visit_some(ValueDeserializer::<E>::with_depth(other, self.depth)),
         }
     }
 
@@ -475,7 +499,11 @@ where
             Value::String(s) => visitor.visit_enum(StrDeserializer::<E>::new(&s)),
             Value::Map(mut entries) if entries.len() == 1 => {
                 let (variant, value) = entries.remove(0);
-                visitor.visit_enum(ValueTaggedEnumAccess::<E>::new(variant, value))
+                visitor.visit_enum(ValueTaggedEnumAccess::<E>::new(
+                    variant,
+                    value,
+                    self.depth + 1,
+                ))
             }
             _ => Err(E::custom("expected string or single-entry object for enum")),
         }
@@ -494,13 +522,15 @@ where
 
 struct ValueSeqAccess<E> {
     items: std::vec::IntoIter<Value>,
+    depth: usize,
     _marker: PhantomData<E>,
 }
 
 impl<E> ValueSeqAccess<E> {
-    fn new(items: Vec<Value>) -> Self {
+    fn new(items: Vec<Value>, depth: usize) -> Self {
         ValueSeqAccess {
             items: items.into_iter(),
+            depth,
             _marker: PhantomData,
         }
     }
@@ -514,7 +544,7 @@ impl<'de, E: ErrorTrait> SeqAccess<'de> for ValueSeqAccess<E> {
         T: Deserialize<'de>,
     {
         match self.items.next() {
-            Some(v) => T::deserialize(ValueDeserializer::<E>::new(v)).map(Some),
+            Some(v) => T::deserialize(ValueDeserializer::<E>::with_depth(v, self.depth)).map(Some),
             None => Ok(None),
         }
     }
@@ -532,14 +562,20 @@ impl<'de, E: ErrorTrait> SeqAccess<'de> for ValueSeqAccess<E> {
 pub(crate) struct ValueMapAccess<E> {
     entries: std::vec::IntoIter<(String, Value)>,
     pending_value: Option<Value>,
+    depth: usize,
     _marker: PhantomData<E>,
 }
 
 impl<E> ValueMapAccess<E> {
     pub(crate) fn new(entries: Vec<(String, Value)>) -> Self {
+        Self::with_depth(entries, 0)
+    }
+
+    fn with_depth(entries: Vec<(String, Value)>, depth: usize) -> Self {
         ValueMapAccess {
             entries: entries.into_iter(),
             pending_value: None,
+            depth,
             _marker: PhantomData,
         }
     }
@@ -569,7 +605,7 @@ impl<'de, E: ErrorTrait> MapAccess<'de> for ValueMapAccess<E> {
             .pending_value
             .take()
             .expect("next_value called without a preceding next_key");
-        V::deserialize(ValueDeserializer::<E>::new(value))
+        V::deserialize(ValueDeserializer::<E>::with_depth(value, self.depth))
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -584,14 +620,16 @@ impl<'de, E: ErrorTrait> MapAccess<'de> for ValueMapAccess<E> {
 struct ValueTaggedEnumAccess<E> {
     variant: String,
     value: Value,
+    depth: usize,
     _marker: PhantomData<E>,
 }
 
 impl<E> ValueTaggedEnumAccess<E> {
-    fn new(variant: String, value: Value) -> Self {
+    fn new(variant: String, value: Value, depth: usize) -> Self {
         ValueTaggedEnumAccess {
             variant,
             value,
+            depth,
             _marker: PhantomData,
         }
     }
@@ -606,19 +644,24 @@ impl<'de, E: ErrorTrait> EnumAccess<'de> for ValueTaggedEnumAccess<E> {
         V: Deserialize<'de>,
     {
         let value = V::deserialize(StrDeserializer::<E>::new(&self.variant))?;
-        Ok((value, ValueTaggedVariantAccess::<E>::new(self.value)))
+        Ok((
+            value,
+            ValueTaggedVariantAccess::<E>::new(self.value, self.depth),
+        ))
     }
 }
 
 struct ValueTaggedVariantAccess<E> {
     value: Value,
+    depth: usize,
     _marker: PhantomData<E>,
 }
 
 impl<E> ValueTaggedVariantAccess<E> {
-    fn new(value: Value) -> Self {
+    fn new(value: Value, depth: usize) -> Self {
         ValueTaggedVariantAccess {
             value,
+            depth,
             _marker: PhantomData,
         }
     }
@@ -634,14 +677,14 @@ impl<'de, E: ErrorTrait> VariantAccess<'de> for ValueTaggedVariantAccess<E> {
     where
         T: Deserialize<'de>,
     {
-        T::deserialize(ValueDeserializer::<E>::new(self.value))
+        T::deserialize(ValueDeserializer::<E>::with_depth(self.value, self.depth))
     }
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, E>
     where
         V: Visitor<'de>,
     {
         match self.value {
-            Value::Seq(items) => visitor.visit_seq(ValueSeqAccess::<E>::new(items)),
+            Value::Seq(items) => visitor.visit_seq(ValueSeqAccess::<E>::new(items, self.depth)),
             _ => Err(E::custom("expected an array for a tuple variant")),
         }
     }
@@ -650,7 +693,9 @@ impl<'de, E: ErrorTrait> VariantAccess<'de> for ValueTaggedVariantAccess<E> {
         V: Visitor<'de>,
     {
         match self.value {
-            Value::Map(entries) => visitor.visit_map(ValueMapAccess::<E>::new(entries)),
+            Value::Map(entries) => {
+                visitor.visit_map(ValueMapAccess::<E>::with_depth(entries, self.depth))
+            }
             _ => Err(E::custom("expected an object for a struct variant")),
         }
     }

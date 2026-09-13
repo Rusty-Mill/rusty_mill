@@ -331,10 +331,9 @@ impl Provider for OpenAiCompatibleProvider {
             return Err(map_error_response(resp).await);
         }
 
-        let wire: WireResponse = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let body = crate::http::read_capped_body(resp).await?;
+        let wire: WireResponse =
+            serde_json::from_slice(&body).map_err(|e| ProviderError::Decode(e.to_string()))?;
         let full_model = format!("{}/{}", self.name, model);
         let exclude_reasoning = req
             .reasoning
@@ -472,10 +471,9 @@ impl Provider for OpenAiCompatibleProvider {
             return Err(map_error_response(resp).await);
         }
 
-        let wire: WireEmbeddingsResponse = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let body = crate::http::read_capped_body(resp).await?;
+        let wire: WireEmbeddingsResponse =
+            serde_json::from_slice(&body).map_err(|e| ProviderError::Decode(e.to_string()))?;
 
         Ok(EmbeddingsResponse {
             object: "list",

@@ -21,19 +21,37 @@ impl Source for Codex {
     }
 
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>> {
-        let mut out = Vec::new();
-        for path in self.files() {
-            if !ctx.should_read(SourceId::Codex, &path) {
-                continue;
-            }
-            if let Some(conv) = parse_rollout(&path)? {
+        scan_roots(self.roots(), ctx)
+    }
+}
+
+/// Scan the given roots for rollout files. A file that cannot be read or
+/// parsed is logged and skipped rather than aborting the whole source via
+/// `?` — mirrors the tolerant-parsing contract this crate documents, and the
+/// per-item skip pattern the vscdb reader already uses for the same failure
+/// class.
+pub fn scan_roots(
+    roots: Vec<std::path::PathBuf>,
+    ctx: &mut ScanContext,
+) -> Result<Vec<ParsedConversation>> {
+    let mut out = Vec::new();
+    for path in super::walk_with_extension(&roots, "jsonl", 5) {
+        if !ctx.should_read(SourceId::Codex, &path) {
+            continue;
+        }
+        match parse_rollout(&path) {
+            Ok(Some(conv)) => {
                 if ctx.since.is_none_or(|s| conv.conversation.updated_at >= s) {
                     out.push(conv);
                 }
             }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("skipping unreadable codex rollout {}: {e}", path.display());
+            }
         }
-        Ok(out)
     }
+    Ok(out)
 }
 
 pub fn parse_rollout(path: &Path) -> Result<Option<ParsedConversation>> {
@@ -207,5 +225,30 @@ mod tests {
         let parsed = parse_rollout(&p).unwrap().unwrap();
         assert_eq!(parsed.messages.len(), 1, "boilerplate should be dropped");
         assert_eq!(parsed.messages[0].text, "actual question here");
+    }
+
+    /// One unreadable file in a source directory must not prevent other
+    /// valid files in that same source from being indexed — the failure
+    /// this crate's tolerant-parsing contract exists to prevent.
+    #[test]
+    fn a_corrupt_file_does_not_block_the_rest_of_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        // Invalid UTF-8: `std::fs::read_to_string` fails on this file alone.
+        std::fs::write(dir.path().join("bad.jsonl"), [0xFF, 0xFE, 0xFD]).unwrap();
+        std::fs::write(
+            dir.path().join("good.jsonl"),
+            r#"{"id":"sess-1","timestamp":"2026-08-05T12:00:00Z"}
+{"type":"message","role":"user","timestamp":"2026-08-05T12:00:10Z","content":"hello"}"#,
+        )
+        .unwrap();
+
+        let mut ctx = ScanContext::new(None, true);
+        let convs = scan_roots(vec![dir.path().to_path_buf()], &mut ctx).unwrap();
+        assert_eq!(
+            convs.len(),
+            1,
+            "a corrupt file must not prevent the valid file in the same source from being indexed"
+        );
+        assert_eq!(convs[0].conversation.external_id, "sess-1");
     }
 }

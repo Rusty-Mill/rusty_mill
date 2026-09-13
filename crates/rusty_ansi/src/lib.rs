@@ -114,10 +114,20 @@ impl<'a> Iterator for AnsiParser<'a> {
                 // OSC sequence: ESC ] <code> ; <payload> (ST | BEL)
                 if let Some(term_idx) = osc_body.find(['\x07', '\x1B']) {
                     let osc_str = &osc_body[..term_idx];
-                    let terminator_len = if osc_body[term_idx..].starts_with("\x1B\\") {
+                    let remainder = &osc_body[term_idx..];
+                    let terminator_len = if remainder.starts_with("\x1B\\") {
+                        // Real 2-byte String Terminator (ST): ESC \.
                         2
-                    } else {
+                    } else if remainder.starts_with('\x07') {
+                        // BEL terminator (xterm extension).
                         1
+                    } else {
+                        // A lone ESC not followed by `\` is not a valid ST.
+                        // Treat the OSC payload as ending here without
+                        // consuming the ESC, so it starts a fresh escape
+                        // sequence on the next iteration instead of being
+                        // silently swallowed and desyncing the parser.
+                        0
                     };
                     let (code, payload) =
                         if let Some((code_str, payload_str)) = osc_str.split_once(';') {
@@ -225,5 +235,45 @@ mod tests {
     fn calculates_visible_width() {
         let colored = "\x1B[31mhello\x1B[0m \x1B[32mworld\x1B[0m";
         assert_eq!(visible_width(colored), 11);
+    }
+
+    #[test]
+    fn osc_terminator_requires_backslash_after_lone_esc() {
+        // An unterminated OSC payload (no BEL, no ESC-backslash ST) is
+        // immediately followed by a real CSI sequence. The lone ESC that
+        // begins the CSI sequence must NOT be swallowed as a bogus
+        // 1-byte OSC terminator; it must remain intact so the CSI
+        // sequence that follows is still recognized and stripped rather
+        // than leaking through as literal text.
+        let input = "\x1B]0;title\x1B[31mRed\x1B[0m";
+
+        let mut p = AnsiParser::new(input);
+        assert_eq!(
+            p.next(),
+            Some(AnsiToken::Osc {
+                code: 0,
+                payload: "title"
+            })
+        );
+        assert_eq!(
+            p.next(),
+            Some(AnsiToken::Csi {
+                params: "31",
+                action: 'm'
+            })
+        );
+        assert_eq!(p.next(), Some(AnsiToken::Text("Red")));
+        assert_eq!(
+            p.next(),
+            Some(AnsiToken::Csi {
+                params: "0",
+                action: 'm'
+            })
+        );
+        assert_eq!(p.next(), None);
+
+        // The stripped output must be just the plain text: the trailing
+        // CSI sequence must not leak through as literal "[31m".
+        assert_eq!(strip_ansi(input), "Red");
     }
 }
