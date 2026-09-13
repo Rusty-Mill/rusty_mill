@@ -386,6 +386,25 @@ independent of ADR-0002/0003)
       handling, so an inline `<a href>` is flattened to text rather than
       preserved as a link; only the image block's `src` attribute is read
       directly and round-trips through URL rewriting.
+- [x] `rusty-hister-extractor` (`ReadabilityExtractor`, §4.4): extract
+      *and* preview for any web page via the `readabilityrs` crate (a
+      Rust port of Mozilla's Readability.js — the same algorithm family
+      Go's own `go-readability` dependency belongs to). Done — 7 new unit
+      tests (181 total in the crate), clippy/fmt clean. Dependency
+      decision made by explicit user choice: `readabilityrs` pulls in
+      `scraper 0.25`/`ego-tree 0.10`, a major version ahead of this
+      crate's own `0.21`/`0.9` pins used by 8 existing extractors — both
+      versions now coexist in the dependency tree (extra compile
+      time/disk, zero risk to the existing extractors) rather than
+      bumping the existing pin or hand-rolling the algorithm. `matches`
+      always returns `true`, like `BasicExtractor`; the real chain places
+      this extractor right before `Basic`. Go's `readability.FromReader`
+      folds URL validation and article extraction into one error path;
+      `readabilityrs` splits them, so this port maps a URL-parse failure
+      to `Abort` and a malformed-HTML error or no-article-found result to
+      `Fallback`. Two Go metadata fields (a favicon URL, a `modified`
+      timestamp) have no `readabilityrs` equivalent and are deliberately
+      not reproduced rather than silently dropped.
 - [x] `rusty-hister-core`: `Document::extra_documents`/
       `Document::skip_indexing`, an additive extension (empty/`false` by
       default, every prior extractor unaffected) resolving
@@ -396,7 +415,7 @@ independent of ADR-0002/0003)
 - [x] `rusty-hister-extractor` (`MastodonExtractor`, §4.5.13): decomposes
       a Mastodon timeline/status page into one `Document` per visible
       toot, the first extractor to use the capability extension above.
-      Done — 6 new unit tests (180 total in the crate), clippy/fmt clean.
+      Done — 6 new unit tests (187 total in the crate), clippy/fmt clean.
       `matches` accepts a real Mastodon page (fingerprinted the same way
       Go does) or a toot document this extractor already produced (a
       recursion guard via `metadata["type"] == "toot"`, matching Go's
@@ -409,10 +428,9 @@ independent of ADR-0002/0003)
 - Bluesky and Twitter (§4.5.14-15) can now reuse the same
   `extra_documents`/`skip_indexing` mechanism Mastodon established;
   porting them just hasn't happened yet.
-- `rusty-hister-extractor`: the remaining 3 built-in extractors in
-  default-chain order (§4.3) not blocked on the above, starting with the
-  ones that have existing Go test coverage and budgeting fresh test
-  authorship for the rest.
+- `rusty-hister-extractor`: the remaining 2 built-in extractors in
+  default-chain order (§4.3), starting with the ones that have existing
+  Go test coverage and budgeting fresh test authorship for the rest.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of
