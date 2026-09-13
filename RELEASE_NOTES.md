@@ -13,6 +13,45 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's GitHub extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-github`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-github)
+
+Seventeenth Phase 1 increment. The seventh of the 20 built-in extractors.
+
+- **Added:** `GitHubExtractor` (capability inventory §4.5.9) — a port of
+  `server/extractor/extractors/github/github.go`. Extract and preview for
+  repository overview, issue, issue-list, and pull-request pages on
+  github.com. Go matches these four URL shapes with independent regexes;
+  hand-rolled here as small string/character-class predicates instead of
+  adding a `regex` dependency for what are fairly mechanical path-shape
+  checks. Two Go regex quirks are reproduced exactly rather than
+  "corrected": the issue-URL pattern allows only a single non-slash
+  character after a `#` fragment marker (almost certainly meant to be
+  `[^/]*`), while the pull-request pattern allows a full non-slash run.
+- **No new dependency:** the README HTML comes from an embedded
+  `<script type="application/json">` payload, parsed with `rusty_json`
+  (already this crate's dependency for `Metadata`) rather than adding
+  `serde_json`.
+- **Behavior preserved deliberately:** `Preview` doesn't re-sanitize its
+  whole accumulated buffer the way StackExchange/Lobsters/HackerNews do —
+  only the README HTML passes through `sanitizer::sanitize_html`,
+  matching a real Go asymmetry (the surrounding metadata card is built
+  entirely from HTML-escaped plain strings, already safe without a
+  second pass).
+- **Flagged, not silently dropped:** Mastodon, Bluesky, and Twitter
+  (capability inventory §4.5.13-15) each decompose one timeline/thread
+  page into multiple indexed documents (Go: `Document.ExtraDocuments`/
+  `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
+  `ExtractOutcome` don't model yet. Recorded as an open item in
+  PROJECT-STATUS.md rather than worked around with a lossy
+  single-document approximation.
+
+Test plan: `cargo test -p rusty-hister-extractor` — 106 passed (8 new
+for this increment), 0 failed; `cargo fmt --check` and `cargo clippy
+--all-targets -- -D warnings` both clean.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's HackerNews extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-hackernews`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-hackernews)
 

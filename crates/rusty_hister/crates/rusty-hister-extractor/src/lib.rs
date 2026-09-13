@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Six concrete extractors so far:**
+//! **Seven concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -49,6 +49,22 @@
 //!   to need `textutil` (a new shared, block-aware HTML-to-text
 //!   flattener — a Rust port of `server/extractor/textutil/textutil.go`,
 //!   which Go itself shares across `hackernews`/`discourse`/`reddit`).
+//! - [`GitHubExtractor`] (capability inventory §4.5.9) — extract *and*
+//!   preview for repository overview, issue, issue-list, and pull-request
+//!   pages. Hand-rolls Go's four regex-based URL-shape checks as small
+//!   string predicates rather than adding a `regex` dependency for what
+//!   are fairly mechanical path-shape checks (see the module doc for the
+//!   two Go regex quirks reproduced faithfully). `Preview` doesn't
+//!   re-sanitize its whole accumulated buffer the way the extractors
+//!   above do — only the embedded README HTML passes through
+//!   `sanitizer::sanitize_html`, matching a real Go asymmetry.
+//!
+//! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
+//! portable: their real behavior decomposes one timeline/thread page into
+//! *multiple* indexed documents (Go's `Document.ExtraDocuments`/
+//! `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
+//! `ExtractOutcome` don't model yet. Flagged in `docs/PROJECT-STATUS.md`
+//! as an open item rather than silently dropped or worked around.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -58,6 +74,7 @@
 //! reading Hister's Go source, never copied).
 
 mod embeddedvideo;
+mod github;
 mod godoc;
 mod hackernews;
 mod jsonld;
@@ -69,6 +86,7 @@ mod textutil;
 mod urlutil;
 
 pub use embeddedvideo::EmbeddedVideoExtractor;
+pub use github::GitHubExtractor;
 pub use godoc::GoDocExtractor;
 pub use hackernews::HackerNewsExtractor;
 pub use jsonld::JsonLdExtractor;

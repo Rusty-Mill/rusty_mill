@@ -251,11 +251,33 @@ independent of ADR-0002/0003)
       already positioned for reuse when those land. `ego-tree` (already
       pinned transitively by `scraper`) is now a direct dependency too,
       needed to name `NodeRef` in `textutil`'s recursive tree walk.
-- `rusty-hister-extractor`: the remaining 14 built-in extractors in
-  default-chain order (§4.3), starting with the ones that have existing Go
-  test coverage and budgeting fresh test authorship for the rest.
-  Markdown/Org (§4.5.1-2) instead need a markdown/org-mode parser, a
-  separate dependency choice of their own, not yet made.
+- [x] `rusty-hister-extractor` (`GitHubExtractor`, §4.5.9): extract *and*
+      preview for repository overview, issue, issue-list, and
+      pull-request pages. Done — 8 new unit tests (106 total in the
+      crate), clippy/fmt clean. Go matches these four URL shapes with
+      independent regexes; hand-rolled here as small string/character-
+      class predicates instead of adding a `regex` dependency for what
+      are fairly mechanical path-shape checks — two Go regex quirks
+      (a single-non-slash-char fragment allowance on issue URLs vs. a
+      full run on pull-request URLs) reproduced exactly rather than
+      "corrected". The README HTML comes from an embedded
+      `<script type="application/json">` payload, parsed with
+      `rusty_json` (already this crate's dependency) rather than adding
+      `serde_json`. `Preview` doesn't re-sanitize its whole buffer the
+      way prior extractors do — only the README HTML passes through
+      `sanitizer::sanitize_html`, matching a real Go asymmetry.
+- **Blocked, flagged rather than silently ported without it**: Mastodon,
+  Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
+  page into multiple indexed documents (Go: `Document.ExtraDocuments`/
+  `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
+  `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
+  for the design question this needs before any of the three can land.
+- `rusty-hister-extractor`: the remaining 13 built-in extractors in
+  default-chain order (§4.3) not blocked on the above, starting with the
+  ones that have existing Go test coverage and budgeting fresh test
+  authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
+  markdown/org-mode parser, a separate dependency choice of their own,
+  not yet made.
 - `rusty-hister-crawler`: the `http` backend only (§8.1's default backend),
   BFS traversal, validator rules, robots.txt, proxy support, persistent
   crawl jobs (§8.2-§8.6) — all backend-agnostic or `http`-specific, none of
