@@ -13,6 +13,34 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Reddit extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-reddit`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-reddit)
+
+Twenty-first Phase 1 increment. The eleventh of the 20 built-in extractors.
+
+- **Added:** `RedditExtractor` (capability inventory §4.5.6) — a port of
+  `server/extractor/extractors/reddit/reddit.go`. Extract and preview for
+  Reddit post pages.
+- **New approach, three markups at once:** Reddit has shipped at least
+  three different markups for the same post over the years — modern
+  `shreddit-*` web components, the legacy `old.reddit.com` DOM, and a
+  `schema.org` JSON-LD block many pages embed regardless of which HTML
+  renders. Like Go, this port copes with an ordered list of CSS-selector
+  candidates (first non-empty/first-match wins) rather than branching on
+  "which Reddit era is this" up front.
+- **Reused, not reinvented:** the crate's third real `textutil` caller
+  (Go itself shares it across `hackernews`/`discourse`/`reddit`). Two
+  tricks already established for `scraper::ElementRef`'s read-only API
+  carry over directly: a post/comment body's URL rewriting re-parses that
+  subtree's own HTML as a standalone fragment
+  (`WikipediaExtractor::extract`'s clone trick), and reading a comment's
+  own text when it has no dedicated body element copies only the kept
+  nodes into a fresh `ego_tree` fragment (`ChatGptExtractor`'s
+  content-cleaning approach) so a nested reply's text isn't
+  double-counted into its parent's.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Wikipedia extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-wikipedia`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-wikipedia)
 

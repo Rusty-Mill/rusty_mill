@@ -9,6 +9,26 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `RedditExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.5.6): a Rust port of
+  `server/extractor/extractors/reddit/reddit.go`, extract *and* preview
+  for Reddit post pages. Reddit has shipped at least three different
+  markups for the same post over the years — modern `shreddit-*` web
+  components, the legacy `old.reddit.com` DOM, and a `schema.org` JSON-LD
+  block many pages embed regardless of which HTML renders — so, like Go,
+  this port copes with an ordered list of CSS-selector candidates (first
+  non-empty/first-match wins) rather than branching on "which Reddit era
+  is this" up front. The crate's third real `textutil` caller (Go itself
+  shares it across `hackernews`/`discourse`/`reddit`). Reuses two tricks
+  already established by earlier extractors for `scraper::ElementRef`'s
+  read-only API: a post/comment body's URL rewriting re-parses that
+  subtree's own HTML as a standalone fragment
+  (`WikipediaExtractor::extract`'s clone trick), and reading a comment's
+  own text when it has no dedicated body element copies only the kept
+  nodes into a fresh `ego_tree` fragment (`ChatGptExtractor`'s
+  content-cleaning approach) so a nested reply's text isn't
+  double-counted into its parent's. 8 new unit tests (139 total in the
+  crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `WikipediaExtractor` (`rusty_hister`'s
   Phase 1, continued — capability inventory §4.5.12): a Rust port of
   `server/extractor/extractors/wikipedia/{wikipedia,style,text}.go`,

@@ -313,13 +313,30 @@ independent of ADR-0002/0003)
       Go behavior isn't reproduced: wrapping a wikitable in a
       horizontally-scrolling `<div>` for preview, which has no cheap
       `NodeId`-based equivalent and isn't covered by Go's own tests.
+- [x] `rusty-hister-extractor` (`RedditExtractor`, §4.5.6): extract *and*
+      preview for Reddit post pages. Done — 8 new unit tests (139 total in
+      the crate), clippy/fmt clean. Reddit has shipped at least three
+      different markups for the same post over the years — modern
+      `shreddit-*` web components, the legacy `old.reddit.com` DOM, and a
+      `schema.org` JSON-LD block many pages embed regardless of which HTML
+      renders — so, like Go, this port copes with an ordered list of
+      CSS-selector candidates (first non-empty/first-match wins) rather
+      than branching on "which Reddit era is this" up front. The crate's
+      third real `textutil` caller. Reuses two tricks already established
+      for `scraper::ElementRef`'s read-only API: a post/comment body's URL
+      rewriting re-parses that subtree's own HTML as a standalone
+      fragment (`WikipediaExtractor::extract`'s clone trick), and reading
+      a comment's own text when it has no dedicated body element copies
+      only the kept nodes into a fresh `ego_tree` fragment
+      (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
+      text isn't double-counted into its parent's.
 - **Blocked, flagged rather than silently ported without it**: Mastodon,
   Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
   page into multiple indexed documents (Go: `Document.ExtraDocuments`/
   `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
   `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
   for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 10 built-in extractors in
+- `rusty-hister-extractor`: the remaining 9 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
