@@ -58,6 +58,20 @@ pub struct Document {
     pub language: Option<String>,
     /// Arbitrary extractor- and enricher-set metadata.
     pub metadata: Metadata,
+    /// Additional documents an extractor discovered while processing this
+    /// one, to be indexed alongside it — e.g. the individual toots on a
+    /// Mastodon timeline page, or the individual posts in a Bluesky/
+    /// Twitter thread, one page decomposing into many indexed documents.
+    /// Empty for every extractor that doesn't do this (the overwhelming
+    /// majority). A future indexer walks this list recursively, indexing
+    /// each entry (and its own `extra_documents`, if any) the same way it
+    /// indexes `self`, honoring each entry's own [`Document::skip_indexing`].
+    pub extra_documents: Vec<Document>,
+    /// When `true`, this document itself should not be indexed — only
+    /// [`Document::extra_documents`] matters. Set by an extractor that
+    /// decomposes one page into many documents (a Mastodon timeline page
+    /// is not itself meaningful content; its individual toots are).
+    pub skip_indexing: bool,
 }
 
 impl Document {
@@ -75,6 +89,8 @@ impl Document {
             document_type: None,
             language: None,
             metadata: Metadata::new(),
+            extra_documents: Vec::new(),
+            skip_indexing: false,
         }
     }
 }
@@ -95,6 +111,8 @@ mod tests {
         assert_eq!(doc.document_type, None);
         assert_eq!(doc.language, None);
         assert!(doc.metadata.is_empty());
+        assert!(doc.extra_documents.is_empty());
+        assert!(!doc.skip_indexing);
     }
 
     #[test]
@@ -116,6 +134,20 @@ mod tests {
             doc.metadata.get("author"),
             Some(&rusty_json::Value::String("Jane".to_string()))
         );
+    }
+
+    #[test]
+    fn extra_documents_and_skip_indexing_default_empty_and_off() {
+        let mut doc = Document::new("https://example.com/timeline");
+        doc.skip_indexing = true;
+        doc.extra_documents
+            .push(Document::new("https://example.com/post/1"));
+        doc.extra_documents
+            .push(Document::new("https://example.com/post/2"));
+        assert!(doc.skip_indexing);
+        assert_eq!(doc.extra_documents.len(), 2);
+        assert_eq!(doc.extra_documents[0].url, "https://example.com/post/1");
+        assert!(!doc.extra_documents[0].skip_indexing);
     }
 
     #[test]

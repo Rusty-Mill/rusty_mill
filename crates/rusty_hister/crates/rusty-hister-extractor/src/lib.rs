@@ -10,7 +10,7 @@
 //! convenience — see that crate before this one for the contract every
 //! concrete extractor implements.
 //!
-//! **Eleven concrete extractors so far:**
+//! **Twelve concrete extractors so far:**
 //!
 //! - [`JsonLdExtractor`] (capability inventory §4.5.5) — enrich-only,
 //!   parses `application/ld+json` script tags. Hand-rolls its own narrow
@@ -110,13 +110,31 @@
 //!   body element copies only the kept nodes into a fresh `ego_tree`
 //!   fragment (`ChatGptExtractor`'s content-cleaning approach) so a
 //!   nested reply's text isn't double-counted into its parent's.
+//! - [`TwitterExtractor`] (capability inventory §4.5.15) — decomposes a
+//!   Twitter/X profile/feed/tweet page into one [`Document`] per visible
+//!   tweet. The first extractor to need a real `rusty-hister-core`
+//!   capability extension: [`Document::extra_documents`]/
+//!   [`Document::skip_indexing`], two new additive fields (empty/`false`
+//!   by default, so every prior extractor is unaffected) mirroring Go's
+//!   own `Document.ExtraDocuments`/`SkipIndexing` — a future indexer
+//!   walks `extra_documents` recursively, the same mechanism Mastodon and
+//!   Bluesky will reuse once ported. Unlike a multi-source merge, Twitter
+//!   has only one real source (the rendered DOM) plus a page-meta
+//!   fallback, and candidates are deduped by canonical URL (first match
+//!   wins) rather than merged field-by-field. Its own trick with no
+//!   Mastodon/Bluesky equivalent: Twitter/X shortens every link in a
+//!   tweet's body through its own `t.co` redirector, so this port rewrites
+//!   each `t.co` anchor's `href` back to its real destination (from a
+//!   `data-expanded-url`/`title` attribute or the anchor's own visible
+//!   text) and patches the plain-text version the same way — reparsing
+//!   the whole tweet subtree as its own fragment up front
+//!   (`WikipediaExtractor::extract`'s clone trick) so both that rewrite
+//!   and the ordinary relative-to-absolute URL pass can mutate the same
+//!   copy in sequence.
 //!
-//! Mastodon/Bluesky/Twitter (capability inventory §4.5.13-15) are not yet
-//! portable: their real behavior decomposes one timeline/thread page into
-//! *multiple* indexed documents (Go's `Document.ExtraDocuments`/
-//! `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
-//! `ExtractOutcome` don't model yet. Flagged in `docs/PROJECT-STATUS.md`
-//! as an open item rather than silently dropped or worked around.
+//! Mastodon/Bluesky (capability inventory §4.5.13-14) can now reuse the
+//! same `extra_documents`/`skip_indexing` mechanism Twitter established;
+//! porting them just hasn't happened yet.
 //!
 //! See `docs/capability-inventory/HISTER-CAPABILITY-INVENTORY.md` §4.3-§4.5
 //! for the full list of 20 built-in extractors and their semantically-
@@ -138,6 +156,7 @@ mod registry;
 mod sanitizer;
 mod stackexchange;
 mod textutil;
+mod twitter;
 mod urlutil;
 mod wikipedia;
 
@@ -157,4 +176,5 @@ pub use rusty_hister_core::{
 };
 pub use sanitizer::{sanitize_html, sanitize_text, sanitize_trusted_html};
 pub use stackexchange::StackExchangeExtractor;
+pub use twitter::TwitterExtractor;
 pub use wikipedia::WikipediaExtractor;

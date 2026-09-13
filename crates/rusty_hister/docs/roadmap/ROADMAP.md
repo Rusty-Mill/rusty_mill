@@ -330,13 +330,33 @@ independent of ADR-0002/0003)
       only the kept nodes into a fresh `ego_tree` fragment
       (`ChatGptExtractor`'s content-cleaning approach) so a nested reply's
       text isn't double-counted into its parent's.
-- **Blocked, flagged rather than silently ported without it**: Mastodon,
-  Bluesky, and Twitter (§4.5.13-15) each decompose one timeline/thread
-  page into multiple indexed documents (Go: `Document.ExtraDocuments`/
-  `SkipIndexing`), a capability `rusty-hister-core`'s `Document`/
-  `ExtractOutcome` don't model yet. See PROJECT-STATUS.md's Open items
-  for the design question this needs before any of the three can land.
-- `rusty-hister-extractor`: the remaining 9 built-in extractors in
+- [x] `rusty-hister-core`: `Document::extra_documents`/
+      `Document::skip_indexing`, an additive extension (empty/`false` by
+      default, every prior extractor unaffected) resolving
+      PROJECT-STATUS.md's "per-page multi-document extraction" open item
+      — mirrors Go's own `Document.ExtraDocuments`/`SkipIndexing` shape
+      directly rather than growing `ExtractOutcome` a new variant, so no
+      signature changes were needed anywhere else in the SDK.
+- [x] `rusty-hister-extractor` (`TwitterExtractor`, §4.5.15): decomposes
+      a Twitter/X profile/feed/tweet page into one `Document` per visible
+      tweet, the first extractor to use the capability extension above.
+      Done — 6 new unit tests (145 total in the crate), clippy/fmt clean.
+      Unlike a multi-source merge, Twitter has only one real source (the
+      rendered DOM) plus a page-meta fallback, and candidates are
+      deduped by canonical URL (first match wins) rather than merged
+      field-by-field. Its own trick with no Mastodon/Bluesky equivalent:
+      Twitter/X shortens every link in a tweet's body through its own
+      `t.co` redirector, so this port rewrites each `t.co` anchor's
+      `href` back to its real destination (from a `data-expanded-url`/
+      `title` attribute or the anchor's own visible text) and patches the
+      plain-text version the same way — reparsing the whole tweet
+      subtree as its own fragment up front so both that rewrite and the
+      ordinary relative-to-absolute URL pass can mutate the same copy in
+      sequence.
+- Mastodon and Bluesky (§4.5.13-14) can now reuse the same
+  `extra_documents`/`skip_indexing` mechanism Twitter established;
+  porting them just hasn't happened yet.
+- `rusty-hister-extractor`: the remaining 8 built-in extractors in
   default-chain order (§4.3) not blocked on the above, starting with the
   ones that have existing Go test coverage and budgeting fresh test
   authorship for the rest. Markdown/Org (§4.5.1-2) instead need a
