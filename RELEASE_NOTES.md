@@ -13,6 +13,35 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Continue rusty_hister Phase 1: implement rusty-hister-extractor's Basic extractor
+**2026-09-13** · branch [`claude/hister-phase1-extractor-basic`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-basic)
+
+Nineteenth Phase 1 increment. The ninth of the 20 built-in extractors.
+
+- **Added:** `BasicExtractor` (capability inventory §4.4) — a port of the
+  `basicExtractor` in `server/extractor/extractor.go`. The universal
+  last-resort fallback: strips markup from any HTML document and keeps
+  whatever plain text and `<title>` remain. `matches` always returns
+  `true` — this only works because a real chain places it last, after
+  everything more specific has had its chance.
+- **Approach, documented rather than perfectly replicated:** Go walks the
+  raw byte stream with its own HTML tokenizer, tracking "inside
+  `<body>`"/"inside `<script>`/`<style>`/`<noscript>`" by hand; this port
+  instead selects the parsed `<body>` element via `scraper` and walks its
+  subtree. Simpler, but not quite equivalent for a fragment with no
+  `<body>` tag at all — Go would find no text there, while `html5ever`
+  always synthesizes one — a difference documented in the module rather
+  than reproduced, since it has no practical effect on real crawled pages.
+- **Behavior preserved deliberately:** text nodes are concatenated with no
+  separators at all (not even between block elements), deliberately
+  cruder than `textutil`'s block-aware flattening, matching Go's own
+  token-by-token concatenation exactly. `Preview` doesn't derive anything
+  from `document.html`; like Go, it just HTML-escapes whatever
+  `document.text` already holds, succeeding with empty content when there
+  is none rather than falling back.
+
+---
+
 ## Continue rusty_hister Phase 1: implement rusty-hister-extractor's ChatGPT extractor
 **2026-09-13** · branch [`claude/hister-phase1-extractor-chatgpt`](https://github.com/Rusty-Mill/rusty_mill/tree/claude/hister-phase1-extractor-chatgpt)
 

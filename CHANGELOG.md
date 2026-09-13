@@ -9,6 +9,25 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty-hister-extractor`'s `BasicExtractor` (`rusty_hister`'s Phase 1,
+  continued — capability inventory §4.4): a Rust port of the
+  `basicExtractor` in `server/extractor/extractor.go`, the universal
+  last-resort fallback that strips markup from any HTML document and
+  keeps whatever plain text and `<title>` remain. `matches` always
+  returns `true` — this only works because a real chain places it last.
+  Go walks the raw byte stream with its own HTML tokenizer, tracking
+  "inside `<body>`"/"inside `<script>`/`<style>`/`<noscript>`" by hand;
+  ported here as a `scraper`-based walk of the parsed `<body>` element's
+  subtree instead — simpler, but not quite equivalent for a fragment with
+  no `<body>` tag at all (documented in the module rather than
+  reproduced, since `html5ever` always synthesizes one and this has no
+  practical effect on real crawled pages). Text nodes are concatenated
+  with no separators at all, deliberately cruder than `textutil`'s
+  block-aware flattening, matching Go's own token-by-token concatenation
+  exactly. `Preview` doesn't derive anything from `document.html`; like
+  Go, it just HTML-escapes whatever `document.text` already holds,
+  succeeding with empty content when there is none rather than falling
+  back. 8 new unit tests (121 total in the crate), clippy/fmt clean.
 - `rusty-hister-extractor`'s `ChatGptExtractor` (`rusty_hister`'s Phase 1,
   continued — capability inventory §4.5.18): a Rust port of
   `server/extractor/extractors/chatgpt/extractor.go`, extract *and*
