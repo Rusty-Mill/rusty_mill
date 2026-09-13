@@ -229,3 +229,33 @@ pub fn request_with_tool(model: &str) -> ChatRequest {
     }]);
     req
 }
+
+/// Mirrors `rp_providers::http::MAX_RESPONSE_BODY_BYTES` (private to the
+/// crate, so integration tests can't reference it directly) -- the cap
+/// every adapter's response-body read must reject past.
+pub const MAX_RESPONSE_BODY_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Spawns a one-shot raw TCP server that accepts a single request and
+/// replies with `status_line` plus a declared `Content-Length` one byte
+/// past [`MAX_RESPONSE_BODY_BYTES`] and no actual body -- proving an
+/// adapter's capped body reader rejects the response via the fast
+/// Content-Length check instead of ever buffering (or even receiving)
+/// gigabytes of data.
+pub fn oversized_content_length_server(
+    status_line: &'static str,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let _ = stream.read(&mut buf);
+        let oversized_len = MAX_RESPONSE_BODY_BYTES + 1;
+        let response = format!(
+            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {oversized_len}\r\n\r\n"
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (addr, handle)
+}

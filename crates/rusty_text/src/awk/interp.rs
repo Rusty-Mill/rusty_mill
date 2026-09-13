@@ -54,6 +54,14 @@ fn format_num(n: f64) -> String {
     }
 }
 
+/// Cap on the number of fields a record (or an explicit `NF`/`$n`
+/// assignment) may have. Hostile input like `$999999999 = x` or
+/// `NF = 999999999` would otherwise drive an unbounded `Vec<String>`
+/// resize -- an easy allocation-exhaustion DoS from ordinary awk program
+/// input. 1,000,000 fields is far beyond any real awk workload but small
+/// enough to fail fast (a runtime error) instead of exhausting memory.
+const MAX_FIELDS: usize = 1_000_000;
+
 fn parse_leading_number(s: &str) -> f64 {
     let trimmed = s.trim_start();
     let mut end = 0;
@@ -75,6 +83,27 @@ fn parse_leading_number(s: &str) -> f64 {
     }
     if !saw_digit {
         return 0.0;
+    }
+    // Optional scientific-notation exponent (`e`/`E`, optional sign, one
+    // or more digits). Only consumed when it forms a *complete* exponent --
+    // a trailing bare "e"/"e+" with no digits after it is left unconsumed
+    // rather than silently dropped. Without this, this function disagreed
+    // with `Value::looks_numeric` (which accepts the whole string via
+    // `str::parse::<f64>`, exponent included) on strings like "1e10",
+    // truncating them to the digits before the `e` instead of the correct
+    // value.
+    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+        let mut exp_end = end + 1;
+        if exp_end < bytes.len() && (bytes[exp_end] == b'+' || bytes[exp_end] == b'-') {
+            exp_end += 1;
+        }
+        let exp_digits_start = exp_end;
+        while exp_end < bytes.len() && bytes[exp_end].is_ascii_digit() {
+            exp_end += 1;
+        }
+        if exp_end > exp_digits_start {
+            end = exp_end;
+        }
     }
     trimmed[..end].parse().unwrap_or(0.0)
 }
@@ -98,6 +127,7 @@ pub struct Interp {
     fs: String,
     ofs: String,
     nr: usize,
+    error: Option<String>,
 }
 
 impl Interp {
@@ -109,6 +139,7 @@ impl Interp {
             fs: field_sep.to_string(),
             ofs: " ".to_string(),
             nr: 0,
+            error: None,
         }
     }
 
@@ -146,6 +177,9 @@ impl Interp {
     }
 
     fn set_field(&mut self, n: i64, value: String) {
+        if self.error.is_some() {
+            return;
+        }
         if n == 0 {
             self.record = value;
             self.split_record();
@@ -155,6 +189,12 @@ impl Interp {
             return;
         }
         let idx = n as usize - 1;
+        if idx >= MAX_FIELDS {
+            self.error = Some(format!(
+                "awk: field index ${n} exceeds the maximum of {MAX_FIELDS} fields"
+            ));
+            return;
+        }
         if idx >= self.fields.len() {
             self.fields.resize(idx + 1, String::new());
         }
@@ -177,9 +217,18 @@ impl Interp {
     }
 
     fn set_var(&mut self, name: &str, value: Value) {
+        if self.error.is_some() {
+            return;
+        }
         match name {
             "NF" => {
                 let n = value.to_num().max(0.0) as usize;
+                if n > MAX_FIELDS {
+                    self.error = Some(format!(
+                        "awk: NF value {n} exceeds the maximum of {MAX_FIELDS} fields"
+                    ));
+                    return;
+                }
                 self.fields.resize(n, String::new());
                 self.record = self.fields.join(&self.ofs);
             }
@@ -192,7 +241,17 @@ impl Interp {
         }
     }
 
+    /// Takes and clears any runtime error raised by field/`NF` cap
+    /// enforcement, so the caller (`AwkProgram::run`) can surface it
+    /// instead of silently continuing after a poisoned evaluation.
+    pub(crate) fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+
     fn eval(&mut self, expr: &Expr) -> Value {
+        if self.error.is_some() {
+            return Value::Num(0.0);
+        }
         match expr {
             Expr::Num(n) => Value::Num(*n),
             Expr::Str(s) => Value::Str(s.clone()),
@@ -282,6 +341,9 @@ impl Interp {
     }
 
     fn exec(&mut self, stmt: &Stmt, emit: &mut dyn FnMut(&str)) {
+        if self.error.is_some() {
+            return;
+        }
         match stmt {
             Stmt::Print(exprs) => {
                 if exprs.is_empty() {

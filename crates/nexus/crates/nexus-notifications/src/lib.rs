@@ -273,6 +273,51 @@ fn blocking_webhook_client() -> reqwest::blocking::Client {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
+/// Redact the secret-bearing request URL out of a [`reqwest::Error`]
+/// before it's allowed to cross the [`SendError::Http`] / IPC
+/// boundary.
+///
+/// Discord webhook URLs and the Telegram bot API URL both carry a
+/// long-lived secret (the webhook id, the bot token) as a path
+/// segment of the request URL. `reqwest::Error`'s `Display` impl
+/// appends that full URL verbatim for every error that occurs below
+/// the HTTP-response layer — DNS failure, TCP connect refusal, TLS
+/// handshake failure, request timeout — since there's no status code
+/// to report yet. Any caller who can trigger (or merely observe) a
+/// failed send would otherwise recover the secret from the error
+/// string surfaced over IPC. This keeps the error's classification
+/// (timeout / connect / request / decode / body / builder) and the
+/// destination host (never secret — the secret lives in the path,
+/// not the host) while dropping the path/query entirely.
+fn sanitize_transport_error(e: &reqwest::Error) -> String {
+    let kind = if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect error"
+    } else if e.is_request() {
+        "request error"
+    } else if e.is_decode() {
+        "decode error"
+    } else if e.is_body() {
+        "body error"
+    } else if e.is_builder() {
+        "builder error"
+    } else {
+        "transport error"
+    };
+    let host = e
+        .url()
+        .and_then(|u| u.host_str())
+        .unwrap_or("<unknown host>");
+    // `source()` is the underlying `hyper`/`std::io` error (e.g. "tcp
+    // connect error: Connection refused", "dns error: ..."); neither
+    // embeds the request URL, only low-level transport detail.
+    match std::error::Error::source(e) {
+        Some(source) => format!("{kind} contacting {host}: {source}"),
+        None => format!("{kind} contacting {host}"),
+    }
+}
+
 /// Discord webhook transport. Posts `{ "username": "Nexus", "content":
 /// "<title or default>\n<message>" }` to the configured URL with
 /// `Content-Type: application/json`. The 2000-char content limit is
@@ -327,7 +372,7 @@ impl Transport for DiscordWebhook {
             .post(&self.webhook_url)
             .json(&serde_json::json!({ "username": "Nexus", "content": body }))
             .send()
-            .map_err(|e| SendError::Http(e.to_string()))?;
+            .map_err(|e| SendError::Http(sanitize_transport_error(&e)))?;
         if !resp.status().is_success() {
             return Err(SendError::Http(format!(
                 "discord webhook returned {}",
@@ -423,7 +468,9 @@ impl Transport for GenericWebhook {
         for (name, value) in &self.headers {
             req = req.header(name, value);
         }
-        let resp = req.send().map_err(|e| SendError::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .map_err(|e| SendError::Http(sanitize_transport_error(&e)))?;
         if !resp.status().is_success() {
             return Err(SendError::Http(format!(
                 "webhook returned {}",
@@ -540,7 +587,7 @@ impl Transport for TelegramBot {
                     "text": chunk,
                 }))
                 .send()
-                .map_err(|e| SendError::Http(e.to_string()))?;
+                .map_err(|e| SendError::Http(sanitize_transport_error(&e)))?;
             if !resp.status().is_success() {
                 return Err(SendError::Http(format!(
                     "telegram sendMessage returned {}",
@@ -796,6 +843,74 @@ mod tests {
         assert!(matches!(err, SendError::NotConfigured("discord")));
     }
 
+    // ── Secret redaction in transport errors (BL-133 IPC leak fix) ──
+    //
+    // `reqwest::Error`'s `Display` impl appends the full request URL
+    // verbatim for any failure below the HTTP-response layer (DNS,
+    // connect, TLS, timeout) — and the Discord webhook URL / Telegram
+    // bot-token URL both carry a long-lived secret as a path segment.
+    // These prove `sanitize_transport_error` (used by all three HTTP
+    // transports) strips that secret before it can reach
+    // `SendError::Http` and, from there, the IPC-visible
+    // `SendReply`/`ChannelFailure` built in `core_plugin`.
+
+    #[test]
+    fn sanitize_transport_error_strips_secret_from_connect_failure() {
+        // Shared-mechanism proof covering all three HTTP transports
+        // (Discord / generic webhook / Telegram), which all funnel a
+        // failed `.send()` through this exact function. Telegram's
+        // request URL is built the same way
+        // (`https://api.telegram.org/bot<TOKEN>/sendMessage`) but the
+        // host is hardcoded, so this reproduces the identical
+        // secret-in-path shape against an address nothing listens on
+        // (fast, deterministic connection-refused — no DNS / network
+        // egress required).
+        let secret = "123456789:AA_super_secret_bot_token_should_not_leak";
+        let url = format!("http://127.0.0.1:1/bot{secret}/sendMessage");
+        let err = blocking_webhook_client()
+            .post(&url)
+            .json(&serde_json::json!({ "chat_id": "1", "text": "hi" }))
+            .send()
+            .expect_err("nothing listens on 127.0.0.1:1; send must fail");
+        // Prove the vulnerability this guards against: reqwest's raw
+        // `Display` really does leak the secret (this is exactly what
+        // pre-fix code passed straight into `SendError::Http` via
+        // `e.to_string()`). If this assertion ever stops holding the
+        // rest of the test is no longer meaningful.
+        assert!(
+            err.to_string().contains(secret),
+            "test invalid: raw reqwest::Error no longer embeds the request URL: {err}"
+        );
+        let sanitized = sanitize_transport_error(&err);
+        assert!(
+            !sanitized.contains(secret),
+            "sanitized transport error still leaked the secret: {sanitized}"
+        );
+        assert!(
+            !sanitized.contains("bot123456789"),
+            "sanitized transport error still leaked the request path: {sanitized}"
+        );
+    }
+
+    #[test]
+    fn discord_transport_connect_failure_does_not_leak_webhook_secret() {
+        let secret = "SUPER_SECRET_DISCORD_WEBHOOK_TOKEN_abc123";
+        let t = DiscordWebhook::new(format!(
+            "http://127.0.0.1:1/api/webhooks/1234567890/{secret}"
+        ));
+        let err = t
+            .send(&Notification {
+                message: "hi".into(),
+                title: None,
+            })
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(secret),
+            "discord transport error leaked webhook secret: {msg}"
+        );
+    }
+
     // ── Generic webhook transport (C90 / #443) ──────────────────
 
     #[test]
@@ -816,6 +931,27 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, SendError::NotConfigured("webhook")));
+    }
+
+    #[test]
+    fn webhook_transport_connect_failure_does_not_leak_url_secret() {
+        let secret = "SUPER_SECRET_WEBHOOK_QUERY_TOKEN_xyz789";
+        let t = GenericWebhook::new(
+            format!("http://127.0.0.1:1/notify?token={secret}"),
+            std::collections::BTreeMap::new(),
+            None,
+        );
+        let err = t
+            .send(&Notification {
+                message: "hi".into(),
+                title: None,
+            })
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(secret),
+            "webhook transport error leaked url secret: {msg}"
+        );
     }
 
     #[test]

@@ -575,6 +575,12 @@ fn resolve_template(gguf: &Gguf, override_name: Option<&str>) -> Option<ChatRend
 /// Reject request bodies larger than this — a memory-exhaustion guard. 16 MiB is
 /// far above any real chat/completion payload.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Bound the request-line + header block read, independent of and prior to
+/// the `Content-Length` cap above: without it, an arbitrarily long request
+/// line or header line (sent before any `Content-Length` has even been
+/// parsed) would grow the read buffer without bound — a memory-exhaustion
+/// DoS. 8 KiB mirrors nexus-lsp's/rusty_lsp's `MAX_HEADER_BYTES`.
+const MAX_HEADER_BYTES: usize = 8 * 1024;
 /// Per-connection socket read/write timeout — a slowloris guard.
 const SOCKET_TIMEOUT_SECS: u64 = 30;
 
@@ -592,10 +598,19 @@ fn handle_connection(stream: TcpStream, jobs: &Sender<Job>, model_id: &str) -> i
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut stream = stream;
 
+    let mut header_bytes = 0usize;
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
+    let remaining = MAX_HEADER_BYTES.saturating_sub(header_bytes);
+    let n = (&mut reader)
+        .take(remaining as u64)
+        .read_line(&mut request_line)?;
+    if n == 0 {
         return Ok(()); // client hung up
     }
+    if n == remaining && !request_line.ends_with('\n') {
+        return write_json(&mut stream, 400, &error_json("request line too large"));
+    }
+    header_bytes += n;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
@@ -603,9 +618,20 @@ fn handle_connection(stream: TcpStream, jobs: &Sender<Job>, model_id: &str) -> i
     let mut content_length = 0usize;
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
+        let remaining = MAX_HEADER_BYTES.saturating_sub(header_bytes);
+        if remaining == 0 {
+            return write_json(&mut stream, 400, &error_json("request headers too large"));
+        }
+        let n = (&mut reader)
+            .take(remaining as u64)
+            .read_line(&mut header)?;
+        if n == 0 {
             break;
         }
+        if n == remaining && !header.ends_with('\n') {
+            return write_json(&mut stream, 400, &error_json("request headers too large"));
+        }
+        header_bytes += n;
         if header.trim().is_empty() {
             break;
         }
@@ -1108,5 +1134,47 @@ mod tests {
         assert!(body_within_limit(MAX_BODY_BYTES));
         assert!(!body_within_limit(MAX_BODY_BYTES + 1));
         assert!(!body_within_limit(usize::MAX));
+    }
+
+    #[test]
+    fn header_read_rejects_oversized_request_line() {
+        // Regression test: before any `Content-Length` is parsed, an
+        // arbitrarily long request line must be capped instead of buffered
+        // without bound (a memory-exhaustion DoS via `read_line` growing a
+        // `String` forever). Send a request line far exceeding
+        // `MAX_HEADER_BYTES` with no `Content-Length` header at all — pre-fix
+        // this would hang reading (or grow unbounded); post-fix it is
+        // rejected with 400 immediately.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (jobs_tx, _jobs_rx) = channel::<Job>();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(stream, &jobs_tx, "test-model")
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("set read timeout");
+        // Exactly `MAX_HEADER_BYTES` of non-newline bytes: the capped read
+        // consumes precisely this much and (finding no `\n`) rejects it,
+        // leaving nothing unread in the socket — so the connection closes
+        // cleanly afterward instead of the peer's unread bytes forcing a
+        // reset that could swallow the response.
+        let oversized = "a".repeat(MAX_HEADER_BYTES);
+        client
+            .write_all(oversized.as_bytes())
+            .expect("write oversized request line");
+
+        let result = server.join().expect("server thread panicked");
+        assert!(result.is_ok(), "handle_connection errored: {result:?}");
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).ok();
+        assert!(
+            resp.contains("400"),
+            "expected a 400 for an oversized request line, got: {resp}"
+        );
     }
 }

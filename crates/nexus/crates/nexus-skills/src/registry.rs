@@ -211,11 +211,17 @@ fn try_load_from_index(root: &Path, index_path: &Path) -> Option<SkillRegistry> 
 
     let mut reg = SkillRegistry::empty();
     for entry in &index.skills {
-        // PRD-13 §3.1 path is forward-slash, root-relative.
-        let mut abs = root.to_path_buf();
-        for part in entry.path.split('/') {
-            abs.push(part);
-        }
+        // PRD-13 §3.1 path is forward-slash, root-relative. Confine
+        // it via `resolve_within` (same primitive `nexus-storage` and
+        // `nexus-editor` use for caller-supplied relpaths) so a
+        // crafted REGISTRY.json can't smuggle an absolute path or a
+        // `..` traversal segment to read arbitrary files off disk as
+        // skill content — content that then flows straight into AI
+        // prompts via compose/invoke. Any structurally unsafe entry
+        // forces a fall back to the authoritative directory walk.
+        let Ok(abs) = nexus_types::paths::resolve_within(root, &entry.path) else {
+            return None;
+        };
         if !abs.is_file() {
             return None;
         }
@@ -509,6 +515,98 @@ body B
         std::fs::remove_file(tmp.path().join("a.skill.md")).unwrap();
         let loaded = SkillRegistry::load_with_index(tmp.path()).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_with_index_rejects_absolute_path_entry() {
+        use crate::registry_index::{RegistryIndex, RegistryIndexEntry, REGISTRY_INDEX_VERSION};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("skills");
+        std::fs::create_dir(&root).unwrap();
+
+        // Secret file living entirely outside the skills root that a
+        // crafted index tries to smuggle in via an absolute path.
+        // Deliberately native-separator (not forward-slash-normalized
+        // like PRD-13 §3.1 requires) — a malicious REGISTRY.json is
+        // attacker-controlled and need not follow that convention,
+        // and it's this exact shape that lets the naive per-`/`-part
+        // `PathBuf::push` join escape `root` on Windows (pushing one
+        // whole absolute, prefixed component replaces the joined path
+        // outright instead of being confined under it).
+        let secret_dir = TempDir::new().unwrap();
+        write_skill(secret_dir.path(), "secret.skill.md", SKILL_A);
+        let secret_path = secret_dir.path().join("secret.skill.md");
+
+        let index = RegistryIndex {
+            version: REGISTRY_INDEX_VERSION.to_string(),
+            last_updated: "2999-01-01T00:00:00Z".to_string(),
+            skills: vec![RegistryIndexEntry {
+                id: "skill-a".to_string(),
+                name: "A".to_string(),
+                path: secret_path.display().to_string(),
+                version: "1.0.0".to_string(),
+                tags: Vec::new(),
+                applicable_contexts: Vec::new(),
+                author: "me".to_string(),
+                visibility: "public".to_string(),
+            }],
+        };
+        std::fs::write(
+            root.join("REGISTRY.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        // A crafted index entry with an absolute path must be
+        // rejected wholesale (falls back to the directory walk, which
+        // finds nothing under `root`) instead of reading the secret
+        // file's content as a loaded skill.
+        let loaded = SkillRegistry::load_with_index(&root).unwrap();
+        assert!(
+            loaded.is_empty(),
+            "absolute path entry must not be read as a skill"
+        );
+    }
+
+    #[test]
+    fn load_with_index_rejects_dotdot_traversal_entry() {
+        use crate::registry_index::{RegistryIndex, RegistryIndexEntry, REGISTRY_INDEX_VERSION};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("skills");
+        std::fs::create_dir(&root).unwrap();
+        let secret_dir = tmp.path().join("secret");
+        std::fs::create_dir(&secret_dir).unwrap();
+        write_skill(&secret_dir, "secret.skill.md", SKILL_A);
+
+        let index = RegistryIndex {
+            version: REGISTRY_INDEX_VERSION.to_string(),
+            last_updated: "2999-01-01T00:00:00Z".to_string(),
+            skills: vec![RegistryIndexEntry {
+                id: "skill-a".to_string(),
+                name: "A".to_string(),
+                path: "../secret/secret.skill.md".to_string(),
+                version: "1.0.0".to_string(),
+                tags: Vec::new(),
+                applicable_contexts: Vec::new(),
+                author: "me".to_string(),
+                visibility: "public".to_string(),
+            }],
+        };
+        std::fs::write(
+            root.join("REGISTRY.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        // `..` in an index entry must be rejected the same way,
+        // whether or not it happens to stay within the root.
+        let loaded = SkillRegistry::load_with_index(&root).unwrap();
+        assert!(
+            loaded.is_empty(),
+            "'..' traversal entry must not be read as a skill"
+        );
     }
 
     #[test]

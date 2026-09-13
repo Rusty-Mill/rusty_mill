@@ -8,6 +8,39 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- 38 correctness/security/reliability findings from a seventh `/codex-build`
+  review (`CODEX-MONOREPO-REVIEW-2026-09-13-round7.md`), across crate
+  families no prior round had reviewed at depth or at all: `rusty_git`/
+  `rusty_diff`, `rusty_ansi`/`rusty_term`'s `l13` side-channel/`rpath`,
+  `rusty_serde`, `rusty_tls`/`rusty_wiremock`, `rusty_libc`,
+  `rusty_provider`'s `providers` adapters, `rusty_inventrory`'s
+  `inventory-core`, `rusty_llama` (beyond earlier GGUF-only fixes),
+  `rusty_text`'s awk engine, and a dozen leaf `nexus-*` crates
+  (`nexus-plugins`, `nexus-ai`, `nexus-skills`, `nexus-notifications`,
+  `nexus-panic-log`, `nexus-audio`, `nexus-collab`, `nexus-memory`/
+  `nexus-memory-hub`, `nexus-hashline`, `nexus-tui`, `rusty-mcp`) — each
+  with a regression test that fails pre-fix and passes post-fix (see the
+  review's own **Disposition** section for the one-line outcome of every
+  finding). Highlights: `rusty-mcp`'s resource URI-template matcher no
+  longer lets a percent-encoded `../` traversal escape the resource root
+  (the CHANGELOG-documented decode-order guarantee this crate previously
+  claimed for this exact code path was, in fact, backwards); `nexus-audio`'s
+  Windows local-TTS shell-out no longer lets spoken text execute arbitrary
+  PowerShell via `$(...)` subexpression injection; `nexus-plugins`' WASM
+  `host::http_request` import no longer lets a plugin bypass its network
+  allowlist via an HTTP redirect, and its per-dispatch epoch watcher no
+  longer spawns an unbounded number of OS threads under frequent dispatch;
+  `rusty_term`'s `l13` OSC 5379 side-channel no longer echoes an
+  unescaped, attacker-controlled protocol tag back into the PTY input
+  stream; `nexus-notifications`' Discord/Telegram/generic-webhook
+  transports no longer leak the webhook secret/bot token into IPC-visible
+  error messages on a failed send; and four more unbounded-recursion/
+  allocation/algorithmic-complexity hostile-input DoS bugs closed
+  (`rusty_git`'s index parser and `.gitignore` matcher, `rusty_serde`'s
+  JSON/RON deserializers, `rusty_llama`'s tokenizer merge loop), the same
+  bug classes prior rounds already fixed elsewhere in this workspace.
+
 ### Added
 - `rusty-hister-extractor`'s `MarkdownExtractor` (capability inventory
   §4.5.1) and `OrgModeExtractor` (§4.5.2) (`rusty_hister`'s Phase 1,

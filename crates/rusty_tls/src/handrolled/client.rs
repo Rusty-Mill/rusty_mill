@@ -632,13 +632,20 @@ pub fn record_length(input: &[u8]) -> Option<usize> {
 /// Only the first flight is unprotected, so `version` is 0x0301 there and
 /// 0x0303 afterwards. RFC 8446 §5.1 says the field MUST be ignored on receipt,
 /// so this matches convention rather than a requirement.
-fn plaintext_record(typ: ContentType, version: u16, fragment: &[u8]) -> Vec<u8> {
+fn plaintext_record(typ: ContentType, version: u16, fragment: &[u8]) -> Result<Vec<u8>> {
+    if fragment.len() > usize::from(u16::MAX) {
+        return Err(RecordError::FragmentTooLong {
+            len: fragment.len(),
+            max: usize::from(u16::MAX),
+        }
+        .into());
+    }
     let mut out = Vec::with_capacity(HEADER_LEN + fragment.len());
     out.push(typ.as_u8());
     out.extend_from_slice(&version.to_be_bytes());
     out.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
     out.extend_from_slice(fragment);
-    out
+    Ok(out)
 }
 
 /// The one-octet record servers send in middlebox-compatibility mode.
@@ -777,7 +784,7 @@ impl<'a> ClientHandshake<'a> {
         let kx = KeyExchange::generate(group)?;
         let (hello, random, session_id) = build_client_hello(config, &kx, None, &[])?;
 
-        let record = plaintext_record(ContentType::Handshake, 0x0301, &hello);
+        let record = plaintext_record(ContentType::Handshake, 0x0301, &hello)?;
         Ok((
             Self {
                 config,
@@ -1352,7 +1359,7 @@ impl ClientHandshake<'_> {
             random,
             session_id,
         };
-        Ok(plaintext_record(ContentType::Handshake, 0x0303, &second))
+        Ok(plaintext_record(ContentType::Handshake, 0x0303, &second)?)
     }
 }
 
@@ -1670,7 +1677,7 @@ impl ClientHandshake<'_> {
 
         // Middlebox compatibility again: a bare change_cipher_spec ahead of
         // the first protected record the client sends.
-        let mut reply = plaintext_record(ContentType::ChangeCipherSpec, 0x0303, &[0x01]);
+        let mut reply = plaintext_record(ContentType::ChangeCipherSpec, 0x0303, &[0x01])?;
         reply.extend_from_slice(&sealer.seal(ContentType::Handshake, &flight, 0)?);
 
         let application =

@@ -165,6 +165,16 @@ fn run(terminal: &mut DefaultTerminal, app: &mut TuiApp) -> Result<()> {
             app.pump_agent();
         }
 
+        // Quitting must not skip the terminal panel's persistence
+        // path: `q` / Ctrl+C (or any other `should_quit` trigger)
+        // used to return here directly, silently dropping an open
+        // PTY session's scrollback because only Ctrl+D routed through
+        // `kill_terminal`'s `close_session` call. Route every exit
+        // through the same close/persist path when a session is open.
+        if app::quit_should_close_terminal(app.should_quit, app.terminal.session_id.is_some()) {
+            app.kill_terminal();
+        }
+
         if app.should_quit {
             return Ok(());
         }

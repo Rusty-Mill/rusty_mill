@@ -31,6 +31,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::{DateTime, Duration, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
@@ -43,6 +44,11 @@ const EPOCH: &str = "1970-01-01T00:00:00+00:00";
 const MAX_PULL_LIMIT: usize = 500;
 /// Default pull page size when the client omits `limit`.
 const DEFAULT_PULL_LIMIT: usize = 100;
+/// Clock-skew tolerance for a pushed `updated_at`: a timestamp further ahead
+/// of the hub's own clock than this is rejected rather than persisted. An
+/// unbounded future `updated_at` would permanently outrank every future
+/// genuine update in the last-write-wins comparison, freezing the record.
+const MAX_FUTURE_SKEW_MINUTES: i64 = 5;
 
 /// Errors from the hub store layer.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +91,18 @@ fn init_conn(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;")
 }
 
+/// True if `updated_at` parses as an RFC 3339 timestamp further in the
+/// future than [`MAX_FUTURE_SKEW_MINUTES`] beyond the hub's own clock.
+/// Unparseable strings fall through untouched — the hub is schema-agnostic
+/// and does not otherwise enforce timestamp format, only guards against the
+/// specific LWW-poisoning shape of an implausible future timestamp.
+fn is_implausibly_future(updated_at: &str) -> bool {
+    let Ok(ts) = DateTime::parse_from_rfc3339(updated_at) else {
+        return false;
+    };
+    ts.with_timezone(&Utc) > Utc::now() + Duration::minutes(MAX_FUTURE_SKEW_MINUTES)
+}
+
 impl HubStore {
     /// Open (creating if needed) a hub database at `path`.
     ///
@@ -115,7 +133,9 @@ impl HubStore {
     /// Upsert a batch of records, last-write-wins on `updated_at`. `origin_node`
     /// is the pushing node (recorded for `exclude_node` filtering, never
     /// returned on pull). Returns the ids that were valid and handled — records
-    /// lacking a string `id` or `updated_at` are skipped (reported as failed).
+    /// lacking a string `id` or `updated_at`, or carrying an `updated_at` more
+    /// than [`MAX_FUTURE_SKEW_MINUTES`] ahead of the hub's clock, are skipped
+    /// (reported as failed) rather than persisted.
     ///
     /// # Errors
     /// Returns an error on a write failure.
@@ -141,6 +161,9 @@ impl HubStore {
                 ) else {
                     continue; // not a valid syncable record
                 };
+                if is_implausibly_future(updated_at) {
+                    continue; // reject: would permanently win every future LWW comparison
+                }
                 let node_id = record.get("node_id").and_then(Value::as_str);
                 let payload = record.to_string();
                 stmt.execute(params![id, updated_at, node_id, origin_node, payload])?;
@@ -427,7 +450,7 @@ mod tests {
         store
             .push(
                 "b",
-                &[json!({ "id": "m1", "updated_at": "2026-12-01T00:00:00+00:00", "content": "fresh" })],
+                &[json!({ "id": "m1", "updated_at": "2026-06-01T00:00:00+00:00", "content": "fresh" })],
             )
             .unwrap();
         let out = store.pull(EPOCH, None, None, 100).unwrap();
@@ -476,5 +499,42 @@ mod tests {
         assert!(ct_eq(b"secret", b"secret"));
         assert!(!ct_eq(b"secret", b"secrEt"));
         assert!(!ct_eq(b"secret", b"secret-longer"));
+    }
+
+    #[test]
+    fn is_implausibly_future_flags_far_future_only() {
+        assert!(!is_implausibly_future("2020-01-01T00:00:00+00:00"));
+        assert!(!is_implausibly_future("not-a-timestamp"));
+        assert!(is_implausibly_future("9999-01-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn push_rejects_implausible_future_timestamp() {
+        let store = HubStore::open_in_memory().unwrap();
+        // A node pushing a year-9999 `updated_at` must not be able to
+        // permanently freeze the record against every future genuine update.
+        let processed = store
+            .push(
+                "attacker",
+                &[rec("m1", "9999-01-01T00:00:00+00:00", "attacker")],
+            )
+            .unwrap();
+        assert!(
+            processed.is_empty(),
+            "far-future timestamp must be rejected"
+        );
+        assert_eq!(store.count().unwrap(), 0);
+
+        // A legitimate, plausible update still writes normally afterward.
+        let processed = store
+            .push(
+                "node-a",
+                &[rec("m1", "2026-06-01T00:00:00+00:00", "node-a")],
+            )
+            .unwrap();
+        assert_eq!(processed, vec!["m1"]);
+        let out = store.pull(EPOCH, None, None, 100).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["content"], "c-m1");
     }
 }

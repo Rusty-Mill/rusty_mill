@@ -41,8 +41,24 @@ const BROADCAST_CAPACITY: usize = 1024;
 
 /// Maximum WebSocket frame size accepted. 16 MiB matches
 /// [`nexus_remote::transport::MAX_LINE_BYTES`] so a misbehaving peer
-/// cannot OOM the relay.
+/// cannot OOM the relay at the individual-frame level.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Practical cap on a single client-authored frame once it becomes a
+/// candidate for the shared broadcast channel. `MAX_FRAME_BYTES` only
+/// bounds one WebSocket frame, but the broadcast channel retains up
+/// to `BROADCAST_CAPACITY` in-flight messages simultaneously: without
+/// a second, tighter cap here, one peer emitting `BROADCAST_CAPACITY`
+/// back-to-back frames at the 16 MiB ceiling could force the relay to
+/// retain `BROADCAST_CAPACITY * MAX_FRAME_BYTES` (~16 GiB) of
+/// buffered memory. Real CRDT/presence ops are small (a few hundred
+/// bytes to a few KiB); 256 KiB leaves generous headroom for
+/// legitimate traffic while bounding the worst case at
+/// `BROADCAST_CAPACITY * MAX_ENVELOPE_FRAME_BYTES` (256 MiB). A peer
+/// that exceeds it is disconnected outright (see `pump_reads`) rather
+/// than having its op silently dropped, so its own state never
+/// diverges from what the relay actually forwarded.
+const MAX_ENVELOPE_FRAME_BYTES: usize = 256 * 1024;
 
 /// Errors the server may surface from its accept loop.
 #[derive(Debug, thiserror::Error)]
@@ -302,28 +318,8 @@ impl RelayServer {
         self.broadcast(None, &joined);
 
         // ---- spawn the write half (drains the broadcast channel) ----
-        let mut rx = self.broadcast_tx.subscribe();
-        let self_peer_for_writer = peer_id.clone();
-        let writer = tokio::spawn(async move {
-            loop {
-                let routed = match rx.recv().await {
-                    Ok(r) => r,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                };
-                if routed.from.as_deref() == Some(&self_peer_for_writer) {
-                    continue;
-                }
-                if sink
-                    .send(Message::Text(routed.payload.into()))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            let _ = sink.close().await;
-        });
+        let rx = self.broadcast_tx.subscribe();
+        let writer = tokio::spawn(run_writer(rx, sink, peer_id.clone()));
 
         // ---- read loop ----
         let read_result = self.pump_reads(&peer_id, &mut stream).await;
@@ -360,6 +356,14 @@ impl RelayServer {
                 }
                 Err(e) => return Err(HandleError::Ws(e)),
             };
+            if text.len() > MAX_ENVELOPE_FRAME_BYTES {
+                tracing::warn!(
+                    peer = %peer_id,
+                    len = text.len(),
+                    "nexus-collab: frame exceeds practical size cap; force-dropping peer"
+                );
+                break;
+            }
             let msg: ClientMessage = match serde_json::from_str(&text) {
                 Ok(m) => m,
                 Err(e) => {
@@ -416,6 +420,49 @@ impl RelayServer {
     }
 }
 
+/// Drain `rx`, forwarding every message not authored by `self_peer_id`
+/// out to `sink`, until the channel closes or forwarding fails.
+///
+/// `RecvError::Lagged` means the broadcast channel already discarded
+/// messages this receiver never saw. Continuing to consume from it
+/// would silently desync the peer's CRDT/presence state with no way
+/// to recover, so — matching this module's documented contract — the
+/// peer is force-dropped instead: the loop exits and the socket is
+/// closed exactly as it would be for a normal disconnect.
+async fn run_writer<S>(
+    mut rx: broadcast::Receiver<Routed>,
+    mut sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    self_peer_id: String,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        let routed = match rx.recv().await {
+            Ok(r) => r,
+            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    peer = %self_peer_id,
+                    missed = n,
+                    "nexus-collab: peer lagged past broadcast retention window; force-dropping"
+                );
+                break;
+            }
+        };
+        if routed.from.as_deref() == Some(self_peer_id.as_str()) {
+            continue;
+        }
+        if sink
+            .send(Message::Text(routed.payload.into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let _ = sink.close().await;
+}
+
 /// Errors raised inside [`RelayServer::run_peer`]. Surfaced to the
 /// accept loop, which logs them and moves on.
 #[derive(Debug, thiserror::Error)]
@@ -450,4 +497,83 @@ where
 {
     let payload = serde_json::to_string(msg).expect("ServerMessage serialises");
     sink.send(Message::Text(payload.into())).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the `RecvError::Lagged` handling in
+    /// [`run_writer`]: a receiver that already missed messages must be
+    /// force-dropped (loop exits, socket closes) rather than silently
+    /// resuming and forwarding whatever is still buffered, which would
+    /// leave the peer running on with a silent gap in its op stream.
+    ///
+    /// Pre-fix, the `Lagged` arm was `continue`, so this receiver
+    /// would resume, successfully receive "two", and forward it —
+    /// which the assertions below reject.
+    #[tokio::test]
+    async fn lagged_writer_is_force_dropped_not_resumed() {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let (server_res, client_res) = tokio::join!(
+            tokio_tungstenite::accept_async(server_io),
+            tokio_tungstenite::client_async("ws://test/", client_io)
+        );
+        let server_ws = server_res.expect("server ws handshake");
+        let (client_ws, _) = client_res.expect("client ws handshake");
+        let (sink, _) = server_ws.split();
+        let (_, mut client_stream) = client_ws.split();
+
+        // Capacity 1: two sends before the first `recv()` guarantees
+        // the receiver missed one and observes `Lagged` on its first
+        // poll.
+        let (tx, rx) = broadcast::channel::<Routed>(1);
+        tx.send(Routed {
+            from: None,
+            payload: "one".to_string(),
+        })
+        .unwrap();
+        tx.send(Routed {
+            from: None,
+            payload: "two".to_string(),
+        })
+        .unwrap();
+
+        let writer = tokio::spawn(run_writer(rx, sink, "victim".to_string()));
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(2), client_stream.next())
+            .await
+            .expect("writer must terminate promptly instead of hanging on a resumed stream");
+        match next {
+            Some(Ok(Message::Close(_))) | None => {}
+            Some(Ok(Message::Text(t))) => {
+                panic!("lagged peer must be force-dropped, not resumed; got frame {t:?}")
+            }
+            other => panic!("expected the lagged peer's socket to close, got {other:?}"),
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), writer)
+            .await
+            .expect("writer task must exit promptly on Lagged")
+            .expect("writer task must not panic");
+    }
+
+    /// Sanity bound for the memory-DoS fix: the worst-case retained
+    /// buffer memory (`BROADCAST_CAPACITY` slots each holding up to
+    /// `MAX_ENVELOPE_FRAME_BYTES`) must stay well below the ~16 GiB
+    /// figure the old `BROADCAST_CAPACITY * MAX_FRAME_BYTES`
+    /// relationship implied.
+    #[test]
+    fn broadcast_worst_case_memory_is_bounded_well_below_prior_16gib() {
+        let worst_case = BROADCAST_CAPACITY * MAX_ENVELOPE_FRAME_BYTES;
+        let prior_worst_case = BROADCAST_CAPACITY * MAX_FRAME_BYTES;
+        assert!(
+            worst_case <= 512 * 1024 * 1024,
+            "worst-case retained buffer memory is {worst_case} bytes, expected <= 512 MiB"
+        );
+        assert!(
+            worst_case * 32 <= prior_worst_case,
+            "new bound ({worst_case}) should be at least ~32x below the prior {prior_worst_case}"
+        );
+    }
 }

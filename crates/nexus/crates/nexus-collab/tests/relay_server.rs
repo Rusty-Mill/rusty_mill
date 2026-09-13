@@ -364,3 +364,50 @@ async fn token_set_accepts_any_named_member_and_rejects_others() {
         "non-member token must be rejected"
     );
 }
+
+/// Round-7 memory-DoS regression: `MAX_FRAME_BYTES` (16 MiB) alone let
+/// one authenticated peer force the relay to retain up to
+/// `BROADCAST_CAPACITY * MAX_FRAME_BYTES` (~16 GiB) by riding the
+/// shared broadcast channel's capacity at the hard frame-size
+/// ceiling. The relay now enforces a much tighter practical cap on
+/// broadcast-bound frames and force-drops any peer that exceeds it
+/// instead of buffering (or silently forwarding) the oversized op.
+///
+/// Pre-fix, this envelope would have been broadcast to Bob as a
+/// normal `Envelope` frame; the assertions below reject that.
+#[tokio::test]
+async fn oversized_envelope_disconnects_peer_without_broadcasting() {
+    let addr = start_server("t").await;
+    let mut a = connect(addr).await;
+    handshake(&mut a, "t", "alice", "Alice").await;
+    let mut b = connect(addr).await;
+    handshake(&mut b, "t", "bob", "Bob").await;
+    let _ = recv(&mut a).await; // PeerJoined for bob
+
+    // Bigger than the relay's practical per-message cap (256 KiB) but
+    // still comfortably under the hard 16 MiB WebSocket frame limit.
+    let huge = "x".repeat(600 * 1024);
+    send(
+        &mut a,
+        &ClientMessage::Envelope {
+            topic: "com.nexus.editor.ops.notes/today.md".into(),
+            payload: json!({ "blob": huge }),
+        },
+    )
+    .await;
+
+    // Bob must see alice force-dropped rather than receiving the
+    // oversized op.
+    let msg = recv(&mut b).await;
+    match msg {
+        ServerMessage::PeerLeft { peer_id } => assert_eq!(peer_id, "alice"),
+        other => panic!("expected alice to be force-dropped, got {other:?}"),
+    }
+
+    // Alice's own socket must be closed too.
+    let after = recv_close_or_error(&mut a).await;
+    assert!(
+        after.is_none(),
+        "expected alice's socket to close, got {after:?}"
+    );
+}

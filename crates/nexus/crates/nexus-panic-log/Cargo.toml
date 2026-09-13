@@ -10,5 +10,12 @@ description = "Local panic hook that appends to ~/.nexus-shell/logs/panic.log wi
 chrono = { workspace = true }
 dirs = "5"
 
+[target.'cfg(windows)'.dependencies]
+# Restricting the panic log's ACL to the owner (SetFileSecurityW +
+# ConvertStringSecurityDescriptorToSecurityDescriptorW) needs
+# Win32_Security_Authorization on top of the workspace's default
+# windows-sys feature set.
+windows-sys = { workspace = true, features = ["Win32_Security_Authorization"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

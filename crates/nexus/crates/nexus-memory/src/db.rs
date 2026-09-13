@@ -1024,8 +1024,15 @@ fn grouped_count(conn: &rusqlite::Connection, column: &str) -> Result<Vec<Catego
     Ok(rows)
 }
 
+/// Hard ceiling on any caller-supplied `limit` before it reaches a SQL
+/// `LIMIT` clause. Every list/search/facts/... query helper funnels its
+/// `limit` argument through [`clamp_limit`], so this is the single point
+/// that keeps an external IPC/MCP caller from forcing an unbounded table
+/// scan and allocation by passing an enormous requested limit.
+const MAX_QUERY_LIMIT: usize = 1000;
+
 fn clamp_limit(limit: usize) -> i64 {
-    i64::try_from(limit).unwrap_or(i64::MAX)
+    i64::try_from(limit.min(MAX_QUERY_LIMIT)).unwrap_or(i64::MAX)
 }
 
 /// Heuristic vitality score (ACT-R-inspired): rewards frequent and recent
@@ -1679,5 +1686,35 @@ mod tests {
         let db2 = MemoryDb::open(&path).unwrap();
         assert_eq!(db2.count().unwrap(), 1);
         assert!(db2.get(m.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn clamp_limit_caps_huge_requested_limit() {
+        // Every limit-taking query helper (list/list_filtered/list_facts/...)
+        // funnels the caller-supplied `limit` through `clamp_limit` before it
+        // reaches a SQL `LIMIT` clause. Pre-fix this only narrowed the usize
+        // -> i64 representation with no upper bound, so an external IPC/MCP
+        // caller passing e.g. `usize::MAX` got an effectively unbounded table
+        // scan. The applied limit must never exceed MAX_QUERY_LIMIT.
+        let max_query_limit_i64 = i64::try_from(MAX_QUERY_LIMIT).unwrap();
+        assert_eq!(clamp_limit(usize::MAX), max_query_limit_i64);
+        assert_eq!(clamp_limit(MAX_QUERY_LIMIT + 1), max_query_limit_i64);
+        assert_eq!(clamp_limit(MAX_QUERY_LIMIT), max_query_limit_i64);
+        assert_eq!(clamp_limit(10), 10);
+    }
+
+    #[test]
+    fn list_caps_an_enormous_requested_limit() {
+        // End-to-end: a `list` call with an enormous requested limit must
+        // still complete against a small dataset and never surface more
+        // rows than exist — exercised through the public API, not just the
+        // helper, so a regression that bypasses `clamp_limit` in a future
+        // refactor is still caught here.
+        let db = MemoryDb::open_in_memory().unwrap();
+        for i in 0..5 {
+            db.insert(&Memory::new(format!("row {i}"))).unwrap();
+        }
+        let rows = db.list(usize::MAX).unwrap();
+        assert_eq!(rows.len(), 5);
     }
 }

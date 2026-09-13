@@ -23,19 +23,40 @@ impl Source for ClaudeCode {
     }
 
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>> {
-        let mut out = Vec::new();
-        for path in self.files() {
-            if !ctx.should_read(SourceId::ClaudeCode, &path) {
-                continue;
-            }
-            if let Some(conv) = parse_transcript(&path)? {
+        scan_roots(self.roots(), ctx)
+    }
+}
+
+/// Scan the given roots for transcript files. A file that cannot be read or
+/// parsed is logged and skipped rather than aborting the whole source via
+/// `?` — mirrors the tolerant-parsing contract this crate documents, and the
+/// per-item skip pattern the vscdb reader already uses for the same failure
+/// class.
+pub fn scan_roots(
+    roots: Vec<std::path::PathBuf>,
+    ctx: &mut ScanContext,
+) -> Result<Vec<ParsedConversation>> {
+    let mut out = Vec::new();
+    for path in super::walk_with_extension(&roots, "jsonl", 4) {
+        if !ctx.should_read(SourceId::ClaudeCode, &path) {
+            continue;
+        }
+        match parse_transcript(&path) {
+            Ok(Some(conv)) => {
                 if ctx.since.is_none_or(|s| conv.conversation.updated_at >= s) {
                     out.push(conv);
                 }
             }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "skipping unreadable claude code transcript {}: {e}",
+                    path.display()
+                );
+            }
         }
-        Ok(out)
     }
+    Ok(out)
 }
 
 /// Parse one transcript. Unrecognised lines are skipped rather than failing
@@ -258,5 +279,29 @@ this is not json at all
             parsed.conversation.project_path.as_deref(),
             Some("/Users/x/work/api")
         );
+    }
+
+    /// One unreadable file in a source directory must not prevent other
+    /// valid files in that same source from being indexed — the failure
+    /// this crate's tolerant-parsing contract exists to prevent.
+    #[test]
+    fn a_corrupt_file_does_not_block_the_rest_of_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        // Invalid UTF-8: `std::fs::read_to_string` fails on this file alone.
+        std::fs::write(dir.path().join("bad.jsonl"), [0xFF, 0xFE, 0xFD]).unwrap();
+        write(
+            dir.path(),
+            "good.jsonl",
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-08-05T12:00:00Z","message":{"role":"user","content":"hello"}}"#,
+        );
+
+        let mut ctx = ScanContext::new(None, true);
+        let convs = scan_roots(vec![dir.path().to_path_buf()], &mut ctx).unwrap();
+        assert_eq!(
+            convs.len(),
+            1,
+            "a corrupt file must not prevent the valid file in the same source from being indexed"
+        );
+        assert_eq!(convs[0].conversation.external_id, "sess-1");
     }
 }
