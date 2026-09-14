@@ -57,24 +57,41 @@ declined, just never asked. Recorded here for the same reason the rest
 of this document exists: honest accounting before a future decision,
 not a guess.
 
-* **Backup/restore as a real, named operation.** The portable store
-  files (`STORAGE-014`–`016`) are copy-safe — the closest thing to a
-  backup story today — but there is no `BACKUP`/`RESTORE` request, no
-  documented procedure, and no tooling around "copy while the server is
-  live" (the files are mutated in place under `with_exclusive`; a copy
-  racing a write has no documented safety story).
+* **Backup/restore as a real, named operation.** *Partly built since
+  this was written:* `Request::Backup`/`Response::BackedUp`
+  (`ADR-0065`, protocol 24) is a real, in-process, lock-consistent
+  snapshot copy under the table's existing write lock, path-confined
+  to an opt-in `SERVER_BACKUP_ROOT`-configured server-local directory
+  — every companion file copied by one shared prefix-glob
+  (`copy_table_files`), write-to-a-temp-directory then one atomic
+  rename so a hard kill never leaves a partial directory visible.
+  Wired into `memory_server.rs` (the one binary with real
+  `SERVER_DATA_DIR` durability); `DogConnectionStore::backup` is
+  mechanically capable but no shipped binary calls it yet. Still
+  absent: any `RESTORE` request or documented restore procedure — a
+  backup is a portable, copy-safe directory (`STORAGE-014`–`016`), so
+  "restore" today means manually pointing a server's data directory at
+  the backup and restarting it, not a request or tool that does that
+  for you.
 * **Replication/high availability.** Zero — no primary/replica concept,
   no write-ahead shipping beyond the per-adapter crash-recovery journal
   (`ADR-0025`/`0026`/`0063`, which never leaves the one process), no
   failover. A single process owning a single directory is the only
   deployment shape this crate has ever had.
-* **Metrics/observability at the storage-engine layer.** The audit log
-  (`ADR-0029`) and access log (`ADR-0031`) record admission/auth/request
-  events to a file; there is no counters/gauges surface (request
-  latency histograms, queue depth, journal size, cache/index stats) and
-  no `/metrics`-style endpoint. (The Prometheus-text metrics the
-  differential test suite exercises belong to the *consumer's* hub
-  layer, `rusty_remind_me`, not this crate.)
+* **Metrics/observability at the storage-engine layer.** *Partly built
+  since this was written:* `Request::Metrics`/`Response::Metrics`
+  (`ADR-0064`, protocol 23) renders a bounded, fixed set of
+  process-wide atomic counters (`requests_total`, the ok/error split,
+  connections accepted/active, uptime) as hand-formatted Prometheus
+  text, gated as a read at the version gate. The audit log
+  (`ADR-0029`) and access log (`ADR-0031`) still separately record
+  admission/auth/request events to a file. Still absent: request
+  latency histograms, queue depth, journal size, cache/index stats, or
+  any HTTP `/metrics` endpoint — `Metrics` is answered over the
+  existing binary wire protocol, not scraped by Prometheus directly.
+  (The Prometheus-text metrics the differential test suite exercises
+  belong to the *consumer's* hub layer, `rusty_remind_me`, not this
+  crate.)
 * **Schema migration tooling.** `ADR-0056`'s schema-tag versioning
   refuses a directory built under an older layout by name, distinctly —
   a real safety property — but there is no migration *runner*: no
