@@ -7,7 +7,7 @@ name = "a2a-agent-server"
 version = "0.1.0"
 dependencies = [
  "adk-a2a",
- "axum 0.7.9",
+ "axum 0.8.9",
  "rusty-adk",
  "serde_json",
  "tokio",
@@ -159,7 +159,7 @@ dependencies = [
  "adk-tools",
  "async-stream",
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "futures",
  "rusty_a2a",
  "rusty_base64",
