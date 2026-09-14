@@ -10,7 +10,7 @@
 //! (`Reversed` never forwarded `Neighbors`; `GenericProductionStore` had
 //! no `neighbors` method) before this adapter could even be written.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
+use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
@@ -73,7 +73,12 @@ impl EmployeeConnectionStore {
         let (journal, batches) = CommitGroup::open(journal_path)?;
         store.with_exclusive(|inner| -> Result<(), JournalError> {
             for (batch_index, batch) in batches.iter().enumerate() {
-                Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
+                let JournaledBatch::Transaction(ops) = batch else {
+                    return Err(JournalError::Format(format!(
+                        "entry {batch_index}: this adapter's journal cannot replay a write batch"
+                    )));
+                };
+                Self::apply_batch(inner, ops).map_err(|(index, code)| JournalError::Replay {
                     batch: batch_index,
                     index,
                     code,
