@@ -95,31 +95,59 @@ the failing test file was never touched by this round's fix, and via
 `where codex` finding nothing on this workstation) — a pre-existing
 environmental gap, not a regression from any of the 30 fixes.
 
+**Gap-closing addendum (findings 31-37):** after cross-referencing all 7
+review rounds (this doc plus rounds 1-6) against the full 239-crate
+workspace member list, several crates/sub-crates had never been
+reviewed at any depth — most notably `nexus-skills`, `nexus-fuzz`, and
+10 of `rusty_tailscale`'s 16 sub-crates including `ts-wg` (WireGuard),
+`ts-stun`/`ts-disco` (NAT traversal/discovery). Five parallel scouts
+covered this gap; the highest-risk crypto/network crates (`ts-key`,
+`ts-wg`, `ts-stun`, `ts-disco`) and `nexus-fuzz` came back genuinely
+clean, but 7 more concrete, triggerable findings turned up elsewhere
+and are fixed below. Notably, while this fix was in flight, an
+independent, earlier "round 7" review+fix effort (a naming collision,
+not related work — PR #209, 38 findings, merged 2026-09-13, *before*
+this session) landed on `main` and had separately found/fixed 4 of the
+same bugs as findings 7, 8, 12, and 11 above (`rusty_git`, `rusty_diff`,
+`rusty_mcp`'s `resources.rs`, `rusty_text`'s awk interpreter) —
+resolved by adopting `main`'s already-merged fix for those files
+rather than re-doing the same work, verified with a full build+test
+pass. The `nexus-skills` capability-gate-drop fix (finding 33) required
+real end-to-end work spanning `nexus-agent` too, not just `nexus-skills`
+itself, folding restrictions across the `depends_on` chain into an
+actual session policy that denies gated capabilities.
+
 | # | Disposition | # | Disposition | # | Disposition |
 | - | - | - | - | - |
-| 1 | fixed | 11 | fixed | 21 | fixed |
-| 2 | fixed | 12 | fixed | 22 | fixed |
-| 3 | fixed | 13 | fixed | 23 | fixed |
-| 4 | fixed | 14 | fixed | 24 | fixed |
-| 5 | fixed | 15 | fixed | 25 | fixed |
-| 6 | fixed | 16 | fixed | 26 | fixed |
-| 7 | fixed | 17 | fixed | 27 | fixed |
-| 8 | fixed | 18 | fixed | 28 | fixed |
-| 9 | fixed | 19 | fixed | 29 | fixed |
-| 10 | fixed | 20 | fixed | 30 | fixed |
+| 1 | fixed | 14 | fixed | 27 | fixed |
+| 2 | fixed | 15 | fixed | 28 | fixed |
+| 3 | fixed | 16 | fixed | 29 | fixed |
+| 4 | fixed | 17 | fixed | 30 | fixed |
+| 5 | fixed | 18 | fixed | 31 | fixed |
+| 6 | fixed | 19 | fixed | 32 | fixed |
+| 7 | fixed | 20 | fixed | 33 | fixed |
+| 8 | fixed | 21 | fixed | 34 | fixed |
+| 9 | fixed | 22 | fixed | 35 | fixed |
+| 10 | fixed | 23 | fixed | 36 | fixed |
+| 11 | fixed | 24 | fixed | 37 | fixed |
+| 12 | fixed | 25 | fixed | | |
+| 13 | fixed | 26 | fixed | | |
 
 | # | Severity | # | Severity | # | Severity |
 | - | - | - | - | - |
-| 1 | medium | 11 | medium | 21 | low-medium |
-| 2 | low | 12 | high | 22 | medium |
-| 3 | medium | 13 | medium | 23 | high |
-| 4 | medium | 14 | medium | 24 | high |
-| 5 | high | 15 | medium | 25 | medium |
-| 6 | high | 16 | medium | 26 | medium-high |
-| 7 | high | 17 | medium | 27 | high |
-| 8 | medium | 18 | medium | 28 | low-medium |
-| 9 | high | 19 | medium | 29 | low-medium |
-| 10 | medium | 20 | low | 30 | low |
+| 1 | medium | 14 | medium | 27 | high |
+| 2 | low | 15 | medium | 28 | low-medium |
+| 3 | medium | 16 | medium | 29 | low-medium |
+| 4 | medium | 17 | medium | 30 | low |
+| 5 | high | 18 | medium | 31 | high |
+| 6 | high | 19 | medium | 32 | high |
+| 7 | high | 20 | low | 33 | high |
+| 8 | medium | 21 | low-medium | 34 | medium |
+| 9 | high | 22 | medium | 35 | high |
+| 10 | medium | 23 | high | 36 | medium |
+| 11 | medium | 24 | high | 37 | medium |
+| 12 | high | 25 | medium | | |
+| 13 | medium | 26 | medium-high | | |
 
 ---
 
@@ -335,3 +363,55 @@ Severity: low-medium. Source: `TestToolsAsyncScout`.
 Location: `README.md`'s History section (lines 7-33 intro, wave-by-wave lists at lines 1225-1308) describes itself as the *complete* provenance of every crate under `crates/`: four numbered `baileyrd/rusty_*` merge waves ("All four waves are complete... every repo that was in scope now lives under `crates/`", line 15-16) plus three explicitly-called-out non-wave merges (nexus, `rusty_multimodal_db`, `rusty_hister`). Every crate name in all four wave lists was individually re-tallied and matches exactly (14 + 15 + 26 + 11) — but `rusty_proxmox`, `rusty_opnsense`, `rusty_homelab_mcp`, `rusty_fedora_agent`, and `rusty_fedora` appear in none of the four lists nor the three non-wave paragraphs, despite all five being real, current workspace members (confirmed in root `Cargo.toml`) with their own rows in the README's own crate table (lines 88-92). Notably `ARCHITECTURE.md`'s dependency-layering table *does* name `rusty_proxmox`/`rusty_opnsense`/`rusty_homelab_mcp` explicitly — this is specifically a hole in README's self-described-as-complete merge-history narrative, not an obscure/unused crate. `RELEASE_NOTES.md`'s earliest entries only go back to 2026-08-27, with no "Added: rusty_proxmox/opnsense/homelab_mcp" entry either — the origin of this crate cluster isn't recorded in any root doc.
 Fix direction: add a wave/merge entry to README.md's History section (folding these 5 crates into an existing wave paragraph with a landing note, or describing them as their own out-of-band addition, following the nexus/multimodal_db/hister pattern) so the "all four waves are complete" claim actually accounts for every crate the table lists.
 Severity: low. Source: `GovDocsScout` (`history://GovDocsScout`).
+
+## `rusty_tailscale` (`ts-filter`)
+
+**31. Fail-open ACL bug: an unparseable `IPProto` entry is silently dropped instead of rejected, and an empty `protos` list means "match all protocols".**
+Location: `crates/rusty_tailscale/crates/ts-filter/src/lib.rs:160-164` (`Filter::new`'s compile step, `r.ip_proto.iter().filter_map(|p| u8::try_from(*p).ok()).collect()`) and `:124` (`Rule::matches`, `if !self.protos.is_empty() && !self.protos.contains(&protocol) { return false; }`).
+Trigger: a control server (Headscale, or an attacker/bug on that path) sends a `FilterRule` with `IPProto: [-1]` (or any value outside `0..=255`) — every entry fails `u8::try_from`, `protos` compiles to `[]`, and the rule now matches *every* IP protocol instead of the intended one, contradicting the module's own doc comment ("unknown protocols simply fail to match") and the fail-closed convention `srcs`/`dsts` already use for their own malformed-entry case in the same compiler.
+Fix direction: distinguish "IPProto absent on the wire" (legitimately unrestricted) from "IPProto had entries but all failed to parse" (should fail closed) — e.g. drop the whole rule at compile time when non-empty input yields zero parsed entries, matching srcs/dsts.
+Severity: high. Source: `TailscaleMiscScout` (`history://TailscaleMiscScout`).
+
+## `rusty_tailscale` (`ts-localapi`, served by `ts-daemon`)
+
+**32. Control-socket TOCTOU race plus a silently-discarded chmod failure.**
+Location: `crates/rusty_tailscale/crates/ts-localapi/src/lib.rs:162-190` (`bind`) — `tokio::net::UnixListener::bind(path)` creates and starts listening in one step (socket immediately connectable under the ambient umask) and only afterward narrows permissions via `let _ = std::fs::set_permissions(path, ...0o600)`, discarding the `Result`.
+Trigger: any local unprivileged process racing a `connect()` against the known socket path (`/var/run/tailscale/tailscaled.sock` by default) in the narrow window right after bind can get through before the mode is tightened; or, with no race needed, a chmod failure (LSM/seccomp restriction, filesystem quirk) leaves the socket permanently exposed with no error surfaced — while it happily serves `PATCH /prefs` (flips `want_running`) and `POST /ping` (triggers outbound tailnet traffic) to any local user who can reach it. The platform layer already has a race-free `unix_listen()` primitive (`crates/rustils/crates/platform-linux/src/sys/net.rs:559-607`) built explicitly for this socket per its own comment — `ts-localapi` doesn't use it.
+Fix direction: bind→chmod(0600)→listen in that order (so the socket cannot accept a connection before permissions are already correct), and propagate a hard error if chmod fails instead of discarding it.
+Severity: high. Source: `TailscaleMiscScout`.
+
+## `nexus-skills`
+
+**33. A skill's declared `restrictions` (execute_code/modify_files/delete_content/allowed_tools) is parsed and stored but never enforced when the skill is actually invoked — capability-gate drop.**
+Location: `crates/nexus/crates/nexus-skills/src/core_plugin.rs:452-465` (`compose_for_invoke`) and `:562-596` (`handle_invoke`); schema at `crates/nexus/crates/nexus-skills/src/lib.rs:96-98,138-155`.
+Trigger: author a `.skill.md` with `restrictions: { execute_code: false, modify_files: false, delete_content: false, allowed_tools: [] }`; invoking it via the wired `com.nexus.skills::invoke` IPC handler builds the `com.nexus.agent::session_run` payload as `{ goal, archetype, system: composed_body, auto_approve: true }` with no restrictions ever forwarded — the only other reader of `restrictions` (`compose.rs`) uses it solely for a non-fatal UI warning. The invoked session runs with full capabilities and blind auto-approval despite the skill's own declared boundary. Same bug class as the `CompositeIpcDispatcher` capability-gate-drop (finding 1).
+Fix direction: fold each ancestor's `restrictions` across the `depends_on` chain (most-restrictive-wins on the boolean levers, intersect `allowed_tools`) into an actual capability/tool-allowlist constraint enforced by `session_run`, and force `auto_approve: false` whenever any ancestor sets a restrictive lever.
+Severity: high. Source: `NexusSkillsFuzzScout` (`history://NexusSkillsFuzzScout`).
+
+**34. Path traversal in the `REGISTRY.json` cold-start loader.**
+Location: `crates/nexus/crates/nexus-skills/src/registry.rs:202-222` (`try_load_from_index`) — joins untrusted `entry.path` components onto `root` with no `..`/absolute-path rejection, unlike `visit_dir`'s existing symlink defense (issue #85) in the same file.
+Trigger: a `REGISTRY.json` entry `{ "path": "../../../../some/file/elsewhere.skill.md" }` reads a file entirely outside the configured skills root. Currently dead in the wired call graph (production uses the directory-walk path, `SkillRegistry::load`, not `load_with_index`) but the function is public, unit-tested, and documented as the intended entry point for a not-yet-built external-CLI cold-start path.
+Fix direction: reject any `entry.path` containing `..`/absolute components (or verify the joined path still `starts_with(root)` after canonicalization) before parsing.
+Severity: medium. Source: `NexusSkillsFuzzScout`.
+
+## `rusty_tailscale` (`ts-key`)
+
+**35. Non-atomic identity-key state write risks durable, unrecoverable loss of the node's persisted identity on interruption.**
+Location: `crates/rusty_tailscale/crates/ts-key/src/state.rs:104-112` (`NodeState::save`) — opens `ts-rs.state.json` with `.write(true).create(true).truncate(true)` and does a single `f.write_all(json.as_bytes())` directly against the truncated file, no write-to-temp-then-rename, unlike the sibling `rusty_crypto_key::SecretBytes::save_to_file` (which ts-key already depends on for `to_secret_bytes()`) that exists specifically to avoid this.
+Trigger: kill the daemon (SIGKILL/OOM-kill), lose power, or hit ENOSPC mid-`write_all`. The file is left truncated/partial JSON; `load_or_generate` only auto-regenerates on `NotFound`, not `Corrupt`, so the daemon fails to start on every subsequent launch until an operator manually deletes the state file — the previously-established, control-plane-registered identity is unrecoverably lost.
+Fix direction: route through `rusty_crypto_key::SecretBytes::save_to_file`'s existing create_new-temp-file + atomic-rename pattern.
+Severity: high. Source: `TailscaleCryptoScout` (`history://TailscaleCryptoScout`).
+
+**36. `save()` does not tighten permissions of a pre-existing state file, under a TOCTOU race.**
+Location: `crates/rusty_tailscale/crates/ts-key/src/state.rs:104-111` — `opts.mode(0o600)` only takes effect when the OS actually creates a new inode; opening an *existing* file with `OpenOptions` ignores `.mode()` entirely.
+Trigger: if `ts-rs.state.json` already exists with looser permissions (e.g. 0644 from a default-umask pre-place/restore) when `save()` runs, the three private keys get written into it without ever restricting access.
+Fix direction: same as finding 35 — `SecretBytes::save_to_file` guarantees tightened permissions unconditionally.
+Severity: medium. Source: `TailscaleCryptoScout`.
+
+## `rusty_skillopt` (`skillopt-core`)
+
+**37. NaN `Reflection` score panics the training loop's feedback-selection step.**
+Location: `crates/rusty_skillopt/crates/skillopt-core/src/prompts.rs:102` (`select_feedback`, `sorted.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap())`).
+Trigger: `score` comes from a caller-supplied `Environment::score()` implementation, documented only as "deterministic reward in `[0, 1]`" with no validation/clamping in this crate. Any scorer that can produce `0.0/0.0` (a common precision/recall-style pitfall) yields `f64::NAN`, `partial_cmp` returns `None`, and `.unwrap()` panics, aborting the whole `skillopt-cli train` run.
+Fix direction: NaN-safe comparator (`total_cmp`, sorting NaN to the worst position) instead of `partial_cmp().unwrap()`.
+Severity: medium. Source: `ThinCratesScout` (`history://ThinCratesScout`).
