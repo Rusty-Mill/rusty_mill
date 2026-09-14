@@ -62,6 +62,26 @@ fn start_dog_server() -> SocketAddr {
     addr
 }
 
+/// Like [`start_dog_server`], but with `n` generated dogs
+/// (`bench_support::build_dataset`) instead of the fixed three-record
+/// sample — large enough to force `SchemaDrivenClient::query`'s
+/// `ORDER BY`-with-no-`LIMIT` path (`OBY-FR-004`, ADR-0061) across
+/// several internal `Request::Page` calls.
+fn start_dog_server_n(n: usize) -> SocketAddr {
+    use rusty_multimodal_db::bench_support::build_dataset;
+
+    let dir = unique_dir("sql_integration_dog_n");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dogs.mmap");
+    let records = build_dataset(n).records;
+    let store = ProductionStore::create(records, Vec::new(), &path).unwrap();
+    let connection_store = Arc::new(DogConnectionStore::new(store));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
 fn start_order_server() -> SocketAddr {
     let dir = unique_dir("sql_integration_order");
     std::fs::create_dir_all(&dir).unwrap();
@@ -295,18 +315,18 @@ fn a_field_with_every_capability_flag_false_is_still_queryable() {
     );
 }
 
-/// A hand-rolled server that always negotiates protocol 7, however high
-/// a version the client's own `Hello` asks for — the moral equivalent of
-/// a real pre-`SQL-FR` build, without needing to check one out. Every
-/// other request is answered by the real `dispatch` over a real
-/// `DogConnectionStore`, so a client that never calls `query` is served
-/// exactly as normal.
-fn start_version_7_dog_server() -> SocketAddr {
+/// A hand-rolled server that always negotiates a fixed protocol
+/// version, however high a version the client's own `Hello` asks for —
+/// the moral equivalent of a real older build, without needing to
+/// check one out. Every other request is answered by the real
+/// `dispatch` over a real `DogConnectionStore`, so a client that never
+/// calls a version-gated method is served exactly as normal.
+fn start_versioned_dog_server(version: u32) -> SocketAddr {
     use rusty_multimodal_db::server::dispatch;
     use rusty_multimodal_db::server::framing::{read_message, write_message};
     use rusty_multimodal_db::server::protocol::{Request, Response};
 
-    let dir = unique_dir("sql_integration_v7_dog");
+    let dir = unique_dir("sql_integration_versioned_dog");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dogs.mmap");
     let store = ProductionStore::create(sample_dogs(), Vec::new(), &path).unwrap();
@@ -324,7 +344,7 @@ fn start_version_7_dog_server() -> SocketAddr {
                 };
                 let resp = match req {
                     Request::Hello { .. } => Response::Hello {
-                        protocol_version: 7,
+                        protocol_version: version,
                     },
                     other => dispatch(connection_store.as_ref(), other),
                 };
@@ -335,6 +355,10 @@ fn start_version_7_dog_server() -> SocketAddr {
         }
     });
     addr
+}
+
+fn start_version_7_dog_server() -> SocketAddr {
+    start_versioned_dog_server(7)
 }
 
 /// `SQL-FR-010`: `query` requires protocol version 8 — against a
@@ -351,6 +375,123 @@ fn query_requires_protocol_version_8() {
         Err(ClientError::Unsupported("sql query"))
     ));
     // The connection is still usable — the refusal above sent no frame.
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+// `OBY-FR-001`–`006`, ADR-0061, `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md`.
+
+/// Acceptance criterion 2: a `LIMIT`-bearing `ORDER BY` returns exactly
+/// that many rows, strictly ascending by the ordered field, matching
+/// `SchemaDrivenClient::page`'s own result for the identical
+/// field/limit.
+#[test]
+fn order_by_with_limit_returns_rows_ascending_matching_page() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    let ordered = rows(
+        client
+            .query("SELECT * FROM dog ORDER BY age LIMIT 2")
+            .unwrap(),
+    );
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(age_of(&ordered, ordered[0].0), 3);
+    assert_eq!(age_of(&ordered, ordered[1].0), 5);
+
+    let paged = client.page("age", None, 2).unwrap();
+    assert_eq!(
+        ordered.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        paged.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        "ORDER BY compiles to the identical Request::Page walk page() uses directly"
+    );
+}
+
+/// Acceptance criterion 2: a named `SELECT` column list projects down
+/// correctly even though `Request::Page` itself always returns every
+/// field of each record.
+#[test]
+fn order_by_projects_named_columns_even_though_page_returns_every_field() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let result = rows(
+        client
+            .query("SELECT age FROM dog ORDER BY age LIMIT 1")
+            .unwrap(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].1, vec![("age".to_string(), ScanValue::U32(3))]);
+}
+
+/// Acceptance criterion 2: an `ORDER BY` with no `LIMIT` walks the whole
+/// table across several internal `Request::Page` calls (2,500 records,
+/// well over the client's internal chunk size), returning every row
+/// exactly once, strictly ascending, with no duplicate or missing row
+/// across a chunk seam.
+#[test]
+fn order_by_with_no_limit_walks_every_record_across_several_pages() {
+    let addr = start_dog_server_n(2_500);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let result = rows(client.query("SELECT * FROM dog ORDER BY age").unwrap());
+    assert_eq!(result.len(), 2_500);
+
+    let ages: Vec<u32> = result.iter().map(|(id, _)| age_of(&result, *id)).collect();
+    assert!(
+        ages.windows(2).all(|pair| pair[0] <= pair[1]),
+        "strictly ascending by age (ties broken by id, unchecked here)"
+    );
+
+    let mut ids: Vec<Uuid> = result.iter().map(|(id, _)| *id).collect();
+    let before = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), before, "no duplicate row across a chunk seam");
+}
+
+/// Acceptance criterion 3: every client-side refusal, no frame sent —
+/// `WHERE`/`JOIN`/`GROUP BY` combined with `ORDER BY` (`ClientError::
+/// Sql`, the parser's own `OrderByWithFilter`/`OrderByWithJoin`/
+/// `OrderByWithAggregate`), a non-`U32`/`I64` order field and a zero
+/// `LIMIT` (`ClientError::Unsupported`), and an unknown order field
+/// (`ClientError::UnknownField`).
+#[test]
+fn order_by_client_side_refusals() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE age > 3 ORDER BY age"),
+        Err(ClientError::Sql(_))
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog ORDER BY breed"),
+        Err(ClientError::Unsupported("order by"))
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog ORDER BY age LIMIT 0"),
+        Err(ClientError::Unsupported("order by limit"))
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog ORDER BY weight"),
+        Err(ClientError::UnknownField(name)) if name == "weight"
+    ));
+    // The connection is still usable after every refusal above — none
+    // of them sent a frame.
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+/// Acceptance criterion 3: `ORDER BY` requires protocol version 20 —
+/// against a connection negotiated below it, `ORDER BY` is
+/// `ClientError::Unsupported("order by")` with no frame sent, and the
+/// connection keeps working normally for everything else.
+#[test]
+fn order_by_requires_protocol_version_20() {
+    let addr = start_versioned_dog_server(19);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(client.server_protocol_version(), 19);
+    assert!(matches!(
+        client.query("SELECT * FROM dog ORDER BY age"),
+        Err(ClientError::Unsupported("order by"))
+    ));
     assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
 }
 
