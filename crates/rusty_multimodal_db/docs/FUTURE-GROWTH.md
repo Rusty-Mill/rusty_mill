@@ -37,7 +37,7 @@ This is a different tier of project, not a natural extension of the current one 
 The big three:
 
 1. SQL. A parser, a query planner, a cost-based optimizer, and an execution engine. Every query today is a hand-written Rust method call against a specific schema's traits — there's no declarative language layer at all. *Partly built since this was written:* a client-side `SELECT`/`GROUP BY`/`JOIN`/`ORDER BY` subset (`ADR-0034`/`0035`/`0044`/`0061`) compiled to fixed request shapes, and one ordered keyset page on the wire (`ADR-0055`) — `ORDER BY` in the SQL text (`ADR-0061`) compiles to it directly, for a plain query only (not combined with `WHERE`/`JOIN`/`GROUP BY` — filtering-then-ordering in one request is still absent). Still absent: any query planner or optimizer, and `ORDER BY` combined with a filter.
-2. Transactions. *Partly built since this was written:* a batch of field updates applies all-or-nothing (`ADR-0013`), a per-connection session stages writes and commits them as one batch with read-your-writes and snapshot isolation (`ADR-0024`/`0027`/`0033`), and an opt-in redo journal makes a batch crash-atomic (`ADR-0025`). Still absent: a general transaction manager — MVCC, multi-table atomicity, and transactions over inserts, links, replacements, and deletes (each of those is a single durable operation, never staged).
+2. Transactions. *Partly built since this was written:* a batch of field updates applies all-or-nothing (`ADR-0013`), a per-connection session stages writes and commits them as one batch with read-your-writes and snapshot isolation (`ADR-0024`/`0027`/`0033`), an opt-in redo journal makes a `Request::Transaction` batch crash-atomic (`ADR-0025`), and — since `ADR-0063` — the same is now true of `Request::WriteBatch`'s atomic mode on `Memory`/`Entity`/`Relation` (journal format version 2, when the adapter is journaled). Still absent: a general transaction manager — real MVCC (versioned records, a snapshot pointer, garbage collection — `ADR-0033`'s own explicitly-declined option), multi-table atomicity, and staged (not single-shot) transactions over inserts, links, replacements, and deletes.
 3. Arbitrary joins. *Partly built since this was written:* a `JOIN … ON <relation>` over a declared relation, within a table or across two tables on one connection (`ADR-0044`/`ADR-0050`), evaluated as an index nested loop. Still absent: a join on an arbitrary predicate at query time — every relation is still declared ahead of time, and relation labels created at runtime (`ADR-0047`) are labels on a declared relation kind, not new predicates.
 
 Smaller, but still real:
@@ -48,4 +48,54 @@ Smaller, but still real:
 * Client ecosystem — drivers for other languages, a CLI, general tooling. A byte-level wire specification and a stdlib-only Python client exist (`ADR-0043`); everything else on this list does not.
 * Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison.
 
-What's already solid and wouldn't need to be redone: the storage engine itself, real measured durability, real measured concurrency (single- and multi-process), and a working generic schema layer proven against more than one domain. SQL, transactions, and arbitrary joins would be built on top of that foundation, not require rebuilding it — but each is a serious, standalone effort, not a small extension of this project.
+## Operational maturity — not named in this document before
+
+Everything above is framed as "SQLite/DuckDB parity," which is really
+about the query/transaction surface. A handful of things every
+production DBMS needs were never named on this page at all — not
+declined, just never asked. Recorded here for the same reason the rest
+of this document exists: honest accounting before a future decision,
+not a guess.
+
+* **Backup/restore as a real, named operation.** *Partly built since
+  this was written:* `Request::Backup`/`Response::BackedUp`
+  (`ADR-0065`, protocol 24) is a real, in-process, lock-consistent
+  snapshot copy under the table's existing write lock, path-confined
+  to an opt-in `SERVER_BACKUP_ROOT`-configured server-local directory
+  — every companion file copied by one shared prefix-glob
+  (`copy_table_files`), write-to-a-temp-directory then one atomic
+  rename so a hard kill never leaves a partial directory visible.
+  Wired into `memory_server.rs` (the one binary with real
+  `SERVER_DATA_DIR` durability); `DogConnectionStore::backup` is
+  mechanically capable but no shipped binary calls it yet. Still
+  absent: any `RESTORE` request or documented restore procedure — a
+  backup is a portable, copy-safe directory (`STORAGE-014`–`016`), so
+  "restore" today means manually pointing a server's data directory at
+  the backup and restarting it, not a request or tool that does that
+  for you.
+* **Replication/high availability.** Zero — no primary/replica concept,
+  no write-ahead shipping beyond the per-adapter crash-recovery journal
+  (`ADR-0025`/`0026`/`0063`, which never leaves the one process), no
+  failover. A single process owning a single directory is the only
+  deployment shape this crate has ever had.
+* **Metrics/observability at the storage-engine layer.** *Partly built
+  since this was written:* `Request::Metrics`/`Response::Metrics`
+  (`ADR-0064`, protocol 23) renders a bounded, fixed set of
+  process-wide atomic counters (`requests_total`, the ok/error split,
+  connections accepted/active, uptime) as hand-formatted Prometheus
+  text, gated as a read at the version gate. The audit log
+  (`ADR-0029`) and access log (`ADR-0031`) still separately record
+  admission/auth/request events to a file. Still absent: request
+  latency histograms, queue depth, journal size, cache/index stats, or
+  any HTTP `/metrics` endpoint — `Metrics` is answered over the
+  existing binary wire protocol, not scraped by Prometheus directly.
+  (The Prometheus-text metrics the differential test suite exercises
+  belong to the *consumer's* hub layer, `rusty_remind_me`, not this
+  crate.)
+* **Schema migration tooling.** `ADR-0056`'s schema-tag versioning
+  refuses a directory built under an older layout by name, distinctly —
+  a real safety property — but there is no migration *runner*: no
+  command that reads an old-tag directory and rewrites it under the new
+  one. Today a layout change is a manual, per-deployment operation.
+
+What's already solid and wouldn't need to be redone: the storage engine itself, real measured durability, real measured concurrency (single- and multi-process), and a working generic schema layer proven against more than one domain. SQL, transactions, and arbitrary joins would be built on top of that foundation, not require rebuilding it — but each is a serious, standalone effort, not a small extension of this project. The operational-maturity items above are a separate axis from SQL/transactions/joins entirely — a single-process, single-directory deployment can be genuinely production-hardened (backup, migration tooling, metrics) without ever growing a query planner or MVCC, and vice versa; neither axis is a prerequisite for the other.

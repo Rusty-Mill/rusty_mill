@@ -198,3 +198,24 @@ exist to prevent].
   client.rs` (1, `server`), `clients/python/tests/test_vectors.py`
   (5). Full sweep green — see `docs/PROJECT-STATUS.md` item 132 for the
   counts. `PROJECT-STATUS` item 38 closes with a pointer.
+- 2026-09-14: **`ECO-FR-008`'s "fails loudly without `python3`" wording
+  corrected — not a scope change, a bounded fix to an unnecessarily
+  narrow implementation.** This ADR's own text (and `docs/design/
+  SERVER-CLIENT-ECOSYSTEM-DESIGN.md`'s) assumed `python3` specifically
+  is always the right binary name; `tests/server_python_client.rs`
+  hardcoded `Command::new("python3")` accordingly. Found not to hold on
+  this session's own dev machine (Windows, `python3` absent from
+  `PATH`, `python` present and a real CPython 3.14) — the previous
+  session's own PR (`#212`) had worked around this by leaving the test
+  failing and documenting it as a known, environment-specific gap.
+  Fixed properly instead: `drive()` now calls a new `python_binary()`
+  helper that tries `python3` first (unchanged default, still what
+  `ubuntu-latest`/CI has), then `python`, accepting whichever answers
+  `--version` with `Python 3` (never a Python 2 `python` silently
+  used). The requirement itself — *some* CPython 3 interpreter, found
+  or a named panic, never a skip — is unchanged; only the one-binary-
+  name assumption was wrong. This also let `tests/server_python_
+  client.rs` run end to end in this environment for the first time,
+  which found and fixed a real, unrelated pre-existing bug (the Python
+  `WriteBatch` dataclass missing its `atomic` field, `ADR-0065`'s own
+  "Acceptance and implementation").

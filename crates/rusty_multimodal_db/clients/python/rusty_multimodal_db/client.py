@@ -445,6 +445,30 @@ class Client:
             return reply
         raise ProtocolError(type(reply).__name__)
 
+    def metrics(self) -> str:
+        """Process-wide observability counters (MET-FR-001, ADR-0064,
+        protocol 23) as Prometheus text exposition format. Any
+        authenticated class, not just read-write. Below 23,
+        ``UnsupportedError`` with no frame sent."""
+        reply = self._roundtrip(p.Metrics())
+        if isinstance(reply, p.MetricsResp):
+            return reply.text
+        raise ProtocolError(type(reply).__name__)
+
+    def backup(self, name: str) -> Tuple[int, int]:
+        """A live, lock-consistent snapshot copy of the selected table's
+        files into the server's ``SERVER_BACKUP_ROOT``-relative ``name``
+        (BAK-FR-001, ADR-0065, protocol 24) — ``(files, bytes)`` copied on
+        success. ``ServerError`` with ``ErrorCode.Unsupported`` when the
+        server has no backup root configured or this table has no known
+        data directory; ``ErrorCode.Storage`` for an existing target or an
+        I/O failure mid-copy. Below 24, ``UnsupportedError`` with no frame
+        sent."""
+        reply = self._roundtrip(p.Backup(name))
+        if isinstance(reply, p.BackedUp):
+            return reply.files, reply.bytes
+        raise ProtocolError(type(reply).__name__)
+
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
         """Add one edge under a symmetric relation label (LNK-FR-012,
         protocol 14). Returns normally whether the edge is new or already

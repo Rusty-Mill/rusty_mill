@@ -164,6 +164,29 @@ def main() -> int:
             print(f"compact={r.records};{r.slots_reclaimed};{r.log_entries_folded};{r.edge_logs_folded}")
         except UnsupportedError as e:
             print(f"compact=unsupported:{e}")
+
+        # Protocol 23 (MET-FR-004): process-wide counters as Prometheus
+        # text -- gated as a read, any authenticated class, not below
+        # ReadWrite. Just check a known metric name is present; the byte
+        # shape itself is proven by the wire-vector fixture.
+        try:
+            text = c.metrics()
+            print(f"metrics_has_counters={'yes' if 'dogserver_requests_total' in text else 'no'}")
+        except UnsupportedError as e:
+            print(f"metrics=unsupported:{e}")
+
+        # Protocol 24 (BAK-FR-006): a live snapshot copy -- the driver's
+        # server is started with a real SERVER_BACKUP_ROOT-equivalent and
+        # this table's backup_source, so this is a genuine successful
+        # copy, not just the Unsupported an unconfigured server would
+        # give (that refusal path is covered on the Rust side,
+        # tests/server_backup_integration.rs).
+        try:
+            files, size = c.backup(f"driver_{hello}")
+            print(f"backup_files={files}")
+            print(f"backup_bytes_positive={'yes' if size > 0 else 'no'}")
+        except UnsupportedError as e:
+            print(f"backup=unsupported:{e}")
     return 0
 
 

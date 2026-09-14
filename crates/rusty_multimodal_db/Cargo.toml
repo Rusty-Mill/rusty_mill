@@ -140,8 +140,10 @@ name = "server_client_only"
 required-features = ["client"]
 
 # `ECO-FR-008` (ADR-0043): the Python reference client driven against a
-# real `Entity` server. Needs `python3` on `PATH` and fails loudly
-# without it — a skipped test is not a test (see the file's own docs).
+# real `Entity` server. Needs a CPython 3 interpreter on `PATH`
+# (`python3` or `python`, whichever is found — see the test's own
+# `python_binary`) and fails loudly without one — a skipped test is not
+# a test (see the file's own docs).
 [[test]]
 name = "server_python_client"
 required-features = ["server"]
@@ -185,6 +187,18 @@ required-features = ["server", "research"]
 # `Entity`/`Relation`, all front-door domains).
 [[test]]
 name = "server_hub_differential"
+required-features = ["server"]
+
+# `ADR-0064`: process-wide counters over a real socket — `server` alone.
+[[test]]
+name = "server_metrics_integration"
+required-features = ["server"]
+
+# `ADR-0065`: a live snapshot copy into a `SERVER_BACKUP_ROOT`-relative
+# directory, reopened via `open_memory_production_stack_portable` to
+# prove the copy is real — `server` alone.
+[[test]]
+name = "server_backup_integration"
 required-features = ["server"]
 
 # Same treatment, same reason.

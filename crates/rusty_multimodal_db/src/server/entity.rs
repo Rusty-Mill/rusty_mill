@@ -52,15 +52,15 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    page_key, predicate_matches, validate_predicate, ConnectionStore, DeleteOutcome, InsertOutcome,
-    LinkOutcome, ReplaceIfOutcome, ReplaceOutcome,
+    copy_table_files, page_key, predicate_matches, validate_predicate, BackupReport,
+    ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{Delete, GetById, Insert, MultiLink, Replace, UpdateField};
 use crate::generic::store::valid_relation_label;
 use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const FIELD_LABEL: FieldRef = 0;
 pub const FIELD_KIND: FieldRef = 1;
@@ -72,6 +72,8 @@ pub struct EntityConnectionStore {
     store: GenericProductionStore<EntityProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
     journal: Option<CommitGroup>,
+    /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
+    backup_source: Option<PathBuf>,
 }
 
 impl EntityConnectionStore {
@@ -79,7 +81,14 @@ impl EntityConnectionStore {
         Self {
             store,
             journal: None,
+            backup_source: None,
         }
+    }
+
+    /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
+    pub fn with_backup_source(mut self, path: PathBuf) -> Self {
+        self.backup_source = Some(path);
+        self
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -119,6 +128,7 @@ impl EntityConnectionStore {
         Ok(Self {
             store,
             journal: Some(journal),
+            backup_source: None,
         })
     }
 
@@ -563,6 +573,16 @@ impl ConnectionStore for EntityConnectionStore {
     /// write lock; a file that could not be rewritten is `Storage`.
     fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
         self.store.compact().map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `BAK-FR-002`/`006` (ADR-0065) — see
+    /// `MemoryConnectionStore::backup` for the full contract; identical
+    /// here.
+    fn backup(&self, target_dir: &Path) -> Result<BackupReport, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        self.store
+            .with_exclusive(|_| copy_table_files(base, target_dir))
+            .map_err(|_| ErrorCode::Storage)
     }
 
     /// `LNK-FR-009` (ADR-0047): open labels — any valid label is

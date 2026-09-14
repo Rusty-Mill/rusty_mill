@@ -9,12 +9,12 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::ConnectionStore;
+use super::{copy_table_files, BackupReport, ConnectionStore};
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::production::{AllIds, TransactionalStore};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `Dog::breed` — read-only over this protocol: no `ScannableField`/
 /// `UpdateField` exists for it in-process either (only `age` is mutable,
@@ -37,6 +37,10 @@ pub struct DogConnectionStore<S> {
     /// group-commit discipline of `GRP-FR-001`–`004` (ADR-0026), so its
     /// `fsync` never runs inside `with_exclusive`.
     journal: Option<CommitGroup>,
+    /// `BAK-FR-002` (ADR-0065): the directory this table's files live
+    /// in, when the caller knows one — `None` from a scratch/ephemeral
+    /// binary; `Request::Backup` answers `Unsupported` without it.
+    backup_source: Option<PathBuf>,
 }
 
 impl<S> DogConnectionStore<S> {
@@ -47,7 +51,17 @@ impl<S> DogConnectionStore<S> {
         Self {
             store,
             journal: None,
+            backup_source: None,
         }
+    }
+
+    /// `BAK-FR-002` (ADR-0065): name the directory `Request::Backup`
+    /// should copy this table's files from — the same on-disk root the
+    /// caller already passed to whatever `S` was opened/created with.
+    /// Independent of `S`'s own capabilities, unlike `with_journal`.
+    pub fn with_backup_source(mut self, path: PathBuf) -> Self {
+        self.backup_source = Some(path);
+        self
     }
 }
 
@@ -92,6 +106,7 @@ where
         Ok(Self {
             store,
             journal: Some(journal),
+            backup_source: None,
         })
     }
 
@@ -194,6 +209,19 @@ where
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect()
+    }
+
+    /// `BAK-FR-002`/`006` (ADR-0065): copy every file under
+    /// `self.backup_source`'s prefix, under `S`'s own write lock —
+    /// `Unsupported` when this adapter was built with no known data
+    /// directory. Unlike `Memory`/`Entity`/`Relation`, `Dog` supports
+    /// backup without supporting `Insert`/`Replace`/`Delete`/`Compact`
+    /// at all — backup only ever copies existing files, it never
+    /// depends on runtime record-set mutation.
+    fn backup(&self, target_dir: &Path) -> Result<BackupReport, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        TransactionalStore::with_exclusive(&self.store, |_| copy_table_files(base, target_dir))
+            .map_err(|_| ErrorCode::Storage)
     }
 
     fn filter_eq(&self, _field: FieldRef, _value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
