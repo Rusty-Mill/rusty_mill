@@ -36,7 +36,7 @@ adk-sessions.workspace = true
 adk-tools.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-test.workspace = true
-axum = "0.7"
+axum.workspace = true
 rusty_a2a = { workspace = true, default-features = false, features = [
   "server",
   "client",

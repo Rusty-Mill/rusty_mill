@@ -36,7 +36,14 @@ async fn run_sync(plugin: &mut MemoryCorePlugin, hub: &str, node: &str) -> Value
     let fut = plugin
         .dispatch_async(
             HANDLER_SYNC,
-            &json!({ "hub_url": hub, "secret": SECRET, "node_id": node }),
+            &json!({
+                "hub_url": hub,
+                "secret": SECRET,
+                "node_id": node,
+                // This suite deliberately runs the hub on loopback; opt out
+                // of the SSRF guard that otherwise refuses it (see #6).
+                "allow_private_hub": true,
+            }),
         )
         .expect("sync must be async");
     fut.await.expect("sync ok")

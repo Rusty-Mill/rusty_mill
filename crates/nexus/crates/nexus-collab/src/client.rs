@@ -540,17 +540,49 @@ fn peer_info_payload(peer: &PeerInfo) -> Value {
     serde_json::to_value(peer).unwrap_or(Value::Null)
 }
 
+/// Prefixes the collab bridge is permitted to relay from a peer onto
+/// the local kernel bus via [`bridge_republish`]'s `publish_core`
+/// escape hatch. `publish_core` bypasses the kernel's namespace
+/// anti-spoof check (`nexus_kernel::event_bus::type_id_in_namespace`,
+/// normally enforced by `publish_plugin`), so without this allowlist
+/// any relay peer could send a [`ServerMessage::Envelope`] with an
+/// arbitrary wire-supplied `topic` — e.g.
+/// `"com.nexus.some-other-plugin.fake"` — and have every connected
+/// client republish it on its local bus under that plugin's
+/// namespace. [`OPS_TOPIC_PREFIX`] / [`COMMENTS_TOPIC_PREFIX`] cover
+/// what peers legitimately relay; [`COLLAB_TOPIC_PREFIX`] covers the
+/// bridge's own synthesized presence/peer-lifecycle/connection-state
+/// topics.
+const ALLOWED_BRIDGE_TOPIC_PREFIXES: &[&str] =
+    &[OPS_TOPIC_PREFIX, COLLAB_TOPIC_PREFIX, COMMENTS_TOPIC_PREFIX];
+
 /// Republish an inbound payload on the local bus, tagging the event's
-/// `emitting_plugin` as [`COLLAB_PLUGIN_ID`]. This serves two roles:
+/// `emitting_plugin` as [`COLLAB_BRIDGE_PLUGIN_ID`]. This serves two
+/// roles:
 ///
-/// * Bypasses the kernel's namespace anti-spoof check (the collab
-///   bridge legitimately republishes events on the editor's topics —
-///   `com.nexus.editor.ops.*` — and `publish_core` is the kernel's
-///   trusted-core-plugin escape hatch).
+/// * Uses `publish_core` — the kernel's trusted-core-plugin escape
+///   hatch — so the bridge can republish under the editor's own
+///   `com.nexus.editor.ops.*` namespace despite not being the
+///   `com.nexus.editor` plugin. Because `publish_core` bypasses the
+///   kernel's namespace anti-spoof check entirely, `topic` is first
+///   validated against [`ALLOWED_BRIDGE_TOPIC_PREFIXES`]; anything
+///   outside that allowlist (e.g. a spoofed topic from a malicious
+///   relay peer) is logged and dropped before it ever reaches
+///   `publish_core`.
 /// * Lets the outbound subscriber detect "bridge-authored" events by
 ///   inspecting `emitting_plugin` and skip them, breaking the
 ///   relay-loop without per-topic special casing.
 pub(crate) fn bridge_republish(bus: &EventBus, topic: &str, payload: Value) {
+    if !ALLOWED_BRIDGE_TOPIC_PREFIXES
+        .iter()
+        .any(|prefix| topic.starts_with(prefix))
+    {
+        tracing::warn!(
+            %topic,
+            "nexus-collab: dropping inbound envelope with disallowed topic prefix"
+        );
+        return;
+    }
     let event = NexusEvent::Custom {
         type_id: topic.to_string(),
         emitting_plugin: COLLAB_BRIDGE_PLUGIN_ID.to_string(),
@@ -601,5 +633,46 @@ mod tests {
         let v = peer_info_payload(&peer);
         assert_eq!(v["peer_id"], "alice");
         assert_eq!(v["display_name"], "Alice");
+    }
+
+    #[tokio::test]
+    async fn bridge_republish_allows_topic_within_allowlist() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe(EventFilter::CustomPrefix(OPS_TOPIC_PREFIX.to_string()));
+        bridge_republish(&bus, &format!("{OPS_TOPIC_PREFIX}doc-1"), json!({"x": 1}));
+        let published = sub.recv().await.expect("event should be republished");
+        match &published.event {
+            NexusEvent::Custom {
+                type_id,
+                emitting_plugin,
+                ..
+            } => {
+                assert_eq!(type_id, &format!("{OPS_TOPIC_PREFIX}doc-1"));
+                assert_eq!(emitting_plugin, COLLAB_BRIDGE_PLUGIN_ID);
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    /// Regression test for the relay-peer topic-spoofing gap: a wire
+    /// envelope's `topic` used to be forwarded to `publish_core`
+    /// verbatim, letting any relay peer forge an event under an
+    /// arbitrary plugin's namespace (bypassing the kernel's
+    /// `type_id_in_namespace` anti-spoof check). Pre-fix, this
+    /// `try_recv` would observe the spoofed event; post-fix it must
+    /// see nothing.
+    #[tokio::test]
+    async fn bridge_republish_drops_topic_outside_allowlist() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe(EventFilter::All);
+        bridge_republish(
+            &bus,
+            "com.nexus.some-other-plugin.fake",
+            json!({"malicious": true}),
+        );
+        assert!(
+            matches!(sub.try_recv(), Ok(None)),
+            "spoofed topic outside the allowlist must not reach the local kernel bus"
+        );
     }
 }

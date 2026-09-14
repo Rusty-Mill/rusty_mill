@@ -3,6 +3,7 @@
 //! `meshed.schema_registry.client`.
 
 use crate::models::{CompatibilityMode, CompatibilityViolation};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_err::Error;
 use rusty_request::{Client, Json};
 
@@ -55,6 +56,33 @@ fn valid_modes_list() -> String {
         .map(|mode| format!("'{}'", mode.as_str()))
         .collect();
     format!("[{}]", parts.join(", "))
+}
+
+/// The set of characters percent-encoded when a caller-supplied
+/// `subject` is spliced into a single path segment of a Schema
+/// Registry request URL: ASCII controls/space plus every character
+/// with structural meaning in a URL (`/` a path separator, `?`/`#`
+/// starting the query/fragment, `%` the escape character itself, and
+/// the remaining `gen-delims`/backslash). This keeps a caller-supplied
+/// `subject` confined to exactly one path segment, so it can't
+/// introduce an extra segment, escape into the query string, or
+/// address a different subject than the one the caller passed in.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'{')
+    .add(b'}');
+
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
 }
 
 /// Schema Registry client wrapper that enforces `FULL_TRANSITIVE`
@@ -122,7 +150,7 @@ impl SchemaRegistryEnforcer {
         mode: CompatibilityMode,
     ) -> Result<(), SchemaRegistryError> {
         let path = match subject {
-            Some(subject) => format!("{}/config/{subject}", self.base_url),
+            Some(subject) => format!("{}/config/{}", self.base_url, encode_path_segment(subject)),
             None => format!("{}/config", self.base_url),
         };
         let mut body = Json::object();
@@ -138,7 +166,7 @@ impl SchemaRegistryEnforcer {
         &self,
         subject: &str,
     ) -> Result<String, SchemaRegistryError> {
-        let path = format!("{}/config/{subject}", self.base_url);
+        let path = format!("{}/config/{}", self.base_url, encode_path_segment(subject));
         let response = self.client.get(&path)?.send().await?;
         let response = response.error_for_status()?;
         let body = response.json()?;
@@ -162,7 +190,11 @@ impl SchemaRegistryEnforcer {
         subject: &str,
         schema_str: &str,
     ) -> Result<i64, RegisterSchemaError> {
-        let path = format!("{}/subjects/{subject}/versions", self.base_url);
+        let path = format!(
+            "{}/subjects/{}/versions",
+            self.base_url,
+            encode_path_segment(subject)
+        );
         let mut body = Json::object();
         body.insert("schema", schema_str);
         body.insert("schemaType", "AVRO");
@@ -301,6 +333,23 @@ mod tests {
         assert_eq!(request.method, "PUT");
         assert_eq!(request.target, "/config/my-subject");
         assert!(request.body.contains("FORWARD_TRANSITIVE"));
+    }
+
+    #[rusty_tokio::test]
+    async fn set_subject_compatibility_percent_encodes_subject_path_traversal() {
+        let (url, server) = start_fake_server(200, "{}");
+        let enforcer = SchemaRegistryEnforcer::new(&url);
+        enforcer
+            .set_subject_compatibility("../config", "FORWARD_TRANSITIVE")
+            .await
+            .unwrap();
+
+        let request = server.await.unwrap();
+        assert_eq!(request.method, "PUT");
+        // "../config" must be percent-encoded as a literal path segment,
+        // not left as a path-traversal-normalizable sequence that could
+        // escape "/config/<subject>" onto a different endpoint.
+        assert_eq!(request.target, "/config/..%2Fconfig");
     }
 
     #[rusty_tokio::test]

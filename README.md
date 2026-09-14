@@ -47,6 +47,16 @@ bootstrapped as eight native crates (`rusty-hister-core` through
 capability inventory and two open decision-requests (search engine, JS-
 rendering crawler) — no port implementation lands until those are decided.
 
+An eighth addition, `rusty_proxmox`, `rusty_opnsense`, `rusty_homelab_mcp`,
+`rusty_fedora_agent`, and `rusty_fedora`, is a homelab-infrastructure
+cluster: Proxmox VE and OPNsense REST clients, an MCP server exposing that
+homelab control as tools, and an agent/client pair for scoped local Fedora
+host control. Unlike the numbered waves and the nexus/`rusty_multimodal_db`/
+`rusty_hister` merges above, no record of when or how these 5 crates landed
+survives — they predate `RELEASE_NOTES.md`'s earliest recorded entries, so
+their arrival is placed here, alongside the broader crate build-out,
+without a specific date.
+
 ## Crates
 
 | Crate | Path | Purpose |

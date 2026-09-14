@@ -721,12 +721,11 @@ impl Drop for LspClient {
     }
 }
 
-/// Convert a filesystem path to an LSP `file://` URI. Cross-platform
-/// only to the extent that `Path::display()` is — Windows callers
-/// would want a smarter implementation but Nexus doesn't ship there
-/// today (CLAUDE.md notes WSL/Linux only).
+/// Convert a filesystem path to an LSP `file://` URI. Delegates to
+/// [`crate::uri::path_to_file_uri`] for RFC 3986-correct percent-encoding
+/// (spaces, `#`, `?`, non-ASCII bytes) — see that module's doc comment.
 fn file_uri(path: &std::path::Path) -> String {
-    format!("file://{}", path.display())
+    crate::uri::path_to_file_uri(path)
 }
 
 /// Minimal client capabilities — enough for completion / hover /

@@ -937,12 +937,19 @@ impl crate::SessionPolicy for BusBridgePolicy {
 /// policy. Drives [`crate::session::run_session_resumed`] with an inherited
 /// `seed_rounds` prefix and an optional `follow_up` message; an empty seed +
 /// no follow-up is an ordinary fresh run.
+///
+/// `skill_policy` is the gap-closing fix for `com.nexus.skills::invoke`'s
+/// capability-gate drop — a restriction folded from the invoked skill's
+/// `depends_on` chain. When present it wraps *outside* `manifest_policy` so
+/// a skill's restrictions can only narrow, never loosen, whatever an
+/// archetype's own `[tools]` manifest already allows.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_session_optionally_gated_resumed<D, P, T>(
     driver: &D,
     dispatcher: &T,
     base_policy: P,
     manifest_policy: Option<crate::ManifestToolPolicy>,
+    skill_policy: Option<crate::ManifestToolPolicy>,
     goal: &str,
     system: &str,
     archetype: Option<String>,
@@ -953,7 +960,7 @@ pub(crate) async fn run_session_optionally_gated_resumed<D, P, T>(
 ) -> crate::session::AgentSession
 where
     D: crate::ChatDriver + ?Sized,
-    P: crate::SessionPolicy,
+    P: crate::SessionPolicy + 'static,
     T: crate::ToolDispatcher + ?Sized,
 {
     // Phase 5.5 follow-up — make opt-in retries idempotency-aware. When a
@@ -966,39 +973,28 @@ where
         config.non_idempotent_tools =
             crate::AgentToolRegistry::global().non_idempotent_tool_names();
     }
-    match manifest_policy {
-        Some(mp) => {
-            let wrapped = crate::ManifestPolicyGate::new(base_policy, mp);
-            crate::session::run_session_resumed(
-                driver,
-                dispatcher,
-                &wrapped,
-                goal,
-                system,
-                archetype,
-                id,
-                config,
-                seed_rounds,
-                follow_up,
-            )
-            .await
-        }
-        None => {
-            crate::session::run_session_resumed(
-                driver,
-                dispatcher,
-                &base_policy,
-                goal,
-                system,
-                archetype,
-                id,
-                config,
-                seed_rounds,
-                follow_up,
-            )
-            .await
-        }
-    }
+    let policy: Box<dyn crate::SessionPolicy> = match (manifest_policy, skill_policy) {
+        (None, None) => Box::new(base_policy),
+        (Some(mp), None) => Box::new(crate::ManifestPolicyGate::new(base_policy, mp)),
+        (None, Some(sp)) => Box::new(crate::ManifestPolicyGate::new(base_policy, sp)),
+        (Some(mp), Some(sp)) => Box::new(crate::ManifestPolicyGate::new(
+            crate::ManifestPolicyGate::new(base_policy, mp),
+            sp,
+        )),
+    };
+    crate::session::run_session_resumed(
+        driver,
+        dispatcher,
+        policy.as_ref(),
+        goal,
+        system,
+        archetype,
+        id,
+        config,
+        seed_rounds,
+        follow_up,
+    )
+    .await
 }
 
 #[cfg(test)]

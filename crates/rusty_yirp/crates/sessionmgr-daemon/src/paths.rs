@@ -68,7 +68,20 @@ pub fn state_root() -> Result<PathBuf> {
 }
 
 pub fn ensure_dir(context: &'static str, dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir).map_err(|e| Error::io(context, dir.to_path_buf(), e))
+    std::fs::create_dir_all(dir).map_err(|e| Error::io(context, dir.to_path_buf(), e))?;
+    // 0o700: session directories hold `state.json` (the full launch
+    // command) and `transcript.jsonl` (every byte a session printed or
+    // received), so the containing directory must not be readable or
+    // traversable by anyone but the owner. Applied unconditionally, not
+    // only on first creation, so a directory left loose by a pre-fix run
+    // is tightened the next time it is touched.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::io(context, dir.to_path_buf(), e))?;
+    }
+    Ok(())
 }
 
 /// The flat socket directory. See the module docs for why sockets are not

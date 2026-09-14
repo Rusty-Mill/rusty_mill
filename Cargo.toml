@@ -532,14 +532,15 @@ boringtun = "0.7"
 # (Apache-2.0) and `repository`, so its fourteen crates carry literal
 # `[package]` fields -- rusty_db treatment. `thiserror` ("2") and `schemars`
 # ("0.8", against rusty_key's "1.0.4") both stay literal on the crates that
-# use them rather than displacing this root's existing entries. `axum` is a
-# fourth split: `adk-a2a` (dev-dependency only) and the `a2a-agent-server`
-# example pin the older "0.7" line against this root's "0.8" -- a real
-# `Router`/`axum::serve` API break between the two (confirmed by attempting
-# the bump: `axum::serve` gained an `IntoFuture` bound that a 0.7-built
-# `Router` doesn't satisfy when both versions land in the same dependency
-# graph), so kept literal and tracked as a migration rather than bumped
-# blind.
+# use them rather than displacing this root's existing entries. `axum` was
+# a fourth split -- `adk-a2a` (dev-dependency only) and the
+# `a2a-agent-server` example pinned the older "0.7" line against this
+# root's "0.8" (a real `Router`/`axum::serve` API break between the two)
+# -- completed as part of round 7's gap-closing pass (finding 18's
+# `rusty_a2a` migration had left these two dependents on the old pin,
+# which only surfaced as a duplicate-crate-version compile failure once
+# CI exercised a full `--all-features` workspace build); both now inherit
+# this entry via `axum.workspace = true` like every other consumer.
 adk-core = { path = "crates/rusty_adk/crates/adk-core", version = "0.1.0" }
 adk-macros = { path = "crates/rusty_adk/crates/adk-macros", version = "0.1.0" }
 adk-tools = { path = "crates/rusty_adk/crates/adk-tools", version = "0.1.0" }

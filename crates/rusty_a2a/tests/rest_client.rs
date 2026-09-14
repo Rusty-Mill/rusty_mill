@@ -417,7 +417,7 @@ async fn subscribe_uses_the_spec_literal_get_binding() {
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     // `get(...)` alone: axum answers 405 Method Not Allowed to a POST on a
     // route that declares no POST handler.
-    let router = axum::Router::new().route("/tasks/:id", get(subscribe));
+    let router = axum::Router::new().route("/tasks/{id}", get(subscribe));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(20)).await;
 

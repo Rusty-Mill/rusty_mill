@@ -7,7 +7,7 @@ name = "a2a-agent-server"
 version = "0.1.0"
 dependencies = [
  "adk-a2a",
- "axum 0.7.9",
+ "axum 0.8.9",
  "rusty-adk",
  "serde_json",
  "tokio",
@@ -159,7 +159,7 @@ dependencies = [
  "adk-tools",
  "async-stream",
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "futures",
  "rusty_a2a",
  "rusty_base64",
@@ -8058,6 +8058,7 @@ version = "0.1.0"
 dependencies = [
  "nexus-kernel",
  "nexus-plugins",
+ "rusty_url",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -11767,6 +11768,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "futures-util",
+ "percent-encoding",
  "reqwest 0.13.4",
  "rp-core",
  "serde",
@@ -12423,6 +12425,7 @@ dependencies = [
 name = "rusty-meshed-observability"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "rusty-meshed-schema-registry",
  "rusty_err",
  "rusty_http",
@@ -12457,6 +12460,7 @@ dependencies = [
 name = "rusty-meshed-schema-registry"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "rusty_err",
  "rusty_http",
  "rusty_request",
@@ -12671,7 +12675,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "chrono",
  "ed25519-dalek 3.0.0",
  "eventsource-stream",
@@ -12681,7 +12685,7 @@ dependencies = [
  "p256 0.14.0",
  "prost",
  "prost-types",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "rusty_base64",
  "rusty_uuid",
  "serde",
@@ -16509,6 +16513,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc 0.2.189",
  "rusty_http",
  "serde",
  "serde_json",

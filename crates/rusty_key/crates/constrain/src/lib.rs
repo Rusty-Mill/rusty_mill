@@ -6,11 +6,13 @@
 //! Owns the [`Policy`] and [`ToolDispatch`] traits (ARCHITECTURE §4).
 
 mod approval;
+mod inspect;
 mod plan;
 mod policy;
 mod security;
 
 pub use approval::{ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger};
+pub use inspect::{DefaultInspector, Inspection, ReturnInspector};
 pub use plan::{PlanController, PlanDecision};
 pub use policy::{
     within_workspace, AcpPolicy, BashGuard, ModePolicy, PermissionMode, Policy, PolicyChain,

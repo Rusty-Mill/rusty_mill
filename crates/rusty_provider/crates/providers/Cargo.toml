@@ -16,6 +16,7 @@ thiserror = "2"
 tracing.workspace = true
 bytes.workspace = true
 eventsource-stream.workspace = true
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio.workspace = true

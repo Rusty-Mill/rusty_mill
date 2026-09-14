@@ -320,7 +320,7 @@ impl Capability {
 
 /// An immutable set of capabilities granted to a plugin.
 ///
-/// Internally a bitmask over the `Capability` discriminant for O(1) contains.
+/// Internally a `HashSet<Capability>` for O(1) amortized contains.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
 #[cfg_attr(

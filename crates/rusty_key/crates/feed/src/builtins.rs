@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::error::ToolError;
 use crate::exec::{BashStream, LocalExecutor, ToolExecutor};
 use crate::tool::{AiSdkTool, ToolRegistry};
+use rk_constrain::PolicyError;
 use serde_json::Value;
 
 mod descriptors {
@@ -76,14 +77,63 @@ fn resolve(root: &Path, args: &Value) -> Result<PathBuf, ToolError> {
     })
 }
 
+/// Canonicalize `path` (already lexically vetted against `root` by
+/// `WorkspacePolicy::before_tool`) and re-verify the *canonical* target is
+/// still inside `root` before any fs call opens it. `within_workspace`
+/// (`constrain::policy`) is lexical-only and never touches disk, so it cannot
+/// see through a symlink committed inside the workspace that resolves
+/// outside it (round7 #24) -- every builtin that actually opens a path must
+/// close that gap here, right before the syscall.
+///
+/// Walks up to the nearest existing ancestor first, because the target of
+/// `write_file`/`edit_file` may not exist yet; that also catches a
+/// symlinked *directory*, not just a symlinked leaf file. Returns the
+/// canonical path to operate on; callers that want a pretty relative label
+/// for output text should keep using the pre-canonical `resolve()` result
+/// via [`rel`] since it already passed the lexical policy check.
+fn canonicalize_within(root: &Path, path: &Path) -> Result<PathBuf, ToolError> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| ToolError::Policy(PolicyError::OutsideWorkspace(root.to_path_buf())))?;
+
+    let mut existing: &Path = path;
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        if let Some(name) = existing.file_name() {
+            trailing.push(name.to_os_string());
+        }
+        existing = parent;
+    }
+
+    let mut canonical = existing
+        .canonicalize()
+        .map_err(|_| ToolError::Policy(PolicyError::OutsideWorkspace(path.to_path_buf())))?;
+    for name in trailing.into_iter().rev() {
+        canonical.push(name);
+    }
+
+    if canonical.starts_with(&canonical_root) {
+        Ok(canonical)
+    } else {
+        Err(ToolError::Policy(PolicyError::OutsideWorkspace(
+            path.to_path_buf(),
+        )))
+    }
+}
+
 async fn read_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
-    Ok(tokio::fs::read_to_string(&path).await?)
+    let verified = canonicalize_within(&root, &path)?;
+    Ok(tokio::fs::read_to_string(&verified).await?)
 }
 
 async fn list_directory_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
-    let mut entries = tokio::fs::read_dir(&path).await?;
+    let verified = canonicalize_within(&root, &path)?;
+    let mut entries = tokio::fs::read_dir(&verified).await?;
     let mut names = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
         names.push(entry.file_name().to_string_lossy().into_owned());
@@ -114,11 +164,12 @@ fn rel(root: &Path, p: &Path) -> String {
 
 async fn write_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
+    let verified = canonicalize_within(&root, &path)?;
     let content = arg_str(&args, "content")?;
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = verified.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&path, content.as_bytes()).await?;
+    tokio::fs::write(&verified, content.as_bytes()).await?;
     Ok(format!(
         "wrote {} bytes to {}",
         content.len(),
@@ -128,16 +179,17 @@ async fn write_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError
 
 async fn edit_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
+    let verified = canonicalize_within(&root, &path)?;
     let old = arg_str(&args, "old_string")?;
     let new = arg_str(&args, "new_string")?;
-    let content = tokio::fs::read_to_string(&path).await?;
+    let content = tokio::fs::read_to_string(&verified).await?;
     match content.matches(&old).count() {
         0 => Err(ToolError::InvalidArgs(format!(
             "edit_file: no match for old_string in {}",
             rel(&root, &path)
         ))),
         1 => {
-            tokio::fs::write(&path, content.replacen(&old, &new, 1).as_bytes()).await?;
+            tokio::fs::write(&verified, content.replacen(&old, &new, 1).as_bytes()).await?;
             Ok(format!("edited {}", rel(&root, &path)))
         }
         n => Err(ToolError::InvalidArgs(format!(
@@ -152,8 +204,14 @@ async fn glob_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let full = root.join(&pattern);
     let entries = glob::glob(&full.to_string_lossy())
         .map_err(|e| ToolError::InvalidArgs(format!("bad glob pattern: {e}")))?;
+    // A glob hit that lexically matched inside the workspace can still be a
+    // symlink resolving outside it (round7 #24) -- filter through the same
+    // canonical re-check `read_file`/`write_file` use, dropping escapees
+    // rather than failing the whole listing (consistent with the existing
+    // `filter_map(Result::ok)` soft-fail on individual glob errors below).
     let mut hits: Vec<String> = entries
         .filter_map(Result::ok)
+        .filter(|p| canonicalize_within(&root, p).is_ok())
         .map(|p| rel(&root, &p))
         .collect();
     hits.sort();
@@ -186,7 +244,10 @@ async fn grep_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let re = regex::Regex::new(&pattern)
         .map_err(|e| ToolError::InvalidArgs(format!("bad regex: {e}")))?;
     let start = match args.get("path").and_then(Value::as_str) {
-        Some(p) if !p.is_empty() => resolve(&root, &args)?,
+        Some(p) if !p.is_empty() => {
+            let raw = resolve(&root, &args)?;
+            canonicalize_within(&root, &raw)?
+        }
         _ => root.clone(),
     };
     let recursive = args
@@ -204,7 +265,15 @@ async fn grep_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
 
     let mut out = Vec::new();
     for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else {
+        // `collect_files` walks real directory entries, but a subdirectory
+        // along the way (or `file` itself) may be a symlink resolving
+        // outside the workspace (round7 #24); re-verify and read through the
+        // canonical path, skipping escapees the same way an unreadable file
+        // is already skipped below.
+        let Ok(canonical) = canonicalize_within(&root, &file) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&canonical) else {
             continue;
         };
         for (i, line) in content.lines().enumerate() {
@@ -365,6 +434,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[cfg(unix)]
+    fn symlink_file(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("create symlink");
+    }
+    #[cfg(windows)]
+    fn symlink_file(target: &Path, link: &Path) {
+        std::os::windows::fs::symlink_file(target, link).expect("create symlink");
+    }
+
+    /// Round7 #24: a symlink committed inside the workspace that points at a
+    /// file outside the workspace root passes `within_workspace`'s lexical
+    /// check (the symlink's own path is inside the workspace) but must not
+    /// let `read_file`/`write_file` actually reach the file it resolves to.
+    #[tokio::test]
+    async fn symlink_escaping_workspace_is_rejected_for_read_and_write() {
+        let root = tmp("symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "rk-builtins-symlink-outside-{}",
+            std::process::id()
+        ));
+        std::fs::write(&outside, "leaked-secret").unwrap();
+        let link = root.join("escape.txt");
+        symlink_file(&outside, &link);
+
+        let read_err = read_file_impl(root.clone(), json!({"path": "escape.txt"}))
+            .await
+            .expect_err("read through a workspace-escaping symlink must be rejected");
+        assert!(
+            matches!(read_err, ToolError::Policy(_)),
+            "expected a policy error, got {read_err:?}"
+        );
+
+        let write_err = write_file_impl(
+            root.clone(),
+            json!({"path": "escape.txt", "content": "pwned"}),
+        )
+        .await
+        .expect_err("write through a workspace-escaping symlink must be rejected");
+        assert!(
+            matches!(write_err, ToolError::Policy(_)),
+            "expected a policy error, got {write_err:?}"
+        );
+
+        // The outside file must be untouched by the rejected write.
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "leaked-secret");
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

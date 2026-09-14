@@ -34,7 +34,11 @@ pub fn eval(src: &str) -> Result<i64, String> {
         return Ok(0);
     }
     let tokens = tokenize(src)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = parser.parse_comma()?;
     if parser.pos != parser.tokens.len() {
         return Err("syntax error in arithmetic expression".into());
@@ -328,9 +332,26 @@ fn strip_compound_eq(op: &'static str) -> &'static str {
     }
 }
 
+/// Cap on `(...)`-nesting depth during parsing — matching rusty_regx's
+/// parser.rs::MAX_NESTING_DEPTH pattern, which guards the identical bug
+/// class in a sibling crate: unbounded parenthesis nesting recurses the
+/// parser itself (each nesting level cascades through the whole
+/// precedence chain, `parse_comma` down to `parse_primary`, before ever
+/// reaching the `(` again), so a pathological `$(((((...)))))`  with tens
+/// of thousands of levels overflows the native stack before the parser
+/// ever finishes. Checked eagerly in `parse_primary`'s `(` branch, before
+/// recursing further, so a pathologically deep input can't overflow the
+/// parser's own stack before this check ever runs. `Expr` is private to
+/// this module (nothing outside it can hand `eval_expr` a deeper tree),
+/// so this one cap also bounds `eval_expr`'s tree-walk recursion — it
+/// only ever walks trees this parser built.
+const MAX_PAREN_DEPTH: u32 = 64;
+
 struct Parser {
     tokens: Vec<Tok>,
     pos: usize,
+    /// Current `(...)`-nesting depth, checked against [`MAX_PAREN_DEPTH`].
+    depth: u32,
 }
 
 impl Parser {
@@ -578,12 +599,17 @@ impl Parser {
             }
             Some(Tok::Op("(")) => {
                 self.pos += 1;
+                self.depth += 1;
+                if self.depth > MAX_PAREN_DEPTH {
+                    return Err("arithmetic expression: too deeply nested".into());
+                }
                 // A full expression, including assignment and comma —
                 // `(i = 5) + 1` and `(a, b)` are both real.
                 let v = self.parse_comma()?;
                 if self.eat(&[")"]).is_none() {
                     return Err("missing `)` in arithmetic".into());
                 }
+                self.depth -= 1;
                 Ok(v)
             }
             Some(Tok::Op("-" | "+" | "!" | "~")) => unreachable!("consumed by parse_unary"),
@@ -960,5 +986,22 @@ mod tests {
         assert_eq!(crate::vars::get("RUSH_SC"), Some("1".into())); // untouched
         assert_eq!(eval("0 ? (RUSH_SC = 9) : (RUSH_SC = 7)"), Ok(7));
         assert_eq!(crate::vars::get("RUSH_SC"), Some("7".into())); // only the taken branch ran
+    }
+
+    #[test]
+    fn deeply_nested_parens_reject_instead_of_overflowing_stack() {
+        // Finding 9: `(` recursion in `parse_primary` had no depth limit —
+        // tens of thousands of nested parens overflowed the native stack
+        // (a real process crash/abort) instead of erroring. A nesting
+        // depth well past `MAX_PAREN_DEPTH` must now be a normal parse
+        // error, and one comfortably under the cap must still work.
+        let within_cap = format!("{}{}{}", "(".repeat(63), "1", ")".repeat(63));
+        assert_eq!(eval(&within_cap), Ok(1));
+
+        let pathological = format!("{}{}{}", "(".repeat(50_000), "1", ")".repeat(50_000));
+        assert_eq!(
+            eval(&pathological),
+            Err("arithmetic expression: too deeply nested".into())
+        );
     }
 }
