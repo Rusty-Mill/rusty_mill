@@ -7,43 +7,37 @@ pub enum DiffOp<T> {
     Delete(T),
 }
 
-/// Maximum combined input length (`old.len() + new.len()`) accepted by
-/// [`diff_myers`].
-///
-/// The classic Myers algorithm implemented here records one snapshot of the
-/// entire edit-graph frontier (`v`, length `2 * (n + m) + 1`) per
-/// edit-distance step explored. For two inputs that share no common
-/// subsequence, the number of steps explored approaches `n + m`, so the
-/// total trace memory is `O((n + m)^2)` with no inherent upper bound (e.g.
-/// two independently generated ~50k-line files can demand multiple
-/// gigabytes). Rather than let that grow unbounded, inputs whose combined
-/// length exceeds this cap are rejected up front; the worst case under the
-/// cap is bounded to roughly `16 * MAX_COMBINED_LEN^2` bytes.
-pub const MAX_COMBINED_LEN: usize = 10_000;
+/// Upper bound on `old.len() + new.len()` for which the full Myers algorithm's
+/// O(D^2)-memory edit-graph trace (one `Vec<isize>` frontier retained per edit
+/// distance `0..=D`, where `D` can be as large as `old.len() + new.len()`) is
+/// computed. Without this guard, `diff_myers` is reachable with attacker- or
+/// user-controlled input of unbounded size (e.g. via `rgit diff` on any
+/// substantially modified tracked file) and its memory usage grows
+/// quadratically without limit, risking exhaustion on large or pathologically
+/// dissimilar inputs. Beyond the cap, `diff_myers` falls back to a trivial
+/// linear-memory diff (delete everything from `old`, then insert everything
+/// from `new`) instead of the full algorithm, trading diff quality for a hard
+/// memory ceiling on inputs that size alone already flags as abnormal.
+pub const MAX_DIFF_INPUT_LEN: usize = 20_000;
 
 /// Computes line-by-line or item-by-item diff using the classic Myers algorithm.
 ///
-/// Returns an error instead of diffing if `old.len() + new.len()` exceeds
-/// [`MAX_COMBINED_LEN`], to avoid the unbounded `O((n + m)^2)` memory this
-/// implementation's trace would otherwise require. See [`MAX_COMBINED_LEN`].
-pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Result<Vec<DiffOp<T>>, String> {
+/// If `old.len() + new.len()` exceeds [`MAX_DIFF_INPUT_LEN`], returns a
+/// trivial delete-all/insert-all diff instead of running the full algorithm;
+/// see [`MAX_DIFF_INPUT_LEN`] for why.
+pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> {
     let n = old.len();
     let m = new.len();
 
     if n == 0 && m == 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
-    if n + m > MAX_COMBINED_LEN {
-        return Err(format!(
-            "diff_myers: combined input length {} (old.len()={}, new.len()={}) exceeds \
-             the maximum of {}; this implementation's trace is O((n+m)^2) in the worst \
-             case and would risk an out-of-memory abort",
-            n + m,
-            n,
-            m,
-            MAX_COMBINED_LEN,
-        ));
+    if n + m > MAX_DIFF_INPUT_LEN {
+        let mut result = Vec::with_capacity(n + m);
+        result.extend(old.iter().cloned().map(DiffOp::Delete));
+        result.extend(new.iter().cloned().map(DiffOp::Insert));
+        return result;
     }
 
     let max_d = n + m;
@@ -76,13 +70,13 @@ pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Result<Vec<Diff
             v[idx] = x;
 
             if x as usize >= n && y as usize >= m {
-                return Ok(backtrack(&trace, old, new, offset));
+                return backtrack(&trace, old, new, offset);
             }
             k += 2;
         }
     }
 
-    Ok(backtrack(&trace, old, new, offset))
+    backtrack(&trace, old, new, offset)
 }
 
 fn backtrack<T: PartialEq + Clone>(
@@ -131,26 +125,23 @@ fn backtrack<T: PartialEq + Clone>(
 }
 
 /// Formats a unified diff string between two text strings.
-///
-/// Returns an error if the underlying [`diff_myers`] call does (see
-/// [`MAX_COMBINED_LEN`]).
 pub fn format_unified_diff(
     old_name: &str,
     new_name: &str,
     old_text: &str,
     new_text: &str,
-) -> Result<String, String> {
+) -> String {
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
 
-    let ops = diff_myers(&old_lines, &new_lines)?;
+    let ops = diff_myers(&old_lines, &new_lines);
 
     let mut out = String::new();
     out.push_str(&format!("--- {}\n", old_name));
     out.push_str(&format!("+++ {}\n", new_name));
 
     if ops.is_empty() {
-        return Ok(out);
+        return out;
     }
 
     out.push_str(&format!(
@@ -167,7 +158,7 @@ pub fn format_unified_diff(
         }
     }
 
-    Ok(out)
+    out
 }
 
 /// Applies a unified diff patch to an original text string.
@@ -353,7 +344,7 @@ mod tests {
         let old = vec!["apple", "banana", "cherry"];
         let new = vec!["apple", "durian", "cherry"];
 
-        let ops = diff_myers(&old, &new).expect("diff_myers failed");
+        let ops = diff_myers(&old, &new);
         assert_eq!(
             ops,
             vec![
@@ -369,7 +360,7 @@ mod tests {
     fn test_diff_myers_empty_empty_no_panic() {
         let old: Vec<&str> = vec![];
         let new: Vec<&str> = vec![];
-        let ops = diff_myers(&old, &new).expect("diff_myers failed");
+        let ops = diff_myers(&old, &new);
         assert_eq!(ops, Vec::<DiffOp<&str>>::new());
     }
 
@@ -377,7 +368,7 @@ mod tests {
     fn test_diff_myers_empty_old_nonempty_new() {
         let old: Vec<&str> = vec![];
         let new = vec!["a", "b"];
-        let ops = diff_myers(&old, &new).expect("diff_myers failed");
+        let ops = diff_myers(&old, &new);
         assert_eq!(ops, vec![DiffOp::Insert("a"), DiffOp::Insert("b")]);
     }
 
@@ -385,29 +376,67 @@ mod tests {
     fn test_diff_myers_nonempty_old_empty_new() {
         let old = vec!["a", "b"];
         let new: Vec<&str> = vec![];
-        let ops = diff_myers(&old, &new).expect("diff_myers failed");
+        let ops = diff_myers(&old, &new);
         assert_eq!(ops, vec![DiffOp::Delete("a"), DiffOp::Delete("b")]);
     }
 
     #[test]
-    fn test_diff_myers_rejects_oversized_combined_input() {
-        // Two inputs whose combined length clearly exceeds `MAX_COMBINED_LEN`, and
-        // which share no common subsequence (every element is unique to its own
-        // side). Pre-fix, this forced the Myers trace to grow to `O((n+m)^2)` --
-        // here that would mean tens of millions of `isize` clones. Post-fix, the
-        // guard at the top of `diff_myers` rejects the input up front, before any
-        // `O((n+m)^2)` allocation is attempted, so this stays fast regardless of
-        // how large `MAX_COMBINED_LEN` is calibrated to be.
-        let half = MAX_COMBINED_LEN / 2 + 1;
-        let old: Vec<String> = (0..half).map(|i| format!("old-{}", i)).collect();
-        let new: Vec<String> = (0..half).map(|i| format!("new-{}", i)).collect();
+    fn test_diff_myers_over_cap_uses_bounded_fallback_not_quadratic_trace() {
+        // Regression for unbounded O(D^2) trace memory in `diff_myers`
+        // (`trace.push(v.clone())` once per edit distance, reachable via
+        // `rgit diff` on any sufficiently modified tracked file). `old` and
+        // `new` here are *identical*, so a full Myers run (no size guard)
+        // would find zero edits and return an all-`Keep` result almost
+        // instantly, without ever growing the trace. The size guard must
+        // instead trigger purely on `old.len() + new.len()` exceeding
+        // `MAX_DIFF_INPUT_LEN` and fall back to the linear delete-all/
+        // insert-all diff regardless of content. Asserting that exact
+        // delete-then-insert shape (rather than all-`Keep`) proves the
+        // size-guarded fallback ran instead of the real algorithm — which is
+        // the mechanism that keeps memory bounded no matter how large or
+        // pathologically dissimilar `old`/`new` are, instead of growing
+        // without bound as input size increases.
+        let half = MAX_DIFF_INPUT_LEN;
+        let old: Vec<usize> = (0..half).collect();
+        let new: Vec<usize> = (0..half).collect();
+        assert!(old.len() + new.len() > MAX_DIFF_INPUT_LEN);
 
-        let err = diff_myers(&old, &new).expect_err("oversized disjoint input must be rejected");
+        let start = std::time::Instant::now();
+        let ops = diff_myers(&old, &new);
+        let elapsed = start.elapsed();
+
+        assert_eq!(ops.len(), old.len() + new.len());
         assert!(
-            err.contains(&MAX_COMBINED_LEN.to_string()),
-            "error should mention the cap: {}",
-            err
+            ops[..old.len()]
+                .iter()
+                .all(|op| matches!(op, DiffOp::Delete(_))),
+            "expected the fallback's delete-all prefix, got a real Myers trace instead"
         );
+        assert!(
+            ops[old.len()..]
+                .iter()
+                .all(|op| matches!(op, DiffOp::Insert(_))),
+            "expected the fallback's insert-all suffix, got a real Myers trace instead"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "fallback path must be O(n + m) and complete quickly, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_diff_myers_at_cap_still_uses_full_algorithm() {
+        // Sanity check on the guard's boundary: input sized at (not over)
+        // `MAX_DIFF_INPUT_LEN` must still take the real Myers path and
+        // produce a genuine diff (with `Keep`s), not the fallback.
+        let old: Vec<usize> = (0..MAX_DIFF_INPUT_LEN / 2 - 1).collect();
+        let mut new = old.clone();
+        new.push(999_999); // one extra element beyond the shared prefix
+        assert!(old.len() + new.len() <= MAX_DIFF_INPUT_LEN);
+
+        let ops = diff_myers(&old, &new);
+        assert!(ops.iter().any(|op| matches!(op, DiffOp::Keep(_))));
+        assert!(matches!(ops.last(), Some(DiffOp::Insert(999_999))));
     }
 
     #[test]
@@ -446,8 +475,7 @@ mod tests {
         let old_text = "header\n--kept\nfooter";
         let new_text = "header\n++added\nfooter";
 
-        let patch = format_unified_diff("a.txt", "b.txt", old_text, new_text)
-            .expect("format_unified_diff failed");
+        let patch = format_unified_diff("a.txt", "b.txt", old_text, new_text);
         assert!(patch.contains("\n---kept\n"));
         assert!(patch.contains("\n+++added\n"));
 
@@ -460,8 +488,7 @@ mod tests {
         let old_text = "line 1\nline 2\nline 3";
         let new_text = "line 1\nline 2 modified\nline 3";
 
-        let patch = format_unified_diff("a.txt", "b.txt", old_text, new_text)
-            .expect("format_unified_diff failed");
+        let patch = format_unified_diff("a.txt", "b.txt", old_text, new_text);
         assert!(patch.contains("+line 2 modified"));
         assert!(patch.contains("-line 2"));
 

@@ -558,10 +558,9 @@ impl Provider for GeminiProvider {
             return Err(crate::http::map_error_response(resp).await);
         }
 
-        let wire: WireResponse = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let body = crate::http::read_capped_body(resp).await?;
+        let wire: WireResponse =
+            serde_json::from_slice(&body).map_err(|e| ProviderError::Decode(e.to_string()))?;
         let candidate = wire.candidates.into_iter().next();
         let (text, reasoning, tool_calls, finish_reason) = match &candidate {
             Some(c) => {
@@ -726,10 +725,9 @@ impl Provider for GeminiProvider {
             return Err(crate::http::map_error_response(resp).await);
         }
 
-        let wire: WireBatchEmbedResponse = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let body = crate::http::read_capped_body(resp).await?;
+        let wire: WireBatchEmbedResponse =
+            serde_json::from_slice(&body).map_err(|e| ProviderError::Decode(e.to_string()))?;
 
         Ok(EmbeddingsResponse {
             object: "list",

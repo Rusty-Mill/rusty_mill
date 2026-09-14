@@ -38,6 +38,7 @@ pub mod privacy;
 mod provider;
 mod rag;
 pub mod sanitize;
+mod stream_buffer;
 mod tokens;
 pub mod tools;
 mod vectorstore;

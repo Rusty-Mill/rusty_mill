@@ -107,6 +107,18 @@ pub struct ComposedSkill {
     pub conflicts: Vec<ComposeConflict>,
 }
 
+/// Maximum `depends_on` chain depth [`visit`] will walk before
+/// bailing out. The white/gray/black colouring below already turns a
+/// *cycle* into an immediate [`ComposeError::Cycle`] (a back-edge into
+/// a `Gray` node is caught before recursing further), but a long
+/// *acyclic* chain — every id distinct, no back-edge — still recurses
+/// one stack frame per hop. Ordinary `.skill.md` content with a long
+/// enough `depends_on` chain could otherwise overflow the stack
+/// instead of surfacing a `ComposeError`. Mirrors
+/// `nexus_database::formula::eval::MAX_RECURSION_DEPTH` /
+/// `nexus_formats::markdown::embed::MAX_EMBED_DEPTH`.
+pub const MAX_COMPOSE_DEPTH: usize = 64;
+
 /// Errors that abort composition. Cycles + missing deps are both
 /// authoritative failures — a partial composition would be misleading.
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -129,6 +141,14 @@ pub enum ComposeError {
         /// repeated at the end so the loop is visually obvious.
         path: Vec<String>,
     },
+    /// `depends_on` chain nested deeper than [`MAX_COMPOSE_DEPTH`].
+    #[error("depends_on chain exceeds max depth {limit} while resolving '{id}'")]
+    DepthExceeded {
+        /// The configured cap.
+        limit: usize,
+        /// The skill id being visited when the cap was hit.
+        id: String,
+    },
 }
 
 fn visit(
@@ -137,7 +157,15 @@ fn visit(
     color: &mut HashMap<String, Color>,
     order: &mut Vec<String>,
     stack: &mut Vec<String>,
+    depth: usize,
 ) -> Result<(), ComposeError> {
+    if depth > MAX_COMPOSE_DEPTH {
+        return Err(ComposeError::DepthExceeded {
+            limit: MAX_COMPOSE_DEPTH,
+            id: id.to_string(),
+        });
+    }
+
     match color.get(id) {
         Some(Color::Black) => return Ok(()),
         Some(Color::Gray) => {
@@ -160,7 +188,7 @@ fn visit(
     color.insert(id.to_string(), Color::Gray);
     stack.push(id.to_string());
     for dep in &skill.meta.depends_on {
-        visit(dep, registry, color, order, stack)?;
+        visit(dep, registry, color, order, stack, depth + 1)?;
     }
     stack.pop();
     color.insert(id.to_string(), Color::Black);
@@ -183,7 +211,7 @@ pub fn compose(registry: &SkillRegistry, root_id: &str) -> Result<ComposedSkill,
     let mut color: HashMap<String, Color> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut stack: Vec<String> = Vec::new();
-    visit(root_id, registry, &mut color, &mut order, &mut stack)?;
+    visit(root_id, registry, &mut color, &mut order, &mut stack, 0)?;
 
     // Build fragments in the post-order (deps first, root last). DFS
     // already verified registry membership for every id in `order`,
@@ -418,6 +446,37 @@ mod tests {
         assert_eq!(ids[0], "a");
         assert_eq!(ids[ids.len() - 1], "d");
         assert_eq!(ids.len(), 4); // a, b, c, d — no double-a
+    }
+
+    #[test]
+    fn compose_rejects_dependency_chain_deeper_than_max_depth() {
+        // Linear chain id-0 -> id-1 -> ... -> id-N, no back-edge — the
+        // white/gray/black cycle check alone would happily walk the
+        // full chain since every id is distinct and only ever White
+        // when first visited. Without `MAX_COMPOSE_DEPTH`, `visit`
+        // recurses one stack frame per hop and a long enough chain
+        // (ordinary `.skill.md` `depends_on` content, not a cycle)
+        // overflows the stack instead of returning a `ComposeError`.
+        let chain_len = MAX_COMPOSE_DEPTH * 4 + 8;
+        let ids: Vec<String> = (0..=chain_len).map(|i| format!("id-{i}")).collect();
+        let skills: Vec<Skill> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let dep_owned: Vec<&str> = if i + 1 < ids.len() {
+                    vec![ids[i + 1].as_str()]
+                } else {
+                    vec![]
+                };
+                skill(id, &dep_owned, "BODY")
+            })
+            .collect();
+        let reg = registry_with(skills);
+        let err = compose(&reg, &ids[0]).unwrap_err();
+        assert!(
+            matches!(err, ComposeError::DepthExceeded { .. }),
+            "expected DepthExceeded, got {err:?}"
+        );
     }
 
     #[test]

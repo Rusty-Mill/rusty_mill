@@ -442,7 +442,7 @@ impl UriTemplate {
                     // A variable stops at the next literal, or at the end.
                     // Never crossing `/` is what keeps a template variable from
                     // being used to walk out of its namespace.
-                    let value = match parts.peek() {
+                    let raw_value = match parts.peek() {
                         Some(Part::Literal(next)) => {
                             let end = rest.find(next.as_str())?;
                             let value = &rest[..end];
@@ -456,16 +456,24 @@ impl UriTemplate {
                         }
                     };
 
-                    // Decode before rejecting: a raw `%2f`/`%2F` is a literal
-                    // `/` once decoded, and decoding must happen before the
-                    // traversal guard runs or an encoded slash would sail
-                    // through the check and only become a path separator
-                    // downstream, defeating the guard entirely.
-                    let decoded = percent_decode(value);
-                    if decoded.is_empty() || decoded.contains('/') {
+                    if raw_value.is_empty() {
                         return None;
                     }
-                    params.insert(name.clone(), decoded);
+
+                    // Decode *before* checking for a path separator or a
+                    // traversal segment. Checking the raw bytes first (and
+                    // decoding afterward) is exactly what a percent-encoded
+                    // bypass exploits: encoding the separator itself as
+                    // `%2f` contains no literal `/`, so a raw-bytes check
+                    // passes, and decoding it afterward reintroduces the
+                    // separator the check was meant to reject. A malformed
+                    // or non-UTF-8 percent sequence is rejected outright
+                    // rather than silently lossy-decoded.
+                    let value = percent_decode(raw_value)?;
+                    if value.is_empty() || value.contains('/') || value == ".." || value == "." {
+                        return None;
+                    }
+                    params.insert(name.clone(), value);
                 }
             }
         }
@@ -474,10 +482,15 @@ impl UriTemplate {
     }
 }
 
-fn percent_decode(value: &str) -> String {
+/// Percent-decodes `value`, rejecting invalid percent-encoding or
+/// non-UTF-8 output rather than lossily replacing it. A malformed escape
+/// (or one that decodes to invalid UTF-8) is treated as a rejection, not a
+/// best-effort decode, since this feeds a traversal check.
+fn percent_decode(value: &str) -> Option<String> {
     percent_encoding::percent_decode_str(value)
-        .decode_utf8_lossy()
-        .into_owned()
+        .decode_utf8()
+        .ok()
+        .map(|decoded| decoded.into_owned())
 }
 
 /// Implement the three resource methods by forwarding to a
@@ -606,6 +619,79 @@ mod tests {
     }
 
     #[test]
+    fn a_percent_encoded_slash_does_not_reintroduce_a_separator() {
+        // Before the fix, the raw-bytes `/`-check ran *before* decoding, so
+        // encoding the separator itself (`%2f`) had no literal `/` and slid
+        // past the check — only for `percent_decode` to hand the reader back
+        // `../../etc/passwd` anyway. Every variant below must still be
+        // rejected once decoding happens first.
+        assert!(
+            template("file:///logs/{name}")
+                .match_uri("file:///logs/..%2f..%2fetc%2fpasswd")
+                .is_none()
+        );
+        assert!(
+            template("file:///logs/{name}")
+                .match_uri("file:///logs/%2e%2e%2f%2e%2e%2fetc%2fpasswd")
+                .is_none()
+        );
+        // Mixed-case hex digits in the escape must not evade the check either.
+        assert!(
+            template("file:///logs/{name}")
+                .match_uri("file:///logs/%2E%2E%2Fetc%2Fpasswd")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bare_or_encoded_dot_dot_segment_is_rejected() {
+        // A single `..` segment never contains `/`, so it slipped through
+        // the old check with or without encoding. One matched segment still
+        // walks the reader's base up a directory, so both forms must fail.
+        assert!(
+            template("file:///logs/{name}")
+                .match_uri("file:///logs/..")
+                .is_none()
+        );
+        assert!(
+            template("file:///logs/{name}")
+                .match_uri("file:///logs/%2e%2e")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_incomplete_escape_is_kept_literal_not_lossy_decoded() {
+        // `percent_encoding` leaves a syntactically invalid escape (no hex
+        // digits, or non-hex digits) untouched rather than guessing at it —
+        // so these decode to their literal text, which carries no separator
+        // or traversal meaning and is accepted as an ordinary segment value.
+        let params = template("db://tables/{table}")
+            .match_uri("db://tables/%")
+            .expect("a lone `%` has no separator meaning once decoded");
+        assert_eq!(params.get("table").map(String::as_str), Some("%"));
+
+        let params = template("db://tables/{table}")
+            .match_uri("db://tables/%zz")
+            .expect("non-hex escape digits have no separator meaning either");
+        assert_eq!(params.get("table").map(String::as_str), Some("%zz"));
+    }
+
+    #[test]
+    fn a_valid_escape_decoding_to_invalid_utf8_is_rejected() {
+        // `%ff` is a syntactically valid escape, but the decoded byte is not
+        // valid UTF-8 on its own. Rejecting outright (rather than lossily
+        // replacing it) matches this checking the same string a reader would
+        // actually receive, not a stand-in with substituted replacement
+        // characters.
+        assert!(
+            template("db://tables/{table}")
+                .match_uri("db://tables/%ff")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn rejects_an_empty_variable() {
         assert!(
             template("db://tables/{table}")
@@ -627,24 +713,6 @@ mod tests {
             .match_uri("db://tables/my%20table")
             .expect("should match");
         assert_eq!(params.get("table").map(String::as_str), Some("my table"));
-    }
-
-    #[test]
-    fn a_variable_never_crosses_a_percent_encoded_slash() {
-        // Same guard as `a_variable_never_crosses_a_slash`, but the traversal
-        // is hidden behind `%2f`/`%2F` so it only becomes a literal `/`
-        // after percent-decoding. The rejection check must run on the
-        // decoded value, or the encoded slash sails through undetected.
-        assert!(
-            template("file:///logs/{name}.log")
-                .match_uri("file:///logs/..%2f..%2fetc%2fpasswd.log")
-                .is_none()
-        );
-        assert!(
-            template("file:///logs/{name}.log")
-                .match_uri("file:///logs/..%2F..%2Fetc%2Fpasswd.log")
-                .is_none()
-        );
     }
 
     #[tokio::test]
@@ -924,6 +992,31 @@ mod tests {
             ResourceContents::TextResourceContents { text, .. } => assert_eq!(text, "exact"),
             other => panic!("expected the concrete resource, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_percent_encoded_traversal_uri_never_reaches_the_reader() {
+        // End-to-end proof: a `file:///logs/{name}` reader that joins `name`
+        // onto a base directory must never be invoked with a percent-encoded
+        // traversal segment. If the bypass were still open, this reader
+        // would be called with `name == "../../etc/passwd"` and `read`
+        // would return its contents instead of a not-found error.
+        let registry = ResourceRegistry::new().with_template(
+            ResourceTemplate::new("file:///logs/{name}", "log-file"),
+            |req: ReadRequest| async move {
+                let name = req.param("name").unwrap_or_default().to_string();
+                Ok(vec![ResourceContents::text(
+                    format!("contents of {name}"),
+                    req.uri.clone(),
+                )])
+            },
+        );
+
+        let err = registry
+            .read("file:///logs/..%2f..%2fetc%2fpasswd")
+            .await
+            .expect_err("percent-encoded traversal must not match");
+        assert_eq!(err.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
     }
 
     #[tokio::test]

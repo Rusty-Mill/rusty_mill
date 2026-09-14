@@ -1215,3 +1215,21 @@ async fn chat_stream_reports_cache_tokens_from_message_start_in_the_final_usage(
     assert_eq!(usage.cached_tokens, Some(1000));
     assert_eq!(usage.cache_creation_tokens, Some(500));
 }
+
+#[tokio::test]
+async fn chat_rejects_oversized_response_instead_of_buffering_it() {
+    let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
+
+    let provider = AnthropicProvider::new(format!("http://{addr}"), "test-key");
+    let req = common::simple_request("claude-sonnet-5");
+    let err = provider
+        .chat(&req, "claude-sonnet-5", None)
+        .await
+        .expect_err("an oversized response body should be rejected");
+
+    assert!(
+        err.to_string().contains("cap"),
+        "expected an over-cap rejection, got: {err}"
+    );
+    let _ = server.join();
+}

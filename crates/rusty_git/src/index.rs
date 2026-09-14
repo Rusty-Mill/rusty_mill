@@ -22,20 +22,6 @@ const INDEX_VERSION: u32 = 2;
 /// + a 2-byte flags field.
 const ENTRY_FIXED_LEN: usize = 4 * 10 + SHA1_DIGEST_LEN + 2;
 
-/// Caps a claimed index-header entry `count` at however many fixed-size
-/// entries could actually fit in `content_len` remaining bytes.
-///
-/// `count` comes straight from the index file's own header and is fully
-/// attacker-controlled: the file's only integrity check is a non-keyed
-/// SHA-1 over its own bytes, which never bounds the claimed count. Without
-/// this cap, a crafted ~32-byte file claiming `count = u32::MAX` would
-/// drive an unbounded `Vec::with_capacity` allocation before any per-entry
-/// bounds check ever runs.
-fn capped_entry_count(count: usize, content_len: usize) -> usize {
-    let max_possible_entries = content_len.saturating_sub(12) / ENTRY_FIXED_LEN;
-    count.min(max_possible_entries)
-}
-
 /// Regular, non-executable file mode (git's own encoding: object-type
 /// nibble `1000` plus Unix permission bits).
 pub const MODE_REGULAR: u32 = 0o100644;
@@ -185,6 +171,18 @@ impl Index {
         let count = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
 
         let content_len = data.len() - SHA1_DIGEST_LEN;
+
+        // Bound the claimed entry count against the bytes actually available
+        // before trusting it for a pre-allocation -- each entry consumes at
+        // least ENTRY_FIXED_LEN bytes (checked again per-entry below), so a
+        // `count` that can't possibly fit in the remaining file is rejected
+        // here instead of driving an allocation-bomb `Vec::with_capacity`
+        // sized off an attacker-controlled 4-byte header field.
+        let max_possible_entries = content_len.saturating_sub(12) / ENTRY_FIXED_LEN;
+        if count > max_possible_entries {
+            return Err(IndexError::Truncated);
+        }
+
         let expected_checksum = &data[content_len..];
         let mut hasher = Sha1::new();
         hasher.update(&data[..content_len]);
@@ -192,7 +190,7 @@ impl Index {
             return Err(IndexError::ChecksumMismatch);
         }
 
-        let mut entries = Vec::with_capacity(capped_entry_count(count, content_len));
+        let mut entries = Vec::with_capacity(count);
         let mut cursor = 12;
         for _ in 0..count {
             if cursor + ENTRY_FIXED_LEN > content_len {
@@ -373,35 +371,17 @@ mod tests {
     }
 
     #[test]
-    fn capped_entry_count_bounds_a_huge_bogus_count() {
-        // `count` comes straight off a crafted index file's own header and
-        // is fully attacker-controlled (the file's only integrity check is
-        // a non-keyed SHA-1 over its own bytes, which never bounds the
-        // claimed count). A 12-byte-header-only file has room for exactly
-        // zero real entries, so a claimed `count` of u32::MAX must be
-        // capped down to 0, not passed straight through to
-        // `Vec::with_capacity`.
-        let capped = capped_entry_count(u32::MAX as usize, 12);
-        assert_eq!(capped, 0);
-    }
-
-    #[test]
-    fn huge_bogus_entry_count_is_rejected_without_unbounded_allocation() {
-        // Minimal well-formed header (DIRC, version 2) with `count` set to
-        // the max u32 -- fully attacker-controlled, and only ever checked
-        // against a non-keyed SHA-1 over the file's own bytes, so a
-        // crafted file can claim any count it likes. A naive
-        // `Vec::with_capacity(count)` before any per-entry bounds check
-        // would try to allocate space for ~4 billion fixed-size entries.
+    fn truncated_index_with_huge_claimed_count_is_rejected_without_allocating() {
+        // A minimal (truncated) index file whose header claims ~2 billion
+        // entries. Pre-fix, this drove `Vec::with_capacity(count)` off the
+        // raw header field before any check against the actual (tiny) file
+        // length -- an allocation-bomb DoS on a truncated/corrupt
+        // `.git/index`. Post-fix this must return `Err` quickly instead.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(DIRC_MAGIC);
         bytes.extend_from_slice(&INDEX_VERSION.to_be_bytes());
-        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
-        let checksum = sha1(&bytes);
-        bytes.extend_from_slice(&checksum);
-
-        // Must return a parse error instead of attempting an allocation
-        // sized off the attacker-controlled count.
+        bytes.extend_from_slice(&0x7FFF_FFFFu32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; SHA1_DIGEST_LEN]); // trailing checksum slot
         assert_eq!(Index::from_bytes(&bytes), Err(IndexError::Truncated));
     }
 }

@@ -54,6 +54,14 @@ fn format_num(n: f64) -> String {
     }
 }
 
+/// Cap on the number of fields a record (or an explicit `NF`/`$n`
+/// assignment) may have. Hostile input like `$999999999 = x` or
+/// `NF = 999999999` would otherwise drive an unbounded `Vec<String>`
+/// resize -- an easy allocation-exhaustion DoS from ordinary awk program
+/// input. 1,000,000 fields is far beyond any real awk workload but small
+/// enough to fail fast (a runtime error) instead of exhausting memory.
+const MAX_FIELDS: usize = 1_000_000;
+
 fn parse_leading_number(s: &str) -> f64 {
     let trimmed = s.trim_start();
     let mut end = 0;
@@ -75,6 +83,27 @@ fn parse_leading_number(s: &str) -> f64 {
     }
     if !saw_digit {
         return 0.0;
+    }
+    // Optional scientific-notation exponent (`e`/`E`, optional sign, one
+    // or more digits). Only consumed when it forms a *complete* exponent --
+    // a trailing bare "e"/"e+" with no digits after it is left unconsumed
+    // rather than silently dropped. Without this, this function disagreed
+    // with `Value::looks_numeric` (which accepts the whole string via
+    // `str::parse::<f64>`, exponent included) on strings like "1e10",
+    // truncating them to the digits before the `e` instead of the correct
+    // value.
+    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+        let mut exp_end = end + 1;
+        if exp_end < bytes.len() && (bytes[exp_end] == b'+' || bytes[exp_end] == b'-') {
+            exp_end += 1;
+        }
+        let exp_digits_start = exp_end;
+        while exp_end < bytes.len() && bytes[exp_end].is_ascii_digit() {
+            exp_end += 1;
+        }
+        if exp_end > exp_digits_start {
+            end = exp_end;
+        }
     }
     trimmed[..end].parse().unwrap_or(0.0)
 }
@@ -98,13 +127,8 @@ pub struct Interp {
     fs: String,
     ofs: String,
     nr: usize,
+    error: Option<String>,
 }
-
-/// Upper bound on the number of fields a record may hold. Guards
-/// `$(huge)=x` and `NF=huge` against resizing `self.fields` to an
-/// attacker/data-controlled size straight from a crafted input line —
-/// far beyond what any real awk script needs.
-const MAX_FIELDS: usize = 10_000_000;
 
 impl Interp {
     pub fn new(field_sep: &str) -> Self {
@@ -115,6 +139,7 @@ impl Interp {
             fs: field_sep.to_string(),
             ofs: " ".to_string(),
             nr: 0,
+            error: None,
         }
     }
 
@@ -151,27 +176,30 @@ impl Interp {
         }
     }
 
-    fn set_field(&mut self, n: i64, value: String) -> Result<(), String> {
+    fn set_field(&mut self, n: i64, value: String) {
+        if self.error.is_some() {
+            return;
+        }
         if n == 0 {
             self.record = value;
             self.split_record();
-            return Ok(());
+            return;
         }
         if n < 1 {
-            return Ok(());
+            return;
         }
         let idx = n as usize - 1;
         if idx >= MAX_FIELDS {
-            return Err(format!(
-                "awk: field index {n} exceeds the maximum supported field count ({MAX_FIELDS})"
+            self.error = Some(format!(
+                "awk: field index ${n} exceeds the maximum of {MAX_FIELDS} fields"
             ));
+            return;
         }
         if idx >= self.fields.len() {
             self.fields.resize(idx + 1, String::new());
         }
         self.fields[idx] = value;
         self.record = self.fields.join(&self.ofs);
-        Ok(())
     }
 
     fn get_var(&self, name: &str) -> Value {
@@ -188,16 +216,19 @@ impl Interp {
         }
     }
 
-    fn set_var(&mut self, name: &str, value: Value) -> Result<(), String> {
+    fn set_var(&mut self, name: &str, value: Value) {
+        if self.error.is_some() {
+            return;
+        }
         match name {
             "NF" => {
-                let raw = value.to_num().max(0.0);
-                if raw > MAX_FIELDS as f64 {
-                    return Err(format!(
-                        "awk: NF value {raw} exceeds the maximum supported field count ({MAX_FIELDS})"
+                let n = value.to_num().max(0.0) as usize;
+                if n > MAX_FIELDS {
+                    self.error = Some(format!(
+                        "awk: NF value {n} exceeds the maximum of {MAX_FIELDS} fields"
                     ));
+                    return;
                 }
-                let n = raw as usize;
                 self.fields.resize(n, String::new());
                 self.record = self.fields.join(&self.ofs);
             }
@@ -208,32 +239,41 @@ impl Interp {
                 self.vars.insert(name.to_string(), value);
             }
         }
-        Ok(())
     }
 
-    fn eval(&mut self, expr: &Expr) -> Result<Value, String> {
-        Ok(match expr {
+    /// Takes and clears any runtime error raised by field/`NF` cap
+    /// enforcement, so the caller (`AwkProgram::run`) can surface it
+    /// instead of silently continuing after a poisoned evaluation.
+    pub(crate) fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+
+    fn eval(&mut self, expr: &Expr) -> Value {
+        if self.error.is_some() {
+            return Value::Num(0.0);
+        }
+        match expr {
             Expr::Num(n) => Value::Num(*n),
             Expr::Str(s) => Value::Str(s.clone()),
             Expr::Field(inner) => {
-                let n = self.eval(inner)?.to_num() as i64;
+                let n = self.eval(inner).to_num() as i64;
                 Value::Str(self.get_field(n))
             }
             Expr::Var(name) => self.get_var(name),
             Expr::Concat(a, b) => {
-                let mut s = self.eval(a)?.to_str();
-                s.push_str(&self.eval(b)?.to_str());
+                let mut s = self.eval(a).to_str();
+                s.push_str(&self.eval(b).to_str());
                 Value::Str(s)
             }
-            Expr::BinOp(op, a, b) => self.eval_binop(op, a, b)?,
-            Expr::Not(e) => Value::Num(if self.eval(e)?.truthy() { 0.0 } else { 1.0 }),
-            Expr::Neg(e) => Value::Num(-self.eval(e)?.to_num()),
+            Expr::BinOp(op, a, b) => self.eval_binop(op, a, b),
+            Expr::Not(e) => Value::Num(if self.eval(e).truthy() { 0.0 } else { 1.0 }),
+            Expr::Neg(e) => Value::Num(-self.eval(e).to_num()),
             Expr::Match {
                 expr,
                 pattern,
                 negate,
             } => {
-                let text = self.eval(expr)?.to_str();
+                let text = self.eval(expr).to_str();
                 // Compiled fresh per evaluation -- a known perf
                 // simplification (no compiled-regex cache), fine at the
                 // line-processing scale this engine targets.
@@ -243,36 +283,36 @@ impl Interp {
                 Value::Num(if is_match != *negate { 1.0 } else { 0.0 })
             }
             Expr::Assign(lvalue, value_expr) => {
-                let value = self.eval(value_expr)?;
+                let value = self.eval(value_expr);
                 match lvalue {
-                    LValue::Var(name) => self.set_var(name, value.clone())?,
+                    LValue::Var(name) => self.set_var(name, value.clone()),
                     LValue::Field(inner) => {
-                        let n = self.eval(inner)?.to_num() as i64;
-                        self.set_field(n, value.to_str())?;
+                        let n = self.eval(inner).to_num() as i64;
+                        self.set_field(n, value.to_str());
                     }
                 }
                 value
             }
-        })
+        }
     }
 
-    fn eval_binop(&mut self, op: &BinOp, a: &Expr, b: &Expr) -> Result<Value, String> {
-        Ok(match op {
+    fn eval_binop(&mut self, op: &BinOp, a: &Expr, b: &Expr) -> Value {
+        match op {
             BinOp::And => {
-                if !self.eval(a)?.truthy() {
-                    return Ok(Value::Num(0.0));
+                if !self.eval(a).truthy() {
+                    return Value::Num(0.0);
                 }
-                Value::Num(if self.eval(b)?.truthy() { 1.0 } else { 0.0 })
+                Value::Num(if self.eval(b).truthy() { 1.0 } else { 0.0 })
             }
             BinOp::Or => {
-                if self.eval(a)?.truthy() {
-                    return Ok(Value::Num(1.0));
+                if self.eval(a).truthy() {
+                    return Value::Num(1.0);
                 }
-                Value::Num(if self.eval(b)?.truthy() { 1.0 } else { 0.0 })
+                Value::Num(if self.eval(b).truthy() { 1.0 } else { 0.0 })
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                let x = self.eval(a)?.to_num();
-                let y = self.eval(b)?.to_num();
+                let x = self.eval(a).to_num();
+                let y = self.eval(b).to_num();
                 Value::Num(match op {
                     BinOp::Add => x + y,
                     BinOp::Sub => x - y,
@@ -283,8 +323,8 @@ impl Interp {
                 })
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let x = self.eval(a)?;
-                let y = self.eval(b)?;
+                let x = self.eval(a);
+                let y = self.eval(b);
                 let ord = compare(&x, &y);
                 let result = match op {
                     BinOp::Eq => ord == std::cmp::Ordering::Equal,
@@ -297,100 +337,87 @@ impl Interp {
                 };
                 Value::Num(if result { 1.0 } else { 0.0 })
             }
-        })
+        }
     }
 
-    fn exec(&mut self, stmt: &Stmt, emit: &mut dyn FnMut(&str)) -> Result<(), String> {
+    fn exec(&mut self, stmt: &Stmt, emit: &mut dyn FnMut(&str)) {
+        if self.error.is_some() {
+            return;
+        }
         match stmt {
             Stmt::Print(exprs) => {
                 if exprs.is_empty() {
                     emit(&self.get_field(0));
                 } else {
-                    let mut parts = Vec::with_capacity(exprs.len());
-                    for e in exprs {
-                        parts.push(self.eval(e)?.to_str());
-                    }
+                    let parts: Vec<String> = exprs.iter().map(|e| self.eval(e).to_str()).collect();
                     emit(&parts.join(&self.ofs));
                 }
             }
             Stmt::Expr(e) => {
-                self.eval(e)?;
+                self.eval(e);
             }
             Stmt::If(cond, then_branch, else_branch) => {
-                if self.eval(cond)?.truthy() {
-                    self.exec(then_branch, emit)?;
+                if self.eval(cond).truthy() {
+                    self.exec(then_branch, emit);
                 } else if let Some(e) = else_branch {
-                    self.exec(e, emit)?;
+                    self.exec(e, emit);
                 }
             }
             Stmt::Block(stmts) => {
                 for s in stmts {
-                    self.exec(s, emit)?;
+                    self.exec(s, emit);
                 }
             }
         }
-        Ok(())
     }
 
-    fn pattern_matches(&mut self, pattern: &Pattern) -> Result<bool, String> {
-        Ok(match pattern {
+    fn pattern_matches(&mut self, pattern: &Pattern) -> bool {
+        match pattern {
             Pattern::Always => true,
-            Pattern::Expr(e) => self.eval(e)?.truthy(),
+            Pattern::Expr(e) => self.eval(e).truthy(),
             Pattern::Begin | Pattern::End => false, // driven separately
-        })
+        }
     }
 
-    fn run_action(&mut self, rule: &Rule, emit: &mut dyn FnMut(&str)) -> Result<(), String> {
+    fn run_action(&mut self, rule: &Rule, emit: &mut dyn FnMut(&str)) {
         match &rule.action {
             Some(stmts) => {
                 for s in stmts {
-                    self.exec(s, emit)?;
+                    self.exec(s, emit);
                 }
             }
             None => emit(&self.get_field(0)),
         }
-        Ok(())
     }
 
     /// Runs every `BEGIN` rule's action, in order.
-    pub fn run_begin(
-        &mut self,
-        program: &Program,
-        emit: &mut dyn FnMut(&str),
-    ) -> Result<(), String> {
+    pub fn run_begin(&mut self, program: &Program, emit: &mut dyn FnMut(&str)) {
         for rule in &program.rules {
             if rule.pattern == Pattern::Begin {
-                self.run_action(rule, emit)?;
+                self.run_action(rule, emit);
             }
         }
-        Ok(())
     }
 
     /// Runs every non-`BEGIN`/`END` rule whose pattern matches the current
     /// record (set via [`Self::set_record`]).
-    pub fn run_main_rules(
-        &mut self,
-        program: &Program,
-        emit: &mut dyn FnMut(&str),
-    ) -> Result<(), String> {
+    pub fn run_main_rules(&mut self, program: &Program, emit: &mut dyn FnMut(&str)) {
         for rule in &program.rules {
             if matches!(rule.pattern, Pattern::Begin | Pattern::End) {
                 continue;
             }
-            if self.pattern_matches(&rule.pattern)? {
-                self.run_action(rule, emit)?;
+            if self.pattern_matches(&rule.pattern) {
+                self.run_action(rule, emit);
             }
         }
-        Ok(())
     }
 
     /// Runs every `END` rule's action, in order.
-    pub fn run_end(&mut self, program: &Program, emit: &mut dyn FnMut(&str)) -> Result<(), String> {
+    pub fn run_end(&mut self, program: &Program, emit: &mut dyn FnMut(&str)) {
         for rule in &program.rules {
             if rule.pattern == Pattern::End {
-                self.run_action(rule, emit)?;
+                self.run_action(rule, emit);
             }
         }
-        Ok(())
     }
 }

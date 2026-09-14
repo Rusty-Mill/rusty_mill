@@ -14,7 +14,8 @@
 //! repeat vocab_size times: float32 score | int32 len | u8[len] piece
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::Path;
 
 use fancy_regex::Regex;
@@ -459,38 +460,106 @@ impl Spm {
             }
         }
 
-        loop {
-            let mut best_score = f32::NEG_INFINITY;
-            let mut best = None;
-            for i in 0..tokens.len().saturating_sub(1) {
-                let mut merged = self.vocab[tokens[i]].clone();
-                merged.extend_from_slice(&self.vocab[tokens[i + 1]]);
-                if let Some(&id) = self.lookup.get(&merged) {
-                    if self.scores[id] > best_score {
-                        best_score = self.scores[id];
-                        best = Some((i, id));
-                    }
+        // Greedy highest-score adjacent merging via a min/max-heap of candidate
+        // merges over a doubly-linked-list token sequence (the standard BPE
+        // merge algorithm), instead of rescanning every remaining pair from
+        // scratch on every merge step. The naive rescan is O(n^2): with the
+        // whole model + tokenizer pinned to a single generation worker thread
+        // (see `server.rs`), a single large adversarial request body (tens of
+        // thousands of highly mergeable characters) could pin that thread for
+        // an unbounded time — a full-server CPU-exhaustion DoS. This version
+        // only re-evaluates the (at most two) new pairs created by each merge,
+        // giving O(n log n) overall.
+        let n = tokens.len();
+        if n > 1 {
+            let mut sym = tokens;
+            let mut prev: Vec<Option<usize>> = (0..n).map(|i| i.checked_sub(1)).collect();
+            let mut next: Vec<Option<usize>> =
+                (0..n).map(|i| (i + 1 < n).then_some(i + 1)).collect();
+            let mut alive = vec![true; n];
+            let mut version = vec![0u32; n];
+
+            let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
+            for i in 0..n - 1 {
+                self.push_candidate(&mut heap, &sym, &version, i, i + 1);
+            }
+
+            while let Some(cand) = heap.pop() {
+                if !alive[cand.left]
+                    || !alive[cand.right]
+                    || version[cand.left] != cand.left_gen
+                    || version[cand.right] != cand.right_gen
+                {
+                    continue; // stale: an endpoint changed since this candidate was queued
+                }
+                sym[cand.left] = cand.id;
+                version[cand.left] = version[cand.left].wrapping_add(1);
+                alive[cand.right] = false;
+                let right_next = next[cand.right];
+                next[cand.left] = right_next;
+                if let Some(rn) = right_next {
+                    prev[rn] = Some(cand.left);
+                }
+                if let Some(p) = prev[cand.left] {
+                    self.push_candidate(&mut heap, &sym, &version, p, cand.left);
+                }
+                if let Some(rn) = next[cand.left] {
+                    self.push_candidate(&mut heap, &sym, &version, cand.left, rn);
                 }
             }
-            match best {
-                Some((i, id)) => {
-                    tokens[i] = id;
-                    tokens.remove(i + 1);
-                }
-                None => break,
+
+            tokens = Vec::with_capacity(n);
+            let mut cur = Some(0usize);
+            while let Some(node) = cur {
+                tokens.push(sym[node]);
+                cur = next[node];
             }
         }
         out.extend(tokens);
     }
 
+    /// Push the merge candidate for adjacent nodes `left`/`right`, if their
+    /// concatenation is itself a vocab entry. `version` snapshots let the heap
+    /// consumer detect and skip stale candidates in O(1) instead of re-scanning.
+    fn push_candidate(
+        &self,
+        heap: &mut BinaryHeap<Candidate>,
+        sym: &[usize],
+        version: &[u32],
+        left: usize,
+        right: usize,
+    ) {
+        let mut merged = self.vocab[sym[left]].clone();
+        merged.extend_from_slice(&self.vocab[sym[right]]);
+        if let Some(&id) = self.lookup.get(&merged) {
+            heap.push(Candidate {
+                score: self.scores[id],
+                left,
+                right,
+                id,
+                left_gen: version[left],
+                right_gen: version[right],
+            });
+        }
+    }
+
     /// Decode, stripping the leading space after BOS and expanding `<0xXX>`.
+    ///
+    /// A GGUF's embedding-tensor row count (`config.vocab_size`, derived from
+    /// the `tok_embd` tensor) can disagree with the tokenizer's own vocab-list
+    /// length; an out-of-range `token` therefore returns no bytes instead of
+    /// panicking and killing the sole generation worker thread (mirrors
+    /// `GrammarStage`'s `self.pieces.get(token as usize)` and `Bpe::decode`'s
+    /// `.get(token).cloned().unwrap_or_default()`).
     pub fn decode(&self, prev_token: usize, token: usize) -> Vec<u8> {
         // Special tokens decode to their literal text (no space-strip / byte
         // parsing).
         if self.specials.contains(token) {
-            return self.vocab[token].clone();
+            return self.vocab.get(token).cloned().unwrap_or_default();
         }
-        let piece = &self.vocab[token];
+        let Some(piece) = self.vocab.get(token) else {
+            return Vec::new();
+        };
         let mut bytes: &[u8] = piece;
         if prev_token == 1 && bytes.first() == Some(&b' ') {
             bytes = &bytes[1..];
@@ -504,6 +573,48 @@ impl Spm {
     /// Vocabulary size.
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
+    }
+}
+
+/// One candidate adjacent merge in [`Spm::encode_piece`]'s heap: nodes `left`
+/// and `right` (positions in the doubly-linked token sequence) merge into
+/// vocab id `id` at `score`. `left_gen`/`right_gen` snapshot each node's
+/// [merge generation](Spm::encode_piece) at push time so a stale entry (an
+/// endpoint already consumed by an earlier, higher-priority merge) is
+/// detected and skipped in O(1) when popped instead of being re-validated by
+/// a full rescan.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    score: f32,
+    left: usize,
+    right: usize,
+    id: usize,
+    left_gen: u32,
+    right_gen: u32,
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.left == other.left
+    }
+}
+
+impl Eq for Candidate {}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // `BinaryHeap` is a max-heap: highest score wins, and — matching the
+        // original left-to-right scan's strict `>` comparison — the leftmost
+        // position wins ties.
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.left.cmp(&self.left))
     }
 }
 
@@ -968,6 +1079,64 @@ mod tests {
             prev = id;
         }
         assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn spm_decode_out_of_range_token_does_not_panic() {
+        // Regression test: a GGUF's embedding-tensor row count
+        // (`config.vocab_size`, derived from the `tok_embd` tensor) can
+        // disagree with the tokenizer's own vocab-list length, producing a
+        // token id beyond `vocab.len()`. Pre-fix, `Spm::decode` indexed
+        // `self.vocab[token]` directly and panicked here, killing the sole
+        // generation worker thread; post-fix it falls back to no bytes.
+        let tk = hello_tokenizer();
+        assert_eq!(tk.decode(0, tk.vocab_size()), Vec::<u8>::new());
+        assert_eq!(tk.decode(0, 999_999), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn spm_encode_large_repeated_input_completes_quickly() {
+        // Regression test for the O(n^2) merge-loop CPU-exhaustion DoS
+        // (`encode_piece` used to rescan every remaining adjacent pair from
+        // scratch on every merge step). Build a vocab where "a" repeatedly
+        // merges into ever-longer "aaa..." pieces (maximizing merge count for
+        // an all-'a' input, the worst case for a per-step full rescan), then
+        // encode a large adversarial input and require it complete quickly.
+        //
+        // Since the whole model + tokenizer runs on a single dedicated
+        // generation worker thread (see `server.rs`), the old rescan-per-merge
+        // loop turned one such request into a full-server hang: verified by
+        // temporarily reverting `encode_piece` to the old "rescan all pairs,
+        // clone+concat+hashmap-lookup per candidate" loop and observing this
+        // same input did not finish within the bound below (it was still
+        // running when killed after far exceeding it), where the fixed
+        // heap+linked-list version finishes in well under it.
+        let mut entries: Vec<(Vec<u8>, f32)> = vec![
+            (b"<unk>".to_vec(), 0.0),
+            (b"\n<s>\n".to_vec(), 0.0),
+            (b"\n</s>\n".to_vec(), 0.0),
+            (b" ".to_vec(), -1.0),
+            (b"a".to_vec(), 0.0),
+        ];
+        let mut piece = b"a".to_vec();
+        for score in 1..500 {
+            piece.push(b'a');
+            entries.push((piece.clone(), score as f32));
+        }
+        let vocab: Vec<Vec<u8>> = entries.iter().map(|(p, _)| p.clone()).collect();
+        let scores: Vec<f32> = entries.iter().map(|(_, s)| *s).collect();
+        let tk = Spm::from_vocab(vocab, scores);
+
+        let input = "a".repeat(20_000);
+        let start = std::time::Instant::now();
+        let ids = tk.encode(&input, false, false);
+        let elapsed = start.elapsed();
+        assert!(!ids.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "encode of {} chars took {elapsed:?}; expected near-linear time",
+            input.len(),
+        );
     }
 
     #[test]

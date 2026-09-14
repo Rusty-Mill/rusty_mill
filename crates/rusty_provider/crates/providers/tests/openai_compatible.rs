@@ -1259,3 +1259,39 @@ async fn embeddings_uses_the_byok_override_key_instead_of_the_configured_one() {
 
     assert_eq!(resp.data.len(), 1);
 }
+
+#[tokio::test]
+async fn chat_rejects_oversized_response_instead_of_buffering_it() {
+    let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
+
+    let provider = OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key");
+    let req = common::simple_request("gpt-4o-mini");
+    let err = provider
+        .chat(&req, "gpt-4o-mini", None)
+        .await
+        .expect_err("an oversized response body should be rejected");
+
+    assert!(
+        err.to_string().contains("cap"),
+        "expected an over-cap rejection, got: {err}"
+    );
+    let _ = server.join();
+}
+
+#[tokio::test]
+async fn embeddings_rejects_oversized_response_instead_of_buffering_it() {
+    let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
+
+    let provider = OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key");
+    let req = embeddings_request(EmbeddingsInput::Single("hello".to_string()));
+    let err = provider
+        .embeddings(&req, "text-embedding-3-small", None)
+        .await
+        .expect_err("an oversized response body should be rejected");
+
+    assert!(
+        err.to_string().contains("cap"),
+        "expected an over-cap rejection, got: {err}"
+    );
+    let _ = server.join();
+}

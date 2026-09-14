@@ -2,8 +2,7 @@
 //! and provides the `dispatch` call used by all higher-level plugin code.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Instant;
 
 use wasmtime::{Engine, Instance, Linker, Module, Store, StoreLimitsBuilder, Trap};
@@ -216,6 +215,148 @@ impl Default for PluginData {
     }
 }
 
+// ─── EpochWatcher ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only counter of watcher threads spawned by
+    /// [`EpochWatcher::new`], tracked per-calling-thread (`thread_local!`)
+    /// so concurrent tests that each create their own `WasmSandbox` on
+    /// separate libtest worker threads don't race on a shared counter.
+    ///
+    /// Regression coverage for the thread-exhaustion DoS previously in
+    /// `WasmSandbox::dispatch`: before the fix, `dispatch` spawned a
+    /// brand-new unjoined OS thread on *every* call whenever
+    /// `max_execution_ms > 0` (the manifest default), so a
+    /// high-frequency dispatch path (IPC fan-out, event-bus delivery)
+    /// grew OS thread count 1:1 with call volume. Now exactly one
+    /// watcher thread is spawned per `WasmSandbox` instance (inside
+    /// `EpochWatcher::new`, called once from `WasmSandbox::new`),
+    /// regardless of dispatch frequency.
+    pub(crate) static EPOCH_WATCHER_THREADS_SPAWNED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Shared mutable state guarded by [`EpochWatcher`]'s condvar.
+struct EpochWatcherState {
+    /// Wall-clock instant at which the watcher thread should call
+    /// `Engine::increment_epoch()`, or `None` when no dispatch call is
+    /// currently in flight with a deadline armed.
+    deadline: Option<Instant>,
+    /// Set by `Drop` to tell the watcher thread to exit.
+    shutdown: bool,
+}
+
+/// A single long-lived background thread that fires
+/// `Engine::increment_epoch()` when the current dispatch's wall-clock
+/// deadline elapses.
+///
+/// One instance is created per [`WasmSandbox`] (in [`WasmSandbox::new`])
+/// rather than per [`WasmSandbox::dispatch`] call — this bounds OS thread
+/// creation to "one per loaded plugin", independent of dispatch
+/// frequency. Previously `dispatch` spawned a brand-new unjoined thread
+/// on every call whenever `max_execution_ms > 0`, which under a
+/// high-frequency dispatch path (frequent IPC calls, event-bus fan-out)
+/// grew OS thread count unbounded -- a thread-exhaustion `DoS`.
+struct EpochWatcher {
+    state: Arc<(Mutex<EpochWatcherState>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EpochWatcher {
+    /// Spawn the watcher thread for `engine`.
+    fn new(engine: Engine) -> Self {
+        let state = Arc::new((
+            Mutex::new(EpochWatcherState {
+                deadline: None,
+                shutdown: false,
+            }),
+            Condvar::new(),
+        ));
+        let state_clone = Arc::clone(&state);
+        let thread = std::thread::spawn(move || {
+            let (lock, condvar) = &*state_clone;
+            let mut guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                if guard.shutdown {
+                    return;
+                }
+                match guard.deadline {
+                    None => {
+                        guard = condvar
+                            .wait(guard)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    Some(deadline) => {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            guard.deadline = None;
+                            drop(guard);
+                            engine.increment_epoch();
+                            guard = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        } else {
+                            let (g, _timed_out) = condvar
+                                .wait_timeout(guard, deadline - now)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            guard = g;
+                        }
+                    }
+                }
+            }
+        });
+
+        #[cfg(test)]
+        EPOCH_WATCHER_THREADS_SPAWNED.with(|c| c.set(c.get() + 1));
+
+        Self {
+            state,
+            thread: Some(thread),
+        }
+    }
+
+    /// Arm the deadline: the watcher thread will call
+    /// `Engine::increment_epoch()` once at `deadline` unless
+    /// [`cancel`](EpochWatcher::cancel) is called first.
+    fn arm(&self, deadline: Instant) {
+        let (lock, condvar) = &*self.state;
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.deadline = Some(deadline);
+        drop(guard);
+        condvar.notify_one();
+    }
+
+    /// Cancel a previously [`arm`](EpochWatcher::arm)ed deadline so a late
+    /// fire doesn't trip the *next* dispatch call. A no-op if the deadline
+    /// already fired or was never armed.
+    fn cancel(&self) {
+        let (lock, _condvar) = &*self.state;
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deadline = None;
+    }
+}
+
+impl Drop for EpochWatcher {
+    fn drop(&mut self) {
+        {
+            let (lock, condvar) = &*self.state;
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown = true;
+            condvar.notify_one();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 // ─── WasmSandbox ─────────────────────────────────────────────────────────────
 
 /// A sandboxed WASM plugin instance.
@@ -231,8 +372,10 @@ impl Default for PluginData {
 pub struct WasmSandbox {
     store: Store<PluginData>,
     instance: Instance,
-    /// Cloned handle used to increment the epoch from the timeout watcher thread.
-    engine: Engine,
+    /// Shared background thread that fires the wall-clock epoch-deadline
+    /// timeout; one per sandbox instance, armed/cancelled (not spawned)
+    /// on every `dispatch` call. See [`EpochWatcher`].
+    watcher: EpochWatcher,
     /// Wall-clock dispatch deadline from the manifest; 0 means no limit.
     max_execution_ms: u64,
     /// Per-call fuel budget from the manifest; 0 means metering disabled.
@@ -313,10 +456,12 @@ impl WasmSandbox {
                     reason: format!("instantiation failed: {e}"),
                 })?;
 
+        let watcher = EpochWatcher::new(engine);
+
         Ok(Self {
             store,
             instance,
-            engine,
+            watcher,
             max_execution_ms: config.max_execution_ms,
             fuel_per_call: config.fuel,
         })
@@ -398,26 +543,16 @@ impl WasmSandbox {
                 })?;
         }
 
-        // Arm the wall-clock deadline watcher. The spawned thread sleeps for
-        // max_execution_ms then increments the epoch once, which wasmtime
-        // converts to Trap::Interrupt inside the dispatch call. An AtomicBool
-        // cancels the increment if dispatch returns before the deadline.
-        let watcher_guard = if self.max_execution_ms > 0 {
+        // Arm the shared epoch-deadline watcher (spawned once in `new`,
+        // not per dispatch call — see `EpochWatcher`). The watcher thread
+        // wakes at the deadline and increments the epoch once, which
+        // wasmtime converts to `Trap::Interrupt` inside the dispatch call
+        // below; cancelling after the call suppresses a late fire.
+        if self.max_execution_ms > 0 {
             self.store.set_epoch_deadline(1);
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let cancelled_clone = Arc::clone(&cancelled);
-            let engine_clone = self.engine.clone();
-            let timeout_ms = self.max_execution_ms;
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
-                if !cancelled_clone.load(Ordering::Relaxed) {
-                    engine_clone.increment_epoch();
-                }
-            });
-            Some(cancelled)
-        } else {
-            None
-        };
+            self.watcher
+                .arm(Instant::now() + std::time::Duration::from_millis(self.max_execution_ms));
+        }
 
         // Locate exports.
         let nexus_dispatch = self
@@ -475,8 +610,8 @@ impl WasmSandbox {
 
         // Cancel the epoch watcher so a late increment_epoch doesn't trip
         // the next dispatch call.
-        if let Some(cancelled) = watcher_guard {
-            cancelled.store(true, Ordering::Relaxed);
+        if self.max_execution_ms > 0 {
+            self.watcher.cancel();
         }
 
         // C86 / #439 — sample resource usage regardless of outcome, so an
@@ -951,5 +1086,89 @@ mod tests {
                 "expected PluginError::ExecutionFailed for an oversized guest result_len, got: {other:?}"
             ),
         }
+    }
+
+    // ── Thread-exhaustion regression: dispatch must not spawn a thread ────
+    // ── per call ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_does_not_spawn_a_thread_per_call() {
+        // Before the fix, `dispatch` spawned a brand-new unjoined OS
+        // thread on *every* call whenever `max_execution_ms > 0` (the
+        // manifest default) to drive the epoch-deadline watcher. Under a
+        // high-frequency dispatch path (frequent IPC calls, event-bus
+        // fan-out) that grows OS thread count 1:1 with call volume — a
+        // thread-exhaustion DoS. `EpochWatcher::new` is now called once
+        // per `WasmSandbox` (from `WasmSandbox::new`), so many dispatch
+        // calls in a tight loop must not spawn any more threads.
+        let before = EPOCH_WATCHER_THREADS_SPAWNED.with(std::cell::Cell::get);
+
+        let bytes = test_wasm_bytes();
+        let config = test_config(); // max_execution_ms = 5_000 (nonzero)
+        let mut sandbox = WasmSandbox::new(&bytes, &config, test_plugin_data()).unwrap();
+
+        let after_new = EPOCH_WATCHER_THREADS_SPAWNED.with(std::cell::Cell::get);
+        assert_eq!(
+            after_new - before,
+            1,
+            "WasmSandbox::new must spawn exactly one epoch-watcher thread"
+        );
+
+        for _ in 0..200 {
+            sandbox
+                .dispatch(100, &serde_json::json!({"hello": "world"}))
+                .unwrap();
+        }
+
+        let after_dispatches = EPOCH_WATCHER_THREADS_SPAWNED.with(std::cell::Cell::get);
+        assert_eq!(
+            after_dispatches, after_new,
+            "200 dispatch calls must not spawn any additional watcher threads \
+             (thread count must not scale with dispatch frequency)"
+        );
+    }
+
+    #[test]
+    fn dispatch_actually_times_out_via_shared_watcher() {
+        // Functional regression for the EpochWatcher refactor: proves the
+        // shared per-sandbox watcher thread still fires within roughly
+        // `max_execution_ms` and interrupts a hung plugin — not merely
+        // that it avoids spawning a thread per call.
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "nexus_alloc") (param i32) (result i32)
+                i32.const 0)
+              (func (export "nexus_dispatch") (param i32 i32 i32) (result i64)
+                (loop $inf
+                  br $inf)
+                i64.const 0)
+            )
+            "#,
+        )
+        .expect("parse infinite-loop probe wat");
+
+        let config = WasmConfig {
+            module: "test.wasm".to_string(),
+            memory_mb: 16,
+            fuel: 0, // metering disabled — rely purely on the epoch watcher
+            max_execution_ms: 200,
+        };
+        let mut sandbox = WasmSandbox::new(&wasm_bytes, &config, test_plugin_data())
+            .expect("load infinite-loop probe");
+
+        let started = Instant::now();
+        let result = sandbox.dispatch(0, &serde_json::json!({}));
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(PluginError::ExecutionTimeout { .. })),
+            "expected ExecutionTimeout, got: {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "epoch watcher should interrupt near the 200ms deadline, took {elapsed:?}"
+        );
     }
 }

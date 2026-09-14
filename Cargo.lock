@@ -8168,6 +8168,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8292,6 +8293,7 @@ version = "0.1.0"
 dependencies = [
  "nexus-kernel",
  "nexus-plugins",
+ "nexus-types",
  "schemars 1.2.2",
  "serde",
  "serde_json",

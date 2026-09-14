@@ -2635,6 +2635,72 @@ fn a_second_connection_resumes_the_first_against_rustls() {
     );
 }
 
+/// Regression test for `plaintext_record` casting a fragment length to `u16`
+/// with no range check: a fragment longer than `u16::MAX` silently truncated
+/// the length field instead of failing, corrupting record framing.
+///
+/// A session ticket is wire-capped at 65535 bytes on its own (`vector_u16` in
+/// `Connection::session_from`) — nothing here manufactures an out-of-protocol
+/// value. `TICKET_LEN` below is sized so the ticket alone, plus the hello's
+/// other fixed extensions, pushes the *total* ClientHello fragment just past
+/// `u16::MAX` while every individual wire-level vector along the way (the
+/// PSK identity, the extension's own data, and the extensions list) stays
+/// within its own 65535-byte limit — this is the specific gap `rusty_tls`'s
+/// own `debug_assert!`s do not cover, exercised with an otherwise-legitimate
+/// ticket size rather than a contrived one.
+#[test]
+fn an_oversized_resumption_ticket_is_refused_rather_than_truncated() {
+    use rusty_tls::handrolled::record::RecordError;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let server_config = resumable_server_config(&pki);
+
+    let first = run_against(
+        &resumption_config(&anchors, None),
+        &server_config,
+        |hello| hello,
+    )
+    .expect("the first handshake");
+    let mut session = first
+        .sessions
+        .into_iter()
+        .next()
+        .expect("rustls issued no ticket to resume with");
+
+    // With this test's fixed ClientHello shape (one group, six signature
+    // schemes, one key share, a 19-octet DNS name, three cipher suites), the
+    // ClientHello's other extensions total 109 bytes and the PSK offer adds
+    // 15 bytes of its own framing plus the resumption hash (32 or 48 bytes
+    // depending on the ticket's cipher suite). 65340 clears `u16::MAX` by
+    // 60-100 bytes at the record layer either way, while every nested
+    // wire-level vector along the way (identity, extension data, extensions
+    // list) stays comfortably under its own 65535-byte cap.
+    const TICKET_LEN: usize = 65_340;
+    session.ticket = vec![0x42; TICKET_LEN];
+
+    let config = resumption_config(
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms: 1_000,
+        }),
+    );
+
+    match ClientHandshake::start(&config) {
+        Err(ClientError::Record(RecordError::FragmentTooLong { .. })) => {}
+        other => panic!(
+            "a ClientHello fragment past u16::MAX must fail record framing rather than \
+             silently truncate; got {other:?}"
+        ),
+    }
+}
+
 /// The binder is actually checked by the server, so the test above means
 /// something.
 ///

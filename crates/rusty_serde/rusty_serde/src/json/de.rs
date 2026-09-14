@@ -35,7 +35,15 @@ where
 pub struct Deserializer<'de> {
     input: &'de [u8],
     pos: usize,
+    depth: usize,
 }
+
+/// Maximum array/object nesting depth this parser will descend into.
+/// `SeqWalker`/`MapWalker` recurse straight into `T::deserialize` for
+/// every nested element with no other bound, so a deeply nested untrusted
+/// document (e.g. tens of thousands of `[` in a row) would otherwise
+/// overflow the native stack before any error could be produced.
+const MAX_NESTING_DEPTH: usize = 128;
 
 impl<'de> Deserializer<'de> {
     #[allow(clippy::should_implement_trait)]
@@ -43,7 +51,23 @@ impl<'de> Deserializer<'de> {
         Deserializer {
             input: input.as_bytes(),
             pos: 0,
+            depth: 0,
         }
+    }
+
+    /// Enters one level of array/object nesting, failing with a typed
+    /// error instead of recursing past [`MAX_NESTING_DEPTH`]. Paired with
+    /// [`Self::exit_nesting`] once the caller's recursive body returns.
+    fn enter_nesting(&mut self) -> Result<(), Error> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(self.error("exceeded maximum nesting depth"));
+        }
+        Ok(())
+    }
+
+    fn exit_nesting(&mut self) {
+        self.depth -= 1;
     }
 
     fn position(&self) -> (usize, usize) {
@@ -320,6 +344,7 @@ impl<'de> Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
+        self.enter_nesting()?;
         self.expect_byte(b'[')?;
         let value = visitor.visit_seq(SeqWalker {
             de: self,
@@ -327,6 +352,7 @@ impl<'de> Deserializer<'de> {
         })?;
         self.skip_whitespace();
         self.expect_byte(b']')?;
+        self.exit_nesting();
         Ok(value)
     }
 
@@ -334,6 +360,7 @@ impl<'de> Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
+        self.enter_nesting()?;
         self.expect_byte(b'{')?;
         let value = visitor.visit_map(MapWalker {
             de: self,
@@ -341,6 +368,7 @@ impl<'de> Deserializer<'de> {
         })?;
         self.skip_whitespace();
         self.expect_byte(b'}')?;
+        self.exit_nesting();
         Ok(value)
     }
 

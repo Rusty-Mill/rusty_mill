@@ -58,14 +58,31 @@ impl Gitignore {
 /// the overwhelming majority of real-world `.gitignore` entries
 /// (`target/`, `*.log`, `Cargo.lock`-style exact names).
 fn glob_match(pattern: &str, name: &str) -> bool {
-    fn matches(pattern: &[u8], name: &[u8]) -> bool {
-        match pattern.first() {
-            None => name.is_empty(),
-            Some(b'*') => (0..=name.len()).any(|i| matches(&pattern[1..], &name[i..])),
-            Some(&c) => name.first() == Some(&c) && matches(&pattern[1..], &name[1..]),
+    // Memoized on (pattern_pos, name_pos) so an adversarial pattern with
+    // several `*` wildcards against a long non-matching name can't
+    // backtrack exponentially (O(n^k) for k wildcards, unbounded time)
+    // reached via any repo's `.gitignore` processed during `add`/`status`.
+    // Bounding the table to O(pattern_len * name_len) states makes this
+    // O(n*m) worst case instead.
+    fn matches(
+        pattern: &[u8],
+        name: &[u8],
+        memo: &mut std::collections::HashMap<(usize, usize), bool>,
+    ) -> bool {
+        let key = (pattern.len(), name.len());
+        if let Some(&cached) = memo.get(&key) {
+            return cached;
         }
+        let result = match pattern.first() {
+            None => name.is_empty(),
+            Some(b'*') => (0..=name.len()).any(|i| matches(&pattern[1..], &name[i..], memo)),
+            Some(&c) => name.first() == Some(&c) && matches(&pattern[1..], &name[1..], memo),
+        };
+        memo.insert(key, result);
+        result
     }
-    matches(pattern.as_bytes(), name.as_bytes())
+    let mut memo = std::collections::HashMap::new();
+    matches(pattern.as_bytes(), name.as_bytes(), &mut memo)
 }
 
 #[cfg(test)]
@@ -131,5 +148,23 @@ mod tests {
         let ig = Gitignore::load(&dir);
         assert!(ig.matches("target", true));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adversarial_multi_wildcard_pattern_matches_quickly_instead_of_exponentially_backtracking() {
+        // Pre-fix, the naive recursive `matches` backtracks a `*` with no
+        // memoization: an adversarial pattern with several `*` wildcards
+        // against a long non-matching name is O(n^k) in the wildcard
+        // count k, and hangs for seconds-to-minutes at these sizes.
+        // Reachable via any repo's `.gitignore` processed during
+        // `rgit add`/`status`.
+        let pattern = format!("{}!", "*a".repeat(20));
+        let name = "a".repeat(35);
+        let start = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &name));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "glob_match took too long -- exponential backtracking suspected"
+        );
     }
 }

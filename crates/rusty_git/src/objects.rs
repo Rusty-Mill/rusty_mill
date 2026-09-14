@@ -64,6 +64,10 @@ pub enum ObjectError {
     Corrupt(String),
     /// Underlying filesystem I/O failure.
     Io(String),
+    /// A recursive walk (e.g. tree flattening) exceeded its maximum depth
+    /// cap -- guards against a maliciously (or accidentally) deeply
+    /// nested chain of single-entry tree objects overflowing the stack.
+    TooDeep(String),
 }
 
 impl fmt::Display for ObjectError {
@@ -75,6 +79,9 @@ impl fmt::Display for ObjectError {
                 "object {h} is corrupt or unreadable: see zlib module docs"
             ),
             ObjectError::Io(e) => write!(f, "I/O error: {e}"),
+            ObjectError::TooDeep(h) => {
+                write!(f, "object {h}: recursion exceeded the maximum tree depth")
+            }
         }
     }
 }

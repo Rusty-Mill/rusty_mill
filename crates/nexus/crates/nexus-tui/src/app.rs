@@ -1235,7 +1235,7 @@ impl TuiApp {
             .block_on(term_ipc::read_output(&*invoker, &id, None, None))
         {
             Ok(lines) => {
-                if lines.len() != self.terminal.last_line_count {
+                if terminal_lines_changed(&self.terminal.lines, &lines) {
                     self.terminal.last_line_count = lines.len();
                     self.terminal.lines = lines;
                 }
@@ -1939,6 +1939,41 @@ pub fn is_modal_expired(
     now.saturating_duration_since(opened_at) >= timeout
 }
 
+/// Pure predicate for `run()`'s quit-cleanup branch: whether an open
+/// terminal session should be closed — persisting its scrollback via
+/// the same `close_session` path [`TuiApp::kill_terminal`] uses on
+/// Ctrl+D — before the event loop returns. Extracted so the gate is
+/// unit-testable without constructing a `DefaultTerminal` (`run()`
+/// needs a live backend a unit test can't fake).
+///
+/// Regression: `run()` used to return on `should_quit` unconditionally,
+/// so quitting via `q` / Ctrl+C (input.rs's global quit key) never
+/// reached `kill_terminal`, silently dropping the open session's
+/// scrollback (`persist_session_before_close` in nexus-terminal's
+/// `handlers/session.rs` never ran).
+pub fn quit_should_close_terminal(should_quit: bool, terminal_session_open: bool) -> bool {
+    should_quit && terminal_session_open
+}
+
+/// Whether newly read terminal output differs from the cached
+/// snapshot, gating [`TuiApp::pump_terminal`]'s refresh. Comparing
+/// only lengths misses in-place updates to the last line's content:
+/// `nexus-terminal`'s `LineBuffer` keeps rewriting the most recent
+/// line while a program is mid-line (no `\n` yet, e.g. a `\r`-driven
+/// progress bar), so the line count stays put while the text changes
+/// underneath it. Comparing the last line's content and repeat count
+/// alongside the length catches that case.
+pub fn terminal_lines_changed(old: &[OutputLine], new: &[OutputLine]) -> bool {
+    if old.len() != new.len() {
+        return true;
+    }
+    match (old.last(), new.last()) {
+        (Some(a), Some(b)) => a.content != b.content || a.repeats != b.repeats,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
 /// BL-132 — render a completed `session_run` response into the agent
 /// transcript. Pulled out for testability; mirrors the CLI's
 /// `print_session` shape but folds each output line into a typed
@@ -2275,5 +2310,85 @@ mod bl132_tests {
             Duration::from_secs(1800),
             earlier
         ));
+    }
+}
+
+// ── Terminal panel — pure-helper tests ───────────────────────────────────────
+
+#[cfg(test)]
+mod terminal_panel_tests {
+    use super::*;
+
+    // ── quit_should_close_terminal ───────────────────────────────────
+    //
+    // Regression for the silent-data-loss bug: `run()` used to return
+    // on `should_quit` unconditionally, so `q` / Ctrl+C never routed
+    // through `kill_terminal`'s persist/close path the way Ctrl+D
+    // does. `run()` itself can't be unit-tested (it needs a live
+    // `DefaultTerminal` backend), so this pins the extracted gate
+    // that `run()`'s exit branch now consults on every loop tick.
+
+    #[test]
+    fn quit_with_open_session_requests_close() {
+        assert!(quit_should_close_terminal(true, true));
+    }
+
+    #[test]
+    fn quit_without_open_session_does_not_request_close() {
+        assert!(!quit_should_close_terminal(true, false));
+    }
+
+    #[test]
+    fn open_session_without_quit_does_not_request_close() {
+        assert!(!quit_should_close_terminal(false, true));
+    }
+
+    // ── terminal_lines_changed ────────────────────────────────────────
+    //
+    // Regression for the frozen-panel bug: `pump_terminal` used to
+    // gate its refresh solely on `lines.len()`, so a `\r`-driven
+    // progress bar (same line count, rewritten content, no `\n` yet)
+    // never refreshed the cached snapshot.
+
+    fn line(content: &str, repeats: u32) -> OutputLine {
+        OutputLine {
+            timestamp_ms: 0,
+            content: content.to_string(),
+            raw: Vec::new(),
+            repeats,
+        }
+    }
+
+    #[test]
+    fn same_length_different_last_line_content_is_a_change() {
+        let old = vec![line("Downloading...", 1), line("[####      ] 40%", 1)];
+        let new = vec![line("Downloading...", 1), line("[########  ] 80%", 1)];
+        assert!(terminal_lines_changed(&old, &new));
+    }
+
+    #[test]
+    fn identical_snapshots_are_not_a_change() {
+        let old = vec![line("a", 1), line("b", 1)];
+        let new = vec![line("a", 1), line("b", 1)];
+        assert!(!terminal_lines_changed(&old, &new));
+    }
+
+    #[test]
+    fn different_length_is_a_change() {
+        let old = vec![line("a", 1)];
+        let new = vec![line("a", 1), line("b", 1)];
+        assert!(terminal_lines_changed(&old, &new));
+    }
+
+    #[test]
+    fn same_length_different_repeats_on_last_line_is_a_change() {
+        let old = vec![line("a", 1), line("spam", 1)];
+        let new = vec![line("a", 1), line("spam", 3)];
+        assert!(terminal_lines_changed(&old, &new));
+    }
+
+    #[test]
+    fn empty_to_empty_is_not_a_change() {
+        assert!(!terminal_lines_changed(&[], &[]));
     }
 }

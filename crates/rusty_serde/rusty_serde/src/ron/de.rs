@@ -22,7 +22,15 @@ where
 pub struct Deserializer<'de> {
     input: &'de [u8],
     pos: usize,
+    depth: usize,
 }
+
+/// Maximum nesting depth for constructs that recurse back into
+/// `Deserialize` — array/object brackets, parenthesized tuples,
+/// `Some(...)`/tagged-variant wrappers. Each of these has no other bound,
+/// so a deeply nested untrusted document would otherwise overflow the
+/// native stack before any error could be produced.
+const MAX_NESTING_DEPTH: usize = 128;
 
 impl<'de> Deserializer<'de> {
     #[allow(clippy::should_implement_trait)]
@@ -30,7 +38,24 @@ impl<'de> Deserializer<'de> {
         Deserializer {
             input: input.as_bytes(),
             pos: 0,
+            depth: 0,
         }
+    }
+
+    /// Enters one level of nesting (array/object/tuple/`Some`/tagged
+    /// variant), failing with a typed error instead of recursing past
+    /// [`MAX_NESTING_DEPTH`]. Paired with [`Self::exit_nesting`] once the
+    /// caller's recursive body returns.
+    fn enter_nesting(&mut self) -> Result<(), Error> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(self.error("exceeded maximum nesting depth"));
+        }
+        Ok(())
+    }
+
+    fn exit_nesting(&mut self) {
+        self.depth -= 1;
     }
 
     fn error(&self, msg: impl Into<String>) -> Error {
@@ -264,6 +289,7 @@ impl<'de> Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
+        self.enter_nesting()?;
         self.expect_byte(open)?;
         let value = visitor.visit_seq(SeqWalker {
             de: self,
@@ -272,6 +298,7 @@ impl<'de> Deserializer<'de> {
         })?;
         self.skip_whitespace();
         self.expect_byte(close)?;
+        self.exit_nesting();
         Ok(value)
     }
 
@@ -279,6 +306,7 @@ impl<'de> Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
+        self.enter_nesting()?;
         self.expect_byte(b'{')?;
         let value = visitor.visit_map(MapWalker {
             de: self,
@@ -286,6 +314,7 @@ impl<'de> Deserializer<'de> {
         })?;
         self.skip_whitespace();
         self.expect_byte(b'}')?;
+        self.exit_nesting();
         Ok(value)
     }
 }
@@ -438,10 +467,12 @@ impl<'a, 'de> VariantAccess<'de> for VariantDataAccess<'a, 'de> {
     where
         T: Deserialize<'de>,
     {
+        self.de.enter_nesting()?;
         self.de.expect_byte(b'(')?;
         let value = T::deserialize(&mut *self.de)?;
         self.de.skip_whitespace();
         self.de.expect_byte(b')')?;
+        self.de.exit_nesting();
         Ok(value)
     }
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Error>
@@ -481,10 +512,12 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
             b'[' => self.parse_seq_bracket(b'[', b']', visitor),
             b'{' => self.parse_map_brace(visitor),
             b'(' => {
+                self.enter_nesting()?;
                 self.bump();
                 self.skip_whitespace();
                 if self.peek()? == b')' {
                     self.bump();
+                    self.exit_nesting();
                     return visitor.visit_unit();
                 }
                 let value = visitor.visit_seq(SeqWalker {
@@ -494,6 +527,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
                 })?;
                 self.skip_whitespace();
                 self.expect_byte(b')')?;
+                self.exit_nesting();
                 Ok(value)
             }
             b'-' | b'0'..=b'9' => {
@@ -517,18 +551,22 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
                     "false" => visitor.visit_bool(false),
                     "None" => visitor.visit_none(),
                     "Some" => {
+                        self.enter_nesting()?;
                         self.expect_byte(b'(')?;
                         let value = visitor.visit_some(&mut *self)?;
                         self.skip_whitespace();
                         self.expect_byte(b')')?;
+                        self.exit_nesting();
                         Ok(value)
                     }
                     tag => match self.peek() {
                         Ok(b'(') => {
+                            self.enter_nesting()?;
                             self.bump();
                             let value = self.deserialize_any(visitor)?;
                             self.skip_whitespace();
                             self.expect_byte(b')')?;
+                            self.exit_nesting();
                             Ok(value)
                         }
                         Ok(b'[') => self.parse_seq_bracket(b'[', b']', visitor),
@@ -693,11 +731,13 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
             self.pos += 4;
             visitor.visit_none()
         } else {
+            self.enter_nesting()?;
             self.parse_literal("Some")?;
             self.expect_byte(b'(')?;
             let value = visitor.visit_some(&mut *self)?;
             self.skip_whitespace();
             self.expect_byte(b')')?;
+            self.exit_nesting();
             Ok(value)
         }
     }
@@ -835,10 +875,13 @@ fn skip_value(de: &mut Deserializer) -> Result<(), Error> {
             let ident = de.parse_ident()?;
             match ident {
                 "Some" => {
+                    de.enter_nesting()?;
                     de.expect_byte(b'(')?;
                     skip_value(de)?;
                     de.skip_whitespace();
-                    de.expect_byte(b')')
+                    de.expect_byte(b')')?;
+                    de.exit_nesting();
+                    Ok(())
                 }
                 // A bare word: `true`/`false`/`None`, a unit enum variant,
                 // or (followed by data) a tagged variant - whatever data
@@ -857,10 +900,12 @@ fn skip_value(de: &mut Deserializer) -> Result<(), Error> {
 
 /// Skips a bracketed, comma-separated list of values: `(...)` and `[...]`.
 fn skip_seq_like(de: &mut Deserializer, open: u8, close: u8) -> Result<(), Error> {
+    de.enter_nesting()?;
     de.expect_byte(open)?;
     de.skip_whitespace();
     if de.peek()? == close {
         de.bump();
+        de.exit_nesting();
         return Ok(());
     }
     loop {
@@ -872,11 +917,13 @@ fn skip_seq_like(de: &mut Deserializer, open: u8, close: u8) -> Result<(), Error
                 de.skip_whitespace();
                 if de.peek()? == close {
                     de.bump();
+                    de.exit_nesting();
                     return Ok(());
                 }
             }
             b if b == close => {
                 de.bump();
+                de.exit_nesting();
                 return Ok(());
             }
             _ => return Err(de.error("expected `,` or a closing bracket")),
@@ -886,10 +933,12 @@ fn skip_seq_like(de: &mut Deserializer, open: u8, close: u8) -> Result<(), Error
 
 /// Skips a brace-delimited, comma-separated list of `key:value` pairs.
 fn skip_map_like(de: &mut Deserializer) -> Result<(), Error> {
+    de.enter_nesting()?;
     de.expect_byte(b'{')?;
     de.skip_whitespace();
     if de.peek()? == b'}' {
         de.bump();
+        de.exit_nesting();
         return Ok(());
     }
     loop {
@@ -904,11 +953,13 @@ fn skip_map_like(de: &mut Deserializer) -> Result<(), Error> {
                 de.skip_whitespace();
                 if de.peek()? == b'}' {
                     de.bump();
+                    de.exit_nesting();
                     return Ok(());
                 }
             }
             b'}' => {
                 de.bump();
+                de.exit_nesting();
                 return Ok(());
             }
             _ => return Err(de.error("expected `,` or `}`")),
