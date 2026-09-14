@@ -288,7 +288,14 @@ mod tests {
         // A valid PEM file classes its certificate and configures `auth`.
         let rcgen::CertifiedKey { cert, .. } =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        let dir = std::env::temp_dir().join(format!(
+        // A relative path, not `std::env::temp_dir()` (Windows-absolute,
+        // `C:\...`): `with_certificate_class_pem_file`'s caller splits on
+        // `:` for a multi-path list (ADR-0028, `CLS-FR-005`, documented
+        // and intentional for the real, Linux-targeted deployment case),
+        // which a Windows drive letter would corrupt — a test-only
+        // concern, not a production one, so worked around here rather
+        // than by touching the documented `:`-separator contract.
+        let dir = std::path::PathBuf::from("target").join(format!(
             "dog_server_certificate_classes_{}",
             std::process::id()
         ));

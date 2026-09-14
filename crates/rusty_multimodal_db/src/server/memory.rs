@@ -17,7 +17,7 @@
 //! See `crate::generic::memory`'s own module docs for what the
 //! consumer's table holds that this record does not, and why.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
+use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
@@ -98,12 +98,28 @@ impl MemoryConnectionStore {
     ) -> Result<Self, JournalError> {
         let (journal, batches) = CommitGroup::open(journal_path)?;
         store.with_exclusive(|inner| -> Result<(), JournalError> {
+            let schema = Self::schema();
             for (batch_index, batch) in batches.iter().enumerate() {
-                Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
-                    batch: batch_index,
-                    index,
-                    code,
-                })?;
+                match batch {
+                    JournaledBatch::Transaction(ops) => {
+                        Self::apply_batch(inner, ops).map_err(|(index, code)| {
+                            JournalError::Replay {
+                                batch: batch_index,
+                                index,
+                                code,
+                            }
+                        })?;
+                    }
+                    JournaledBatch::Write(ops) => {
+                        Self::replay_write_batch(inner, &schema, ops).map_err(
+                            |(index, code)| JournalError::Replay {
+                                batch: batch_index,
+                                index,
+                                code,
+                            },
+                        )?;
+                    }
+                }
             }
             inner.checkpoint_flush()?;
             journal.truncate()
@@ -112,6 +128,85 @@ impl MemoryConnectionStore {
             store,
             journal: Some(journal),
         })
+    }
+
+    /// `WBJ-FR-003` (ADR-0063): replay a journaled, already-validated
+    /// `WriteOp` batch — the identical `prepare_write`/`apply_prepared`
+    /// pair the live atomic path uses, in order, under the same
+    /// exclusive section `with_journal`'s replay already holds. Safe to
+    /// re-run a `ReplaceIf`'s guard here: a crash before this point means
+    /// the store is exactly the state the guard was (or would have been)
+    /// evaluated against originally, so replay reconstructs the
+    /// identical decision. A prepare or apply failure here is a real
+    /// anomaly (the crate's own crash-atomicity invariant broken, not an
+    /// expected outcome) and aborts replay via `JournalError::Replay`
+    /// rather than being silently skipped.
+    fn replay_write_batch(
+        inner: &mut MemoryProductionStack,
+        schema: &DomainSchema,
+        ops: &[WriteOp],
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (i, op) in ops.iter().enumerate() {
+            let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
+            Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?;
+        }
+        Ok(())
+    }
+
+    /// This domain's `DomainSchema`, without an instance — needed at
+    /// `with_journal`'s replay, before `Self` exists yet.
+    /// `ConnectionStore::describe` delegates here.
+    fn schema() -> DomainSchema {
+        let read_only = FieldCapabilities {
+            filter_eq: false,
+            scan: false,
+            update: false,
+        };
+        let field = |tag: FieldRef, name: &str, value_kind: ValueKind| FieldDescriptor {
+            tag,
+            name: name.into(),
+            value_kind,
+            capabilities: read_only,
+        };
+        DomainSchema {
+            fields: vec![
+                field(FIELD_CONTENT, "content", ValueKind::Str),
+                FieldDescriptor {
+                    tag: FIELD_CATEGORY,
+                    name: "category".into(),
+                    value_kind: ValueKind::Str,
+                    capabilities: FieldCapabilities {
+                        filter_eq: true,
+                        scan: false,
+                        update: false,
+                    },
+                },
+                field(FIELD_TAGS, "tags", ValueKind::StrList),
+                field(FIELD_SOURCE, "source", ValueKind::Str),
+                field(FIELD_METADATA_JSON, "metadata_json", ValueKind::Str),
+                field(FIELD_CREATED_AT, "created_at_unix_ms", ValueKind::I64),
+                field(FIELD_UPDATED_AT, "updated_at_unix_ms", ValueKind::I64),
+                field(FIELD_MEMORY_TYPE, "memory_type", ValueKind::Str),
+                field(FIELD_STATUS, "status", ValueKind::Str),
+                field(FIELD_SENSITIVE, "sensitive", ValueKind::Bool),
+                FieldDescriptor {
+                    tag: FIELD_ACCESS_COUNT,
+                    name: "access_count".into(),
+                    value_kind: ValueKind::I64,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: true,
+                        update: true,
+                    },
+                },
+                field(FIELD_DELETED_AT, "deleted_at_unix_ms", ValueKind::I64),
+                field(FIELD_NODE_ID, "node_id", ValueKind::Str),
+            ],
+            relations: RelationCapabilities {
+                parent_children: false,
+                neighbors: true,
+            },
+        }
     }
 
     /// The validate-then-apply shape every adapter uses — the one
@@ -639,7 +734,7 @@ impl ConnectionStore for MemoryConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
-        self.store.with_exclusive(|inner| {
+        let apply = |inner: &mut MemoryProductionStack| {
             for (i, p) in prepared.iter().enumerate() {
                 if let PreparedWrite::Link { left, .. } = p {
                     if GetById::<Memory>::get(inner, *left).is_none() {
@@ -652,7 +747,36 @@ impl ConnectionStore for MemoryConnectionStore {
                 results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
             }
             Ok(results)
-        })
+        };
+        match &self.journal {
+            // `WBJ-FR-004`: no journal, no change from before ADR-0063.
+            None => self.store.with_exclusive(apply),
+            // `WBJ-FR-002` (ADR-0063): journal the raw, already-validated
+            // `ops` before applying — a crash after the journal `fsync`
+            // but before/during apply replays cleanly (`WBJ-FR-003`).
+            // The apply closure's own results escape via `results_cell`
+            // since `CommitGroup::commit_write`'s own contract only
+            // reports whether a checkpoint happened, not arbitrary data.
+            Some(journal) => {
+                let results_cell: std::cell::RefCell<Option<Vec<WriteResult>>> =
+                    std::cell::RefCell::new(None);
+                journal
+                    .commit_write(ops, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            let results = apply(inner)?;
+                            *results_cell.borrow_mut() = Some(results);
+                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })?;
+                Ok(results_cell
+                    .into_inner()
+                    .expect("commit_write's apply closure always sets results_cell on Ok"))
+            }
+        }
     }
 
     fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {
@@ -732,56 +856,7 @@ impl ConnectionStore for MemoryConnectionStore {
     }
 
     fn describe(&self) -> DomainSchema {
-        let read_only = FieldCapabilities {
-            filter_eq: false,
-            scan: false,
-            update: false,
-        };
-        let field = |tag: FieldRef, name: &str, value_kind: ValueKind| FieldDescriptor {
-            tag,
-            name: name.into(),
-            value_kind,
-            capabilities: read_only,
-        };
-        DomainSchema {
-            fields: vec![
-                field(FIELD_CONTENT, "content", ValueKind::Str),
-                FieldDescriptor {
-                    tag: FIELD_CATEGORY,
-                    name: "category".into(),
-                    value_kind: ValueKind::Str,
-                    capabilities: FieldCapabilities {
-                        filter_eq: true,
-                        scan: false,
-                        update: false,
-                    },
-                },
-                field(FIELD_TAGS, "tags", ValueKind::StrList),
-                field(FIELD_SOURCE, "source", ValueKind::Str),
-                field(FIELD_METADATA_JSON, "metadata_json", ValueKind::Str),
-                field(FIELD_CREATED_AT, "created_at_unix_ms", ValueKind::I64),
-                field(FIELD_UPDATED_AT, "updated_at_unix_ms", ValueKind::I64),
-                field(FIELD_MEMORY_TYPE, "memory_type", ValueKind::Str),
-                field(FIELD_STATUS, "status", ValueKind::Str),
-                field(FIELD_SENSITIVE, "sensitive", ValueKind::Bool),
-                FieldDescriptor {
-                    tag: FIELD_ACCESS_COUNT,
-                    name: "access_count".into(),
-                    value_kind: ValueKind::I64,
-                    capabilities: FieldCapabilities {
-                        filter_eq: false,
-                        scan: true,
-                        update: true,
-                    },
-                },
-                field(FIELD_DELETED_AT, "deleted_at_unix_ms", ValueKind::I64),
-                field(FIELD_NODE_ID, "node_id", ValueKind::Str),
-            ],
-            relations: RelationCapabilities {
-                parent_children: false,
-                neighbors: true,
-            },
-        }
+        Self::schema()
     }
 
     fn apply_transaction(
@@ -1195,5 +1270,64 @@ mod tests {
             Err(ErrorCode::Malformed)
         );
         assert_eq!(adapter.get(id).unwrap(), newer);
+    }
+
+    /// `WBJ-FR-005` (ADR-0063): a journaled adapter's atomic `write_batch`
+    /// survives a crash between the journal `fsync` and the apply —
+    /// simulated the same way `dog.rs`'s own journal crash-recovery test
+    /// is: a genuinely committed batch's durable journal, replayed onto
+    /// a fresh copy of the pre-batch store files (the state a crash
+    /// right after the `fsync` but before any apply would leave behind).
+    #[test]
+    fn write_batch_atomic_is_crash_atomic_via_the_journal() {
+        let dir = fresh_temp_dir("server_memory_write_batch_journal").unwrap();
+        let seed = || vec![memory(1, "general", false), memory(2, "preference", false)];
+        let journal = dir.join("wbt.journal");
+        let header_len = 12;
+
+        let path_a = dir.join("a.mmap");
+        let stack_a = create_memory_production_stack(seed(), &[], &path_a).unwrap();
+        let adapter =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_a), &journal)
+                .unwrap();
+        assert_eq!(std::fs::metadata(&journal).unwrap().len(), header_len);
+
+        let ops = vec![
+            WriteOp::Insert {
+                id: Uuid::from_u128(10),
+                fields: full_fields(10),
+            },
+            WriteOp::Replace {
+                id: Uuid::from_u128(1),
+                fields: full_fields(1),
+            },
+        ];
+        let results = adapter.write_batch(&ops, true).unwrap();
+        assert_eq!(results, vec![WriteResult::Inserted, WriteResult::Replaced]);
+        let after_ok = std::fs::metadata(&journal).unwrap().len();
+        assert!(after_ok > header_len, "the batch is journaled");
+        drop(adapter);
+
+        // Fresh, pre-batch store files + the durable journal: replay
+        // applies both ops, exactly as a real crash-then-restart would.
+        let path_b = dir.join("b.mmap");
+        let stack_b = create_memory_production_stack(seed(), &[], &path_b).unwrap();
+        let replayed =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_b), &journal)
+                .unwrap();
+        assert!(
+            replayed.get(Uuid::from_u128(10)).is_some(),
+            "the insert landed"
+        );
+        assert_eq!(
+            replayed.get(Uuid::from_u128(1)).unwrap(),
+            full_fields(1),
+            "the replace landed"
+        );
+        assert_eq!(
+            std::fs::metadata(&journal).unwrap().len(),
+            header_len,
+            "checkpointed after replay"
+        );
     }
 }

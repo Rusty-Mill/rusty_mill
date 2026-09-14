@@ -42,7 +42,7 @@
 //! always holds exactly the batches applied since the last moment every
 //! slot write was known to be on disk.
 
-use super::protocol::{ErrorCode, TransactionOp};
+use super::protocol::{ErrorCode, TransactionOp, WriteOp};
 use crate::durability::DurabilityError;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -54,8 +54,15 @@ use std::thread::Thread;
 
 /// The journal file's magic.
 pub const JOURNAL_MAGIC: &[u8; 8] = b"TXNJRNL\0";
-/// The journal format this build writes and reads.
-pub const JOURNAL_FORMAT_VERSION: u32 = 1;
+/// The journal format this build writes and reads. Version 2
+/// (`WBJ-FR-001`, ADR-0063) adds a leading kind byte per entry — `0` a
+/// `TransactionOp` batch (every entry before this round), `1` a
+/// `WriteOp` batch (`Request::WriteBatch`'s atomic mode,
+/// `Memory`/`Entity`/`Relation` only). Strict version match on open, as
+/// before this round — a version-1 journal left over from an older
+/// build is refused, not silently upgraded; the journal is expected to
+/// be small and frequently checkpointed, unlike a long-lived blob.
+pub const JOURNAL_FORMAT_VERSION: u32 = 2;
 /// After an append leaves the journal larger than this, the adapter
 /// checkpoints: flushes the store, then truncates the journal
 /// (`JRN-FR-004`). A constant chosen without measurement; the journaled
@@ -63,6 +70,28 @@ pub const JOURNAL_FORMAT_VERSION: u32 = 1;
 pub const JOURNAL_CHECKPOINT_BYTES: u64 = 1 << 20;
 
 const HEADER_LEN: u64 = 12;
+
+/// Version-2 entry kind bytes (`WBJ-FR-001`, ADR-0063).
+const KIND_TRANSACTION: u8 = 0;
+const KIND_WRITE: u8 = 1;
+
+/// One journal entry about to be appended — borrowed, chosen by the
+/// caller's own typed [`CommitGroup::commit`]/[`CommitGroup::
+/// commit_write`] (`WBJ-FR-001`, ADR-0063).
+pub(crate) enum JournalEntry<'a> {
+    Transaction(&'a [TransactionOp]),
+    Write(&'a [WriteOp]),
+}
+
+/// One journal entry replayed from disk, oldest first (`WBJ-FR-001`,
+/// ADR-0063): `Transaction` (kind `0`, every entry before this round —
+/// `Request::Transaction`'s field-update batches, every adapter);
+/// `Write` (kind `1` — `Request::WriteBatch`'s runtime writes,
+/// `Memory`/`Entity`/`Relation`'s atomic mode only).
+pub(crate) enum JournaledBatch {
+    Transaction(Vec<TransactionOp>),
+    Write(Vec<WriteOp>),
+}
 
 /// Everything that can go wrong opening, appending to, or replaying a
 /// batch journal.
@@ -207,7 +236,7 @@ impl BatchJournal {
     /// entry in it, oldest first, for the caller to replay. A torn tail
     /// is dropped and truncated away; a bad magic or version, or a
     /// complete entry that does not decode, is an error (`JRN-FR-003`).
-    pub(crate) fn open(path: &Path) -> Result<(Self, Vec<Vec<TransactionOp>>), JournalError> {
+    pub(crate) fn open(path: &Path) -> Result<(Self, Vec<JournaledBatch>), JournalError> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -242,18 +271,37 @@ impl BatchJournal {
         let mut entries = Vec::new();
         let mut pos = HEADER_LEN as usize;
         // Stops at the first incomplete entry — a torn tail, or exactly the
-        // end of the file.
-        while let Some(len_bytes) = bytes.get(pos..pos + 4) {
+        // end of the file. Each entry: `[kind: u8][len: u32 LE][payload]`.
+        while let Some(&kind) = bytes.get(pos) {
+            let Some(len_bytes) = bytes.get(pos + 1..pos + 5) else {
+                break; // torn tail: the kind byte landed, the length did not
+            };
             let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
                 as usize;
-            let Some(payload) = bytes.get(pos + 4..pos + 4 + len) else {
+            let Some(payload) = bytes.get(pos + 5..pos + 5 + len) else {
                 break; // torn tail: the length prefix landed, the payload did not
             };
-            let batch: Vec<TransactionOp> = crate::codec::decode(payload).map_err(|e| {
-                JournalError::Format(format!("entry at byte {pos} does not decode: {e}"))
-            })?;
+            let batch = match kind {
+                KIND_TRANSACTION => {
+                    let ops: Vec<TransactionOp> = crate::codec::decode(payload).map_err(|e| {
+                        JournalError::Format(format!("entry at byte {pos} does not decode: {e}"))
+                    })?;
+                    JournaledBatch::Transaction(ops)
+                }
+                KIND_WRITE => {
+                    let ops: Vec<WriteOp> = crate::codec::decode(payload).map_err(|e| {
+                        JournalError::Format(format!("entry at byte {pos} does not decode: {e}"))
+                    })?;
+                    JournaledBatch::Write(ops)
+                }
+                other => {
+                    return Err(JournalError::Format(format!(
+                        "entry at byte {pos} has unknown kind {other}"
+                    )))
+                }
+            };
             entries.push(batch);
-            pos += 4 + len;
+            pos += 5 + len;
         }
         let complete = pos as u64;
         if complete != bytes.len() as u64 {
@@ -276,21 +324,36 @@ impl BatchJournal {
     /// the two halves.
     #[cfg(test)]
     pub(crate) fn append(&mut self, batch: &[TransactionOp]) -> Result<(), JournalError> {
-        self.append_unsynced(batch)?;
+        self.append_unsynced(JournalEntry::Transaction(batch))?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    /// [`append`] for a decided `WriteOp` batch (`WBJ-FR-001`, ADR-0063)
+    /// — tests only; a journaled adapter goes through [`CommitGroup::
+    /// commit_write`].
+    #[cfg(test)]
+    pub(crate) fn append_write(&mut self, batch: &[WriteOp]) -> Result<(), JournalError> {
+        self.append_unsynced(JournalEntry::Write(batch))?;
         self.file.sync_data()?;
         Ok(())
     }
 
     /// Write one entry without syncing (`GRP-FR-001`): the caller owns
     /// the `fsync` — see [`CommitGroup`]. `len` advances only if the
-    /// whole entry was written.
-    pub(crate) fn append_unsynced(&mut self, batch: &[TransactionOp]) -> Result<(), JournalError> {
-        let payload = crate::codec::encode(batch)?;
+    /// whole entry was written. The kind byte is `entry`'s own variant
+    /// (`WBJ-FR-001`).
+    pub(crate) fn append_unsynced(&mut self, entry: JournalEntry<'_>) -> Result<(), JournalError> {
+        let (kind, payload) = match entry {
+            JournalEntry::Transaction(batch) => (KIND_TRANSACTION, crate::codec::encode(batch)?),
+            JournalEntry::Write(batch) => (KIND_WRITE, crate::codec::encode(batch)?),
+        };
         let len = u32::try_from(payload.len())
             .map_err(|_| JournalError::Format("batch too large to journal".into()))?;
+        self.file.write_all(&[kind])?;
         self.file.write_all(&len.to_le_bytes())?;
         self.file.write_all(&payload)?;
-        self.len += 4 + payload.len() as u64;
+        self.len += 5 + payload.len() as u64;
         Ok(())
     }
 
@@ -435,7 +498,7 @@ impl CommitGroup {
     /// [`BatchJournal::open`] plus the group state. Replay is the
     /// caller's (it knows how to apply an operation); once every replayed
     /// batch is applied and the store flushed, [`CommitGroup::truncate`].
-    pub(crate) fn open(path: &Path) -> Result<(Self, Vec<Vec<TransactionOp>>), JournalError> {
+    pub(crate) fn open(path: &Path) -> Result<(Self, Vec<JournaledBatch>), JournalError> {
         let (journal, batches) = BatchJournal::open(path)?;
         let sync_handle = journal.sync_handle()?;
         Ok((
@@ -497,10 +560,34 @@ impl CommitGroup {
         batch: &[TransactionOp],
         apply: impl FnOnce(Turn) -> Result<bool, E>,
     ) -> Result<(), CommitError<E>> {
+        self.commit_entry(JournalEntry::Transaction(batch), apply)
+    }
+
+    /// [`commit`] for `Request::WriteBatch`'s atomic mode (`WBJ-FR-002`,
+    /// ADR-0063) — `Memory`/`Entity`/`Relation` only. `ops` is the raw,
+    /// already-`prepare_write`-validated wire batch; replay re-runs the
+    /// identical `prepare_write`/`apply_prepared` pair in order, which is
+    /// what makes a `ReplaceIf` guard inside it safe to re-evaluate on
+    /// replay — a crash before `apply` here means the store is exactly
+    /// the pre-apply state the guard was (or will be) evaluated against,
+    /// so replay reconstructs the identical decision, not a stale one.
+    pub(crate) fn commit_write<E>(
+        &self,
+        ops: &[WriteOp],
+        apply: impl FnOnce(Turn) -> Result<bool, E>,
+    ) -> Result<(), CommitError<E>> {
+        self.commit_entry(JournalEntry::Write(ops), apply)
+    }
+
+    fn commit_entry<E>(
+        &self,
+        entry: JournalEntry<'_>,
+        apply: impl FnOnce(Turn) -> Result<bool, E>,
+    ) -> Result<(), CommitError<E>> {
         let mut state = self.lock().map_err(CommitError::Journal)?;
         state
             .journal
-            .append_unsynced(batch)
+            .append_unsynced(entry)
             .map_err(CommitError::Journal)?;
         state.appended += 1;
         let seq = state.appended;
@@ -609,6 +696,30 @@ mod tests {
         }
     }
 
+    fn write_op(id: u128) -> WriteOp {
+        WriteOp::Delete {
+            id: Uuid::from_u128(id),
+        }
+    }
+
+    /// `WBJ-FR-001` (ADR-0063): a kind-`1` (`WriteOp`) entry round-trips
+    /// distinctly from a kind-`0` (`TransactionOp`) entry in the same
+    /// journal, in append order, each decoded as its own variant.
+    #[test]
+    fn a_write_batch_entry_round_trips_alongside_a_transaction_entry() {
+        let dir = fresh_temp_dir("journal_write_kind").unwrap();
+        let path = dir.join("txn.journal");
+        {
+            let (mut journal, _) = BatchJournal::open(&path).unwrap();
+            journal.append(&[op(1, 30)]).unwrap();
+            journal.append_write(&[write_op(2), write_op(3)]).unwrap();
+        }
+        let (_, entries) = BatchJournal::open(&path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], JournaledBatch::Transaction(ops) if ops.len() == 1));
+        assert!(matches!(&entries[1], JournaledBatch::Write(ops) if ops.len() == 2));
+    }
+
     #[test]
     fn a_fresh_journal_is_a_header_and_replays_nothing() {
         let dir = fresh_temp_dir("journal_fresh").unwrap();
@@ -640,9 +751,15 @@ mod tests {
         let torn_len = std::fs::metadata(&path).unwrap().len();
         let (journal, entries) = BatchJournal::open(&path).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].len(), 2);
-        assert_eq!(entries[0][1].id, Uuid::from_u128(2));
-        assert_eq!(entries[1][0].value, ScanValue::U32(50));
+        let JournaledBatch::Transaction(entry0) = &entries[0] else {
+            panic!("expected a Transaction batch");
+        };
+        let JournaledBatch::Transaction(entry1) = &entries[1] else {
+            panic!("expected a Transaction batch");
+        };
+        assert_eq!(entry0.len(), 2);
+        assert_eq!(entry0[1].id, Uuid::from_u128(2));
+        assert_eq!(entry1[0].value, ScanValue::U32(50));
         // The torn tail was truncated away.
         assert!(journal.len_bytes() < torn_len);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), journal.len_bytes());
@@ -659,7 +776,7 @@ mod tests {
         ));
         let future = dir.join("future.journal");
         let mut bytes = JOURNAL_MAGIC.to_vec();
-        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
         std::fs::write(&future, bytes).unwrap();
         assert!(matches!(
             BatchJournal::open(&future).map(|_| ()),
@@ -752,9 +869,14 @@ mod tests {
         let (_, entries) = BatchJournal::open(&path).unwrap();
         let journaled: Vec<u32> = entries
             .iter()
-            .map(|batch| match batch[0].value {
-                ScanValue::U32(v) => v,
-                _ => unreachable!(),
+            .map(|batch| {
+                let JournaledBatch::Transaction(ops) = batch else {
+                    unreachable!()
+                };
+                match ops[0].value {
+                    ScanValue::U32(v) => v,
+                    _ => unreachable!(),
+                }
             })
             .collect();
         assert_eq!(journaled.len(), 320);

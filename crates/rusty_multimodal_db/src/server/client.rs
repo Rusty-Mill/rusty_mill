@@ -1149,31 +1149,42 @@ impl SchemaDrivenClient {
         }
     }
 
-    /// A real, minimal SQL `SELECT`/`GROUP BY`/aggregate-function query —
-    /// tokenized and parsed entirely client-side, never sent as text on
-    /// the wire (`SQL-FR-001`/`002`/`003`, ADR-0034; `AGG-FR-001`–`003`,
-    /// ADR-0035; see `src/server/sql.rs`'s own grammar and each design
-    /// document). A parsed query with no aggregate column and no `GROUP
-    /// BY` clause compiles to `Request::Query` and answers
-    /// [`QueryResult::Rows`], exactly as `ADR-0034` already does — zero
-    /// change to that path; one using either compiles to
-    /// `Request::Aggregate` and answers [`QueryResult::Groups`] instead
-    /// (`AGG-FR-002`). A syntax error (`ClientError::Sql`), an unknown
-    /// column (`ClientError::UnknownField`, matching every other
-    /// name-addressed method), a `WHERE`/aggregate-argument literal or
-    /// field kind that doesn't fit, an ordering comparator against a
-    /// `Str`/`Bool` field, a plain `SELECT`-list column missing from
-    /// `GROUP BY`, or `SELECT *` alongside `GROUP BY`/an aggregate
-    /// column are each resolved — and rejected, where invalid — entirely
-    /// client-side, no round trip. A plain query needs protocol version
-    /// 8 or later; one using `GROUP BY`/an aggregate function needs
-    /// version 9 — `ClientError::Unsupported("sql query"/"sql
-    /// aggregate")`, no frame sent, otherwise (`SQL-FR-010`,
-    /// `AGG-FR-010`).
+    /// A real, minimal SQL `SELECT`/`GROUP BY`/aggregate-function/
+    /// `ORDER BY` query — tokenized and parsed entirely client-side,
+    /// never sent as text on the wire (`SQL-FR-001`/`002`/`003`,
+    /// ADR-0034; `AGG-FR-001`–`003`, ADR-0035; `OBY-FR-001`–`004`,
+    /// ADR-0061; see `src/server/sql.rs`'s own grammar and each design
+    /// document). A parsed query with no `ORDER BY`, no aggregate
+    /// column, and no `GROUP BY` clause compiles to `Request::Query`
+    /// and answers [`QueryResult::Rows`], exactly as `ADR-0034` already
+    /// does — zero change to that path; one using `GROUP BY`/an
+    /// aggregate function compiles to `Request::Aggregate` and answers
+    /// [`QueryResult::Groups`] instead (`AGG-FR-002`); one using `ORDER
+    /// BY` — mutually exclusive with `WHERE`/`JOIN`/`GROUP BY`/an
+    /// aggregate column, refused at parse time otherwise
+    /// (`OBY-FR-002`) — compiles to one or more `Request::Page` calls
+    /// and still answers [`QueryResult::Rows`] (`OBY-FR-004`,
+    /// `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md`). A syntax error
+    /// (`ClientError::Sql`), an unknown column (`ClientError::
+    /// UnknownField`, matching every other name-addressed method), a
+    /// `WHERE`/aggregate-argument literal or field kind that doesn't
+    /// fit, an ordering comparator against a `Str`/`Bool` field, a
+    /// plain `SELECT`-list column missing from `GROUP BY`, `SELECT *`
+    /// alongside `GROUP BY`/an aggregate column, or an `ORDER BY` field
+    /// that isn't `U32`/`I64` are each resolved — and rejected, where
+    /// invalid — entirely client-side, no round trip. A plain query
+    /// needs protocol version 8 or later; `GROUP BY`/an aggregate
+    /// function needs version 9; `ORDER BY` needs version 20 —
+    /// `ClientError::Unsupported("sql query"/"sql aggregate"/"order
+    /// by")`, no frame sent, otherwise (`SQL-FR-010`, `AGG-FR-010`,
+    /// `OBY-FR-003`).
     pub fn query(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         let parsed = sql::parse(sql).map_err(|e| ClientError::Sql(e.to_string()))?;
         if parsed.join.is_some() {
             return self.query_join(parsed).map(QueryResult::Joined);
+        }
+        if parsed.order_by.is_some() {
+            return self.query_ordered(parsed).map(QueryResult::Rows);
         }
         let is_aggregate = !parsed.group_by.is_empty()
             || matches!(&parsed.columns, sql::ParsedColumns::Named(items)
@@ -1215,6 +1226,138 @@ impl SchemaDrivenClient {
             select,
             filter,
             limit: parsed.limit,
+        })? {
+            Response::Rows { rows } => Ok(rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let named = fields
+                        .into_iter()
+                        .map(|(tag, value)| (self.field_name(tag), value))
+                        .collect();
+                    (id, named)
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Rows")),
+        }
+    }
+
+    /// `OBY-FR-003`/`004` (ADR-0061): compiles an `ORDER BY`-bearing
+    /// `ParsedQuery` — mutually exclusive with `WHERE`/`JOIN`/`GROUP BY`/
+    /// an aggregate column, enforced by `sql::parse` itself
+    /// (`OBY-FR-002`) — to one or more `Request::Page` calls (ADR-0055,
+    /// protocol 20), projecting each full row down to the `SELECT` list
+    /// before returning, since `Page` has no `Selection` argument of its
+    /// own. `LIMIT n` compiles to exactly one round trip; no `LIMIT`
+    /// walks the whole table in fixed-size pages until one returns fewer
+    /// rows than requested (the walk's own exhaustion signal,
+    /// `docs/design/SERVER-PAGE-DESIGN.md`'s "the empty page ends a
+    /// walk" generalized to "a short page ends a walk") — a materially
+    /// different, multi-round-trip cost from every other `SELECT`,
+    /// named in `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md` rather than
+    /// hidden. `ClientError::Unsupported("order by")` for a non-`U32`/
+    /// `I64` field or below protocol 20 (rule 4), `("order by limit")`
+    /// for `LIMIT 0` — both client-side, no frame sent — and
+    /// `ClientError::UnknownField` for an unknown `ORDER BY` or
+    /// `SELECT`-list field, matching `query_rows`'s own posture.
+    fn query_ordered(&mut self, parsed: sql::ParsedQuery) -> Result<Vec<QueryRow>, ClientError> {
+        const ORDER_BY_PAGE_CHUNK: u64 = 1_000;
+
+        if self.server_protocol_version < 20 {
+            return Err(ClientError::Unsupported("order by"));
+        }
+        let order_by_name = parsed
+            .order_by
+            .as_ref()
+            .expect("query() routes only ORDER-BY-bearing queries here")
+            .clone();
+        let descriptor = self.field(&order_by_name)?;
+        if !matches!(descriptor.value_kind, ValueKind::U32 | ValueKind::I64) {
+            return Err(ClientError::Unsupported("order by"));
+        }
+        let order_by_tag = descriptor.tag;
+
+        // Resolve the SELECT list now, before any round trip, matching
+        // `query_rows`'s own posture — `Page` returns every field, so
+        // this is a client-side projection applied after each page.
+        let projected_names: Option<Vec<String>> = match &parsed.columns {
+            sql::ParsedColumns::All => None,
+            sql::ParsedColumns::Named(items) => {
+                let mut names = Vec::with_capacity(items.len());
+                for item in items {
+                    let name = match item {
+                        sql::ParsedColumnItem::Plain(name)
+                        | sql::ParsedColumnItem::Qualified { name, .. } => name,
+                        sql::ParsedColumnItem::Aggregate { .. } => unreachable!(
+                            "validate_order_by refuses an aggregate column alongside ORDER BY"
+                        ),
+                    };
+                    self.field(name)?;
+                    names.push(name.clone());
+                }
+                Some(names)
+            }
+        };
+
+        let mut rows: Vec<QueryRow> = Vec::new();
+        match parsed.limit {
+            Some(0) => return Err(ClientError::Unsupported("order by limit")),
+            Some(limit) => {
+                rows.extend(self.fetch_page(order_by_tag, None, limit as u64)?);
+            }
+            None => {
+                let mut after = None;
+                loop {
+                    let page = self.fetch_page(order_by_tag, after.take(), ORDER_BY_PAGE_CHUNK)?;
+                    let page_len = page.len() as u64;
+                    if let Some((id, fields)) = page.last() {
+                        let value = fields
+                            .iter()
+                            .find(|(name, _)| *name == order_by_name)
+                            .map(|(_, v)| v.clone())
+                            .expect("Page returns every field of each record");
+                        after = Some((value, *id));
+                    }
+                    rows.extend(page);
+                    if page_len < ORDER_BY_PAGE_CHUNK {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(names) = projected_names {
+            rows = rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let projected = names
+                        .iter()
+                        .filter_map(|name| {
+                            fields
+                                .iter()
+                                .find(|(field_name, _)| field_name == name)
+                                .cloned()
+                        })
+                        .collect();
+                    (id, projected)
+                })
+                .collect();
+        }
+        Ok(rows)
+    }
+
+    /// One `Request::Page` round trip translated to named fields —
+    /// shared by `query_ordered`'s `LIMIT` and no-`LIMIT` paths.
+    fn fetch_page(
+        &mut self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: u64,
+    ) -> Result<Vec<QueryRow>, ClientError> {
+        match self.roundtrip(Request::Page {
+            order_by,
+            after,
+            limit,
         })? {
             Response::Rows { rows } => Ok(rows
                 .into_iter()

@@ -46,7 +46,7 @@
 //! and the descriptor from `Schema` (rule 3, `ENT4-FR-003`), leaving
 //! exactly the three-field shape `FR-042` returned.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
+use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
@@ -90,12 +90,28 @@ impl EntityConnectionStore {
     ) -> Result<Self, JournalError> {
         let (journal, batches) = CommitGroup::open(journal_path)?;
         store.with_exclusive(|inner| -> Result<(), JournalError> {
+            let schema = Self::schema();
             for (batch_index, batch) in batches.iter().enumerate() {
-                Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
-                    batch: batch_index,
-                    index,
-                    code,
-                })?;
+                match batch {
+                    JournaledBatch::Transaction(ops) => {
+                        Self::apply_batch(inner, ops).map_err(|(index, code)| {
+                            JournalError::Replay {
+                                batch: batch_index,
+                                index,
+                                code,
+                            }
+                        })?;
+                    }
+                    JournaledBatch::Write(ops) => {
+                        Self::replay_write_batch(inner, &schema, ops).map_err(
+                            |(index, code)| JournalError::Replay {
+                                batch: batch_index,
+                                index,
+                                code,
+                            },
+                        )?;
+                    }
+                }
             }
             inner.checkpoint_flush()?;
             journal.truncate()
@@ -104,6 +120,74 @@ impl EntityConnectionStore {
             store,
             journal: Some(journal),
         })
+    }
+
+    /// `WBJ-FR-003` (ADR-0063) — see `MemoryConnectionStore::
+    /// replay_write_batch` for the full contract; identical here.
+    fn replay_write_batch(
+        inner: &mut EntityProductionStack,
+        schema: &DomainSchema,
+        ops: &[WriteOp],
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (i, op) in ops.iter().enumerate() {
+            let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
+            Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?;
+        }
+        Ok(())
+    }
+
+    /// This domain's `DomainSchema`, without an instance — needed at
+    /// `with_journal`'s replay. `ConnectionStore::describe` delegates
+    /// here.
+    fn schema() -> DomainSchema {
+        DomainSchema {
+            fields: vec![
+                FieldDescriptor {
+                    tag: FIELD_LABEL,
+                    name: "label".into(),
+                    value_kind: ValueKind::Str,
+                    capabilities: FieldCapabilities {
+                        filter_eq: true,
+                        scan: false,
+                        update: false,
+                    },
+                },
+                FieldDescriptor {
+                    tag: FIELD_KIND,
+                    name: "kind".into(),
+                    value_kind: ValueKind::Str,
+                    capabilities: FieldCapabilities {
+                        filter_eq: true,
+                        scan: false,
+                        update: false,
+                    },
+                },
+                FieldDescriptor {
+                    tag: FIELD_MENTION_COUNT,
+                    name: "mention_count".into(),
+                    value_kind: ValueKind::I64,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: true,
+                        update: true,
+                    },
+                },
+                FieldDescriptor {
+                    tag: FIELD_ALIASES,
+                    name: "aliases".into(),
+                    value_kind: ValueKind::StrList,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: false,
+                        update: false,
+                    },
+                },
+            ],
+            relations: RelationCapabilities {
+                parent_children: false,
+                neighbors: true,
+            },
+        }
     }
 
     /// `Entity`'s only mutable field over this protocol is
@@ -541,7 +625,7 @@ impl ConnectionStore for EntityConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
-        self.store.with_exclusive(|inner| {
+        let apply = |inner: &mut EntityProductionStack| {
             for (i, p) in prepared.iter().enumerate() {
                 if let PreparedWrite::Link { left, .. } = p {
                     if GetById::<Entity>::get(inner, *left).is_none() {
@@ -554,7 +638,29 @@ impl ConnectionStore for EntityConnectionStore {
                 results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
             }
             Ok(results)
-        })
+        };
+        match &self.journal {
+            None => self.store.with_exclusive(apply),
+            Some(journal) => {
+                let results_cell: std::cell::RefCell<Option<Vec<WriteResult>>> =
+                    std::cell::RefCell::new(None);
+                journal
+                    .commit_write(ops, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            let results = apply(inner)?;
+                            *results_cell.borrow_mut() = Some(results);
+                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })?;
+                Ok(results_cell
+                    .into_inner()
+                    .expect("commit_write's apply closure always sets results_cell on Ok"))
+            }
+        }
     }
 
     fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {
