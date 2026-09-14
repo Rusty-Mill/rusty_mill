@@ -77,6 +77,8 @@
 //! | 20 | `SERVER-001` v0.45.0 | + [`Request::Page`] (29) — `PAG-FR-004`, ADR-0055: one ordered keyset page of the connection's table — every record sorted ascending by an orderable (`U32`/`I64`) field with the id as tie-break, starting strictly after an optional `(value, id)` cursor, at most `limit` rows — answered with the existing [`Response::Rows`] (every field of each record). The shape a sync puller needs (`updated_at`, then the last row's `(value, id)` as the next cursor) and the first request on this wire whose result has an order. Validated: `UnknownField` for an unknown `order_by`, `Malformed` for a non-orderable field, a cursor value of another kind, or a zero `limit`. A read, gated as `Query` (authentication only, never overlaid, never read-set-tracked); server-gated `Malformed` below 20 (rule 3). No new response, no new `ErrorCode`. ADR-0055 |
 //! | 21 | `SERVER-001` v0.47.0 | + [`Request::CountEdges`] (30) and [`Response::Count`] (19) — `CNT-FR-003`, ADR-0057: how many edges the connection's table holds under one relation label, each undirected edge counted once, a cross-table (foreign) label included — one read under the table's lock, in place of one `NeighborsByRelation` round trip per record. `Malformed` for a label the table has no relation under (`NeighborsByRelation`'s own rule); `Unsupported` from a domain with no labelled relations. A read, gated as `Query`; server-gated `Malformed` below 21 (rule 3). No new `ErrorCode`. ADR-0057 |
 //! | 22 | `SERVER-001` v0.50.0 | + [`Request::WriteBatch`] (31) and [`Response::BatchResults`] (20) — `WBT-FR-001`, ADR-0060: a batch of the five runtime writes (`Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link`, as [`WriteOp`]) for the connection's table, applied in order under one write-lock acquisition, answered one [`WriteResult`] per op. `atomic: false` pipelined (each op stands on its own); `atomic: true` precondition- and isolation-atomic — nothing applies unless every op validates, else all apply, an abort reported by [`Response::TransactionFailed`] (reused). Not crash-atomic across the batch (a storage batch marker is the named follow-on). A write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, server-gated `Malformed` below 22 or over `MAX_BATCH_OPS` ops. No new `ErrorCode`. ADR-0060 |
+//! | 23 | `SERVER-001` v0.53.0 | + [`Request::Metrics`] (32) and [`Response::Metrics`] (21) — `MET-FR-001`, ADR-0064: a bounded, fixed set of process-wide atomic counters (requests total/ok/error, connections accepted/active, uptime), rendered as Prometheus text exposition format — no new dependency, no second listener. Gated as a **read**, but not restricted to `ReadWrite` — the first request answerable by any authenticated class, since observing process health is not a data write. `Malformed` below 23 (rule 3); never overlaid by a session, never read-set-tracked (process-wide data, not table data). No new `ErrorCode`. ADR-0064 |
+//! | 24 | `SERVER-001` v0.54.0 | + [`Request::Backup`] (33) and [`Response::BackedUp`] (22) — `BAK-FR-001`, ADR-0065: a live, lock-consistent snapshot copy of the connection's table files into an opt-in, server-configured `SERVER_BACKUP_ROOT`-relative directory named by `name` (a single path component — `/`, `\`, and `..` refused before any I/O, `BAK-FR-004`), under the table's write lock (`Compact`'s own precedent). Answered [`Response::BackedUp`] with the files/bytes copied; `Unsupported` when `SERVER_BACKUP_ROOT` is unconfigured or the adapter has no known data directory (`Dog`'s bespoke store when built without one, `Order`/`Employee`); `Storage` for an existing non-empty target or an I/O failure mid-copy (the partial target removed, never left half-written). An operator's write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, `Malformed` below 24. No new `ErrorCode`. ADR-0065 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -111,7 +113,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -942,6 +944,28 @@ pub enum Request {
         ops: Vec<WriteOp>,
         atomic: bool,
     },
+    /// Protocol 23 (`MET-FR-001`, ADR-0064,
+    /// `docs/design/SERVER-METRICS-DESIGN.md`): a bounded, fixed set of
+    /// process-wide atomic counters, rendered as Prometheus text.
+    /// Answered [`Response::Metrics`]. Gated as a **read** — any
+    /// authenticated class, not just `ReadWrite`; never overlaid or
+    /// read-set-tracked by a session (process-wide, not table data).
+    /// `Malformed` below 23 (rule 3).
+    Metrics,
+    /// Protocol 24 (`BAK-FR-001`, ADR-0065,
+    /// `docs/design/SERVER-BACKUP-DESIGN.md`): a live, lock-consistent
+    /// snapshot copy of this table's files into
+    /// `SERVER_BACKUP_ROOT.join(name)` — `name` a single path component,
+    /// checked before any I/O (`BAK-FR-004`). Answered
+    /// [`Response::BackedUp`] with the files/bytes copied;
+    /// `Unsupported` when no backup root is configured or the adapter
+    /// has no known data directory; `Storage` for an existing non-empty
+    /// target or an I/O failure mid-copy. An operator's write, gated
+    /// like [`Request::Compact`]: `Malformed` below 24; `Unauthorized`
+    /// for a `ReadOnly` token; `SessionOpen` while a session is open.
+    Backup {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1061,6 +1085,21 @@ pub enum Response {
     BatchResults {
         results: Vec<WriteResult>,
     },
+    /// Protocol 23 (`MET-FR-001`, ADR-0064). Answers [`Request::Metrics`]:
+    /// the bounded counter set as Prometheus text exposition format.
+    /// Only ever answers a gated request, so it needs no
+    /// `downgrade_for_version` arm.
+    Metrics {
+        text: String,
+    },
+    /// Protocol 24 (`BAK-FR-001`, ADR-0065). Answers [`Request::Backup`]
+    /// on success: how many files and bytes were copied into the backup
+    /// directory. Only ever answers a gated request, so it needs no
+    /// `downgrade_for_version` arm.
+    BackedUp {
+        files: u64,
+        bytes: u64,
+    },
 }
 
 #[cfg(test)]
@@ -1101,6 +1140,8 @@ mod tests {
             "Page" => 20,
             "CountEdges" | "Count" => 21,
             "WriteBatch" | "BatchResults" => 22,
+            "Metrics" => 23,
+            "Backup" | "BackedUp" => 24,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1455,6 +1496,23 @@ mod tests {
                 &ID2,                      // id 2
                 &[0x01],                   // atomic: true
             ]),
+        );
+        // Protocol 23 (`MET-FR-001`, ADR-0064): `Metrics` at 32 — no
+        // fields.
+        assert_golden("Metrics", &Request::Metrics, &[0x20, 0x00, 0x00, 0x00]);
+        // Protocol 24 (`BAK-FR-001`, ADR-0065): `Backup` at 33 — one
+        // `String` field, the same length-then-bytes shape `Authenticate`
+        // and `Use` already establish.
+        assert_golden(
+            "Backup",
+            &Request::Backup {
+                name: "nightly".into(),
+            },
+            &[
+                0x21, 0x00, 0x00, 0x00, // Backup
+                0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // name len
+                b'n', b'i', b'g', b'h', b't', b'l', b'y',
+            ],
         );
         // Protocol 20 (`PAG-FR-004`, ADR-0055): `Page` at 29 — field tag,
         // `Some((I64 2000, id))`, limit.
@@ -1885,6 +1943,34 @@ mod tests {
                 &[0x01, 0x00, 0x00, 0x00],                         // ErrorCode::Unsupported
             ]),
         );
+        // Protocol 23 (`MET-FR-001`, ADR-0064): `Metrics` at 21 — one
+        // `String` field.
+        assert_golden_eq(
+            "Metrics",
+            &Response::Metrics {
+                text: "dogserver_requests_total 0\n".into(),
+            },
+            &{
+                let mut v = vec![0x15, 0x00, 0x00, 0x00]; // Metrics
+                v.extend_from_slice(&27u64.to_le_bytes()); // text len
+                v.extend_from_slice(b"dogserver_requests_total 0\n");
+                v
+            },
+        );
+        // Protocol 24 (`BAK-FR-001`, ADR-0065): `BackedUp` at 22 — two
+        // `u64` fields.
+        assert_golden_eq(
+            "BackedUp",
+            &Response::BackedUp {
+                files: 3,
+                bytes: 4096,
+            },
+            &bytes(&[
+                &[0x16, 0x00, 0x00, 0x00],                         // BackedUp
+                &[0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // files
+                &[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // bytes: 4096
+            ]),
+        );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
         assert_golden_eq(
             "Compacted",
@@ -1951,8 +2037,10 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 21 is the one that added
-    /// `Request::WriteBatch`/`Response::BatchResults` (21 `Request::CountEdges`/`Response::Count`, 20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
+    /// module docs' table — version 24 is the one that added
+    /// `Request::Backup`/`Response::BackedUp` (23 `Request::Metrics`/
+    /// `Response::Metrics`, 22 `Request::WriteBatch`/`Response::BatchResults`
+    /// (21 `Request::CountEdges`/`Response::Count`, 20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
     /// `DescribeRelations` and `Response::JoinedRows`/`Relations`, 11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
@@ -1964,7 +2052,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 22);
+        assert_eq!(PROTOCOL_VERSION, 24);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

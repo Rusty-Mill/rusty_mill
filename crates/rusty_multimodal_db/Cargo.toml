@@ -187,6 +187,18 @@ required-features = ["server", "research"]
 name = "server_hub_differential"
 required-features = ["server"]
 
+# `ADR-0064`: process-wide counters over a real socket — `server` alone.
+[[test]]
+name = "server_metrics_integration"
+required-features = ["server"]
+
+# `ADR-0065`: a live snapshot copy into a `SERVER_BACKUP_ROOT`-relative
+# directory, reopened via `open_memory_production_stack_portable` to
+# prove the copy is real — `server` alone.
+[[test]]
+name = "server_backup_integration"
+required-features = ["server"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"

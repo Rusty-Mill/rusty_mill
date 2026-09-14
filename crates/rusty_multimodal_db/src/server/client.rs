@@ -2157,6 +2157,44 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// Process-wide observability counters (`MET-FR-001`, ADR-0064,
+    /// protocol 23) as Prometheus text exposition format. Any
+    /// authenticated class, not just `ReadWrite` — observing process
+    /// health is not a data write. [`ClientError::Unsupported`]`("metrics")`
+    /// below 23, with no frame sent (rule 4).
+    pub fn metrics(&mut self) -> Result<String, ClientError> {
+        if self.server_protocol_version() < 23 {
+            return Err(ClientError::Unsupported("metrics"));
+        }
+        match self.roundtrip(Request::Metrics)? {
+            Response::Metrics { text } => Ok(text),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Metrics")),
+        }
+    }
+
+    /// A live, lock-consistent snapshot copy of the selected table's
+    /// files into the server's `SERVER_BACKUP_ROOT`-relative `name`
+    /// (`BAK-FR-001`, ADR-0065, protocol 24) — `(files, bytes)` copied
+    /// on success. `Server(Unsupported, _)` when the server has no
+    /// backup root configured or this table has no known data
+    /// directory; `Server(Storage, _)` for an existing target or an I/O
+    /// failure mid-copy. [`ClientError::Unsupported`]`("backup")` below
+    /// 24, with no frame sent (rule 4). Never inside a [`Session`] — the
+    /// server answers `SessionOpen`.
+    pub fn backup(&mut self, name: &str) -> Result<(u64, u64), ClientError> {
+        if self.server_protocol_version() < 24 {
+            return Err(ClientError::Unsupported("backup"));
+        }
+        match self.roundtrip(Request::Backup {
+            name: name.to_string(),
+        })? {
+            Response::BackedUp { files, bytes } => Ok((files, bytes)),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("BackedUp")),
+        }
+    }
+
     /// Add one edge between two records under a symmetric relation label
     /// (`LNK-FR-012`, ADR-0047, protocol 14). `Ok(())` whether the edge is
     /// new or was already present — insert-or-ignore, so a retry is

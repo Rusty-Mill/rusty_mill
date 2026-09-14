@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 22
+PROTOCOL_VERSION = 24
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -643,12 +643,29 @@ class WriteBatch:
         object.__setattr__(self, "ops", tuple(self.ops))
 
 
+@_variant(32, [])
+class Metrics:
+    """MET-FR-001, ADR-0064, protocol 23: process-wide counters as
+    Prometheus text. Gated as a read — any authenticated class."""
+
+    pass
+
+
+@_variant(33, [("name", "str")])
+class Backup:
+    """BAK-FR-001, ADR-0065, protocol 24: a live snapshot copy into
+    ``SERVER_BACKUP_ROOT.join(name)``. ``name`` must be a single path
+    component; the server refuses anything else before any I/O."""
+
+    name: str
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
-    WriteBatch,
+    WriteBatch, Metrics, Backup,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -659,7 +676,7 @@ REQUEST_INTRODUCED_AT = {
     Begin: 3, Commit: 3, Rollback: 3, BeginWith: 5, Query: 8, Aggregate: 9,
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
-    ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22,
+    ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22, Metrics: 23, Backup: 24,
 }
 
 
@@ -811,10 +828,26 @@ class Count:
     count: int
 
 
+@_variant(21, [("text", "str")])
+class MetricsResp:
+    """MET-FR-001, ADR-0064. Answers `Metrics`: the counter set as
+    Prometheus text."""
+
+    text: str
+
+
+@_variant(22, [("files", "u64"), ("bytes", "u64")])
+class BackedUp:
+    """BAK-FR-001, ADR-0065. Answers `Backup` on success."""
+
+    files: int
+    bytes: int
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
-    BatchResults,
+    BatchResults, MetricsResp, BackedUp,
 ]
 
 

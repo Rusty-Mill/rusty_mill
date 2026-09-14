@@ -169,6 +169,11 @@ pub mod journal;
 /// the `Reminder`/`Entity` precedent: real, deployable capability.
 #[cfg(feature = "server")]
 pub mod memory;
+/// Process-wide observability counters (`ADR-0064`): [`metrics::ServerMetrics`]
+/// lives on [`ServeOptions`] and is rendered as Prometheus text by
+/// [`Request::Metrics`].
+#[cfg(feature = "server")]
+pub mod metrics;
 #[cfg(all(feature = "server", feature = "research"))]
 pub mod order;
 mod pem;

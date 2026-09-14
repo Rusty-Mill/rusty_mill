@@ -50,6 +50,22 @@
 //! holds a slot file but lacks a companion is a startup error, never a
 //! silent recreation. Combine with `SERVER_TXN_JOURNAL_PATH` for
 //! crash-atomic batches; the two are independent settings.
+//!
+//! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
+//!
+//! Opt-in, and only meaningful with `SERVER_DATA_DIR` also set (a
+//! scratch-mode table has nothing worth backing up — it is gone on
+//! restart regardless). Set `SERVER_BACKUP_ROOT=<dir>` and an
+//! authenticated write-class client's `Request::Backup { name }`
+//! copies one table's files, under its write lock, into
+//! `<dir>/<name>` — `name` a single path component, never a caller
+//! path. Unset, every `Backup` request answers `Unsupported`.
+//!
+//! # Process metrics — `Request::Metrics` (ADR-0064)
+//!
+//! Always on, no configuration: any authenticated connection may call
+//! `Request::Metrics` for a bounded set of process-wide counters as
+//! Prometheus text.
 
 use rusty_multimodal_db::generic::entity::{
     create_entity_production_stack, open_or_create_entity_production_stack, Entity,
@@ -167,25 +183,45 @@ fn main() {
             std::env::temp_dir().join(format!("memory_server_{}", std::process::id())),
         ),
     };
-    let (store, entity_store, relation_store) =
+    let durable = matches!(data, DataLocation::Durable(_));
+    let (store, entity_store, relation_store, memories_path, entities_path, relations_path) =
         open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
-    let relation_connection_store: Arc<dyn ConnectionStore> = Arc::new(
-        RelationConnectionStore::new(GenericProductionStore::new(relation_store)),
-    );
-    let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new(EntityConnectionStore::new(
-        GenericProductionStore::new(entity_store),
-    ));
+    let relation_connection_store: Arc<dyn ConnectionStore> = Arc::new({
+        let adapter = RelationConnectionStore::new(GenericProductionStore::new(relation_store));
+        // `BAK-FR-002` (ADR-0065): only a durable table has a directory
+        // worth naming — a scratch table is gone on restart regardless.
+        if durable {
+            adapter.with_backup_source(relations_path)
+        } else {
+            adapter
+        }
+    });
+    let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
+        let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
+        if durable {
+            adapter.with_backup_source(entities_path)
+        } else {
+            adapter
+        }
+    });
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
     // write, replayed on the next start. Set it the same way every start:
     // opening without it after a crash forgoes the replay.
-    let connection_store = Arc::new(match std::env::var("SERVER_TXN_JOURNAL_PATH") {
-        Ok(journal_path) => MemoryConnectionStore::with_journal(
-            GenericProductionStore::new(store),
-            Path::new(&journal_path),
-        )
-        .unwrap_or_else(|e| panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")),
-        Err(_) => MemoryConnectionStore::new(GenericProductionStore::new(store)),
+    let connection_store = Arc::new({
+        let adapter = match std::env::var("SERVER_TXN_JOURNAL_PATH") {
+            Ok(journal_path) => MemoryConnectionStore::with_journal(
+                GenericProductionStore::new(store),
+                Path::new(&journal_path),
+            )
+            .unwrap_or_else(|e| panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")),
+            Err(_) => MemoryConnectionStore::new(GenericProductionStore::new(store)),
+        };
+        if durable {
+            adapter.with_backup_source(memories_path)
+        } else {
+            adapter
+        }
     });
     let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
 
@@ -243,8 +279,16 @@ fn main() {
         Some(tls) => auth.with_tls(tls),
         None => auth,
     };
+    // `SERVER_BACKUP_ROOT` (ADR-0065, `BAK-FR-003`): opt-in — unset,
+    // every `Request::Backup` answers `Unsupported` server-wide, no new
+    // filesystem-write surface at all.
+    let options = match std::env::var_os("SERVER_BACKUP_ROOT") {
+        Some(root) => options.with_backup_root(PathBuf::from(root)),
+        None => options,
+    };
+    let backup_rooted = std::env::var_os("SERVER_BACKUP_ROOT").is_some();
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -256,6 +300,7 @@ fn main() {
         if audited { "configured" } else { "NOT configured" },
         if rate_limited { "configured" } else { "lockout only (default)" },
         if access_logged { "configured" } else { "NOT configured" },
+        if backup_rooted { "configured" } else { "NOT configured" },
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary
@@ -304,6 +349,9 @@ fn open_stores(
         MemoryProductionStack,
         EntityProductionStack,
         RelationProductionStack,
+        PathBuf,
+        PathBuf,
+        PathBuf,
     ),
     String,
 > {
@@ -323,7 +371,14 @@ fn open_stores(
             .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?;
         let relation_store = open_or_create_relation_production_stack(&relations)
             .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", relations.display()))?;
-        return Ok((store, entity_store, relation_store));
+        return Ok((
+            store,
+            entity_store,
+            relation_store,
+            memories,
+            entities,
+            relations,
+        ));
     }
     let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &memories)
         .map_err(|e| format!("creating the sample MemoryProductionStack: {e}"))?;
@@ -331,7 +386,14 @@ fn open_stores(
         .map_err(|e| format!("creating the sample EntityProductionStack: {e}"))?;
     let relation_store = create_relation_production_stack(sample_relations(), &relations)
         .map_err(|e| format!("creating the sample RelationProductionStack: {e}"))?;
-    Ok((store, entity_store, relation_store))
+    Ok((
+        store,
+        entity_store,
+        relation_store,
+        memories,
+        entities,
+        relations,
+    ))
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see
