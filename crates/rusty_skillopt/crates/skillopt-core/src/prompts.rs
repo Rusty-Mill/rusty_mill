@@ -99,7 +99,16 @@ pub fn select_feedback(
     };
 
     let mut sorted: Vec<Reflection> = reflections.to_vec();
-    sorted.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+    sorted.sort_by(|a, b| match (a.score.is_nan(), b.score.is_nan()) {
+        // NaN scores indicate a broken/invalid environment scorer; treat
+        // them as the worst possible outcome so they never dominate the
+        // highlighted (lowest-score) feedback shown to the optimizer,
+        // rather than panicking or sorting arbitrarily on sign bit.
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.score.total_cmp(&b.score),
+    });
     sorted.truncate(highlight_count);
 
     AggregatedFeedback {
@@ -146,5 +155,33 @@ mod tests {
         assert_eq!(fb.highlighted[0].example_id, "b");
         assert_eq!(fb.highlighted[1].example_id, "c");
         assert!((fb.mean_score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn select_feedback_does_not_panic_on_nan_score() {
+        let reflections = vec![
+            Reflection {
+                example_id: "a".into(),
+                score: 1.0,
+                critique: "ok".into(),
+            },
+            Reflection {
+                example_id: "b".into(),
+                score: f64::NAN,
+                critique: "broken scorer".into(),
+            },
+            Reflection {
+                example_id: "c".into(),
+                score: 0.5,
+                critique: "meh".into(),
+            },
+        ];
+
+        // Must not panic, and the NaN-scored reflection must not crowd out
+        // valid low scores when only the top `highlight_count` are kept.
+        let fb = select_feedback(&reflections, 2, vec![]);
+        assert_eq!(fb.highlighted.len(), 2);
+        assert_eq!(fb.highlighted[0].example_id, "c");
+        assert_eq!(fb.highlighted[1].example_id, "a");
     }
 }

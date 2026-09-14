@@ -157,7 +157,21 @@ async fn write_response(
     transport.write_body(body).await
 }
 
-/// Removes a stale socket, binds a fresh one, and tightens its permissions.
+/// Removes a stale socket, then binds a fresh one with permissions
+/// already narrowed to `0600` *before* it starts accepting connections.
+///
+/// `tokio::net::UnixListener::bind`/`std::os::unix::net::UnixListener::bind`
+/// both `bind` *and* `listen` in one call, so a caller that narrows
+/// permissions only afterwards (as this function used to) leaves a TOCTOU
+/// window: the socket is already connectable, at whatever mode the
+/// process umask allows, until the subsequent `chmod` lands.
+/// [`unix_bind_chmod_listen`] below instead runs `socket` -> `bind` ->
+/// `chmod(0600)` -> `listen`, in that exact order, so the socket cannot
+/// accept a single connection until its permissions are already correct.
+/// Mirrors rustils' `platform_linux::sys::net::unix_listen` (not taken as
+/// a dependency: that crate is Linux-only, while this socket has to bind
+/// on every Unix target `ts-daemon` runs on, hence the plain `libc` calls
+/// here instead).
 #[cfg(unix)]
 fn bind(path: &Path) -> Result<UnixListener, ServeError> {
     if let Some(dir) = path.parent()
@@ -177,16 +191,147 @@ fn bind(path: &Path) -> Result<UnixListener, ServeError> {
             });
         }
     }
-    let listener = UnixListener::bind(path).map_err(|source| ServeError::Bind {
+    let std_listener =
+        unix_bind_chmod_listen(path, narrow_permissions).map_err(|source| ServeError::Bind {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|source| ServeError::Bind {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    UnixListener::from_std(std_listener).map_err(|source| ServeError::Bind {
         path: path.to_path_buf(),
         source,
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    })
+}
+
+/// `socket` + `bind`, deferring `chmod`/`listen` to the caller. Split out
+/// from [`unix_bind_chmod_listen`] purely so a test can observe that a
+/// freshly bound-but-not-yet-listening socket refuses every connection --
+/// the invariant that makes the TOCTOU window structurally impossible,
+/// rather than merely narrow.
+#[cfg(unix)]
+fn unix_socket_bind(path: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AF_UNIX path must not contain a NUL byte",
+        ));
     }
-    Ok(listener)
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AF_UNIX path too long (must fit in sockaddr_un::sun_path)",
+        ));
+    }
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes.iter()) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: all-zeroes is a valid (if meaningless) `sockaddr_un`; only
+    // the fields set above are ever read back -- the offset below only
+    // ever takes the address of a field, never reads through it.
+    let base = std::ptr::addr_of!(addr) as usize;
+    let sun_path = std::ptr::addr_of!(addr.sun_path) as usize;
+    let addr_len = (sun_path - base + bytes.len() + 1) as libc::socklen_t;
+
+    // No `SOCK_CLOEXEC` at `socket(2)`: Darwin has no such type flag, so
+    // (matching platform-bsd's own documented portable subset) close-on-
+    // exec is set as an explicit second step below instead of atomically.
+    // SAFETY: plain integer arguments, no memory referenced.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a freshly returned, valid, otherwise-unowned
+    // descriptor; wrapped exactly once so every early return below closes
+    // it instead of leaking.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+
+    // SAFETY: plain integer arguments, no memory referenced beyond `fd`.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // SAFETY: `addr` holds a valid `sockaddr_un` for exactly `addr_len`
+    // bytes constructed above; `fd` is a freshly created, valid socket.
+    let r = unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            (&addr as *const libc::sockaddr_un).cast::<libc::sockaddr>(),
+            addr_len,
+        )
+    };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+/// Mode-`0600` (owner read/write only) `chmod` on `path`. This is the
+/// step `bind()` used to run *after* the socket had already started
+/// listening, and discard the `Result` of (`let _ = set_permissions(..)`)
+/// -- a failure here now propagates as a hard error instead of leaving a
+/// permanently exposed socket with no error surfaced.
+#[cfg(unix)]
+fn narrow_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AF_UNIX path must not contain a NUL byte",
+        )
+    })?;
+    // SAFETY: `c_path` is a valid, NUL-terminated C string outliving the
+    // call; `unix_socket_bind` has just created a regular file at this
+    // exact path for us to narrow.
+    let r = unsafe { libc::chmod(c_path.as_ptr(), 0o600) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `listen` on an already-`bind`-ed descriptor, then hand it to `std` as
+/// a `UnixListener`. Split out from [`unix_bind_chmod_listen`] for the
+/// same testability reason as [`unix_socket_bind`].
+#[cfg(unix)]
+fn unix_finish_listen(
+    fd: std::os::fd::OwnedFd,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `fd` is a valid, bound socket.
+    let r = unsafe { libc::listen(fd.as_raw_fd(), libc::SOMAXCONN) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(std::os::unix::net::UnixListener::from(fd))
+}
+
+/// `unix_socket_bind` -> `chmod` -> `unix_finish_listen`, in that exact
+/// order: the socket cannot accept a single connection until `chmod` has
+/// already succeeded. `chmod` is threaded through as a parameter (rather
+/// than calling [`narrow_permissions`] inline) solely so a test can swap
+/// in a failing stand-in and prove a `chmod` failure surfaces as `Err`
+/// from this exact sequence -- the one `bind()` composes in production --
+/// instead of being silently swallowed.
+#[cfg(unix)]
+fn unix_bind_chmod_listen(
+    path: &Path,
+    chmod: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    let fd = unix_socket_bind(path)?;
+    chmod(path)?;
+    unix_finish_listen(fd)
 }
 
 /// A canonical reason phrase for the status codes this server ever sends --
@@ -349,5 +494,105 @@ mod tests {
         );
 
         server_task.await.unwrap();
+    }
+
+    /// A fresh, unique scratch directory under the OS temp dir -- one per
+    /// test invocation (mixes in the PID and a per-call counter, since
+    /// several of these tests run concurrently within the same process).
+    #[cfg(unix)]
+    fn unique_test_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "ts-localapi-bind-test-{label}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// Regression for the bind-then-chmod TOCTOU window: `bind()` used to
+    /// call `UnixListener::bind` (which binds *and* starts listening in
+    /// one step) and only narrowed permissions afterwards, so a
+    /// freshly-listening socket sat at the ambient umask's permissions
+    /// until the subsequent `chmod` landed. The fix reorders this to
+    /// `bind` -> `chmod` -> `listen`, which this test proves structurally:
+    /// a socket that has been `bind`-ed but not yet had `chmod`/`listen`
+    /// run on it must refuse every connection, so there is no window in
+    /// which it is both loosely permissioned *and* acceptable.
+    #[cfg(unix)]
+    #[test]
+    fn socket_cannot_accept_connections_before_permissions_are_narrowed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_test_dir("no-window");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sock");
+
+        let fd = unix_socket_bind(&path).expect("socket+bind must succeed");
+
+        // The socket *file* already exists on disk (bind() alone creates
+        // it), but nothing is listening yet -- a connect attempt must
+        // fail. This is the invariant that makes the old TOCTOU window
+        // structurally impossible: whatever the file's mode is at this
+        // point, it cannot matter, because nothing can connect regardless.
+        let refused = std::os::unix::net::UnixStream::connect(&path);
+        assert!(
+            refused.is_err(),
+            "a bound-but-not-yet-listening socket must refuse connections, not accept one"
+        );
+
+        narrow_permissions(&path).expect("chmod must succeed on the just-bound socket");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "permissions must already be narrowed before listen() runs"
+        );
+
+        let listener = unix_finish_listen(fd).expect("listen must succeed");
+        let accepted = std::thread::spawn(move || listener.accept());
+        let client = std::os::unix::net::UnixStream::connect(&path).expect("connect after listen");
+        drop(client);
+        accepted
+            .join()
+            .unwrap()
+            .expect("listener must accept once listen() has actually run");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real `chmod(2)` wrapper `bind()` composes with must be able to
+    /// report a genuine OS failure, not just theoretically -- proven here
+    /// with a real, deterministic `ENOENT` (no such path) rather than a
+    /// synthetic error.
+    #[cfg(unix)]
+    #[test]
+    fn narrow_permissions_reports_a_real_chmod_failure() {
+        let dir = unique_test_dir("real-chmod-failure");
+        let path = dir.join("missing.sock");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = narrow_permissions(&path).expect_err("chmod on a nonexistent path must fail");
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    }
+
+    /// Regression for the discarded `let _ = set_permissions(..)`: a
+    /// `chmod` failure inside the bind-chmod-listen sequence must
+    /// propagate as `Err` from that sequence (the exact one `bind()`
+    /// composes with `narrow_permissions` in production), not be
+    /// swallowed and let the caller carry on to `listen()` regardless.
+    #[cfg(unix)]
+    #[test]
+    fn chmod_failure_surfaces_as_an_error_instead_of_being_swallowed() {
+        let dir = unique_test_dir("swallowed-chmod-failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sock");
+
+        let err = unix_bind_chmod_listen(&path, |_path| {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        })
+        .expect_err("a chmod failure inside bind()'s sequence must surface as Err");
+        assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

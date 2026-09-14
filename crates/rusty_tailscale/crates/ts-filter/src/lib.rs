@@ -115,13 +115,22 @@ impl Dst {
 struct Rule {
     srcs: Vec<Net>,
     dsts: Vec<Dst>,
-    /// Protocol numbers this rule is restricted to; empty means all.
-    protos: Vec<u8>,
+    /// Protocol numbers this rule is restricted to. `None` means the
+    /// `IPProto` field was absent/empty on the wire (unrestricted: matches
+    /// every protocol). `Some(vec)` means `IPProto` had entries; a valid
+    /// entry restricts matching to that protocol, and an out-of-range entry
+    /// (negative or >255) is dropped rather than silently treated as "no
+    /// restriction" — if *every* entry is out of range this ends up
+    /// `Some(vec![])`, which matches no protocol (fails closed), mirroring
+    /// how `srcs`/`dsts` fail closed when every entry is malformed.
+    protos: Option<Vec<u8>>,
 }
 
 impl Rule {
     fn matches(&self, src: IpAddr, dst: IpAddr, protocol: u8, port: u16) -> bool {
-        if !self.protos.is_empty() && !self.protos.contains(&protocol) {
+        if let Some(protos) = &self.protos
+            && !protos.contains(&protocol)
+        {
             return false;
         }
         if !self.srcs.iter().any(|s| s.contains(src)) {
@@ -138,9 +147,11 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// Compiles a flat list of [`FilterRule`]s. Malformed CIDRs and
-    /// out-of-range protocol numbers are dropped (defensive: never panic on a
-    /// hostile netmap).
+    /// Compiles a flat list of [`FilterRule`]s. Malformed CIDRs are dropped
+    /// (defensive: never panic on a hostile netmap). Out-of-range `IPProto`
+    /// entries (negative or >255) are dropped individually; if *every* entry
+    /// in a non-empty `IPProto` list is out of range, the rule is compiled to
+    /// match no protocol rather than silently becoming unrestricted.
     pub fn new(rules: &[FilterRule]) -> Self {
         let compiled = rules
             .iter()
@@ -157,11 +168,16 @@ impl Filter {
                         })
                     })
                     .collect();
-                let protos = r
-                    .ip_proto
-                    .iter()
-                    .filter_map(|p| u8::try_from(*p).ok())
-                    .collect();
+                let protos = if r.ip_proto.is_empty() {
+                    None
+                } else {
+                    Some(
+                        r.ip_proto
+                            .iter()
+                            .filter_map(|p| u8::try_from(*p).ok())
+                            .collect(),
+                    )
+                };
                 Rule { srcs, dsts, protos }
             })
             .collect();
@@ -180,7 +196,7 @@ impl Filter {
                     first: 0,
                     last: u16::MAX,
                 }],
-                protos: Vec::new(),
+                protos: None,
             }],
         }
     }
@@ -281,5 +297,17 @@ mod tests {
         let f = Filter::new(&[rule(&["not-an-ip", "*/999"], "garbage", 0, 65535, &[])]);
         // Both srcs dropped → rule can never match.
         assert!(!f.allows(ip("1.2.3.4"), ip("5.6.7.8"), proto::TCP, 1));
+    }
+
+    #[test]
+    fn all_malformed_ip_proto_denies_rather_than_becoming_unrestricted() {
+        // Every IPProto entry is out of u8 range; the field is non-empty on
+        // the wire, so this must fail closed (match nothing) rather than be
+        // silently treated as "no protocol restriction" (which would allow
+        // every protocol).
+        let f = Filter::new(&[rule(&["*"], "*", 0, 65535, &[-1])]);
+        assert!(!f.allows(ip("1.2.3.4"), ip("5.6.7.8"), proto::TCP, 80));
+        assert!(!f.allows(ip("1.2.3.4"), ip("5.6.7.8"), proto::UDP, 53));
+        assert!(!f.allows(ip("1.2.3.4"), ip("5.6.7.8"), 1, 0));
     }
 }

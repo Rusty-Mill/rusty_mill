@@ -12,8 +12,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use nexus_agent::{
-    run_session, AutoApproveAll, ChatDriver, Proposal, ProposedToolCall, SessionOutcome, ToolCall,
-    ToolDispatchError, ToolDispatcher,
+    run_session, AutoApproveAll, Capability, ChatDriver, ManifestPolicyGate, ManifestToolPolicy,
+    Proposal, ProposedToolCall, SessionOutcome, ToolCall, ToolDispatchError, ToolDispatcher,
 };
 
 /// Driver that emits one tool call on the first round and a plain
@@ -148,4 +148,90 @@ async fn empty_goal_short_circuits() {
         !matches!(session.outcome, SessionOutcome::Complete) || session.rounds.is_empty(),
         "an empty goal must not run a normal session loop"
     );
+}
+
+/// Driver that proposes a terminal-execute call on the first round,
+/// then a plain final answer once it sees the denial come back.
+struct RestrictedToolThenDone {
+    round: AtomicUsize,
+}
+
+#[async_trait]
+impl ChatDriver for RestrictedToolThenDone {
+    async fn propose(&self, _system: &str, _user: &str) -> Result<Proposal, String> {
+        match self.round.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(Proposal {
+                text: "running the build".to_string(),
+                tool_calls: vec![ProposedToolCall {
+                    id: "call-1".to_string(),
+                    name: "terminal_run_saved".to_string(),
+                    tool_call: ToolCall {
+                        target_plugin_id: "com.nexus.terminal".to_string(),
+                        command_id: "run_saved".to_string(),
+                        args: serde_json::json!({ "slug": "build" }),
+                    },
+                }],
+                usage: None,
+            }),
+            _ => Ok(Proposal {
+                text: "acknowledged the denial".to_string(),
+                tool_calls: vec![],
+                usage: None,
+            }),
+        }
+    }
+}
+
+/// Gap-closing fix regression — a skill-derived
+/// [`ManifestToolPolicy::from_capability_restriction`] wrapped around
+/// `AutoApproveAll` must actually block a proposed call requiring a
+/// denied capability. Pre-fix, `com.nexus.skills::invoke` had no way
+/// to fold a skill's `execute_code: false` restriction into anything
+/// enforced here — every proposed call, including
+/// capability-restricted ones, was dispatched unconditionally under
+/// `auto_approve: true`.
+#[tokio::test]
+async fn capability_restriction_blocks_denied_tool_even_under_auto_approve() {
+    nexus_agent::seed_default_tools();
+    let driver = RestrictedToolThenDone {
+        round: AtomicUsize::new(0),
+    };
+    let dispatcher = RecordingDispatcher::default();
+    let policy = ManifestPolicyGate::new(
+        AutoApproveAll,
+        ManifestToolPolicy::from_capability_restriction(
+            std::collections::HashSet::from([Capability::TerminalExecute]),
+            Vec::new(),
+            "skill restrictions".to_string(),
+        ),
+    );
+
+    let session = run_session(
+        &driver,
+        &dispatcher,
+        &policy,
+        "run the build",
+        "you are a test agent",
+        None,
+    )
+    .await;
+
+    assert!(
+        dispatcher.calls.lock().expect("poisoned").is_empty(),
+        "a call requiring a denied capability must never reach the dispatcher"
+    );
+    // A fully-denied round has nothing left to feed back, so the loop
+    // aborts rather than looping — the same behaviour a manifest
+    // `[tools]` full denial already gets (see `session::tests`'
+    // `partial_decision_dispatches_subset_and_denies_rest` sibling
+    // coverage for the mixed-approval case).
+    assert_eq!(session.outcome, SessionOutcome::Aborted);
+    assert_eq!(session.rounds.len(), 1);
+    let first_round = &session.rounds[0];
+    assert_eq!(first_round.tool_calls.len(), 1);
+    assert!(
+        !first_round.tool_calls[0].approved,
+        "the terminal-execute call must be recorded as denied"
+    );
+    assert!(first_round.tool_calls[0].reason.contains("restrictions"));
 }

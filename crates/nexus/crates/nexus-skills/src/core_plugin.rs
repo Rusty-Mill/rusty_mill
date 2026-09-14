@@ -426,10 +426,15 @@ impl SkillsCorePlugin {
 
     /// BL-054 Phase 3 — pre-async setup for `invoke`. Parses the args,
     /// resolves the skill's `depends_on` closure, and returns the
-    /// merged body the agent should use as its system prompt. Lives
+    /// merged body the agent should use as its system prompt plus
+    /// the [`EffectiveRestrictions`] folded across every ancestor in
+    /// that closure (gap-closing fix — capability gate drop). Lives
     /// on `&self` so the locked registry guard never crosses an
     /// `.await` (which would make the future `!Send`).
-    fn compose_for_invoke(&self, args: &serde_json::Value) -> Result<String, PluginError> {
+    fn compose_for_invoke(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<ComposedInvocation, PluginError> {
         let parsed: InvokeSkillArgs = parse_args(args, "invoke")?;
         if parsed.skill_id.is_empty() {
             return Err(exec_err("invoke: skill_id must not be empty".to_string()));
@@ -443,7 +448,12 @@ impl SkillsCorePlugin {
         }
         let composed = crate::compose::compose(&reg, &parsed.skill_id)
             .map_err(|e| exec_err(format!("invoke: compose: {e}")))?;
-        Ok(composed.merged_body)
+        let order: Vec<String> = composed.fragments.iter().map(|f| f.id.clone()).collect();
+        let restrictions = fold_restrictions(&reg, &order);
+        Ok(ComposedInvocation {
+            body: composed.merged_body,
+            restrictions,
+        })
     }
 
     fn dispatch_reload(&self) -> Result<serde_json::Value, PluginError> {
@@ -509,16 +519,140 @@ fn poisoned<T>(_e: std::sync::PoisonError<T>) -> PluginError {
     exec_err("skills registry mutex poisoned — prior handler panicked".to_string())
 }
 
+/// Gap-closing fix (capability gate drop) — most-restrictive-wins
+/// fold of every ancestor skill's `restrictions` block across a
+/// `depends_on` closure (including the invoked skill itself).
+/// Threaded into the `com.nexus.agent::session_run` payload's
+/// `restrictions` field and into an `auto_approve` downgrade so a
+/// restricted skill can't silently retain full tool access and
+/// blind approval.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EffectiveRestrictions {
+    execute_code: Option<bool>,
+    modify_files: Option<bool>,
+    delete_content: Option<bool>,
+    /// Intersection of every non-empty ancestor `allowed_tools` list.
+    /// Empty means no ancestor declared one (unconstrained), matching
+    /// [`crate::SkillRestrictions::allowed_tools`]'s own "empty means
+    /// unconstrained" semantics.
+    allowed_tools: Vec<String>,
+}
+
+impl EffectiveRestrictions {
+    /// `true` once at least one ancestor turned a lever off. Session
+    /// invocation downgrades `auto_approve` whenever this holds.
+    fn is_restrictive(&self) -> bool {
+        self.execute_code == Some(false)
+            || self.modify_files == Some(false)
+            || self.delete_content == Some(false)
+    }
+
+    /// `None` when every field is at its unrestricted default — the
+    /// `session_run` payload omits the `restrictions` key entirely
+    /// rather than sending a no-op object.
+    fn to_json(&self) -> Option<serde_json::Value> {
+        if self.execute_code.is_none()
+            && self.modify_files.is_none()
+            && self.delete_content.is_none()
+            && self.allowed_tools.is_empty()
+        {
+            return None;
+        }
+        Some(serde_json::json!({
+            "execute_code": self.execute_code,
+            "modify_files": self.modify_files,
+            "delete_content": self.delete_content,
+            "allowed_tools": self.allowed_tools,
+        }))
+    }
+}
+
+/// Most-restrictive-wins merge of a single boolean lever across two
+/// ancestors: an explicit `false` anywhere in the chain always wins
+/// (over `true` or unset); an explicit `true` beats unset; unset
+/// stays unset when neither ancestor declared the lever.
+fn fold_lever(acc: Option<bool>, next: Option<bool>) -> Option<bool> {
+    match (acc, next) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (None, None) => None,
+    }
+}
+
+/// Fold every skill in `order` (the topologically-sorted
+/// `depends_on` closure `compose` already resolved — dependencies
+/// first, root last) into one [`EffectiveRestrictions`].
+fn fold_restrictions(reg: &SkillRegistry, order: &[String]) -> EffectiveRestrictions {
+    let mut out = EffectiveRestrictions::default();
+    let mut allow_lists: Vec<Vec<String>> = Vec::new();
+    for id in order {
+        let Some(skill) = reg.get(id) else { continue };
+        let Some(r) = skill.meta.restrictions.as_ref() else {
+            continue;
+        };
+        out.execute_code = fold_lever(out.execute_code, r.execute_code);
+        out.modify_files = fold_lever(out.modify_files, r.modify_files);
+        out.delete_content = fold_lever(out.delete_content, r.delete_content);
+        if !r.allowed_tools.is_empty() {
+            allow_lists.push(r.allowed_tools.clone());
+        }
+    }
+    if let Some(first) = allow_lists.first().cloned() {
+        out.allowed_tools = allow_lists.into_iter().fold(first, |acc, list| {
+            let set: std::collections::HashSet<&String> = list.iter().collect();
+            acc.into_iter().filter(|t| set.contains(t)).collect()
+        });
+    }
+    out
+}
+
+/// Result of [`SkillsCorePlugin::compose_for_invoke`] — the merged
+/// system-prompt body plus the folded restriction constraint the
+/// async `invoke` handler must enforce on the dispatched session.
+struct ComposedInvocation {
+    body: String,
+    restrictions: EffectiveRestrictions,
+}
+
+/// Pure builder for the `com.nexus.agent::session_run` payload —
+/// split out from [`handle_invoke`] so the capability-downgrade
+/// logic is unit-testable without a live `KernelPluginContext`/IPC.
+/// A restrictive fold forces `auto_approve: false` (interactive
+/// approval gate instead of blind auto-approval) and always attaches
+/// the folded `restrictions` object so `session_run`'s tool-policy
+/// gate denies unreachable capabilities/tools even if a future
+/// caller re-enables `auto_approve` upstream of this handler.
+fn build_invoke_payload(
+    goal: &str,
+    archetype: &str,
+    composed_body: &str,
+    restrictions: &EffectiveRestrictions,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "goal": goal,
+        "archetype": archetype,
+        "system": composed_body,
+        "auto_approve": !restrictions.is_restrictive(),
+    });
+    if let Some(r) = restrictions.to_json() {
+        payload["restrictions"] = r;
+    }
+    payload
+}
+
 /// BL-054 Phase 3 — async handler for `com.nexus.skills::invoke`.
 /// Composes the skill body (precomputed by `compose_for_invoke` so
 /// the registry lock doesn't cross the `.await`) and dispatches
 /// `com.nexus.agent::session_run` with `goal = input`,
-/// `system = composed body`, `archetype = arg ?? "general"`,
-/// `auto_approve = true`. Returns the agent's reply verbatim — the
-/// caller decides how to render the observation.
+/// `system = composed body`, `archetype = arg ?? "general"`. Gap-
+/// closing fix — `auto_approve` and an explicit `restrictions` object
+/// are derived from the skill's folded `depends_on` restrictions
+/// (see [`build_invoke_payload`]) instead of always sending
+/// `auto_approve: true` with no constraint. Returns the agent's reply
+/// verbatim — the caller decides how to render the observation.
 async fn handle_invoke(
     ctx: Option<&Arc<KernelPluginContext>>,
-    composed_body: String,
+    composed: ComposedInvocation,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, PluginError> {
     let parsed: InvokeSkillArgs =
@@ -534,12 +668,12 @@ async fn handle_invoke(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_ARCHETYPE)
         .to_string();
-    let payload = serde_json::json!({
-        "goal": parsed.input,
-        "archetype": archetype,
-        "system": composed_body,
-        "auto_approve": true,
-    });
+    let payload = build_invoke_payload(
+        &parsed.input,
+        &archetype,
+        &composed.body,
+        &composed.restrictions,
+    );
     ctx.ipc_call(
         "com.nexus.agent",
         "session_run",
@@ -833,5 +967,144 @@ body B
         assert!(plugin
             .dispatch_async(HANDLER_LIST, &serde_json::json!({}))
             .is_none());
+    }
+
+    // ── gap-closing fix — capability gate drop (restrictions enforcement) ──
+
+    const SKILL_RESTRICTED: &str = r"---
+name: Restricted
+id: skill-restricted
+description: may not run code or delete anything
+version: 1.0.0
+author: me
+created: 2026-04-03
+restrictions:
+  execute_code: false
+  allowed_tools: []
+---
+body restricted
+";
+
+    const SKILL_CHILD_OF_RESTRICTED: &str = r"---
+name: Child
+id: skill-child
+description: layers on the restricted base
+version: 1.0.0
+author: me
+created: 2026-04-04
+depends_on: [skill-restricted]
+---
+body child
+";
+
+    #[test]
+    fn build_invoke_payload_downgrades_auto_approve_when_restrictive() {
+        let restrictions = EffectiveRestrictions {
+            execute_code: Some(false),
+            modify_files: None,
+            delete_content: None,
+            allowed_tools: Vec::new(),
+        };
+        let payload = build_invoke_payload("do the thing", "general", "system body", &restrictions);
+        assert_eq!(payload["auto_approve"], false);
+        assert_eq!(payload["restrictions"]["execute_code"], false);
+        assert_eq!(
+            payload["restrictions"]["allowed_tools"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn build_invoke_payload_keeps_auto_approve_true_when_unrestricted() {
+        let restrictions = EffectiveRestrictions::default();
+        let payload = build_invoke_payload("do the thing", "general", "system body", &restrictions);
+        assert_eq!(payload["auto_approve"], true);
+        assert!(
+            payload.get("restrictions").is_none(),
+            "an unrestricted fold must not attach a no-op restrictions object"
+        );
+    }
+
+    #[test]
+    fn compose_for_invoke_folds_restrictions_for_a_single_restricted_skill() {
+        let tmp = TempDir::new().unwrap();
+        write_skill(tmp.path(), "restricted.skill.md", SKILL_RESTRICTED);
+        let plugin = SkillsCorePlugin::open(tmp.path().to_path_buf());
+        let composed = plugin
+            .compose_for_invoke(&serde_json::json!({
+                "skill_id": "skill-restricted",
+                "input": "go",
+            }))
+            .unwrap();
+        assert_eq!(composed.restrictions.execute_code, Some(false));
+        assert!(composed.restrictions.allowed_tools.is_empty());
+        assert!(composed.restrictions.is_restrictive());
+
+        // Pre-fix, `handle_invoke` always sent `auto_approve: true`
+        // with no `restrictions` key regardless of this skill's
+        // frontmatter — a `session_run` call with full capabilities
+        // and blind approval. Post-fix the payload is constrained.
+        let payload = build_invoke_payload("go", "general", &composed.body, &composed.restrictions);
+        assert_eq!(payload["auto_approve"], false);
+        assert_eq!(payload["restrictions"]["execute_code"], false);
+    }
+
+    #[test]
+    fn compose_for_invoke_folds_restrictions_across_depends_on_chain() {
+        let tmp = TempDir::new().unwrap();
+        write_skill(tmp.path(), "restricted.skill.md", SKILL_RESTRICTED);
+        write_skill(tmp.path(), "child.skill.md", SKILL_CHILD_OF_RESTRICTED);
+        let plugin = SkillsCorePlugin::open(tmp.path().to_path_buf());
+        // Invoking the *child* (which does not itself declare
+        // restrictions) must still inherit the restrictive lever from
+        // its `skill-restricted` ancestor — most-restrictive-wins.
+        let composed = plugin
+            .compose_for_invoke(&serde_json::json!({
+                "skill_id": "skill-child",
+                "input": "go",
+            }))
+            .unwrap();
+        assert_eq!(composed.restrictions.execute_code, Some(false));
+        assert!(composed.restrictions.is_restrictive());
+    }
+
+    #[test]
+    fn fold_restrictions_intersects_allowed_tools_across_ancestors() {
+        const SKILL_ALLOW_AB: &str = r"---
+name: AllowAB
+id: skill-allow-ab
+description: d
+version: 1.0.0
+author: me
+created: 2026-04-05
+restrictions:
+  allowed_tools: [read_file, write_file]
+---
+base
+";
+        const SKILL_ALLOW_B_ONLY: &str = r"---
+name: AllowBOnly
+id: skill-allow-b
+description: d
+version: 1.0.0
+author: me
+created: 2026-04-06
+depends_on: [skill-allow-ab]
+restrictions:
+  allowed_tools: [write_file]
+---
+child
+";
+        let tmp = TempDir::new().unwrap();
+        write_skill(tmp.path(), "a.skill.md", SKILL_ALLOW_AB);
+        write_skill(tmp.path(), "b.skill.md", SKILL_ALLOW_B_ONLY);
+        let plugin = SkillsCorePlugin::open(tmp.path().to_path_buf());
+        let composed = plugin
+            .compose_for_invoke(&serde_json::json!({
+                "skill_id": "skill-allow-b",
+                "input": "go",
+            }))
+            .unwrap();
+        assert_eq!(composed.restrictions.allowed_tools, vec!["write_file"]);
     }
 }

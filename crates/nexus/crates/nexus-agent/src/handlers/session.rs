@@ -16,11 +16,62 @@ use crate::DEFAULT_SYSTEM_PROMPT;
 use super::shared::{
     compose_memory_preamble, drop_pending, exec_err, now_unix_ms, parse_args,
     resolve_archetype_for_run, run_session_optionally_gated_resumed, AiChatBridge, BusBridgePolicy,
-    KernelToolBridge, PendingApprovals, DEFAULT_APPROVAL_TIMEOUT_SECS, DEFAULT_CHAT_TIMEOUT,
-    DEFAULT_TOOL_TIMEOUT, MAX_APPROVAL_TIMEOUT_SECS, PLUGIN_ID,
+    KernelToolBridge, PendingApprovals, ResolvedArchetype, DEFAULT_APPROVAL_TIMEOUT_SECS,
+    DEFAULT_CHAT_TIMEOUT, DEFAULT_TOOL_TIMEOUT, MAX_APPROVAL_TIMEOUT_SECS, PLUGIN_ID,
 };
 
 pub(crate) const SESSION_DIR: &str = ".forge/agent/sessions";
+
+/// Wire shape for `session_run`'s optional `restrictions` field.
+/// Mirrors `nexus_skills::SkillRestrictions` field-for-field without a
+/// crate dependency — `nexus-agent` and `nexus-skills` communicate
+/// purely over IPC per the intentional runtime cycle documented on
+/// `crate::core_plugin`'s module doc, so the wire shape is duplicated
+/// rather than shared. Gap-closing fix for the `com.nexus.skills::invoke`
+/// capability-gate drop: a restricted skill previously ran with full
+/// tool access and blind auto-approval despite declaring
+/// `execute_code: false` / `modify_files: false` / `delete_content: false`
+/// / a non-empty `allowed_tools` allow-list.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct SessionRestrictions {
+    /// `Some(false)` denies any tool requiring
+    /// [`crate::Capability::TerminalExecute`].
+    #[serde(default)]
+    pub(crate) execute_code: Option<bool>,
+    /// `Some(false)` denies any tool requiring
+    /// [`crate::Capability::FileSystemWrite`].
+    #[serde(default)]
+    pub(crate) modify_files: Option<bool>,
+    /// `Some(false)` denies any tool requiring
+    /// [`crate::Capability::FileSystemWrite`] (deletes are writes —
+    /// mirrors `Capability::FileSystemWrite`'s own doc comment).
+    #[serde(default)]
+    pub(crate) delete_content: Option<bool>,
+    /// Non-empty narrows the session to exactly these tool names,
+    /// same semantics as `custom_agent::ToolsSection::allowed`.
+    #[serde(default)]
+    pub(crate) allowed_tools: Vec<String>,
+}
+
+impl SessionRestrictions {
+    /// Build the [`crate::ManifestToolPolicy`] this restriction block
+    /// implies. Returns a no-op policy when every field is left at
+    /// its unrestricted default.
+    fn to_policy(&self) -> crate::ManifestToolPolicy {
+        let mut denied_capabilities = std::collections::HashSet::new();
+        if self.execute_code == Some(false) {
+            denied_capabilities.insert(crate::Capability::TerminalExecute);
+        }
+        if self.modify_files == Some(false) || self.delete_content == Some(false) {
+            denied_capabilities.insert(crate::Capability::FileSystemWrite);
+        }
+        crate::ManifestToolPolicy::from_capability_restriction(
+            denied_capabilities,
+            self.allowed_tools.clone(),
+            "skill restrictions".to_string(),
+        )
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct SessionRunArgs {
@@ -56,6 +107,12 @@ struct SessionRunArgs {
     /// depth rather than resetting to `0`.
     #[serde(default)]
     delegation_depth: u32,
+    /// Gap-closing fix — capability/tool restrictions folded by the
+    /// caller (today: `com.nexus.skills::invoke`) across a skill's
+    /// `depends_on` chain. `None` preserves the pre-fix unrestricted
+    /// behaviour for every other existing caller.
+    #[serde(default)]
+    restrictions: Option<SessionRestrictions>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +248,11 @@ struct SessionRunRequest {
     parent_id: Option<String>,
     branch_point: Option<u32>,
     delegation_depth: u32,
+    /// Gap-closing fix — `None` for every fork verb (resume/branch/
+    /// rewind don't re-derive a skill's restrictions) and for any
+    /// caller that omits the field; `Some` only for a fresh
+    /// `session_run` whose caller supplied `restrictions`.
+    restrictions: Option<SessionRestrictions>,
 }
 
 pub(crate) async fn handle_session_run(
@@ -219,6 +281,7 @@ pub(crate) async fn handle_session_run(
         parent_id: None,
         branch_point: None,
         delegation_depth: parsed.delegation_depth,
+        restrictions: parsed.restrictions,
     };
     run_and_persist_session(ctx, pending_approvals, req).await
 }
@@ -272,6 +335,9 @@ async fn fork_session(
         // recursion chain (only a fresh `session_run` is), so a fork
         // always starts at depth 0.
         delegation_depth: 0,
+        // Gap-closing fix — fork verbs don't carry a skill's folded
+        // restrictions forward; only a fresh `session_run` supplies one.
+        restrictions: None,
     };
     run_and_persist_session(ctx, pending_approvals, req).await
 }
@@ -363,6 +429,32 @@ pub(crate) async fn handle_session_rewind(
     .await
 }
 
+/// Resolve the effective system prompt for a run: an explicit `req.system`
+/// wins outright; otherwise an archetype's own prompt, falling back to the
+/// crate default, with a memory-recall preamble appended when the caller
+/// didn't supply `system` explicitly. Split out of `run_and_persist_session`
+/// purely to keep that function under clippy's line-count limit.
+async fn compose_effective_system(
+    ctx: &KernelPluginContext,
+    req: &SessionRunRequest,
+    resolved: Option<&ResolvedArchetype>,
+) -> String {
+    let mut system = match (&req.system, resolved) {
+        (Some(s), _) => s.clone(),
+        (None, Some(r)) => r.system_prompt.clone(),
+        (None, None) => DEFAULT_SYSTEM_PROMPT.to_string(),
+    };
+    if req.system.is_none() {
+        if let Some(slug) = req.archetype.as_deref() {
+            if let Some(preamble) = compose_memory_preamble(ctx, slug).await {
+                system.push_str("\n\n");
+                system.push_str(&preamble);
+            }
+        }
+    }
+    system
+}
+
 /// Shared core: build the driver/dispatcher, resolve the system prompt + manifest
 /// policy, run the (possibly seeded) loop under the right approval policy, then
 /// persist the node (a fork stores only its new rounds), record memory, and
@@ -390,19 +482,7 @@ async fn run_and_persist_session(
         Some(name) => Some(resolve_archetype_for_run(&ctx, Some(name)).await),
         None => None,
     };
-    let mut system = match (&req.system, resolved.as_ref()) {
-        (Some(s), _) => s.clone(),
-        (None, Some(r)) => r.system_prompt.clone(),
-        (None, None) => DEFAULT_SYSTEM_PROMPT.to_string(),
-    };
-    if req.system.is_none() {
-        if let Some(slug) = req.archetype.as_deref() {
-            if let Some(preamble) = compose_memory_preamble(&ctx, slug).await {
-                system.push_str("\n\n");
-                system.push_str(&preamble);
-            }
-        }
-    }
+    let system = compose_effective_system(&ctx, &req, resolved.as_ref()).await;
 
     let manifest_policy = resolved
         .as_ref()
@@ -417,12 +497,29 @@ async fn run_and_persist_session(
         );
     }
 
+    // Gap-closing fix — a skill's folded `restrictions` (threaded from
+    // `com.nexus.skills::invoke`) become a second, outer policy gate so
+    // a restricted skill's tool access is actually constrained rather
+    // than merely documented in its frontmatter.
+    let skill_policy = req
+        .restrictions
+        .as_ref()
+        .map(SessionRestrictions::to_policy)
+        .filter(|p| !p.is_noop());
+    if skill_policy.is_some() {
+        tracing::debug!(
+            plugin_id = PLUGIN_ID,
+            "gap-closing fix: applying skill-restriction tool policy",
+        );
+    }
+
     let mut session = if req.auto_approve {
         run_session_optionally_gated_resumed(
             &driver,
             &dispatcher,
             crate::session::AutoApproveAll,
             manifest_policy,
+            skill_policy,
             &req.goal,
             &system,
             req.archetype.clone(),
@@ -449,6 +546,7 @@ async fn run_and_persist_session(
             &dispatcher,
             policy,
             manifest_policy,
+            skill_policy,
             &req.goal,
             &system,
             req.archetype.clone(),
