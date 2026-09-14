@@ -642,10 +642,11 @@ any line differs from the pins, so the file cannot drift.
 `Request/*` line and decodes every `Response/*` line with version ≤ *N*
 byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
-client; it needs only `python3` (any CPython 3 — verified in this
-session against CPython 3.14). The live half —
-`tests/server_python_client.rs` — drives the reference client against a
-real server at 24 and at a hand-negotiated 10.
+client; it needs a CPython 3 interpreter (`python3` or `python`,
+whichever is found — see `tests/server_python_client.rs`'s own
+`python_binary`; verified in this session against CPython 3.14). The
+live half — `tests/server_python_client.rs` — drives the reference
+client against a real server at 24 and at a hand-negotiated 10.
 
 ## 10. Change history
 

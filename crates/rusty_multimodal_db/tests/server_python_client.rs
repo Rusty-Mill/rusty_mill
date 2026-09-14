@@ -5,11 +5,15 @@
 //! The driver prints `key=value` lines; this test asserts them, then
 //! confirms the Python client's one write through the Rust client.
 //!
-//! **This test needs `python3` on `PATH` and fails loudly without it.**
-//! This repository's own posture (`a skipped test is not a test`) is why
-//! it panics with a named message rather than silently passing;
-//! `ubuntu-latest` and every developer machine this project has used
-//! ship `python3`.
+//! **This test needs a CPython 3 interpreter on `PATH` and fails loudly
+//! without one.** This repository's own posture (`a skipped test is not
+//! a test`) is why it panics with a named message rather than silently
+//! passing. The interpreter binary name is not hardcoded to one string:
+//! [`python_binary`] tries `python3` first (the POSIX convention, and
+//! what `ubuntu-latest`/CI ships), then `python` (some Windows/`pyenv`
+//! installs never provide `python3` at all) — whichever answers
+//! `--version` with `Python 3` is used. Neither present is the named
+//! panic.
 
 use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
@@ -33,11 +37,15 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
 
 /// The same five entities and edges `tests/server_entity_integration.rs`
 /// uses, so the driver's expectations are the ones that suite already
-/// proves for the Rust client.
+/// proves for the Rust client. Also wires a real `SERVER_BACKUP_ROOT`-
+/// equivalent (`BAK-FR-003`, ADR-0065) so the driver can exercise a
+/// genuine successful `Backup`, not just the `Unsupported` refusal an
+/// unconfigured server would give.
 fn start_server() -> SocketAddr {
     let dir = unique_dir("python_client");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("entities.mmap");
+    let backup_root = unique_dir("python_client_backup_root");
     let e = |n: u128, label: &str, kind: &str, count: i64, aliases: &[&str]| Entity {
         id: Uuid::from_u128(n),
         label: label.into(),
@@ -69,20 +77,50 @@ fn start_server() -> SocketAddr {
     let mentioned_with = [(Uuid::from_u128(1), Uuid::from_u128(5))];
     let stack =
         create_entity_production_stack(entities, &relates_to, &mentioned_with, &path).unwrap();
-    let store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
-        stack,
-    )));
+    let store = Arc::new(
+        EntityConnectionStore::new(GenericProductionStore::new(stack))
+            .with_backup_source(path.clone()),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, store, ServeOptions::default()));
+    let options = ServeOptions::default().with_backup_root(backup_root);
+    thread::spawn(move || serve(listener, store, options));
     addr
 }
 
+/// Whichever of the two conventional CPython 3 binary names is on
+/// `PATH` — `python3` preferred (the POSIX convention, and what
+/// `ubuntu-latest`/CI ships), `python` as a fallback (present without
+/// `python3` on some Windows/`pyenv` installs). Checked by running
+/// `--version` and requiring `Python 3` in the output, so a `python`
+/// that resolves to Python 2 is never silently used. Neither present is
+/// a named panic, never a skip.
+fn python_binary() -> &'static str {
+    for candidate in ["python3", "python"] {
+        let Ok(output) = Command::new(candidate).arg("--version").output() else {
+            continue;
+        };
+        let version = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if version.contains("Python 3") {
+            return candidate;
+        }
+    }
+    panic!(
+        "neither python3 nor python (CPython 3) is on PATH — required by \
+         tests/server_python_client.rs (ECO-FR-008, ADR-0043). Install Python 3 or run without \
+         this test target."
+    )
+}
+
 /// Run the driver once; return its `key=value` lines as a map. A missing
-/// `python3` is a named panic, never a skip.
+/// interpreter is a named panic, never a skip.
 fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let output = Command::new("python3")
+    let output = Command::new(python_binary())
         .arg("clients/python/driver.py")
         .arg(addr.to_string())
         .arg(hello.to_string())
@@ -90,8 +128,9 @@ fn drive(addr: SocketAddr, hello: u32) -> HashMap<String, String> {
         .output()
         .unwrap_or_else(|e| {
             panic!(
-                "python3 is required by tests/server_python_client.rs (ECO-FR-008, ADR-0043) \
-                 and could not be started: {e}. Install Python 3 or run without this test target."
+                "a CPython 3 interpreter is required by tests/server_python_client.rs \
+                 (ECO-FR-008, ADR-0043) and could not be started: {e}. Install Python 3 or run \
+                 without this test target."
             )
         });
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -190,6 +229,18 @@ fn the_python_reference_client_speaks_the_protocol_at_24_and_at_10() {
     // record log (an insert, a replace, a guarded replace, an insert, a
     // tombstone), and the edge logs a runtime link touched.
     assert_eq!(get("compact"), "6;1;5;1");
+    // `MET-FR-004` (ADR-0064): process-wide counters from Python — a
+    // real round trip, any authenticated class.
+    assert_eq!(get("metrics_has_counters"), "yes");
+    // `BAK-FR-006` (ADR-0065): a real successful backup from Python —
+    // this driver's server has a configured root and backup source
+    // (`start_server`), so this is the success path, not `Unsupported`.
+    assert!(
+        get("backup_files").parse::<u64>().unwrap() >= 1,
+        "{}",
+        get("backup_files")
+    );
+    assert_eq!(get("backup_bytes_positive"), "yes");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -239,6 +290,16 @@ fn the_python_reference_client_speaks_the_protocol_at_24_and_at_10() {
         get("link").starts_with("unsupported"),
         "rule 4: no Link below 14 — {}",
         get("link")
+    );
+    assert!(
+        get("metrics").starts_with("unsupported"),
+        "rule 4: no Metrics below 23 — {}",
+        get("metrics")
+    );
+    assert!(
+        get("backup").starts_with("unsupported"),
+        "rule 4: no Backup below 24 — {}",
+        get("backup")
     );
 
     // The Python client's write is real: the Rust client sees 42.

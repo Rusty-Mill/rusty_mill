@@ -157,6 +157,6 @@ The fork, held for the owner:
   -p rusty_multimodal_db -- --check` clean; `cargo clippy -p
   rusty_multimodal_db --all-features -- -D warnings` clean; `cargo test
   -p rusty_multimodal_db --all-features --no-fail-fast` 527 lib tests +
-  every integration target green except the pre-existing, unrelated
-  `server_python_client` failure (`python3` missing from this session's
-  `PATH`).
+  every integration target green (including `server_python_client`,
+  fixed in a follow-up round the same session — see `ADR-0043`'s own
+  final addendum).
