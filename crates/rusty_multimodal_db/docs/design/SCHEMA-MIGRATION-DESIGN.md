@@ -1,7 +1,9 @@
-# Schema Migration Tooling: Reading an Old-Tagged Directory Forward, Proven on `Memory@1 → Memory@2` (Proposed)
+# Schema Migration Tooling: Reading an Old-Tagged Directory Forward, Proven on `Memory@1 → Memory@2` (Accepted, Implemented)
 
-- Status: **Proposed** (2026-09-14, `ADR-0066`), design only — no source
-  file touched.
+- Status: **Accepted as designed, implemented on the same branch**
+  (2026-09-14, `ADR-0066`, option (a)). See `ADR-0066`'s own
+  "Acceptance and implementation" section for the full implementation
+  record.
 - Related: `ADR-0019`/`docs/design/BLOB-SCHEMA-TAG-DESIGN.md` (the
   `SchemaTag` mechanism this round exercises, not changes), `ADR-0056`
   (the only real schema-tag bump this crate has ever shipped, and the
@@ -431,19 +433,26 @@ checkpoint.
 
 ## Open questions
 
-- **Does the owner want option (b)'s generic helper built alongside (a)
-  now, or only if/when a second real migration actually needs it?**
-  This design recommends deferring (b) — see Considered options — but
-  names it explicitly rather than silently deciding it.
-- **Is `examples/` (not shipped by `cargo install`, not part of the
-  published crate surface consumers see) the right home, or should this
-  live as a `[[bin]]` under `server`/unconditionally, matching
-  `dog_server`/`memory_server`'s own convention?** `examples/` is
-  recommended: this tool is a one-shot, hand-invoked operator utility,
-  not a long-running service `serve` starts — closer in spirit to
-  `memory_footprint` (also an `examples/` entry) than to any `[[bin]]`
-  in this crate today.
+- **Resolved: the owner picked (a)**, not (b)'s generic helper — see
+  `ADR-0066`'s own Decision/Acceptance record.
+- **Resolved: `examples/` is the right home**, confirmed by
+  implementation — with one refinement the original text didn't
+  anticipate: the shared migration logic (`MemoryV1` and the `migrate`
+  function) lives in `examples/support/migrate_memory_v1_to_v2_lib.rs`
+  (a subdirectory, not a direct child of `examples/`) and is pulled
+  into both the real CLI (`examples/migrate_memory_v1_to_v2.rs`) and
+  the regression test (`tests/schema_migration.rs`) via `#[path]` —
+  not published, not a new library module, but shared between the two
+  Cargo targets that need it rather than duplicated. A direct child of
+  `examples/` with no `fn main()` would have been auto-discovered by
+  Cargo as its own (failing) example target; the subdirectory avoids
+  that without needing `autoexamples = false` or any other Cargo.toml
+  change to this crate's existing discovery behavior.
 
 ## Change history
 
 - 2026-09-14: initial proposal, design only.
+- 2026-09-14: the owner picked option (a); implemented on the same
+  branch as `STORAGE-019` v0.1.0. No deviation from the design as
+  proposed. See `ADR-0066`'s own "Acceptance and implementation"
+  section for the full record.

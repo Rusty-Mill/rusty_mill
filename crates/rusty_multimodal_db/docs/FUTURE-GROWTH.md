@@ -92,10 +92,20 @@ not a guess.
   (The Prometheus-text metrics the differential test suite exercises
   belong to the *consumer's* hub layer, `rusty_remind_me`, not this
   crate.)
-* **Schema migration tooling.** `ADR-0056`'s schema-tag versioning
-  refuses a directory built under an older layout by name, distinctly —
-  a real safety property — but there is no migration *runner*: no
-  command that reads an old-tag directory and rewrites it under the new
-  one. Today a layout change is a manual, per-deployment operation.
+* **Schema migration tooling.** *Partly built since this was written:*
+  a documented three-step pattern — a caller-defined old-layout struct
+  implementing `SchemaTag` under the old tag; the existing
+  `open_..._portable` read path, typed over it; the existing
+  `create_..._production_stack` write path, unmodified, for a fresh
+  new-tagged directory — proven end to end, as a real CLI
+  (`examples/migrate_memory_v1_to_v2.rs`, `ADR-0066`,
+  `STORAGE-019`), against `Memory`'s own `@1 → @2` bump (`ADR-0056`),
+  the one bump this crate has ever shipped. Still absent: a reusable
+  generic engine (deliberately declined — one real case, not enough to
+  validate an abstraction against) and coverage for any *other* record
+  type's tag bump, since none has ever happened — the next one still
+  needs its own old-layout struct and conversion function written by
+  hand, following this round's now-proven pattern rather than
+  inventing it from scratch.
 
 What's already solid and wouldn't need to be redone: the storage engine itself, real measured durability, real measured concurrency (single- and multi-process), and a working generic schema layer proven against more than one domain. SQL, transactions, and arbitrary joins would be built on top of that foundation, not require rebuilding it — but each is a serious, standalone effort, not a small extension of this project. The operational-maturity items above are a separate axis from SQL/transactions/joins entirely — a single-process, single-directory deployment can be genuinely production-hardened (backup, migration tooling, metrics) without ever growing a query planner or MVCC, and vice versa; neither axis is a prerequisite for the other.
