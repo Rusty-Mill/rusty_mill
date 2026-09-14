@@ -117,6 +117,25 @@ impl McpServer {
             .find(|t| t.name() == name)
             .ok_or_else(|| (METHOD_NOT_FOUND, format!("unknown tool '{name}'")))?;
 
+        // This transport has no channel to carry a confirmation answer back
+        // to the tool: `tools/call` is a single request/response round trip
+        // with no pause-and-resume step, so `ToolContext::tool_confirmation`
+        // is always `None` here. Left unchecked, `invoke_tool` would call
+        // `ctx.request_confirmation` and the resulting
+        // `AdkError::ConfirmationRequired` would fall into the generic tool
+        // error branch below, indistinguishable from a real tool failure.
+        // Fail fast instead, with a message that names the actual limitation.
+        if let Some(hint) = tool.confirmation_hint(&args) {
+            return Err((
+                INTERNAL_ERROR,
+                format!(
+                    "tool '{name}' requires user confirmation ('{hint}') before it can run, \
+                     but the MCP stdio/http transport does not support confirmation-gated \
+                     tools: there is no channel to carry an approval back to a suspended call"
+                ),
+            ));
+        }
+
         let session = Session::new(adk_core::new_id("mcp"), &self.app_name, "mcp-client");
         let ctx = ToolContext::new(InvocationContext::new(
             session,

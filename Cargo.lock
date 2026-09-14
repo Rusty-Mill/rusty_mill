@@ -6144,6 +6144,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-global-shortcut",
+ "tempfile",
 ]
 
 [[package]]

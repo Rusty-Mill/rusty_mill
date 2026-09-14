@@ -148,6 +148,10 @@ fn capture(state: tauri::State<'_, AppState>, text: String) -> CmdResult<Capture
 #[tauri::command]
 fn clips(state: tauri::State<'_, AppState>, limit: usize) -> CmdResult<Vec<inventory_core::Clip>> {
     let inv = state.inventory.lock().map_err(stringify)?;
+    // A clipboard-history page view has no business asking for the entire
+    // table; unbounded `usize` limits also hit SQLite's `LIMIT -1` (meaning
+    // "no limit") once cast to `i64`, see `Inventory::clips`.
+    let limit = limit.clamp(1, 500);
     inv.clips(limit).map_err(stringify)
 }
 
@@ -540,4 +544,48 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inventory_core::keychain::StaticKey;
+
+    /// A mock Tauri app with `AppState` managed, so `tauri::State` can be
+    /// pulled out of it the same way the real runtime hands one to a
+    /// `#[tauri::command]` function.
+    fn mock_app(inv: Inventory) -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .manage(AppState {
+                inventory: Mutex::new(inv),
+            })
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app")
+    }
+
+    /// Regression test for an unbounded `clips` limit: `Inventory::clips`
+    /// passes `limit as i64` straight into a SQL `LIMIT`, so a `usize` near
+    /// its max wraps to a negative `i64` — which SQLite treats as "no
+    /// limit" — and the whole clipboard table comes back. The command must
+    /// clamp the limit before it ever reaches the query.
+    #[test]
+    fn clips_limit_is_clamped_instead_of_returning_the_whole_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = StaticKey::new("f".repeat(64));
+        let inv = Inventory::open_at(&dir.path().join("inventory.sqlite3"), &key).unwrap();
+        inv.set_scratchpad_enabled(true).unwrap();
+        for i in 0..600 {
+            inv.remember_clip(&format!("clip {i}"), None).unwrap();
+        }
+
+        let app = mock_app(inv);
+        let state = app.state::<AppState>();
+
+        let result = clips(state, usize::MAX).expect("clips should succeed");
+        assert_eq!(
+            result.len(),
+            500,
+            "an oversized limit must be clamped, not passed straight to SQL LIMIT"
+        );
+    }
 }
