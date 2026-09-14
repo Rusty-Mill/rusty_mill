@@ -155,7 +155,7 @@ impl SearchBackend for TantivyBackend {
         let handle = self.handle(index).await?;
         let writer = handle.writer.lock().expect("writer mutex poisoned");
         for document in documents {
-            let (id, tantivy_doc) = document_to_tantivy(&handle.tantivy_schema, document);
+            let (id, tantivy_doc) = document_to_tantivy(&handle.tantivy_schema, document)?;
             // Insert-or-replace: clear out any previous document with this id first.
             writer.delete_term(Term::from_field_text(handle.id_field, &id));
             writer.add_document(tantivy_doc).map_err(backend_err)?;
@@ -738,5 +738,75 @@ mod tests {
             "an offset far beyond the result set must yield no hits, not a panic: {:?}",
             results.hits
         );
+    }
+
+    #[tokio::test]
+    async fn index_batch_with_schema_mismatched_field_errors_instead_of_panicking() {
+        // `views` is `i64`-typed in `articles_schema()`. Handing it a
+        // string value must surface as an ordinary `Err`, not panic inside
+        // `TantivyDocument::from_json_object` while the writer mutex is
+        // held.
+        let backend = TantivyBackend::in_memory();
+        backend
+            .create_index("articles", articles_schema())
+            .await
+            .unwrap();
+        let err = backend
+            .index_batch(
+                "articles",
+                vec![Document::new()
+                    .with_id("bad")
+                    .set("title", "mismatched")
+                    .set("views", "not-a-number")],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SearchError::InvalidSchema(_)),
+            "expected InvalidSchema, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_batch_failure_does_not_poison_the_writer_mutex() {
+        // A malformed document in one `index_batch` call must not wedge the
+        // index for the rest of the process: a subsequent, well-formed
+        // `index_batch`/`commit`/`delete` on the same index must still
+        // succeed rather than panicking on a poisoned `std::sync::Mutex`.
+        let backend = TantivyBackend::in_memory();
+        backend
+            .create_index("articles", articles_schema())
+            .await
+            .unwrap();
+        backend
+            .index_batch(
+                "articles",
+                vec![Document::new()
+                    .with_id("bad")
+                    .set("title", "mismatched")
+                    .set("views", "not-a-number")],
+            )
+            .await
+            .unwrap_err();
+
+        backend
+            .index_batch(
+                "articles",
+                vec![Document::new()
+                    .with_id("good")
+                    .set("title", "well formed")
+                    .set("status", "published")
+                    .set("views", 42)],
+            )
+            .await
+            .unwrap();
+        backend.commit("articles").await.unwrap();
+
+        let results = backend
+            .search("articles", Query::term("status", "published").into())
+            .await
+            .unwrap();
+        assert_eq!(results.total, 1);
+        assert_eq!(results.hits[0].id, "good");
     }
 }

@@ -132,10 +132,16 @@ pub fn json_value_to_term(
 ///
 /// Fields not present in the index's schema are silently dropped, matching
 /// `TantivyDocument::from_json_object`'s own behavior.
+///
+/// Returns [`SearchError::InvalidSchema`] if a field's value doesn't match
+/// the type the index's schema declares for it (e.g. a string value for an
+/// `i64`-typed field), rather than panicking - a single malformed document
+/// must surface as an ordinary error, not take down the caller's writer
+/// mutex with it.
 pub fn document_to_tantivy(
     tantivy_schema: &TantivySchema,
     document: Document,
-) -> (String, TantivyDocument) {
+) -> Result<(String, TantivyDocument), SearchError> {
     let id = document
         .id
         .clone()
@@ -151,8 +157,8 @@ pub fn document_to_tantivy(
     );
 
     let tantivy_doc = TantivyDocument::from_json_object(tantivy_schema, object)
-        .expect("document fields were already validated against this schema");
-    (id, tantivy_doc)
+        .map_err(|e| SearchError::InvalidSchema(e.to_string()))?;
+    Ok((id, tantivy_doc))
 }
 
 /// Converts a Tantivy document (as retrieved from a `Searcher`) back into a
