@@ -12,20 +12,21 @@
 //! plain identifiers, never quoted):
 //!
 //! ```text
-//! query         := "SELECT" columns "FROM" table_ref [join_clause] [where_clause] [group_by_clause] [limit_clause]
-//! table_ref     := ident [["AS"] ident]                      -- optional alias (JOIN-FR-005)
-//! join_clause   := "JOIN" table_ref "ON" ident               -- ident names a declared relation
-//! columns       := "*" | column_item ("," column_item)*
-//! column_item   := qualified | ident | agg_call
-//! qualified     := ident "." ident                           -- alias.field
-//! agg_call      := agg_fn "(" ( "*" | ident ) ")"
-//! agg_fn        := "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
-//! where_clause  := "WHERE" condition ("AND" condition)*
-//! condition     := (qualified | ident) comparator literal
-//! comparator    := "=" | "!=" | "<" | "<=" | ">" | ">="
-//! literal       := number | "'" ... "'" | "true" | "false"
-//! group_by_clause := "GROUP" "BY" ident ("," ident)*
-//! limit_clause  := "LIMIT" number
+//! query            := "SELECT" columns "FROM" table_ref [join_clause] [where_clause] [group_by_clause] [order_by_clause] [limit_clause]
+//! table_ref        := ident [["AS"] ident]                      -- optional alias (JOIN-FR-005)
+//! join_clause      := "JOIN" table_ref "ON" ident               -- ident names a declared relation
+//! columns          := "*" | column_item ("," column_item)*
+//! column_item      := qualified | ident | agg_call
+//! qualified        := ident "." ident                           -- alias.field
+//! agg_call         := agg_fn "(" ( "*" | ident ) ")"
+//! agg_fn           := "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
+//! where_clause     := "WHERE" condition ("AND" condition)*
+//! condition        := (qualified | ident) comparator literal
+//! comparator       := "=" | "!=" | "<" | "<=" | ">" | ">="
+//! literal          := number | "'" ... "'" | "true" | "false"
+//! group_by_clause  := "GROUP" "BY" ident ("," ident)*
+//! order_by_clause  := "ORDER" "BY" ident                        -- OBY-FR-001, ADR-0061
+//! limit_clause     := "LIMIT" number
 //! ```
 //!
 //! # `JOIN` (`JOIN-FR-005`, ADR-0044, protocol 12)
@@ -46,6 +47,18 @@
 //! The right table name is *not* checked against the left here — the
 //! client refuses a different one until ADR-0045 lands.
 //!
+//! # `ORDER BY` (`OBY-FR-001`–`002`, ADR-0061, protocol 20 reused)
+//!
+//! `ORDER BY <field>` compiles to the existing `Request::Page`
+//! (`ADR-0055`) instead of `Request::Query` — one field, `U32`/`I64`
+//! only, ascending only — see
+//! `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md`. Refused at parse time,
+//! never silently unordered or unfiltered: combined with `WHERE`
+//! (`OrderByWithFilter` — `Page` takes no filter argument), with `JOIN`
+//! (`OrderByWithJoin` — `JOIN`'s own Non-goal), or with `GROUP BY`/an
+//! aggregate column (`OrderByWithAggregate` — grouped output is not the
+//! raw per-record field `Page` walks).
+//!
 //! `*` is only ever valid as `COUNT`'s own argument (`COUNT(*)`); every
 //! other `agg_fn` requires a plain field `ident` — `SUM(*)` and
 //! `COUNT(age)` are both syntax errors here, not silently accepted then
@@ -54,10 +67,10 @@
 //! looked up against anything — a connection serves exactly one domain,
 //! so there is nothing to validate it against (a deliberate
 //! simplification, named in the design rather than silently assumed). No
-//! `OR`, no `HAVING`, no `LIKE`/`IN`/`IS NULL`/`BETWEEN`, no `ORDER BY`,
-//! no nested/composite aggregate expressions, no subqueries, no
-//! `INSERT`/`UPDATE`/`DELETE` — see each design document's own
-//! "Non-goals".
+//! `OR`, no `HAVING`, no `LIKE`/`IN`/`IS NULL`/`BETWEEN`, no descending or
+//! multi-field `ORDER BY`, no nested/composite aggregate expressions, no
+//! subqueries, no `INSERT`/`UPDATE`/`DELETE` — see each design
+//! document's own "Non-goals".
 
 use super::protocol::{AggregateFn, CompareOp};
 use std::fmt;
@@ -135,6 +148,10 @@ pub(crate) struct ParsedQuery {
     /// `GROUP BY`'s field list — empty when the clause was omitted.
     /// `AGG-FR-001`, ADR-0035.
     pub group_by: Vec<String>,
+    /// `ORDER BY`'s field, if written — `OBY-FR-001`, ADR-0061. Mutually
+    /// exclusive with `conditions`, `join`, and `group_by`/an aggregate
+    /// column, enforced at parse time (`OBY-FR-002`).
+    pub order_by: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -181,6 +198,16 @@ pub(crate) enum SqlParseError {
     /// `FROM t JOIN t` with no aliases (or the same alias twice) — the
     /// two sides cannot be told apart.
     AmbiguousQualifiers(String),
+    /// `ORDER BY` combined with `WHERE` — `Request::Page` takes no
+    /// filter argument. `OBY-FR-002`, ADR-0061.
+    OrderByWithFilter,
+    /// `ORDER BY` combined with `JOIN` — `JOIN`'s own Non-goal.
+    /// `OBY-FR-002`, ADR-0061.
+    OrderByWithJoin,
+    /// `ORDER BY` combined with `GROUP BY` or an aggregate column —
+    /// grouped/aggregated output is not the raw per-record field
+    /// `Page` walks. `OBY-FR-002`, ADR-0061.
+    OrderByWithAggregate,
 }
 
 impl fmt::Display for SqlParseError {
@@ -228,6 +255,18 @@ impl fmt::Display for SqlParseError {
                 write!(
                     f,
                     "{name:?} names both sides of the JOIN; give each side a distinct alias"
+                )
+            }
+            SqlParseError::OrderByWithFilter => {
+                write!(f, "ORDER BY cannot be combined with WHERE")
+            }
+            SqlParseError::OrderByWithJoin => {
+                write!(f, "ORDER BY cannot be combined with JOIN")
+            }
+            SqlParseError::OrderByWithAggregate => {
+                write!(
+                    f,
+                    "ORDER BY cannot be combined with GROUP BY or an aggregate function"
                 )
             }
         }
@@ -591,7 +630,7 @@ impl<'a> Parser<'a> {
 /// (`JOIN-FR-005`), so `FROM dog WHERE` never reads `WHERE` as an alias.
 fn is_keyword(ident: &str) -> bool {
     [
-        "SELECT", "FROM", "WHERE", "AND", "GROUP", "BY", "LIMIT", "JOIN", "ON", "AS",
+        "SELECT", "FROM", "WHERE", "AND", "GROUP", "BY", "ORDER", "LIMIT", "JOIN", "ON", "AS",
     ]
     .iter()
     .any(|k| ident.eq_ignore_ascii_case(k))
@@ -656,6 +695,13 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
         }
     }
 
+    let mut order_by = None;
+    if parser.peek_keyword("ORDER") {
+        parser.advance();
+        parser.expect_keyword("BY")?;
+        order_by = Some(parser.ident()?);
+    }
+
     let mut limit = None;
     if parser.peek_keyword("LIMIT") {
         parser.advance();
@@ -673,10 +719,35 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
         join,
         conditions,
         group_by,
+        order_by,
         limit,
     };
     validate_qualifiers(&query)?;
+    validate_order_by(&query)?;
     Ok(query)
+}
+
+/// `OBY-FR-002`, ADR-0061: `ORDER BY` may not be combined with `WHERE`
+/// (`Request::Page` takes no filter), `JOIN` (`JOIN`'s own Non-goal), or
+/// `GROUP BY`/an aggregate column (grouped output is not the raw field
+/// `Page` walks).
+fn validate_order_by(query: &ParsedQuery) -> Result<(), SqlParseError> {
+    if query.order_by.is_none() {
+        return Ok(());
+    }
+    if !query.conditions.is_empty() {
+        return Err(SqlParseError::OrderByWithFilter);
+    }
+    if query.join.is_some() {
+        return Err(SqlParseError::OrderByWithJoin);
+    }
+    let has_aggregate = !query.group_by.is_empty()
+        || matches!(&query.columns, ParsedColumns::Named(items)
+            if items.iter().any(|item| matches!(item, ParsedColumnItem::Aggregate { .. })));
+    if has_aggregate {
+        return Err(SqlParseError::OrderByWithAggregate);
+    }
+    Ok(())
 }
 
 /// `JOIN-FR-005`'s three parse-time rules (see the module doc's own
@@ -1100,5 +1171,52 @@ mod tests {
             parse("SELECT a.label FROM entity a JOIN entity b WHERE a.kind = 'x'"),
             Err(SqlParseError::Expected { .. })
         ));
+    }
+
+    #[test]
+    fn parses_order_by_case_insensitive() {
+        let q = parse("SELECT * FROM memory order by updated_at").unwrap();
+        assert_eq!(q.order_by, Some("updated_at".into()));
+        assert_eq!(q.limit, None);
+
+        let q2 = parse("SELECT name FROM memory ORDER BY updated_at LIMIT 5").unwrap();
+        assert_eq!(q2.order_by, Some("updated_at".into()));
+        assert_eq!(q2.limit, Some(5));
+    }
+
+    #[test]
+    fn order_by_with_where_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT * FROM memory WHERE age > 3 ORDER BY updated_at"),
+            Err(SqlParseError::OrderByWithFilter)
+        );
+    }
+
+    #[test]
+    fn order_by_with_join_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT a.label FROM entity a JOIN entity b ON neighbors ORDER BY label"),
+            Err(SqlParseError::OrderByWithJoin)
+        );
+    }
+
+    #[test]
+    fn order_by_with_group_by_or_aggregate_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT breed, COUNT(*) FROM dog GROUP BY breed ORDER BY breed"),
+            Err(SqlParseError::OrderByWithAggregate)
+        );
+        assert_eq!(
+            parse("SELECT COUNT(*) FROM dog ORDER BY age"),
+            Err(SqlParseError::OrderByWithAggregate)
+        );
+    }
+
+    #[test]
+    fn order_keyword_is_reserved_as_a_table_alias() {
+        // "ORDER" must not be read back as a bare `table_ref` alias.
+        let q = parse("SELECT * FROM dog ORDER BY age").unwrap();
+        assert_eq!(q.alias, None);
+        assert_eq!(q.order_by, Some("age".into()));
     }
 }

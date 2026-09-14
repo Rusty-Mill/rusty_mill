@@ -178,6 +178,15 @@ required-features = ["server", "research"]
 name = "server_sql_integration"
 required-features = ["server", "research"]
 
+# `ADR-0062` item 5, re-scoped `DIFFERENTIAL-TEST-SUITE-PORT`: the
+# equivalent differential/behavioral coverage the original ~60-test
+# port would have been, built directly against this crate's own real
+# primitives instead — `server` alone, no `research` (only `Memory`/
+# `Entity`/`Relation`, all front-door domains).
+[[test]]
+name = "server_hub_differential"
+required-features = ["server"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"
