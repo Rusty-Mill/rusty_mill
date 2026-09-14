@@ -11,12 +11,28 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncWriteExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use crate::line_read::read_capped_line;
 use crate::protocol::PROTOCOL_VERSION;
+
+/// Default deadline for one MCP request/response round trip — including
+/// the `initialize` handshake, `tools/list`, and every `tools/call` —
+/// measured from the moment the request is written until a matching
+/// response line arrives.
+///
+/// A stalled or hostile subprocess would otherwise leave
+/// [`StdioConnection::request`] waiting forever, wedging the toolset's
+/// single connection [`Mutex`] and blocking every later call. 60s
+/// matches this workspace's other MCP-call timeout convention
+/// (`nexus_ai::tools::mcp_bridge::MCP_CALL_TIMEOUT`): real MCP tools
+/// (web fetches, code execution, …) routinely take tens of seconds, so
+/// this exists to recover from a wedge rather than police tool latency.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How to reach an MCP server.
 #[derive(Debug, Clone)]
@@ -60,10 +76,11 @@ struct StdioConnection {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
+    timeout: Duration,
 }
 
 impl StdioConnection {
-    async fn spawn(params: &ConnectionParams) -> Result<Self> {
+    async fn spawn(params: &ConnectionParams, timeout: Duration) -> Result<Self> {
         let ConnectionParams::Stdio { command, args, env } = params;
 
         let mut cmd = Command::new(command);
@@ -95,10 +112,14 @@ impl StdioConnection {
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
+            timeout,
         })
     }
 
-    /// Sends a request and waits for its response.
+    /// Sends a request and waits for its response, bounded by `self.timeout`.
+    ///
+    /// A subprocess that never answers must not wedge this connection's
+    /// [`Mutex`] forever — see [`DEFAULT_REQUEST_TIMEOUT`].
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
@@ -106,29 +127,7 @@ impl StdioConnection {
         let payload = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         self.write(&payload).await?;
 
-        loop {
-            let line = read_capped_line(&mut self.stdout)
-                .await?
-                .ok_or_else(|| AdkError::Other("MCP server closed the connection".into()))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let message: Value = serde_json::from_str(&line)?;
-            // Skip anything that is not the response we are waiting for:
-            // servers may interleave notifications on the same stream.
-            if message.get("id").and_then(Value::as_i64) != Some(id) {
-                continue;
-            }
-            if let Some(error) = message.get("error") {
-                let text = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error");
-                return Err(AdkError::Other(format!("MCP error on {method}: {text}")));
-            }
-            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-        }
+        wait_for_response(&mut self.stdout, id, method, self.timeout).await
     }
 
     /// Sends a notification, which expects no response.
@@ -151,10 +150,60 @@ impl StdioConnection {
     }
 }
 
+/// Waits for the JSON-RPC response matching `id` on `stdout`, bounded by
+/// `deadline`.
+///
+/// Extracted from [`StdioConnection::request`] so the timeout behaviour
+/// can be exercised directly against an in-memory pipe in tests, without
+/// spawning a real subprocess.
+async fn wait_for_response<R>(
+    stdout: &mut BufReader<R>,
+    id: i64,
+    method: &str,
+    deadline: Duration,
+) -> Result<Value>
+where
+    R: AsyncRead + Unpin,
+{
+    let wait = async {
+        loop {
+            let line = read_capped_line(stdout)
+                .await?
+                .ok_or_else(|| AdkError::Other("MCP server closed the connection".into()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let message: Value = serde_json::from_str(&line)?;
+            // Skip anything that is not the response we are waiting for:
+            // servers may interleave notifications on the same stream.
+            if message.get("id").and_then(Value::as_i64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                let text = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error");
+                return Err(AdkError::Other(format!("MCP error on {method}: {text}")));
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    };
+
+    match timeout(deadline, wait).await {
+        Ok(result) => result,
+        Err(_) => Err(AdkError::Other(format!(
+            "MCP server did not respond to '{method}' within {deadline:?}"
+        ))),
+    }
+}
+
 /// Tools discovered from an external MCP server.
 pub struct McpToolset {
     params: ConnectionParams,
     filter: Option<HashSet<String>>,
+    timeout: Duration,
     connection: Mutex<Option<StdioConnection>>,
     cached: Mutex<Option<Vec<SharedTool>>>,
 }
@@ -168,6 +217,7 @@ impl McpToolset {
         Self {
             params,
             filter: None,
+            timeout: DEFAULT_REQUEST_TIMEOUT,
             connection: Mutex::new(None),
             cached: Mutex::new(None),
         }
@@ -183,6 +233,14 @@ impl McpToolset {
         self
     }
 
+    /// Overrides the default per-request timeout ([`DEFAULT_REQUEST_TIMEOUT`],
+    /// 60s) applied to the `initialize` handshake and every subsequent
+    /// request against this server.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Wraps this toolset for registration with an agent.
     pub fn shared(self) -> Arc<dyn Toolset> {
         Arc::new(self)
@@ -195,8 +253,8 @@ impl McpToolset {
             return Ok(());
         }
 
-        let mut connection = StdioConnection::spawn(&self.params).await?;
-        connection
+        let mut connection = StdioConnection::spawn(&self.params, self.timeout).await?;
+        if let Err(err) = connection
             .request(
                 "initialize",
                 json!({
@@ -205,7 +263,14 @@ impl McpToolset {
                     "clientInfo": {"name": "rusty-adk", "version": env!("CARGO_PKG_VERSION")},
                 }),
             )
-            .await?;
+            .await
+        {
+            // The handshake stalled or failed: tear the subprocess down
+            // rather than leaking it. Nothing was ever stored in `guard`,
+            // so the next call simply respawns a fresh one.
+            let _ = connection.shutdown().await;
+            return Err(err);
+        }
         connection.notify("notifications/initialized").await?;
 
         *guard = Some(connection);
@@ -221,7 +286,16 @@ impl McpToolset {
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| AdkError::Other("MCP connection unavailable".into()))?;
-            connection.request("tools/list", json!({})).await?
+            match connection.request("tools/list", json!({})).await {
+                Ok(result) => result,
+                Err(err) => {
+                    // A wedged or dead connection must not linger in the
+                    // slot: drop it so the next call respawns instead of
+                    // repeatedly failing against the same broken one.
+                    *guard = None;
+                    return Err(err);
+                }
+            }
         };
 
         let entries = result
@@ -272,12 +346,21 @@ impl McpToolset {
             .as_mut()
             .ok_or_else(|| AdkError::Other("MCP connection unavailable".into()))?;
 
-        let result = connection
+        let result = match connection
             .request(
                 "tools/call",
                 json!({"name": name, "arguments": Value::Object(args)}),
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                // Same reasoning as `discover`: a stuck connection must not
+                // survive to wedge every subsequent call.
+                *guard = None;
+                return Err(err);
+            }
+        };
 
         Ok(decode_tool_result(&result))
     }
@@ -544,6 +627,36 @@ mod tests {
         assert!(
             result.is_err(),
             "expected the unterminated oversized line to be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_response_times_out_instead_of_hanging_on_a_stalled_subprocess() {
+        // Regression test for the request/response wait `StdioConnection::request`
+        // performs on `self.stdout`: pre-fix this loop had no deadline at all, so a
+        // stalled or malicious MCP subprocess that writes nothing back would hang
+        // the call -- and the toolset's single connection `Mutex` -- forever.
+        // `wait_for_response` is `StdioConnection::request`'s exact wait loop,
+        // extracted so it can be exercised against a subprocess stand-in (an
+        // in-memory duplex pipe that never writes anything back) instead of a
+        // real hung child process.
+        let (_writer, reader_half) = tokio::io::duplex(4096);
+        let mut stdout = BufReader::new(reader_half);
+
+        let start = std::time::Instant::now();
+        let result =
+            wait_for_response(&mut stdout, 1, "tools/call", Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wait_for_response should have timed out quickly instead of hanging, took {elapsed:?}"
+        );
+        let err =
+            result.expect_err("expected a timeout error from a subprocess that never responds");
+        assert!(
+            err.to_string().contains("did not respond"),
+            "expected a timeout error message, got: {err}"
         );
     }
 }

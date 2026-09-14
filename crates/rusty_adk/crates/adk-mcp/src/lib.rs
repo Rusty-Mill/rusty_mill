@@ -94,8 +94,15 @@ mod tests {
         let failing = FunctionTool::new("boom", "Always fails.", Schema::object(), |_a, _c| {
             Box::pin(async { Err(adk_core::AdkError::tool("boom", "exploded")) })
         });
+        let approve_me = FunctionTool::new(
+            "approve_me",
+            "Needs approval before running.",
+            Schema::object(),
+            |_a, _c| Box::pin(async { Ok(adk_tools::success(json!({"ran": true}))) }),
+        )
+        .require_confirmation("Approve this action?");
 
-        let tools: Vec<SharedTool> = vec![weather.shared(), failing.shared()];
+        let tools: Vec<SharedTool> = vec![weather.shared(), failing.shared(), approve_me.shared()];
         McpServer::new(
             "test-server",
             tools,
@@ -131,7 +138,7 @@ mod tests {
         )
         .await;
         let tools = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
 
         let weather = tools.iter().find(|t| t["name"] == "get_weather").unwrap();
         assert_eq!(weather["inputSchema"]["type"], "object");
@@ -206,6 +213,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_confirmation_gated_tool_is_rejected_as_a_transport_limitation() {
+        // Regression test: pre-fix, `McpServer::call_tool` always built a
+        // `ToolContext` with `tool_confirmation: None`, so a tool requiring
+        // confirmation ran into `invoke_tool`'s `AdkError::ConfirmationRequired`
+        // and that got folded into the generic tool-error path below -- a
+        // client saw an opaque failure instead of an explanation that this
+        // transport cannot carry a confirmation answer back to the tool.
+        let response = call(
+            &test_server(),
+            json!({
+                "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": {"name": "approve_me", "arguments": {}},
+            }),
+        )
+        .await;
+
+        // A protocol-level error (the request cannot be honored at all),
+        // not a tool-result error (the tool ran and failed).
+        assert!(response.get("result").is_none());
+        assert_eq!(response["error"]["code"], protocol::INTERNAL_ERROR);
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("confirmation"),
+            "expected the error to name the confirmation limitation, got: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("transport"),
+            "expected the error to identify the transport limitation, got: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_notification_is_not_answered() {
         let server = test_server();
         let response = server
@@ -257,7 +296,7 @@ mod tests {
         let second: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(first["id"], 1);
         assert_eq!(second["id"], 2);
-        assert_eq!(second["result"]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(second["result"]["tools"].as_array().unwrap().len(), 3);
     }
 
     #[cfg(feature = "stdio")]
