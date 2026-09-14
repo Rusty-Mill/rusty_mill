@@ -206,6 +206,26 @@ required-features = ["server"]
 name = "memory_footprint"
 required-features = ["research"]
 
+# `ADR-0066`: the schema-migration regression test, sharing its logic
+# with `examples/migrate_memory_v1_to_v2.rs` via `#[path]` (see that
+# file's own module doc comment). No `required-features` — unlike
+# every other `[[test]]` entry above, `crate::generic::memory` is
+# front-door, not `server`/`research`-gated, so this needs nothing
+# beyond the default build; listed explicitly anyway, matching this
+# file's own convention of naming every test target rather than
+# leaving some to bare autodiscovery.
+[[test]]
+name = "schema_migration"
+
+# `ADR-0066`: the real, runnable migration CLI this design's worked
+# example ships as — `cargo run --example migrate_memory_v1_to_v2 --
+# <old_path> <new_path>`. Same no-feature-needed reasoning as the test
+# entry above; `examples/support/migrate_memory_v1_to_v2_lib.rs` lives
+# in a subdirectory specifically so Cargo's example autodiscovery does
+# not also try to build it as its own (`main`-less) example target.
+[[example]]
+name = "migrate_memory_v1_to_v2"
+
 # `crash_writer`/`crash_safety_harness` (the crash-safety diagnosis
 # harness) build `Order`/`Customer` datasets via `generic::order_customer`
 # and use `bench_support::fresh_temp_dir` — both research-gated. Explicit
